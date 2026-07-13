@@ -12,10 +12,53 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "httpx>=0.28",
+    "import-linter>=2.1",
 ]
 
 [tool.uv.workspace]
 members = ["libs/*", "app/*", "clients/cli/*"]
+
+[tool.importlinter]
+include_external_packages = true
+root_packages = [
+    "habeas_privacy_core",
+    "reaper",
+    "admin_api",
+    "matching",
+    "mailchimp",
+    "paylocity",
+    "lever",
+    "auth0",
+    "google_sheets",
+    "cassandra",
+    "intake_csv_dispatcher",
+    "intake_drop_poller",
+    "sla_monitor",
+    "habeas_cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "Domain and services must not import infra"
+type = "forbidden"
+source_modules = [
+    "habeas_privacy_core",
+    "reaper",
+    "admin_api",
+    "matching",
+    "mailchimp",
+    "paylocity",
+    "lever",
+    "auth0",
+    "google_sheets",
+    "cassandra",
+    "intake_csv_dispatcher",
+    "intake_drop_poller",
+    "sla_monitor",
+    "habeas_cli",
+]
+forbidden_modules = [
+    "infra",
+]
 
 [tool.ruff]
 line-length = 100

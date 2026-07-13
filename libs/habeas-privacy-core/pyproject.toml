@@ -10,6 +10,9 @@ dependencies = [
     "httpx>=0.28",
     "tenacity>=9.0",
     "email-validator>=2.0",
+    "opentelemetry-api>=1.29",
+    "opentelemetry-sdk>=1.29",
+    "opentelemetry-exporter-gcp-trace>=1.9",
 ]
 
 [build-system]

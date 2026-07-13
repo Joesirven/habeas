@@ -1,0 +1,21 @@
+# Cloud Build trigger for reaper (apply after Artifact Registry repo exists).
+#
+# gcloud builds triggers create github \
+#   --name=data-privacy-reaper \
+#   --repo-name=data-privacy \
+#   --repo-owner=dsts \
+#   --branch-pattern='^main$|^master$|^PROJ-.*' \
+#   --build-config=infra/cloudbuild/reaper.yaml \
+#   --included-files='app/reaper/**,libs/habeas-privacy-core/**,db/migrations/**,pyproject.toml,uv.lock' \
+#   --project=example-gcp-project
+
+name: data-privacy-reaper
+description: Build, migrate, and deploy reaper on monorepo changes
+filename: infra/cloudbuild/reaper.yaml
+includedFiles:
+  - app/reaper/**
+  - libs/habeas-privacy-core/**
+  - db/migrations/**
+  - pyproject.toml
+  - uv.lock
+  - infra/cloudbuild/reaper.yaml

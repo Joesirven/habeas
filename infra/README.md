@@ -1,7 +1,30 @@
-# infra/
+# Cloud Build + Artifact Registry
 
-Google Cloud Platform infrastructure as code and build configuration.
+| File | Purpose |
+|------|---------|
+| [`cloudbuild/reaper.yaml`](cloudbuild/reaper.yaml) | Test, build, migrate, deploy `reaper` |
+| [`cloudbuild/trigger-reaper.yaml`](cloudbuild/trigger-reaper.yaml) | Trigger definition (path-filtered) |
 
-Expected contents: Cloud Build YAML per app, Terraform for Cloud Run / Cloud Scheduler / Cloud SQL bindings.
+**Project:** `example-gcp-project` · **Region:** `us-east4` · **Artifact Registry repo:** `data-privacy`
 
-**Agent rules:** [`AGENTS.md`](AGENTS.md)
+## One-time setup
+
+```bash
+gcloud artifacts repositories create data-privacy \
+  --repository-format=docker \
+  --location=us-east4 \
+  --project=example-gcp-project
+
+# Secret for Cloud Build migrations + Cloud Run runtime
+echo -n 'postgres://…' | gcloud secrets create database-url \
+  --data-file=- \
+  --project=example-gcp-project
+```
+
+Wire the Cloud Build trigger using `cloudbuild/trigger-reaper.yaml` after connecting the Bitbucket repo.
+
+## Manual deploy (dev)
+
+```bash
+gcloud builds submit --config=infra/cloudbuild/reaper.yaml --project=example-gcp-project .
+```
