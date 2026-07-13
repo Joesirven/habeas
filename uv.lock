@@ -226,6 +226,7 @@ dependencies = [
     { name = "opentelemetry-sdk" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "starlette" },
     { name = "tenacity" },
 ]
 
@@ -239,6 +240,7 @@ requires-dist = [
     { name = "opentelemetry-sdk", specifier = ">=1.29" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pydantic-settings", specifier = ">=2.6" },
+    { name = "starlette", specifier = ">=0.41" },
     { name = "tenacity", specifier = ">=9.0" },
 ]
 

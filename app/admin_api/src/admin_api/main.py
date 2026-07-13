@@ -3,9 +3,11 @@
 from fastapi import FastAPI
 from sse_starlette.sse import EventSourceResponse
 
+from habeas_privacy_core.audit import AuditMiddleware
 from habeas_privacy_core.health import health_payload
 
 app = FastAPI(title="Habeas Privacy Admin API", version="0.1.0")
+app.add_middleware(AuditMiddleware)
 
 
 @app.get("/healthz")
