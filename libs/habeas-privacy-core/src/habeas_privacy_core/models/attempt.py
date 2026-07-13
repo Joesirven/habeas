@@ -1,17 +1,10 @@
 """Queue attempt row models."""
 
-from enum import StrEnum
-
 from pydantic import BaseModel
 
+from habeas_privacy_core.queue.status import AttemptStatus
 
-class AttemptStatus(StrEnum):
-    PENDING = "pending"
-    CLAIMED = "claimed"
-    IN_FLIGHT = "in_flight"
-    SUCCESS = "success"
-    OUTCOME_ERROR = "outcome_error"
-    TIMEOUT = "timeout"
+__all__ = ["AttemptStatus", "AttemptRow"]
 
 
 class AttemptRow(BaseModel):

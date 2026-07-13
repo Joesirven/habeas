@@ -10,10 +10,12 @@ from fastapi import FastAPI, HTTPException, status
 from pydantic_settings import SettingsConfigDict
 
 from habeas_privacy_core.config import CoreSettings
-from habeas_privacy_core.db.pool import close_pool, create_pool, ping
+from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
 from habeas_privacy_core.health import health_payload, ready_payload
 from habeas_privacy_core.observability.logging import configure_logging
 from habeas_privacy_core.observability.tracing import setup_tracing
+from habeas_privacy_core.queue.reap import run_reap
+from reaper.config import DEFAULT_REAPED_TABLES
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,18 @@ async def readyz():
     if payload["status"] != "ok":
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=payload)
     return payload
+
+
+@app.post("/reap")
+async def reap():
+    """Run queue sweeps — invoked by Cloud Scheduler every minute."""
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="database not configured")
+
+    pool = get_pool()
+    results = await run_reap(pool, DEFAULT_REAPED_TABLES)
+    logger.info("reap_complete", extra={"event": "reap_complete", "results": results})
+    return {"status": "ok", "results": results}
 
 
 def run() -> None:
