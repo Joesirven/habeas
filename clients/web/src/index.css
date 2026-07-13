@@ -1,0 +1,5 @@
+@import 'tailwindcss';
+
+body {
+  @apply m-0 min-h-screen bg-slate-950 text-slate-100 antialiased;
+}

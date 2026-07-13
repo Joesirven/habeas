@@ -1,0 +1,1 @@
+"""mailchimp-worker — scaffold placeholder."""
