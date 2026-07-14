@@ -4,9 +4,11 @@
 
 **Kind:** automation
 
-California DELETE Act hash matching — SHA-256 compare against drop hash index and matching_attempts queue table.
+Consumer record matching for privacy requests, across all intake sources — not DROP-only.
 
-- DROP pipeline only; plaintext matching is a future separate app
-
-- Vendor adapter code in `adapters/` inside this app only.
+- One `MatchingPipeline` interface (`pipeline.py`); one adapter class per intake source in
+  `adapters/` (`drop_hash.py`, `plaintext.py`); `router.py` dispatches by `IntakeSource`
+  (`habeas_privacy_core.models.request.IntakeSource`). A new intake source or a new
+  state-specific matching requirement is a new adapter + router entry, never a new app.
+- Vendor adapter code in `adapters/` inside this app only — no top-level `adapters/`.
 - Schema in [`db/migrations/`](../../db/migrations/) — prefix `matching_` or `matching_` as appropriate.
