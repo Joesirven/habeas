@@ -45,7 +45,8 @@ export type ManualRequestInput = {
 }
 
 export function getHealth() {
-  return fetchAdminApi<HealthPayload>('/healthz')
+  // Prefer /readyz: Cloud Run's public edge returns a Google HTML 404 for /healthz.
+  return fetchAdminApi<HealthPayload>('/readyz')
 }
 
 export function listRequests(intakeSource?: IntakeSource) {

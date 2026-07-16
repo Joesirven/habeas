@@ -1,0 +1,22 @@
+# One-shot: allow unauthenticated invoke on admin-api-dev (Firebase SPA v0).
+# Requires Cloud Build SA to have run.services.setIamPolicy (or run.admin).
+substitutions:
+  _REGION: us-east4
+  _SERVICE: admin-api-dev
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: allow-unauthenticated
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - add-iam-policy-binding
+      - ${_SERVICE}
+      - --region=${_REGION}
+      - --member=allUsers
+      - --role=roles/run.invoker
+      - --quiet

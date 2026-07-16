@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
 
+from admin_api.cloud_run_auth import auth_headers_for
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
 from habeas_privacy_core.workflow.approval import MATCHING_REVIEW_ACTION
@@ -80,11 +81,15 @@ def _require_database() -> None:
 
 
 async def _probe_worker_health(name: str, base_url: str) -> dict[str, Any]:
-    """Best-effort GET {base}/healthz — never raises."""
-    url = f"{base_url.rstrip('/')}/healthz"
+    """Best-effort GET {base}/readyz — never raises.
+
+    Prefer /readyz: Cloud Run's public edge often returns a Google HTML 404 for /healthz.
+    """
+    url = f"{base_url.rstrip('/')}/readyz"
     try:
+        headers = auth_headers_for(base_url)
         async with httpx.AsyncClient(timeout=3.0) as client:
-            response = await client.get(url)
+            response = await client.get(url, headers=headers)
             try:
                 body: Any = response.json()
             except Exception:
@@ -97,6 +102,14 @@ async def _probe_worker_health(name: str, base_url: str) -> dict[str, Any]:
                 "body": body,
             }
     except httpx.RequestError as exc:
+        return {
+            "name": name,
+            "url": base_url,
+            "ok": False,
+            "status_code": None,
+            "error": str(exc),
+        }
+    except Exception as exc:
         return {
             "name": name,
             "url": base_url,
@@ -286,8 +299,13 @@ async def proxy_post(
 ) -> JSONResponse:
     """Forward POST to a worker; return upstream JSON + status."""
     try:
+        headers = auth_headers_for(url)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(url, json=json_body if json_body is not None else {})
+            response = await client.post(
+                url,
+                json=json_body if json_body is not None else {},
+                headers=headers,
+            )
             try:
                 payload: Any = response.json()
             except Exception:

@@ -124,9 +124,10 @@ def test_download_proxy_returns_upstream_json(monkeypatch: pytest.MonkeyPatch):
         async def __aexit__(self, *args: Any) -> None:
             return None
 
-        async def post(self, url: str, json: Any = None) -> FakeResponse:
+        async def post(self, url: str, json: Any = None, headers: Any = None) -> FakeResponse:
             captured["url"] = url
             captured["json"] = json
+            captured["headers"] = headers
             return FakeResponse()
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
@@ -152,7 +153,7 @@ def test_download_proxy_upstream_unreachable(monkeypatch: pytest.MonkeyPatch):
         async def __aexit__(self, *args: Any) -> None:
             return None
 
-        async def post(self, url: str, json: Any = None) -> Any:
+        async def post(self, url: str, json: Any = None, headers: Any = None) -> Any:
             raise httpx.ConnectError("connection refused", request=MagicMock())
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
@@ -183,9 +184,10 @@ def test_land_proxy_forwards_attempt_id(monkeypatch: pytest.MonkeyPatch):
         async def __aexit__(self, *args: Any) -> None:
             return None
 
-        async def post(self, url: str, json: Any = None) -> FakeResponse:
+        async def post(self, url: str, json: Any = None, headers: Any = None) -> FakeResponse:
             captured["url"] = url
             captured["json"] = json
+            captured["headers"] = headers
             return FakeResponse()
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
@@ -217,9 +219,10 @@ def test_fulfill_proxy_forwards_request_id(monkeypatch: pytest.MonkeyPatch):
         async def __aexit__(self, *args: Any) -> None:
             return None
 
-        async def post(self, url: str, json: Any = None) -> FakeResponse:
+        async def post(self, url: str, json: Any = None, headers: Any = None) -> FakeResponse:
             captured["url"] = url
             captured["json"] = json
+            captured["headers"] = headers
             return FakeResponse()
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
@@ -277,3 +280,21 @@ async def test_collect_pipeline_counts_shape():
     assert result["matching_attempts"]["success"] == 5
     assert result["matching_review"]["pending"] == 1
     assert result["matching_review"]["approved"] == 3
+
+
+def test_auth_headers_skipped_for_localhost():
+    from admin_api.cloud_run_auth import auth_headers_for, clear_id_token_cache
+
+    clear_id_token_cache()
+    assert auth_headers_for("http://127.0.0.1:8081/download") == {}
+
+
+def test_auth_headers_for_cloud_run(monkeypatch: pytest.MonkeyPatch):
+    from admin_api import cloud_run_auth
+
+    cloud_run_auth.clear_id_token_cache()
+    monkeypatch.setattr(cloud_run_auth, "_cached_id_token", lambda audience: f"tok-for-{audience}")
+    headers = cloud_run_auth.auth_headers_for(
+        "https://drop-connector-dev-hsa55rg7ja-uk.a.run.app/download"
+    )
+    assert headers["Authorization"].startswith("Bearer tok-for-https://drop-connector-dev")

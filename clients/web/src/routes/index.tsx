@@ -22,13 +22,29 @@ export function DashboardPage() {
         <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">Admin API</h3>
         {healthQuery.isPending && <p className="mt-3 text-slate-300">Checking health…</p>}
         {healthQuery.isError && (
-          <p className="mt-3 text-red-300">
-            Could not reach admin-api. Start it with{' '}
-            <code className="rounded bg-slate-800 px-2 py-1 text-sm">
-              uv run --package admin-api uvicorn admin_api.main:app --reload --app-dir
-              app/admin_api/src
-            </code>
-          </p>
+          <div className="mt-3 space-y-2 text-red-300">
+            <p>Could not reach admin-api.</p>
+            <p className="text-sm text-red-200/80">
+              {healthQuery.error instanceof Error
+                ? healthQuery.error.message
+                : String(healthQuery.error)}
+            </p>
+            {!import.meta.env.VITE_ADMIN_API_URL ? (
+              <p className="text-sm text-slate-400">
+                Locally, start it with{' '}
+                <code className="rounded bg-slate-800 px-2 py-1 text-xs text-slate-200">
+                  uv run --package admin-api uvicorn admin_api.main:app --reload --app-dir
+                  app/admin_api/src
+                </code>
+              </p>
+            ) : (
+              <p className="text-sm text-slate-400">
+                Deployed builds need Cloud Run Invoker for{' '}
+                <code className="rounded bg-slate-800 px-1 text-xs">allUsers</code> (or IAP).
+                API: {import.meta.env.VITE_ADMIN_API_URL}
+              </p>
+            )}
+          </div>
         )}
         {healthQuery.isSuccess && (
           <dl className="mt-4 grid gap-3 sm:grid-cols-2">
