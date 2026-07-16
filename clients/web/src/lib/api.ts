@@ -59,3 +59,33 @@ export function createManualRequest(body: ManualRequestInput) {
     body: JSON.stringify(body),
   })
 }
+
+export type ApprovalRecord = {
+  id: number
+  request_id: string
+  action_type: string
+  status: string
+  approver_role?: string | null
+  decided_by?: string | null
+  decision_reason?: string | null
+}
+
+export type ApprovalDecisionInput = {
+  decided_by: string
+  decision_reason?: string
+}
+
+export function listMatchingReviewApprovals(status: string = 'pending') {
+  const params = new URLSearchParams({
+    action_type: 'matching.review',
+    status,
+  })
+  return fetchAdminApi<ApprovalRecord[]>(`/approvals?${params}`)
+}
+
+export function approveMatchingReview(approvalId: number, body: ApprovalDecisionInput) {
+  return fetchAdminApi<ApprovalRecord>(`/approvals/${approvalId}/approve`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}

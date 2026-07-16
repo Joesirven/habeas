@@ -31,6 +31,12 @@ export function AppShell({ children }: AppShellProps) {
             >
               Requests
             </Link>
+            <Link
+              to="/approvals/matching-review"
+              className="hover:text-white [&.active]:font-medium [&.active]:text-white"
+            >
+              Matching review
+            </Link>
           </nav>
         </div>
       </header>

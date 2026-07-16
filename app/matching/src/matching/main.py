@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
@@ -12,8 +11,10 @@ from pydantic_settings import SettingsConfigDict
 
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
+from habeas_privacy_core.db.request_resolver import request_resolver
 from habeas_privacy_core.db.requests import load_request_row
 from habeas_privacy_core.health import health_payload, ready_payload
+from habeas_privacy_core.models.intake import DropMatchingPayload
 from habeas_privacy_core.observability.logging import configure_logging
 from habeas_privacy_core.observability.tracing import setup_tracing
 from habeas_privacy_core.queue.claim import claim_next
@@ -68,22 +69,33 @@ async def readyz():
     return payload
 
 
-def _build_match_request(row: dict[str, Any]) -> MatchRequest:
-    raw_payload = row["raw_payload"]
-    if isinstance(raw_payload, str):
-        raw_payload = json.loads(raw_payload)
-    first = raw_payload.get("first_name") or ""
-    last = raw_payload.get("last_name") or ""
-    name = " ".join(part for part in [first, last] if part).strip() or None
+def match_request_from_drop_payload(
+    request_id: str,
+    payload: DropMatchingPayload,
+) -> MatchRequest:
+    """Build a MatchRequest from request_resolver DROP payload (T8.2)."""
     return MatchRequest(
-        request_id=str(row["id"]),
-        intake_source=IntakeSource(row["intake_source"]),
-        name=name,
-        email=raw_payload.get("email"),
-        phone=raw_payload.get("phone"),
-        zip=raw_payload.get("zip"),
-        dob=raw_payload.get("dob"),
-        pii_hash=row.get("pii_hash"),
+        request_id=request_id,
+        intake_source=IntakeSource.DROP,
+        list_type=payload.list_type,
+        hash_fields=dict(payload.hash_fields),
+    )
+
+
+async def build_match_request(conn: Any, row: dict[str, Any]) -> MatchRequest:
+    """Resolve matching input from the thin request + per-source raw table."""
+    request_id = str(row["id"])
+    intake_source = IntakeSource(row["intake_source"])
+    raw_record_id = row.get("raw_record_id")
+
+    if intake_source == IntakeSource.DROP:
+        if raw_record_id is None:
+            raise ValueError("drop request missing raw_record_id")
+        payload = await request_resolver(conn, intake_source, int(raw_record_id))
+        return match_request_from_drop_payload(request_id, payload)
+
+    raise NotImplementedError(
+        f"matching via request_resolver for {intake_source.value} is not wired yet"
     )
 
 
@@ -123,7 +135,7 @@ async def process_next():
                 return {"status": "error", "reason": "request_missing"}
 
             pipeline = get_pipeline(IntakeSource(row["intake_source"]))
-            match_request = _build_match_request(row)
+            match_request = await build_match_request(conn, row)
             result = await pipeline.match(match_request)
             result_id = await complete_attempt_success(
                 conn,

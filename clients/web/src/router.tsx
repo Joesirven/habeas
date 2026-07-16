@@ -2,6 +2,7 @@ import { createRootRoute, createRoute, createRouter, Outlet } from '@tanstack/re
 import { TanStackRouterDevtools } from '@tanstack/router-devtools'
 
 import { AppShell } from '@/components/AppShell'
+import { MatchingReviewPage } from '@/routes/approvals/matching-review'
 import { DashboardPage } from '@/routes/index'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
@@ -33,10 +34,17 @@ const manualRequestRoute = createRoute({
   component: ManualRequestPage,
 })
 
+const matchingReviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/approvals/matching-review',
+  component: MatchingReviewPage,
+})
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   requestsRoute,
   manualRequestRoute,
+  matchingReviewRoute,
 ])
 
 export const router = createRouter({ routeTree })

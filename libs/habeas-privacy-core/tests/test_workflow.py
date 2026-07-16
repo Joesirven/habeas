@@ -133,7 +133,16 @@ async def pool():
 async def test_approval_rules_seed_loaded(pool):
     async with pool.acquire() as conn:
         count = await conn.fetchval("SELECT COUNT(*) FROM approval_rules WHERE effective_to IS NULL")
-        assert count == 5
+        assert count >= 6
+        matching_review = await conn.fetchval(
+            """
+            SELECT requires_approval
+              FROM approval_rules
+             WHERE action_type = 'matching.review'
+               AND effective_to IS NULL
+            """
+        )
+        assert matching_review is True
 
 
 @integration

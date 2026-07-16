@@ -7,12 +7,15 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 import asyncpg
 
 _TABLE_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _RULE_CACHE_TTL = timedelta(seconds=60)
 _rule_cache: dict[str, tuple[dict[str, Any] | None, datetime]] = {}
+
+MATCHING_REVIEW_ACTION = "matching.review"
 
 
 def _validate_table(table: str) -> str:
@@ -122,6 +125,29 @@ async def check_approval_required(
         approver_role=rule["approver_role"],
         rationale=rule["rationale"],
     )
+
+
+async def is_matching_review_approved(
+    conn: asyncpg.Connection,
+    request_id: str,
+) -> bool:
+    """Return True when matching.review has an approved approval_requests row.
+
+    Used by fulfillment dispatch (U9) to block until human review completes.
+    """
+    row = await conn.fetchval(
+        """
+        SELECT 1
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status = 'approved'
+         LIMIT 1
+        """,
+        UUID(request_id),
+        MATCHING_REVIEW_ACTION,
+    )
+    return row is not None
 
 
 async def release_approved(

@@ -16,7 +16,7 @@ __all__ = ["get_pipeline"]
 _PIPELINES: dict[IntakeSource, MatchingPipeline] = {
     IntakeSource.DROP: DropHashPipeline(),
     IntakeSource.WEBFORM: PlaintextMatchPipeline(),
-    IntakeSource.CSV_BATCH: PlaintextMatchPipeline(),
+    IntakeSource.CSV: PlaintextMatchPipeline(),
     IntakeSource.MANUAL: PlaintextMatchPipeline(),
 }
 

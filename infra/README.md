@@ -45,6 +45,10 @@ gcloud builds submit --config=infra/cloudbuild/matching-dev.yaml \
 gcloud builds submit --config=infra/cloudbuild/drop-connector-dev.yaml \
   --project=example-gcp-project \
   --substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@/postgres?host=/cloudsql/example-gcp-project:us-east4:dpra-dev-temp',_DROP_API_KEY='YOUR_SANDBOX_KEY'
+
+gcloud builds submit --config=infra/cloudbuild/drop-ingestor-dev.yaml \
+  --project=example-gcp-project \
+  --substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@/postgres?host=/cloudsql/example-gcp-project:us-east4:dpra-dev-temp'
 ```
 
 ### drop-connector (U6)
@@ -54,6 +58,14 @@ gcloud builds submit --config=infra/cloudbuild/drop-connector-dev.yaml \
 | [`cloudbuild/drop-connector-dev.yaml`](cloudbuild/drop-connector-dev.yaml) | Build/push/deploy `drop-connector-dev` |
 
 Env on Cloud Run: `DROP_ENV=sandbox`, `DROP_API_BASE_URL=https://api.drop.privacy.ca.gov/sandbox`, `DROP_API_KEY` via `_DROP_API_KEY` substitution (prefer Secret Manager `drop-sandbox-api-key` when IAM allows). Never point sandbox deploy at production host.
+
+### drop-ingestor (U7)
+
+| File | Purpose |
+|------|---------|
+| [`cloudbuild/drop-ingestor-dev.yaml`](cloudbuild/drop-ingestor-dev.yaml) | Build/push/deploy `drop-ingestor-dev` |
+
+Land/promote only — no `DROP_API_KEY`. Needs `DATABASE_URL`.
 
 After INF grants `secretmanager.admin`, cut over to `dev-dpra` + `database-url` and delete `dpra-dev-temp`.
 

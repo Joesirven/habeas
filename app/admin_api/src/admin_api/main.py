@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
+from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
 from sse_starlette.sse import EventSourceResponse
 
+from admin_api.approvals import (
+    MATCHING_REVIEW_ACTION,
+    create_matching_review_approval,
+    decide_approval,
+    is_matching_review_approved,
+    list_approvals,
+)
 from habeas_privacy_core.audit import AuditMiddleware
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
@@ -43,6 +51,26 @@ class ManualRequestBody(BaseModel):
     external_id: str | None = None
 
 
+class MatchingReviewCreateBody(BaseModel):
+    request_id: str
+    context: dict[str, Any] | None = None
+
+
+class ApprovalDecisionBody(BaseModel):
+    decided_by: str = Field(min_length=1, max_length=200)
+    decision_reason: str | None = None
+
+
+class ApprovalRecord(BaseModel):
+    id: int
+    request_id: str
+    action_type: str
+    status: str
+    approver_role: str | None = None
+    decided_by: str | None = None
+    decision_reason: str | None = None
+
+
 settings = AdminSettings()
 
 
@@ -62,6 +90,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Habeas Privacy Admin API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(AuditMiddleware)
+
+
+def _approval_record(row: dict[str, Any]) -> ApprovalRecord:
+    return ApprovalRecord(
+        id=int(row["id"]),
+        request_id=str(row["request_id"]),
+        action_type=row["action_type"],
+        status=row["status"],
+        approver_role=row.get("approver_role"),
+        decided_by=row.get("decided_by"),
+        decision_reason=row.get("decision_reason"),
+    )
 
 
 @app.get("/healthz")
@@ -129,6 +169,109 @@ async def requests_create(_body: ManualRequestBody):
     if record is None:
         raise HTTPException(status_code=500, detail="request insert failed")
     return record
+
+
+@app.get("/approvals", response_model=list[ApprovalRecord])
+async def approvals_list(
+    action_type: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="database not configured")
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await list_approvals(
+            conn,
+            action_type=action_type,
+            status=status,
+            limit=limit,
+        )
+    return [_approval_record(row) for row in rows]
+
+
+@app.post("/approvals/matching-review", response_model=ApprovalRecord, status_code=201)
+async def approvals_create_matching_review(body: MatchingReviewCreateBody):
+    """Create a pending matching.review approval gate for a request."""
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="database not configured")
+    try:
+        UUID(body.request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid request_id") from exc
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        record = await get_request(conn, body.request_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="request not found")
+        try:
+            row = await create_matching_review_approval(
+                conn,
+                request_id=body.request_id,
+                context=body.context,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _approval_record(row)
+
+
+@app.post("/approvals/{approval_id}/approve", response_model=ApprovalRecord)
+async def approvals_approve(approval_id: int, body: ApprovalDecisionBody):
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="database not configured")
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await decide_approval(
+            conn,
+            approval_id=approval_id,
+            status="approved",
+            decided_by=body.decided_by,
+            decision_reason=body.decision_reason,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="pending approval not found")
+    return _approval_record(row)
+
+
+@app.post("/approvals/{approval_id}/reject", response_model=ApprovalRecord)
+async def approvals_reject(approval_id: int, body: ApprovalDecisionBody):
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="database not configured")
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await decide_approval(
+            conn,
+            approval_id=approval_id,
+            status="rejected",
+            decided_by=body.decided_by,
+            decision_reason=body.decision_reason,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="pending approval not found")
+    return _approval_record(row)
+
+
+@app.get("/requests/{request_id}/matching-review-approved")
+async def matching_review_approved(request_id: str):
+    """Fulfillment gate probe — True only after matching.review is approved (U9)."""
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="database not configured")
+    try:
+        UUID(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid request_id") from exc
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        approved = await is_matching_review_approved(conn, request_id)
+    return {
+        "request_id": request_id,
+        "action_type": MATCHING_REVIEW_ACTION,
+        "approved": approved,
+    }
 
 
 def run() -> None:

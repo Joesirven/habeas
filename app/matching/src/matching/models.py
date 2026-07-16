@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
+from habeas_privacy_core.models.intake import DropListType
 from habeas_privacy_core.models.request import IntakeSource
 
-__all__ = ["IntakeSource", "MatchRequest", "MatchResult"]
+__all__ = ["IntakeSource", "DropListType", "MatchRequest", "MatchResult"]
 
 
 class MatchRequest(BaseModel):
@@ -20,6 +23,8 @@ class MatchRequest(BaseModel):
     zip_code: str | None = Field(default=None, alias="zip")
     dob: str | None = None
     pii_hash: bytes | None = None
+    list_type: DropListType | None = None
+    hash_fields: dict[str, Any] = Field(default_factory=dict)
 
     model_config = {"populate_by_name": True}
 

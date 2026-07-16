@@ -15,14 +15,17 @@ members = [
     "cassandra-worker",
     "habeas-cli",
     "habeas-privacy-core",
+    "data-fulfillment-dispatcher",
     "data-privacy",
     "drop-connector",
+    "drop-ingestor",
     "google-sheets-worker",
     "lever-worker",
     "mailchimp-worker",
     "matching-worker",
     "paylocity-worker",
     "reaper",
+    "request-dispatcher",
     "sla-monitor",
 ]
 
@@ -474,6 +477,23 @@ wheels = [
 ]
 
 [[package]]
+name = "data-fulfillment-dispatcher"
+version = "0.1.0"
+source = { editable = "app/data_fulfillment_dispatcher" }
+dependencies = [
+    { name = "habeas-privacy-core" },
+    { name = "fastapi" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+]
+
+[[package]]
 name = "data-privacy"
 version = "0.1.0"
 source = { virtual = "." }
@@ -513,6 +533,23 @@ wheels = [
 name = "drop-connector"
 version = "0.1.0"
 source = { editable = "app/drop_connector" }
+dependencies = [
+    { name = "habeas-privacy-core" },
+    { name = "fastapi" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+]
+
+[[package]]
+name = "drop-ingestor"
+version = "0.1.0"
+source = { editable = "app/drop_ingestor" }
 dependencies = [
     { name = "habeas-privacy-core" },
     { name = "fastapi" },
@@ -1419,6 +1456,23 @@ wheels = [
 name = "reaper"
 version = "0.1.0"
 source = { editable = "app/reaper" }
+dependencies = [
+    { name = "habeas-privacy-core" },
+    { name = "fastapi" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+]
+
+[[package]]
+name = "request-dispatcher"
+version = "0.1.0"
+source = { editable = "app/request_dispatcher" }
 dependencies = [
     { name = "habeas-privacy-core" },
     { name = "fastapi" },

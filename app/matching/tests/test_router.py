@@ -12,8 +12,8 @@ def test_webform_routes_to_plaintext_pipeline():
     assert isinstance(get_pipeline(IntakeSource.WEBFORM), PlaintextMatchPipeline)
 
 
-def test_csv_batch_routes_to_plaintext_pipeline():
-    assert isinstance(get_pipeline(IntakeSource.CSV_BATCH), PlaintextMatchPipeline)
+def test_csv_routes_to_plaintext_pipeline():
+    assert isinstance(get_pipeline(IntakeSource.CSV), PlaintextMatchPipeline)
 
 
 def test_manual_routes_to_plaintext_pipeline():
