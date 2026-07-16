@@ -4,6 +4,7 @@ import { TanStackRouterDevtools } from '@tanstack/router-devtools'
 import { AppShell } from '@/components/AppShell'
 import { MatchingReviewPage } from '@/routes/approvals/matching-review'
 import { DashboardPage } from '@/routes/index'
+import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
 
@@ -40,11 +41,18 @@ const matchingReviewRoute = createRoute({
   component: MatchingReviewPage,
 })
 
+const dropPipelineRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/drop-pipeline',
+  component: DropPipelinePage,
+})
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   requestsRoute,
   manualRequestRoute,
   matchingReviewRoute,
+  dropPipelineRoute,
 ])
 
 export const router = createRouter({ routeTree })

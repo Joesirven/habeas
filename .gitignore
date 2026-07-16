@@ -19,6 +19,9 @@ htmlcov/
 # Node / Bun (clients/web)
 node_modules/
 clients/web/dist/
+clients/web/.firebase/
+firebase-debug.log
+clients/web/firebase-debug.log
 
 # IDE / OS
 .idea/

@@ -89,3 +89,98 @@ export function approveMatchingReview(approvalId: number, body: ApprovalDecision
     body: JSON.stringify(body),
   })
 }
+
+export type StepStatusCount = {
+  step: string
+  status: string
+  count: number
+}
+
+export type RawListTypeCount = {
+  list_type: string
+  total: number
+  response_status_null: number
+  response_status_set: number
+}
+
+export type DropRequestThin = {
+  id: string
+  received_at: string | null
+  raw_record_id: number | null
+}
+
+export type MatchingResultSummary = {
+  request_id: string
+  matched: boolean
+  matched_via: string
+  recorded_at: string | null
+}
+
+export type WorkerHealthProbe = {
+  name: string
+  url: string
+  ok: boolean
+  status_code?: number | null
+  body?: unknown
+  error?: string
+}
+
+export type DropPipelineStatus = {
+  connector_attempts: StepStatusCount[]
+  ingest_attempts: StepStatusCount[]
+  raw_requests_by_list_type: RawListTypeCount[]
+  drop_requests: {
+    count: number
+    recent: DropRequestThin[]
+  }
+  matching_attempts: {
+    pending: number
+    success: number
+    by_status: { status: string; count: number }[]
+  }
+  matching_results_recent: MatchingResultSummary[]
+  matching_review: {
+    action_type: string
+    pending: number
+    approved: number
+    by_status: { status: string; count: number }[]
+  }
+  worker_health: Record<string, WorkerHealthProbe>
+}
+
+export function getDropPipeline() {
+  return fetchAdminApi<DropPipelineStatus>('/ops/drop/pipeline')
+}
+
+export function postDropDownload() {
+  return fetchAdminApi<Record<string, unknown>>('/ops/drop/download', { method: 'POST' })
+}
+
+export function postDropLand(body?: { land_attempt_id?: number }) {
+  return fetchAdminApi<Record<string, unknown>>('/ops/drop/land', {
+    method: 'POST',
+    body: JSON.stringify(body ?? {}),
+  })
+}
+
+export function postDropPromote(body?: { promote_attempt_id?: number }) {
+  return fetchAdminApi<Record<string, unknown>>('/ops/drop/promote', {
+    method: 'POST',
+    body: JSON.stringify(body ?? {}),
+  })
+}
+
+export function postDropDispatch() {
+  return fetchAdminApi<Record<string, unknown>>('/ops/drop/dispatch', { method: 'POST' })
+}
+
+export function postDropMatch() {
+  return fetchAdminApi<Record<string, unknown>>('/ops/drop/match', { method: 'POST' })
+}
+
+export function postDropFulfill(body?: { request_id?: string }) {
+  return fetchAdminApi<Record<string, unknown>>('/ops/drop/fulfill', {
+    method: 'POST',
+    body: JSON.stringify(body ?? {}),
+  })
+}

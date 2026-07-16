@@ -37,6 +37,12 @@ export function AppShell({ children }: AppShellProps) {
             >
               Matching review
             </Link>
+            <Link
+              to="/ops/drop-pipeline"
+              className="hover:text-white [&.active]:font-medium [&.active]:text-white"
+            >
+              DROP pipeline
+            </Link>
           </nav>
         </div>
       </header>

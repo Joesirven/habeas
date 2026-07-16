@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 dependencies = [
     "habeas-privacy-core",
     "fastapi>=0.115",
+    "httpx>=0.28",
     "uvicorn[standard]>=0.32",
     "sse-starlette>=2.0",
 ]

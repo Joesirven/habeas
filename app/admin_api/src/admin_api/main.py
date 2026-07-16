@@ -19,6 +19,7 @@ from admin_api.approvals import (
     is_matching_review_approved,
     list_approvals,
 )
+from admin_api.drop_pipeline import router as drop_pipeline_router
 from habeas_privacy_core.audit import AuditMiddleware
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
@@ -37,6 +38,12 @@ class AdminSettings(CoreSettings):
 
     service_name: str = "admin-api"
     port: int = 8080
+    # DROP pipeline worker proxies (ops console). Overridable via env.
+    drop_connector_url: str = "http://127.0.0.1:8081"
+    drop_ingestor_url: str = "http://127.0.0.1:8082"
+    request_dispatcher_url: str = "http://127.0.0.1:8083"
+    matching_url: str = "http://127.0.0.1:8084"
+    data_fulfillment_url: str = "http://127.0.0.1:8085"
 
 
 class ManualRequestBody(BaseModel):
@@ -90,6 +97,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Habeas Privacy Admin API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(AuditMiddleware)
+app.include_router(drop_pipeline_router)
 
 
 def _approval_record(row: dict[str, Any]) -> ApprovalRecord:
