@@ -67,11 +67,22 @@ Env on Cloud Run: `DROP_ENV=sandbox`, `DROP_API_BASE_URL=https://api.drop.privac
 
 Land/promote only — no `DROP_API_KEY`. Needs `DATABASE_URL`.
 
+### Cloud Run auth (dev)
+
+| Surface | Invoker |
+|---------|---------|
+| `admin-api-dev` | `allUsers` (Firebase SPA CORS; IAP later) |
+| Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) |
+
+Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Localhost worker URLs skip auth.
+
 After INF grants `secretmanager.admin`, cut over to `dev-dpra` + `database-url` and delete `dpra-dev-temp`.
 
-## Blocked on infra IAM (Jose cannot `setIamPolicy`)
+## Blocked on infra IAM (historical — largely unblocked)
 
-`dev-owner-1@example.com` has `roles/editor` + `roles/iam.serviceAccountAdmin` but **not** project/secret `setIamPolicy`. Ask Henry/Chris for:
+`dev-owner-1@example.com` now has `roles/resourcemanager.projectIamAdmin`, `roles/run.admin`, and `roles/secretmanager.admin` (plus editor / serviceAccountAdmin). Earlier note:
+
+`dev-owner-1@example.com` previously lacked project/secret `setIamPolicy`. Ask Henry/Chris for:
 
 1. **Secret accessors** on `database-url`:
    - `user:dev-owner-1@example.com`

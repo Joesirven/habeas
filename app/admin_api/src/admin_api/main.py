@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
 from sse_starlette.sse import EventSourceResponse
@@ -38,6 +39,11 @@ class AdminSettings(CoreSettings):
 
     service_name: str = "admin-api"
     port: int = 8080
+    # Pipe-separated browser origins (commas break gcloud --substitutions).
+    cors_origins: str = (
+        "http://127.0.0.1:5173|http://localhost:5173|"
+        "https://example-gcp-project-dev.web.app|https://example-gcp-project-data-privacy-dev.web.app"
+    )
     # DROP pipeline worker proxies (ops console). Overridable via env.
     drop_connector_url: str = "http://127.0.0.1:8081"
     drop_ingestor_url: str = "http://127.0.0.1:8082"
@@ -96,6 +102,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Habeas Privacy Admin API", version="0.1.0", lifespan=lifespan)
+_cors_origins = [o.strip() for o in settings.cors_origins.replace(",", "|").split("|") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins or ["http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.add_middleware(AuditMiddleware)
 app.include_router(drop_pipeline_router)
 

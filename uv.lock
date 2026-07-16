@@ -36,6 +36,7 @@ source = { editable = "app/admin_api" }
 dependencies = [
     { name = "habeas-privacy-core" },
     { name = "fastapi" },
+    { name = "google-auth" },
     { name = "httpx" },
     { name = "sse-starlette" },
     { name = "uvicorn", extra = ["standard"] },
@@ -45,6 +46,7 @@ dependencies = [
 requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "google-auth", specifier = ">=2.36" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "sse-starlette", specifier = ">=2.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
