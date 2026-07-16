@@ -42,8 +42,18 @@ gcloud builds submit --config=infra/cloudbuild/matching-dev.yaml \
   --project=example-gcp-project \
   --substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@/postgres?host=/cloudsql/example-gcp-project:us-east4:dpra-dev-temp'
 
-# CA DROP connector (U6 — `drop-connector-dev` Cloud Build config coming)
+gcloud builds submit --config=infra/cloudbuild/drop-connector-dev.yaml \
+  --project=example-gcp-project \
+  --substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@/postgres?host=/cloudsql/example-gcp-project:us-east4:dpra-dev-temp',_DROP_API_KEY='YOUR_SANDBOX_KEY'
 ```
+
+### drop-connector (U6)
+
+| File | Purpose |
+|------|---------|
+| [`cloudbuild/drop-connector-dev.yaml`](cloudbuild/drop-connector-dev.yaml) | Build/push/deploy `drop-connector-dev` |
+
+Env on Cloud Run: `DROP_ENV=sandbox`, `DROP_API_BASE_URL=https://api.drop.privacy.ca.gov/sandbox`, `DROP_API_KEY` via `_DROP_API_KEY` substitution (prefer Secret Manager `drop-sandbox-api-key` when IAM allows). Never point sandbox deploy at production host.
 
 After INF grants `secretmanager.admin`, cut over to `dev-dpra` + `database-url` and delete `dpra-dev-temp`.
 
