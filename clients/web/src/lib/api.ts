@@ -5,12 +5,14 @@ export async function fetchAdminApi<T>(path: string, init?: RequestInit): Promis
     ...init,
     headers: {
       Accept: 'application/json',
+      'Content-Type': 'application/json',
       ...init?.headers,
     },
   })
 
   if (!response.ok) {
-    throw new Error(`Admin API ${response.status}: ${response.statusText}`)
+    const detail = await response.text()
+    throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
   }
 
   return response.json() as Promise<T>
@@ -21,6 +23,39 @@ export type HealthPayload = {
   service?: string
 }
 
+export type IntakeSource = 'webform' | 'drop' | 'csv' | 'manual'
+
+export type RequestRecord = {
+  id: string
+  received_at: string
+  intake_source: IntakeSource
+  raw_record_id: number | null
+}
+
+export type ManualRequestInput = {
+  request_type?: string
+  first_name?: string
+  last_name?: string
+  email?: string
+  phone?: string
+  zip?: string
+  dob?: string
+  state: string
+  external_id?: string
+}
+
 export function getHealth() {
   return fetchAdminApi<HealthPayload>('/healthz')
+}
+
+export function listRequests(intakeSource?: IntakeSource) {
+  const query = intakeSource ? `?intake_source=${intakeSource}` : ''
+  return fetchAdminApi<RequestRecord[]>(`/requests${query}`)
+}
+
+export function createManualRequest(body: ManualRequestInput) {
+  return fetchAdminApi<RequestRecord>('/requests', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
 }

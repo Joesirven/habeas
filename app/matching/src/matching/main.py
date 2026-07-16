@@ -1,0 +1,164 @@
+"""Matching Cloud Run worker."""
+
+from __future__ import annotations
+
+import json
+import logging
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
+
+from fastapi import FastAPI, HTTPException
+from pydantic_settings import SettingsConfigDict
+
+from habeas_privacy_core.config import CoreSettings
+from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
+from habeas_privacy_core.db.requests import load_request_row
+from habeas_privacy_core.health import health_payload, ready_payload
+from habeas_privacy_core.observability.logging import configure_logging
+from habeas_privacy_core.observability.tracing import setup_tracing
+from habeas_privacy_core.queue.claim import claim_next
+from habeas_privacy_core.queue.constants import MATCHING_ATTEMPTS_TABLE, MATCHING_STEP
+from matching.models import IntakeSource, MatchRequest
+from matching.results import complete_attempt_error, complete_attempt_success
+from matching.router import get_pipeline
+
+logger = logging.getLogger(__name__)
+
+
+class MatchingSettings(CoreSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    service_name: str = "matching"
+    port: int = 8080
+    worker_id: str = "matching-dev"
+
+
+settings = MatchingSettings()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    configure_logging(service_name=settings.service_name, level=settings.log_level)
+    setup_tracing(
+        service_name=settings.service_name,
+        project_id=settings.gcp_project,
+        enabled=settings.enable_cloud_trace,
+    )
+    if settings.database_url:
+        await create_pool(settings.database_url)
+    yield
+    await close_pool()
+
+
+app = FastAPI(title="Habeas Privacy Matching Worker", version="0.1.0", lifespan=lifespan)
+
+
+@app.get("/healthz")
+async def healthz():
+    return health_payload(service=settings.service_name)
+
+
+@app.get("/readyz")
+async def readyz():
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="database not configured")
+    payload = await ready_payload(service=settings.service_name, db_check=lambda: ping())
+    if payload["status"] != "ok":
+        raise HTTPException(status_code=503, detail=payload)
+    return payload
+
+
+def _build_match_request(row: dict[str, Any]) -> MatchRequest:
+    raw_payload = row["raw_payload"]
+    if isinstance(raw_payload, str):
+        raw_payload = json.loads(raw_payload)
+    first = raw_payload.get("first_name") or ""
+    last = raw_payload.get("last_name") or ""
+    name = " ".join(part for part in [first, last] if part).strip() or None
+    return MatchRequest(
+        request_id=str(row["id"]),
+        intake_source=IntakeSource(row["intake_source"]),
+        name=name,
+        email=raw_payload.get("email"),
+        phone=raw_payload.get("phone"),
+        zip=raw_payload.get("zip"),
+        dob=raw_payload.get("dob"),
+        pii_hash=row.get("pii_hash"),
+    )
+
+
+@app.post("/process")
+async def process_next():
+    """Claim and process one matching attempt."""
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="database not configured")
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        claim = await claim_next(
+            conn,
+            MATCHING_ATTEMPTS_TABLE,
+            MATCHING_STEP,
+            worker_id=settings.worker_id,
+        )
+        if claim is None:
+            return {"status": "idle"}
+
+        attempt_id = int(claim["id"])
+        request_id = str(claim["request_id"])
+        await conn.execute(
+            f"UPDATE {MATCHING_ATTEMPTS_TABLE} SET status = 'in_flight' WHERE id = $1",
+            attempt_id,
+        )
+
+        try:
+            row = await load_request_row(conn, request_id)
+            if row is None:
+                await complete_attempt_error(
+                    conn,
+                    attempt_id=attempt_id,
+                    error_code="request_missing",
+                    error_message="request row not found",
+                )
+                return {"status": "error", "reason": "request_missing"}
+
+            pipeline = get_pipeline(IntakeSource(row["intake_source"]))
+            match_request = _build_match_request(row)
+            result = await pipeline.match(match_request)
+            result_id = await complete_attempt_success(
+                conn,
+                attempt_id=attempt_id,
+                request_id=request_id,
+                matched=result.matched,
+                matched_via=result.matched_via,
+                consumer_id=result.consumer_id,
+                confidence=result.confidence,
+            )
+        except Exception as exc:
+            await complete_attempt_error(
+                conn,
+                attempt_id=attempt_id,
+                error_code="matching_error",
+                error_message=str(exc),
+            )
+            logger.exception("matching_failed", extra={"event": "matching_failed"})
+            return {"status": "error", "reason": str(exc)}
+
+    return {
+        "status": "ok",
+        "attempt_id": attempt_id,
+        "request_id": request_id,
+        "matched": result.matched,
+        "result_id": result_id,
+    }
+
+
+def run() -> None:
+    import uvicorn
+
+    uvicorn.run(
+        "matching.main:app",
+        host="0.0.0.0",
+        port=settings.port,
+        factory=False,
+    )

@@ -3,6 +3,8 @@ import { TanStackRouterDevtools } from '@tanstack/router-devtools'
 
 import { AppShell } from '@/components/AppShell'
 import { DashboardPage } from '@/routes/index'
+import { ManualRequestPage } from '@/routes/requests/new'
+import { RequestsPage } from '@/routes/requests/index'
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -19,7 +21,23 @@ const indexRoute = createRoute({
   component: DashboardPage,
 })
 
-const routeTree = rootRoute.addChildren([indexRoute])
+const requestsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/requests',
+  component: RequestsPage,
+})
+
+const manualRequestRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/requests/new',
+  component: ManualRequestPage,
+})
+
+const routeTree = rootRoute.addChildren([
+  indexRoute,
+  requestsRoute,
+  manualRequestRoute,
+])
 
 export const router = createRouter({ routeTree })
 

@@ -16,7 +16,25 @@ dev = [
 ]
 
 [tool.uv.workspace]
-members = ["libs/*", "app/*", "clients/cli/*"]
+# Explicit workspace members (wave 1). Globs libs/* app/* also work; list is for visibility.
+members = [
+    "libs/habeas-privacy-core",
+    # control plane
+    "app/admin_api",
+    # pipeline
+    "app/reaper",
+    "app/matching",
+    "app/sla_monitor",
+    # suppression (tier C — scaffold)
+    "app/mailchimp",
+    "app/paylocity",
+    "app/lever",
+    "app/auth0",
+    "app/google_sheets",
+    "app/cassandra",
+    # cli
+    "clients/cli/habeas-cli",
+]
 
 [tool.importlinter]
 include_external_packages = true
@@ -31,8 +49,6 @@ root_packages = [
     "auth0",
     "google_sheets",
     "cassandra",
-    "intake_csv_dispatcher",
-    "intake_drop_poller",
     "sla_monitor",
     "habeas_cli",
 ]
@@ -51,8 +67,6 @@ source_modules = [
     "auth0",
     "google_sheets",
     "cassandra",
-    "intake_csv_dispatcher",
-    "intake_drop_poller",
     "sla_monitor",
     "habeas_cli",
 ]

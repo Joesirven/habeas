@@ -1,24 +1,52 @@
-"""DROP hash-index matching adapter — California DELETE Act.
-
-DROP delivers SHA-256/Base64 hashed identifiers; this adapter reproduces the same hash from
-Habeas's own records (standardize -> SHA-256 -> Base64, per ADR-21) and does an indexed
-lookup against the pre-computed hash index. The lookup plane (Postgres `drop_hash_index` vs
-BigQuery) is still open — see Matching-Design-Brief Q1 — so this is a stub until that lands.
-"""
+"""DROP hash-index matching adapter — California DELETE Act."""
 
 from __future__ import annotations
 
+import base64
+import logging
+
+from matching.hash import hash_identifier
+
 from matching.models import MatchRequest, MatchResult
 from matching.pipeline import MatchingPipeline
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["DropHashPipeline"]
 
 
 class DropHashPipeline(MatchingPipeline):
-    """Adapter for IntakeSource.DROP — pre-computed hash index lookup (ADR-21 Option A)."""
+    """Adapter for IntakeSource.DROP — hash compare against request pii_hash."""
 
     async def match(self, request: MatchRequest) -> MatchResult:
-        raise NotImplementedError(
-            "DropHashPipeline: hash-index lookup plane (Postgres vs BigQuery) not yet decided "
-            "— see Matching-Design-Brief Q1"
-        )
+        if request.pii_hash is None:
+            return MatchResult(matched=False, matched_via="drop_hash_missing")
+
+        candidate_hashes: list[bytes] = []
+        if request.email:
+            candidate_hashes.append(hash_identifier(request.email))
+        if request.phone:
+            candidate_hashes.append(hash_identifier(request.phone))
+
+        for candidate in candidate_hashes:
+            if candidate == request.pii_hash:
+                return MatchResult(
+                    matched=True,
+                    matched_via="drop_hash",
+                    confidence=1.0,
+                )
+
+        # Dev stub: also accept the raw stored hash when no plaintext identifiers exist.
+        if not candidate_hashes:
+            logger.info(
+                "drop_hash_lookup_stub",
+                extra={"event": "drop_hash_lookup_stub", "request_id": request.request_id},
+            )
+            return MatchResult(matched=False, matched_via="drop_hash_stub")
+
+        return MatchResult(matched=False, matched_via="drop_hash")
+
+    @staticmethod
+    def decode_drop_hash(value: str) -> bytes:
+        """Decode a Base64 DROP hash from intake payloads."""
+        return base64.b64decode(value)

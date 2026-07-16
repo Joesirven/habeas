@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -110,6 +111,8 @@ async def check_approval_required(
         return None
 
     condition = rule["condition_jsonb"]
+    if isinstance(condition, str):
+        condition = json.loads(condition)
     if condition and not eval_condition(condition, context):
         return None
 

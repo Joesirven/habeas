@@ -13,7 +13,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def pool():
     database_url = os.environ["DATABASE_URL"]
     run_migrations(database_url=database_url)
@@ -25,8 +25,8 @@ async def pool():
 async def _insert_pending_attempt(conn: asyncpg.Connection) -> None:
     request_id = await conn.fetchval(
         """
-        INSERT INTO requests (intake_source, requestor_state, request_type, raw_payload)
-        VALUES ('webform', 'CA', 'delete', '{}'::jsonb)
+        INSERT INTO requests (intake_source, raw_record_id)
+        VALUES ('manual', NULL)
         RETURNING id
         """,
     )
@@ -41,6 +41,12 @@ async def _insert_pending_attempt(conn: asyncpg.Connection) -> None:
 
 async def test_concurrent_claims_are_unique(pool):
     async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            DELETE FROM core_queue_test_attempts
+             WHERE step = 'matching' AND status = 'pending'
+            """
+        )
         for _ in range(100):
             await _insert_pending_attempt(conn)
 
@@ -66,8 +72,8 @@ async def test_reaper_releases_expired_claim(pool):
     async with pool.acquire() as conn:
         request_id = await conn.fetchval(
             """
-            INSERT INTO requests (intake_source, requestor_state, request_type, raw_payload)
-            VALUES ('webform', 'CA', 'delete', '{}'::jsonb)
+            INSERT INTO requests (intake_source, raw_record_id)
+            VALUES ('manual', NULL)
             RETURNING id
             """,
         )

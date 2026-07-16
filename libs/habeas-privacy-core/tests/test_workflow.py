@@ -120,7 +120,7 @@ def test_approval_migration_exists():
     assert "suppress.paylocity" in content
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def pool():
     database_url = os.environ["DATABASE_URL"]
     run_migrations(database_url=database_url)
@@ -169,8 +169,8 @@ async def test_release_approved_updates_only_matching_rows(pool):
     async with pool.acquire() as conn:
         request_id = await conn.fetchval(
             """
-            INSERT INTO requests (intake_source, requestor_state, request_type, raw_payload)
-            VALUES ('webform', 'CA', 'delete', '{}'::jsonb)
+            INSERT INTO requests (intake_source, raw_record_id)
+            VALUES ('manual', NULL)
             RETURNING id
             """,
         )

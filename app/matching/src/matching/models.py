@@ -19,6 +19,7 @@ class MatchRequest(BaseModel):
     phone: str | None = None
     zip_code: str | None = Field(default=None, alias="zip")
     dob: str | None = None
+    pii_hash: bytes | None = None
 
     model_config = {"populate_by_name": True}
 

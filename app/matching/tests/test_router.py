@@ -16,6 +16,10 @@ def test_csv_batch_routes_to_plaintext_pipeline():
     assert isinstance(get_pipeline(IntakeSource.CSV_BATCH), PlaintextMatchPipeline)
 
 
+def test_manual_routes_to_plaintext_pipeline():
+    assert isinstance(get_pipeline(IntakeSource.MANUAL), PlaintextMatchPipeline)
+
+
 def test_unknown_source_raises():
     with pytest.raises(ValueError, match="no MatchingPipeline registered"):
         get_pipeline("carrier_pigeon")  # type: ignore[arg-type]

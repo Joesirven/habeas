@@ -1,0 +1,8 @@
+> inherits: ../../AGENTS.md
+
+# AGENTS.md — src/habeas_privacy_core/db/
+
+asyncpg connection pool and table helpers (`pool.py`, `requests.py`, `migrations.py`). Raw SQL only — no object-relational mapper.
+
+- Imported by apps and CLI — never import app code from here.
+- No vendor-specific logic in this module.

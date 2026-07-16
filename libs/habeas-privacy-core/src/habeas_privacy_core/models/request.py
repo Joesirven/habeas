@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field
 class IntakeSource(StrEnum):
     WEBFORM = "webform"
     DROP = "drop"
-    CSV_BATCH = "csv_batch"
+    CSV = "csv"
+    MANUAL = "manual"
 
 
 class RequestSummary(BaseModel):

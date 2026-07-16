@@ -25,6 +25,12 @@ export function AppShell({ children }: AppShellProps) {
             >
               Dashboard
             </Link>
+            <Link
+              to="/requests"
+              className="hover:text-white [&.active]:font-medium [&.active]:text-white"
+            >
+              Requests
+            </Link>
           </nav>
         </div>
       </header>

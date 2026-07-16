@@ -8,7 +8,7 @@ Shared Python libraries. **Not deployed alone** — imported by `app/*` and `cli
 
 | Package | Purpose |
 |---------|---------|
-| [`habeas-privacy-core/`](habeas-privacy-core/) | Models, queue, audit — each submodule has its own AGENTS.md and README.md |
+| [`habeas-privacy-core/`](habeas-privacy-core/) | Models, queue, audit — submodule AGENTS.md/README live under `src/habeas_privacy_core/` |
 
 ## Rules
 

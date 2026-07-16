@@ -19,7 +19,9 @@ data-privacy/
 ├── libs/habeas-privacy-core/ # shared Python library
 ├── app/                        # Cloud Run FastAPI apps
 │   ├── admin_api/              # control plane (Identity-Aware Proxy)
-│   ├── matching/               # California DELETE Act hash matching
+│   ├── drop_connector/         # CA DROP Type-I connector (U6 — planned)
+│   ├── drop_ingestor/          # CA DROP land/promote only (U7 — planned)
+│   ├── matching/               # hash + plaintext matching (all sources)
 │   ├── mailchimp/ …            # per-system automation apps
 │   └── reaper/ …
 ├── clients/
