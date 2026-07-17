@@ -13,7 +13,7 @@ All Cloud Run FastAPI deployables. **Each app subdirectory has its own AGENTS.md
 
 ## All apps (version 0)
 
-[`admin_api/`](admin_api/) · [`matching/`](matching/) · [`request_dispatcher/`](request_dispatcher/) **(U8)** · [`drop_connector/`](drop_connector/) **(CA DROP, U6)** · [`drop_ingestor/`](drop_ingestor/) **(CA DROP, U7)** · [`reaper/`](reaper/) · [`sla_monitor/`](sla_monitor/) · [`cassandra/`](cassandra/) · [`mailchimp/`](mailchimp/) · [`paylocity/`](paylocity/) · [`lever/`](lever/) · [`auth0/`](auth0/) · [`google_sheets/`](google_sheets/)
+[`admin_api/`](admin_api/) · [`matching/`](matching/) · [`request_dispatcher/`](request_dispatcher/) · [`drop_connector/`](drop_connector/) · [`drop_ingestor/`](drop_ingestor/) · [`hash_index_refresh/`](hash_index_refresh/) · [`data_fulfillment_dispatcher/`](data_fulfillment_dispatcher/) · [`reaper/`](reaper/) · [`sla_monitor/`](sla_monitor/) · [`cassandra/`](cassandra/) · [`mailchimp/`](mailchimp/) · [`paylocity/`](paylocity/) · [`lever/`](lever/) · [`auth0/`](auth0/) · [`google_sheets/`](google_sheets/)
 
 ## Rules
 
