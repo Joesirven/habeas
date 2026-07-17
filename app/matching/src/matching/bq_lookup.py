@@ -71,7 +71,7 @@ def lookup_dwids_by_hash(
     sql = f"""
         SELECT CAST(dwid AS STRING) AS dwid
           FROM {fq_table}
-         WHERE `hash` = @hash_value
+         WHERE hash_value = @hash_value
            AND state = @lookup_state
     """
 

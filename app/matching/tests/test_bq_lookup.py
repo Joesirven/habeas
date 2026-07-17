@@ -44,7 +44,7 @@ async def test_bq_lookup_zero_rows(monkeypatch: pytest.MonkeyPatch):
     job_config = client.query.call_args.kwargs["job_config"]
     params = {p.name: p.value for p in job_config.query_parameters}
     assert params["lookup_state"] == "CA"
-    assert "`hash` = @hash_value" in client.query.call_args.args[0]
+    assert "hash_value = @hash_value" in client.query.call_args.args[0]
     assert "state = @lookup_state" in client.query.call_args.args[0]
 
 
