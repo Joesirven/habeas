@@ -7,12 +7,17 @@ import pytest
 from habeas_privacy_core.adapters.gcs import clear_gcs_store, read_object, write_object
 from habeas_privacy_core.adapters.secret_manager import clear_secret_cache, get_secret
 from habeas_privacy_core.db.migrations import migrations_dir, run_migrations
+from unittest.mock import AsyncMock, patch
+
 from habeas_privacy_core.workflow.approval import (
+    MATCHING_REVIEW_ACTION,
     abandon_rejected,
     check_approval_required,
     clear_rule_cache,
+    ensure_pending_matching_review,
     eval_condition,
     fetch_active_rule,
+    is_matching_review_approved,
     release_approved,
 )
 from habeas_privacy_core.workflow.error_policy import (
@@ -118,6 +123,38 @@ def test_approval_migration_exists():
     assert "CREATE TABLE approval_rules" in content
     assert "INSERT INTO approval_rules" in content
     assert "suppress.paylocity" in content
+
+
+@pytest.mark.asyncio
+async def test_is_matching_review_approved_requires_decided_after_latest_result():
+    """H1 gate SQL ties approval decided_at to latest matching_results.recorded_at."""
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=1)
+    request_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    assert await is_matching_review_approved(conn, request_id) is True
+    sql = conn.fetchval.await_args.args[0]
+    assert "decided_at" in sql
+    assert "matching_results" in sql
+    assert "MAX(mr.recorded_at)" in sql
+    assert conn.fetchval.await_args.args[2] == MATCHING_REVIEW_ACTION
+
+
+@pytest.mark.asyncio
+async def test_ensure_pending_matching_review_noop_when_freshly_approved():
+    conn = AsyncMock()
+    with patch(
+        "habeas_privacy_core.workflow.approval.is_matching_review_approved",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        result = await ensure_pending_matching_review(
+            conn,
+            request_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        )
+    assert result is None
+    conn.fetchval.assert_not_awaited()
+    conn.fetchrow.assert_not_awaited()
 
 
 @pytest.fixture

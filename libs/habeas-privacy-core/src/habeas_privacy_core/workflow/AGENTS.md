@@ -6,3 +6,6 @@ Approval helpers, service level agreement computation, terminal error classifica
 
 - Imported by apps and CLI — never import app code from here.
 - No vendor-specific logic in this module.
+- `is_matching_review_approved` requires approval after the latest
+  `matching_results` row; `ensure_pending_matching_review` opens a fresh
+  pending gate when rematch invalidates a prior approval.

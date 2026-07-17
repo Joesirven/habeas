@@ -77,6 +77,12 @@ async def find_requests_ready_to_fulfill(
                   WHERE ar.request_id = r.id
                     AND ar.action_type = 'matching.review'
                     AND ar.status = 'approved'
+                    AND ar.decided_at IS NOT NULL
+                    AND ar.decided_at >= (
+                          SELECT MAX(mr.recorded_at)
+                            FROM matching_results mr
+                           WHERE mr.request_id = r.id
+                        )
                )
          ORDER BY r.received_at ASC
          LIMIT $1

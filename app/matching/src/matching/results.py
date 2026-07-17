@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 import asyncpg
 
 from habeas_privacy_core.queue.constants import MATCHING_ATTEMPTS_TABLE
+from habeas_privacy_core.workflow.approval import ensure_pending_matching_review
+
+logger = logging.getLogger(__name__)
 
 
 async def complete_attempt_success(
@@ -20,7 +24,12 @@ async def complete_attempt_success(
     confidence: float | None = None,
     match_count: int = 0,
 ) -> int:
-    """Mark attempt successful and append a matching_results row."""
+    """Mark attempt successful and append a matching_results row.
+
+    After writing the result, ensure a pending ``matching.review`` exists when
+    the latest outcome is not already covered by a fresh approval (rematch
+    invalidates prior approvals via the fulfill gate).
+    """
     await conn.execute(
         f"""
         UPDATE {MATCHING_ATTEMPTS_TABLE}
@@ -46,7 +55,29 @@ async def complete_attempt_success(
         matched_via,
         match_count,
     )
-    return int(result_id)
+    result_id_int = int(result_id)
+    try:
+        await ensure_pending_matching_review(
+            conn,
+            request_id=request_id,
+            context={
+                "matching_result_id": result_id_int,
+                "match_count": match_count,
+                "matched": matched,
+            },
+        )
+    except Exception:
+        # Match persistence must succeed even if review enqueue fails; fulfill
+        # stays fail-closed without a fresh approved matching.review.
+        logger.exception(
+            "matching_review_ensure_failed",
+            extra={
+                "event": "matching_review_ensure_failed",
+                "request_id": request_id,
+                "matching_result_id": result_id_int,
+            },
+        )
+    return result_id_int
 
 
 async def complete_attempt_error(

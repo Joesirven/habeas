@@ -203,6 +203,8 @@ async def test_find_requests_ready_to_fulfill_sql():
     assert "matching.review" in sql
     assert "response_status IS NULL" in sql
     assert "matching_results" in sql
+    assert "decided_at" in sql
+    assert "MAX(mr.recorded_at)" in sql
 
 
 @pytest.mark.asyncio
