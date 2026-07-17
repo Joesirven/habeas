@@ -5,8 +5,29 @@ import { AppShell } from '@/components/AppShell'
 import { MatchingReviewPage } from '@/routes/approvals/matching-review'
 import { DashboardPage } from '@/routes/index'
 import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
+import { HealthConfigurationPage } from '@/routes/ops/health/configuration'
+import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
+import { HealthLandingPage } from '@/routes/ops/health/index'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
+
+export const PIPELINE_TABS = [
+  'home',
+  'download',
+  'ingest',
+  'matching',
+  'fulfillment',
+  'configurations',
+] as const
+
+export type PipelineTab = (typeof PIPELINE_TABS)[number]
+
+function parsePipelineTab(value: unknown): PipelineTab {
+  if (typeof value === 'string' && PIPELINE_TABS.includes(value as PipelineTab)) {
+    return value as PipelineTab
+  }
+  return 'home'
+}
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -44,7 +65,28 @@ const matchingReviewRoute = createRoute({
 const dropPipelineRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/drop-pipeline',
+  validateSearch: (search: Record<string, unknown>) => ({
+    tab: parsePipelineTab(search.tab),
+  }),
   component: DropPipelinePage,
+})
+
+const healthRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/health',
+  component: HealthLandingPage,
+})
+
+const healthEscalationsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/health/escalations',
+  component: HealthEscalationsPage,
+})
+
+const healthConfigurationRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/health/configuration',
+  component: HealthConfigurationPage,
 })
 
 const routeTree = rootRoute.addChildren([
@@ -53,6 +95,9 @@ const routeTree = rootRoute.addChildren([
   manualRequestRoute,
   matchingReviewRoute,
   dropPipelineRoute,
+  healthRoute,
+  healthEscalationsRoute,
+  healthConfigurationRoute,
 ])
 
 export const router = createRouter({ routeTree })

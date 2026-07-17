@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, useBlocker } from '@tanstack/react-router'
+import { Link, useBlocker, useNavigate, useSearch } from '@tanstack/react-router'
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
@@ -17,14 +17,24 @@ import {
   postDropMatchingResultsBulkApprove,
   postDropPromote,
   postHashIndexRefreshEnqueue,
+  postHashIndexRefreshEnqueueAll,
   postHashIndexRefreshProcess,
   type DropPipelineStatus,
+  type HashIndexRefreshStatus,
   type MatchTypeFilter,
   type MatchingResultDetail,
   type MatchingResultsStats,
   type StepStatusCount,
   type WorkerHealthProbe,
 } from '@/lib/api'
+
+type PipelineTab =
+  | 'home'
+  | 'download'
+  | 'ingest'
+  | 'matching'
+  | 'fulfillment'
+  | 'configurations'
 
 function matchTypeFromCount(matchCount: number): MatchTypeFilter {
   if (matchCount <= 0) return 'not_found'
@@ -50,10 +60,25 @@ const PIPELINE_STAGES = [
   '06 Fulfill',
 ] as const
 
+const PIPELINE_TAB_BAR: { key: PipelineTab; label: string }[] = [
+  { key: 'home', label: 'Home' },
+  { key: 'download', label: 'Download' },
+  { key: 'ingest', label: 'Ingest' },
+  { key: 'matching', label: 'Matching' },
+  { key: 'fulfillment', label: 'Fulfillment' },
+]
+
+const SERVED_STATE_ACRONYMS = [
+  'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'DC', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA',
+  'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM',
+  'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA',
+  'WV', 'WI', 'WY',
+] as const
+
 const ACTIONS = [
   { key: 'download', label: 'Download ZIP', run: () => postDropDownload() },
-  { key: 'land', label: 'Land', run: () => postDropLand() },
-  { key: 'promote', label: 'Promote', run: () => postDropPromote() },
+  { key: 'land', label: 'Land (unzip)', run: () => postDropLand() },
+  { key: 'promote', label: 'Promote to raw', run: () => postDropPromote() },
   { key: 'dispatch', label: 'Dispatch matching', run: () => postDropDispatch() },
   { key: 'match', label: 'Run matching', run: () => postDropMatch() },
   { key: 'fulfill', label: 'Fulfill', run: () => postDropFulfill() },
@@ -71,6 +96,218 @@ const MATCH_TYPE_OPTIONS: MatchTypeFilter[] = ['single_match', 'multi_match', 'n
 
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
+}
+
+function summarizeActionPayload(raw: string | null): { status: string | null; blurb: string } {
+  if (!raw) return { status: null, blurb: '' }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    const status = typeof parsed.status === 'string' ? parsed.status : null
+    const parts: string[] = []
+    if (Array.isArray(parsed.lists)) parts.push(`${parsed.lists.length} lists`)
+    if (Array.isArray(parsed.land_attempt_ids)) {
+      parts.push(`${parsed.land_attempt_ids.length} land attempts`)
+    }
+    if (typeof parsed.connector_attempt_id === 'number') {
+      parts.push(`connector #${parsed.connector_attempt_id}`)
+    }
+    if (typeof parsed.request_id === 'string') parts.push(`request ${parsed.request_id.slice(0, 8)}…`)
+    if (typeof parsed.match_count === 'number') parts.push(`${parsed.match_count} matches`)
+    if (typeof parsed.gcs_uri === 'string') {
+      const leaf = parsed.gcs_uri.split('/').pop() ?? parsed.gcs_uri
+      parts.push(leaf)
+    }
+    return { status, blurb: parts.join(' · ') || 'Payload ready' }
+  } catch {
+    const trimmed = raw.trim()
+    return {
+      status: null,
+      blurb: trimmed.length > 72 ? `${trimmed.slice(0, 72)}…` : trimmed,
+    }
+  }
+}
+
+function ActionResultFrame({
+  lastAction,
+  actionResult,
+  onClear,
+}: {
+  lastAction: string | null
+  actionResult: string | null
+  onClear: () => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const titleId = useId()
+  const { status, blurb } = summarizeActionPayload(actionResult)
+  const isError =
+    status === 'error' ||
+    (actionResult != null &&
+      !actionResult.trimStart().startsWith('{') &&
+      /error|fail|502|503|401|403/i.test(actionResult))
+
+  if (!lastAction && !actionResult) return null
+
+  return (
+    <>
+      <div className="min-w-0 rounded-[0.9rem] border border-line bg-paper-raised/80">
+        <div className="flex items-start justify-between gap-3 border-b border-line px-3 py-2.5">
+          <div className="min-w-0">
+            <Micro>Last response</Micro>
+            <p className="mt-1 truncate text-sm text-ink">{lastAction ?? 'Action'}</p>
+            <p className="mt-0.5 truncate text-xs text-ink-soft">
+              {status ? (
+                <span className={isError ? 'text-red-700' : 'text-emerald-700'}>{status}</span>
+              ) : null}
+              {status && blurb ? <span className="text-mute"> · </span> : null}
+              {blurb || '—'}
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <button
+              type="button"
+              className="taste-btn px-2.5 py-1 text-[0.65rem]"
+              onClick={() => setExpanded(true)}
+            >
+              View payload
+            </button>
+            <button
+              type="button"
+              className="taste-btn px-2.5 py-1 text-[0.65rem]"
+              onClick={onClear}
+              aria-label="Clear last response"
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+        <pre className="max-h-28 overflow-auto overscroll-contain px-3 py-2 font-mono text-[0.7rem] leading-relaxed text-ink-soft [overflow-wrap:anywhere] whitespace-pre-wrap break-all">
+          {actionResult ?? ''}
+        </pre>
+      </div>
+
+      {expanded
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[100] flex items-end justify-center bg-habeas-navy/45 p-4 backdrop-blur-sm sm:items-center"
+              role="presentation"
+              onClick={() => setExpanded(false)}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby={titleId}
+                className="taste-panel flex max-h-[min(85vh,40rem)] w-full max-w-2xl flex-col overflow-hidden p-0"
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault()
+                    setExpanded(false)
+                  }
+                }}
+              >
+                <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
+                  <div className="min-w-0">
+                    <Micro>Payload</Micro>
+                    <h3
+                      id={titleId}
+                      className="mt-2 truncate font-display text-xl font-medium tracking-tight text-ink"
+                    >
+                      {lastAction ?? 'Action response'}
+                    </h3>
+                  </div>
+                  <button
+                    type="button"
+                    className="taste-btn shrink-0 px-2.5 py-1 text-[0.65rem]"
+                    onClick={() => setExpanded(false)}
+                  >
+                    Close
+                  </button>
+                </div>
+                <pre className="min-h-0 flex-1 overflow-auto overscroll-contain px-5 py-4 font-mono text-xs leading-relaxed text-ink-soft [overflow-wrap:anywhere] whitespace-pre-wrap break-all">
+                  {actionResult ?? ''}
+                </pre>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
+  )
+}
+
+function PipelineTabBar({
+  active,
+  onSelect,
+}: {
+  active: PipelineTab
+  onSelect: (tab: PipelineTab) => void
+}) {
+  const tabs =
+    active === 'configurations'
+      ? [...PIPELINE_TAB_BAR, { key: 'configurations' as const, label: 'Configurations' }]
+      : PIPELINE_TAB_BAR
+
+  return (
+    <div className="flex flex-wrap gap-2 border-b border-line pb-4">
+      {tabs.map((tab) => (
+        <button
+          key={tab.key}
+          type="button"
+          className={active === tab.key ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'}
+          onClick={() => onSelect(tab.key)}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function ActionButtons({
+  keys,
+  showSkeleton,
+  postMatchOpen,
+  actionMutation,
+}: {
+  keys: ActionKey[]
+  showSkeleton: boolean
+  postMatchOpen: boolean
+  actionMutation: {
+    isPending: boolean
+    variables?: ActionKey
+    mutate: (key: ActionKey) => void
+  }
+}) {
+  const filtered = ACTIONS.filter((action) => keys.includes(action.key))
+  return (
+    <div className="flex flex-col gap-2">
+      {filtered.map((action, index) => {
+        const busy = actionMutation.isPending && actionMutation.variables === action.key
+        return (
+          <button
+            key={action.key}
+            type="button"
+            className={
+              index === 0
+                ? 'taste-btn-primary w-full justify-between gap-3 text-left'
+                : 'taste-btn w-full justify-between gap-3 text-left'
+            }
+            disabled={actionMutation.isPending || showSkeleton || postMatchOpen}
+            onClick={() => actionMutation.mutate(action.key)}
+          >
+            <span>{action.label}</span>
+            {busy ? (
+              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+            ) : (
+              <span className="font-mono text-[0.65rem] opacity-50">
+                {String(index + 1).padStart(2, '0')}
+              </span>
+            )}
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
 function CountTable({ rows, empty }: { rows: StepStatusCount[]; empty: string }) {
@@ -272,7 +509,7 @@ function PostMatchDialog({
           Navigation is blocked until you pick an action.
         </p>
         {matchSummary && (
-          <pre className="mt-4 overflow-x-auto rounded-lg border border-line bg-paper-raised p-3 text-xs text-ink-soft">
+          <pre className="mt-4 max-h-36 overflow-auto overscroll-contain rounded-lg border border-line bg-paper-raised p-3 text-xs text-ink-soft [overflow-wrap:anywhere] whitespace-pre-wrap break-all">
             {matchSummary}
           </pre>
         )}
@@ -614,8 +851,141 @@ function MatchingResultsPanel({
   )
 }
 
+function HashIndexPanel({
+  data,
+  showSkeleton,
+  hashState,
+  setHashState,
+  hashPending,
+  hashWorkerDown,
+  lastRun,
+  hashIndexMutation,
+  actionMutation,
+  postMatchOpen,
+}: {
+  data: DropPipelineStatus | undefined
+  showSkeleton: boolean
+  hashState: string
+  setHashState: (state: string) => void
+  hashPending: boolean
+  hashWorkerDown: boolean
+  lastRun: HashIndexRefreshStatus['last_run']
+  hashIndexMutation: {
+    isPending: boolean
+    mutate: (
+      action: { kind: 'enqueue'; state: string } | { kind: 'enqueue-all' } | { kind: 'process' },
+    ) => void
+  }
+  actionMutation: { isPending: boolean }
+  postMatchOpen: boolean
+}) {
+  return (
+    <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
+      <div>
+        <Micro>Hash index refresh</Micro>
+        <p className="mt-2 max-w-xl text-sm text-ink-soft">
+          Rebuild serving marts per state via dbt, then rematch open not-found and prior multi-match
+          DROP requests for that state. Enqueue queues one attempt; enqueue all covers USPS 50+DC.
+        </p>
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2 text-sm text-ink-soft">
+          <span className="taste-micro">State</span>
+          <select
+            className="glass rounded-lg px-3 py-2 font-mono text-sm text-ink"
+            value={hashState}
+            onChange={(event) => setHashState(event.target.value)}
+            aria-label="Hash index refresh state"
+          >
+            {SERVED_STATE_ACRONYMS.map((state) => (
+              <option key={state} value={state}>
+                {state}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="text-sm text-ink-soft">
+          {hashWorkerDown
+            ? 'Worker down'
+            : hashPending
+              ? 'Pending / in-flight'
+              : lastRun
+                ? `Last ${lastRun.status}`
+                : 'None'}
+        </span>
+        {lastRun?.status === 'success' && (
+          <span className="text-sm text-ink-soft">
+            rows e/p/n {lastRun.rows_email ?? '—'}/{lastRun.rows_phone ?? '—'}/
+            {lastRun.rows_ndz ?? '—'} · rematch {lastRun.rematch_enqueued_count}
+          </span>
+        )}
+        {lastRun?.status && lastRun.status !== 'success' && lastRun.error_message && (
+          <span className="text-sm text-red-700">{lastRun.error_message}</span>
+        )}
+      </div>
+      <div>
+        <Micro>Attempts by status</Micro>
+        <p className="mt-1 text-xs text-mute">
+          Immutable attempt history counts — pending through terminal statuses.
+        </p>
+        <div className="mt-3">
+          <StatusCountTable
+            rows={data?.hash_index_refresh?.attempts_by_status ?? []}
+            empty="No hash-index refresh attempts yet."
+          />
+        </div>
+      </div>
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:gap-3">
+        <button
+          type="button"
+          className="taste-btn"
+          disabled={
+            showSkeleton ||
+            hashPending ||
+            hashIndexMutation.isPending ||
+            actionMutation.isPending ||
+            postMatchOpen
+          }
+          onClick={() => hashIndexMutation.mutate({ kind: 'enqueue', state: hashState })}
+        >
+          Enqueue state
+        </button>
+        <button
+          type="button"
+          className="taste-btn"
+          disabled={
+            showSkeleton ||
+            hashIndexMutation.isPending ||
+            actionMutation.isPending ||
+            postMatchOpen
+          }
+          onClick={() => hashIndexMutation.mutate({ kind: 'enqueue-all' })}
+        >
+          Enqueue all states
+        </button>
+        <button
+          type="button"
+          className="taste-btn"
+          disabled={
+            showSkeleton ||
+            !hashPending ||
+            hashIndexMutation.isPending ||
+            actionMutation.isPending ||
+            postMatchOpen
+          }
+          onClick={() => hashIndexMutation.mutate({ kind: 'process' })}
+        >
+          Process refresh
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export function DropPipelinePage() {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const { tab } = useSearch({ from: '/ops/drop-pipeline' })
   const [lastAction, setLastAction] = useState<string | null>(null)
   const [actionResult, setActionResult] = useState<string | null>(null)
   const [postMatchOpen, setPostMatchOpen] = useState(false)
@@ -623,7 +993,12 @@ export function DropPipelinePage() {
   const [resultsFocusBulk, setResultsFocusBulk] = useState(false)
   const [highlightRequestId, setHighlightRequestId] = useState<string | null>(null)
   const [preferredBulkType, setPreferredBulkType] = useState<MatchTypeFilter | null>(null)
+  const [hashState, setHashState] = useState('CA')
   const resultsAnchorRef = useRef<HTMLDivElement>(null)
+
+  function setTab(next: PipelineTab) {
+    void navigate({ to: '/ops/drop-pipeline', search: { tab: next } })
+  }
 
   // Hard-block AppShell / in-page Links while the required post-match dialog is open.
   useBlocker({
@@ -675,15 +1050,24 @@ export function DropPipelinePage() {
   })
 
   const hashIndexMutation = useMutation({
-    mutationFn: async (key: 'enqueue' | 'process') => {
-      setLastAction(key === 'enqueue' ? 'Enqueue hash-index refresh' : 'Process hash-index refresh')
-      return key === 'enqueue'
-        ? postHashIndexRefreshEnqueue({ state: 'CA' })
-        : postHashIndexRefreshProcess()
+    mutationFn: async (
+      action: { kind: 'enqueue'; state: string } | { kind: 'enqueue-all' } | { kind: 'process' },
+    ) => {
+      if (action.kind === 'enqueue') {
+        setLastAction(`Enqueue hash-index refresh (${action.state})`)
+        return postHashIndexRefreshEnqueue({ state: action.state })
+      }
+      if (action.kind === 'enqueue-all') {
+        setLastAction('Enqueue hash-index refresh (all states)')
+        return postHashIndexRefreshEnqueueAll()
+      }
+      setLastAction('Process hash-index refresh')
+      return postHashIndexRefreshProcess()
     },
     onSuccess: (payload) => {
       setActionResult(JSON.stringify(payload, null, 2))
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-stats-global'] })
     },
     onError: (error) => {
       setActionResult(error instanceof Error ? error.message : String(error))
@@ -701,6 +1085,9 @@ export function DropPipelinePage() {
     setResultsFocusBulk(choice === 'bulk_approve')
     resultsAnchorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
+
+  const showActionPanel =
+    tab === 'download' || tab === 'ingest' || tab === 'matching' || tab === 'fulfillment'
 
   return (
     <section className="space-y-16">
@@ -721,7 +1108,7 @@ export function DropPipelinePage() {
         </div>
         <div className="border-l border-line pl-5">
           <p className="max-w-sm text-sm leading-relaxed text-ink-soft">
-            Super-admin console for CA DROP download → land → promote → match → matching review →
+            Super-admin console for DROP download → unzip/promote to raw → match → matching review →
             fulfill. Counts and ids only.
           </p>
           <div className="mt-5 flex flex-wrap gap-2">
@@ -737,138 +1124,7 @@ export function DropPipelinePage() {
         </div>
       </header>
 
-      <div className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
-        <div className="taste-panel-soft flex flex-col gap-6 p-6 sm:p-7">
-          <div>
-            <Micro>Actions</Micro>
-            <p className="mt-2 max-w-sm text-sm text-ink-soft">
-              Run one step at a time. After matching completes, choose the next ops action in the
-              required dialog.
-            </p>
-          </div>
-
-          <div className="flex flex-col gap-2">
-            {ACTIONS.map((action, index) => {
-              const busy =
-                actionMutation.isPending && actionMutation.variables === action.key
-              return (
-                <button
-                  key={action.key}
-                  type="button"
-                  className={
-                    index === 0
-                      ? 'taste-btn-primary w-full justify-between gap-3 text-left'
-                      : 'taste-btn w-full justify-between gap-3 text-left'
-                  }
-                  disabled={actionMutation.isPending || showSkeleton || postMatchOpen}
-                  onClick={() => actionMutation.mutate(action.key)}
-                >
-                  <span>{action.label}</span>
-                  {busy ? (
-                    <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                  ) : (
-                    <span className="font-mono text-[0.65rem] opacity-50">
-                      {String(index + 1).padStart(2, '0')}
-                    </span>
-                  )}
-                </button>
-              )
-            })}
-          </div>
-
-          {(lastAction || actionResult) && (
-            <pre className="overflow-x-auto rounded-lg border border-line bg-paper-raised p-3 text-xs text-ink-soft">
-              {lastAction ? `# ${lastAction}\n` : ''}
-              {actionResult ?? ''}
-            </pre>
-          )}
-        </div>
-
-        <AtmospherePanel data={data} />
-      </div>
-
-      <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
-        <div>
-          <Micro>Hash index refresh</Micro>
-          <p className="mt-2 max-w-xl text-sm text-ink-soft">
-            Rebuild CA serving marts via dbt, then rematch open not-found and prior multi-match
-            DROP requests. Enqueue queues an attempt; process claims the worker.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="glass px-2.5 py-1 font-mono text-[0.65rem] uppercase tracking-[0.08em] text-ink-soft">
-            State CA
-          </span>
-          <span className="text-sm text-ink-soft">
-            {hashWorkerDown
-              ? 'Worker down'
-              : hashPending
-                ? 'Pending / in-flight'
-                : lastRun
-                  ? `Last ${lastRun.status}`
-                  : 'None'}
-          </span>
-          {lastRun?.status === 'success' && (
-            <span className="text-sm text-ink-soft">
-              rows e/p/n {lastRun.rows_email ?? '—'}/{lastRun.rows_phone ?? '—'}/
-              {lastRun.rows_ndz ?? '—'} · rematch {lastRun.rematch_enqueued_count}
-            </span>
-          )}
-          {lastRun?.status && lastRun.status !== 'success' && lastRun.error_message && (
-            <span className="text-sm text-red-700">{lastRun.error_message}</span>
-          )}
-        </div>
-        <div>
-          <Micro>Attempts by status</Micro>
-          <p className="mt-1 text-xs text-mute">
-            Immutable attempt history counts — pending through terminal statuses.
-          </p>
-          <div className="mt-3">
-            <StatusCountTable
-              rows={data?.hash_index_refresh?.attempts_by_status ?? []}
-              empty="No hash-index refresh attempts yet."
-            />
-          </div>
-        </div>
-        <div className="flex flex-col gap-2 sm:flex-row sm:gap-3">
-          <button
-            type="button"
-            className="taste-btn"
-            disabled={
-              showSkeleton ||
-              hashPending ||
-              hashIndexMutation.isPending ||
-              actionMutation.isPending ||
-              postMatchOpen
-            }
-            onClick={() => hashIndexMutation.mutate('enqueue')}
-          >
-            Enqueue refresh
-          </button>
-          <button
-            type="button"
-            className="taste-btn"
-            disabled={
-              showSkeleton ||
-              !hashPending ||
-              hashIndexMutation.isPending ||
-              actionMutation.isPending ||
-              postMatchOpen
-            }
-            onClick={() => hashIndexMutation.mutate('process')}
-          >
-            Process refresh
-          </button>
-        </div>
-      </div>
-
-      <div ref={resultsAnchorRef}>
-        <MatchingResultsPanel
-          focusBulk={resultsFocusBulk}
-          highlightRequestId={highlightRequestId}
-          preferredBulkType={preferredBulkType}
-        />
-      </div>
+      <PipelineTabBar active={tab} onSelect={setTab} />
 
       {showSkeleton && (
         <div className="taste-panel p-6" role="status" aria-label="Loading pipeline status">
@@ -882,137 +1138,269 @@ export function DropPipelinePage() {
         </p>
       )}
 
-      {data && (
+      {tab === 'home' && (
         <>
-          <div className="grid gap-4 sm:grid-cols-3">
-            <Link
-              to="/approvals/matching-review"
-              className="taste-panel block p-5 transition hover:border-habeas-mid/40"
-            >
-              <Micro>Matching review</Micro>
-              <p className="mt-3 font-display text-3xl text-ink">{data.matching_review.pending}</p>
-              <p className="mt-1 text-xs text-mute">{data.matching_review.approved} approved</p>
-            </Link>
-            <div className="taste-panel p-5">
-              <Micro>Matching attempts</Micro>
-              <p className="mt-3 font-display text-3xl text-ink">{data.matching_attempts.pending}</p>
-              <p className="mt-1 text-xs text-mute">{data.matching_attempts.success} success</p>
+          <div className="grid items-start gap-6 lg:grid-cols-[0.95fr_1.05fr]">
+            <div className="taste-panel-soft flex min-w-0 flex-col gap-6 p-6 sm:p-7">
+              <div>
+                <Micro>Overview</Micro>
+                <p className="mt-2 max-w-sm text-sm text-ink-soft">
+                  Spine snapshot across review, matching, and intake. Use stage tabs to run actions.
+                </p>
+              </div>
+              {data ? (
+                <div className="overflow-x-auto">
+                  <table className="taste-table">
+                    <tbody>
+                      <tr>
+                        <td className="!px-0 text-ink-soft">Matching review pending</td>
+                        <td className="!px-0 tabular-nums">{data.matching_review.pending}</td>
+                      </tr>
+                      <tr>
+                        <td className="!px-0 text-ink-soft">Matching attempts pending</td>
+                        <td className="!px-0 tabular-nums">{data.matching_attempts.pending}</td>
+                      </tr>
+                      <tr>
+                        <td className="!px-0 text-ink-soft">DROP requests</td>
+                        <td className="!px-0 tabular-nums">{data.drop_requests.count}</td>
+                      </tr>
+                      <tr>
+                        <td className="!px-0 text-ink-soft">Hash refresh pending</td>
+                        <td className="!px-0 tabular-nums">{data.hash_index_refresh?.pending ?? 0}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+              <Link to="/approvals/matching-review" className="taste-btn w-fit text-xs">
+                Matching review →
+              </Link>
             </div>
-            <div className="taste-panel p-5">
-              <Micro>DROP requests</Micro>
-              <p className="mt-3 font-display text-3xl text-ink">{data.drop_requests.count}</p>
-              <p className="mt-1 text-xs text-mute">intake_source=drop</p>
-            </div>
+            <AtmospherePanel data={data} />
           </div>
 
-          <div className="space-y-3">
-            <Micro>Worker health</Micro>
-            <div className="taste-panel overflow-x-auto px-2 py-1">
-              <table className="taste-table">
-                <thead>
-                  <tr>
-                    <th>Worker</th>
-                    <th>Health</th>
-                    <th>Code</th>
-                    <th>URL</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {WORKER_ORDER.map((name) => {
-                    const probe = data.worker_health[name]
-                    if (!probe) {
-                      return (
-                        <tr key={name}>
-                          <td className="font-mono text-xs">{name}</td>
-                          <td colSpan={3} className="text-mute">
-                            —
-                          </td>
+          {data ? (
+            <>
+              <div className="space-y-3">
+                <Micro>Worker health</Micro>
+                <div className="taste-panel overflow-x-auto px-2 py-1">
+                  <table className="taste-table">
+                    <thead>
+                      <tr>
+                        <th>Worker</th>
+                        <th>Health</th>
+                        <th>Code</th>
+                        <th>URL</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {WORKER_ORDER.map((name) => {
+                        const probe = data.worker_health[name]
+                        if (!probe) {
+                          return (
+                            <tr key={name}>
+                              <td className="font-mono text-xs">{name}</td>
+                              <td colSpan={3} className="text-mute">
+                                —
+                              </td>
+                            </tr>
+                          )
+                        }
+                        return <WorkerHealthRow key={name} probe={probe} />
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <Micro>Recent DROP requests</Micro>
+                <div className="taste-panel overflow-x-auto px-2 py-1">
+                  {data.drop_requests.recent.length === 0 ? (
+                    <p className="p-4 text-sm text-ink-soft">No DROP thin requests yet.</p>
+                  ) : (
+                    <table className="taste-table">
+                      <thead>
+                        <tr>
+                          <th>Received</th>
+                          <th>Request ID</th>
+                          <th>Raw record</th>
                         </tr>
-                      )
-                    }
-                    return <WorkerHealthRow key={name} probe={probe} />
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
+                      </thead>
+                      <tbody>
+                        {data.drop_requests.recent.map((row) => (
+                          <tr key={row.id}>
+                            <td>
+                              {row.received_at ? new Date(row.received_at).toLocaleString() : '—'}
+                            </td>
+                            <td className="font-mono text-xs">{row.id}</td>
+                            <td className="tabular-nums">{row.raw_record_id ?? '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            </>
+          ) : null}
+        </>
+      )}
 
-          <div className="grid gap-6 lg:grid-cols-2">
+      {tab === 'download' && (
+        <div className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+          <div className="taste-panel-soft flex flex-col gap-6 p-6 sm:p-7">
+            <div>
+              <Micro>Download</Micro>
+              <p className="mt-2 text-sm text-ink-soft">
+                Fetch the latest DROP ZIP from the connector worker.
+              </p>
+            </div>
+            <ActionButtons
+              keys={['download']}
+              showSkeleton={showSkeleton}
+              postMatchOpen={postMatchOpen}
+              actionMutation={actionMutation}
+            />
+          </div>
+          {data ? (
             <div className="space-y-3">
               <Micro>Connector attempts</Micro>
               <div className="taste-panel-soft p-4">
                 <CountTable rows={data.connector_attempts} empty="No connector attempts." />
               </div>
             </div>
-            <div className="space-y-3">
-              <Micro>Ingest attempts</Micro>
-              <div className="taste-panel-soft p-4">
-                <CountTable rows={data.ingest_attempts} empty="No ingest attempts." />
+          ) : null}
+        </div>
+      )}
+
+      {tab === 'ingest' && (
+        <div className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+          <div className="taste-panel-soft flex flex-col gap-6 p-6 sm:p-7">
+            <div>
+              <Micro>Ingest</Micro>
+              <p className="mt-2 text-sm text-ink-soft">
+                Unzip and promote to raw — land unpacks the archive; promote writes drop_raw_requests.
+              </p>
+            </div>
+            <ActionButtons
+              keys={['land', 'promote']}
+              showSkeleton={showSkeleton}
+              postMatchOpen={postMatchOpen}
+              actionMutation={actionMutation}
+            />
+          </div>
+          {data ? (
+            <div className="space-y-6">
+              <div className="space-y-3">
+                <Micro>Ingest attempts</Micro>
+                <div className="taste-panel-soft p-4">
+                  <CountTable rows={data.ingest_attempts} empty="No ingest attempts." />
+                </div>
+              </div>
+              <div className="space-y-3">
+                <Micro>Raw by list type</Micro>
+                <div className="taste-panel overflow-x-auto px-2 py-1">
+                  {data.raw_requests_by_list_type.length === 0 ? (
+                    <p className="p-4 text-sm text-ink-soft">No drop_raw_requests rows.</p>
+                  ) : (
+                    <table className="taste-table">
+                      <thead>
+                        <tr>
+                          <th>List type</th>
+                          <th>Total</th>
+                          <th>response_status null</th>
+                          <th>response_status set</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.raw_requests_by_list_type.map((row) => (
+                          <tr key={row.list_type}>
+                            <td className="font-mono text-xs">{row.list_type}</td>
+                            <td className="tabular-nums">{row.total}</td>
+                            <td className="tabular-nums">{row.response_status_null}</td>
+                            <td className="tabular-nums">{row.response_status_set}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
+          ) : null}
+        </div>
+      )}
 
-          <div className="space-y-3">
-            <Micro>Raw by list type</Micro>
-            <div className="taste-panel overflow-x-auto px-2 py-1">
-              {data.raw_requests_by_list_type.length === 0 ? (
-                <p className="p-4 text-sm text-ink-soft">No drop_raw_requests rows.</p>
-              ) : (
-                <table className="taste-table">
-                  <thead>
-                    <tr>
-                      <th>List type</th>
-                      <th>Total</th>
-                      <th>response_status null</th>
-                      <th>response_status set</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.raw_requests_by_list_type.map((row) => (
-                      <tr key={row.list_type}>
-                        <td className="font-mono text-xs">{row.list_type}</td>
-                        <td className="tabular-nums">{row.total}</td>
-                        <td className="tabular-nums">{row.response_status_null}</td>
-                        <td className="tabular-nums">{row.response_status_set}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
+      {tab === 'matching' && (
+        <>
+          <div className="taste-panel-soft flex max-w-xl flex-col gap-6 p-6 sm:p-7">
+            <div>
+              <Micro>Matching</Micro>
+              <p className="mt-2 text-sm text-ink-soft">
+                Dispatch thin requests to the matcher, then run matching. After success, the required
+                dialog forces review or bulk approve.
+              </p>
             </div>
+            <ActionButtons
+              keys={['dispatch', 'match']}
+              showSkeleton={showSkeleton}
+              postMatchOpen={postMatchOpen}
+              actionMutation={actionMutation}
+            />
           </div>
-
-          <div className="space-y-3">
-            <Micro>Recent DROP requests</Micro>
-            <div className="taste-panel overflow-x-auto px-2 py-1">
-              {data.drop_requests.recent.length === 0 ? (
-                <p className="p-4 text-sm text-ink-soft">No DROP thin requests yet.</p>
-              ) : (
-                <table className="taste-table">
-                  <thead>
-                    <tr>
-                      <th>Received</th>
-                      <th>Request ID</th>
-                      <th>Raw record</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.drop_requests.recent.map((row) => (
-                      <tr key={row.id}>
-                        <td>
-                          {row.received_at ? new Date(row.received_at).toLocaleString() : '—'}
-                        </td>
-                        <td className="font-mono text-xs">{row.id}</td>
-                        <td className="tabular-nums">{row.raw_record_id ?? '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
+          <div ref={resultsAnchorRef}>
+            <MatchingResultsPanel
+              focusBulk={resultsFocusBulk}
+              highlightRequestId={highlightRequestId}
+              preferredBulkType={preferredBulkType}
+            />
           </div>
         </>
       )}
+
+      {tab === 'fulfillment' && (
+        <div className="taste-panel-soft flex max-w-xl flex-col gap-6 p-6 sm:p-7">
+          <div>
+            <Micro>Fulfillment</Micro>
+            <p className="mt-2 text-sm text-ink-soft">
+              Trigger fulfillment for approved DROP requests via the data fulfillment worker.
+            </p>
+          </div>
+          <ActionButtons
+            keys={['fulfill']}
+            showSkeleton={showSkeleton}
+            postMatchOpen={postMatchOpen}
+            actionMutation={actionMutation}
+          />
+        </div>
+      )}
+
+      {tab === 'configurations' && (
+        <HashIndexPanel
+          data={data}
+          showSkeleton={showSkeleton}
+          hashState={hashState}
+          setHashState={setHashState}
+          hashPending={hashPending}
+          hashWorkerDown={hashWorkerDown}
+          lastRun={lastRun ?? null}
+          hashIndexMutation={hashIndexMutation}
+          actionMutation={actionMutation}
+          postMatchOpen={postMatchOpen}
+        />
+      )}
+
+      {showActionPanel || tab === 'configurations' ? (
+        <ActionResultFrame
+          lastAction={lastAction}
+          actionResult={actionResult}
+          onClear={() => {
+            setLastAction(null)
+            setActionResult(null)
+          }}
+        />
+      ) : null}
     </section>
   )
 }

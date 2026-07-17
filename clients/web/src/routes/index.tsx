@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 
 import { Skeleton, SkeletonLines } from '@/components/AppShell'
-import { getHealth } from '@/lib/api'
+import { getDropGlobalStats, getHealth } from '@/lib/api'
 
 export function DashboardPage() {
   const healthQuery = useQuery({
@@ -13,6 +13,16 @@ export function DashboardPage() {
     retryDelay: (attempt) => Math.min(1_000 * 2 ** attempt, 8_000),
     placeholderData: (previous) => previous,
   })
+
+  const dropStatsQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'drop-stats-global'],
+    queryFn: getDropGlobalStats,
+    refetchInterval: 15_000,
+    retry: 2,
+    placeholderData: (previous) => previous,
+  })
+
+  const dropStats = dropStatsQuery.data
 
   return (
     <section className="space-y-12">
@@ -113,8 +123,11 @@ export function DashboardPage() {
             <div>
               <p className="taste-micro text-white/55">Shortcuts</p>
               <div className="mt-4 flex flex-wrap gap-3">
-                <Link to="/ops/drop-pipeline" className="taste-frost-chip-dark">
-                  DROP pipeline →
+                <Link to="/ops/drop-pipeline" search={{ tab: 'home' }} className="taste-frost-chip-dark">
+                  Pipeline →
+                </Link>
+                <Link to="/ops/health" className="taste-frost-chip-dark">
+                  Health →
                 </Link>
                 <Link to="/approvals/matching-review" className="taste-frost-chip-dark">
                   Matching review →
@@ -125,6 +138,71 @@ export function DashboardPage() {
               </div>
             </div>
           </div>
+        </div>
+      </div>
+
+      <div className="taste-panel-soft p-6 sm:p-7">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="taste-micro">DROP ops summary</p>
+          {(dropStatsQuery.isPending || dropStatsQuery.isFetching) && dropStatsQuery.data ? (
+            <span className="taste-frost-chip">Refreshing</span>
+          ) : null}
+        </div>
+        <p className="mt-2 max-w-xl text-sm text-ink-soft">
+          Global counts from admin-api — matching review backlog, hash-index in flight, and worker
+          health. Ids and counts only.
+        </p>
+
+        {dropStatsQuery.isPending && !dropStats ? (
+          <div className="mt-5">
+            <SkeletonLines lines={4} />
+          </div>
+        ) : null}
+
+        {dropStatsQuery.isError && !dropStats ? (
+          <p className="mt-5 text-sm text-red-700">
+            Could not load DROP summary. Pipeline may be unavailable without DATABASE_URL.
+          </p>
+        ) : null}
+
+        {dropStats ? (
+          <div className="mt-5 overflow-x-auto">
+            <table className="taste-table">
+              <tbody>
+                <tr>
+                  <td className="!px-0 text-ink-soft">Matching review pending</td>
+                  <td className="!px-0 tabular-nums">{dropStats.matching_review_pending}</td>
+                </tr>
+                <tr>
+                  <td className="!px-0 text-ink-soft">Hash index refresh in flight</td>
+                  <td className="!px-0 tabular-nums">{dropStats.hash_index_refresh_inflight}</td>
+                </tr>
+                <tr>
+                  <td className="!px-0 text-ink-soft">Workers down</td>
+                  <td className="!px-0 tabular-nums">
+                    {dropStats.workers_down} / {dropStats.workers_total}
+                  </td>
+                </tr>
+                <tr>
+                  <td className="!px-0 text-ink-soft">Open DROP requests</td>
+                  <td className="!px-0 tabular-nums">{dropStats.open_drop_requests}</td>
+                </tr>
+                <tr>
+                  <td className="!px-0 text-ink-soft">Matching failed terminal</td>
+                  <td className="!px-0 tabular-nums">{dropStats.matching_failed_terminal}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+
+        <div className="mt-5 flex flex-wrap gap-2">
+          <Link to="/ops/drop-pipeline" search={{ tab: 'matching' }} className="taste-btn text-xs">
+            Pipeline matching →
+          </Link>
+          <Link to="/ops/health/escalations" className="taste-btn text-xs">
+            Escalations →
+          </Link>
         </div>
       </div>
     </section>

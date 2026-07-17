@@ -1,6 +1,6 @@
-import { Link } from '@tanstack/react-router'
 import type { ReactNode } from 'react'
 
+import { NavMenu } from '@/components/NavMenu'
 import { useLiveEvents } from '@/lib/live-events'
 
 type AppShellProps = {
@@ -33,9 +33,6 @@ export function SkeletonLines({
   )
 }
 
-const navClass =
-  'text-mute transition-colors hover:text-ink [&.active]:text-ink [&.active]:underline [&.active]:decoration-ink/25 [&.active]:underline-offset-4'
-
 export function AppShell({ children }: AppShellProps) {
   useLiveEvents()
 
@@ -57,20 +54,7 @@ export function AppShell({ children }: AppShellProps) {
               Data Privacy
             </h1>
           </div>
-          <nav className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2 text-[0.8125rem]">
-            <Link to="/" className={navClass}>
-              Dashboard
-            </Link>
-            <Link to="/requests" className={navClass}>
-              Requests
-            </Link>
-            <Link to="/approvals/matching-review" className={navClass}>
-              Matching review
-            </Link>
-            <Link to="/ops/drop-pipeline" className={navClass}>
-              DROP pipeline
-            </Link>
-          </nav>
+          <NavMenu />
         </div>
       </header>
 

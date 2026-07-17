@@ -215,8 +215,104 @@ export type DropPipelineStatus = {
   worker_health: Record<string, WorkerHealthProbe>
 }
 
+export type DropWorkerQueue = {
+  table: string | null
+  pending: number
+  claimed: number
+  in_flight: number
+  failed_terminal: number
+  oldest_pending_age_seconds: number | null
+}
+
+export type DropWorkerRecord = {
+  name: string
+  ok: boolean
+  status_code: number | null
+  ready: { status?: string; service?: string }
+  queue: DropWorkerQueue
+  pool: {
+    configured_concurrency: number | null
+    max_attempts?: number | null
+    note?: string
+  }
+}
+
+export type DropWorkersPayload = {
+  workers: DropWorkerRecord[]
+}
+
+export type HealthQueueRecord = {
+  worker: string
+  table: string
+  by_status: { status: string; count: number }[]
+  pending: number
+  claimed: number
+  in_flight: number
+  failed_terminal: number
+  oldest_pending_age_seconds: number | null
+  pool: {
+    configured_concurrency: number | null
+    max_attempts?: number | null
+    note?: string
+  }
+}
+
+export type HealthQueuesPayload = {
+  queues: HealthQueueRecord[]
+}
+
+export type DropGlobalStats = {
+  open_drop_requests: number
+  matching_review_pending: number
+  matching_failed_terminal: number
+  hash_index_refresh_inflight: number
+  workers_down: number
+  workers_total: number
+}
+
 export function getDropPipeline() {
   return fetchAdminApi<DropPipelineStatus>('/ops/drop/pipeline')
+}
+
+export function getDropWorkers() {
+  return fetchAdminApi<DropWorkersPayload>('/ops/drop/workers')
+}
+
+export function getHealthQueues() {
+  return fetchAdminApi<HealthQueuesPayload>('/ops/health/queues')
+}
+
+export function getDropGlobalStats() {
+  return fetchAdminApi<DropGlobalStats>('/ops/drop/stats/global')
+}
+
+export type RetryConfigTable = {
+  table_name: string
+  max_attempts: number
+  default_max_attempts: number
+  overridden: boolean
+  updated_at: string | null
+  updated_by: string | null
+  apply_note: string
+}
+
+export type RetryConfigPayload = {
+  tables: RetryConfigTable[]
+  floor: number
+}
+
+export function getRetryConfig() {
+  return fetchAdminApi<RetryConfigPayload>('/ops/health/retry-config')
+}
+
+export function patchRetryConfig(body: { table_name: string; max_attempts: number }) {
+  return fetchAdminApi<{ status: string; table_name: string; max_attempts: number }>(
+    '/ops/health/retry-config',
+    {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    },
+  )
 }
 
 export function postDropDownload() {
