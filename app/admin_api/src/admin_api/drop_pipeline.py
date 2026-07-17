@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
@@ -16,9 +16,15 @@ from admin_api.approvals import (
     MATCH_TYPE_FILTERS,
     MatchTypeFilter,
     bulk_approve_matching_review_by_match_type,
+    create_matching_review_approval,
     match_type_for_count,
 )
 from admin_api.cloud_run_auth import auth_headers_for
+from habeas_privacy_core.auth import (
+    UNKNOWN_ACTOR,
+    actor_from_iap_header,
+    is_authenticated_actor,
+)
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
 from habeas_privacy_core.workflow.approval import MATCHING_REVIEW_ACTION
@@ -39,6 +45,9 @@ class DropPipelineSettings(CoreSettings):
     matching_url: str = "http://127.0.0.1:8084"
     data_fulfillment_url: str = "http://127.0.0.1:8085"
     hash_index_refresh_url: str = "http://127.0.0.1:8086"
+    # When true, mutating /ops/drop/* requires X-Goog-Authenticated-User-Email.
+    # Local default false; enable with IAP in front of admin-api (see infra/README).
+    require_iap_identity: bool = False
 
 
 settings = DropPipelineSettings()
@@ -92,6 +101,7 @@ class BulkApproveMatchingResultsBody(BaseModel):
     """Clear matching.review for DROP results filtered by match type."""
 
     match_type: MatchTypeFilter
+    # Client hint only — overwritten by IAP identity when the header is present.
     decided_by: str = "web-admin@habeas.com"
     decision_reason: str | None = None
 
@@ -99,6 +109,29 @@ class BulkApproveMatchingResultsBody(BaseModel):
 def _require_database() -> None:
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
+
+
+async def require_drop_mutation_actor(request: Request) -> str:
+    """Require IAP principal on mutating /ops/drop routes when configured."""
+    actor = actor_from_iap_header(request)
+    if settings.require_iap_identity and not is_authenticated_actor(actor):
+        raise HTTPException(
+            status_code=401,
+            detail="Identity-Aware Proxy identity required for DROP mutations",
+        )
+    return actor
+
+
+DropMutationActor = Annotated[str, Depends(require_drop_mutation_actor)]
+
+
+def decided_by_for_mutation(actor: str, client_decided_by: str | None) -> str:
+    """Prefer IAP email over client-supplied decided_by when a principal is present."""
+    if is_authenticated_actor(actor):
+        return actor
+    if client_decided_by and client_decided_by.strip():
+        return client_decided_by.strip()
+    return UNKNOWN_ACTOR
 
 
 async def _probe_worker_health(name: str, base_url: str) -> dict[str, Any]:
@@ -367,13 +400,13 @@ async def get_pipeline_status() -> dict[str, Any]:
     return {**counts, "worker_health": worker_health}
 
 
-async def proxy_post(
+async def proxy_post_payload(
     url: str,
     *,
     json_body: dict[str, Any] | None = None,
     timeout: float = DEFAULT_PROXY_TIMEOUT,
-) -> JSONResponse:
-    """Forward POST to a worker; return upstream JSON + status."""
+) -> tuple[int, Any]:
+    """Forward POST to a worker; return (status_code, JSON payload)."""
     try:
         headers = auth_headers_for(url)
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -386,13 +419,27 @@ async def proxy_post(
                 payload: Any = response.json()
             except Exception:
                 payload = {"raw": response.text}
-            return JSONResponse(content=payload, status_code=response.status_code)
+            return response.status_code, payload
     except httpx.RequestError as exc:
         logger.warning("drop_pipeline_proxy_unreachable", extra={"url": url, "error": str(exc)})
-        return JSONResponse(
-            status_code=502,
-            content={"status": "error", "detail": f"upstream unreachable: {exc}", "url": url},
-        )
+        return 502, {
+            "status": "error",
+            "detail": f"upstream unreachable: {exc}",
+            "url": url,
+        }
+
+
+async def proxy_post(
+    url: str,
+    *,
+    json_body: dict[str, Any] | None = None,
+    timeout: float = DEFAULT_PROXY_TIMEOUT,
+) -> JSONResponse:
+    """Forward POST to a worker; return upstream JSON + status."""
+    status_code, payload = await proxy_post_payload(
+        url, json_body=json_body, timeout=timeout
+    )
+    return JSONResponse(content=payload, status_code=status_code)
 
 
 def _model_dump_nonzero(model: BaseModel) -> dict[str, Any]:
@@ -434,8 +481,43 @@ async def drop_dispatch(body: DispatchProxyBody | None = None):
 
 @router.post("/match")
 async def drop_match():
+    """Proxy matching /process; on success open a matching.review gate for ops."""
     url = f"{settings.matching_url.rstrip('/')}/process"
-    return await proxy_post(url)
+    status_code, payload = await proxy_post_payload(url)
+    if (
+        status_code == 200
+        and isinstance(payload, dict)
+        and payload.get("status") == "ok"
+        and isinstance(payload.get("request_id"), str)
+    ):
+        try:
+            _require_database()
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                approval = await create_matching_review_approval(
+                    conn,
+                    request_id=payload["request_id"],
+                )
+            payload = {
+                **payload,
+                "matching_review_approval_id": int(approval["id"]),
+                "matching_review_status": "pending",
+            }
+        except Exception as exc:
+            # Do not block match success; bulk-approve can ensure gates later.
+            logger.warning(
+                "drop_match_review_gate_failed",
+                extra={
+                    "event": "drop_match_review_gate_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
+            payload = {
+                **payload,
+                "matching_review_status": "error",
+                "matching_review_error": type(exc).__name__,
+            }
+    return JSONResponse(content=payload, status_code=status_code)
 
 
 @router.post("/fulfill")

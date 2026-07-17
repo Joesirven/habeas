@@ -560,15 +560,23 @@ def test_matching_results_bulk_approve_route(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_bulk_approve_matching_review_sql_filters_status_4():
+async def test_bulk_approve_matching_review_sql_filters_status_4(monkeypatch: pytest.MonkeyPatch):
+    from admin_api import approvals as approvals_mod
     from admin_api.approvals import bulk_approve_matching_review_by_match_type
 
     conn = MagicMock()
+    # 1) ensure query (no missing gates)  2) approve UPDATE returning one row
     conn.fetch = AsyncMock(
-        return_value=[
-            _Row(id=7, request_id="00000000-0000-0000-0000-000000000007"),
+        side_effect=[
+            [],
+            [_Row(id=7, request_id="00000000-0000-0000-0000-000000000007")],
         ]
     )
+
+    async def fail_create(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("ensure should not create when fetch returns empty")
+
+    monkeypatch.setattr(approvals_mod, "create_matching_review_approval", fail_create)
 
     result = await bulk_approve_matching_review_by_match_type(
         conn,
@@ -576,10 +584,76 @@ async def test_bulk_approve_matching_review_sql_filters_status_4():
         decided_by="ops@habeas.com",
         decision_reason="bulk approve match_type=multi_match",
     )
+    assert result["ensured_count"] == 0
     assert result["approved_count"] == 1
     assert result["approval_ids"] == [7]
-    sql = conn.fetch.await_args.args[0]
-    assert "match_count > 1" in sql
-    assert "intake_source = 'drop'" in sql
-    assert "status = 'pending'" in sql
-    assert "matching.review" in str(conn.fetch.await_args.args)
+    assert conn.fetch.await_count == 2
+    ensure_sql = conn.fetch.await_args_list[0].args[0]
+    approve_sql = conn.fetch.await_args_list[1].args[0]
+    assert "match_count > 1" in ensure_sql
+    assert "match_count > 1" in approve_sql
+    assert "intake_source = 'drop'" in approve_sql
+    assert "status = 'pending'" in approve_sql
+    assert "matching.review" in str(conn.fetch.await_args_list[1].args)
+
+
+def test_match_proxy_opens_matching_review_gate(monkeypatch: pytest.MonkeyPatch):
+    request_id = "00000000-0000-0000-0000-000000000099"
+    created: dict[str, Any] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "status": "ok",
+                "attempt_id": 3,
+                "request_id": request_id,
+                "matched": False,
+                "match_count": 0,
+                "result_id": 12,
+            }
+
+    class FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url: str, json: Any = None, headers: Any = None) -> FakeResponse:
+            return FakeResponse()
+
+    class _Acquire:
+        async def __aenter__(self):
+            return MagicMock()
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    async def fake_create(conn: Any, *, request_id: str, **kwargs: Any) -> dict[str, Any]:
+        created["request_id"] = request_id
+        return {"id": 42, "request_id": request_id, "status": "pending"}
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(drop_pipeline, "create_matching_review_approval", fake_create)
+
+    with TestClient(app) as client:
+        response = client.post("/ops/drop/match")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["request_id"] == request_id
+    assert body["matching_review_approval_id"] == 42
+    assert body["matching_review_status"] == "pending"
+    assert created["request_id"] == request_id

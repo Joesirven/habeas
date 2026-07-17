@@ -4,6 +4,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import {
+  approveMatchingReview,
   getDropMatchingResultDetail,
   getDropMatchingResults,
   getDropPipeline,
@@ -23,6 +24,12 @@ import {
   type StepStatusCount,
   type WorkerHealthProbe,
 } from '@/lib/api'
+
+function matchTypeFromCount(matchCount: number): MatchTypeFilter {
+  if (matchCount <= 0) return 'not_found'
+  if (matchCount === 1) return 'single_match'
+  return 'multi_match'
+}
 
 const WORKER_ORDER = [
   'drop_connector',
@@ -261,9 +268,11 @@ function PostMatchDialog({
 function MatchingResultsPanel({
   focusBulk,
   highlightRequestId,
+  preferredBulkType,
 }: {
   focusBulk: boolean
   highlightRequestId: string | null
+  preferredBulkType: MatchTypeFilter | null
 }) {
   const queryClient = useQueryClient()
   const [view, setView] = useState<'list' | 'detail'>('list')
@@ -306,12 +315,36 @@ function MatchingResultsPanel({
     },
   })
 
+  const singleApproveMutation = useMutation({
+    mutationFn: (approvalId: number) =>
+      approveMatchingReview(approvalId, {
+        decided_by: 'web-admin@habeas.com',
+        decision_reason: 'approve from matching results detail',
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-matching-results'] })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'approvals'] })
+      if (selectedId) {
+        void queryClient.invalidateQueries({
+          queryKey: ['admin-api', 'ops', 'drop-matching-result', selectedId],
+        })
+      }
+    },
+  })
+
   useEffect(() => {
     if (highlightRequestId) {
       setSelectedId(highlightRequestId)
       setView('detail')
     }
   }, [highlightRequestId])
+
+  useEffect(() => {
+    if (preferredBulkType) {
+      setBulkType(preferredBulkType)
+    }
+  }, [preferredBulkType])
 
   useEffect(() => {
     if (focusBulk) {
@@ -468,6 +501,28 @@ function MatchingResultsPanel({
                   </dd>
                 </div>
               </dl>
+              {detail.review_status === 'pending' && detail.approval_id != null && (
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <button
+                    type="button"
+                    className="taste-btn-primary"
+                    disabled={singleApproveMutation.isPending}
+                    onClick={() => singleApproveMutation.mutate(detail.approval_id!)}
+                  >
+                    {singleApproveMutation.isPending ? 'Approving…' : 'Approve review'}
+                  </button>
+                  {singleApproveMutation.isError && (
+                    <p className="text-sm text-red-700">
+                      {singleApproveMutation.error instanceof Error
+                        ? singleApproveMutation.error.message
+                        : String(singleApproveMutation.error)}
+                    </p>
+                  )}
+                  {singleApproveMutation.isSuccess && (
+                    <p className="text-sm text-emerald-700">Review approved.</p>
+                  )}
+                </div>
+              )}
             </>
           )}
         </div>
@@ -476,7 +531,8 @@ function MatchingResultsPanel({
       <div ref={bulkSectionRef} className="border-t border-line pt-5">
         <Micro>Bulk approve</Micro>
         <p className="mt-2 max-w-xl text-sm text-ink-soft">
-          Approve all pending matching.review gates whose latest result matches the selected type.
+          Ensures matching.review gates exist for the filter, then approves all pending gates for
+          that match type (including multi-match / status 4).
         </p>
         <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
           <select
@@ -503,7 +559,13 @@ function MatchingResultsPanel({
         {bulkMutation.isSuccess && (
           <p className="mt-3 text-sm text-emerald-700">
             Approved {bulkMutation.data.approved_count} pending review
-            {bulkMutation.data.approved_count === 1 ? '' : 's'} for {bulkMutation.data.match_type}.
+            {bulkMutation.data.approved_count === 1 ? '' : 's'} for {bulkMutation.data.match_type}
+            {bulkMutation.data.ensured_count
+              ? ` (opened ${bulkMutation.data.ensured_count} missing gate${
+                  bulkMutation.data.ensured_count === 1 ? '' : 's'
+                })`
+              : ''}
+            .
           </p>
         )}
         {bulkMutation.isError && (
@@ -526,6 +588,7 @@ export function DropPipelinePage() {
   const [postMatchSummary, setPostMatchSummary] = useState<string | null>(null)
   const [resultsFocusBulk, setResultsFocusBulk] = useState(false)
   const [highlightRequestId, setHighlightRequestId] = useState<string | null>(null)
+  const [preferredBulkType, setPreferredBulkType] = useState<MatchTypeFilter | null>(null)
   const resultsAnchorRef = useRef<HTMLDivElement>(null)
 
   const pipelineQuery = useQuery({
@@ -546,6 +609,7 @@ export function DropPipelinePage() {
       setActionResult(JSON.stringify(data, null, 2))
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-matching-results'] })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'approvals'] })
       if (key === 'match' && data && typeof data === 'object' && 'status' in data) {
         const status = String((data as { status?: unknown }).status ?? '')
         if (status === 'ok') {
@@ -553,7 +617,12 @@ export function DropPipelinePage() {
             'request_id' in data && typeof (data as { request_id?: unknown }).request_id === 'string'
               ? (data as { request_id: string }).request_id
               : null
+          const matchCount =
+            'match_count' in data && typeof (data as { match_count?: unknown }).match_count === 'number'
+              ? (data as { match_count: number }).match_count
+              : null
           setHighlightRequestId(requestId)
+          setPreferredBulkType(matchCount == null ? null : matchTypeFromCount(matchCount))
           setPostMatchSummary(JSON.stringify(data, null, 2))
           setPostMatchOpen(true)
         }
@@ -681,8 +750,8 @@ export function DropPipelinePage() {
         <div>
           <Micro>Hash index refresh</Micro>
           <p className="mt-2 max-w-xl text-sm text-ink-soft">
-            Rebuild CA serving marts via dbt, then rematch open not-found DROP requests. Enqueue
-            queues an attempt; process claims the worker.
+            Rebuild CA serving marts via dbt, then rematch open not-found and prior multi-match
+            DROP requests. Enqueue queues an attempt; process claims the worker.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -708,6 +777,15 @@ export function DropPipelinePage() {
             <span className="text-sm text-red-700">{lastRun.error_message}</span>
           )}
         </div>
+        {(data?.hash_index_refresh.attempts_by_status.length ?? 0) > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {data!.hash_index_refresh.attempts_by_status.map((row) => (
+              <span key={row.status} className="glass px-2.5 py-1 text-xs text-ink-soft">
+                {row.status} <span className="tabular-nums text-ink">{row.count}</span>
+              </span>
+            ))}
+          </div>
+        )}
         <div className="flex flex-col gap-2 sm:flex-row sm:gap-3">
           <button
             type="button"
@@ -727,7 +805,11 @@ export function DropPipelinePage() {
             type="button"
             className="taste-btn"
             disabled={
-              showSkeleton || hashIndexMutation.isPending || actionMutation.isPending || postMatchOpen
+              showSkeleton ||
+              !hashPending ||
+              hashIndexMutation.isPending ||
+              actionMutation.isPending ||
+              postMatchOpen
             }
             onClick={() => hashIndexMutation.mutate('process')}
           >
@@ -740,6 +822,7 @@ export function DropPipelinePage() {
         <MatchingResultsPanel
           focusBulk={resultsFocusBulk}
           highlightRequestId={highlightRequestId}
+          preferredBulkType={preferredBulkType}
         />
       </div>
 

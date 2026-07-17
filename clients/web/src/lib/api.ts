@@ -160,6 +160,7 @@ export type BulkApproveMatchingResultsInput = {
 export type BulkApproveMatchingResultsResult = {
   status: string
   match_type: MatchTypeFilter
+  ensured_count?: number
   approved_count: number
   approval_ids: number[]
   request_ids: string[]

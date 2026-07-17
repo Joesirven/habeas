@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
-import json
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any, Literal
 from uuid import UUID
 
 import asyncpg
 
 from habeas_privacy_core.workflow.approval import (
+    DEFAULT_MATCHING_REVIEW_TTL,
     MATCHING_REVIEW_ACTION,
-    check_approval_required,
-    fetch_active_rule,
+    create_pending_matching_review,
     is_matching_review_approved,
 )
 
-DEFAULT_APPROVAL_TTL = timedelta(days=7)
+DEFAULT_APPROVAL_TTL = DEFAULT_MATCHING_REVIEW_TTL
 
 MatchTypeFilter = Literal["single_match", "multi_match", "not_found"]
 MATCH_TYPE_FILTERS: tuple[MatchTypeFilter, ...] = (
@@ -52,29 +51,12 @@ async def create_matching_review_approval(
     expires_in: timedelta = DEFAULT_APPROVAL_TTL,
 ) -> dict[str, Any]:
     """Insert a pending matching.review approval_requests row for a request."""
-    requirement = await check_approval_required(conn, MATCHING_REVIEW_ACTION, context or {})
-    if requirement is None:
-        rule = await fetch_active_rule(conn, MATCHING_REVIEW_ACTION)
-        if rule is None:
-            raise LookupError("matching.review approval rule is not configured")
-        raise ValueError("matching.review does not currently require approval")
-
-    expires_at = datetime.now(UTC) + expires_in
-    row = await conn.fetchrow(
-        """
-        INSERT INTO approval_requests (
-            request_id, action_type, rule_id, approver_role, status, context_jsonb, expires_at
-        ) VALUES ($1, $2, $3, $4, 'pending', $5::jsonb, $6)
-        RETURNING id, request_id, action_type, status, approver_role, requested_at, expires_at
-        """,
-        UUID(request_id),
-        MATCHING_REVIEW_ACTION,
-        requirement.rule_id,
-        requirement.approver_role,
-        json.dumps(context) if context is not None else None,
-        expires_at,
+    return await create_pending_matching_review(
+        conn,
+        request_id=request_id,
+        context=context,
+        expires_in=expires_in,
     )
-    return dict(row)
 
 
 async def decide_approval(
@@ -141,6 +123,62 @@ async def list_approvals(
     return [dict(row) for row in rows]
 
 
+async def ensure_pending_matching_reviews_for_match_type(
+    conn: asyncpg.Connection,
+    *,
+    match_type: MatchTypeFilter,
+) -> dict[str, Any]:
+    """Create pending matching.review gates for DROP results missing one.
+
+    Used by bulk-approve so ops can clear review for a match type even when
+    gates were never opened (legacy rows) or match-proxy create failed.
+    Ids/counts only — no PII.
+    """
+    if match_type not in MATCH_TYPE_FILTERS:
+        raise ValueError(f"invalid match_type: {match_type!r}")
+
+    predicate = match_count_predicate_sql(match_type, "lr.match_count")
+    rows = await conn.fetch(
+        f"""
+        WITH latest AS (
+            SELECT DISTINCT ON (mr.request_id)
+                   mr.request_id::text AS request_id,
+                   mr.match_count
+              FROM matching_results mr
+              JOIN requests r ON r.id = mr.request_id
+             WHERE r.intake_source = 'drop'
+             ORDER BY mr.request_id, mr.recorded_at DESC
+        )
+        SELECT lr.request_id
+          FROM latest lr
+         WHERE {predicate}
+           AND NOT EXISTS (
+                 SELECT 1
+                   FROM approval_requests ar
+                  WHERE ar.request_id = lr.request_id::uuid
+                    AND ar.action_type = $1
+                    AND ar.status = 'pending'
+               )
+        """,
+        MATCHING_REVIEW_ACTION,
+    )
+    created_ids: list[int] = []
+    request_ids: list[str] = []
+    for row in rows:
+        approval = await create_matching_review_approval(
+            conn,
+            request_id=row["request_id"],
+        )
+        created_ids.append(int(approval["id"]))
+        request_ids.append(row["request_id"])
+    return {
+        "match_type": match_type,
+        "ensured_count": len(created_ids),
+        "approval_ids": created_ids,
+        "request_ids": request_ids,
+    }
+
+
 async def bulk_approve_matching_review_by_match_type(
     conn: asyncpg.Connection,
     *,
@@ -150,12 +188,17 @@ async def bulk_approve_matching_review_by_match_type(
 ) -> dict[str, Any]:
     """Approve pending matching.review rows for DROP requests of a match type.
 
-    Filter uses latest ``matching_results.match_count`` per request:
+    Ensures a pending gate exists for each filtered result first (create if
+    missing). Filter uses latest ``matching_results.match_count`` per request:
     not_found=0, single_match=1, multi_match>1 (DROP status 4).
     Audit payloads must stay ids/counts only — no PII.
     """
     if match_type not in MATCH_TYPE_FILTERS:
         raise ValueError(f"invalid match_type: {match_type!r}")
+
+    ensured = await ensure_pending_matching_reviews_for_match_type(
+        conn, match_type=match_type
+    )
 
     predicate = match_count_predicate_sql(match_type, "lr.match_count")
     reason = decision_reason or f"bulk approve match_type={match_type}"
@@ -193,6 +236,7 @@ async def bulk_approve_matching_review_by_match_type(
     approved_ids = [int(row["id"]) for row in rows]
     return {
         "match_type": match_type,
+        "ensured_count": ensured["ensured_count"],
         "approved_count": len(approved_ids),
         "approval_ids": approved_ids,
         "request_ids": [row["request_id"] for row in rows],
@@ -206,6 +250,7 @@ __all__ = [
     "bulk_approve_matching_review_by_match_type",
     "create_matching_review_approval",
     "decide_approval",
+    "ensure_pending_matching_reviews_for_match_type",
     "is_matching_review_approved",
     "list_approvals",
     "match_count_predicate_sql",

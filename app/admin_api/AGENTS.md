@@ -8,10 +8,11 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
 
 - Routes: approvals, dashboard, admin rules, ops, `GET /live/events`
 - DROP ops: `GET /ops/drop/pipeline`, spine proxies, hash-index refresh enqueue/process
+- `POST /ops/drop/match` proxies matching worker and opens a pending `matching.review` gate on success
 - Matching results (Unit 8b): `GET /ops/drop/matching-results` (list + global stats),
   `GET /ops/drop/matching-results/{request_id}` (detail),
-  `POST /ops/drop/matching-results/bulk-approve` (clear `matching.review` by match type:
-  `single_match` / `multi_match` status-4 / `not_found`)
+  `POST /ops/drop/matching-results/bulk-approve` (ensure missing gates, then clear
+  `matching.review` by match type: `single_match` / `multi_match` status-4 / `not_found`)
 - Postgres LISTEN on approval events → forward to Server-Sent Events clients
 
 - Vendor adapter code in `adapters/` inside this app only.
