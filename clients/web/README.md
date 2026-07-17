@@ -4,9 +4,38 @@ React admin UI for Legal, Operations, and Data Owners.
 
 **Stack (locked):** Vite, React, TypeScript, TanStack Router, TanStack Query, Tailwind, Bun.
 
-Deploy target: Firebase Hosting in front of Identity-Aware Proxy.
+Deploy targets:
+
+- **Dev:** Cloud Run `admin-web-dev` (nginx static image; see [Docker](#docker) below).
+- **Prod path:** Firebase Hosting in front of Identity-Aware Proxy (`.firebaserc` / `firebase.json`).
 
 **Agent rules:** [`AGENTS.md`](AGENTS.md)
+
+---
+
+## Docker
+
+Production-like nginx image (bakes `VITE_ADMIN_API_URL` at build time):
+
+```bash
+cd clients/web
+docker compose up web          # http://127.0.0.1:8080
+docker compose up web-dev      # Vite hot reload on :5173
+```
+
+Override API target for local builds:
+
+```bash
+VITE_ADMIN_API_URL=https://admin-api-dev-hsa55rg7ja-uk.a.run.app docker compose up web
+```
+
+Cloud Build deploy (from repo root):
+
+```bash
+gcloud builds submit --config=infra/cloudbuild/admin-web-dev.yaml --project=example-gcp-project .
+```
+
+After first deploy, add the Cloud Run URL to `admin-api-dev` `CORS_ORIGINS` (see [`infra/README.md`](../../infra/README.md)).
 
 ---
 

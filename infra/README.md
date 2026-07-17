@@ -67,6 +67,20 @@ Env on Cloud Run: `DROP_ENV=sandbox`, `DROP_API_BASE_URL=https://api.drop.privac
 
 Land/promote only — no `DROP_API_KEY`. Needs `DATABASE_URL`.
 
+### admin-web-dev (static admin SPA)
+
+| File | Purpose |
+|------|---------|
+| [`cloudbuild/admin-web-dev.yaml`](cloudbuild/admin-web-dev.yaml) | Build/push/deploy `admin-web-dev` |
+
+Bun/Vite multi-stage build → nginx on port 8080. `VITE_ADMIN_API_URL` is a **build arg** (default: dev admin-api Cloud Run URL). No runtime secrets.
+
+```bash
+gcloud builds submit --config=infra/cloudbuild/admin-web-dev.yaml --project=example-gcp-project .
+```
+
+After first deploy, append the `admin-web-dev` `*.run.app` origin to `admin-api-dev` `_CORS_ORIGINS` and redeploy admin-api so the browser can call the API cross-origin.
+
 ### hash-index-refresh (DROP hash productionize)
 
 | File | Purpose |
@@ -86,6 +100,7 @@ gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
 | Surface | Invoker |
 |---------|---------|
 | `admin-api-dev` | `allUsers` (Firebase SPA CORS; **residual** until Identity-Aware Proxy) |
+| `admin-web-dev` | `allUsers` (static SPA; CORS origin must be listed on admin-api) |
 | Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`, `hash-index-refresh-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) |
 
 Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Localhost worker URLs skip auth.
