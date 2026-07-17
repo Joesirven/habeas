@@ -2,6 +2,19 @@
 
 Operator steps for production hash-index rebuild in `example-gcp-project.drop_hash_index`.
 
+**Canonical dbt path:** `transform/drop_hash/` only. Do not `cd analytics` for production
+refresh — that tree was the pre-migration CA bake-off sandbox.
+
+## Serving schema
+
+| BigQuery table | Columns |
+|----------------|---------|
+| `example-gcp-project.drop_hash_index.email_hash` | `hash_value`, `dwid`, `state`, `built_at` |
+| `example-gcp-project.drop_hash_index.phone_hash` | same |
+| `example-gcp-project.drop_hash_index.ndz_hash` | same |
+
+All three are clustered on `(state, hash_value)`. Matching lookups use `hash_value` + `state`.
+
 ## Prerequisites
 
 - ADC / service account with BigQuery Data Editor on `drop_hash_index`, read on `person_db`
@@ -46,10 +59,11 @@ UNION ALL SELECT "ndz_hash", COUNT(*) FROM `example-gcp-project.drop_hash_index.
 '
 ```
 
-## Experiment sandbox (leftover)
+## Experiment sandbox (non-prod)
 
-CA bake-off artifacts remain in `drop_hash_experiment`. Compare tooling under
-`compare/` still targets that dataset for arm metrics — not used in production refresh.
+CA bake-off artifacts remain in dataset `drop_hash_experiment` (dbt/UDF code historically
+lived under `analytics/` on pre-migration branches). Compare tooling under `compare/`
+still targets that dataset for arm metrics — not used in production refresh.
 
 ## Future triggers
 

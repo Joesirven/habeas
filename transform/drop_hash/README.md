@@ -6,8 +6,9 @@ refresh. Materializes serving tables `email_hash`, `phone_hash`, and `ndz_hash` 
 
 **GCP project:** `example-gcp-project` · **Dataset:** `drop_hash_index` · **Region:** `us-east4`
 
-The experiment sandbox `drop_hash_experiment` (under the old `analytics/` tree in other
-branches) is **not** updated by this project.
+**Production dbt home:** this directory only (`transform/drop_hash/`). The experiment
+sandbox `drop_hash_experiment` (formerly under `analytics/` in pre-migration branches) is
+**not** updated by this project.
 
 ## Prerequisites
 
@@ -38,13 +39,26 @@ DBT_PROFILES_DIR=. dbt build --vars '{state: CA}'
 ```
 
 `state` filters MDR staging (`stg_person`, `stg_phones`). Intermediate models keep
-`*_std` columns plus per-field hashes; serving marts expose `(hash, dwid, state)`.
+`*_std` columns plus per-field hashes; serving marts expose `(hash_value, dwid, state, built_at)`.
 
 | Layer | Examples | Notes |
 |-------|----------|-------|
 | Staging | `stg_person`, `stg_phones` | `state = var('state')` |
 | Intermediate | `int_email_hash`, `int_phone_hash`, `int_dob_hash`, `int_zip_hash`, `int_name_hash`, `int_ndz_hash` | `*_std` + hash columns |
 | Serving | `email_hash`, `phone_hash`, `ndz_hash` | Built as `*_build` then swapped in |
+
+### Serving schema
+
+Production lookup tables in `example-gcp-project.drop_hash_index`:
+
+| Table | Columns | Clustering |
+|-------|---------|------------|
+| `email_hash` | `hash_value`, `dwid`, `state`, `built_at` | `(state, hash_value)` |
+| `phone_hash` | same | same |
+| `ndz_hash` | same | same |
+
+`hash_value` is Base64(SHA-256) of the DROP-standardized field (or NDZ composite).
+`app/matching` lookups filter on `(hash_value, state)`.
 
 ### Phone rows
 

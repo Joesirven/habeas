@@ -3,6 +3,8 @@
 Persistent UDF `example-gcp-project.drop_hash_index.normalize_name` — JS port of
 `drop_normalize` name rules (maps from the same JSON tables).
 
+Apply from `transform/drop_hash/udf/` (not the legacy `analytics/udf/` experiment path).
+
 ## Apply UDF
 
 ```bash

@@ -7,32 +7,40 @@ Production dbt project for DROP hash-index serving tables in BigQuery.
 | Path | Role |
 |------|------|
 | `models/drop_clean/` | State-filtered staging + intermediate hashes (`var('state', 'CA')`) |
-| `models/marts/` | Serving marts → `email_hash`, `phone_hash`, `ndz_hash` via build+swap |
-| `udf/` | BigQuery JS `normalize_name` in `drop_hash_index` |
+| `models/marts/` | Serving marts → `email_hash`, `phone_hash`, `ndz_hash` via build+state merge |
+| `udf/` | BigQuery JS `normalize_name` in `drop_hash_index` (bake-off winner) |
 | `drop_normalize/` | Python DROP v1.2.0 standardization + CPPA vector tests |
 | `compare/` | Experiment arm comparison (reads `drop_hash_experiment` only) |
-| `macros/swap_serving_tables.sql` | Post-build rename swap for serving tables |
+| `macros/swap_serving_tables.sql` | Post-build state-scoped merge into serving tables |
 
 ## Invariants
 
-- Dataset: `drop_hash_index` (not `drop_hash_experiment`).
+- **Canonical dbt home:** this directory (`transform/drop_hash/`). Do not run production
+  dbt from `analytics/` (legacy experiment tree on pre-migration branches).
+- Dataset: `example-gcp-project.drop_hash_index` — serving tables `email_hash`, `phone_hash`,
+  `ndz_hash` (not `drop_hash_experiment`).
 - No MDR PII in tests — CPPA vectors use literals only.
-- Serving columns: `(hash, dwid, state)`; phone mart may have two rows per dwid (cell + land).
+- Serving columns: `(hash_value, dwid, state, built_at)`; clustered `(state, hash_value)`.
+- Phone mart: two rows per dwid when both cell and land exist.
 - Worker invokes dbt from this directory with `--vars '{state: ...}'`.
+- UDF body must stay the bake-off winner (`normalizeName` + LATIN_EXTENDED).
 
 ## Commands
 
 ```bash
 cd transform/drop_hash
+cp profiles.yml.example profiles.yml   # once; gitignored
 DBT_PROFILES_DIR=. dbt build --vars '{state: CA}'
 cd drop_normalize && uv run pytest tests -q
 ```
 
 ## Do not
 
+- Run production hash-index dbt from `analytics/` or treat that path as the operator entrypoint.
 - Point production models at `drop_hash_experiment`.
 - Commit `profiles.yml` or ADC secrets.
 - Run raw `bq`/`psql` with PII in agent sessions without operator approval.
+- Truncate the bake-off UDF (missing LATIN_EXTENDED breaks accent folding in BQ JS).
 
 ## Parent
 
