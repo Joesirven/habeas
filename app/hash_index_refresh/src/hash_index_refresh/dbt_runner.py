@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,10 @@ def run_dbt_build(
         "--vars",
         vars_json,
     ]
+    env = {
+        **os.environ,
+        "DBT_PROFILES_DIR": os.environ.get("DBT_PROFILES_DIR", str(cwd)),
+    }
     completed = subprocess.run(
         cmd,
         cwd=str(cwd),
@@ -37,6 +42,7 @@ def run_dbt_build(
         text=True,
         timeout=timeout_seconds,
         check=False,
+        env=env,
     )
     return DbtRunResult(
         ok=completed.returncode == 0,

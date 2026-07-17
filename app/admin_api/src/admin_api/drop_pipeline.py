@@ -78,6 +78,8 @@ settings = DropPipelineSettings()
 
 DEFAULT_PROXY_TIMEOUT = 60.0
 DOWNLOAD_PROXY_TIMEOUT = 120.0
+# dbt per-state builds can run nearly an hour; keep under worker Cloud Run timeout.
+HASH_INDEX_REFRESH_PROXY_TIMEOUT = 3300.0
 
 WORKER_KEYS = (
     ("drop_connector", "drop_connector_url"),
@@ -724,7 +726,7 @@ async def hash_index_refresh_enqueue_all(
 async def hash_index_refresh_process(_actor: DropMutationActor):
     """Proxy process to hash_index_refresh worker (Cloud Run invoker token)."""
     url = f"{settings.hash_index_refresh_url.rstrip('/')}/process"
-    return await proxy_post(url)
+    return await proxy_post(url, timeout=HASH_INDEX_REFRESH_PROXY_TIMEOUT)
 
 
 def _serialize_matching_result_row(row: Any) -> dict[str, Any]:
