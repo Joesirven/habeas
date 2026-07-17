@@ -22,9 +22,12 @@ Production dbt project for DROP hash-index serving tables in BigQuery.
 - Serving columns: `(hash_value, dwid, state, built_at)`; clustered `(state, hash_value)`.
 - Phone mart: two rows per dwid when both cell and land exist.
 - Worker invokes dbt from this directory with `--vars '{state: ...}'` per state.
-  Shared marts are filled for all MDR/DROP-served states (USPS 50+DC allowlist
-  until Jose confirms Q6). Default `state: CA` in `dbt_project.yml` is local
-  convenience only — production passes the attempt’s state.
+  Shared marts are filled for all MDR/DROP-served states (A10: USPS 50+DC = 51
+  codes until Jose confirms Q6). Default `state: CA` in `dbt_project.yml` is
+  local convenience only — production passes the attempt’s state. Full-wave
+  enqueue is admin-api `.../enqueue-all`; live BQ coverage + blockers are in
+  [RUNBOOK.md](RUNBOOK.md) (“Live multi-state builds”). No prod dbt /
+  enqueue-all without Jose.
 - UDF body must stay the bake-off winner (`normalizeName` + LATIN_EXTENDED).
 
 ## Commands

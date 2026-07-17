@@ -33,10 +33,11 @@ chmod +x udf/apply_udf.sh
 
 ## Build for a state
 
-Shared marts hold all served states; each dbt run fills **one** state. Default
-`state: CA` in `dbt_project.yml` is local convenience only — production passes the
-attempt’s state (ops can enqueue one state or all via admin-api
-`POST /ops/drop/hash-index-refresh/enqueue` / `.../enqueue-all`).
+Shared marts hold all served states (A10: USPS 50+DC); each dbt run fills **one**
+state. Default `state: CA` in `dbt_project.yml` is local convenience only —
+production passes the attempt’s state (ops can enqueue one state or all via
+admin-api `POST /ops/drop/hash-index-refresh/enqueue` / `.../enqueue-all`).
+Live mart coverage and multi-state blockers → [RUNBOOK.md](RUNBOOK.md).
 
 ```bash
 cd transform/drop_hash
