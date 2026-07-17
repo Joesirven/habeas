@@ -1,4 +1,14 @@
-# Copy to profiles.yml (gitignored) or set DBT_PROFILES_DIR to this directory.
+# Copy to profiles.yml in this directory (gitignored) or point DBT_PROFILES_DIR here.
+#
+#   cp profiles.yml.example profiles.yml
+#   DBT_PROFILES_DIR=. dbt parse --vars '{state: CA}'
+#
+# Auth: Application Default Credentials (gcloud auth application-default login)
+# or a service account with BigQuery jobUser + dataEditor on drop_hash_index
+# and dataViewer on person_db.
+#
+# Do not commit profiles.yml or credentials.
+
 drop_hash:
   target: dev
   outputs:
@@ -9,3 +19,6 @@ drop_hash:
       dataset: drop_hash_index
       location: us-east4
       threads: 4
+      # Name UDF + CA-scale builds can run long; raise if jobs abort early.
+      job_execution_timeout_seconds: 14400
+      priority: interactive

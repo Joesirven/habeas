@@ -1,27 +1,32 @@
 /**
- * DROP v1.2.0 name standardization — JS port of drop_normalize names.py
- * Maps synced from drop_normalize/data/*.json
- * BigQuery JS UDF–safe (avoid Unicode property escapes).
+ * DROP v1.2.0 name standardization — JS port of drop_normalize.names
+ * Source maps: transform/drop_hash/drop_normalize/src/drop_normalize/data/*.json
+ * LATIN_EXTENDED: NFKD fallback for BQ JS (String.normalize NFKD is incomplete)
  */
-const SPECIAL = {
+
+const SPECIAL_LATIN = {
   "ß": "ss",
   "æ": "ae",
-  "œ": "oe",
-  "ø": "o",
   "ð": "d",
+  "ø": "o",
   "þ": "th",
-  "ł": "l",
   "đ": "d",
   "ħ": "h",
-  "ŋ": "n",
   "ı": "i",
   "ĳ": "ij",
-  "ŀ": "l"
+  "ŀ": "l",
+  "ł": "l",
+  "ŋ": "n",
+  "œ": "oe",
 };
+
 const GREEK = {
-  "θ": "th",
-  "χ": "ch",
-  "ψ": "ps",
+  "ΐ": "i",
+  "ά": "a",
+  "έ": "e",
+  "ή": "i",
+  "ί": "i",
+  "ΰ": "y",
   "α": "a",
   "β": "v",
   "γ": "g",
@@ -29,6 +34,7 @@ const GREEK = {
   "ε": "e",
   "ζ": "z",
   "η": "i",
+  "θ": "th",
   "ι": "i",
   "κ": "k",
   "λ": "l",
@@ -38,40 +44,29 @@ const GREEK = {
   "ο": "o",
   "π": "p",
   "ρ": "r",
-  "σ": "s",
   "ς": "s",
+  "σ": "s",
   "τ": "t",
   "υ": "y",
   "φ": "f",
+  "χ": "ch",
+  "ψ": "ps",
   "ω": "o",
-  "ά": "a",
-  "έ": "e",
-  "ί": "i",
-  "ή": "i",
-  "ύ": "y",
-  "ό": "o",
-  "ώ": "o",
   "ϊ": "i",
-  "ΐ": "i",
   "ϋ": "y",
-  "ΰ": "y"
+  "ό": "o",
+  "ύ": "y",
+  "ώ": "o",
 };
-const CYR = {
-  "щ": "shch",
-  "ё": "yo",
-  "ж": "zh",
-  "х": "kh",
-  "ц": "ts",
-  "ч": "ch",
-  "ш": "sh",
-  "ю": "yu",
-  "я": "ya",
+
+const CYRILLIC = {
   "а": "a",
   "б": "b",
   "в": "v",
   "г": "g",
   "д": "d",
   "е": "e",
+  "ж": "zh",
   "з": "z",
   "и": "i",
   "й": "y",
@@ -86,77 +81,222 @@ const CYR = {
   "т": "t",
   "у": "u",
   "ф": "f",
+  "х": "kh",
+  "ц": "ts",
+  "ч": "ch",
+  "ш": "sh",
+  "щ": "shch",
   "ъ": "",
   "ы": "y",
   "ь": "",
   "э": "e",
+  "ю": "yu",
+  "я": "ya",
+  "ё": "yo",
   "є": "e",
   "і": "i",
   "ї": "i",
+  "ў": "u",
   "ґ": "g",
-  "ў": "u"
 };
 
-function applyMap(text, mapping) {
-  const keys = Object.keys(mapping).sort(function (a, b) {
+const LATIN_EXTENDED = {
+  "i̇": "i",
+  "à": "a",
+  "á": "a",
+  "â": "a",
+  "ã": "a",
+  "ä": "a",
+  "å": "a",
+  "ç": "c",
+  "è": "e",
+  "é": "e",
+  "ê": "e",
+  "ë": "e",
+  "ì": "i",
+  "í": "i",
+  "î": "i",
+  "ï": "i",
+  "ñ": "n",
+  "ò": "o",
+  "ó": "o",
+  "ô": "o",
+  "õ": "o",
+  "ö": "o",
+  "ù": "u",
+  "ú": "u",
+  "û": "u",
+  "ü": "u",
+  "ý": "y",
+  "ÿ": "y",
+  "ā": "a",
+  "ă": "a",
+  "ą": "a",
+  "ć": "c",
+  "ĉ": "c",
+  "ċ": "c",
+  "č": "c",
+  "ď": "d",
+  "ē": "e",
+  "ĕ": "e",
+  "ė": "e",
+  "ę": "e",
+  "ě": "e",
+  "ĝ": "g",
+  "ğ": "g",
+  "ġ": "g",
+  "ģ": "g",
+  "ĥ": "h",
+  "ĩ": "i",
+  "ī": "i",
+  "ĭ": "i",
+  "į": "i",
+  "ĵ": "j",
+  "ķ": "k",
+  "ĺ": "l",
+  "ļ": "l",
+  "ľ": "l",
+  "ń": "n",
+  "ņ": "n",
+  "ň": "n",
+  "ŉ": "ʼn",
+  "ō": "o",
+  "ŏ": "o",
+  "ő": "o",
+  "ŕ": "r",
+  "ŗ": "r",
+  "ř": "r",
+  "ś": "s",
+  "ŝ": "s",
+  "ş": "s",
+  "š": "s",
+  "ţ": "t",
+  "ť": "t",
+  "ũ": "u",
+  "ū": "u",
+  "ŭ": "u",
+  "ů": "u",
+  "ű": "u",
+  "ų": "u",
+  "ŵ": "w",
+  "ŷ": "y",
+  "ź": "z",
+  "ż": "z",
+  "ž": "z",
+  "ſ": "s",
+  "ơ": "o",
+  "ư": "u",
+  "ǆ": "dz",
+  "ǉ": "lj",
+  "ǌ": "nj",
+  "ǎ": "a",
+  "ǐ": "i",
+  "ǒ": "o",
+  "ǔ": "u",
+  "ǖ": "u",
+  "ǘ": "u",
+  "ǚ": "u",
+  "ǜ": "u",
+  "ǟ": "a",
+  "ǡ": "a",
+  "ǣ": "æ",
+  "ǧ": "g",
+  "ǩ": "k",
+  "ǫ": "o",
+  "ǭ": "o",
+  "ǯ": "ʒ",
+  "ǰ": "j",
+  "ǳ": "dz",
+  "ǵ": "g",
+  "ǹ": "n",
+  "ǻ": "a",
+  "ǽ": "æ",
+  "ǿ": "ø",
+  "ȁ": "a",
+  "ȃ": "a",
+  "ȅ": "e",
+  "ȇ": "e",
+  "ȉ": "i",
+  "ȋ": "i",
+  "ȍ": "o",
+  "ȏ": "o",
+  "ȑ": "r",
+  "ȓ": "r",
+  "ȕ": "u",
+  "ȗ": "u",
+  "ș": "s",
+  "ț": "t",
+  "ȟ": "h",
+  "ȧ": "a",
+  "ȩ": "e",
+  "ȫ": "o",
+  "ȭ": "o",
+  "ȯ": "o",
+  "ȱ": "o",
+  "ȳ": "y",
+};
+
+function applyCharMap(text, mapping) {
+  const keys = Object.keys(mapping).sort(function(a, b) {
     return b.length - a.length;
   });
-  for (var i = 0; i < keys.length; i++) {
-    var k = keys[i];
-    text = text.split(k).join(mapping[k]);
+  for (let i = 0; i < keys.length; i++) {
+    const ch = keys[i];
+    text = text.split(ch).join(mapping[ch]);
   }
   return text;
 }
 
-function stripCombining(text) {
-  var out = "";
-  for (var i = 0; i < text.length; i++) {
-    var c = text.charCodeAt(i);
-    if (c >= 0x0300 && c <= 0x036f) continue;
-    if (c >= 0x1ab0 && c <= 0x1aff) continue;
-    if (c >= 0x1dc0 && c <= 0x1dff) continue;
-    if (c >= 0x20d0 && c <= 0x20ff) continue;
-    if (c >= 0xfe20 && c <= 0xfe2f) continue;
-    out += text.charAt(i);
+function stripCombiningMarks(text) {
+  let normalized = text;
+  try {
+    normalized = text.normalize('NFKD');
+  } catch (e) {
+    normalized = text;
   }
-  return out;
+  let result = '';
+  for (let i = 0; i < normalized.length; i++) {
+    const code = normalized.charCodeAt(i);
+    if (code >= 0x0300 && code <= 0x036f) {
+      continue;
+    }
+    result += normalized.charAt(i);
+  }
+  return result;
 }
 
-function isAlnumChar(ch) {
-  if (/[0-9A-Za-z]/.test(ch)) return true;
-  if (ch.toLowerCase() !== ch.toUpperCase()) return true;
-  var cp = ch.codePointAt(0);
-  if (cp >= 0x4e00 && cp <= 0x9fff) return true;
-  if (cp >= 0x3400 && cp <= 0x4dbf) return true;
-  if (cp >= 0x3040 && cp <= 0x30ff) return true;
-  if (cp >= 0xac00 && cp <= 0xd7af) return true;
-  if (cp >= 0x0600 && cp <= 0x06ff) return true;
-  if (cp >= 0x0590 && cp <= 0x05ff) return true;
+function isAlnum(ch) {
+  const code = ch.charCodeAt(0);
+  if (code >= 48 && code <= 57) {
+    return true;
+  }
+  if (code >= 97 && code <= 122) {
+    return true;
+  }
+  if (code > 127) {
+    return true;
+  }
   return false;
 }
 
-function stripNonAlnum(text) {
-  var out = "";
-  for (var i = 0; i < text.length; ) {
-    var cp = text.codePointAt(i);
-    var ch = String.fromCodePoint(cp);
-    if (isAlnumChar(ch)) out += ch;
-    i += ch.length;
+function normalizeName(value) {
+  if (value === null || value === undefined) {
+    return null;
   }
-  return out;
-}
-
-/**
- * @param {string} value
- * @returns {string|null}
- */
-function normalize_name(value) {
-  if (value === null || value === undefined) return null;
-  var result = String(value).toLowerCase();
-  result = applyMap(result, SPECIAL);
-  result = applyMap(result, GREEK);
-  result = applyMap(result, CYR);
-  result = stripCombining(result.normalize("NFKD"));
-  result = stripNonAlnum(result);
-  return result === "" ? null : result;
+  let result = String(value).toLowerCase();
+  result = applyCharMap(result, SPECIAL_LATIN);
+  result = applyCharMap(result, GREEK);
+  result = applyCharMap(result, CYRILLIC);
+  result = applyCharMap(result, LATIN_EXTENDED);
+  result = stripCombiningMarks(result);
+  let filtered = '';
+  for (let i = 0; i < result.length; i++) {
+    if (isAlnum(result.charAt(i))) {
+      filtered += result.charAt(i);
+    }
+  }
+  if (filtered.length === 0) {
+    return null;
+  }
+  return filtered;
 }
