@@ -19,6 +19,7 @@ members = [
     "data-privacy",
     "drop-connector",
     "drop-ingestor",
+    "drop-normalize",
     "drop-notice-dispatcher",
     "google-sheets-worker",
     "lever-worker",
@@ -569,6 +570,11 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
+
+[[package]]
+name = "drop-normalize"
+version = "0.1.0"
+source = { editable = "analytics/drop_normalize" }
 
 [[package]]
 name = "drop-notice-dispatcher"

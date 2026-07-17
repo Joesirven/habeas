@@ -39,6 +39,8 @@ members = [
     "app/cassandra",
     # cli
     "clients/cli/habeas-cli",
+    # analytics experiment
+    "analytics/drop_normalize",
 ]
 
 [tool.importlinter]
@@ -103,4 +105,4 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["libs", "app", "clients/cli"]
+testpaths = ["libs", "app", "clients/cli", "analytics/drop_normalize/tests"]
