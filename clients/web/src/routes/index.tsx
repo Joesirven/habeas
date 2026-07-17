@@ -2,9 +2,11 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 
 import { Skeleton, SkeletonLines } from '@/components/AppShell'
+import { useMe } from '@/lib/auth'
 import { getDropGlobalStats, getHealth } from '@/lib/api'
 
 export function DashboardPage() {
+  const { isSuperAdmin, isAdmin } = useMe()
   const healthQuery = useQuery({
     queryKey: ['admin-api', 'health'],
     queryFn: getHealth,
@@ -123,17 +125,32 @@ export function DashboardPage() {
             <div>
               <p className="taste-micro text-white/55">Shortcuts</p>
               <div className="mt-4 flex flex-wrap gap-3">
-                <Link to="/ops/drop-pipeline" search={{ tab: 'home' }} className="taste-frost-chip-dark">
-                  Pipeline →
-                </Link>
-                <Link to="/ops/health" className="taste-frost-chip-dark">
-                  Health →
-                </Link>
-                <Link to="/approvals/matching-review" className="taste-frost-chip-dark">
-                  Matching review →
+                <Link to="/requests/needs-attention" className="taste-frost-chip-dark">
+                  Needs attention →
                 </Link>
                 <Link to="/requests" className="taste-frost-chip-dark">
                   Requests →
+                </Link>
+                {isSuperAdmin ? (
+                  <>
+                    <Link to="/ops/dashboard" className="taste-frost-chip-dark">
+                      Ops dashboard →
+                    </Link>
+                    <Link to="/ops/runs" className="taste-frost-chip-dark">
+                      Runs →
+                    </Link>
+                    <Link to="/ops/drop-pipeline" search={{ tab: 'home' }} className="taste-frost-chip-dark">
+                      Console →
+                    </Link>
+                  </>
+                ) : null}
+                {isAdmin || isSuperAdmin ? (
+                  <Link to="/ops/health" className="taste-frost-chip-dark">
+                    Insights →
+                  </Link>
+                ) : null}
+                <Link to="/approvals/matching-review" className="taste-frost-chip-dark">
+                  Matching review →
                 </Link>
               </div>
             </div>

@@ -4,6 +4,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 import { SkeletonLines } from '@/components/AppShell'
+import { RoleGate, isSuperAdmin } from '@/lib/auth'
 import {
   getDropMatchingResultDetail,
   getDropMatchingResults,
@@ -1384,6 +1385,14 @@ function HashIndexPanel({
 }
 
 export function DropPipelinePage() {
+  return (
+    <RoleGate allow={isSuperAdmin}>
+      <DropPipelinePageInner />
+    </RoleGate>
+  )
+}
+
+function DropPipelinePageInner() {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const { tab } = useSearch({ from: '/ops/drop-pipeline' })

@@ -610,9 +610,8 @@ export type RunDetail = {
 }
 
 export function getRunDetail(job: string, attemptId: number) {
-  return fetchAdminApi<RunDetail>(
-    `/ops/runs/${encodeURIComponent(job)}/${attemptId}`,
-  )
+  const runId = `${job}:${attemptId}`
+  return fetchAdminApi<RunDetail>(`/ops/runs/${encodeURIComponent(runId)}`)
 }
 
 // --- Ops runs list (U4) ---

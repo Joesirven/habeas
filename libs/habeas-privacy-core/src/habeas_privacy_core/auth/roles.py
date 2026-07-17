@@ -70,10 +70,6 @@ def resolve_role_from_allowlists(
             return ROLE_SUPER_ADMIN
         return None
 
-    if is_authenticated:
-        return None
-
-    if not require_identity:
-        return ROLE_SUPER_ADMIN
-
+    # Allowlists are configured but email did not match (or was missing).
+    # Never elevate unauthenticated callers to super_admin once allowlists exist.
     return None

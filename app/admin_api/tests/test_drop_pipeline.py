@@ -1433,6 +1433,8 @@ def test_drop_spine_composes_super_admin_role_with_iap_actor(
             json={"state": "CA"},
         )
 
-    assert denied.status_code == 401
+    # Role gate runs first (unknown email ∉ allowlist → 403). With IAP header, both
+    # require_roles(super_admin) and DropMutationActor succeed → 200.
+    assert denied.status_code == 403
     assert allowed.status_code == 200
     assert allowed.json()["attempt_id"] == 42
