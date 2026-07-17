@@ -11,6 +11,8 @@ import {
   postDropLand,
   postDropMatch,
   postDropPromote,
+  postHashIndexRefreshEnqueue,
+  postHashIndexRefreshProcess,
   type DropPipelineStatus,
   type StepStatusCount,
   type WorkerHealthProbe,
@@ -22,6 +24,7 @@ const WORKER_ORDER = [
   'request_dispatcher',
   'matching',
   'data_fulfillment',
+  'hash_index_refresh',
 ] as const
 
 const PIPELINE_STAGES = [
@@ -176,8 +179,27 @@ export function DropPipelinePage() {
     },
   })
 
+  const hashIndexMutation = useMutation({
+    mutationFn: async (key: 'enqueue' | 'process') => {
+      setLastAction(key === 'enqueue' ? 'Enqueue hash-index refresh' : 'Process hash-index refresh')
+      return key === 'enqueue'
+        ? postHashIndexRefreshEnqueue({ state: 'CA' })
+        : postHashIndexRefreshProcess()
+    },
+    onSuccess: (payload) => {
+      setActionResult(JSON.stringify(payload, null, 2))
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
+    },
+    onError: (error) => {
+      setActionResult(error instanceof Error ? error.message : String(error))
+    },
+  })
+
   const data: DropPipelineStatus | undefined = pipelineQuery.data
   const showSkeleton = pipelineQuery.isPending && !data
+  const hashPending = (data?.hash_index_refresh.pending ?? 0) > 0
+  const hashWorkerDown = data ? !data.worker_health.hash_index_refresh?.ok : false
+  const lastRun = data?.hash_index_refresh.last_run
 
   return (
     <section className="space-y-16">
@@ -255,6 +277,59 @@ export function DropPipelinePage() {
         </div>
 
         <AtmospherePanel data={data} />
+      </div>
+
+      <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
+        <div>
+          <Micro>Hash index refresh</Micro>
+          <p className="mt-2 max-w-xl text-sm text-ink-soft">
+            Rebuild CA serving marts via dbt, then rematch open not-found DROP requests. Enqueue
+            queues an attempt; process claims the worker.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="glass px-2.5 py-1 font-mono text-[0.65rem] uppercase tracking-[0.08em] text-ink-soft">
+            State CA
+          </span>
+          <span className="text-sm text-ink-soft">
+            {hashWorkerDown
+              ? 'Worker down'
+              : hashPending
+                ? 'Pending / in-flight'
+                : lastRun
+                  ? `Last ${lastRun.status}`
+                  : 'None'}
+          </span>
+          {lastRun?.status === 'success' && (
+            <span className="text-sm text-ink-soft">
+              rows e/p/n {lastRun.rows_email ?? '—'}/{lastRun.rows_phone ?? '—'}/
+              {lastRun.rows_ndz ?? '—'} · rematch {lastRun.rematch_enqueued_count}
+            </span>
+          )}
+          {lastRun?.status && lastRun.status !== 'success' && lastRun.error_message && (
+            <span className="text-sm text-red-700">{lastRun.error_message}</span>
+          )}
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:gap-3">
+          <button
+            type="button"
+            className="taste-btn"
+            disabled={
+              showSkeleton || hashPending || hashIndexMutation.isPending || actionMutation.isPending
+            }
+            onClick={() => hashIndexMutation.mutate('enqueue')}
+          >
+            Enqueue refresh
+          </button>
+          <button
+            type="button"
+            className="taste-btn"
+            disabled={showSkeleton || hashIndexMutation.isPending || actionMutation.isPending}
+            onClick={() => hashIndexMutation.mutate('process')}
+          >
+            Process refresh
+          </button>
+        </div>
       </div>
 
       {showSkeleton && (
@@ -411,6 +486,7 @@ export function DropPipelinePage() {
                       <th>Recorded</th>
                       <th>Request ID</th>
                       <th>Matched</th>
+                      <th>Count</th>
                       <th>Via</th>
                     </tr>
                   </thead>
@@ -426,6 +502,7 @@ export function DropPipelinePage() {
                             {row.matched ? 'yes' : 'no'}
                           </span>
                         </td>
+                        <td className="tabular-nums">{row.match_count}</td>
                         <td className="font-mono text-xs">{row.matched_via}</td>
                       </tr>
                     ))}

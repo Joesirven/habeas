@@ -113,8 +113,24 @@ export type DropRequestThin = {
 export type MatchingResultSummary = {
   request_id: string
   matched: boolean
+  match_count: number
   matched_via: string
   recorded_at: string | null
+}
+
+export type HashIndexRefreshStatus = {
+  pending: number
+  attempts_by_status: { status: string; count: number }[]
+  last_run: {
+    state: string
+    status: string
+    finished_at: string | null
+    rows_email: number | null
+    rows_phone: number | null
+    rows_ndz: number | null
+    error_message: string | null
+    rematch_enqueued_count: number
+  } | null
 }
 
 export type WorkerHealthProbe = {
@@ -146,6 +162,7 @@ export type DropPipelineStatus = {
     approved: number
     by_status: { status: string; count: number }[]
   }
+  hash_index_refresh: HashIndexRefreshStatus
   worker_health: Record<string, WorkerHealthProbe>
 }
 
@@ -183,5 +200,18 @@ export function postDropFulfill(body?: { request_id?: string }) {
   return fetchAdminApi<Record<string, unknown>>('/ops/drop/fulfill', {
     method: 'POST',
     body: JSON.stringify(body ?? {}),
+  })
+}
+
+export function postHashIndexRefreshEnqueue(body?: { state?: string; list_types?: string[] }) {
+  return fetchAdminApi<Record<string, unknown>>('/ops/drop/hash-index-refresh/enqueue', {
+    method: 'POST',
+    body: JSON.stringify(body ?? { state: 'CA' }),
+  })
+}
+
+export function postHashIndexRefreshProcess() {
+  return fetchAdminApi<Record<string, unknown>>('/ops/drop/hash-index-refresh/process', {
+    method: 'POST',
   })
 }
