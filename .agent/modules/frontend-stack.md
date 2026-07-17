@@ -2,6 +2,8 @@
 
 > Gate: editing `clients/web/`.
 
+Visual design: also load [`design-taste.md`](design-taste.md).
+
 ## Locked stack
 
 | Piece | Choice |

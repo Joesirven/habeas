@@ -1,10 +1,52 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
+import { Skeleton } from '@/components/AppShell'
 import {
   approveMatchingReview,
   listMatchingReviewApprovals,
   type ApprovalRecord,
 } from '@/lib/api'
+
+function MatchingReviewTableSkeleton({ rows = 5 }: { rows?: number }) {
+  return (
+    <table className="taste-table" role="status" aria-label="Loading approvals">
+      <thead>
+        <tr>
+          <th>
+            <Skeleton className="h-3 w-20" />
+          </th>
+          <th>
+            <Skeleton className="h-3 w-16" />
+          </th>
+          <th>
+            <Skeleton className="h-3 w-12" />
+          </th>
+          <th>
+            <Skeleton className="h-3 w-14" />
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        {Array.from({ length: rows }, (_, index) => (
+          <tr key={index}>
+            <td>
+              <Skeleton className="h-4 w-40" />
+            </td>
+            <td>
+              <Skeleton className="h-4 w-36" />
+            </td>
+            <td>
+              <Skeleton className="h-4 w-24" />
+            </td>
+            <td>
+              <Skeleton className="h-7 w-20 rounded-lg" />
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
 
 export function MatchingReviewPage() {
   const queryClient = useQueryClient()
@@ -19,54 +61,69 @@ export function MatchingReviewPage() {
       approveMatchingReview(approval.id, { decided_by: 'web-admin@habeas.com' }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'approvals'] })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
     },
   })
 
   return (
-    <section className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold text-white">Matching review</h2>
-        <p className="mt-2 max-w-2xl text-slate-400">
+    <section className="space-y-10">
+      <header>
+        <p className="taste-micro">Approvals</p>
+        <h2 className="mt-3 font-display text-[2.5rem] font-medium leading-none tracking-tight text-ink">
+          Matching review
+        </h2>
+        <p className="mt-3 max-w-xl text-sm text-ink-soft">
           Approve matching.review gates before fulfillment dispatch can proceed.
         </p>
-      </div>
+      </header>
 
-      <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
-        {approvalsQuery.isPending && <p className="p-6 text-slate-300">Loading approvals…</p>}
+      <div className="taste-panel overflow-hidden">
+        {approvalsQuery.isPending && <MatchingReviewTableSkeleton />}
         {approvalsQuery.isError && (
-          <p className="p-6 text-red-300">Could not load matching.review approvals.</p>
+          <p className="p-6 text-sm text-red-700">Could not load matching.review approvals.</p>
         )}
         {approvalsQuery.isSuccess && approvalsQuery.data.length === 0 && (
-          <p className="p-6 text-slate-400">No pending matching.review items.</p>
+          <p className="p-6 text-sm text-ink-soft">No pending matching.review items.</p>
         )}
         {approvalsQuery.isSuccess && approvalsQuery.data.length > 0 && (
-          <table className="min-w-full text-left text-sm">
-            <thead className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+          <table className="taste-table">
+            <thead>
               <tr>
-                <th className="px-4 py-3">Approval</th>
-                <th className="px-4 py-3">Request</th>
-                <th className="px-4 py-3">Role</th>
-                <th className="px-4 py-3">Action</th>
+                <th>Approval</th>
+                <th>Request</th>
+                <th>Role</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {approvalsQuery.data.map((approval) => (
-                <tr key={approval.id} className="border-b border-slate-800/80 text-slate-200">
-                  <td className="px-4 py-3 font-mono text-xs">{approval.id}</td>
-                  <td className="px-4 py-3 font-mono text-xs">{approval.request_id}</td>
-                  <td className="px-4 py-3">{approval.approver_role ?? '—'}</td>
-                  <td className="px-4 py-3">
-                    <button
-                      type="button"
-                      className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-                      disabled={approveMutation.isPending}
-                      onClick={() => approveMutation.mutate(approval)}
-                    >
-                      Approve
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {approvalsQuery.data.map((approval) => {
+                const isApproving =
+                  approveMutation.isPending && approveMutation.variables?.id === approval.id
+                return (
+                  <tr key={approval.id}>
+                    <td className="font-mono text-xs text-ink-soft">{approval.id}</td>
+                    <td className="font-mono text-xs text-ink-soft">{approval.request_id}</td>
+                    <td>{approval.approver_role ?? '—'}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="taste-btn-primary inline-flex items-center gap-2 text-xs"
+                        disabled={approveMutation.isPending}
+                        onClick={() => approveMutation.mutate(approval)}
+                      >
+                        {isApproving ? (
+                          <>
+                            <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                            Approving…
+                          </>
+                        ) : (
+                          'Approve'
+                        )}
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         )}

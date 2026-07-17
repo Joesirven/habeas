@@ -33,3 +33,4 @@ tmp/
 
 # dbmate
 dbmate.env
+.worktrees/

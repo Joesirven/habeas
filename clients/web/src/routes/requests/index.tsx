@@ -1,7 +1,49 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 
+import { Skeleton } from '@/components/AppShell'
 import { listRequests } from '@/lib/api'
+
+function RequestsTableSkeleton({ rows = 6 }: { rows?: number }) {
+  return (
+    <table className="taste-table" role="status" aria-label="Loading requests">
+      <thead>
+        <tr>
+          <th>
+            <Skeleton className="h-3 w-20" />
+          </th>
+          <th>
+            <Skeleton className="h-3 w-16" />
+          </th>
+          <th>
+            <Skeleton className="h-3 w-24" />
+          </th>
+          <th>
+            <Skeleton className="h-3 w-20" />
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        {Array.from({ length: rows }, (_, index) => (
+          <tr key={index}>
+            <td>
+              <Skeleton className="h-4 w-36" />
+            </td>
+            <td>
+              <Skeleton className="h-4 w-28" />
+            </td>
+            <td>
+              <Skeleton className="h-4 w-40" />
+            </td>
+            <td>
+              <Skeleton className="h-4 w-24" />
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
 
 const SOURCE_LABELS: Record<string, string> = {
   webform: 'Gravity Forms',
@@ -18,45 +60,60 @@ export function RequestsPage() {
   })
 
   return (
-    <section className="space-y-6">
-      <div className="flex items-center justify-between gap-4">
+    <section className="space-y-10">
+      <header className="flex flex-wrap items-end justify-between gap-6">
         <div>
-          <h2 className="text-2xl font-semibold text-white">Requests</h2>
-          <p className="mt-2 text-slate-400">Thin-spine privacy requests across all intake channels.</p>
+          <p className="taste-micro">Intake</p>
+          <div className="mt-3 flex flex-wrap items-baseline gap-3">
+            <h2 className="font-display text-[2.5rem] font-medium leading-none tracking-tight text-ink">
+              Requests
+            </h2>
+            {requestsQuery.isFetching && !requestsQuery.isPending && (
+              <span className="taste-frost-chip">Refreshing</span>
+            )}
+          </div>
+          <p className="mt-3 max-w-md text-sm text-ink-soft">
+            Thin-spine privacy requests across all intake channels.
+          </p>
         </div>
-        <Link
-          to="/requests/new"
-          className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500"
-        >
+        <Link to="/requests/new" className="taste-btn-primary">
           Manual submit
         </Link>
-      </div>
+      </header>
 
-      <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
-        {requestsQuery.isPending && <p className="p-6 text-slate-300">Loading requests…</p>}
+      <div className="taste-panel overflow-hidden">
+        {requestsQuery.isPending && <RequestsTableSkeleton />}
         {requestsQuery.isError && (
-          <p className="p-6 text-red-300">Could not load requests. Is admin-api running with DATABASE_URL?</p>
+          <p className="p-6 text-sm text-red-700">
+            Could not load requests. Is admin-api running with DATABASE_URL?
+          </p>
         )}
         {requestsQuery.isSuccess && requestsQuery.data.length === 0 && (
-          <p className="p-6 text-slate-400">No requests yet.</p>
+          <p className="p-6 text-sm text-ink-soft">No requests yet.</p>
         )}
         {requestsQuery.isSuccess && requestsQuery.data.length > 0 && (
-          <table className="min-w-full text-left text-sm">
-            <thead className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+          <table className="taste-table">
+            <thead>
               <tr>
-                <th className="px-4 py-3">Received</th>
-                <th className="px-4 py-3">Source</th>
-                <th className="px-4 py-3">Request ID</th>
-                <th className="px-4 py-3">Raw record</th>
+                <th>Received</th>
+                <th>Source</th>
+                <th>Request ID</th>
+                <th>Raw record</th>
               </tr>
             </thead>
             <tbody>
               {requestsQuery.data.map((request) => (
-                <tr key={request.id} className="border-b border-slate-800/80 text-slate-200">
-                  <td className="px-4 py-3">{new Date(request.received_at).toLocaleString()}</td>
-                  <td className="px-4 py-3">{SOURCE_LABELS[request.intake_source] ?? request.intake_source}</td>
-                  <td className="px-4 py-3 font-mono text-xs">{request.id}</td>
-                  <td className="px-4 py-3">{request.raw_record_id ?? '—'}</td>
+                <tr key={request.id}>
+                  <td>{new Date(request.received_at).toLocaleString()}</td>
+                  <td>
+                    <span className="taste-frost-chip">
+                      {SOURCE_LABELS[request.intake_source] ?? request.intake_source}
+                    </span>
+                  </td>
+                  <td className="font-mono text-xs text-ink-soft">{request.id}</td>
+                  <td className="font-mono text-xs text-ink-soft">
+                    {request.raw_record_id ?? '—'}
+                  </td>
                 </tr>
               ))}
             </tbody>

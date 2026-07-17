@@ -14,6 +14,9 @@ const initialForm: ManualRequestInput = {
   zip: '',
 }
 
+const fieldClass =
+  'w-full rounded-lg border border-line bg-paper-raised px-3 py-2 text-sm text-ink outline-none transition focus:border-habeas-mid'
+
 export function ManualRequestPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -32,67 +35,72 @@ export function ManualRequestPage() {
   }
 
   return (
-    <section className="mx-auto max-w-2xl space-y-6">
-      <div>
-        <h2 className="text-2xl font-semibold text-white">Manual request</h2>
-        <p className="mt-2 text-slate-400">Legal-team intake. Creates a normalized request and enqueues matching.</p>
-      </div>
+    <section className="mx-auto max-w-2xl space-y-10">
+      <header>
+        <p className="taste-micro">Intake</p>
+        <h2 className="mt-3 font-display text-[2.5rem] font-medium leading-none tracking-tight text-ink">
+          Manual request
+        </h2>
+        <p className="mt-3 text-sm text-ink-soft">
+          Legal-team intake. Creates a normalized request and enqueues matching.
+        </p>
+      </header>
 
       <form
-        className="space-y-4 rounded-xl border border-slate-800 bg-slate-900/60 p-6"
+        className="taste-panel-soft space-y-5 p-6 sm:p-7"
         onSubmit={(event) => {
           event.preventDefault()
           createMutation.mutate(form)
         }}
       >
         <div className="grid gap-4 sm:grid-cols-2">
-          <label className="space-y-1 text-sm text-slate-300">
+          <label className="space-y-1.5 text-sm text-ink-soft">
             First name
             <input
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+              className={fieldClass}
               value={form.first_name ?? ''}
               onChange={(event) => updateField('first_name', event.target.value)}
             />
           </label>
-          <label className="space-y-1 text-sm text-slate-300">
+          <label className="space-y-1.5 text-sm text-ink-soft">
             Last name
             <input
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+              className={fieldClass}
               value={form.last_name ?? ''}
               onChange={(event) => updateField('last_name', event.target.value)}
             />
           </label>
-          <label className="space-y-1 text-sm text-slate-300">
+          <label className="space-y-1.5 text-sm text-ink-soft">
             Email
             <input
               type="email"
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+              className={fieldClass}
               value={form.email ?? ''}
               onChange={(event) => updateField('email', event.target.value)}
             />
           </label>
-          <label className="space-y-1 text-sm text-slate-300">
+          <label className="space-y-1.5 text-sm text-ink-soft">
             Phone
             <input
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+              className={fieldClass}
               value={form.phone ?? ''}
               onChange={(event) => updateField('phone', event.target.value)}
             />
           </label>
-          <label className="space-y-1 text-sm text-slate-300">
+          <label className="space-y-1.5 text-sm text-ink-soft">
             ZIP
             <input
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white"
+              className={fieldClass}
               value={form.zip ?? ''}
               onChange={(event) => updateField('zip', event.target.value)}
             />
           </label>
-          <label className="space-y-1 text-sm text-slate-300">
+          <label className="space-y-1.5 text-sm text-ink-soft">
             State
             <input
               required
               maxLength={2}
-              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-white uppercase"
+              className={`${fieldClass} uppercase`}
               value={form.state}
               onChange={(event) => updateField('state', event.target.value.toUpperCase())}
             />
@@ -100,18 +108,18 @@ export function ManualRequestPage() {
         </div>
 
         {createMutation.isError ? (
-          <p className="text-sm text-red-300">{String(createMutation.error)}</p>
+          <p className="text-sm text-red-700">{String(createMutation.error)}</p>
         ) : null}
 
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-3 pt-1">
           <button
             type="submit"
             disabled={createMutation.isPending}
-            className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+            className="taste-btn-primary"
           >
             {createMutation.isPending ? 'Submitting…' : 'Submit request'}
           </button>
-          <Link to="/requests" className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-300">
+          <Link to="/requests" className="taste-btn">
             Cancel
           </Link>
         </div>

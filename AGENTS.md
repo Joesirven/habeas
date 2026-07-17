@@ -49,6 +49,7 @@ If pre-merge → read [`.agent/modules/review-personas.md`](.agent/modules/revie
 | Editing `db/migrations/` | [`db-migrations.md`](.agent/modules/db-migrations.md) |
 | Deploy / prod migrate / CLI `--execute` | [`prod-write-gate.md`](.agent/modules/prod-write-gate.md) |
 | Editing `clients/web/` | [`frontend-stack.md`](.agent/modules/frontend-stack.md) |
+| Any UI / visual design | [`design-taste.md`](.agent/modules/design-taste.md) |
 | Agent using Habeas CLI | [`cli-agent-interface.md`](.agent/modules/cli-agent-interface.md) |
 | Touching request or audit tables | [`privacy-invariants.md`](.agent/modules/privacy-invariants.md) |
 

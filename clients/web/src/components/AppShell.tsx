@@ -7,46 +7,83 @@ type AppShellProps = {
   children: ReactNode
 }
 
+/** Pulse placeholder for loading panels (dashboard, ops, approvals). */
+export function Skeleton({ className = '' }: { className?: string }) {
+  return (
+    <div
+      className={`animate-pulse rounded-md bg-line/80 ${className}`}
+      aria-hidden="true"
+    />
+  )
+}
+
+export function SkeletonLines({
+  lines = 3,
+  className = '',
+}: {
+  lines?: number
+  className?: string
+}) {
+  return (
+    <div className={`space-y-3 ${className}`} role="status" aria-label="Loading">
+      {Array.from({ length: lines }, (_, index) => (
+        <Skeleton key={index} className={`h-4 ${index === lines - 1 ? 'w-2/3' : 'w-full'}`} />
+      ))}
+    </div>
+  )
+}
+
+const navClass =
+  'text-mute transition-colors hover:text-ink [&.active]:text-ink [&.active]:underline [&.active]:decoration-ink/25 [&.active]:underline-offset-4'
+
 export function AppShell({ children }: AppShellProps) {
   useLiveEvents()
 
   return (
-    <div className="min-h-screen">
-      <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
-          <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Habeas</p>
-            <h1 className="text-lg font-semibold text-white">Data Privacy Admin</h1>
+    <div className="flex min-h-screen flex-col">
+      <header
+        className="sticky top-0 z-20 border-b border-[var(--glass-border)]"
+        style={{
+          WebkitBackdropFilter: 'blur(var(--glass-blur))',
+          backdropFilter: 'blur(var(--glass-blur))',
+          background:
+            'linear-gradient(to right, var(--glass-gradient-start), var(--glass-gradient-end))',
+        }}
+      >
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-6 py-5">
+          <div className="min-w-0">
+            <p className="taste-micro">Habeas</p>
+            <h1 className="mt-1 font-display text-[1.35rem] font-medium leading-none tracking-tight text-ink">
+              Data Privacy
+            </h1>
           </div>
-          <nav className="flex gap-4 text-sm text-slate-300">
-            <Link
-              to="/"
-              className="hover:text-white [&.active]:font-medium [&.active]:text-white"
-            >
+          <nav className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2 text-[0.8125rem]">
+            <Link to="/" className={navClass}>
               Dashboard
             </Link>
-            <Link
-              to="/requests"
-              className="hover:text-white [&.active]:font-medium [&.active]:text-white"
-            >
+            <Link to="/requests" className={navClass}>
               Requests
             </Link>
-            <Link
-              to="/approvals/matching-review"
-              className="hover:text-white [&.active]:font-medium [&.active]:text-white"
-            >
+            <Link to="/approvals/matching-review" className={navClass}>
               Matching review
             </Link>
-            <Link
-              to="/ops/drop-pipeline"
-              className="hover:text-white [&.active]:font-medium [&.active]:text-white"
-            >
+            <Link to="/ops/drop-pipeline" className={navClass}>
               DROP pipeline
             </Link>
           </nav>
         </div>
       </header>
-      <main className="mx-auto max-w-6xl px-6 py-8">{children}</main>
+
+      <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-12">{children}</main>
+
+      <footer className="mt-auto bg-ink">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
+          <p className="text-xs tracking-wide text-white/85">Habeas · Data Privacy</p>
+          <p className="text-[0.65rem] uppercase tracking-[0.16em] text-white/45">
+            Ops console
+          </p>
+        </div>
+      </footer>
     </div>
   )
 }

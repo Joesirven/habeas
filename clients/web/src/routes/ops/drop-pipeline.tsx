@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { Link } from '@tanstack/react-router'
+import { useState, type ReactNode } from 'react'
 
+import { SkeletonLines } from '@/components/AppShell'
 import {
   getDropPipeline,
   postDropDispatch,
@@ -22,6 +24,15 @@ const WORKER_ORDER = [
   'data_fulfillment',
 ] as const
 
+const PIPELINE_STAGES = [
+  '01 Download',
+  '02 Land',
+  '03 Promote',
+  '04 Match',
+  '05 Review',
+  '06 Fulfill',
+] as const
+
 const ACTIONS = [
   { key: 'download', label: 'Download ZIP', run: () => postDropDownload() },
   { key: 'land', label: 'Land', run: () => postDropLand() },
@@ -31,25 +42,31 @@ const ACTIONS = [
   { key: 'fulfill', label: 'Fulfill', run: () => postDropFulfill() },
 ] as const
 
+type ActionKey = (typeof ACTIONS)[number]['key']
+
+function Micro({ children }: { children: ReactNode }) {
+  return <p className="taste-micro">{children}</p>
+}
+
 function CountTable({ rows, empty }: { rows: StepStatusCount[]; empty: string }) {
   if (rows.length === 0) {
-    return <p className="text-sm text-slate-500">{empty}</p>
+    return <p className="text-sm text-ink-soft">{empty}</p>
   }
   return (
-    <table className="min-w-full text-left text-sm">
-      <thead className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+    <table className="taste-table">
+      <thead>
         <tr>
-          <th className="py-2 pr-4">Step</th>
-          <th className="py-2 pr-4">Status</th>
-          <th className="py-2">Count</th>
+          <th className="!px-0">Step</th>
+          <th className="!px-0">Status</th>
+          <th className="!px-0">Count</th>
         </tr>
       </thead>
       <tbody>
         {rows.map((row) => (
-          <tr key={`${row.step}-${row.status}`} className="border-b border-slate-800/60 text-slate-200">
-            <td className="py-2 pr-4 font-mono text-xs">{row.step}</td>
-            <td className="py-2 pr-4">{row.status}</td>
-            <td className="py-2 tabular-nums">{row.count}</td>
+          <tr key={`${row.step}-${row.status}`}>
+            <td className="!px-0 font-mono text-xs">{row.step}</td>
+            <td className="!px-0">{row.status}</td>
+            <td className="!px-0 tabular-nums">{row.count}</td>
           </tr>
         ))}
       </tbody>
@@ -59,16 +76,75 @@ function CountTable({ rows, empty }: { rows: StepStatusCount[]; empty: string })
 
 function WorkerHealthRow({ probe }: { probe: WorkerHealthProbe }) {
   return (
-    <tr className="border-b border-slate-800/60 text-slate-200">
-      <td className="py-2 pr-4 font-mono text-xs">{probe.name}</td>
-      <td className="py-2 pr-4">
-        <span className={probe.ok ? 'text-emerald-300' : 'text-red-300'}>
+    <tr>
+      <td className="font-mono text-xs">{probe.name}</td>
+      <td>
+        <span className={probe.ok ? 'text-emerald-700' : 'text-red-700'}>
           {probe.ok ? 'up' : 'down'}
         </span>
       </td>
-      <td className="py-2 pr-4 tabular-nums text-slate-400">{probe.status_code ?? '—'}</td>
-      <td className="py-2 font-mono text-xs text-slate-500">{probe.url}</td>
+      <td className="tabular-nums text-ink-soft">{probe.status_code ?? '—'}</td>
+      <td className="font-mono text-xs text-mute">{probe.url}</td>
     </tr>
+  )
+}
+
+function AtmospherePanel({ data }: { data: DropPipelineStatus | undefined }) {
+  const workersUp = data
+    ? WORKER_ORDER.filter((name) => data.worker_health[name]?.ok).length
+    : 0
+
+  return (
+    <div className="relative min-h-[22rem] overflow-hidden rounded-[1.35rem] bg-habeas-navy">
+      <div
+        aria-hidden
+        className="taste-atmosphere-orb pointer-events-none absolute -left-16 top-8 h-56 w-56 rounded-full bg-habeas-light/35 blur-2xl"
+      />
+      <div
+        aria-hidden
+        className="taste-atmosphere-orb pointer-events-none absolute -right-10 bottom-0 h-64 w-64 rounded-full bg-habeas-mid/45 blur-3xl"
+        style={{ animationDelay: '1.6s' }}
+      />
+      <div
+        aria-hidden
+        className="taste-atmosphere-orb pointer-events-none absolute left-1/3 top-1/4 h-40 w-40 rounded-full bg-white/10 blur-xl"
+        style={{ animationDelay: '3.2s' }}
+      />
+
+      <div className="relative flex h-full flex-col justify-between gap-8 p-6 sm:p-7">
+        <div className="flex flex-wrap gap-2">
+          <span className="taste-frost-chip-dark">Spine live</span>
+          <span className="taste-frost-chip-dark">
+            Workers {data ? `${workersUp}/${WORKER_ORDER.length}` : '—'}
+          </span>
+          <span className="taste-frost-chip-dark">
+            Matching pending {data?.matching_review.pending ?? '—'}
+          </span>
+        </div>
+
+        <div>
+          <p className="text-[0.65rem] font-medium uppercase tracking-[0.18em] text-white/55">
+            DROP requests
+          </p>
+          <p className="mt-2 font-display text-6xl font-medium tracking-tight text-white sm:text-7xl">
+            {data?.drop_requests.count ?? '—'}
+          </p>
+          <p className="mt-3 max-w-xs text-sm leading-relaxed text-white/65">
+            Thin intake rows in flight. Counts and ids only — no personally identifiable
+            information.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <span className="taste-frost-chip-dark">
+            Match success {data?.matching_attempts.success ?? '—'}
+          </span>
+          <span className="taste-frost-chip-dark">
+            Review approved {data?.matching_review.approved ?? '—'}
+          </span>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -81,17 +157,18 @@ export function DropPipelinePage() {
     queryKey: ['admin-api', 'ops', 'drop-pipeline'],
     queryFn: getDropPipeline,
     refetchInterval: 5_000,
+    placeholderData: (previous) => previous,
   })
 
   const actionMutation = useMutation({
-    mutationFn: async (key: (typeof ACTIONS)[number]['key']) => {
+    mutationFn: async (key: ActionKey) => {
       const action = ACTIONS.find((item) => item.key === key)
       if (!action) throw new Error(`unknown action ${key}`)
       setLastAction(action.label)
       return action.run()
     },
     onSuccess: (data) => {
-      setActionResult(JSON.stringify(data))
+      setActionResult(JSON.stringify(data, null, 2))
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
     },
     onError: (error) => {
@@ -100,61 +177,131 @@ export function DropPipelinePage() {
   })
 
   const data: DropPipelineStatus | undefined = pipelineQuery.data
+  const showSkeleton = pipelineQuery.isPending && !data
 
   return (
-    <section className="space-y-8">
-      <div>
-        <h2 className="text-2xl font-semibold text-white">DROP pipeline</h2>
-        <p className="mt-2 max-w-2xl text-slate-400">
-          Super-admin console for CA DROP download → land → promote → match → fulfill. Counts and
-          ids only — no personally identifiable information.
-        </p>
-      </div>
-
-      <div className="space-y-3">
-        <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">Actions</h3>
-        <div className="flex flex-wrap gap-2">
-          {ACTIONS.map((action) => (
-            <button
-              key={action.key}
-              type="button"
-              className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 hover:border-slate-500 hover:bg-slate-800 disabled:opacity-50"
-              disabled={actionMutation.isPending}
-              onClick={() => actionMutation.mutate(action.key)}
-            >
-              {action.label}
-            </button>
-          ))}
+    <section className="space-y-16">
+      <header className="grid gap-10 lg:grid-cols-[1.15fr_0.85fr] lg:items-end">
+        <div>
+          <Micro>Operations</Micro>
+          <h2 className="mt-4 max-w-md font-display text-[3.25rem] font-medium leading-[1.02] tracking-tight text-ink sm:text-[3.75rem]">
+            DROP
+            <br />
+            pipeline
+          </h2>
         </div>
-        {(lastAction || actionResult) && (
-          <pre className="overflow-x-auto rounded-lg border border-slate-800 bg-slate-950/80 p-3 text-xs text-slate-300">
-            {lastAction ? `# ${lastAction}\n` : ''}
-            {actionResult ?? ''}
-          </pre>
-        )}
+        <div className="border-l border-line pl-5">
+          <p className="max-w-sm text-sm leading-relaxed text-ink-soft">
+            Super-admin console for CA DROP download → land → promote → match → matching review →
+            fulfill. Counts and ids only.
+          </p>
+          <div className="mt-5 flex flex-wrap gap-2">
+            {PIPELINE_STAGES.map((stage) => (
+              <span
+                key={stage}
+                className="glass px-2.5 py-1 font-mono text-[0.65rem] uppercase tracking-[0.08em] text-ink-soft"
+              >
+                {stage}
+              </span>
+            ))}
+          </div>
+        </div>
+      </header>
+
+      <div className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
+        <div className="taste-panel-soft flex flex-col gap-6 p-6 sm:p-7">
+          <div>
+            <Micro>Actions</Micro>
+            <p className="mt-2 max-w-sm text-sm text-ink-soft">
+              Run one step at a time. Results stay on this page — ids and counts only.
+            </p>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            {ACTIONS.map((action, index) => {
+              const busy =
+                actionMutation.isPending && actionMutation.variables === action.key
+              return (
+                <button
+                  key={action.key}
+                  type="button"
+                  className={
+                    index === 0
+                      ? 'taste-btn-primary w-full justify-between gap-3 text-left'
+                      : 'taste-btn w-full justify-between gap-3 text-left'
+                  }
+                  disabled={actionMutation.isPending || showSkeleton}
+                  onClick={() => actionMutation.mutate(action.key)}
+                >
+                  <span>{action.label}</span>
+                  {busy ? (
+                    <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                  ) : (
+                    <span className="font-mono text-[0.65rem] opacity-50">
+                      {String(index + 1).padStart(2, '0')}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+
+          {(lastAction || actionResult) && (
+            <pre className="overflow-x-auto rounded-lg border border-line bg-paper-raised p-3 text-xs text-ink-soft">
+              {lastAction ? `# ${lastAction}\n` : ''}
+              {actionResult ?? ''}
+            </pre>
+          )}
+        </div>
+
+        <AtmospherePanel data={data} />
       </div>
 
-      {pipelineQuery.isPending && <p className="text-slate-300">Loading pipeline status…</p>}
-      {pipelineQuery.isError && (
-        <p className="text-red-300">
+      {showSkeleton && (
+        <div className="taste-panel p-6" role="status" aria-label="Loading pipeline status">
+          <SkeletonLines lines={5} />
+        </div>
+      )}
+
+      {pipelineQuery.isError && !data && (
+        <p className="text-sm text-red-700">
           Could not load DROP pipeline status. Is admin-api running with DATABASE_URL?
         </p>
       )}
 
       {data && (
         <>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Link
+              to="/approvals/matching-review"
+              className="taste-panel block p-5 transition hover:border-habeas-mid/40"
+            >
+              <Micro>Matching review</Micro>
+              <p className="mt-3 font-display text-3xl text-ink">{data.matching_review.pending}</p>
+              <p className="mt-1 text-xs text-mute">{data.matching_review.approved} approved</p>
+            </Link>
+            <div className="taste-panel p-5">
+              <Micro>Matching attempts</Micro>
+              <p className="mt-3 font-display text-3xl text-ink">{data.matching_attempts.pending}</p>
+              <p className="mt-1 text-xs text-mute">{data.matching_attempts.success} success</p>
+            </div>
+            <div className="taste-panel p-5">
+              <Micro>DROP requests</Micro>
+              <p className="mt-3 font-display text-3xl text-ink">{data.drop_requests.count}</p>
+              <p className="mt-1 text-xs text-mute">intake_source=drop</p>
+            </div>
+          </div>
+
           <div className="space-y-3">
-            <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">
-              Worker health
-            </h3>
-            <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-2">
-              <table className="min-w-full text-left text-sm">
-                <thead className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+            <Micro>Worker health</Micro>
+            <div className="taste-panel overflow-x-auto px-2 py-1">
+              <table className="taste-table">
+                <thead>
                   <tr>
-                    <th className="py-2 pr-4">Worker</th>
-                    <th className="py-2 pr-4">Health</th>
-                    <th className="py-2 pr-4">Code</th>
-                    <th className="py-2">URL</th>
+                    <th>Worker</th>
+                    <th>Health</th>
+                    <th>Code</th>
+                    <th>URL</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -162,9 +309,9 @@ export function DropPipelinePage() {
                     const probe = data.worker_health[name]
                     if (!probe) {
                       return (
-                        <tr key={name} className="border-b border-slate-800/60 text-slate-500">
-                          <td className="py-2 pr-4 font-mono text-xs">{name}</td>
-                          <td className="py-2" colSpan={3}>
+                        <tr key={name}>
+                          <td className="font-mono text-xs">{name}</td>
+                          <td colSpan={3} className="text-mute">
                             —
                           </td>
                         </tr>
@@ -179,50 +326,41 @@ export function DropPipelinePage() {
 
           <div className="grid gap-6 lg:grid-cols-2">
             <div className="space-y-3">
-              <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">
-                Connector attempts
-              </h3>
-              <div className="rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3">
+              <Micro>Connector attempts</Micro>
+              <div className="taste-panel-soft p-4">
                 <CountTable rows={data.connector_attempts} empty="No connector attempts." />
               </div>
             </div>
             <div className="space-y-3">
-              <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">
-                Ingest attempts
-              </h3>
-              <div className="rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3">
+              <Micro>Ingest attempts</Micro>
+              <div className="taste-panel-soft p-4">
                 <CountTable rows={data.ingest_attempts} empty="No ingest attempts." />
               </div>
             </div>
           </div>
 
           <div className="space-y-3">
-            <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">
-              Raw by list type
-            </h3>
-            <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-2">
+            <Micro>Raw by list type</Micro>
+            <div className="taste-panel overflow-x-auto px-2 py-1">
               {data.raw_requests_by_list_type.length === 0 ? (
-                <p className="py-2 text-sm text-slate-500">No drop_raw_requests rows.</p>
+                <p className="p-4 text-sm text-ink-soft">No drop_raw_requests rows.</p>
               ) : (
-                <table className="min-w-full text-left text-sm">
-                  <thead className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+                <table className="taste-table">
+                  <thead>
                     <tr>
-                      <th className="py-2 pr-4">List type</th>
-                      <th className="py-2 pr-4">Total</th>
-                      <th className="py-2 pr-4">response_status null</th>
-                      <th className="py-2">response_status set</th>
+                      <th>List type</th>
+                      <th>Total</th>
+                      <th>response_status null</th>
+                      <th>response_status set</th>
                     </tr>
                   </thead>
                   <tbody>
                     {data.raw_requests_by_list_type.map((row) => (
-                      <tr
-                        key={row.list_type}
-                        className="border-b border-slate-800/60 text-slate-200"
-                      >
-                        <td className="py-2 pr-4 font-mono text-xs">{row.list_type}</td>
-                        <td className="py-2 pr-4 tabular-nums">{row.total}</td>
-                        <td className="py-2 pr-4 tabular-nums">{row.response_status_null}</td>
-                        <td className="py-2 tabular-nums">{row.response_status_set}</td>
+                      <tr key={row.list_type}>
+                        <td className="font-mono text-xs">{row.list_type}</td>
+                        <td className="tabular-nums">{row.total}</td>
+                        <td className="tabular-nums">{row.response_status_null}</td>
+                        <td className="tabular-nums">{row.response_status_set}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -231,78 +369,28 @@ export function DropPipelinePage() {
             </div>
           </div>
 
-          <div className="grid gap-6 lg:grid-cols-3">
-            <div className="space-y-2 rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3">
-              <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">
-                Matching attempts
-              </h3>
-              <dl className="grid grid-cols-2 gap-2 text-sm">
-                <div>
-                  <dt className="text-xs text-slate-500">Pending</dt>
-                  <dd className="text-lg tabular-nums text-amber-200">
-                    {data.matching_attempts.pending}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Success</dt>
-                  <dd className="text-lg tabular-nums text-emerald-300">
-                    {data.matching_attempts.success}
-                  </dd>
-                </div>
-              </dl>
-            </div>
-            <div className="space-y-2 rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3">
-              <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">
-                Matching review
-              </h3>
-              <dl className="grid grid-cols-2 gap-2 text-sm">
-                <div>
-                  <dt className="text-xs text-slate-500">Pending</dt>
-                  <dd className="text-lg tabular-nums text-amber-200">
-                    {data.matching_review.pending}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Approved</dt>
-                  <dd className="text-lg tabular-nums text-emerald-300">
-                    {data.matching_review.approved}
-                  </dd>
-                </div>
-              </dl>
-            </div>
-            <div className="space-y-2 rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3">
-              <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">
-                DROP requests
-              </h3>
-              <p className="text-lg tabular-nums text-white">{data.drop_requests.count}</p>
-              <p className="text-xs text-slate-500">intake_source=drop</p>
-            </div>
-          </div>
-
           <div className="space-y-3">
-            <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">
-              Recent DROP requests
-            </h3>
-            <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-2">
+            <Micro>Recent DROP requests</Micro>
+            <div className="taste-panel overflow-x-auto px-2 py-1">
               {data.drop_requests.recent.length === 0 ? (
-                <p className="py-2 text-sm text-slate-500">No DROP thin requests yet.</p>
+                <p className="p-4 text-sm text-ink-soft">No DROP thin requests yet.</p>
               ) : (
-                <table className="min-w-full text-left text-sm">
-                  <thead className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+                <table className="taste-table">
+                  <thead>
                     <tr>
-                      <th className="py-2 pr-4">Received</th>
-                      <th className="py-2 pr-4">Request ID</th>
-                      <th className="py-2">Raw record</th>
+                      <th>Received</th>
+                      <th>Request ID</th>
+                      <th>Raw record</th>
                     </tr>
                   </thead>
                   <tbody>
                     {data.drop_requests.recent.map((row) => (
-                      <tr key={row.id} className="border-b border-slate-800/60 text-slate-200">
-                        <td className="py-2 pr-4">
+                      <tr key={row.id}>
+                        <td>
                           {row.received_at ? new Date(row.received_at).toLocaleString() : '—'}
                         </td>
-                        <td className="py-2 pr-4 font-mono text-xs">{row.id}</td>
-                        <td className="py-2 tabular-nums">{row.raw_record_id ?? '—'}</td>
+                        <td className="font-mono text-xs">{row.id}</td>
+                        <td className="tabular-nums">{row.raw_record_id ?? '—'}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -312,38 +400,33 @@ export function DropPipelinePage() {
           </div>
 
           <div className="space-y-3">
-            <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">
-              Matching results
-            </h3>
-            <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-2">
+            <Micro>Matching results</Micro>
+            <div className="taste-panel overflow-x-auto px-2 py-1">
               {data.matching_results_recent.length === 0 ? (
-                <p className="py-2 text-sm text-slate-500">No matching results for DROP requests.</p>
+                <p className="p-4 text-sm text-ink-soft">No matching results for DROP requests.</p>
               ) : (
-                <table className="min-w-full text-left text-sm">
-                  <thead className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+                <table className="taste-table">
+                  <thead>
                     <tr>
-                      <th className="py-2 pr-4">Recorded</th>
-                      <th className="py-2 pr-4">Request ID</th>
-                      <th className="py-2 pr-4">Matched</th>
-                      <th className="py-2">Via</th>
+                      <th>Recorded</th>
+                      <th>Request ID</th>
+                      <th>Matched</th>
+                      <th>Via</th>
                     </tr>
                   </thead>
                   <tbody>
                     {data.matching_results_recent.map((row) => (
-                      <tr
-                        key={`${row.request_id}-${row.recorded_at}`}
-                        className="border-b border-slate-800/60 text-slate-200"
-                      >
-                        <td className="py-2 pr-4">
+                      <tr key={`${row.request_id}-${row.recorded_at}`}>
+                        <td>
                           {row.recorded_at ? new Date(row.recorded_at).toLocaleString() : '—'}
                         </td>
-                        <td className="py-2 pr-4 font-mono text-xs">{row.request_id}</td>
-                        <td className="py-2 pr-4">
-                          <span className={row.matched ? 'text-emerald-300' : 'text-slate-400'}>
+                        <td className="font-mono text-xs">{row.request_id}</td>
+                        <td>
+                          <span className={row.matched ? 'text-emerald-700' : 'text-mute'}>
                             {row.matched ? 'yes' : 'no'}
                           </span>
                         </td>
-                        <td className="py-2 font-mono text-xs">{row.matched_via}</td>
+                        <td className="font-mono text-xs">{row.matched_via}</td>
                       </tr>
                     ))}
                   </tbody>
