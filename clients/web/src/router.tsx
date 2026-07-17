@@ -9,6 +9,7 @@ import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
 import { OpsIncidentsPage } from '@/routes/ops/incidents'
 import { OpsJobsPage } from '@/routes/ops/jobs'
 import { OpsRunsPage } from '@/routes/ops/runs'
+import { RunDetailPage } from '@/routes/ops/run-detail'
 import { HealthConfigurationPage } from '@/routes/ops/health/configuration'
 import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
 import { HealthLandingPage } from '@/routes/ops/health/index'
@@ -138,6 +139,12 @@ const healthConfigurationRoute = createRoute({
   component: HealthConfigurationPage,
 })
 
+const runDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/runs/$job/$attemptId',
+  component: RunDetailPage,
+})
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   requestsRoute,
@@ -154,6 +161,7 @@ const routeTree = rootRoute.addChildren([
   healthRoute,
   healthEscalationsRoute,
   healthConfigurationRoute,
+  runDetailRoute,
 ])
 
 export const router = createRouter({ routeTree })
