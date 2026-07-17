@@ -22,6 +22,7 @@ from admin_api.approvals import (
 )
 from admin_api.drop_pipeline import health_router as ops_health_router
 from admin_api.drop_pipeline import router as drop_pipeline_router
+from admin_api.runs import router as runs_router
 from admin_api.request_journey import router as request_journey_router
 from admin_api.roles import CurrentRolePrincipal, MeResponse
 from habeas_privacy_core.audit import AuditMiddleware
@@ -116,6 +117,7 @@ app.add_middleware(
 app.add_middleware(AuditMiddleware)
 app.include_router(drop_pipeline_router)
 app.include_router(ops_health_router)
+app.include_router(runs_router)
 app.include_router(request_journey_router)
 
 
