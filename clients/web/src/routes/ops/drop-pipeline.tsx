@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import { useEffect, useState, type ReactNode } from 'react'
 
 import { Skeleton, SkeletonLines } from '@/components/AppShell'
@@ -391,6 +392,7 @@ function MatchResultSummary({ response }: { response: Record<string, unknown> })
 
 function FulfillResultSummary({ response }: { response: Record<string, unknown> }) {
   const status = asString(response.status) ?? 'unknown'
+  const reason = asString(response.reason)
   const fulfilled = asNumber(response.fulfilled)
   const skipped = asNumber(response.skipped)
   const rejected = asNumber(response.rejected)
@@ -401,12 +403,23 @@ function FulfillResultSummary({ response }: { response: Record<string, unknown> 
       )
     : []
   const sample = items.slice(0, 5)
+  const showNextStep = status === 'ok' || (fulfilled !== undefined && fulfilled > 0)
 
   return (
     <ActionResultCard title="Fulfill" response={response}>
       <ResultRow label="Status">
         <StatusValue status={status} />
       </ResultRow>
+      {(status === 'error' || status === 'idle') && reason && (
+        <ResultRow label="Reason">{reason}</ResultRow>
+      )}
+      {status === 'idle' && !reason && items.length === 0 && (
+        <ResultRow label="Note">
+          <span className="text-amber-200/90">
+            No DROP rows ready — confirm matching review is approved and matching results exist.
+          </span>
+        </ResultRow>
+      )}
       {fulfilled !== undefined && <ResultRow label="Fulfilled">{fulfilled}</ResultRow>}
       {skipped !== undefined && <ResultRow label="Skipped">{skipped}</ResultRow>}
       {rejected !== undefined && <ResultRow label="Rejected">{rejected}</ResultRow>}
@@ -431,12 +444,25 @@ function FulfillResultSummary({ response }: { response: Record<string, unknown> 
           </div>
         )}
       </ResultRow>
+      {showNextStep && (
+        <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-sm text-slate-300">
+          Open{' '}
+          <Link
+            to="/approvals/notice-review"
+            className="text-sky-300 underline decoration-sky-300/40 underline-offset-2 hover:text-sky-200"
+          >
+            Notice review
+          </Link>{' '}
+          if pending items appear.
+        </div>
+      )}
     </ActionResultCard>
   )
 }
 
 function UploadWeeklyResultSummary({ response }: { response: Record<string, unknown> }) {
   const status = asString(response.status) ?? 'unknown'
+  const reason = asString(response.reason)
   const uploaded = asNumber(response.uploaded)
   const skipped = asNumber(response.skipped)
   const failed = asNumber(response.failed)
@@ -456,6 +482,15 @@ function UploadWeeklyResultSummary({ response }: { response: Record<string, unkn
       <ResultRow label="Status">
         <StatusValue status={status} />
       </ResultRow>
+      {reason && <ResultRow label="Reason">{reason}</ResultRow>}
+      {status === 'idle' && batches.length === 0 && (
+        <ResultRow label="Note">
+          <span className="text-amber-200/90">
+            No batches ready — rows need response_status set, notice.review approved, and must not
+            already be uploaded.
+          </span>
+        </ResultRow>
+      )}
       {uploaded !== undefined && <ResultRow label="Uploaded batches">{uploaded}</ResultRow>}
       {skipped !== undefined && <ResultRow label="Skipped">{skipped}</ResultRow>}
       {failed !== undefined && <ResultRow label="Failed">{failed}</ResultRow>}
@@ -474,12 +509,33 @@ function UploadWeeklyResultSummary({ response }: { response: Record<string, unkn
                   {asNumber(batch.row_count) !== undefined ? (
                     <span className="ml-2 text-slate-500">{batch.row_count} rows</span>
                   ) : null}
+                  {asNumber(batch.connector_attempt_id) !== undefined ? (
+                    <span className="ml-2 text-slate-500">
+                      attempt {batch.connector_attempt_id}
+                    </span>
+                  ) : null}
+                  {asString(batch.reason) ? (
+                    <span className="ml-2 text-amber-200/80">— {batch.reason}</span>
+                  ) : null}
                 </li>
               ))}
             </ul>
           )
         ) : (
-          uploadedFilenames.join(', ')
+          <ul className="space-y-1">
+            {batches
+              .filter((batch) => asString(batch.outcome) === 'uploaded')
+              .map((batch, index) => (
+                <li key={index} className="font-mono text-xs">
+                  {asString(batch.source_csv_filename) ?? '—'}
+                  {asNumber(batch.connector_attempt_id) !== undefined ? (
+                    <span className="ml-2 text-slate-500">
+                      attempt {batch.connector_attempt_id}
+                    </span>
+                  ) : null}
+                </li>
+              ))}
+          </ul>
         )}
       </ResultRow>
     </ActionResultCard>
@@ -579,6 +635,96 @@ function ActionResultError({
       <p className="mt-2 text-xs text-slate-400">
         Check worker health below. If workers just deployed, wait for cold start and retry.
       </p>
+    </div>
+  )
+}
+
+function sumResponseStatusSet(rows: DropPipelineStatus['raw_requests_by_list_type']): number {
+  return rows.reduce((total, row) => total + row.response_status_set, 0)
+}
+
+function WeeklyUploadPreflightHint({ data }: { data: DropPipelineStatus }) {
+  const responseStatusSet = sumResponseStatusSet(data.raw_requests_by_list_type)
+  const { pending: noticePending, approved: noticeApproved } = data.notice_review
+
+  if (noticePending > 0) {
+    return (
+      <p className="text-sm text-amber-200/90">
+        {noticePending} notice.review item{noticePending === 1 ? '' : 's'} pending —{' '}
+        <Link
+          to="/approvals/notice-review"
+          className="text-sky-300 underline decoration-sky-300/40 underline-offset-2 hover:text-sky-200"
+        >
+          approve notices first
+        </Link>{' '}
+        before weekly upload.
+      </p>
+    )
+  }
+
+  if (responseStatusSet === 0) {
+    return (
+      <p className="text-sm text-slate-400">
+        No DROP rows with response_status set yet — run Fulfill after matching review is clear.
+      </p>
+    )
+  }
+
+  if (noticeApproved === 0) {
+    return (
+      <p className="text-sm text-slate-400">
+        {responseStatusSet} row{responseStatusSet === 1 ? '' : 's'} fulfilled but no notice.review
+        approvals yet — open Notice review after Fulfill creates gates.
+      </p>
+    )
+  }
+
+  return null
+}
+
+function ReviewCountCard({
+  title,
+  pending,
+  approved,
+  reviewTo,
+}: {
+  title: string
+  pending: number
+  approved: number
+  reviewTo: '/approvals/matching-review' | '/approvals/notice-review'
+}) {
+  return (
+    <div className="space-y-2 rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3">
+      <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">{title}</h3>
+      <dl className="grid grid-cols-2 gap-2 text-sm">
+        <div>
+          <dt className="text-xs text-slate-500">Pending</dt>
+          <dd className="text-lg tabular-nums text-amber-200">
+            {pending > 0 ? (
+              <Link
+                to={reviewTo}
+                className="underline decoration-amber-200/30 underline-offset-2 hover:text-amber-100"
+              >
+                {pending}
+              </Link>
+            ) : (
+              pending
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs text-slate-500">Approved</dt>
+          <dd className="text-lg tabular-nums text-emerald-300">{approved}</dd>
+        </div>
+      </dl>
+      {pending > 0 && (
+        <Link
+          to={reviewTo}
+          className="inline-block text-xs text-sky-300 hover:text-sky-200"
+        >
+          Open {title.toLowerCase()} →
+        </Link>
+      )}
     </div>
   )
 }
@@ -688,9 +834,10 @@ export function DropPipelinePage() {
     <section className="space-y-8">
       <div>
         <h2 className="text-2xl font-semibold text-white">DROP pipeline</h2>
-        <p className="mt-2 max-w-2xl text-slate-400">
-          Super-admin console for CA DROP download → land → promote → match → fulfill. Counts and
-          ids only — no personally identifiable information.
+        <p className="mt-2 max-w-3xl text-slate-400">
+          Super-admin console for the CA DROP spine: download → land → promote → match → matching
+          review → fulfill → notice review → weekly upload. Counts and ids only — no personally
+          identifiable information.
         </p>
       </div>
 
@@ -720,6 +867,7 @@ export function DropPipelinePage() {
             )
           })}
         </div>
+        {data && <WeeklyUploadPreflightHint data={data} />}
         {(actionMutation.isPending || actionOutcome) && (
           <div className="mt-2">
             {actionMutation.isPending ? (
@@ -868,44 +1016,18 @@ export function DropPipelinePage() {
                 </div>
               </dl>
             </div>
-            <div className="space-y-2 rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3">
-              <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">
-                Matching review
-              </h3>
-              <dl className="grid grid-cols-2 gap-2 text-sm">
-                <div>
-                  <dt className="text-xs text-slate-500">Pending</dt>
-                  <dd className="text-lg tabular-nums text-amber-200">
-                    {data.matching_review.pending}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Approved</dt>
-                  <dd className="text-lg tabular-nums text-emerald-300">
-                    {data.matching_review.approved}
-                  </dd>
-                </div>
-              </dl>
-            </div>
-            <div className="space-y-2 rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3">
-              <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">
-                Notice review
-              </h3>
-              <dl className="grid grid-cols-2 gap-2 text-sm">
-                <div>
-                  <dt className="text-xs text-slate-500">Pending</dt>
-                  <dd className="text-lg tabular-nums text-amber-200">
-                    {data.notice_review.pending}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-slate-500">Approved</dt>
-                  <dd className="text-lg tabular-nums text-emerald-300">
-                    {data.notice_review.approved}
-                  </dd>
-                </div>
-              </dl>
-            </div>
+            <ReviewCountCard
+              title="Matching review"
+              pending={data.matching_review.pending}
+              approved={data.matching_review.approved}
+              reviewTo="/approvals/matching-review"
+            />
+            <ReviewCountCard
+              title="Notice review"
+              pending={data.notice_review.pending}
+              approved={data.notice_review.approved}
+              reviewTo="/approvals/notice-review"
+            />
             <div className="space-y-2 rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3">
               <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">
                 DROP requests

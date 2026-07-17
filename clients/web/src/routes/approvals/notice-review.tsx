@@ -61,6 +61,7 @@ export function NoticeReviewPage() {
       approveNoticeReview(approval.id, { decided_by: 'web-admin@habeas.com' }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'approvals'] })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
     },
   })
 
