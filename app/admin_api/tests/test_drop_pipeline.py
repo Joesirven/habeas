@@ -51,6 +51,7 @@ PIPELINE_FIXTURE: dict[str, Any] = {
             "request_id": "00000000-0000-0000-0000-000000000001",
             "matched": True,
             "matched_via": "drop_hash",
+            "match_count": 1,
             "recorded_at": "2026-07-16T12:05:00+00:00",
         }
     ],
@@ -60,6 +61,23 @@ PIPELINE_FIXTURE: dict[str, Any] = {
         "approved": 0,
         "by_status": [{"status": "pending", "count": 1}],
     },
+    "hash_index_refresh": {
+        "pending": 1,
+        "attempts_by_status": [
+            {"status": "pending", "count": 1},
+            {"status": "success", "count": 2},
+        ],
+        "last_run": {
+            "state": "CA",
+            "status": "success",
+            "finished_at": "2026-07-16T13:00:00+00:00",
+            "rows_email": 10,
+            "rows_phone": 20,
+            "rows_ndz": 30,
+            "error_message": None,
+            "rematch_enqueued_count": 5,
+        },
+    },
     "worker_health": {
         "drop_connector": {
             "name": "drop_connector",
@@ -67,7 +85,14 @@ PIPELINE_FIXTURE: dict[str, Any] = {
             "ok": True,
             "status_code": 200,
             "body": {"status": "ok"},
-        }
+        },
+        "hash_index_refresh": {
+            "name": "hash_index_refresh",
+            "url": "http://127.0.0.1:8086",
+            "ok": True,
+            "status_code": 200,
+            "body": {"status": "ok"},
+        },
     },
 }
 
@@ -93,10 +118,14 @@ def test_pipeline_status_shape(monkeypatch: pytest.MonkeyPatch):
     assert body["matching_attempts"]["pending"] == 1
     assert "matching_results_recent" in body
     assert body["matching_results_recent"][0]["matched"] is True
+    assert body["matching_results_recent"][0]["match_count"] == 1
     assert "consumer_id" not in body["matching_results_recent"][0]
     assert body["matching_review"]["action_type"] == "matching.review"
+    assert body["hash_index_refresh"]["pending"] == 1
+    assert body["hash_index_refresh"]["last_run"]["state"] == "CA"
     assert "worker_health" in body
     assert body["worker_health"]["drop_connector"]["ok"] is True
+    assert body["worker_health"]["hash_index_refresh"]["ok"] is True
 
 
 def test_download_proxy_returns_upstream_json(monkeypatch: pytest.MonkeyPatch):
@@ -258,6 +287,8 @@ async def test_collect_pipeline_counts_shape():
             return [_Row(status="pending", count=2), _Row(status="success", count=5)]
         if "matching_results" in sql:
             return []
+        if "hash_index_refresh_attempts" in sql and "GROUP BY status" in sql:
+            return [_Row(status="pending", count=1), _Row(status="success", count=2)]
         if "approval_requests" in sql:
             return [_Row(status="pending", count=1), _Row(status="approved", count=3)]
         if "FROM requests" in sql and "LIMIT" in sql:
@@ -267,8 +298,25 @@ async def test_collect_pipeline_counts_shape():
     async def fetchval(sql: str, *args: Any) -> int:
         return 7
 
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        if "hash_index_refresh_runs" in sql:
+            from datetime import datetime, timezone
+
+            return _Row(
+                state="CA",
+                status="success",
+                finished_at=datetime(2026, 7, 16, 13, 0, tzinfo=timezone.utc),
+                rows_email=10,
+                rows_phone=20,
+                rows_ndz=30,
+                error_message=None,
+                rematch_enqueued_count=5,
+            )
+        return None
+
     conn = MagicMock()
     conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
     conn.fetchval = AsyncMock(side_effect=fetchval)
 
     result = await drop_pipeline.collect_pipeline_counts(conn)
@@ -280,6 +328,118 @@ async def test_collect_pipeline_counts_shape():
     assert result["matching_attempts"]["success"] == 5
     assert result["matching_review"]["pending"] == 1
     assert result["matching_review"]["approved"] == 3
+    assert result["hash_index_refresh"]["pending"] == 1
+    assert result["hash_index_refresh"]["last_run"]["rows_ndz"] == 30
+
+
+def test_hash_index_refresh_enqueue_returns_attempt_id(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_enqueue(
+        conn: Any,
+        *,
+        state: str,
+        list_types: list[str],
+    ) -> int:
+        captured["state"] = state
+        captured["list_types"] = list_types
+        return 42
+
+    class FakePool:
+        def acquire(self) -> _AcquireContext:
+            return _AcquireContext()
+
+    class _AcquireContext:
+        async def __aenter__(self) -> MagicMock:
+            return MagicMock()
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    monkeypatch.setattr(drop_pipeline, "enqueue_hash_index_refresh", fake_enqueue)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(drop_pipeline.settings, "database_url", "postgres://test")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/ops/drop/hash-index-refresh/enqueue",
+            json={"state": "ca", "list_types": ["Email", "Phone"]},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"hash_index_refresh_attempt_id": 42}
+    assert captured["state"] == "ca"
+    assert captured["list_types"] == ["Email", "Phone"]
+
+
+def test_hash_index_refresh_enqueue_defaults(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_enqueue(
+        conn: Any,
+        *,
+        state: str,
+        list_types: list[str],
+    ) -> int:
+        captured["state"] = state
+        captured["list_types"] = list_types
+        return 7
+
+    class FakePool:
+        def acquire(self) -> _AcquireContext:
+            return _AcquireContext()
+
+    class _AcquireContext:
+        async def __aenter__(self) -> MagicMock:
+            return MagicMock()
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    monkeypatch.setattr(drop_pipeline, "enqueue_hash_index_refresh", fake_enqueue)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(drop_pipeline.settings, "database_url", "postgres://test")
+
+    with TestClient(app) as client:
+        response = client.post("/ops/drop/hash-index-refresh/enqueue")
+
+    assert response.status_code == 200
+    assert captured["state"] == "CA"
+    assert captured["list_types"] == list(drop_pipeline.DEFAULT_HASH_INDEX_LIST_TYPES)
+
+
+def test_hash_index_refresh_process_proxy(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, Any]:
+            return {"status": "ok", "processed": 1}
+
+    class FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url: str, json: Any = None, headers: Any = None) -> FakeResponse:
+            captured["url"] = url
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/ops/drop/hash-index-refresh/process")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert captured["url"].endswith("/process")
 
 
 def test_auth_headers_skipped_for_localhost():

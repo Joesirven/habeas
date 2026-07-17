@@ -1,4 +1,8 @@
-"""DROP pipeline ops console — SQL status snapshot + HTTP proxies to local workers."""
+"""DROP pipeline ops console — SQL status snapshot + HTTP proxies to local workers.
+
+Mutation routes under ``/ops/drop`` are Identity-Aware Proxy–protected in deployed
+environments and recorded by ``AuditMiddleware`` (see ``admin_api.main``).
+"""
 
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ from pydantic_settings import SettingsConfigDict
 
 from admin_api.cloud_run_auth import auth_headers_for
 from habeas_privacy_core.config import CoreSettings
+from habeas_privacy_core.db.hash_index_refresh import enqueue_hash_index_refresh
 from habeas_privacy_core.db.pool import get_pool
 from habeas_privacy_core.workflow.approval import MATCHING_REVIEW_ACTION
 
@@ -32,6 +37,7 @@ class DropPipelineSettings(CoreSettings):
     request_dispatcher_url: str = "http://127.0.0.1:8083"
     matching_url: str = "http://127.0.0.1:8084"
     data_fulfillment_url: str = "http://127.0.0.1:8085"
+    hash_index_refresh_url: str = "http://127.0.0.1:8086"
 
 
 settings = DropPipelineSettings()
@@ -45,7 +51,10 @@ WORKER_KEYS = (
     ("request_dispatcher", "request_dispatcher_url"),
     ("matching", "matching_url"),
     ("data_fulfillment", "data_fulfillment_url"),
+    ("hash_index_refresh", "hash_index_refresh_url"),
 )
+
+DEFAULT_HASH_INDEX_LIST_TYPES = ("NDZ", "Email", "Phone")
 
 
 class LandProxyBody(BaseModel):
@@ -73,6 +82,11 @@ class DispatchProxyBody(BaseModel):
 class FulfillProxyBody(BaseModel):
     request_id: str | None = None
     limit: int | None = Field(default=None, ge=1, le=5000)
+
+
+class HashIndexRefreshEnqueueBody(BaseModel):
+    state: str = Field(default="CA", min_length=2, max_length=2)
+    list_types: list[str] | None = None
 
 
 def _require_database() -> None:
@@ -196,6 +210,7 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
         SELECT mr.request_id::text AS request_id,
                mr.matched,
                mr.matched_via,
+               mr.match_count,
                mr.recorded_at
           FROM matching_results mr
           JOIN requests r ON r.id = mr.request_id
@@ -224,6 +239,54 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
             approval_pending = item["count"]
         elif row["status"] == "approved":
             approval_approved = item["count"]
+
+    hash_index_attempt_rows = await conn.fetch(
+        """
+        SELECT status, COUNT(*)::int AS count
+          FROM hash_index_refresh_attempts
+         GROUP BY status
+         ORDER BY status
+        """
+    )
+    hash_index_pending = 0
+    hash_index_attempts_by_status: list[dict[str, Any]] = []
+    for row in hash_index_attempt_rows:
+        item = {"status": row["status"], "count": int(row["count"])}
+        hash_index_attempts_by_status.append(item)
+        if row["status"] == "pending":
+            hash_index_pending = item["count"]
+
+    hash_index_last_run_row = await conn.fetchrow(
+        """
+        SELECT a.state,
+               run.status,
+               run.finished_at,
+               run.rows_email,
+               run.rows_phone,
+               run.rows_ndz,
+               run.error_message,
+               run.rematch_enqueued_count
+          FROM hash_index_refresh_runs run
+          JOIN hash_index_refresh_attempts a ON a.id = run.attempt_id
+         ORDER BY run.finished_at DESC NULLS LAST, run.id DESC
+         LIMIT 1
+        """
+    )
+    hash_index_last_run: dict[str, Any] | None = None
+    if hash_index_last_run_row is not None:
+        finished_at = hash_index_last_run_row["finished_at"]
+        hash_index_last_run = {
+            "state": hash_index_last_run_row["state"],
+            "status": hash_index_last_run_row["status"],
+            "finished_at": finished_at.isoformat() if finished_at is not None else None,
+            "rows_email": hash_index_last_run_row["rows_email"],
+            "rows_phone": hash_index_last_run_row["rows_phone"],
+            "rows_ndz": hash_index_last_run_row["rows_ndz"],
+            "error_message": hash_index_last_run_row["error_message"],
+            "rematch_enqueued_count": int(
+                hash_index_last_run_row["rematch_enqueued_count"] or 0
+            ),
+        }
 
     return {
         "connector_attempts": [
@@ -266,6 +329,7 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
                 "request_id": r["request_id"],
                 "matched": bool(r["matched"]),
                 "matched_via": r["matched_via"],
+                "match_count": int(r["match_count"] or 0),
                 "recorded_at": r["recorded_at"].isoformat()
                 if r["recorded_at"] is not None
                 else None,
@@ -277,6 +341,11 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
             "pending": approval_pending,
             "approved": approval_approved,
             "by_status": approvals_by_status,
+        },
+        "hash_index_refresh": {
+            "pending": hash_index_pending,
+            "attempts_by_status": hash_index_attempts_by_status,
+            "last_run": hash_index_last_run,
         },
     }
 
@@ -367,3 +436,32 @@ async def drop_fulfill(body: FulfillProxyBody | None = None):
     url = f"{settings.data_fulfillment_url.rstrip('/')}/fulfill"
     payload = _model_dump_nonzero(body) if body is not None else {}
     return await proxy_post(url, json_body=payload)
+
+
+@router.post("/hash-index-refresh/enqueue")
+async def drop_hash_index_refresh_enqueue(body: HashIndexRefreshEnqueueBody | None = None):
+    """Enqueue a hash index refresh attempt (single-flight per state)."""
+    _require_database()
+    request = body or HashIndexRefreshEnqueueBody()
+    list_types = (
+        request.list_types
+        if request.list_types is not None
+        else list(DEFAULT_HASH_INDEX_LIST_TYPES)
+    )
+    pool = get_pool()
+    try:
+        async with pool.acquire() as conn:
+            attempt_id = await enqueue_hash_index_refresh(
+                conn,
+                state=request.state,
+                list_types=list_types,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"hash_index_refresh_attempt_id": attempt_id}
+
+
+@router.post("/hash-index-refresh/process")
+async def drop_hash_index_refresh_process():
+    url = f"{settings.hash_index_refresh_url.rstrip('/')}/process"
+    return await proxy_post(url)
