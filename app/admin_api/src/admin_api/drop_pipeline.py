@@ -32,6 +32,7 @@ class DropPipelineSettings(CoreSettings):
     request_dispatcher_url: str = "http://127.0.0.1:8083"
     matching_url: str = "http://127.0.0.1:8084"
     data_fulfillment_url: str = "http://127.0.0.1:8085"
+    hash_index_refresh_url: str = "http://127.0.0.1:8086"
 
 
 settings = DropPipelineSettings()
@@ -45,6 +46,7 @@ WORKER_KEYS = (
     ("request_dispatcher", "request_dispatcher_url"),
     ("matching", "matching_url"),
     ("data_fulfillment", "data_fulfillment_url"),
+    ("hash_index_refresh", "hash_index_refresh_url"),
 )
 
 
@@ -73,6 +75,11 @@ class DispatchProxyBody(BaseModel):
 class FulfillProxyBody(BaseModel):
     request_id: str | None = None
     limit: int | None = Field(default=None, ge=1, le=5000)
+
+
+class HashIndexRefreshEnqueueBody(BaseModel):
+    state: str = "CA"
+    list_types: list[str] | None = None
 
 
 def _require_database() -> None:
@@ -195,6 +202,7 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
         """
         SELECT mr.request_id::text AS request_id,
                mr.matched,
+               mr.match_count,
                mr.matched_via,
                mr.recorded_at
           FROM matching_results mr
@@ -224,6 +232,53 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
             approval_pending = item["count"]
         elif row["status"] == "approved":
             approval_approved = item["count"]
+
+    refresh_attempt_rows = await conn.fetch(
+        """
+        SELECT status, COUNT(*)::int AS count
+          FROM hash_index_refresh_attempts
+         GROUP BY status
+         ORDER BY status
+        """
+    )
+    refresh_pending = 0
+    refresh_by_status: list[dict[str, Any]] = []
+    for row in refresh_attempt_rows:
+        item = {"status": row["status"], "count": int(row["count"])}
+        refresh_by_status.append(item)
+        if row["status"] in ("pending", "claimed", "in_flight"):
+            refresh_pending += item["count"]
+
+    last_run_row = await conn.fetchrow(
+        """
+        SELECT r.status,
+               r.finished_at,
+               r.rows_email,
+               r.rows_phone,
+               r.rows_ndz,
+               r.error_message,
+               r.rematch_enqueued_count,
+               a.state
+          FROM hash_index_refresh_runs r
+          JOIN hash_index_refresh_attempts a ON a.id = r.attempt_id
+         ORDER BY COALESCE(r.finished_at, r.started_at) DESC
+         LIMIT 1
+        """
+    )
+    last_run: dict[str, Any] | None = None
+    if last_run_row is not None:
+        last_run = {
+            "state": last_run_row["state"],
+            "status": last_run_row["status"],
+            "finished_at": last_run_row["finished_at"].isoformat()
+            if last_run_row["finished_at"] is not None
+            else None,
+            "rows_email": last_run_row["rows_email"],
+            "rows_phone": last_run_row["rows_phone"],
+            "rows_ndz": last_run_row["rows_ndz"],
+            "error_message": last_run_row["error_message"],
+            "rematch_enqueued_count": int(last_run_row["rematch_enqueued_count"] or 0),
+        }
 
     return {
         "connector_attempts": [
@@ -265,6 +320,7 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
             {
                 "request_id": r["request_id"],
                 "matched": bool(r["matched"]),
+                "match_count": int(r["match_count"] or 0),
                 "matched_via": r["matched_via"],
                 "recorded_at": r["recorded_at"].isoformat()
                 if r["recorded_at"] is not None
@@ -277,6 +333,11 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
             "pending": approval_pending,
             "approved": approval_approved,
             "by_status": approvals_by_status,
+        },
+        "hash_index_refresh": {
+            "pending": refresh_pending,
+            "attempts_by_status": refresh_by_status,
+            "last_run": last_run,
         },
     }
 
@@ -367,3 +428,28 @@ async def drop_fulfill(body: FulfillProxyBody | None = None):
     url = f"{settings.data_fulfillment_url.rstrip('/')}/fulfill"
     payload = _model_dump_nonzero(body) if body is not None else {}
     return await proxy_post(url, json_body=payload)
+
+
+@router.post("/hash-index-refresh/enqueue")
+async def hash_index_refresh_enqueue(body: HashIndexRefreshEnqueueBody | None = None):
+    """Enqueue a hash-index refresh attempt (single-flight per state). IAP + AuditMiddleware."""
+    from habeas_privacy_core.db.hash_index_refresh import enqueue_hash_index_refresh
+
+    _require_database()
+    payload = body or HashIndexRefreshEnqueueBody()
+    list_types = payload.list_types or ["NDZ", "Email", "Phone"]
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        attempt_id = await enqueue_hash_index_refresh(
+            conn,
+            state=payload.state,
+            list_types=list_types,
+        )
+    return {"status": "ok", "attempt_id": attempt_id, "state": payload.state.upper()}
+
+
+@router.post("/hash-index-refresh/process")
+async def hash_index_refresh_process():
+    """Proxy process to hash_index_refresh worker (Cloud Run invoker token)."""
+    url = f"{settings.hash_index_refresh_url.rstrip('/')}/process"
+    return await proxy_post(url)
