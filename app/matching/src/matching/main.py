@@ -76,6 +76,8 @@ async def readyz():
 def match_request_from_drop_payload(
     request_id: str,
     payload: DropMatchingPayload,
+    *,
+    requestor_state: str | None = None,
 ) -> MatchRequest:
     """Build a MatchRequest from request_resolver DROP payload (T8.2)."""
     return MatchRequest(
@@ -83,6 +85,7 @@ def match_request_from_drop_payload(
         intake_source=IntakeSource.DROP,
         list_type=payload.list_type,
         hash_fields=dict(payload.hash_fields),
+        requestor_state=requestor_state,
     )
 
 
@@ -91,12 +94,17 @@ async def build_match_request(conn: Any, row: dict[str, Any]) -> MatchRequest:
     request_id = str(row["id"])
     intake_source = IntakeSource(row["intake_source"])
     raw_record_id = row.get("raw_record_id")
+    requestor_state = row.get("requestor_state")
 
     if intake_source == IntakeSource.DROP:
         if raw_record_id is None:
             raise ValueError("drop request missing raw_record_id")
         payload = await request_resolver(conn, intake_source, int(raw_record_id))
-        return match_request_from_drop_payload(request_id, payload)
+        return match_request_from_drop_payload(
+            request_id,
+            payload,
+            requestor_state=str(requestor_state) if requestor_state else None,
+        )
 
     raise NotImplementedError(
         f"matching via request_resolver for {intake_source.value} is not wired yet"

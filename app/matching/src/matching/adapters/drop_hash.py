@@ -1,4 +1,4 @@
-"""DROP hash-index matching adapter — California DELETE Act."""
+"""DROP hash-index matching adapter — BigQuery mart lookup by requester state."""
 
 from __future__ import annotations
 
@@ -6,9 +6,10 @@ import base64
 import logging
 from typing import Any
 
+from habeas_privacy_core.geo.state import InvalidStateAcronymError, normalize_state_acronym
 from habeas_privacy_core.models.intake import DropListType
 
-from matching.bq_lookup import BigQueryLookupError, lookup_dwids_by_hash, lookup_state
+from matching.bq_lookup import BigQueryLookupError, lookup_dwids_by_hash
 from matching.hash import hash_identifier
 from matching.models import MatchRequest, MatchResult
 from matching.pipeline import MatchingPipeline
@@ -105,7 +106,14 @@ class DropHashPipeline(MatchingPipeline):
                 match_count=0,
             )
 
-        state = lookup_state()
+        if not request.requestor_state:
+            raise ValueError("requestor_state is required for DROP hash lookup")
+        try:
+            state = normalize_state_acronym(request.requestor_state)
+        except InvalidStateAcronymError as exc:
+            raise ValueError(
+                f"invalid requestor_state for DROP hash lookup: {exc}"
+            ) from exc
         hits = lookup_dwids_by_hash(
             list_type=request.list_type,
             hash_value=hash_value,

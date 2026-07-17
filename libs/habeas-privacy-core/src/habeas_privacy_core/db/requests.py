@@ -123,7 +123,7 @@ async def load_request_row(conn: asyncpg.Connection, request_id: str) -> dict | 
     """Load raw request fields for worker pipelines."""
     row = await conn.fetchrow(
         """
-        SELECT id, received_at, intake_source, raw_record_id
+        SELECT id, received_at, intake_source, raw_record_id, requestor_state
           FROM requests
          WHERE id = $1
         """,

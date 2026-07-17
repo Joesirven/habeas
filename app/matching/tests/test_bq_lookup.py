@@ -36,6 +36,7 @@ async def test_bq_lookup_zero_rows(monkeypatch: pytest.MonkeyPatch):
         intake_source=IntakeSource.DROP,
         list_type=DropListType.EMAIL,
         hash_fields={"hashed_email": "abc"},
+        requestor_state="CA",
     )
     result = await DropHashPipeline(bq_client=client).match(request)
     assert result.matched is False
@@ -58,11 +59,17 @@ async def test_bq_lookup_single_row():
         intake_source=IntakeSource.DROP,
         list_type=DropListType.PHONE,
         hash_fields={"hashed_phone": "abc"},
+        requestor_state="TX",
     )
     result = await DropHashPipeline(bq_client=client).match(request)
     assert result.matched is True
     assert result.match_count == 1
     assert result.consumer_id == "1001"
+    params = {
+        p.name: p.value
+        for p in client.query.call_args.kwargs["job_config"].query_parameters
+    }
+    assert params["lookup_state"] == "TX"
 
 
 @pytest.mark.asyncio
@@ -77,12 +84,55 @@ async def test_bq_lookup_multi_row():
         intake_source=IntakeSource.DROP,
         list_type=DropListType.NDZ,
         hash_fields={"concatenated_hash": "abc"},
+        requestor_state="ny",
     )
     result = await DropHashPipeline(bq_client=client).match(request)
     assert result.matched is False
     assert result.match_count == 3
     assert result.consumer_ids == ["1", "2", "3"]
     assert result.consumer_id == "1"
+    params = {
+        p.name: p.value
+        for p in client.query.call_args.kwargs["job_config"].query_parameters
+    }
+    assert params["lookup_state"] == "NY"
+
+
+@pytest.mark.asyncio
+async def test_bq_lookup_requires_requestor_state():
+    client = MagicMock()
+    request = MatchRequest(
+        request_id="r1",
+        intake_source=IntakeSource.DROP,
+        list_type=DropListType.EMAIL,
+        hash_fields={"hashed_email": "abc"},
+    )
+    with pytest.raises(ValueError, match="requestor_state is required"):
+        await DropHashPipeline(bq_client=client).match(request)
+    client.query.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bq_lookup_binds_requester_state_not_env(monkeypatch: pytest.MonkeyPatch):
+    """TX requester must bind @lookup_state=TX even if env default is CA."""
+    monkeypatch.setenv("DROP_HASH_LOOKUP_STATE", "CA")
+    client = MagicMock()
+    client.query.return_value = _FakeJob([_FakeRow(dwid="tx-only")])
+
+    request = MatchRequest(
+        request_id="r1",
+        intake_source=IntakeSource.DROP,
+        list_type=DropListType.EMAIL,
+        hash_fields={"hashed_email": "abc"},
+        requestor_state="TX",
+    )
+    result = await DropHashPipeline(bq_client=client).match(request)
+    assert result.match_count == 1
+    params = {
+        p.name: p.value
+        for p in client.query.call_args.kwargs["job_config"].query_parameters
+    }
+    assert params["lookup_state"] == "TX"
 
 
 def test_bq_lookup_timeout_raises():
@@ -236,6 +286,7 @@ async def test_missing_hash_field():
         intake_source=IntakeSource.DROP,
         list_type=DropListType.EMAIL,
         hash_fields={},
+        requestor_state="CA",
     )
     result = await DropHashPipeline().match(request)
     assert result.matched is False

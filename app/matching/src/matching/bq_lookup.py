@@ -39,6 +39,11 @@ class BigQueryClient(Protocol):
 
 
 def lookup_state() -> str:
+    """Dev/local fallback only — production DROP matching must pass requester state.
+
+    Prefer fail-closed at the adapter when ``requestor_state`` is missing rather
+    than silently binding California from this env default.
+    """
     return os.environ.get("DROP_HASH_LOOKUP_STATE", "CA").strip().upper() or "CA"
 
 
@@ -58,8 +63,16 @@ def lookup_dwids_by_hash(
     project: str | None = None,
     dataset: str | None = None,
 ) -> list[LookupHit]:
-    """Query serving mart for matching hashes. Always filters by state."""
-    resolved_state = (state or lookup_state()).strip().upper()
+    """Query serving mart for matching hashes. Always filters by state.
+
+    Callers (DROP adapter) must pass the requester's normalized source state.
+    Omitting ``state`` falls back to ``DROP_HASH_LOOKUP_STATE`` for local/dev
+    only and must not be used as the production DROP matching path.
+    """
+    if state is None or not str(state).strip():
+        resolved_state = lookup_state()
+    else:
+        resolved_state = str(state).strip().upper()
     if not resolved_state:
         raise ValueError("lookup state is required")
 
