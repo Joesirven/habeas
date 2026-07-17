@@ -121,10 +121,31 @@ export type MatchingResultSummary = {
   recorded_at: string | null
 }
 
+export type WorkflowAssignmentTarget = 'reviewer' | 'legal' | 'data_owner'
+
+export type WorkflowAssignmentSummary = {
+  target_role: WorkflowAssignmentTarget | string
+  kind?: string | null
+  assignee_identity?: string | null
+  id?: number
+  status?: string
+}
+
+export type MatchingAttemptRow = {
+  id: number
+  attempt_number: number
+  status: string
+  attempted_at: string | null
+  completed_at: string | null
+  error_code: string | null
+  audit_payload: Record<string, unknown>
+}
+
 export type MatchingResultRow = MatchingResultSummary & {
   match_type: MatchTypeFilter
   review_status: string
   approval_id: number | null
+  assignment?: WorkflowAssignmentSummary | null
 }
 
 export type MatchingResultsStats = {
@@ -149,6 +170,8 @@ export type MatchingResultDetail = MatchingResultRow & {
   decided_by: string | null
   decided_at: string | null
   decision_reason: string | null
+  attempts?: MatchingAttemptRow[]
+  assignment?: WorkflowAssignmentSummary | null
 }
 
 export type BulkApproveMatchingResultsInput = {
@@ -392,4 +415,108 @@ export function postDropMatchingResultsBulkApprove(body: BulkApproveMatchingResu
       ...body,
     }),
   })
+}
+
+export function postDropMatchingResultsBulkDecline(body: BulkApproveMatchingResultsInput) {
+  return fetchAdminApi<{
+    status: string
+    match_type: MatchTypeFilter
+    declined_count: number
+    approval_ids: number[]
+    request_ids: string[]
+  }>('/ops/drop/matching-results/bulk-decline', {
+    method: 'POST',
+    body: JSON.stringify({
+      decided_by: 'web-admin@habeas.com',
+      ...body,
+    }),
+  })
+}
+
+export function postDropMatchingResultPromote(
+  requestId: string,
+  body?: { decision_reason?: string },
+) {
+  return fetchAdminApi<{ status: string; request_id: string; approval_id: number | null }>(
+    `/ops/drop/matching-results/${requestId}/promote`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        decided_by: 'web-admin@habeas.com',
+        decision_reason: body?.decision_reason ?? 'promote to fulfillment',
+      }),
+    },
+  )
+}
+
+export function postDropMatchingResultDecline(
+  requestId: string,
+  body?: { decision_reason?: string },
+) {
+  return fetchAdminApi<{ status: string; request_id: string; approval_id: number | null }>(
+    `/ops/drop/matching-results/${requestId}/decline`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        decided_by: 'web-admin@habeas.com',
+        decision_reason: body?.decision_reason ?? 'decline — not fulfill-ready',
+      }),
+    },
+  )
+}
+
+export function postDropWorkflowAssign(body: {
+  request_ids: string[]
+  target_role?: WorkflowAssignmentTarget
+  assignee_identity: string
+}) {
+  return fetchAdminApi<{
+    status: string
+    kind: string
+    count: number
+    request_ids: string[]
+  }>('/ops/drop/workflow/assign', {
+    method: 'POST',
+    body: JSON.stringify({
+      target_role: 'reviewer',
+      decided_by: 'web-admin@habeas.com',
+      ...body,
+    }),
+  })
+}
+
+export function postDropWorkflowEscalate(body: {
+  request_ids: string[]
+  target_role: 'legal' | 'data_owner'
+  assignee_identity?: string
+}) {
+  return fetchAdminApi<{
+    status: string
+    kind: string
+    count: number
+    request_ids: string[]
+  }>('/ops/drop/workflow/escalate', {
+    method: 'POST',
+    body: JSON.stringify({
+      decided_by: 'web-admin@habeas.com',
+      ...body,
+    }),
+  })
+}
+
+export function getDropWorkflowAssignments(params?: {
+  assignee?: string
+  target_role?: WorkflowAssignmentTarget
+  status?: string
+  limit?: number
+}) {
+  const search = new URLSearchParams()
+  if (params?.assignee) search.set('assignee', params.assignee)
+  if (params?.target_role) search.set('target_role', params.target_role)
+  if (params?.status) search.set('status', params.status)
+  if (params?.limit != null) search.set('limit', String(params.limit))
+  const query = search.toString()
+  return fetchAdminApi<{ assignments: WorkflowAssignmentSummary[]; count: number }>(
+    `/ops/drop/workflow/assignments${query ? `?${query}` : ''}`,
+  )
 }

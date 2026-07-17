@@ -5,7 +5,6 @@ import { createPortal } from 'react-dom'
 
 import { SkeletonLines } from '@/components/AppShell'
 import {
-  approveMatchingReview,
   getDropMatchingResultDetail,
   getDropMatchingResults,
   getDropPipeline,
@@ -14,14 +13,20 @@ import {
   postDropFulfill,
   postDropLand,
   postDropMatch,
+  postDropMatchingResultDecline,
+  postDropMatchingResultPromote,
   postDropMatchingResultsBulkApprove,
+  postDropMatchingResultsBulkDecline,
   postDropPromote,
+  postDropWorkflowAssign,
+  postDropWorkflowEscalate,
   postHashIndexRefreshEnqueue,
   postHashIndexRefreshEnqueueAll,
   postHashIndexRefreshProcess,
   type DropPipelineStatus,
   type HashIndexRefreshStatus,
   type MatchTypeFilter,
+  type MatchingAttemptRow,
   type MatchingResultDetail,
   type MatchingResultsStats,
   type StepStatusCount,
@@ -536,6 +541,64 @@ function PostMatchDialog({
   )
 }
 
+function AttemptHistory({ attempts }: { attempts: MatchingAttemptRow[] }) {
+  const [openId, setOpenId] = useState<number | null>(null)
+  if (attempts.length === 0) {
+    return <p className="text-sm text-ink-soft">No matching attempts recorded for this request.</p>
+  }
+  return (
+    <div className="space-y-2">
+      <Micro>Attempt history</Micro>
+      <ul className="divide-y divide-line rounded-lg border border-line">
+        {attempts.map((attempt) => {
+          const open = openId === attempt.id
+          return (
+            <li key={attempt.id} className="px-3 py-2">
+              <button
+                type="button"
+                className="flex w-full items-center justify-between gap-3 text-left text-sm"
+                onClick={() => setOpenId(open ? null : attempt.id)}
+              >
+                <span>
+                  #{attempt.attempt_number}{' '}
+                  <span className="text-ink-soft">{attempt.status}</span>
+                </span>
+                <span className="tabular-nums text-xs text-ink-soft">
+                  {attempt.completed_at
+                    ? new Date(attempt.completed_at).toLocaleString()
+                    : attempt.attempted_at
+                      ? new Date(attempt.attempted_at).toLocaleString()
+                      : '—'}
+                </span>
+              </button>
+              {open && (
+                <dl className="mt-2 grid gap-2 rounded-md bg-paper-raised/60 p-3 text-xs sm:grid-cols-2">
+                  <div>
+                    <dt className="taste-micro">Attempt id</dt>
+                    <dd className="mt-0.5 tabular-nums">{attempt.id}</dd>
+                  </div>
+                  <div>
+                    <dt className="taste-micro">Error code</dt>
+                    <dd className="mt-0.5 font-mono">{attempt.error_code ?? '—'}</dd>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <dt className="taste-micro">Audit payload (allowlisted)</dt>
+                    <dd className="mt-1 overflow-x-auto font-mono text-[11px] text-ink-soft">
+                      <pre className="whitespace-pre-wrap">
+                        {JSON.stringify(attempt.audit_payload ?? {}, null, 2)}
+                      </pre>
+                    </dd>
+                  </div>
+                </dl>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
 function MatchingResultsPanel({
   focusBulk,
   highlightRequestId,
@@ -550,7 +613,21 @@ function MatchingResultsPanel({
   const [selectedId, setSelectedId] = useState<string | null>(highlightRequestId)
   const [listFilter, setListFilter] = useState<MatchTypeFilter | 'all'>('all')
   const [bulkType, setBulkType] = useState<MatchTypeFilter>('multi_match')
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set())
+  const [assigneeEmail, setAssigneeEmail] = useState('')
+  const [escalateTarget, setEscalateTarget] = useState<'legal' | 'data_owner'>('legal')
   const bulkSectionRef = useRef<HTMLDivElement>(null)
+
+  function invalidateMatching() {
+    void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-matching-results'] })
+    void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
+    void queryClient.invalidateQueries({ queryKey: ['admin-api', 'approvals'] })
+    if (selectedId) {
+      void queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'ops', 'drop-matching-result', selectedId],
+      })
+    }
+  }
 
   const resultsQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-matching-results', listFilter],
@@ -568,39 +645,62 @@ function MatchingResultsPanel({
     enabled: view === 'detail' && Boolean(selectedId),
   })
 
-  const bulkMutation = useMutation({
+  const bulkPromoteMutation = useMutation({
     mutationFn: (matchType: MatchTypeFilter) =>
       postDropMatchingResultsBulkApprove({
         match_type: matchType,
-        decision_reason: `bulk approve match_type=${matchType}`,
+        decision_reason: `bulk promote match_type=${matchType}`,
+      }),
+    onSuccess: () => invalidateMatching(),
+  })
+
+  const bulkDeclineMutation = useMutation({
+    mutationFn: (matchType: MatchTypeFilter) =>
+      postDropMatchingResultsBulkDecline({
+        match_type: matchType,
+        decision_reason: `bulk decline match_type=${matchType}`,
+      }),
+    onSuccess: () => invalidateMatching(),
+  })
+
+  const promoteMutation = useMutation({
+    mutationFn: (requestId: string) =>
+      postDropMatchingResultPromote(requestId, {
+        decision_reason: 'promote to fulfillment',
+      }),
+    onSuccess: () => invalidateMatching(),
+  })
+
+  const declineMutation = useMutation({
+    mutationFn: (requestId: string) =>
+      postDropMatchingResultDecline(requestId, {
+        decision_reason: 'decline — not fulfill-ready',
+      }),
+    onSuccess: () => invalidateMatching(),
+  })
+
+  const assignMutation = useMutation({
+    mutationFn: (requestIds: string[]) =>
+      postDropWorkflowAssign({
+        request_ids: requestIds,
+        target_role: 'reviewer',
+        assignee_identity: assigneeEmail.trim() || 'web-admin@habeas.com',
       }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-matching-results'] })
-      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
-      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'approvals'] })
-      if (selectedId) {
-        void queryClient.invalidateQueries({
-          queryKey: ['admin-api', 'ops', 'drop-matching-result', selectedId],
-        })
-      }
+      setCheckedIds(new Set())
+      invalidateMatching()
     },
   })
 
-  const singleApproveMutation = useMutation({
-    mutationFn: (approvalId: number) =>
-      approveMatchingReview(approvalId, {
-        decided_by: 'web-admin@habeas.com',
-        decision_reason: 'approve from matching results detail',
+  const escalateMutation = useMutation({
+    mutationFn: (requestIds: string[]) =>
+      postDropWorkflowEscalate({
+        request_ids: requestIds,
+        target_role: escalateTarget,
       }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-matching-results'] })
-      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
-      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'approvals'] })
-      if (selectedId) {
-        void queryClient.invalidateQueries({
-          queryKey: ['admin-api', 'ops', 'drop-matching-result', selectedId],
-        })
-      }
+      setCheckedIds(new Set())
+      invalidateMatching()
     },
   })
 
@@ -632,14 +732,30 @@ function MatchingResultsPanel({
     setView('detail')
   }
 
+  function toggleChecked(requestId: string) {
+    setCheckedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(requestId)) next.delete(requestId)
+      else next.add(requestId)
+      return next
+    })
+  }
+
+  const selectedIds = [...checkedIds]
+  const detailActionPending =
+    promoteMutation.isPending ||
+    declineMutation.isPending ||
+    assignMutation.isPending ||
+    escalateMutation.isPending
+
   return (
     <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <Micro>Matching results</Micro>
           <p className="mt-2 max-w-xl text-sm text-ink-soft">
-            Global stats by match type. Open a row for detail. Bulk approve clears pending
-            matching.review for a filtered set (including multi-match / status 4).
+            Grouped by request. Promote clears matching.review for fulfillment; decline rejects
+            without fulfilling. Assign/escalate uses IAP identity for the actor.
           </p>
         </div>
         <div className="flex gap-2">
@@ -688,6 +804,48 @@ function MatchingResultsPanel({
               </button>
             ))}
           </div>
+
+          {selectedIds.length > 0 && (
+            <div className="flex flex-col gap-3 rounded-lg border border-line p-4 sm:flex-row sm:flex-wrap sm:items-end">
+              <p className="text-sm text-ink-soft">{selectedIds.length} selected</p>
+              <label className="flex flex-col gap-1 text-xs text-ink-soft">
+                Reviewer email
+                <input
+                  className="glass rounded-lg px-3 py-2 text-sm text-ink"
+                  value={assigneeEmail}
+                  onChange={(e) => setAssigneeEmail(e.target.value)}
+                  placeholder="reviewer@habeas.com"
+                  aria-label="Assignee email for assign"
+                />
+              </label>
+              <button
+                type="button"
+                className="taste-btn-primary text-xs"
+                disabled={assignMutation.isPending}
+                onClick={() => assignMutation.mutate(selectedIds)}
+              >
+                {assignMutation.isPending ? 'Assigning…' : 'Assign to reviewer'}
+              </button>
+              <select
+                className="glass rounded-lg px-3 py-2 text-sm text-ink"
+                value={escalateTarget}
+                onChange={(e) => setEscalateTarget(e.target.value as 'legal' | 'data_owner')}
+                aria-label="Escalate target"
+              >
+                <option value="legal">Legal</option>
+                <option value="data_owner">Data owner</option>
+              </select>
+              <button
+                type="button"
+                className="taste-btn text-xs"
+                disabled={escalateMutation.isPending}
+                onClick={() => escalateMutation.mutate(selectedIds)}
+              >
+                {escalateMutation.isPending ? 'Escalating…' : `Escalate to ${escalateTarget}`}
+              </button>
+            </div>
+          )}
+
           <div className="taste-panel overflow-x-auto px-2 py-1">
             {resultsQuery.isPending && <SkeletonLines lines={4} />}
             {resultsQuery.isSuccess && rows.length === 0 && (
@@ -697,35 +855,81 @@ function MatchingResultsPanel({
               <table className="taste-table">
                 <thead>
                   <tr>
+                    <th className="w-8" aria-label="Select" />
                     <th>Recorded</th>
                     <th>Request ID</th>
                     <th>Type</th>
                     <th>Count</th>
-                    <th>Via</th>
                     <th>Review</th>
+                    <th>Assignment</th>
                   </tr>
                 </thead>
                 <tbody>
                   {rows.map((row) => (
                     <tr
                       key={`${row.request_id}-${row.recorded_at}`}
-                      className="cursor-pointer hover:bg-paper-raised/80"
-                      onClick={() => openDetail(row.request_id)}
+                      className="hover:bg-paper-raised/80"
                     >
                       <td>
+                        <input
+                          type="checkbox"
+                          checked={checkedIds.has(row.request_id)}
+                          onChange={() => toggleChecked(row.request_id)}
+                          aria-label={`Select ${row.request_id}`}
+                        />
+                      </td>
+                      <td
+                        className="cursor-pointer"
+                        onClick={() => openDetail(row.request_id)}
+                      >
                         {row.recorded_at ? new Date(row.recorded_at).toLocaleString() : '—'}
                       </td>
-                      <td className="font-mono text-xs">{row.request_id}</td>
-                      <td>{MATCH_TYPE_LABELS[row.match_type]}</td>
-                      <td className="tabular-nums">{row.match_count}</td>
-                      <td className="font-mono text-xs">{row.matched_via}</td>
-                      <td>{row.review_status}</td>
+                      <td
+                        className="cursor-pointer font-mono text-xs"
+                        onClick={() => openDetail(row.request_id)}
+                      >
+                        {row.request_id}
+                      </td>
+                      <td
+                        className="cursor-pointer"
+                        onClick={() => openDetail(row.request_id)}
+                      >
+                        {MATCH_TYPE_LABELS[row.match_type]}
+                      </td>
+                      <td
+                        className="cursor-pointer tabular-nums"
+                        onClick={() => openDetail(row.request_id)}
+                      >
+                        {row.match_count}
+                      </td>
+                      <td
+                        className="cursor-pointer"
+                        onClick={() => openDetail(row.request_id)}
+                      >
+                        {row.review_status}
+                      </td>
+                      <td className="text-xs text-ink-soft">
+                        {row.assignment
+                          ? `${row.assignment.target_role}${
+                              row.assignment.assignee_identity
+                                ? ` · ${row.assignment.assignee_identity}`
+                                : ''
+                            }`
+                          : '—'}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             )}
           </div>
+          {(assignMutation.isError || escalateMutation.isError) && (
+            <p className="text-sm text-red-700">
+              {(assignMutation.error ?? escalateMutation.error) instanceof Error
+                ? (assignMutation.error ?? escalateMutation.error)!.message
+                : String(assignMutation.error ?? escalateMutation.error)}
+            </p>
+          )}
         </>
       )}
 
@@ -762,8 +966,20 @@ function MatchingResultsPanel({
                   <dd className="mt-1 text-sm text-ink">{detail.review_status}</dd>
                 </div>
                 <div>
-                  <dt className="taste-micro">Attempt</dt>
+                  <dt className="taste-micro">Latest attempt</dt>
                   <dd className="mt-1 tabular-nums text-sm text-ink">{detail.attempt_id ?? '—'}</dd>
+                </div>
+                <div>
+                  <dt className="taste-micro">Assignment</dt>
+                  <dd className="mt-1 text-sm text-ink">
+                    {detail.assignment
+                      ? `${detail.assignment.kind ?? '—'} → ${detail.assignment.target_role}${
+                          detail.assignment.assignee_identity
+                            ? ` (${detail.assignment.assignee_identity})`
+                            : ''
+                        }`
+                      : '—'}
+                  </dd>
                 </div>
                 <div>
                   <dt className="taste-micro">Recorded</dt>
@@ -772,45 +988,82 @@ function MatchingResultsPanel({
                   </dd>
                 </div>
               </dl>
-              {detail.review_status === 'pending' && detail.approval_id != null && (
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                  <button
-                    type="button"
-                    className="taste-btn-primary"
-                    disabled={singleApproveMutation.isPending}
-                    onClick={() => singleApproveMutation.mutate(detail.approval_id!)}
-                  >
-                    {singleApproveMutation.isPending ? 'Approving…' : 'Approve review'}
-                  </button>
-                  {singleApproveMutation.isError && (
-                    <p className="text-sm text-red-700">
-                      {singleApproveMutation.error instanceof Error
-                        ? singleApproveMutation.error.message
-                        : String(singleApproveMutation.error)}
-                    </p>
-                  )}
-                  {singleApproveMutation.isSuccess && (
-                    <p className="text-sm text-emerald-700">Review approved.</p>
-                  )}
-                </div>
+
+              <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+                <button
+                  type="button"
+                  className="taste-btn-primary"
+                  disabled={detailActionPending}
+                  onClick={() => promoteMutation.mutate(detail.request_id)}
+                >
+                  {promoteMutation.isPending ? 'Promoting…' : 'Promote to fulfillment'}
+                </button>
+                <button
+                  type="button"
+                  className="taste-btn"
+                  disabled={detailActionPending}
+                  onClick={() => declineMutation.mutate(detail.request_id)}
+                >
+                  {declineMutation.isPending ? 'Declining…' : 'Decline'}
+                </button>
+                <button
+                  type="button"
+                  className="taste-btn text-xs"
+                  disabled={detailActionPending}
+                  onClick={() => assignMutation.mutate([detail.request_id])}
+                >
+                  Assign to reviewer
+                </button>
+                <select
+                  className="glass rounded-lg px-3 py-2 text-sm text-ink"
+                  value={escalateTarget}
+                  onChange={(e) => setEscalateTarget(e.target.value as 'legal' | 'data_owner')}
+                  aria-label="Escalate target detail"
+                >
+                  <option value="legal">Legal</option>
+                  <option value="data_owner">Data owner</option>
+                </select>
+                <button
+                  type="button"
+                  className="taste-btn text-xs"
+                  disabled={detailActionPending}
+                  onClick={() => escalateMutation.mutate([detail.request_id])}
+                >
+                  Escalate
+                </button>
+              </div>
+              {(promoteMutation.isError || declineMutation.isError) && (
+                <p className="text-sm text-red-700">
+                  {(promoteMutation.error ?? declineMutation.error) instanceof Error
+                    ? (promoteMutation.error ?? declineMutation.error)!.message
+                    : String(promoteMutation.error ?? declineMutation.error)}
+                </p>
               )}
+              {promoteMutation.isSuccess && (
+                <p className="text-sm text-emerald-700">Promoted — fulfill-ready when gate approved.</p>
+              )}
+              {declineMutation.isSuccess && (
+                <p className="text-sm text-emerald-700">Declined — not fulfill-ready.</p>
+              )}
+
+              <AttemptHistory attempts={detail.attempts ?? []} />
             </>
           )}
         </div>
       )}
 
       <div ref={bulkSectionRef} className="border-t border-line pt-5">
-        <Micro>Bulk approve</Micro>
+        <Micro>Bulk promote / decline</Micro>
         <p className="mt-2 max-w-xl text-sm text-ink-soft">
-          Ensures matching.review gates exist for the filter, then approves all pending gates for
-          that match type (including multi-match / status 4).
+          Promote ensures matching.review gates and approves them for the match type (including
+          multi-match). Decline rejects pending gates without fulfilling.
         </p>
         <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
           <select
             className="glass rounded-lg px-3 py-2 text-sm text-ink"
             value={bulkType}
             onChange={(event) => setBulkType(event.target.value as MatchTypeFilter)}
-            aria-label="Bulk approve match type"
+            aria-label="Bulk promote match type"
           >
             {MATCH_TYPE_OPTIONS.map((type) => (
               <option key={type} value={type}>
@@ -821,29 +1074,49 @@ function MatchingResultsPanel({
           <button
             type="button"
             className="taste-btn-primary"
-            disabled={bulkMutation.isPending}
-            onClick={() => bulkMutation.mutate(bulkType)}
+            disabled={bulkPromoteMutation.isPending}
+            onClick={() => bulkPromoteMutation.mutate(bulkType)}
           >
-            {bulkMutation.isPending ? 'Approving…' : `Approve ${MATCH_TYPE_LABELS[bulkType]}`}
+            {bulkPromoteMutation.isPending
+              ? 'Promoting…'
+              : `Promote ${MATCH_TYPE_LABELS[bulkType]}`}
+          </button>
+          <button
+            type="button"
+            className="taste-btn"
+            disabled={bulkDeclineMutation.isPending}
+            onClick={() => bulkDeclineMutation.mutate(bulkType)}
+          >
+            {bulkDeclineMutation.isPending
+              ? 'Declining…'
+              : `Decline ${MATCH_TYPE_LABELS[bulkType]}`}
           </button>
         </div>
-        {bulkMutation.isSuccess && (
+        {bulkPromoteMutation.isSuccess && (
           <p className="mt-3 text-sm text-emerald-700">
-            Approved {bulkMutation.data.approved_count} pending review
-            {bulkMutation.data.approved_count === 1 ? '' : 's'} for {bulkMutation.data.match_type}
-            {bulkMutation.data.ensured_count
-              ? ` (opened ${bulkMutation.data.ensured_count} missing gate${
-                  bulkMutation.data.ensured_count === 1 ? '' : 's'
+            Promoted {bulkPromoteMutation.data.approved_count} pending review
+            {bulkPromoteMutation.data.approved_count === 1 ? '' : 's'} for{' '}
+            {bulkPromoteMutation.data.match_type}
+            {bulkPromoteMutation.data.ensured_count
+              ? ` (opened ${bulkPromoteMutation.data.ensured_count} missing gate${
+                  bulkPromoteMutation.data.ensured_count === 1 ? '' : 's'
                 })`
               : ''}
             .
           </p>
         )}
-        {bulkMutation.isError && (
+        {bulkDeclineMutation.isSuccess && (
+          <p className="mt-3 text-sm text-emerald-700">
+            Declined {bulkDeclineMutation.data.declined_count} pending review
+            {bulkDeclineMutation.data.declined_count === 1 ? '' : 's'} for{' '}
+            {bulkDeclineMutation.data.match_type}.
+          </p>
+        )}
+        {(bulkPromoteMutation.isError || bulkDeclineMutation.isError) && (
           <p className="mt-3 text-sm text-red-700">
-            {bulkMutation.error instanceof Error
-              ? bulkMutation.error.message
-              : String(bulkMutation.error)}
+            {(bulkPromoteMutation.error ?? bulkDeclineMutation.error) instanceof Error
+              ? (bulkPromoteMutation.error ?? bulkDeclineMutation.error)!.message
+              : String(bulkPromoteMutation.error ?? bulkDeclineMutation.error)}
           </p>
         )}
       </div>

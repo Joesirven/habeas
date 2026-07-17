@@ -9,3 +9,6 @@ Approval helpers, service level agreement computation, terminal error classifica
 - `is_matching_review_approved` requires approval after the latest
   `matching_results` row; `ensure_pending_matching_review` opens a fresh
   pending gate when rematch invalidates a prior approval.
+- Assign/escalate (U17) stores pending `workflow.assignment` rows on
+  `approval_requests` (append-history; supersede prior pending). Targets:
+  `reviewer` | `legal` | `data_owner`. No separate assignment table.

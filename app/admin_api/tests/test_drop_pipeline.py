@@ -609,6 +609,8 @@ async def test_collect_matching_results_stats_and_filter():
             recorded_at=recorded,
             approval_id=10,
             review_status="pending",
+            assignment_target="reviewer",
+            assignment_context={"kind": "assign", "assignee_identity": "rev@habeas.com"},
         ),
         _Row(
             request_id="00000000-0000-0000-0000-000000000002",
@@ -618,6 +620,8 @@ async def test_collect_matching_results_stats_and_filter():
             recorded_at=recorded,
             approval_id=11,
             review_status="pending",
+            assignment_target=None,
+            assignment_context=None,
         ),
         _Row(
             request_id="00000000-0000-0000-0000-000000000003",
@@ -627,6 +631,8 @@ async def test_collect_matching_results_stats_and_filter():
             recorded_at=recorded,
             approval_id=None,
             review_status="none",
+            assignment_target=None,
+            assignment_context=None,
         ),
     ]
 
@@ -640,6 +646,8 @@ async def test_collect_matching_results_stats_and_filter():
     assert all_results["stats"]["not_found"] == 1
     assert all_results["stats"]["review_pending"] == 2
     assert all_results["results"][0]["match_type"] == "single_match"
+    assert all_results["results"][0]["assignment"]["assignee_identity"] == "rev@habeas.com"
+    assert all_results["results"][1]["assignment"] is None
     assert "consumer_id" not in all_results["results"][0]
 
     multi = await drop_pipeline.collect_matching_results(
@@ -651,7 +659,7 @@ async def test_collect_matching_results_stats_and_filter():
 
 
 @pytest.mark.asyncio
-async def test_get_matching_result_detail_shape():
+async def test_get_matching_result_detail_shape(monkeypatch: pytest.MonkeyPatch):
     from datetime import datetime, timezone
 
     recorded = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
@@ -685,6 +693,18 @@ async def test_get_matching_result_detail_shape():
         ]
     )
 
+    async def fake_assignment(_conn: Any, request_id: str) -> dict[str, Any] | None:
+        assert request_id == "00000000-0000-0000-0000-000000000002"
+        return {
+            "id": 7,
+            "request_id": request_id,
+            "target_role": "legal",
+            "kind": "escalate",
+            "assignee_identity": None,
+            "status": "pending",
+        }
+
+    monkeypatch.setattr(drop_pipeline, "get_current_assignment", fake_assignment)
     detail = await drop_pipeline.get_matching_result_detail(
         conn, "00000000-0000-0000-0000-000000000002"
     )
@@ -693,6 +713,7 @@ async def test_get_matching_result_detail_shape():
     assert detail["match_count"] == 4
     assert detail["attempt_id"] == 99
     assert detail["attempts"][0]["audit_payload"]["lookup_state"] == "CA"
+    assert detail["assignment"]["target_role"] == "legal"
     assert "consumer_id" not in detail
     assert "email" not in detail["attempts"][0]["audit_payload"]
 
@@ -987,3 +1008,199 @@ def test_match_proxy_opens_matching_review_gate(monkeypatch: pytest.MonkeyPatch)
     assert body["matching_review_approval_id"] == 42
     assert body["matching_review_status"] == "pending"
     assert created["request_id"] == request_id
+
+
+def test_matching_result_promote_and_decline_routes(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_promote(
+        conn: Any,
+        *,
+        request_id: str,
+        decided_by: str,
+        decision_reason: str | None = None,
+    ) -> dict[str, Any]:
+        captured["promote"] = {
+            "request_id": request_id,
+            "decided_by": decided_by,
+            "decision_reason": decision_reason,
+        }
+        return {"request_id": request_id, "review_status": "approved", "approval_id": 3}
+
+    async def fake_decline(
+        conn: Any,
+        *,
+        request_id: str,
+        decided_by: str,
+        decision_reason: str | None = None,
+    ) -> dict[str, Any]:
+        captured["decline"] = {
+            "request_id": request_id,
+            "decided_by": decided_by,
+        }
+        return {"request_id": request_id, "review_status": "rejected", "approval_id": 4}
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "promote_matching_review_for_request", fake_promote)
+    monkeypatch.setattr(drop_pipeline, "decline_matching_review_for_request", fake_decline)
+
+    rid = "00000000-0000-0000-0000-000000000033"
+    with TestClient(app) as client:
+        promote = client.post(
+            f"/ops/drop/matching-results/{rid}/promote",
+            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
+            json={"decision_reason": "promote to fulfillment"},
+        )
+        decline = client.post(
+            f"/ops/drop/matching-results/{rid}/decline",
+            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
+            json={},
+        )
+
+    assert promote.status_code == 200
+    assert promote.json()["status"] == "ok"
+    assert captured["promote"]["decided_by"] == "ops@habeas.com"
+    assert decline.status_code == 200
+    assert decline.json()["approval_id"] == 4
+
+
+def test_workflow_assign_escalate_and_list(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_assign(
+        conn: Any,
+        *,
+        request_ids: list[str],
+        target_role: str,
+        assignee_identity: str,
+        decided_by: str,
+    ) -> dict[str, Any]:
+        captured["assign"] = {
+            "request_ids": request_ids,
+            "target_role": target_role,
+            "assignee_identity": assignee_identity,
+            "decided_by": decided_by,
+        }
+        return {
+            "kind": "assign",
+            "target_role": target_role,
+            "assignee_identity": assignee_identity,
+            "count": len(request_ids),
+            "assignments": [],
+            "request_ids": request_ids,
+        }
+
+    async def fake_escalate(
+        conn: Any,
+        *,
+        request_ids: list[str],
+        target_role: str,
+        decided_by: str,
+        assignee_identity: str | None = None,
+    ) -> dict[str, Any]:
+        captured["escalate"] = {
+            "request_ids": request_ids,
+            "target_role": target_role,
+            "decided_by": decided_by,
+        }
+        return {
+            "kind": "escalate",
+            "target_role": target_role,
+            "assignee_identity": assignee_identity,
+            "count": len(request_ids),
+            "assignments": [],
+            "request_ids": request_ids,
+        }
+
+    async def fake_list(
+        conn: Any,
+        *,
+        assignee_identity: str | None = None,
+        target_role: str | None = None,
+        status: str = "pending",
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        captured["list"] = {
+            "assignee_identity": assignee_identity,
+            "target_role": target_role,
+            "status": status,
+        }
+        return [
+            {
+                "id": 1,
+                "request_id": "00000000-0000-0000-0000-000000000001",
+                "target_role": "legal",
+                "kind": "escalate",
+                "assignee_identity": None,
+                "status": "pending",
+            }
+        ]
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "assign_requests", fake_assign)
+    monkeypatch.setattr(drop_pipeline, "escalate_requests", fake_escalate)
+    monkeypatch.setattr(drop_pipeline, "list_workflow_assignments", fake_list)
+
+    with TestClient(app) as client:
+        assign = client.post(
+            "/ops/drop/workflow/assign",
+            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:rev@habeas.com"},
+            json={
+                "request_ids": ["00000000-0000-0000-0000-000000000001"],
+                "target_role": "reviewer",
+                "assignee_identity": "web-admin@habeas.com",
+            },
+        )
+        escalate = client.post(
+            "/ops/drop/workflow/escalate",
+            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
+            json={
+                "request_ids": [
+                    "00000000-0000-0000-0000-000000000001",
+                    "00000000-0000-0000-0000-000000000002",
+                ],
+                "target_role": "legal",
+            },
+        )
+        listed = client.get("/ops/drop/workflow/assignments?target_role=legal")
+        bad = client.post(
+            "/ops/drop/workflow/escalate",
+            json={
+                "request_ids": ["00000000-0000-0000-0000-000000000001"],
+                "target_role": "reviewer",
+            },
+        )
+
+    assert assign.status_code == 200
+    assert captured["assign"]["assignee_identity"] == "rev@habeas.com"
+    assert captured["assign"]["decided_by"] == "rev@habeas.com"
+    assert escalate.status_code == 200
+    assert escalate.json()["count"] == 2
+    assert listed.status_code == 200
+    assert listed.json()["count"] == 1
+    assert "email" not in str(listed.json()).lower() or "assignee" in str(listed.json())
+    assert bad.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_create_workflow_assignment_validation():
+    from habeas_privacy_core.workflow.approval import create_workflow_assignment
+
+    with pytest.raises(ValueError, match="assignee_identity"):
+        await create_workflow_assignment(
+            MagicMock(),
+            request_id="00000000-0000-0000-0000-000000000001",
+            kind="assign",
+            target_role="reviewer",
+            decided_by="ops@habeas.com",
+            assignee_identity="",
+        )
+
+    with pytest.raises(ValueError, match="legal or data_owner"):
+        await create_workflow_assignment(
+            MagicMock(),
+            request_id="00000000-0000-0000-0000-000000000001",
+            kind="escalate",
+            target_role="reviewer",
+            decided_by="ops@habeas.com",
+        )

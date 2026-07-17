@@ -24,7 +24,9 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
 - Ingest copy: **Unzip** (land) + **Promote to raw** (promote).
 - Hash-index: per-state enqueue + enqueue-all served states (USPS 50+DC); rematch-on-refresh for every successful state.
 - After **Run matching** completes (`status=ok`), required post-match dialog (review / bulk approve); `useBlocker` until choice.
-- Matching results: stats, list ↔ detail (attempt history + allowlisted `audit_payload`), bulk approve by match type.
+- Matching tab: stats, list ↔ detail (attempt history + allowlisted `audit_payload`),
+  promote/decline (individual + bulk by match type), assign to reviewer / escalate to
+  legal|data_owner (IAP actor; `workflow.assignment` via admin-api).
 
 ## Rules
 

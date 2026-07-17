@@ -16,10 +16,13 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
 - Home summary: `GET /ops/drop/stats/global` (ids/counts only)
 - Matching result detail includes attempt history + allowlisted `audit_payload`
 - `POST /ops/drop/match` proxies matching worker and opens a pending `matching.review` gate on success
-- Matching results (Unit 8b): `GET /ops/drop/matching-results` (list + global stats),
-  `GET /ops/drop/matching-results/{request_id}` (detail),
-  `POST /ops/drop/matching-results/bulk-approve` (ensure missing gates, then clear
-  `matching.review` by match type: `single_match` / `multi_match` status-4 / `not_found`)
+- Matching results (Unit 8b / U15): `GET /ops/drop/matching-results` (list + global stats),
+  `GET /ops/drop/matching-results/{request_id}` (detail + attempt audit drill-down),
+  `POST .../bulk-approve` (bulk promote), `POST .../bulk-decline`,
+  `POST .../{request_id}/promote`, `POST .../{request_id}/decline`
+- Assign / escalate (U17): reuses `approval_requests` with `action_type=workflow.assignment`
+  (no new migration) — `POST /ops/drop/workflow/assign`, `POST .../escalate`,
+  `GET .../assignments`; targets `reviewer` | `legal` | `data_owner`; actor = IAP email
 - Postgres LISTEN on approval events → forward to Server-Sent Events clients
 
 - Vendor adapter code in `adapters/` inside this app only.

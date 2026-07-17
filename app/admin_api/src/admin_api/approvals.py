@@ -9,10 +9,16 @@ from uuid import UUID
 import asyncpg
 
 from habeas_privacy_core.workflow.approval import (
+    ASSIGNMENT_TARGETS,
     DEFAULT_MATCHING_REVIEW_TTL,
     MATCHING_REVIEW_ACTION,
+    WORKFLOW_ASSIGNMENT_ACTION,
     create_pending_matching_review,
+    create_workflow_assignment,
+    ensure_pending_matching_review,
+    get_current_assignment,
     is_matching_review_approved,
+    list_workflow_assignments,
 )
 
 DEFAULT_APPROVAL_TTL = DEFAULT_MATCHING_REVIEW_TTL
@@ -243,16 +249,229 @@ async def bulk_approve_matching_review_by_match_type(
     }
 
 
+async def promote_matching_review_for_request(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    decided_by: str,
+    decision_reason: str | None = None,
+) -> dict[str, Any]:
+    """Ensure a pending matching.review gate, then approve (promote to fulfillment)."""
+    await ensure_pending_matching_review(conn, request_id=request_id)
+    pending_id = await conn.fetchval(
+        """
+        SELECT id
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status = 'pending'
+         ORDER BY requested_at DESC
+         LIMIT 1
+        """,
+        UUID(request_id),
+        MATCHING_REVIEW_ACTION,
+    )
+    if pending_id is None:
+        if await is_matching_review_approved(conn, request_id):
+            return {
+                "request_id": request_id,
+                "review_status": "already_approved",
+                "approval_id": None,
+            }
+        raise LookupError("no matching.review gate available to promote")
+
+    reason = decision_reason or "promote to fulfillment"
+    decided = await decide_approval(
+        conn,
+        approval_id=int(pending_id),
+        status="approved",
+        decided_by=decided_by,
+        decision_reason=reason,
+    )
+    if decided is None:
+        raise LookupError("matching.review gate was not pending")
+    return {
+        "request_id": request_id,
+        "review_status": "approved",
+        "approval_id": int(decided["id"]),
+    }
+
+
+async def decline_matching_review_for_request(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    decided_by: str,
+    decision_reason: str | None = None,
+) -> dict[str, Any]:
+    """Reject pending matching.review (decline — does not fulfill; A3)."""
+    await ensure_pending_matching_review(conn, request_id=request_id)
+    pending_id = await conn.fetchval(
+        """
+        SELECT id
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status = 'pending'
+         ORDER BY requested_at DESC
+         LIMIT 1
+        """,
+        UUID(request_id),
+        MATCHING_REVIEW_ACTION,
+    )
+    if pending_id is None:
+        raise LookupError("no pending matching.review to decline")
+
+    reason = decision_reason or "decline — not fulfill-ready"
+    decided = await decide_approval(
+        conn,
+        approval_id=int(pending_id),
+        status="rejected",
+        decided_by=decided_by,
+        decision_reason=reason,
+    )
+    if decided is None:
+        raise LookupError("matching.review gate was not pending")
+    return {
+        "request_id": request_id,
+        "review_status": "rejected",
+        "approval_id": int(decided["id"]),
+    }
+
+
+async def bulk_decline_matching_review_by_match_type(
+    conn: asyncpg.Connection,
+    *,
+    match_type: MatchTypeFilter,
+    decided_by: str,
+    decision_reason: str | None = None,
+) -> dict[str, Any]:
+    """Reject pending matching.review for DROP requests of a match type."""
+    if match_type not in MATCH_TYPE_FILTERS:
+        raise ValueError(f"invalid match_type: {match_type!r}")
+
+    predicate = match_count_predicate_sql(match_type, "lr.match_count")
+    reason = decision_reason or f"bulk decline match_type={match_type}"
+    rows = await conn.fetch(
+        f"""
+        WITH latest AS (
+            SELECT DISTINCT ON (mr.request_id)
+                   mr.request_id,
+                   mr.match_count
+              FROM matching_results mr
+              JOIN requests r ON r.id = mr.request_id
+             WHERE r.intake_source = 'drop'
+             ORDER BY mr.request_id, mr.recorded_at DESC
+        ),
+        filtered AS (
+            SELECT lr.request_id
+              FROM latest lr
+             WHERE {predicate}
+        )
+        UPDATE approval_requests AS ar
+           SET status = 'rejected',
+               decided_by = $1,
+               decided_at = NOW(),
+               decision_reason = $2
+          FROM filtered
+         WHERE ar.request_id = filtered.request_id
+           AND ar.action_type = $3
+           AND ar.status = 'pending'
+        RETURNING ar.id, ar.request_id::text AS request_id
+        """,
+        decided_by,
+        reason,
+        MATCHING_REVIEW_ACTION,
+    )
+    rejected_ids = [int(row["id"]) for row in rows]
+    return {
+        "match_type": match_type,
+        "declined_count": len(rejected_ids),
+        "approval_ids": rejected_ids,
+        "request_ids": [row["request_id"] for row in rows],
+    }
+
+
+async def assign_requests(
+    conn: asyncpg.Connection,
+    *,
+    request_ids: list[str],
+    target_role: str,
+    assignee_identity: str,
+    decided_by: str,
+) -> dict[str, Any]:
+    """Bulk/individual assign to reviewer (IAP email as assignee)."""
+    created: list[dict[str, Any]] = []
+    for request_id in request_ids:
+        row = await create_workflow_assignment(
+            conn,
+            request_id=request_id,
+            kind="assign",
+            target_role=target_role,
+            assignee_identity=assignee_identity,
+            decided_by=decided_by,
+        )
+        created.append(row)
+    return {
+        "kind": "assign",
+        "target_role": target_role,
+        "assignee_identity": assignee_identity.strip(),
+        "count": len(created),
+        "assignments": created,
+        "request_ids": [a["request_id"] for a in created],
+    }
+
+
+async def escalate_requests(
+    conn: asyncpg.Connection,
+    *,
+    request_ids: list[str],
+    target_role: str,
+    decided_by: str,
+    assignee_identity: str | None = None,
+) -> dict[str, Any]:
+    """Bulk/individual escalate to legal or data_owner."""
+    created: list[dict[str, Any]] = []
+    for request_id in request_ids:
+        row = await create_workflow_assignment(
+            conn,
+            request_id=request_id,
+            kind="escalate",
+            target_role=target_role,
+            assignee_identity=assignee_identity,
+            decided_by=decided_by,
+        )
+        created.append(row)
+    return {
+        "kind": "escalate",
+        "target_role": target_role,
+        "assignee_identity": assignee_identity.strip() if assignee_identity else None,
+        "count": len(created),
+        "assignments": created,
+        "request_ids": [a["request_id"] for a in created],
+    }
+
+
 __all__ = [
+    "ASSIGNMENT_TARGETS",
     "MATCHING_REVIEW_ACTION",
     "MATCH_TYPE_FILTERS",
+    "WORKFLOW_ASSIGNMENT_ACTION",
     "MatchTypeFilter",
+    "assign_requests",
     "bulk_approve_matching_review_by_match_type",
+    "bulk_decline_matching_review_by_match_type",
     "create_matching_review_approval",
+    "create_workflow_assignment",
     "decide_approval",
+    "decline_matching_review_for_request",
     "ensure_pending_matching_reviews_for_match_type",
+    "escalate_requests",
+    "get_current_assignment",
     "is_matching_review_approved",
     "list_approvals",
+    "list_workflow_assignments",
     "match_count_predicate_sql",
     "match_type_for_count",
+    "promote_matching_review_for_request",
 ]

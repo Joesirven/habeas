@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Annotated, Any
 
@@ -13,11 +14,19 @@ from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
 
 from admin_api.approvals import (
+    ASSIGNMENT_TARGETS,
     MATCH_TYPE_FILTERS,
     MatchTypeFilter,
+    assign_requests,
     bulk_approve_matching_review_by_match_type,
+    bulk_decline_matching_review_by_match_type,
     create_matching_review_approval,
+    decline_matching_review_for_request,
+    escalate_requests,
+    get_current_assignment,
+    list_workflow_assignments,
     match_type_for_count,
+    promote_matching_review_for_request,
 )
 from admin_api.cloud_run_auth import auth_headers_for
 from habeas_privacy_core.auth import (
@@ -122,6 +131,31 @@ class BulkApproveMatchingResultsBody(BaseModel):
     # Client hint only — overwritten by IAP identity when the header is present.
     decided_by: str = "web-admin@habeas.com"
     decision_reason: str | None = None
+
+
+class MatchingReviewDecisionBody(BaseModel):
+    """Promote (approve) or decline (reject) a single matching.review gate."""
+
+    decided_by: str | None = None
+    decision_reason: str | None = None
+
+
+class AssignBody(BaseModel):
+    """Assign one or more requests to a reviewer (IAP email)."""
+
+    request_ids: list[str] = Field(min_length=1, max_length=200)
+    target_role: str = "reviewer"
+    assignee_identity: str = Field(min_length=3, max_length=200)
+    decided_by: str | None = None
+
+
+class EscalateBody(BaseModel):
+    """Escalate one or more requests to legal or data_owner."""
+
+    request_ids: list[str] = Field(min_length=1, max_length=200)
+    target_role: str
+    assignee_identity: str | None = None
+    decided_by: str | None = None
 
 
 def _require_database() -> None:
@@ -660,6 +694,8 @@ async def collect_matching_results(
     limit: int = 100,
 ) -> dict[str, Any]:
     """Latest DROP matching_results + global stats + pending review counts."""
+    from habeas_privacy_core.workflow.approval import WORKFLOW_ASSIGNMENT_ACTION
+
     latest_rows = await conn.fetch(
         """
         WITH latest AS (
@@ -680,7 +716,9 @@ async def collect_matching_results(
                lr.matched_via,
                lr.recorded_at,
                ar.id AS approval_id,
-               COALESCE(ar.status, 'none') AS review_status
+               COALESCE(ar.status, 'none') AS review_status,
+               wa.approver_role AS assignment_target,
+               wa.context_jsonb AS assignment_context
           FROM latest lr
           LEFT JOIN LATERAL (
                 SELECT a.id, a.status
@@ -690,9 +728,19 @@ async def collect_matching_results(
                  ORDER BY a.requested_at DESC
                  LIMIT 1
           ) ar ON TRUE
+          LEFT JOIN LATERAL (
+                SELECT a.approver_role, a.context_jsonb
+                  FROM approval_requests a
+                 WHERE a.request_id = lr.request_id::uuid
+                   AND a.action_type = $2
+                   AND a.status = 'pending'
+                 ORDER BY a.requested_at DESC
+                 LIMIT 1
+          ) wa ON TRUE
          ORDER BY lr.recorded_at DESC
         """,
         MATCHING_REVIEW_ACTION,
+        WORKFLOW_ASSIGNMENT_ACTION,
     )
 
     stats = {
@@ -707,6 +755,19 @@ async def collect_matching_results(
     results: list[dict[str, Any]] = []
     for row in latest_rows:
         item = _serialize_matching_result_row(row)
+        ctx = row["assignment_context"]
+        if isinstance(ctx, str):
+            ctx = json.loads(ctx)
+        ctx = dict(ctx or {})
+        item["assignment"] = (
+            {
+                "target_role": row["assignment_target"],
+                "kind": ctx.get("kind"),
+                "assignee_identity": ctx.get("assignee_identity"),
+            }
+            if row["assignment_target"] is not None
+            else None
+        )
         stats["total"] += 1
         stats[item["match_type"]] += 1
         review = item["review_status"]
@@ -811,6 +872,7 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
         }
         for a in attempt_rows
     ]
+    detail["assignment"] = await get_current_assignment(conn, request_id)
     return detail
 
 
@@ -835,7 +897,7 @@ async def drop_matching_results_bulk_approve(
     body: BulkApproveMatchingResultsBody,
     actor: DropMutationActor,
 ):
-    """Bulk-approve pending matching.review filtered by match type."""
+    """Bulk-promote: approve pending matching.review filtered by match type."""
     _require_database()
     if body.match_type not in MATCH_TYPE_FILTERS:
         raise HTTPException(status_code=422, detail=f"invalid match_type: {body.match_type}")
@@ -851,6 +913,73 @@ async def drop_matching_results_bulk_approve(
     return {"status": "ok", **result}
 
 
+@router.post("/matching-results/bulk-decline")
+async def drop_matching_results_bulk_decline(
+    body: BulkApproveMatchingResultsBody,
+    actor: DropMutationActor,
+):
+    """Bulk-decline: reject pending matching.review filtered by match type."""
+    _require_database()
+    if body.match_type not in MATCH_TYPE_FILTERS:
+        raise HTTPException(status_code=422, detail=f"invalid match_type: {body.match_type}")
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        result = await bulk_decline_matching_review_by_match_type(
+            conn,
+            match_type=body.match_type,
+            decided_by=decided_by,
+            decision_reason=body.decision_reason,
+        )
+    return {"status": "ok", **result}
+
+
+@router.post("/matching-results/{request_id}/promote")
+async def drop_matching_result_promote(
+    request_id: str,
+    body: MatchingReviewDecisionBody,
+    actor: DropMutationActor,
+):
+    """Promote one request to fulfillment (approve matching.review)."""
+    _require_database()
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await promote_matching_review_for_request(
+                conn,
+                request_id=request_id,
+                decided_by=decided_by,
+                decision_reason=body.decision_reason,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "ok", **result}
+
+
+@router.post("/matching-results/{request_id}/decline")
+async def drop_matching_result_decline(
+    request_id: str,
+    body: MatchingReviewDecisionBody,
+    actor: DropMutationActor,
+):
+    """Decline one request (reject matching.review — not fulfill-ready)."""
+    _require_database()
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await decline_matching_review_for_request(
+                conn,
+                request_id=request_id,
+                decided_by=decided_by,
+                decision_reason=body.decision_reason,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "ok", **result}
+
+
 @router.get("/matching-results/{request_id}")
 async def drop_matching_result_detail(request_id: str):
     """Detail pane payload for one DROP matching result."""
@@ -861,6 +990,89 @@ async def drop_matching_result_detail(request_id: str):
     if detail is None:
         raise HTTPException(status_code=404, detail="matching result not found")
     return detail
+
+
+@router.post("/workflow/assign")
+async def drop_workflow_assign(
+    body: AssignBody,
+    actor: DropMutationActor,
+):
+    """Assign request(s) to a reviewer (assignee = IAP email / explicit identity)."""
+    _require_database()
+    if body.target_role not in ASSIGNMENT_TARGETS:
+        raise HTTPException(status_code=422, detail=f"invalid target_role: {body.target_role}")
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
+    # Prefer IAP actor as assignee when authenticated and client omits a distinct email.
+    assignee = body.assignee_identity.strip()
+    if is_authenticated_actor(actor) and (
+        not assignee or assignee == "web-admin@habeas.com"
+    ):
+        assignee = actor
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await assign_requests(
+                conn,
+                request_ids=body.request_ids,
+                target_role=body.target_role,
+                assignee_identity=assignee,
+                decided_by=decided_by,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": "ok", **result}
+
+
+@router.post("/workflow/escalate")
+async def drop_workflow_escalate(
+    body: EscalateBody,
+    actor: DropMutationActor,
+):
+    """Escalate request(s) to legal or data_owner."""
+    _require_database()
+    if body.target_role not in {"legal", "data_owner"}:
+        raise HTTPException(
+            status_code=422,
+            detail="escalate target_role must be legal or data_owner",
+        )
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await escalate_requests(
+                conn,
+                request_ids=body.request_ids,
+                target_role=body.target_role,
+                decided_by=decided_by,
+                assignee_identity=body.assignee_identity,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": "ok", **result}
+
+
+@router.get("/workflow/assignments")
+async def drop_workflow_assignments(
+    assignee: str | None = None,
+    target_role: str | None = None,
+    status: str = "pending",
+    limit: int = 50,
+):
+    """List assign/escalate rows by assignee and/or target role (ids only)."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            rows = await list_workflow_assignments(
+                conn,
+                assignee_identity=assignee,
+                target_role=target_role,
+                status=status,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"assignments": rows, "count": len(rows)}
 
 
 async def collect_queue_depths(conn: Any) -> list[dict[str, Any]]:
