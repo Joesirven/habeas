@@ -15,3 +15,5 @@ class DropIngestorSettings(CoreSettings):
     service_name: str = "drop-ingestor"
     port: int = 8080
     worker_id: str = "drop-ingestor-dev"
+    # ADR-32: required durable CSV staging after land (no local disk).
+    drop_parsed_bucket: str = "example-gcp-project-drop-parsed-dev"

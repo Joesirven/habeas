@@ -53,7 +53,6 @@ class LandProxyBody(BaseModel):
 
     land_attempt_id: int | None = None
     gcs_uri: str | None = None
-    zip_path: str | None = None
     zip_base64: str | None = None
     source_csv_filename: str | None = None
     list_type: str | None = None

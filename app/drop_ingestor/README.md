@@ -13,5 +13,7 @@ uv run --package drop-ingestor uvicorn drop_ingestor.main:app \
 | `POST /ingest/promote` | Thin `requests` for pending raw rows; **no** matching enqueue |
 | `GET /healthz` / `GET /readyz` | Liveness / readiness |
 
-Env: `DATABASE_URL`, `WORKER_ID` (optional), `SERVICE_NAME=drop-ingestor`.
-Land accepts `gcs_uri` (`file://` or local path for tests), `zip_path`, or `zip_base64`.
+Env: `DATABASE_URL`, `WORKER_ID` (optional), `SERVICE_NAME=drop-ingestor`,
+`DROP_PARSED_BUCKET` (default `example-gcp-project-drop-parsed-dev`).
+
+Land accepts `gcs_uri` (`gs://` only) or in-memory `zip_base64` for tests. No local disk.

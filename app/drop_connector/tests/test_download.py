@@ -1,16 +1,16 @@
-"""T6.1 — download creates land attempts per list in ZIP (mocked HTTP + DB)."""
+"""T6.1 — download creates land attempts per list in ZIP (mocked HTTP + DB + GCS)."""
 
 from __future__ import annotations
 
 import io
 import zipfile
-from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
+from habeas_privacy_core.adapters import gcs
 from drop_connector.client import DropApiClient
 from drop_connector.download import (
     list_type_from_csv_filename,
@@ -48,8 +48,26 @@ def test_parse_zip_list_members_filters_mvp_types():
 
 
 @pytest.mark.asyncio
-async def test_download_creates_land_attempt_per_list(tmp_path: Path):
+async def test_download_creates_land_attempt_per_list(monkeypatch: pytest.MonkeyPatch):
     """T6.1 — one drop_ingest_attempts step=land per list in batch."""
+    gcs.clear_gcs_store()
+
+    async def memory_write(
+        bucket: str,
+        path: str,
+        data: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+        transport: Any = None,
+    ) -> str:
+        del transport
+        return await gcs.write_object(bucket, path, data, content_type=content_type)
+
+    monkeypatch.setattr(
+        "habeas_privacy_core.adapters.gcs.write_bytes_to_bucket",
+        memory_write,
+    )
+
     zip_bytes = _zip_with_lists(
         "20260716_9999_NDZ.csv",
         "20260716_9999_EMAIL.csv",
@@ -82,10 +100,11 @@ async def test_download_creates_land_attempt_per_list(tmp_path: Path):
             client=client,
             conn=conn,
             worker_id="drop-connector-test",
-            storage_dir=str(tmp_path),
+            inbound_bucket="test-drop-inbound",
         )
 
-    assert result.gcs_uri.startswith("file://")
+    assert result.gcs_uri.startswith("gs://test-drop-inbound/inbound/")
+    assert result.gcs_uri.endswith(".zip")
     assert len(result.lists) == 3
     assert len(result.land_attempt_ids) == 3
     assert result.connector_attempt_id is not None

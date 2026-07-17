@@ -4,6 +4,7 @@ substitutions:
   _SERVICE: drop-ingestor-dev
   _TAG: latest
   _CLOUDSQL_INSTANCE: example-gcp-project:us-east4:dpra-dev-temp
+  _DROP_PARSED_BUCKET: example-gcp-project-drop-parsed-dev
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -37,7 +38,7 @@ steps:
       - --platform=managed
       - --no-allow-unauthenticated
       - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
-      - --set-env-vars=SERVICE_NAME=drop-ingestor,WORKER_ID=drop-ingestor-dev,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL}
+      - --set-env-vars=SERVICE_NAME=drop-ingestor,WORKER_ID=drop-ingestor-dev,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},DROP_PARSED_BUCKET=${_DROP_PARSED_BUCKET}
 
 images:
   - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}

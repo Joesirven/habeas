@@ -129,14 +129,14 @@ async def download():
                     client=client,
                     conn=conn,
                     worker_id=settings.worker_id,
-                    storage_dir=settings.drop_storage_dir or None,
+                    inbound_bucket=settings.drop_inbound_bucket,
                 )
         else:
             result = await run_download(
                 client=client,
                 conn=None,
                 worker_id=settings.worker_id,
-                storage_dir=settings.drop_storage_dir or None,
+                inbound_bucket=settings.drop_inbound_bucket,
             )
     except DropApiError as exc:
         logger.exception("drop_download_failed", extra={"event": "drop_download_failed"})

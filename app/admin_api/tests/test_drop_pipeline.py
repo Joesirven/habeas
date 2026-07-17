@@ -108,7 +108,7 @@ def test_download_proxy_returns_upstream_json(monkeypatch: pytest.MonkeyPatch):
         def json(self) -> dict[str, Any]:
             return {
                 "status": "ok",
-                "gcs_uri": "file:///tmp/drop.zip",
+                "gcs_uri": "gs://example-gcp-project-drop-inbound-dev/inbound/2026/07/16/drop.zip",
                 "connector_attempt_id": 9,
                 "land_attempt_ids": [1, 2],
                 "lists": [],

@@ -26,7 +26,6 @@ class LandRequest(BaseModel):
     """Optional explicit ZIP source; otherwise claims next pending land attempt."""
 
     gcs_uri: str | None = None
-    zip_path: str | None = None
     zip_base64: str | None = None
     land_attempt_id: int | None = None
     source_csv_filename: str | None = None
@@ -89,17 +88,17 @@ async def ingest_land(body: LandRequest | None = None):
     req = body or LandRequest()
     if not settings.database_url:
         # Allow parse-only when ZIP is provided without DB (local smoke).
-        if not any([req.gcs_uri, req.zip_path, req.zip_base64]):
+        if not any([req.gcs_uri, req.zip_base64]):
             raise HTTPException(status_code=503, detail="DATABASE_URL not configured")
         result = await run_land(
             conn=None,
             worker_id=settings.worker_id,
             gcs_uri=req.gcs_uri,
-            zip_path=req.zip_path,
             zip_base64=req.zip_base64,
             land_attempt_id=req.land_attempt_id,
             source_csv_filename=req.source_csv_filename,
             list_type=req.list_type,
+            parsed_bucket=settings.drop_parsed_bucket,
         )
         return {
             "status": "ok",
@@ -118,16 +117,19 @@ async def ingest_land(body: LandRequest | None = None):
                 conn=conn,
                 worker_id=settings.worker_id,
                 gcs_uri=req.gcs_uri,
-                zip_path=req.zip_path,
                 zip_base64=req.zip_base64,
                 land_attempt_id=req.land_attempt_id,
                 source_csv_filename=req.source_csv_filename,
                 list_type=req.list_type,
+                parsed_bucket=settings.drop_parsed_bucket,
             )
         except NotImplementedError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
         except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=404,
+                detail=f"GCS object not found: {exc}",
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception:

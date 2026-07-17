@@ -72,18 +72,28 @@ def parse_zip_list_members(zip_bytes: bytes) -> list[LandedList]:
     return landed
 
 
-def store_zip_bytes(zip_bytes: bytes, storage_dir: str | Path | None = None) -> str:
-    """Write ZIP to storage_dir (or temp) and return a file:// URI for tests/local."""
-    if storage_dir:
-        root = Path(storage_dir)
-        root.mkdir(parents=True, exist_ok=True)
-    else:
-        root = Path("/tmp/drop_connector")
-        root.mkdir(parents=True, exist_ok=True)
+async def store_zip_bytes_async(
+    zip_bytes: bytes,
+    *,
+    inbound_bucket: str,
+) -> str:
+    """Write ZIP to ``gs://{inbound_bucket}/inbound/…`` only (no local disk)."""
+    if not inbound_bucket.strip():
+        raise ValueError("DROP_INBOUND_BUCKET is required — local ZIP staging is not supported")
+    from habeas_privacy_core.adapters.gcs import (
+        inbound_zip_object_path,
+        write_bytes_to_bucket,
+    )
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = root / f"drop_download_{stamp}.zip"
-    path.write_bytes(zip_bytes)
-    return path.resolve().as_uri()
+    filename = f"drop_download_{stamp}.zip"
+    object_path = inbound_zip_object_path(filename)
+    return await write_bytes_to_bucket(
+        inbound_bucket.strip(),
+        object_path,
+        zip_bytes,
+        content_type="application/zip",
+    )
 
 
 async def record_download_success(
@@ -164,18 +174,19 @@ async def run_download(
     client: DropApiClient,
     conn: DbConnection | None,
     worker_id: str,
-    storage_dir: str | None = None,
+    inbound_bucket: str,
     zip_bytes: bytes | None = None,
 ) -> DownloadResult:
     """
-    Download ZIP from DROP (or use injected bytes), stage URI, write ledgers.
+    Download ZIP from DROP (or use injected bytes), stage to GCS, write ledgers.
 
+    ``inbound_bucket`` is required (ADR-32). No local disk staging.
     When ``conn`` is None, ledgers are skipped (unit tests of parse/store only).
     """
     if zip_bytes is None:
         zip_bytes = await client.download()
 
-    gcs_uri = store_zip_bytes(zip_bytes, storage_dir)
+    gcs_uri = await store_zip_bytes_async(zip_bytes, inbound_bucket=inbound_bucket)
     lists = parse_zip_list_members(zip_bytes)
     logger.info(
         "drop_download_staged",

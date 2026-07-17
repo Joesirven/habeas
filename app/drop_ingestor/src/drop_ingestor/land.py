@@ -11,7 +11,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 
 from habeas_privacy_core.models.intake import DropListType
 from habeas_privacy_core.queue.claim import claim_next
@@ -149,39 +149,82 @@ def parse_zip_drop_rows(
 def load_zip_bytes(
     *,
     gcs_uri: str | None = None,
-    zip_path: str | None = None,
     zip_base64: str | None = None,
     zip_bytes: bytes | None = None,
 ) -> bytes:
-    """Load ZIP from bytes, base64, local path, file:// URI, or GCS stub."""
+    """Load ZIP from in-memory bytes/base64 only (sync). Prefer load_zip_bytes_async for gs://."""
     if zip_bytes is not None:
         return zip_bytes
     if zip_base64:
         return base64.b64decode(zip_base64)
-    if zip_path:
-        return Path(zip_path).read_bytes()
     if gcs_uri:
-        return _read_uri(gcs_uri)
-    raise ValueError("need gcs_uri, zip_path, zip_base64, or zip_bytes")
-
-
-def _read_uri(uri: str) -> bytes:
-    parsed = urlparse(uri)
-    scheme = (parsed.scheme or "").lower()
-    if scheme in ("", "file") or (not scheme and uri.startswith("/")):
-        if scheme == "file":
-            path = Path(unquote(parsed.path))
-        elif scheme == "":
-            path = Path(uri)
-        else:
-            path = Path(unquote(parsed.path))
-        return path.read_bytes()
-    if scheme == "gs" or scheme == "gcs":
-        # Stub: real GCS client lands with infra IAM; local/tests use file://.
         raise NotImplementedError(
-            "GCS URI loading is stubbed — use file:// or zip_path/zip_base64 for land"
+            "gs:// reads require load_zip_bytes_async (Cloud Storage client)"
         )
-    raise ValueError(f"unsupported zip URI scheme: {scheme!r}")
+    raise ValueError("need gcs_uri, zip_base64, or zip_bytes")
+
+
+async def load_zip_bytes_async(
+    *,
+    gcs_uri: str | None = None,
+    zip_base64: str | None = None,
+    zip_bytes: bytes | None = None,
+) -> bytes:
+    """Load ZIP from ``gs://`` (Storage client) or in-memory bytes/base64. No local paths."""
+    if zip_bytes is not None:
+        return zip_bytes
+    if zip_base64:
+        return base64.b64decode(zip_base64)
+    if gcs_uri:
+        scheme = (urlparse(gcs_uri).scheme or "").lower()
+        if scheme not in ("gs", "gcs"):
+            raise ValueError(
+                f"unsupported zip URI scheme {scheme!r}; only gs:// staging is supported"
+            )
+        from habeas_privacy_core.adapters.gcs import read_gs_uri
+
+        return await read_gs_uri(gcs_uri)
+    raise ValueError("need gcs_uri, zip_base64, or zip_bytes")
+
+
+async def stage_parsed_csvs(
+    zip_bytes: bytes,
+    *,
+    parsed_bucket: str,
+    filenames: list[str] | None = None,
+) -> list[str]:
+    """Write extracted list CSVs to the parsed bucket; return gs:// URIs."""
+    from habeas_privacy_core.adapters.gcs import (
+        parsed_csv_object_path,
+        write_bytes_to_bucket,
+    )
+
+    wanted = set(filenames) if filenames else None
+    uris: list[str] = []
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name = Path(info.filename).name
+            if not name.lower().endswith(".csv"):
+                continue
+            if wanted is not None and name not in wanted:
+                continue
+            list_type = list_type_from_csv_filename(name)
+            if list_type is None:
+                continue
+            content = zf.read(info)
+            object_path = parsed_csv_object_path(
+                list_type=list_type.value, filename=name
+            )
+            uri = await write_bytes_to_bucket(
+                parsed_bucket,
+                object_path,
+                content,
+                content_type="text/csv",
+            )
+            uris.append(uri)
+    return uris
 
 
 async def mark_attempt_in_flight(conn: DbConnection, attempt_id: int) -> None:
@@ -281,18 +324,18 @@ async def run_land(
     conn: DbConnection | None,
     worker_id: str,
     gcs_uri: str | None = None,
-    zip_path: str | None = None,
     zip_base64: str | None = None,
     zip_bytes: bytes | None = None,
     land_attempt_id: int | None = None,
     source_csv_filename: str | None = None,
     list_type: str | None = None,
+    parsed_bucket: str | None = None,
 ) -> LandResult:
     """
     Land ZIP CSV rows into drop_raw_requests.
 
     When ``conn`` is set and no explicit ZIP source is given, claims the next
-    pending ``step=land`` attempt and reads its ``gcs_uri``.
+    pending ``step=land`` attempt with a ``gs://`` URI (skips stale local URIs).
     """
     attempt_id = land_attempt_id
     attempt_gcs_uri = gcs_uri
@@ -300,28 +343,43 @@ async def run_land(
     filter_list_type = list_type
 
     if conn is not None and attempt_id is None and not any(
-        [gcs_uri, zip_path, zip_base64, zip_bytes]
+        [gcs_uri, zip_base64, zip_bytes]
     ):
-        claim = await claim_next(
-            conn,
-            DROP_INGEST_ATTEMPTS_TABLE,
-            LAND_STEP,
-            worker_id=worker_id,
-        )
-        if claim is None:
+        # Prefer gs:// staging; retire stale local file:// rows from pre-GCS deploys.
+        for _ in range(50):
+            claim = await claim_next(
+                conn,
+                DROP_INGEST_ATTEMPTS_TABLE,
+                LAND_STEP,
+                worker_id=worker_id,
+            )
+            if claim is None:
+                return LandResult()
+            claim_uri = claim.get("gcs_uri") or ""
+            if str(claim_uri).startswith("gs://"):
+                attempt_id = int(claim["id"])
+                attempt_gcs_uri = claim_uri
+                filter_filename = filter_filename or claim.get("source_csv_filename")
+                filter_list_type = filter_list_type or claim.get("list_type")
+                break
+            await mark_attempt_error(
+                conn,
+                int(claim["id"]),
+                error_code="stale_local_uri",
+                error_message=(
+                    f"skipped non-GCS staging URI {claim_uri!r}; "
+                    "re-download to stage under DROP inbound bucket"
+                )[:500],
+            )
+        else:
             return LandResult()
-        attempt_id = int(claim["id"])
-        attempt_gcs_uri = claim.get("gcs_uri") or attempt_gcs_uri
-        filter_filename = filter_filename or claim.get("source_csv_filename")
-        filter_list_type = filter_list_type or claim.get("list_type")
 
     if conn is not None and attempt_id is not None:
         await mark_attempt_in_flight(conn, attempt_id)
 
     try:
-        raw_zip = load_zip_bytes(
+        raw_zip = await load_zip_bytes_async(
             gcs_uri=attempt_gcs_uri,
-            zip_path=zip_path,
             zip_base64=zip_base64,
             zip_bytes=zip_bytes,
         )
@@ -334,6 +392,13 @@ async def run_land(
             rows_landed=len(rows),
             source_csv_filenames=sorted({r.source_csv_filename for r in rows}),
         )
+
+        if parsed_bucket and result.source_csv_filenames:
+            await stage_parsed_csvs(
+                raw_zip,
+                parsed_bucket=parsed_bucket,
+                filenames=result.source_csv_filenames,
+            )
 
         if conn is None:
             return result

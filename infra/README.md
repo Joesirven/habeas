@@ -65,7 +65,23 @@ Env on Cloud Run: `DROP_ENV=sandbox`, `DROP_API_BASE_URL=https://api.drop.privac
 |------|---------|
 | [`cloudbuild/drop-ingestor-dev.yaml`](cloudbuild/drop-ingestor-dev.yaml) | Build/push/deploy `drop-ingestor-dev` |
 
-Land/promote only — no `DROP_API_KEY`. Needs `DATABASE_URL`.
+Land/promote only — no `DROP_API_KEY`. Needs `DATABASE_URL` + `DROP_PARSED_BUCKET`.
+
+### GCS staging (ADR-32)
+
+| Bucket | Purpose | Writers | Readers |
+|--------|---------|---------|---------|
+| `example-gcp-project-drop-inbound-dev` | CPPA download ZIPs | `drop-connector` | `drop-ingestor` |
+| `example-gcp-project-drop-parsed-dev` | Per-list CSVs after land | `drop-ingestor` | future notice/fulfill |
+
+Object layout:
+
+```text
+gs://…-drop-inbound-dev/inbound/{yyyy}/{mm}/{dd}/drop_download_{ts}.zip
+gs://…-drop-parsed-dev/parsed/{NDZ|Email|Phone}/{yyyy}/{mm}/{dd}/{source_csv_filename}
+```
+
+Env: `DROP_INBOUND_BUCKET`, `DROP_PARSED_BUCKET` (required; no local/`file://` staging).
 
 ### Cloud Run auth (dev)
 

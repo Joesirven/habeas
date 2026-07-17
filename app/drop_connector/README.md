@@ -7,4 +7,5 @@ uv run --package drop-connector uvicorn drop_connector.main:app \
   --reload --app-dir app/drop_connector/src --port 8082
 ```
 
-Env: `DROP_API_BASE_URL`, `DROP_API_KEY`, `DROP_ENV=sandbox` (URL must contain `/sandbox`).
+Env: `DROP_API_BASE_URL`, `DROP_API_KEY`, `DROP_ENV=sandbox` (URL must contain `/sandbox`),
+`DROP_INBOUND_BUCKET` (default `example-gcp-project-drop-inbound-dev`). Download stages ZIPs to GCS only.

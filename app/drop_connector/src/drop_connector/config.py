@@ -24,8 +24,8 @@ class DropConnectorSettings(CoreSettings):
     drop_api_base_url: str = DEFAULT_DROP_API_BASE_URL
     drop_api_key: str = ""
     drop_env: str = "sandbox"
-    # Local staging directory for ZIP bytes when GCS is unavailable (tests / local).
-    drop_storage_dir: str = ""
+    # ADR-32: required durable ZIP staging (no local disk).
+    drop_inbound_bucket: str = "example-gcp-project-drop-inbound-dev"
 
     @model_validator(mode="after")
     def refuse_non_sandbox_url_when_sandbox_env(self) -> Self:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import zipfile
-from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -54,16 +53,13 @@ def test_parse_drop_csv_hash_and_concatenated():
 
 
 @pytest.mark.asyncio
-async def test_t7_1_land_persists_source_csv_filename(tmp_path: Path):
+async def test_t7_1_land_persists_source_csv_filename():
     """T7.1 Land persists source_csv_filename from CPPA ZIP."""
-    zip_path = tmp_path / "batch.zip"
-    zip_path.write_bytes(
-        _zip_bytes(
-            {
-                "20260716_9999_EMAIL.csv": "Id,Hash\nemail-1,h1\n",
-                "readme.txt": "ignore",
-            }
-        )
+    zip_bytes = _zip_bytes(
+        {
+            "20260716_9999_EMAIL.csv": "Id,Hash\nemail-1,h1\n",
+            "readme.txt": "ignore",
+        }
     )
 
     inserts: list[dict[str, Any]] = []
@@ -82,7 +78,7 @@ async def test_t7_1_land_persists_source_csv_filename(tmp_path: Path):
     result = await run_land(
         conn=conn,
         worker_id="drop-ingestor-test",
-        zip_path=str(zip_path),
+        zip_bytes=zip_bytes,
     )
 
     assert result.rows_landed == 1
@@ -94,17 +90,14 @@ async def test_t7_1_land_persists_source_csv_filename(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_t7_5_list_types_distinguished(tmp_path: Path):
+async def test_t7_5_list_types_distinguished():
     """T7.5 NDZ, Email, Phone rows distinguished in drop_raw_requests.list_type."""
-    zip_path = tmp_path / "all.zip"
-    zip_path.write_bytes(
-        _zip_bytes(
-            {
-                "20260716_1_NDZ.csv": "Id,ConcatenatedHash\nn1,nh\n",
-                "20260716_1_EMAIL.csv": "Id,Hash\ne1,eh\n",
-                "20260716_1_PHONE.csv": "Id,Hash\np1,ph\n",
-            }
-        )
+    zip_bytes = _zip_bytes(
+        {
+            "20260716_1_NDZ.csv": "Id,ConcatenatedHash\nn1,nh\n",
+            "20260716_1_EMAIL.csv": "Id,Hash\ne1,eh\n",
+            "20260716_1_PHONE.csv": "Id,Hash\np1,ph\n",
+        }
     )
 
     inserts: list[dict[str, Any]] = []
@@ -123,7 +116,7 @@ async def test_t7_5_list_types_distinguished(tmp_path: Path):
     result = await run_land(
         conn=conn,
         worker_id="drop-ingestor-test",
-        zip_path=str(zip_path),
+        zip_bytes=zip_bytes,
     )
 
     assert result.rows_landed == 3
@@ -131,8 +124,7 @@ async def test_t7_5_list_types_distinguished(tmp_path: Path):
     list_types = {row["args"][1] for row in raw_inserts}
     assert list_types == {"NDZ", "Email", "Phone"}
 
-    # Also covered by pure parse helper.
-    parsed = parse_zip_drop_rows(zip_path.read_bytes())
+    parsed = parse_zip_drop_rows(zip_bytes)
     assert {r.list_type for r in parsed} == {
         DropListType.NDZ,
         DropListType.EMAIL,
