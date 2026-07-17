@@ -210,7 +210,8 @@ export type DropPipelineStatus = {
     approved: number
     by_status: { status: string; count: number }[]
   }
-  hash_index_refresh: HashIndexRefreshStatus
+  /** Absent on older admin-api revisions that predate hash-index ops. */
+  hash_index_refresh?: HashIndexRefreshStatus
   worker_health: Record<string, WorkerHealthProbe>
 }
 

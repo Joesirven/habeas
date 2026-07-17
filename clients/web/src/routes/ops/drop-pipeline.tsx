@@ -692,9 +692,9 @@ export function DropPipelinePage() {
 
   const data: DropPipelineStatus | undefined = pipelineQuery.data
   const showSkeleton = pipelineQuery.isPending && !data
-  const hashPending = (data?.hash_index_refresh.pending ?? 0) > 0
+  const hashPending = (data?.hash_index_refresh?.pending ?? 0) > 0
   const hashWorkerDown = data ? !data.worker_health.hash_index_refresh?.ok : false
-  const lastRun = data?.hash_index_refresh.last_run
+  const lastRun = data?.hash_index_refresh?.last_run
 
   function handlePostMatchChoice(choice: PostMatchChoice) {
     setPostMatchOpen(false)
@@ -825,7 +825,7 @@ export function DropPipelinePage() {
           </p>
           <div className="mt-3">
             <StatusCountTable
-              rows={data?.hash_index_refresh.attempts_by_status ?? []}
+              rows={data?.hash_index_refresh?.attempts_by_status ?? []}
               empty="No hash-index refresh attempts yet."
             />
           </div>
