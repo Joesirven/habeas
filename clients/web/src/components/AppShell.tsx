@@ -7,6 +7,32 @@ type AppShellProps = {
   children: ReactNode
 }
 
+/** Pulse placeholder for loading panels (dashboard, ops, approvals). */
+export function Skeleton({ className = '' }: { className?: string }) {
+  return (
+    <div
+      className={`animate-pulse rounded-md bg-slate-800/80 ${className}`}
+      aria-hidden="true"
+    />
+  )
+}
+
+export function SkeletonLines({
+  lines = 3,
+  className = '',
+}: {
+  lines?: number
+  className?: string
+}) {
+  return (
+    <div className={`space-y-3 ${className}`} role="status" aria-label="Loading">
+      {Array.from({ length: lines }, (_, index) => (
+        <Skeleton key={index} className={`h-4 ${index === lines - 1 ? 'w-2/3' : 'w-full'}`} />
+      ))}
+    </div>
+  )
+}
+
 export function AppShell({ children }: AppShellProps) {
   useLiveEvents()
 

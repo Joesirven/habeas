@@ -1,7 +1,49 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 
+import { Skeleton } from '@/components/AppShell'
 import { listRequests } from '@/lib/api'
+
+function RequestsTableSkeleton({ rows = 6 }: { rows?: number }) {
+  return (
+    <table className="min-w-full text-left text-sm" role="status" aria-label="Loading requests">
+      <thead className="border-b border-slate-800 text-xs uppercase tracking-wide text-slate-500">
+        <tr>
+          <th className="px-4 py-3">
+            <Skeleton className="h-3 w-20" />
+          </th>
+          <th className="px-4 py-3">
+            <Skeleton className="h-3 w-16" />
+          </th>
+          <th className="px-4 py-3">
+            <Skeleton className="h-3 w-24" />
+          </th>
+          <th className="px-4 py-3">
+            <Skeleton className="h-3 w-20" />
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        {Array.from({ length: rows }, (_, index) => (
+          <tr key={index} className="border-b border-slate-800/80">
+            <td className="px-4 py-3">
+              <Skeleton className="h-4 w-36" />
+            </td>
+            <td className="px-4 py-3">
+              <Skeleton className="h-4 w-28" />
+            </td>
+            <td className="px-4 py-3">
+              <Skeleton className="h-4 w-40" />
+            </td>
+            <td className="px-4 py-3">
+              <Skeleton className="h-4 w-24" />
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
 
 const SOURCE_LABELS: Record<string, string> = {
   webform: 'Gravity Forms',
@@ -21,7 +63,12 @@ export function RequestsPage() {
     <section className="space-y-6">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <h2 className="text-2xl font-semibold text-white">Requests</h2>
+          <div className="flex items-center gap-3">
+            <h2 className="text-2xl font-semibold text-white">Requests</h2>
+            {requestsQuery.isFetching && !requestsQuery.isPending && (
+              <span className="text-xs text-slate-500">Refreshing…</span>
+            )}
+          </div>
           <p className="mt-2 text-slate-400">Thin-spine privacy requests across all intake channels.</p>
         </div>
         <Link
@@ -33,7 +80,7 @@ export function RequestsPage() {
       </div>
 
       <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
-        {requestsQuery.isPending && <p className="p-6 text-slate-300">Loading requests…</p>}
+        {requestsQuery.isPending && <RequestsTableSkeleton />}
         {requestsQuery.isError && (
           <p className="p-6 text-red-300">Could not load requests. Is admin-api running with DATABASE_URL?</p>
         )}

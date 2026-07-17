@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 
+import { Skeleton, SkeletonLines } from '@/components/AppShell'
 import { getHealth } from '@/lib/api'
 
 export function DashboardPage() {
@@ -7,6 +8,9 @@ export function DashboardPage() {
     queryKey: ['admin-api', 'health'],
     queryFn: getHealth,
     refetchInterval: 30_000,
+    retry: 3,
+    retryDelay: (attempt) => Math.min(1_000 * 2 ** attempt, 8_000),
+    placeholderData: (previous) => previous,
   })
 
   return (
@@ -19,15 +23,29 @@ export function DashboardPage() {
       </div>
 
       <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
-        <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">Admin API</h3>
-        {healthQuery.isPending && <p className="mt-3 text-slate-300">Checking health…</p>}
-        {healthQuery.isError && (
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">Admin API</h3>
+          {(healthQuery.isPending || healthQuery.isFetching) && (
+            <span className="text-xs text-slate-500">Checking…</span>
+          )}
+        </div>
+
+        {healthQuery.isPending && !healthQuery.data && (
+          <div className="mt-4" role="status" aria-label="Loading admin API health">
+            <SkeletonLines lines={3} />
+          </div>
+        )}
+
+        {healthQuery.isError && !healthQuery.data && (
           <div className="mt-3 space-y-2 text-red-300">
             <p>Could not reach admin-api.</p>
             <p className="text-sm text-red-200/80">
               {healthQuery.error instanceof Error
                 ? healthQuery.error.message
                 : String(healthQuery.error)}
+            </p>
+            <p className="text-sm text-slate-400">
+              Waiting for the API / Cloud Run cold start — retries automatically.
             </p>
             {!import.meta.env.VITE_ADMIN_API_URL ? (
               <p className="text-sm text-slate-400">
@@ -39,14 +57,13 @@ export function DashboardPage() {
               </p>
             ) : (
               <p className="text-sm text-slate-400">
-                Deployed builds need Cloud Run Invoker for{' '}
-                <code className="rounded bg-slate-800 px-1 text-xs">allUsers</code> (or IAP).
-                API: {import.meta.env.VITE_ADMIN_API_URL}
+                Deployed API: {import.meta.env.VITE_ADMIN_API_URL}
               </p>
             )}
           </div>
         )}
-        {healthQuery.isSuccess && (
+
+        {healthQuery.data && (
           <dl className="mt-4 grid gap-3 sm:grid-cols-2">
             <div>
               <dt className="text-xs uppercase text-slate-500">Status</dt>
@@ -57,7 +74,14 @@ export function DashboardPage() {
                 <dt className="text-xs uppercase text-slate-500">Service</dt>
                 <dd className="text-lg text-white">{healthQuery.data.service}</dd>
               </div>
-            ) : null}
+            ) : (
+              <div>
+                <dt className="text-xs uppercase text-slate-500">Service</dt>
+                <dd>
+                  <Skeleton className="mt-1 h-6 w-32" />
+                </dd>
+              </div>
+            )}
           </dl>
         )}
       </div>
