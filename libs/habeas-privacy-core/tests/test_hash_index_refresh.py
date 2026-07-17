@@ -136,7 +136,9 @@ async def _insert_matching_result(
     )
 
 
-async def test_enqueue_rematch_for_refresh_attempt_two_for_not_found_only(pool):
+async def test_enqueue_rematch_for_refresh_attempt_two_for_not_found_skips_single(
+    pool,
+):
     async with pool.acquire() as conn:
         not_found_id = await _promote_drop(
             conn,
@@ -183,7 +185,7 @@ async def test_enqueue_rematch_for_refresh_attempt_two_for_not_found_only(pool):
         assert matched_attempts == 1
 
 
-async def test_enqueue_rematch_skips_match_count_ge_one(pool):
+async def test_enqueue_rematch_includes_multi_match_skips_single(pool):
     async with pool.acquire() as conn:
         multi_match_id = await _promote_drop(
             conn,
@@ -195,8 +197,14 @@ async def test_enqueue_rematch_skips_match_count_ge_one(pool):
             drop_record_id="rematch-zero",
             list_type=DropListType.PHONE,
         )
+        single_match_id = await _promote_drop(
+            conn,
+            drop_record_id="rematch-single",
+            list_type=DropListType.PHONE,
+        )
         await _insert_matching_result(conn, request_id=multi_match_id, match_count=2)
         await _insert_matching_result(conn, request_id=zero_match_id, match_count=0)
+        await _insert_matching_result(conn, request_id=single_match_id, match_count=1)
 
         enqueued = await enqueue_rematch_for_refresh(
             conn,
@@ -204,13 +212,20 @@ async def test_enqueue_rematch_skips_match_count_ge_one(pool):
             list_types=["Phone"],
             state="CA",
         )
-        assert enqueued >= 1
+        assert enqueued >= 2
 
-        multi_attempts = await conn.fetchval(
-            "SELECT COUNT(*) FROM matching_attempts WHERE request_id = $1::uuid",
+        multi_attempt = await conn.fetchrow(
+            """
+            SELECT attempt_number, status
+              FROM matching_attempts
+             WHERE request_id = $1::uuid
+             ORDER BY attempt_number DESC
+             LIMIT 1
+            """,
             multi_match_id,
         )
-        assert multi_attempts == 1
+        assert multi_attempt["attempt_number"] == 2
+        assert multi_attempt["status"] == "pending"
 
         zero_attempt = await conn.fetchrow(
             """
@@ -223,6 +238,12 @@ async def test_enqueue_rematch_skips_match_count_ge_one(pool):
             zero_match_id,
         )
         assert zero_attempt["attempt_number"] == 2
+
+        single_attempts = await conn.fetchval(
+            "SELECT COUNT(*) FROM matching_attempts WHERE request_id = $1::uuid",
+            single_match_id,
+        )
+        assert single_attempts == 1
 
 
 def test_enqueue_rematch_rejects_unsupported_vertical():

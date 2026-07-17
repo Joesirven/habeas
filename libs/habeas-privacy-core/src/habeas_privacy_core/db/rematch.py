@@ -24,7 +24,7 @@ candidates AS (
      WHERE r.intake_source = 'drop'
        AND dr.response_status IS NULL
        AND dr.list_type = ANY($1::text[])
-       AND (lr.request_id IS NULL OR lr.match_count = 0)
+       AND (lr.request_id IS NULL OR lr.match_count <> 1)
 ),
 numbered AS (
     SELECT
@@ -59,8 +59,8 @@ async def enqueue_rematch_for_refresh(
     MVP supports ``vertical='drop'`` only. The ``state`` parameter is reserved
     for future request-level state filtering and is not applied in DROP SQL yet.
     Candidates are open DROP requests (``response_status IS NULL``) whose latest
-    match result is missing or has ``match_count = 0``. Requests with
-    ``match_count >= 1`` (including multi-match / status 4) are skipped.
+    match result is missing, ``match_count = 0`` (not-found), or ``match_count > 1``
+    (prior multi-match / status 4). Single-match (``match_count = 1``) is skipped.
     """
     if vertical != "drop":
         raise ValueError(f"unsupported rematch vertical: {vertical!r}")
