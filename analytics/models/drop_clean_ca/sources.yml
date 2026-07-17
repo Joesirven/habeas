@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: person_db
+    database: example-gcp-project
+    schema: person_db
+    tables:
+      - name: person
+      - name: phones
