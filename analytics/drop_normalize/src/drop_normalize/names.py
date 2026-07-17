@@ -4,15 +4,38 @@ from __future__ import annotations
 
 import json
 import unicodedata
+import zipfile
 from functools import lru_cache
-from importlib import resources
+from pathlib import Path
+
 __all__ = ["normalize_name"]
 
 
 @lru_cache(maxsize=1)
 def _load_map(filename: str) -> dict[str, str]:
-    data = resources.files("drop_normalize.data").joinpath(filename).read_text(encoding="utf-8")
-    return json.loads(data)
+    """Load transliteration JSON from package data (source tree or --py-files zip)."""
+    here = Path(__file__)
+    # Source / extracted layout
+    candidate = here.parent / "data" / filename
+    if candidate.is_file():
+        return json.loads(candidate.read_text(encoding="utf-8"))
+
+    # Spark --py-files: __file__ looks like .../drop_normalize.zip/drop_normalize/names.py
+    parts = here.parts
+    if ".zip" in here.as_posix() or any(p.endswith(".zip") for p in parts):
+        zip_path = None
+        inner_prefix = []
+        for i, part in enumerate(parts):
+            if part.endswith(".zip"):
+                zip_path = Path(*parts[: i + 1])
+                inner_prefix = list(parts[i + 1 : -1])  # drop_normalize
+                break
+        if zip_path is not None and zip_path.is_file():
+            member = "/".join([*inner_prefix, "data", filename])
+            with zipfile.ZipFile(zip_path) as zf:
+                return json.loads(zf.read(member).decode("utf-8"))
+
+    raise FileNotFoundError(f"transliteration map not found: {filename} (from {here})")
 
 
 def _apply_char_map(text: str, mapping: dict[str, str]) -> str:
