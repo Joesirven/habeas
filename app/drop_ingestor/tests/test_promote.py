@@ -21,18 +21,21 @@ async def test_t7_2_promote_inserts_raw_fk_per_list_type():
             "drop_record_id": "n1",
             "list_type": "NDZ",
             "source_csv_filename": "20260716_1_NDZ.csv",
+            "raw_payload": {"hash": "abc"},
         },
         {
             "id": 12,
             "drop_record_id": "e1",
             "list_type": "Email",
             "source_csv_filename": "20260716_1_EMAIL.csv",
+            "raw_payload": {"hash": "def"},
         },
         {
             "id": 13,
             "drop_record_id": "p1",
             "list_type": "Phone",
             "source_csv_filename": "20260716_1_PHONE.csv",
+            "raw_payload": {"hash": "ghi"},
         },
     ]
 
@@ -65,6 +68,67 @@ async def test_t7_2_promote_inserts_raw_fk_per_list_type():
     assert result.raw_record_ids == [11, 12, 13]
     assert {p.raw_record_id for p in inserted} == {11, 12, 13}
     assert all(p.intake_source.value == "drop" for p in inserted)
+    # CA DROP sandbox filenames omit state → default CA
+    assert all(p.requestor_state == "CA" for p in inserted)
+
+
+@pytest.mark.asyncio
+async def test_promote_requestor_state_from_payload():
+    raw_rows = [
+        {
+            "id": 42,
+            "drop_record_id": "e42",
+            "list_type": "Email",
+            "source_csv_filename": "20260716_1_EMAIL.csv",
+            "raw_payload": {"state": "tx", "hash": "x"},
+        }
+    ]
+    inserted: list[Any] = []
+
+    async def fake_insert_request(conn: Any, payload: Any) -> str:
+        inserted.append(payload)
+        return "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=raw_rows)
+    conn.fetchval = AsyncMock(return_value=0)
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    with patch("drop_ingestor.promote.insert_request", side_effect=fake_insert_request):
+        with patch("drop_ingestor.promote.claim_next", AsyncMock(return_value=None)):
+            await run_promote(conn=conn, worker_id="drop-ingestor-test")
+
+    assert len(inserted) == 1
+    assert inserted[0].requestor_state == "TX"
+
+
+@pytest.mark.asyncio
+async def test_promote_requestor_state_from_filename():
+    raw_rows = [
+        {
+            "id": 7,
+            "drop_record_id": "n7",
+            "list_type": "NDZ",
+            "source_csv_filename": "broker_NY_NDZ.csv",
+            "raw_payload": {"hash": "h"},
+        }
+    ]
+    inserted: list[Any] = []
+
+    async def fake_insert_request(conn: Any, payload: Any) -> str:
+        inserted.append(payload)
+        return "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=raw_rows)
+    conn.fetchval = AsyncMock(return_value=0)
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    with patch("drop_ingestor.promote.insert_request", side_effect=fake_insert_request):
+        with patch("drop_ingestor.promote.claim_next", AsyncMock(return_value=None)):
+            await run_promote(conn=conn, worker_id="drop-ingestor-test")
+
+    assert inserted[0].requestor_state == "NY"
 
 
 @pytest.mark.asyncio
@@ -76,6 +140,7 @@ async def test_t7_3_promote_does_not_enqueue_matching():
             "drop_record_id": "e42",
             "list_type": "Email",
             "source_csv_filename": "20260716_1_EMAIL.csv",
+            "raw_payload": {},
         }
     ]
 

@@ -187,7 +187,11 @@ async def requests_create(_body: ManualRequestBody):
     async with pool.acquire() as conn:
         request_id = await insert_request(
             conn,
-            CreateRequestInput(intake_source=IntakeSource.MANUAL, raw_record_id=None),
+            CreateRequestInput(
+                intake_source=IntakeSource.MANUAL,
+                raw_record_id=None,
+                requestor_state=_body.state,
+            ),
         )
         record = await get_request(conn, request_id)
     if record is None:

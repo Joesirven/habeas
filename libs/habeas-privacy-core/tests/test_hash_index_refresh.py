@@ -306,8 +306,8 @@ async def test_enqueue_rematch_includes_multi_match_skips_single(pool):
 
 
 @requires_database
-async def test_enqueue_rematch_skips_fulfilled_response_status_4(pool):
-    """Already-fulfilled Opted-out (response_status=4) must not rematch."""
+async def test_enqueue_rematch_reopens_fulfilled_response_status_4(pool):
+    """Fulfilled Opted-out (response_status=4) rematches and reopens to NULL."""
     async with pool.acquire() as conn:
         fulfilled_id = await _promote_drop(
             conn,
@@ -319,8 +319,14 @@ async def test_enqueue_rematch_skips_fulfilled_response_status_4(pool):
             drop_record_id="rematch-open-multi",
             list_type=DropListType.EMAIL,
         )
+        fulfilled_deleted_id = await _promote_drop(
+            conn,
+            drop_record_id="rematch-fulfilled-3",
+            list_type=DropListType.EMAIL,
+        )
         await _insert_matching_result(conn, request_id=fulfilled_id, match_count=2)
         await _insert_matching_result(conn, request_id=open_multi_id, match_count=2)
+        await _insert_matching_result(conn, request_id=fulfilled_deleted_id, match_count=0)
         await conn.execute(
             """
             UPDATE drop_raw_requests
@@ -331,6 +337,31 @@ async def test_enqueue_rematch_skips_fulfilled_response_status_4(pool):
             """,
             fulfilled_id,
         )
+        await conn.execute(
+            """
+            UPDATE drop_raw_requests
+               SET response_status = 3
+             WHERE id = (
+                SELECT raw_record_id FROM requests WHERE id = $1::uuid
+             )
+            """,
+            fulfilled_deleted_id,
+        )
+        # Pending matching.review on status-4 must be closed on reopen.
+        await conn.execute(
+            """
+            INSERT INTO approval_requests (
+                request_id, action_type, rule_id, approver_role, status, expires_at
+            )
+            SELECT $1::uuid, 'matching.review', ar.id, ar.approver_role, 'pending',
+                   NOW() + INTERVAL '7 days'
+              FROM approval_rules ar
+             WHERE ar.action_type = 'matching.review'
+               AND ar.effective_to IS NULL
+             LIMIT 1
+            """,
+            fulfilled_id,
+        )
 
         enqueued = await enqueue_rematch_for_refresh(
             conn,
@@ -338,13 +369,57 @@ async def test_enqueue_rematch_skips_fulfilled_response_status_4(pool):
             list_types=["Email"],
             state="CA",
         )
-        assert enqueued >= 1
+        assert enqueued >= 2
 
-        fulfilled_attempts = await conn.fetchval(
-            "SELECT COUNT(*) FROM matching_attempts WHERE request_id = $1::uuid",
+        fulfilled_attempt = await conn.fetchrow(
+            """
+            SELECT attempt_number, status
+              FROM matching_attempts
+             WHERE request_id = $1::uuid
+             ORDER BY attempt_number DESC
+             LIMIT 1
+            """,
             fulfilled_id,
         )
-        assert fulfilled_attempts == 1
+        assert fulfilled_attempt["attempt_number"] == 2
+        assert fulfilled_attempt["status"] == "pending"
+
+        reopened_status = await conn.fetchval(
+            """
+            SELECT dr.response_status
+              FROM drop_raw_requests dr
+              JOIN requests r ON r.raw_record_id = dr.id
+             WHERE r.id = $1::uuid
+            """,
+            fulfilled_id,
+        )
+        assert reopened_status is None
+
+        pending_closed = await conn.fetchval(
+            """
+            SELECT status
+              FROM approval_requests
+             WHERE request_id = $1::uuid
+               AND action_type = 'matching.review'
+               AND status = 'pending'
+             LIMIT 1
+            """,
+            fulfilled_id,
+        )
+        assert pending_closed is None
+        superseded = await conn.fetchrow(
+            """
+            SELECT status, decision_reason
+              FROM approval_requests
+             WHERE request_id = $1::uuid
+               AND action_type = 'matching.review'
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            fulfilled_id,
+        )
+        assert superseded["status"] == "rejected"
+        assert superseded["decision_reason"] == "superseded_by_rematch_reopen"
 
         open_attempt = await conn.fetchrow(
             """
@@ -359,6 +434,23 @@ async def test_enqueue_rematch_skips_fulfilled_response_status_4(pool):
         assert open_attempt["attempt_number"] == 2
         assert open_attempt["status"] == "pending"
 
+        # Other fulfilled statuses (3 Deleted) must not rematch or reopen.
+        deleted_attempts = await conn.fetchval(
+            "SELECT COUNT(*) FROM matching_attempts WHERE request_id = $1::uuid",
+            fulfilled_deleted_id,
+        )
+        assert deleted_attempts == 1
+        deleted_status = await conn.fetchval(
+            """
+            SELECT dr.response_status
+              FROM drop_raw_requests dr
+              JOIN requests r ON r.raw_record_id = dr.id
+             WHERE r.id = $1::uuid
+            """,
+            fulfilled_deleted_id,
+        )
+        assert deleted_status == 3
+
 
 def test_rematch_sql_filters_requestor_state():
     """Candidate SQL must scope rematch to the refreshed requester state."""
@@ -369,6 +461,9 @@ def test_rematch_sql_filters_requestor_state():
     source = inspect.getsource(rematch_mod)
     assert "requestor_state" in source
     assert "UPPER(TRIM(r.requestor_state))" in source
+    assert "response_status = 4" in source
+    assert "response_status = NULL" in source
+    assert "superseded_by_rematch_reopen" in source
 
 
 def test_enqueue_rematch_rejects_unsupported_vertical():

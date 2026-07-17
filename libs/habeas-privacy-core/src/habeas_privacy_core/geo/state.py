@@ -6,6 +6,10 @@ a different MDR/DROP source of truth (Q6).
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+from typing import Any, Literal, Mapping
+
 # Fixed allowlist — USPS 50 states + District of Columbia (A10).
 USPS_STATES_PLUS_DC: frozenset[str] = frozenset(
     {
@@ -79,9 +83,52 @@ class InvalidStateAcronymError(ValueError):
     """Raised when a value cannot be normalized to a served USPS state code."""
 
 
+# CA DROP sandbox / MDR MVP default when payload and filename omit state.
+DEFAULT_DROP_REQUESTOR_STATE = "CA"
+
+_FILENAME_STATE_TOKEN = re.compile(r"(?:^|_)([A-Za-z]{2})(?=_|\.|$)")
+
+RequestorStateSource = Literal["payload", "filename", "default"]
+
+
 def served_state_acronyms() -> frozenset[str]:
     """Return the MDR/DROP-served state allowlist (A10: 50 + DC)."""
     return USPS_STATES_PLUS_DC
+
+
+def resolve_drop_requestor_state(
+    *,
+    raw_payload: Mapping[str, Any] | None = None,
+    source_csv_filename: str | None = None,
+) -> tuple[str, RequestorStateSource]:
+    """Resolve DROP ``requestor_state`` for thin-spine insert.
+
+    Preference order:
+    1. ``raw_payload`` keys ``requestor_state`` / ``state`` (normalized)
+    2. USPS token in ``source_csv_filename`` (e.g. ``broker_TX_EMAIL.csv``)
+    3. ``DEFAULT_DROP_REQUESTOR_STATE`` (``CA``) for CA DROP sandbox filenames
+       that omit state (e.g. ``20260716_1_NDZ.csv``)
+    """
+    if raw_payload:
+        for key in ("requestor_state", "state"):
+            value = raw_payload.get(key)
+            if value is None or str(value).strip() == "":
+                continue
+            try:
+                return normalize_state_acronym(str(value)), "payload"
+            except InvalidStateAcronymError:
+                continue
+
+    if source_csv_filename:
+        stem = Path(source_csv_filename).name
+        for match in _FILENAME_STATE_TOKEN.finditer(stem):
+            token = match.group(1)
+            try:
+                return normalize_state_acronym(token), "filename"
+            except InvalidStateAcronymError:
+                continue
+
+    return DEFAULT_DROP_REQUESTOR_STATE, "default"
 
 
 def normalize_state_acronym(

@@ -42,6 +42,7 @@ async def test_t5_2_insert_request_does_not_enqueue_matching(pool):
             CreateRequestInput(
                 intake_source=IntakeSource.MANUAL,
                 raw_record_id=None,
+                requestor_state="CA",
             ),
         )
         attempt = await conn.fetchrow(
@@ -91,4 +92,5 @@ async def test_t5_3_promote_drop_request_writes_raw_and_thin_atomically(pool):
     assert request is not None
     assert request.intake_source == IntakeSource.DROP
     assert request.raw_record_id == raw_record_id
+    assert request.requestor_state == "CA"
     assert attempt is None

@@ -13,9 +13,12 @@ Does **not** call Tier-C suppression APIs (mailchimp, paylocity, etc.).
   `decided_at >=` latest `matching_results.recorded_at` (stale approvals after
   rematch do not unlock fulfill); same gate for statuses 3/4/5
 - `match_count` 0 → `response_status=5` (Not found); 1 → `3` (Deleted); N>1 → `4` (Opted out)
-- Open-row rematch coherence: fulfill always uses the **latest** `match_count`, so
-  multi→1 / multi→0 cannot ship as stale Opted-out (4). Fulfilled `response_status=4`
-  is not auto-rematched (known gap until an explicit reopen path).
+- Rematch coherence (open + reopened Opted-out): fulfill always uses the
+  **latest** `match_count`, so multi→1 / multi→0 cannot ship as stale Opted-out
+  (4). After hash-index refresh, fulfilled `response_status=4` with latest
+  match missing / 0 / >1 is rematched and **reopened** to NULL so fulfill can
+  rewrite 3/4/5 from the new result (other fulfilled statuses 3/5 are not
+  rematched).
 - **No** fulfillment queue / attempts table — operates on `matching_results` +
   `drop_raw_requests` (reaper registry unchanged)
 
