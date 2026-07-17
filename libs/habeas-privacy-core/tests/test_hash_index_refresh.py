@@ -28,9 +28,9 @@ async def pool():
 
 
 async def _clear_refresh_attempts(conn: asyncpg.Connection) -> None:
-    # Terminal rows are immutable. The terminal-guard trigger returns NEW on
-    # DELETE (null), which cancels deletes — abandon non-terminal rows instead
-    # so the single-flight unique index frees the state.
+    # Attempts are immutable/auditable: DELETE is forbidden (terminal-guard raises
+    # on terminal DELETE; non-terminal DELETE is cancelled via RETURN NEW/NULL).
+    # Free the single-flight unique index with a process-legal transition only.
     await conn.execute(
         """
         UPDATE hash_index_refresh_attempts
@@ -99,6 +99,52 @@ async def test_enqueue_hash_index_refresh_allows_new_after_terminal(pool):
             list_types=["Phone"],
         )
         assert next_id != attempt_id
+
+
+@requires_database
+async def test_hash_index_refresh_attempts_forbid_delete(pool):
+    """Attempts stay visible: DELETE must not remove rows (auditability)."""
+    async with pool.acquire() as conn:
+        await _clear_refresh_attempts(conn)
+        attempt_id = await enqueue_hash_index_refresh(
+            conn,
+            state="CA",
+            list_types=["Email"],
+        )
+
+        # Non-terminal DELETE is cancelled by the terminal-guard (RETURN NULL).
+        await conn.execute(
+            "DELETE FROM hash_index_refresh_attempts WHERE id = $1",
+            attempt_id,
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT COUNT(*) FROM hash_index_refresh_attempts WHERE id = $1",
+                attempt_id,
+            )
+            == 1
+        )
+
+        await conn.execute(
+            """
+            UPDATE hash_index_refresh_attempts
+               SET status = 'success', completed_at = NOW()
+             WHERE id = $1
+            """,
+            attempt_id,
+        )
+        with pytest.raises(asyncpg.RaiseError, match="terminal attempt rows are immutable"):
+            await conn.execute(
+                "DELETE FROM hash_index_refresh_attempts WHERE id = $1",
+                attempt_id,
+            )
+        assert (
+            await conn.fetchval(
+                "SELECT COUNT(*) FROM hash_index_refresh_attempts WHERE id = $1",
+                attempt_id,
+            )
+            == 1
+        )
 
 
 async def _promote_drop(

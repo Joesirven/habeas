@@ -11,6 +11,7 @@
 - Expand-then-contract for zero-downtime changes
 - Never edit a migration that has been applied to production — add a new file
 - `REVOKE UPDATE, DELETE` on append-only audit and attempt tables
+- Attempt tables use `core_forbid_terminal_attempt_mutation` — terminal rows immutable; **do not** migrate the guard to allow DELETE for test cleanup (`hash_index_refresh_attempts` immutability locked)
 - v0 live events: triggers on **approval_requests** (and related) → `NOTIFY privacy_events`
 
 ## Commands

@@ -20,4 +20,6 @@ Migration adds `NOTIFY privacy_events` on **approval_requests** (and related) fo
 
 Postgres owns the DROP hash index refresh control plane: `hash_index_refresh_attempts` (single-flight per `state`) and append-only `hash_index_refresh_runs`. Enqueue helpers live in `habeas_privacy_core.db.hash_index_refresh`.
 
+**Immutability / auditability (locked):** Attempts must remain visible. No DELETE of `hash_index_refresh_attempts` in app/ops/worker/test paths. Updates only via process transitions on non-terminal rows; terminal rows stay terminal (`hash_index_refresh_attempts_terminal_guard` → `core_forbid_terminal_attempt_mutation`). Runs are append-only (`REVOKE UPDATE, DELETE`). Free single-flight in tests by abandoning non-terminal rows, then enqueue a new attempt — never DELETE. Do not add a migration that opens DELETE for cleanup.
+
 If editing → [`.agent/modules/db-migrations.md`](../.agent/modules/db-migrations.md).
