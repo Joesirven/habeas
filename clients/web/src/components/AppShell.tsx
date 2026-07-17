@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 
 import { NavMenu } from '@/components/NavMenu'
+import { AuthProvider } from '@/lib/auth'
 import { useLiveEvents } from '@/lib/live-events'
 
 type AppShellProps = {
@@ -33,7 +34,7 @@ export function SkeletonLines({
   )
 }
 
-export function AppShell({ children }: AppShellProps) {
+function AppShellFrame({ children }: AppShellProps) {
   useLiveEvents()
 
   return (
@@ -69,5 +70,13 @@ export function AppShell({ children }: AppShellProps) {
         </div>
       </footer>
     </div>
+  )
+}
+
+export function AppShell({ children }: AppShellProps) {
+  return (
+    <AuthProvider>
+      <AppShellFrame>{children}</AppShellFrame>
+    </AuthProvider>
   )
 }

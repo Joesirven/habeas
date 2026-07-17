@@ -1,5 +1,12 @@
 const API_BASE = import.meta.env.VITE_ADMIN_API_URL ?? '/api'
 
+export type UserRole = 'super_admin' | 'admin' | 'data_owner'
+
+export type MePayload = {
+  email: string
+  role: UserRole
+}
+
 export async function fetchAdminApi<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -42,6 +49,10 @@ export type ManualRequestInput = {
   dob?: string
   state: string
   external_id?: string
+}
+
+export function getMe() {
+  return fetchAdminApi<MePayload>('/me')
 }
 
 export function getHealth() {
@@ -555,5 +566,51 @@ export function getDropWorkflowAssignments(params?: {
   const query = search.toString()
   return fetchAdminApi<{ assignments: WorkflowAssignmentSummary[]; count: number }>(
     `/ops/drop/workflow/assignments${query ? `?${query}` : ''}`,
+  )
+}
+
+// --- Ops runs detail (U4) — append-only for parallel agent merges ---
+
+export type RunTimelineStepStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'skipped'
+
+export type RunTimelineStep = {
+  key: string
+  label: string
+  status: RunTimelineStepStatus
+  timestamp: string | null
+  detail?: string | null
+}
+
+export type RunEvent = {
+  id: string
+  event_type: string
+  occurred_at: string
+  summary?: string | null
+}
+
+export type RunDetail = {
+  run_id: string
+  attempt_id: number
+  job: string
+  status: string
+  request_id: string | null
+  attempt_number?: number | null
+  started_at: string | null
+  completed_at: string | null
+  duration_seconds: number | null
+  error_code?: string | null
+  error_message?: string | null
+  timeline: RunTimelineStep[]
+  events: RunEvent[]
+}
+
+export function getRunDetail(job: string, attemptId: number) {
+  return fetchAdminApi<RunDetail>(
+    `/ops/runs/${encodeURIComponent(job)}/${attemptId}`,
   )
 }

@@ -1,6 +1,12 @@
 import { Link, useRouterState } from '@tanstack/react-router'
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 
+import {
+  canAccessInsights,
+  canAccessOpsSurfaces,
+  useAuth,
+} from '@/lib/auth'
+
 const navClass =
   'text-mute transition-colors hover:text-ink [&.active]:text-ink [&.active]:underline [&.active]:decoration-ink/25 [&.active]:underline-offset-4'
 
@@ -17,8 +23,31 @@ type NavGroup = {
   children: NavChild[]
 }
 
-const PIPELINE_GROUP: NavGroup = {
-  label: 'Pipeline',
+const REQUESTS_GROUP: NavGroup = {
+  label: 'Requests',
+  to: '/requests',
+  children: [
+    { label: 'All requests', to: '/requests' },
+    { label: 'Needs attention', to: '/requests/needs-attention' },
+    { label: 'SLAs', to: '/requests/slas' },
+  ],
+}
+
+const OPS_GROUP: NavGroup = {
+  label: 'Ops',
+  to: '/ops/dashboard',
+  children: [
+    { label: 'Dashboard', to: '/ops/dashboard' },
+    { label: 'Runs', to: '/ops/runs' },
+    { label: 'Jobs', to: '/ops/jobs' },
+    { label: 'Insights', to: '/ops/health' },
+    { label: 'Incidents', to: '/ops/incidents' },
+    { label: 'Configuration', to: '/ops/health/configuration' },
+  ],
+}
+
+const CONSOLE_GROUP: NavGroup = {
+  label: 'Console',
   to: '/ops/drop-pipeline',
   search: { tab: 'home' },
   children: [
@@ -30,12 +59,12 @@ const PIPELINE_GROUP: NavGroup = {
   ],
 }
 
-const HEALTH_GROUP: NavGroup = {
-  label: 'Health',
+const INSIGHTS_GROUP: NavGroup = {
+  label: 'Insights',
   to: '/ops/health',
   children: [
+    { label: 'Workers & queues', to: '/ops/health' },
     { label: 'Escalations / retries', to: '/ops/health/escalations' },
-    { label: 'Configuration', to: '/ops/health/configuration' },
   ],
 }
 
@@ -129,16 +158,26 @@ function NavDropdown({ group }: { group: NavGroup }) {
 }
 
 export function NavMenu() {
+  const { role, isLoading } = useAuth()
+  const showOps = canAccessOpsSurfaces(role)
+  const showInsights = canAccessInsights(role)
+
   return (
-    <nav className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2 text-[0.8125rem]">
+    <nav
+      className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2 text-[0.8125rem]"
+      aria-busy={isLoading}
+    >
       <Link to="/" className={navClass}>
         Dashboard
       </Link>
-      <NavDropdown group={PIPELINE_GROUP} />
-      <NavDropdown group={HEALTH_GROUP} />
-      <Link to="/requests" className={navClass}>
-        Requests
-      </Link>
+      <NavDropdown group={REQUESTS_GROUP} />
+      {showOps ? (
+        <>
+          <NavDropdown group={OPS_GROUP} />
+          <NavDropdown group={CONSOLE_GROUP} />
+        </>
+      ) : null}
+      {!showOps && showInsights ? <NavDropdown group={INSIGHTS_GROUP} /> : null}
       <Link to="/approvals/matching-review" className={navClass}>
         Matching review
       </Link>
