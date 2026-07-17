@@ -1,7 +1,27 @@
 # Admin API
 
-Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Server-Sent Events live stream, mutation routes for web and Habeas CLI.
+Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Server-Sent Events
+live stream, mutation routes for web and Habeas CLI.
 
-Cloud Run FastAPI app (scaffold pending). Depends on [`habeas-privacy-core`](../../libs/habeas-privacy-core/).
+## DROP ops (Wave B)
+
+| Surface | Endpoints (representative) |
+|---------|----------------------------|
+| Pipeline status / spine proxies | `GET /ops/drop/pipeline`, download/land/promote/dispatch/match/fulfill proxies |
+| Hash-index refresh | `POST .../hash-index-refresh/enqueue`, `.../enqueue-all`, `.../process` |
+| Matching results | list/detail (attempt history + allowlisted `audit_payload`), promote/decline (individual + bulk) |
+| Assign / escalate | `POST /ops/drop/workflow/assign`, `.../escalate`, `GET .../assignments` |
+| Health / fleet | `GET /ops/drop/workers`, `GET /ops/health/queues`, `GET/PATCH /ops/health/retry-config` |
+| Home summary | `GET /ops/drop/stats/global` |
+
+Browser never calls workers — admin_api aggregates `/readyz` + Postgres queue depths.
+
+## Local
+
+```bash
+uv run --package admin-api uvicorn admin_api.main:app --reload --app-dir app/admin_api/src
+```
+
+Depends on [`habeas-privacy-core`](../../libs/habeas-privacy-core/).
 
 **Agent rules:** [`AGENTS.md`](AGENTS.md) · **Parent:** [`app/AGENTS.md`](../AGENTS.md)

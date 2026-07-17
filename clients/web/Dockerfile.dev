@@ -1,0 +1,9 @@
+# Hot-reload Vite image with deps baked in (Colima-friendly).
+FROM oven/bun:1.3
+WORKDIR /app
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+COPY . .
+EXPOSE 5173
+ENV VITE_ADMIN_API_URL=https://admin-api-dev-hsa55rg7ja-uk.a.run.app
+CMD ["bun", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]

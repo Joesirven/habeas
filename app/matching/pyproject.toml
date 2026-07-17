@@ -6,6 +6,7 @@ dependencies = [
     "habeas-privacy-core",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
+    "google-cloud-bigquery>=3.25",
 ]
 
 [tool.uv.sources]

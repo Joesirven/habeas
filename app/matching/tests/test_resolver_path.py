@@ -19,6 +19,7 @@ async def test_t8_2_matcher_builds_request_via_resolver():
         "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         "intake_source": "drop",
         "raw_record_id": 42,
+        "requestor_state": "TX",
     }
     payload = DropMatchingPayload(
         drop_record_id="drop-42",
@@ -34,6 +35,7 @@ async def test_t8_2_matcher_builds_request_via_resolver():
     assert match_request.intake_source == IntakeSource.DROP
     assert match_request.list_type == DropListType.EMAIL
     assert match_request.hash_fields["pii_hash"] == "abc"
+    assert match_request.requestor_state == "TX"
 
 
 def test_t8_2_match_request_from_drop_payload():
@@ -88,12 +90,18 @@ def test_t8_4_primary_hash_paths(list_type, hash_fields, expected_via, expected_
     ],
 )
 async def test_t8_4_drop_hash_pipeline_list_type_paths(list_type, hash_fields, expected_via):
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    client.query.return_value = []
     request = MatchRequest(
         request_id="r1",
         intake_source=IntakeSource.DROP,
         list_type=list_type,
         hash_fields=hash_fields,
+        requestor_state="CA",
     )
-    result = await DropHashPipeline().match(request)
+    result = await DropHashPipeline(bq_client=client).match(request)
     assert result.matched is False
+    assert result.match_count == 0
     assert result.matched_via == expected_via

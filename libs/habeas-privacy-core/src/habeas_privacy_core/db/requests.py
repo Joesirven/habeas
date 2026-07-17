@@ -7,6 +7,10 @@ from uuid import UUID
 
 import asyncpg
 
+from habeas_privacy_core.geo.state import (
+    normalize_state_acronym,
+    resolve_drop_requestor_state,
+)
 from habeas_privacy_core.models.intake import (
     CreateRequestInput,
     PromoteDropRequestInput,
@@ -18,14 +22,16 @@ from habeas_privacy_core.queue.constants import MATCHING_ATTEMPTS_TABLE, MATCHIN
 
 async def insert_request(conn: asyncpg.Connection, payload: CreateRequestInput) -> str:
     """Insert a thin-spine request row (no matching enqueue)."""
+    requestor_state = normalize_state_acronym(payload.requestor_state)
     request_id = await conn.fetchval(
         """
-        INSERT INTO requests (intake_source, raw_record_id)
-        VALUES ($1, $2)
+        INSERT INTO requests (intake_source, raw_record_id, requestor_state)
+        VALUES ($1, $2, $3)
         RETURNING id
         """,
         payload.intake_source.value,
         payload.raw_record_id,
+        requestor_state,
     )
     return str(request_id)
 
@@ -35,6 +41,10 @@ async def promote_drop_request(
     payload: PromoteDropRequestInput,
 ) -> tuple[int, str]:
     """Atomically insert drop_raw_requests and a linked thin requests row."""
+    requestor_state, _source = resolve_drop_requestor_state(
+        raw_payload=payload.raw_payload,
+        source_csv_filename=payload.source_csv_filename,
+    )
     async with conn.transaction():
         raw_record_id = await conn.fetchval(
             """
@@ -56,6 +66,7 @@ async def promote_drop_request(
             CreateRequestInput(
                 intake_source=IntakeSource.DROP,
                 raw_record_id=raw_record_id,
+                requestor_state=requestor_state,
             ),
         )
         return raw_record_id, request_id
@@ -84,7 +95,7 @@ async def list_requests(
     if intake_source is None:
         rows = await conn.fetch(
             """
-            SELECT id, received_at, intake_source, raw_record_id
+            SELECT id, received_at, intake_source, raw_record_id, requestor_state
               FROM requests
              ORDER BY received_at DESC
              LIMIT $1
@@ -94,7 +105,7 @@ async def list_requests(
     else:
         rows = await conn.fetch(
             """
-            SELECT id, received_at, intake_source, raw_record_id
+            SELECT id, received_at, intake_source, raw_record_id, requestor_state
               FROM requests
              WHERE intake_source = $1
              ORDER BY received_at DESC
@@ -110,7 +121,7 @@ async def get_request(conn: asyncpg.Connection, request_id: str) -> RequestRecor
     """Fetch a single request by id."""
     row = await conn.fetchrow(
         """
-        SELECT id, received_at, intake_source, raw_record_id
+        SELECT id, received_at, intake_source, raw_record_id, requestor_state
           FROM requests
          WHERE id = $1
         """,
@@ -123,7 +134,7 @@ async def load_request_row(conn: asyncpg.Connection, request_id: str) -> dict | 
     """Load raw request fields for worker pipelines."""
     row = await conn.fetchrow(
         """
-        SELECT id, received_at, intake_source, raw_record_id
+        SELECT id, received_at, intake_source, raw_record_id, requestor_state
           FROM requests
          WHERE id = $1
         """,
@@ -138,4 +149,5 @@ def _row_to_request(row: asyncpg.Record) -> RequestRecord:
         received_at=row["received_at"].isoformat(),
         intake_source=IntakeSource(row["intake_source"]),
         raw_record_id=row["raw_record_id"],
+        requestor_state=str(row["requestor_state"]),
     )

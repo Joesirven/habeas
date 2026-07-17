@@ -67,14 +67,81 @@ Env on Cloud Run: `DROP_ENV=sandbox`, `DROP_API_BASE_URL=https://api.drop.privac
 
 Land/promote only — no `DROP_API_KEY`. Needs `DATABASE_URL`.
 
+### admin-web-dev (static admin SPA)
+
+| File | Purpose |
+|------|---------|
+| [`cloudbuild/admin-web-dev.yaml`](cloudbuild/admin-web-dev.yaml) | Build/push/deploy `admin-web-dev` |
+
+Bun/Vite multi-stage build → nginx on port 8080. `VITE_ADMIN_API_URL` is a **build arg** (default: dev admin-api Cloud Run URL). No runtime secrets.
+
+```bash
+gcloud builds submit --config=infra/cloudbuild/admin-web-dev.yaml --project=example-gcp-project .
+```
+
+After first deploy, append the `admin-web-dev` `*.run.app` origin to `admin-api-dev` `_CORS_ORIGINS` and redeploy admin-api so the browser can call the API cross-origin.
+
+### hash-index-refresh (DROP hash productionize)
+
+| File | Purpose |
+|------|---------|
+| [`cloudbuild/hash-index-refresh-dev.yaml`](cloudbuild/hash-index-refresh-dev.yaml) | Build/push/deploy `hash-index-refresh-dev` |
+
+Runs dbt under `transform/drop_hash/` against BigQuery `drop_hash_index`. Needs `DATABASE_URL` + workload identity with BigQuery **jobUser** and dataset write on `example-gcp-project.drop_hash_index` (read on MDR source datasets). Matching SA remains **select-only** on the three serving marts (`email_hash`, `phone_hash`, `ndz_hash`).
+
+```bash
+gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
+  --project=example-gcp-project \
+  --substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@/postgres?host=/cloudsql/example-gcp-project:us-east4:dpra-dev-temp'
+```
+
 ### Cloud Run auth (dev)
 
 | Surface | Invoker |
 |---------|---------|
-| `admin-api-dev` | `allUsers` (Firebase SPA CORS; IAP later) |
-| Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) |
+| `admin-api-dev` | `allUsers` (Firebase SPA CORS; **residual** until Identity-Aware Proxy) |
+| `admin-web-dev` | `allUsers` (static SPA; CORS origin must be listed on admin-api) |
+| Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`, `hash-index-refresh-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) |
 
 Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Localhost worker URLs skip auth.
+
+#### DROP mutation identity (app layer)
+
+Mutating `/ops/drop/*` routes call `require_drop_mutation_actor`. Set `REQUIRE_IAP_IDENTITY=true` on admin-api (Cloud Build `_REQUIRE_IAP_IDENTITY`) so headerless callers get **401**. Local default is `false` so Vite/CLI against localhost keep working.
+
+`decided_by` on bulk-approve prefers `X-Goog-Authenticated-User-Email` when present (ignores client spoof).
+
+**Residual (do not waive for shared/prod without this checklist):**
+
+1. Put Identity-Aware Proxy in front of `admin-api` (Architecture: IAP at edge; JWT assertion strips client-forged email headers).
+2. Flip `_REQUIRE_IAP_IDENTITY=true` on `admin-api-dev` deploy.
+3. Remove `allUsers` invoker (`admin-api-dev-iam.yaml` is the opposite of the end state — do not copy that pattern to workers).
+4. Grant worker invoker only to the admin-api runtime SA:
+
+```bash
+gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev-iam.yaml \
+  --project=example-gcp-project
+```
+
+#### Workload identity least privilege (hash-index vs matching) — go-live
+
+Cloud Build does **not** yet attach dedicated runtime service accounts (same gap as other workers besides `reaper`). Before production:
+
+| Workload | Runtime SA (create if missing) | BigQuery |
+|----------|--------------------------------|----------|
+| `hash-index-refresh` | dedicated SA | `roles/bigquery.jobUser` + dataset write on `drop_hash_index` + read on MDR sources |
+| `matching` | distinct SA | **select-only** on `email_hash` / `phone_hash` / `ndz_hash` (e.g. `roles/bigquery.dataViewer` at dataset or table) |
+
+Verify after bind:
+
+```bash
+gcloud run services describe hash-index-refresh-dev --region=us-east4 --project=example-gcp-project \
+  --format='value(spec.template.spec.serviceAccountName)'
+gcloud run services describe matching-dev --region=us-east4 --project=example-gcp-project \
+  --format='value(spec.template.spec.serviceAccountName)'
+# Confirm invoker is admin-api SA only (no allUsers):
+gcloud run services get-iam-policy hash-index-refresh-dev --region=us-east4 --project=example-gcp-project
+```
 
 After INF grants `secretmanager.admin`, cut over to `dev-dpra` + `database-url` and delete `dpra-dev-temp`.
 

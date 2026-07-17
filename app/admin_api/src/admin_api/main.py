@@ -20,7 +20,11 @@ from admin_api.approvals import (
     is_matching_review_approved,
     list_approvals,
 )
+from admin_api.drop_pipeline import health_router as ops_health_router
 from admin_api.drop_pipeline import router as drop_pipeline_router
+from admin_api.runs import router as runs_router
+from admin_api.request_journey import router as request_journey_router
+from admin_api.roles import CurrentRolePrincipal, MeResponse
 from habeas_privacy_core.audit import AuditMiddleware
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
@@ -112,6 +116,9 @@ app.add_middleware(
 )
 app.add_middleware(AuditMiddleware)
 app.include_router(drop_pipeline_router)
+app.include_router(ops_health_router)
+app.include_router(runs_router)
+app.include_router(request_journey_router)
 
 
 def _approval_record(row: dict[str, Any]) -> ApprovalRecord:
@@ -124,6 +131,11 @@ def _approval_record(row: dict[str, Any]) -> ApprovalRecord:
         decided_by=row.get("decided_by"),
         decision_reason=row.get("decision_reason"),
     )
+
+
+@app.get("/me", response_model=MeResponse)
+async def me(principal: CurrentRolePrincipal) -> MeResponse:
+    return MeResponse(email=principal.email, role=principal.role)
 
 
 @app.get("/healthz")
@@ -185,7 +197,11 @@ async def requests_create(_body: ManualRequestBody):
     async with pool.acquire() as conn:
         request_id = await insert_request(
             conn,
-            CreateRequestInput(intake_source=IntakeSource.MANUAL, raw_record_id=None),
+            CreateRequestInput(
+                intake_source=IntakeSource.MANUAL,
+                raw_record_id=None,
+                requestor_state=_body.state,
+            ),
         )
         record = await get_request(conn, request_id)
     if record is None:

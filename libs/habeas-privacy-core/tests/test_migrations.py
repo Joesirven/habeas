@@ -60,6 +60,19 @@ def test_u4_migrations_exist():
     assert "requests_validate_raw_fk" in spine_sql
 
 
+def test_hash_index_refresh_migration_exists():
+    migration = migrations_dir() / "20260717000001_matching_hash_index_refresh.sql"
+    assert migration.exists()
+    content = migration.read_text()
+    assert "CREATE TABLE hash_index_refresh_attempts" in content
+    assert "CREATE TABLE hash_index_refresh_runs" in content
+    assert "ix_hash_index_refresh_attempts_single_flight" in content
+    assert "match_count" in content
+    assert "SET match_count = CASE WHEN matched THEN 1 ELSE 0 END" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+
+
 @pytest.fixture
 async def migrated_pool():
     database_url = os.environ["DATABASE_URL"]
@@ -71,7 +84,7 @@ async def migrated_pool():
 
 @integration
 async def test_t4_1_requests_thin_spine_columns(migrated_pool):
-    """T4.1: requests has exactly 4 data columns + PK."""
+    """T4.1: thin spine + restore migration retain requestor_state (U20/U21)."""
     async with migrated_pool.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -83,7 +96,14 @@ async def test_t4_1_requests_thin_spine_columns(migrated_pool):
             """
         )
         columns = [row["column_name"] for row in rows]
-        assert columns == ["id", "received_at", "intake_source", "raw_record_id"]
+        assert set(columns) == {
+            "id",
+            "received_at",
+            "intake_source",
+            "raw_record_id",
+            "requestor_state",
+        }
+        assert "requestor_state" in columns
 
 
 @integration
@@ -93,8 +113,8 @@ async def test_t4_2_trigger_rejects_missing_raw_fk(migrated_pool):
         with pytest.raises(asyncpg.RaiseError, match="not found in drop_raw_requests"):
             await conn.execute(
                 """
-                INSERT INTO requests (intake_source, raw_record_id)
-                VALUES ('drop', 999999999)
+                INSERT INTO requests (intake_source, raw_record_id, requestor_state)
+                VALUES ('drop', 999999999, 'CA')
                 """
             )
 
@@ -112,8 +132,8 @@ async def test_t4_2_trigger_accepts_valid_drop_fk(migrated_pool):
         )
         request_id = await conn.fetchval(
             """
-            INSERT INTO requests (intake_source, raw_record_id)
-            VALUES ('drop', $1)
+            INSERT INTO requests (intake_source, raw_record_id, requestor_state)
+            VALUES ('drop', $1, 'CA')
             RETURNING id
             """,
             raw_id,
@@ -126,8 +146,8 @@ async def test_t4_2_manual_null_raw_record_id_allowed(migrated_pool):
     async with migrated_pool.acquire() as conn:
         request_id = await conn.fetchval(
             """
-            INSERT INTO requests (intake_source, raw_record_id)
-            VALUES ('manual', NULL)
+            INSERT INTO requests (intake_source, raw_record_id, requestor_state)
+            VALUES ('manual', NULL, 'CA')
             RETURNING id
             """
         )

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from habeas_privacy_core.db.requests import insert_request
+from habeas_privacy_core.geo.state import resolve_drop_requestor_state
 from habeas_privacy_core.models.intake import CreateRequestInput
 from habeas_privacy_core.models.request import IntakeSource
 from habeas_privacy_core.queue.claim import claim_next
@@ -34,6 +36,17 @@ class PromoteResult:
     raw_record_ids: list[int] = field(default_factory=list)
     promote_attempt_id: int | None = None
     matching_attempts_created: int = 0
+
+
+def _payload_as_dict(raw_payload: Any) -> dict[str, Any]:
+    if raw_payload is None:
+        return {}
+    if isinstance(raw_payload, dict):
+        return raw_payload
+    if isinstance(raw_payload, str):
+        loaded = json.loads(raw_payload)
+        return loaded if isinstance(loaded, dict) else {}
+    return dict(raw_payload)
 
 
 async def fetch_unpromoted_raw_rows(
@@ -64,7 +77,7 @@ async def fetch_unpromoted_raw_rows(
     where = " AND ".join(clauses)
     rows = await conn.fetch(
         f"""
-        SELECT r.id, r.drop_record_id, r.list_type, r.source_csv_filename
+        SELECT r.id, r.drop_record_id, r.list_type, r.source_csv_filename, r.raw_payload
           FROM drop_raw_requests r
          WHERE {where}
          ORDER BY r.id
@@ -131,11 +144,30 @@ async def run_promote(
         )
         for raw in raw_rows:
             raw_id = int(raw["id"])
+            payload = _payload_as_dict(raw.get("raw_payload"))
+            filename = raw.get("source_csv_filename")
+            requestor_state, state_source = resolve_drop_requestor_state(
+                raw_payload=payload,
+                source_csv_filename=str(filename) if filename else None,
+            )
+            if state_source == "default":
+                logger.info(
+                    "drop_promote_requestor_state_default",
+                    extra={
+                        "event": "drop_promote_requestor_state_default",
+                        "requestor_state": requestor_state,
+                        "raw_record_id": raw_id,
+                        "list_type": raw.get("list_type"),
+                        # Filename shape only — no PII / hash values.
+                        "filename_has_state_token": False,
+                    },
+                )
             request_id = await insert_request(
                 conn,
                 CreateRequestInput(
                     intake_source=IntakeSource.DROP,
                     raw_record_id=raw_id,
+                    requestor_state=requestor_state,
                 ),
             )
             result.request_ids.append(request_id)

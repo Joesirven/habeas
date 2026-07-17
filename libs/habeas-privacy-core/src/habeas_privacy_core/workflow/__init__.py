@@ -1,14 +1,21 @@
 """Business workflow primitives."""
 
 from habeas_privacy_core.workflow.approval import (
+    ASSIGNMENT_TARGETS,
     MATCHING_REVIEW_ACTION,
+    WORKFLOW_ASSIGNMENT_ACTION,
     ApprovalRequirement,
     abandon_rejected,
     check_approval_required,
     clear_rule_cache,
+    create_pending_matching_review,
+    create_workflow_assignment,
+    ensure_pending_matching_review,
     eval_condition,
     fetch_active_rule,
+    get_current_assignment,
     is_matching_review_approved,
+    list_workflow_assignments,
     release_approved,
 )
 from habeas_privacy_core.workflow.error_policy import (
@@ -21,7 +28,9 @@ from habeas_privacy_core.workflow.error_policy import (
 )
 
 __all__ = [
+    "ASSIGNMENT_TARGETS",
     "MATCHING_REVIEW_ACTION",
+    "WORKFLOW_ASSIGNMENT_ACTION",
     "ApprovalRequirement",
     "Classifier",
     "ErrorDisposition",
@@ -30,10 +39,15 @@ __all__ = [
     "check_approval_required",
     "classify_with",
     "clear_rule_cache",
+    "create_pending_matching_review",
+    "create_workflow_assignment",
     "disposition_to_terminal_status",
+    "ensure_pending_matching_review",
     "eval_condition",
     "fetch_active_rule",
+    "get_current_assignment",
     "handle_terminal",
     "is_matching_review_approved",
+    "list_workflow_assignments",
     "release_approved",
 ]

@@ -1,0 +1,34 @@
+name: drop_hash
+version: 1.0.0
+config-version: 2
+
+profile: drop_hash
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+
+clean-targets:
+  - target
+  - dbt_packages
+  - logs
+
+vars:
+  state: CA
+  perform_serving_swap: true
+
+on-run-end:
+  - "{{ perform_serving_swap() if var('perform_serving_swap', true) }}"
+
+models:
+  drop_hash:
+    drop_clean:
+      +tags: [drop_clean]
+      +materialized: table
+      stg_person:
+        +materialized: view
+      stg_phones:
+        +materialized: view
+    marts:
+      +tags: [mart]
+      +materialized: table

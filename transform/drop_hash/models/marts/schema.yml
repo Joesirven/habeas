@@ -1,0 +1,62 @@
+version: 2
+
+models:
+  - name: mart_email_hash
+    description: >
+      Serving staging for email hashes (materializes as email_hash__build, then
+      merged into email_hash). Clustered (state, hash_value).
+    columns:
+      - name: hash_value
+        description: Base64(SHA-256) of DROP-standardized email
+        tests:
+          - not_null
+      - name: dwid
+        description: Habeas MDR person id (string)
+        tests:
+          - not_null
+      - name: state
+        description: Two-letter state from var('state')
+        tests:
+          - not_null
+      - name: built_at
+        description: Timestamp when this build row was written
+        tests:
+          - not_null
+
+  - name: mart_phone_hash
+    description: >
+      Serving staging for phone hashes (phone_hash__build → phone_hash). Cell and
+      land are separate rows when both exist. Clustered (state, hash_value).
+    columns:
+      - name: hash_value
+        description: Base64(SHA-256) of DROP-standardized 10-digit phone
+        tests:
+          - not_null
+      - name: dwid
+        tests:
+          - not_null
+      - name: state
+        tests:
+          - not_null
+      - name: built_at
+        tests:
+          - not_null
+
+  - name: mart_ndz_hash
+    description: >
+      Serving staging for NDZ composite hashes (ndz_hash__build → ndz_hash).
+      Built from name UDF + dob/zip ints. Clustered (state, hash_value).
+    columns:
+      - name: hash_value
+        description: Base64(SHA-256) of concat of FN/LN/DOB/ZIP Base64 digests
+        tests:
+          - not_null
+      - name: dwid
+        tests:
+          - not_null
+      - name: state
+        tests:
+          - not_null
+      - name: built_at
+        tests:
+          - not_null

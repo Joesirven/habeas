@@ -25,6 +25,8 @@ class MatchRequest(BaseModel):
     pii_hash: bytes | None = None
     list_type: DropListType | None = None
     hash_fields: dict[str, Any] = Field(default_factory=dict)
+    # Requester source state (DROP intake); required for BQ hash lookup filter.
+    requestor_state: str | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -36,3 +38,5 @@ class MatchResult(BaseModel):
     consumer_id: str | None = None
     confidence: float | None = None
     matched_via: str
+    match_count: int = 0
+    consumer_ids: list[str] | None = None

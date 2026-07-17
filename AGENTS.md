@@ -19,9 +19,10 @@ Code repo for **Habeas Data Privacy Request Automation**. Design authority (arch
 | Path | Role |
 |------|------|
 | [`libs/habeas-privacy-core/`](libs/habeas-privacy-core/) | Shared library — models, queue, audit, adapter bases (not deployed alone) |
+| [`transform/drop_hash/`](transform/drop_hash/) | dbt + UDF DROP hash index — prod home; serving marts `email_hash` / `phone_hash` / `ndz_hash` in `example-gcp-project.drop_hash_index` (not `analytics/`) |
 | [`app/`](app/) | All Cloud Run FastAPI apps — control plane + automation |
 | [`app/admin_api/`](app/admin_api/) | Main control-plane app — mutations, dashboard, live events |
-| [`clients/web/`](clients/web/) | Admin web app — Vite, React, TypeScript, Bun |
+| [`clients/web/`](clients/web/) | Admin web app — Vite, React, TypeScript, Bun; Drop ops Pipeline + Health |
 | [`clients/cli/habeas-cli/`](clients/cli/habeas-cli/) | Habeas command-line — hybrid read/write |
 | [`db/migrations/`](db/migrations/) | Unified database migrations (dbmate) |
 | [`infra/`](infra/) | Cloud Build, Terraform, Docker |

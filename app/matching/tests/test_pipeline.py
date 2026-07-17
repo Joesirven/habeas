@@ -1,4 +1,5 @@
 import base64
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -6,6 +7,7 @@ from matching.hash import hash_identifier, hash_identifier_base64, standardize_i
 
 from matching import IntakeSource, MatchRequest
 from matching.adapters import DropHashPipeline, PlaintextMatchPipeline
+from matching.results import complete_attempt_success
 
 
 def test_matching_pipeline_is_abstract():
@@ -50,3 +52,57 @@ async def test_plaintext_pipeline_stub_raises_until_data_source_decided():
     request = MatchRequest(request_id="r2", intake_source=IntakeSource.WEBFORM, email="a@b.com")
     with pytest.raises(NotImplementedError, match="data source"):
         await PlaintextMatchPipeline().match(request)
+
+
+@pytest.mark.asyncio
+async def test_complete_attempt_success_ensures_pending_matching_review():
+    conn = AsyncMock()
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+    conn.fetchval = AsyncMock(return_value=42)
+    request_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    with patch(
+        "matching.results.ensure_pending_matching_review",
+        new_callable=AsyncMock,
+        return_value={"id": 7, "status": "pending"},
+    ) as ensure:
+        result_id = await complete_attempt_success(
+            conn,
+            attempt_id=9,
+            request_id=request_id,
+            matched=False,
+            matched_via="drop_hash",
+            match_count=3,
+        )
+
+    assert result_id == 42
+    ensure.assert_awaited_once()
+    assert ensure.await_args.kwargs["request_id"] == request_id
+    assert ensure.await_args.kwargs["context"] == {
+        "matching_result_id": 42,
+        "match_count": 3,
+        "matched": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_complete_attempt_success_survives_review_ensure_failure():
+    conn = AsyncMock()
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+    conn.fetchval = AsyncMock(return_value=11)
+
+    with patch(
+        "matching.results.ensure_pending_matching_review",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("db blip"),
+    ):
+        result_id = await complete_attempt_success(
+            conn,
+            attempt_id=1,
+            request_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            matched=True,
+            matched_via="drop_hash",
+            match_count=1,
+        )
+
+    assert result_id == 11

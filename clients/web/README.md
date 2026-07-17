@@ -4,9 +4,38 @@ React admin UI for Legal, Operations, and Data Owners.
 
 **Stack (locked):** Vite, React, TypeScript, TanStack Router, TanStack Query, Tailwind, Bun.
 
-Deploy target: Firebase Hosting in front of Identity-Aware Proxy.
+Deploy targets:
+
+- **Dev:** Cloud Run `admin-web-dev` (nginx static image; see [Docker](#docker) below).
+- **Prod path:** Firebase Hosting in front of Identity-Aware Proxy (`.firebaserc` / `firebase.json`).
 
 **Agent rules:** [`AGENTS.md`](AGENTS.md)
+
+---
+
+## Docker
+
+Production-like nginx image (bakes `VITE_ADMIN_API_URL` at build time):
+
+```bash
+cd clients/web
+docker compose up web          # http://127.0.0.1:8080
+docker compose up web-dev      # Vite hot reload on :5173
+```
+
+Override API target for local builds:
+
+```bash
+VITE_ADMIN_API_URL=https://admin-api-dev-hsa55rg7ja-uk.a.run.app docker compose up web
+```
+
+Cloud Build deploy (from repo root):
+
+```bash
+gcloud builds submit --config=infra/cloudbuild/admin-web-dev.yaml --project=example-gcp-project .
+```
+
+After first deploy, add the Cloud Run URL to `admin-api-dev` `CORS_ORIGINS` (see [`infra/README.md`](../../infra/README.md)).
 
 ---
 
@@ -30,9 +59,15 @@ Vite proxies `/api/*` to `http://127.0.0.1:8000` so the dashboard can call `/api
 
 Optional: copy `.env.example` to `.env` and set `VITE_ADMIN_API_URL` when not using the dev proxy.
 
+### Drop ops navigation
+
+- **Pipeline** (`/ops/drop-pipeline?tab=`) — tabbed Download / Ingest / Matching / Fulfillment; home tab is Configurations (hash-index enqueue / enqueue-all).
+- **Health** (`/ops/health`) — workers + queues from admin_api; Escalations/retries and Configuration (retry `max_attempts`) under the Health hover menu.
+- Browser never calls worker URLs — only admin-api aggregates.
+
 ### Local DROP pipeline stack (ports)
 
-The ops console at `/ops/drop-pipeline` talks only to admin-api. Admin-api proxies workers:
+The ops console talks only to admin-api. Admin-api proxies workers:
 
 | Worker | Default URL | Typical local port |
 |--------|-------------|--------------------|

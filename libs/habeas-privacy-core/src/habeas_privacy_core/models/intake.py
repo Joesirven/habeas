@@ -25,10 +25,15 @@ class NormalizedPayload(BaseModel):
 
 
 class CreateRequestInput(BaseModel):
-    """Input for inserting a thin-spine privacy request row."""
+    """Input for inserting a thin-spine privacy request row.
+
+    ``requestor_state`` is required (USPS / alias). Normalized at insert time
+    via ``normalize_state_acronym`` — pass a 2-letter code or known alias.
+    """
 
     intake_source: IntakeSource
     raw_record_id: int | None = None
+    requestor_state: str = Field(min_length=1, max_length=64)
 
 
 class DropListType(StrEnum):
@@ -61,3 +66,4 @@ class RequestRecord(BaseModel):
     received_at: str
     intake_source: IntakeSource
     raw_record_id: int | None = None
+    requestor_state: str

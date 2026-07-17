@@ -1,4 +1,4 @@
-"""DROP hash-index matching adapter — California DELETE Act."""
+"""DROP hash-index matching adapter — BigQuery mart lookup by requester state."""
 
 from __future__ import annotations
 
@@ -6,15 +6,17 @@ import base64
 import logging
 from typing import Any
 
+from habeas_privacy_core.geo.state import InvalidStateAcronymError, normalize_state_acronym
 from habeas_privacy_core.models.intake import DropListType
 
+from matching.bq_lookup import BigQueryLookupError, lookup_dwids_by_hash
 from matching.hash import hash_identifier
 from matching.models import MatchRequest, MatchResult
 from matching.pipeline import MatchingPipeline
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["DropHashPipeline", "primary_hash_for_list_type"]
+__all__ = ["DropHashPipeline", "primary_hash_for_list_type", "BigQueryLookupError"]
 
 
 def primary_hash_for_list_type(
@@ -44,7 +46,6 @@ def primary_hash_for_list_type(
         return (str(value) if value is not None else None), "drop_hash_phone"
 
     if list_type == DropListType.NDZ:
-        # Composite: ConcatenatedHash of per-field Base64 digests (ADR-21).
         value = (
             hash_fields.get("concatenated_hash")
             or hash_fields.get("pii_hash")
@@ -56,14 +57,17 @@ def primary_hash_for_list_type(
 
 
 class DropHashPipeline(MatchingPipeline):
-    """Adapter for IntakeSource.DROP — hash compare against request hash fields."""
+    """Adapter for IntakeSource.DROP — BQ hash-index lookup against serving marts."""
+
+    def __init__(self, *, bq_client: Any | None = None) -> None:
+        self._bq_client = bq_client
 
     async def match(self, request: MatchRequest) -> MatchResult:
         if request.hash_fields and request.list_type is not None:
             return self._match_from_hash_fields(request)
 
         if request.pii_hash is None:
-            return MatchResult(matched=False, matched_via="drop_hash_missing")
+            return MatchResult(matched=False, matched_via="drop_hash_missing", match_count=0)
 
         candidate_hashes: list[bytes] = []
         if request.email:
@@ -77,17 +81,17 @@ class DropHashPipeline(MatchingPipeline):
                     matched=True,
                     matched_via="drop_hash",
                     confidence=1.0,
+                    match_count=1,
                 )
 
-        # Dev stub: also accept the raw stored hash when no plaintext identifiers exist.
         if not candidate_hashes:
             logger.info(
                 "drop_hash_lookup_stub",
                 extra={"event": "drop_hash_lookup_stub", "request_id": request.request_id},
             )
-            return MatchResult(matched=False, matched_via="drop_hash_stub")
+            return MatchResult(matched=False, matched_via="drop_hash_stub", match_count=0)
 
-        return MatchResult(matched=False, matched_via="drop_hash")
+        return MatchResult(matched=False, matched_via="drop_hash", match_count=0)
 
     def _match_from_hash_fields(self, request: MatchRequest) -> MatchResult:
         assert request.list_type is not None
@@ -96,19 +100,36 @@ class DropHashPipeline(MatchingPipeline):
             request.hash_fields,
         )
         if not hash_value:
-            return MatchResult(matched=False, matched_via=f"{matched_via}_missing")
+            return MatchResult(
+                matched=False,
+                matched_via=f"{matched_via}_missing",
+                match_count=0,
+            )
 
-        # Hash-index lookup is deferred; path selection is the U8 contract (T8.4).
-        logger.info(
-            "drop_hash_fields_path",
-            extra={
-                "event": "drop_hash_fields_path",
-                "request_id": request.request_id,
-                "list_type": request.list_type.value,
-                "matched_via": matched_via,
-            },
+        if not request.requestor_state:
+            raise ValueError("requestor_state is required for DROP hash lookup")
+        try:
+            state = normalize_state_acronym(request.requestor_state)
+        except InvalidStateAcronymError as exc:
+            raise ValueError(
+                f"invalid requestor_state for DROP hash lookup: {exc}"
+            ) from exc
+        hits = lookup_dwids_by_hash(
+            list_type=request.list_type,
+            hash_value=hash_value,
+            state=state,
+            client=self._bq_client,
         )
-        return MatchResult(matched=False, matched_via=matched_via)
+        count = len(hits)
+        consumer_ids = [hit.dwid for hit in hits] if hits else None
+        return MatchResult(
+            matched=count == 1,
+            matched_via=matched_via,
+            confidence=1.0 if count == 1 else None,
+            consumer_id=consumer_ids[0] if consumer_ids else None,
+            match_count=count,
+            consumer_ids=consumer_ids,
+        )
 
     @staticmethod
     def decode_drop_hash(value: str) -> bytes:

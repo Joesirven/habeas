@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -14,8 +15,16 @@ import asyncpg
 _TABLE_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _RULE_CACHE_TTL = timedelta(seconds=60)
 _rule_cache: dict[str, tuple[dict[str, Any] | None, datetime]] = {}
+_logger = logging.getLogger(__name__)
 
 MATCHING_REVIEW_ACTION = "matching.review"
+DEFAULT_MATCHING_REVIEW_TTL = timedelta(days=7)
+
+# Assign/escalate workflow (U17) — reuses approval_requests; no new table.
+# Pending rows are the current pointer; re-assign supersedes prior pending.
+WORKFLOW_ASSIGNMENT_ACTION = "workflow.assignment"
+ASSIGNMENT_TARGETS = frozenset({"reviewer", "legal", "data_owner"})
+DEFAULT_ASSIGNMENT_TTL = timedelta(days=30)
 
 
 def _validate_table(table: str) -> str:
@@ -131,23 +140,283 @@ async def is_matching_review_approved(
     conn: asyncpg.Connection,
     request_id: str,
 ) -> bool:
-    """Return True when matching.review has an approved approval_requests row.
+    """Return True when matching.review is approved for the latest match result.
 
-    Used by fulfillment dispatch (U9) to block until human review completes.
+    Approval must be ``approved`` with ``decided_at`` at or after the latest
+    ``matching_results.recorded_at``. A prior approval does not unlock fulfill
+    after rematch writes a newer result (including when ``match_count`` changes).
+    Fail-closed when no matching_results row exists.
     """
     row = await conn.fetchval(
         """
         SELECT 1
-          FROM approval_requests
-         WHERE request_id = $1
-           AND action_type = $2
-           AND status = 'approved'
+          FROM approval_requests ar
+         WHERE ar.request_id = $1
+           AND ar.action_type = $2
+           AND ar.status = 'approved'
+           AND ar.decided_at IS NOT NULL
+           AND ar.decided_at >= (
+                 SELECT MAX(mr.recorded_at)
+                   FROM matching_results mr
+                  WHERE mr.request_id = $1
+               )
          LIMIT 1
         """,
         UUID(request_id),
         MATCHING_REVIEW_ACTION,
     )
     return row is not None
+
+
+async def create_pending_matching_review(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    context: dict[str, Any] | None = None,
+    expires_in: timedelta = DEFAULT_MATCHING_REVIEW_TTL,
+) -> dict[str, Any]:
+    """Insert a pending matching.review approval_requests row for a request."""
+    requirement = await check_approval_required(conn, MATCHING_REVIEW_ACTION, context or {})
+    if requirement is None:
+        rule = await fetch_active_rule(conn, MATCHING_REVIEW_ACTION)
+        if rule is None:
+            raise LookupError("matching.review approval rule is not configured")
+        raise ValueError("matching.review does not currently require approval")
+
+    expires_at = datetime.now(UTC) + expires_in
+    row = await conn.fetchrow(
+        """
+        INSERT INTO approval_requests (
+            request_id, action_type, rule_id, approver_role, status, context_jsonb, expires_at
+        ) VALUES ($1, $2, $3, $4, 'pending', $5::jsonb, $6)
+        RETURNING id, request_id, action_type, status, approver_role, requested_at, expires_at
+        """,
+        UUID(request_id),
+        MATCHING_REVIEW_ACTION,
+        requirement.rule_id,
+        requirement.approver_role,
+        json.dumps(context) if context is not None else None,
+        expires_at,
+    )
+    return dict(row)
+
+
+async def ensure_pending_matching_review(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    context: dict[str, Any] | None = None,
+    expires_in: timedelta = DEFAULT_MATCHING_REVIEW_TTL,
+) -> dict[str, Any] | None:
+    """Open a pending matching.review when the latest result is not yet approved.
+
+    No-op when an approval already covers the latest ``matching_results`` row, or
+    when a pending review already exists (ops can still approve after rematch;
+    ``decided_at`` will be after the new result). Used after match success /
+    rematch so fulfill stays blocked until a fresh human decision.
+    """
+    if await is_matching_review_approved(conn, request_id):
+        return None
+
+    pending = await conn.fetchval(
+        """
+        SELECT 1
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status = 'pending'
+         LIMIT 1
+        """,
+        UUID(request_id),
+        MATCHING_REVIEW_ACTION,
+    )
+    if pending is not None:
+        return None
+
+    try:
+        return await create_pending_matching_review(
+            conn,
+            request_id=request_id,
+            context=context,
+            expires_in=expires_in,
+        )
+    except (LookupError, ValueError) as exc:
+        _logger.warning(
+            "matching_review_ensure_skipped",
+            extra={
+                "event": "matching_review_ensure_skipped",
+                "request_id": request_id,
+                "reason": str(exc),
+            },
+        )
+        return None
+
+
+def _serialize_assignment_row(row: Any) -> dict[str, Any]:
+    context = row.get("context_jsonb") if hasattr(row, "get") else row["context_jsonb"]
+    if isinstance(context, str):
+        context = json.loads(context)
+    context = dict(context or {})
+    return {
+        "id": int(row["id"]),
+        "request_id": str(row["request_id"]),
+        "action_type": row["action_type"],
+        "status": row["status"],
+        "target_role": row["approver_role"],
+        "kind": context.get("kind"),
+        "assignee_identity": context.get("assignee_identity"),
+        "requested_at": row["requested_at"].isoformat()
+        if row["requested_at"] is not None
+        else None,
+        "expires_at": row["expires_at"].isoformat() if row["expires_at"] is not None else None,
+        "decided_by": row["decided_by"],
+        "decided_at": row["decided_at"].isoformat() if row.get("decided_at") is not None else None,
+        "decision_reason": row.get("decision_reason"),
+    }
+
+
+async def _supersede_pending_assignments(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    decided_by: str,
+) -> list[int]:
+    """Close prior pending workflow.assignment rows for a request (append-history)."""
+    rows = await conn.fetch(
+        """
+        UPDATE approval_requests
+           SET status = 'rejected',
+               decided_by = $2,
+               decided_at = NOW(),
+               decision_reason = 'superseded_by_reassignment'
+         WHERE request_id = $1
+           AND action_type = $3
+           AND status = 'pending'
+        RETURNING id
+        """,
+        UUID(request_id),
+        decided_by,
+        WORKFLOW_ASSIGNMENT_ACTION,
+    )
+    return [int(r["id"]) for r in rows]
+
+
+async def create_workflow_assignment(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    kind: str,
+    target_role: str,
+    decided_by: str,
+    assignee_identity: str | None = None,
+    expires_in: timedelta = DEFAULT_ASSIGNMENT_TTL,
+) -> dict[str, Any]:
+    """Append a pending assign/escalate row; supersede any prior pending assignment.
+
+    ``kind`` is ``assign`` (typically ``reviewer`` + assignee email) or ``escalate``
+    (``legal`` / ``data_owner``). Identity is IAP email when present (A4).
+    """
+    if kind not in {"assign", "escalate"}:
+        raise ValueError(f"invalid assignment kind: {kind!r}")
+    if target_role not in ASSIGNMENT_TARGETS:
+        raise ValueError(f"invalid assignment target: {target_role!r}")
+    if kind == "assign":
+        if not assignee_identity or not assignee_identity.strip():
+            raise ValueError("assignee_identity required for assign")
+        if target_role != "reviewer":
+            raise ValueError("assign target_role must be reviewer")
+    if kind == "escalate" and target_role not in {"legal", "data_owner"}:
+        raise ValueError("escalate target_role must be legal or data_owner")
+
+    assignee = assignee_identity.strip() if assignee_identity else None
+    await _supersede_pending_assignments(
+        conn, request_id=request_id, decided_by=decided_by
+    )
+    context = {"kind": kind}
+    if assignee:
+        context["assignee_identity"] = assignee
+    expires_at = datetime.now(UTC) + expires_in
+    row = await conn.fetchrow(
+        """
+        INSERT INTO approval_requests (
+            request_id, action_type, rule_id, approver_role, status,
+            context_jsonb, expires_at, decided_by
+        ) VALUES ($1, $2, NULL, $3, 'pending', $4::jsonb, $5, $6)
+        RETURNING id, request_id, action_type, status, approver_role,
+                  context_jsonb, requested_at, expires_at, decided_by,
+                  decided_at, decision_reason
+        """,
+        UUID(request_id),
+        WORKFLOW_ASSIGNMENT_ACTION,
+        target_role,
+        json.dumps(context),
+        expires_at,
+        decided_by,
+    )
+    return _serialize_assignment_row(dict(row))
+
+
+async def list_workflow_assignments(
+    conn: asyncpg.Connection,
+    *,
+    assignee_identity: str | None = None,
+    target_role: str | None = None,
+    status: str = "pending",
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """List workflow.assignment rows (ids + role/email only — no DROP PII)."""
+    if target_role is not None and target_role not in ASSIGNMENT_TARGETS:
+        raise ValueError(f"invalid assignment target: {target_role!r}")
+    if status not in {"pending", "approved", "rejected", "expired"}:
+        raise ValueError(f"invalid assignment status: {status!r}")
+    if limit < 1 or limit > 500:
+        raise ValueError("limit must be 1..500")
+
+    clauses = ["action_type = $1", "status = $2"]
+    args: list[Any] = [WORKFLOW_ASSIGNMENT_ACTION, status]
+    if target_role is not None:
+        args.append(target_role)
+        clauses.append(f"approver_role = ${len(args)}")
+    if assignee_identity is not None:
+        args.append(assignee_identity.strip())
+        clauses.append(f"context_jsonb->>'assignee_identity' = ${len(args)}")
+    args.append(limit)
+    rows = await conn.fetch(
+        f"""
+        SELECT id, request_id, action_type, status, approver_role,
+               context_jsonb, requested_at, expires_at, decided_by,
+               decided_at, decision_reason
+          FROM approval_requests
+         WHERE {' AND '.join(clauses)}
+         ORDER BY requested_at DESC
+         LIMIT ${len(args)}
+        """,
+        *args,
+    )
+    return [_serialize_assignment_row(dict(r)) for r in rows]
+
+
+async def get_current_assignment(
+    conn: asyncpg.Connection,
+    request_id: str,
+) -> dict[str, Any] | None:
+    """Latest pending workflow.assignment for a request, if any."""
+    row = await conn.fetchrow(
+        """
+        SELECT id, request_id, action_type, status, approver_role,
+               context_jsonb, requested_at, expires_at, decided_by,
+               decided_at, decision_reason
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status = 'pending'
+         ORDER BY requested_at DESC
+         LIMIT 1
+        """,
+        UUID(request_id),
+        WORKFLOW_ASSIGNMENT_ACTION,
+    )
+    return _serialize_assignment_row(dict(row)) if row else None
 
 
 async def release_approved(

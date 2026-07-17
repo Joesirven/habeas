@@ -12,8 +12,10 @@ import pytest
 from data_fulfillment_dispatcher.fulfill import (
     RESPONSE_STATUS_DELETED,
     RESPONSE_STATUS_NOT_FOUND,
+    RESPONSE_STATUS_OPTED_OUT,
     find_requests_ready_to_fulfill,
     fulfill_one,
+    response_status_for_match_count,
     run_fulfill,
 )
 
@@ -46,7 +48,7 @@ async def test_t9_1_skips_when_matching_review_not_approved():
 async def test_t9_2_match_sets_response_status_deleted():
     """T9.2 Match → status 3 (Deleted)."""
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={"matched": True})
+    conn.fetchrow = AsyncMock(return_value={"matched": True, "match_count": 1})
     conn.execute = AsyncMock(return_value="UPDATE 1")
 
     with patch(
@@ -69,7 +71,7 @@ async def test_t9_2_match_sets_response_status_deleted():
 async def test_t9_3_no_match_sets_response_status_not_found():
     """T9.3 No-match → status 5."""
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={"matched": False})
+    conn.fetchrow = AsyncMock(return_value={"matched": False, "match_count": 0})
     conn.execute = AsyncMock(return_value="UPDATE 1")
 
     with patch(
@@ -114,7 +116,7 @@ async def test_t9_4_no_external_suppression_http():
                 assert root not in banned_imports, f"{path.name} imports from {node.module}"
 
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={"matched": True})
+    conn.fetchrow = AsyncMock(return_value={"matched": True, "match_count": 1})
     conn.execute = AsyncMock(return_value="UPDATE 1")
 
     with patch(
@@ -129,6 +131,69 @@ async def test_t9_4_no_external_suppression_http():
     # Only DB execute — never an HTTP client
     assert conn.execute.await_count == 1
     conn.fetch.assert_not_awaited()  # single-id path skips batch finder
+
+
+@pytest.mark.asyncio
+async def test_multi_match_sets_response_status_opted_out():
+    """N>1 → status 4 (Opted out); still requires matching.review."""
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={"matched": False, "match_count": 3})
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    with patch(
+        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        result = await fulfill_one(conn, REQUEST_ID)
+
+    assert result.outcome == "fulfilled"
+    assert result.match_count == 3
+    assert result.response_status == RESPONSE_STATUS_OPTED_OUT
+    assert conn.execute.await_args.args[2] == 4
+
+
+def test_response_status_for_match_count_mapping():
+    assert response_status_for_match_count(0) == RESPONSE_STATUS_NOT_FOUND
+    assert response_status_for_match_count(1) == RESPONSE_STATUS_DELETED
+    assert response_status_for_match_count(2) == RESPONSE_STATUS_OPTED_OUT
+
+
+@pytest.mark.asyncio
+async def test_u25_open_row_rematch_multi_to_single_fulfills_deleted():
+    """After rematch multi→1, fulfill maps latest match_count to status 3 (not 4)."""
+    conn = AsyncMock()
+    # Latest result after rematch is single-match.
+    conn.fetchrow = AsyncMock(return_value={"matched": True, "match_count": 1})
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    with patch(
+        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        result = await fulfill_one(conn, REQUEST_ID)
+
+    assert result.outcome == "fulfilled"
+    assert result.match_count == 1
+    assert result.response_status == RESPONSE_STATUS_DELETED
+    assert result.response_status != RESPONSE_STATUS_OPTED_OUT
+
+
+@pytest.mark.asyncio
+async def test_u25_open_row_rematch_multi_to_zero_fulfills_not_found():
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={"matched": False, "match_count": 0})
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    with patch(
+        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        result = await fulfill_one(conn, REQUEST_ID)
+
+    assert result.response_status == RESPONSE_STATUS_NOT_FOUND
 
 
 @pytest.mark.asyncio
@@ -175,6 +240,8 @@ async def test_find_requests_ready_to_fulfill_sql():
     assert "matching.review" in sql
     assert "response_status IS NULL" in sql
     assert "matching_results" in sql
+    assert "decided_at" in sql
+    assert "MAX(mr.recorded_at)" in sql
 
 
 @pytest.mark.asyncio

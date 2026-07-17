@@ -2,7 +2,7 @@
 
 import typer
 
-from habeas_cli.commands import audit, db, queue, request, worker
+from habeas_cli.commands import audit, db, drop, queue, request, worker
 
 app = typer.Typer(help="Habeas privacy automation command-line interface")
 app.add_typer(db.app, name="db")
@@ -10,6 +10,7 @@ app.add_typer(request.app, name="request")
 app.add_typer(queue.app, name="queue")
 app.add_typer(worker.app, name="worker")
 app.add_typer(audit.app, name="audit")
+app.add_typer(drop.app, name="drop")
 
 
 @app.callback()
@@ -46,6 +47,14 @@ def commands(human: bool = typer.Option(False, "--human")):
                 "audit recent",
                 "audit for COMMAND",
                 "audit by-actor ACTOR",
+                "drop pipeline",
+                "drop download",
+                "drop land",
+                "drop promote",
+                "drop dispatch",
+                "drop match",
+                "drop fulfill",
+                "drop hash-index-refresh enqueue|process|status",
             ]
         },
         human=human,
