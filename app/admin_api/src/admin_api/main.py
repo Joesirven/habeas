@@ -15,9 +15,12 @@ from sse_starlette.sse import EventSourceResponse
 
 from admin_api.approvals import (
     MATCHING_REVIEW_ACTION,
+    NOTICE_REVIEW_ACTION,
     create_matching_review_approval,
+    create_notice_review_approval,
     decide_approval,
     is_matching_review_approved,
+    is_notice_review_approved,
     list_approvals,
 )
 from admin_api.drop_pipeline import router as drop_pipeline_router
@@ -65,6 +68,11 @@ class ManualRequestBody(BaseModel):
 
 
 class MatchingReviewCreateBody(BaseModel):
+    request_id: str
+    context: dict[str, Any] | None = None
+
+
+class NoticeReviewCreateBody(BaseModel):
     request_id: str
     context: dict[str, Any] | None = None
 
@@ -240,6 +248,34 @@ async def approvals_create_matching_review(body: MatchingReviewCreateBody):
     return _approval_record(row)
 
 
+@app.post("/approvals/notice-review", response_model=ApprovalRecord, status_code=201)
+async def approvals_create_notice_review(body: NoticeReviewCreateBody):
+    """Create a pending notice.review approval gate for a request."""
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="database not configured")
+    try:
+        UUID(body.request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid request_id") from exc
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        record = await get_request(conn, body.request_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="request not found")
+        try:
+            row = await create_notice_review_approval(
+                conn,
+                request_id=body.request_id,
+                context=body.context,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _approval_record(row)
+
+
 @app.post("/approvals/{approval_id}/approve", response_model=ApprovalRecord)
 async def approvals_approve(approval_id: int, body: ApprovalDecisionBody):
     if not settings.database_url:
@@ -292,6 +328,26 @@ async def matching_review_approved(request_id: str):
     return {
         "request_id": request_id,
         "action_type": MATCHING_REVIEW_ACTION,
+        "approved": approved,
+    }
+
+
+@app.get("/requests/{request_id}/notice-review-approved")
+async def notice_review_approved(request_id: str):
+    """Notice dispatch gate probe — True only after notice.review is approved (U10)."""
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="database not configured")
+    try:
+        UUID(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid request_id") from exc
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        approved = await is_notice_review_approved(conn, request_id)
+    return {
+        "request_id": request_id,
+        "action_type": NOTICE_REVIEW_ACTION,
         "approved": approved,
     }
 

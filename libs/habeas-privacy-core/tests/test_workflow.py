@@ -143,6 +143,15 @@ async def test_approval_rules_seed_loaded(pool):
             """
         )
         assert matching_review is True
+        notice_review = await conn.fetchval(
+            """
+            SELECT requires_approval
+              FROM approval_rules
+             WHERE action_type = 'notice.review'
+               AND effective_to IS NULL
+            """
+        )
+        assert notice_review is True
 
 
 @integration

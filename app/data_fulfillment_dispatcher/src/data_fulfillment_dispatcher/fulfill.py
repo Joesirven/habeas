@@ -7,10 +7,16 @@ CPPA codes: 2 Exempted, 3 Deleted, 4 Opted out, 5 Not found.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from uuid import UUID
 
-from habeas_privacy_core.workflow.approval import is_matching_review_approved
+from habeas_privacy_core.workflow.approval import (
+    NOTICE_REVIEW_ACTION,
+    check_approval_required,
+    fetch_active_rule,
+    is_matching_review_approved,
+)
 
 # CPPA response CSV status codes (KTD-5)
 RESPONSE_STATUS_DELETED = 3
@@ -127,6 +133,48 @@ async def _set_response_status(
     return result.endswith("1") if isinstance(result, str) else bool(result)
 
 
+async def _notice_review_exists(conn: DbConnection, request_id: str) -> bool:
+    row = await conn.fetchval(
+        """
+        SELECT 1
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+         LIMIT 1
+        """,
+        UUID(request_id),
+        NOTICE_REVIEW_ACTION,
+    )
+    return row is not None
+
+
+async def _ensure_notice_review_pending(conn: DbConnection, request_id: str) -> None:
+    """Create a pending notice.review approval after fulfillment when absent."""
+    if await _notice_review_exists(conn, request_id):
+        return
+
+    requirement = await check_approval_required(conn, NOTICE_REVIEW_ACTION, {})
+    if requirement is None:
+        rule = await fetch_active_rule(conn, NOTICE_REVIEW_ACTION)
+        if rule is None:
+            return
+        return
+
+    expires_at = datetime.now(UTC) + timedelta(days=7)
+    await conn.execute(
+        """
+        INSERT INTO approval_requests (
+            request_id, action_type, rule_id, approver_role, status, expires_at
+        ) VALUES ($1, $2, $3, $4, 'pending', $5)
+        """,
+        UUID(request_id),
+        NOTICE_REVIEW_ACTION,
+        requirement.rule_id,
+        requirement.approver_role,
+        expires_at,
+    )
+
+
 async def fulfill_one(
     conn: DbConnection,
     request_id: str,
@@ -160,6 +208,8 @@ async def fulfill_one(
             response_status=response_status,
             reason="response_status_already_set_or_not_drop",
         )
+
+    await _ensure_notice_review_pending(conn, request_id)
 
     return FulfillItemResult(
         request_id=request_id,

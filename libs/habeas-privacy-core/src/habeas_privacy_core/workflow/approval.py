@@ -16,6 +16,7 @@ _RULE_CACHE_TTL = timedelta(seconds=60)
 _rule_cache: dict[str, tuple[dict[str, Any] | None, datetime]] = {}
 
 MATCHING_REVIEW_ACTION = "matching.review"
+NOTICE_REVIEW_ACTION = "notice.review"
 
 
 def _validate_table(table: str) -> str:
@@ -146,6 +147,29 @@ async def is_matching_review_approved(
         """,
         UUID(request_id),
         MATCHING_REVIEW_ACTION,
+    )
+    return row is not None
+
+
+async def is_notice_review_approved(
+    conn: asyncpg.Connection,
+    request_id: str,
+) -> bool:
+    """Return True when notice.review has an approved approval_requests row.
+
+    Used by notice dispatch (U10) to block until human review completes.
+    """
+    row = await conn.fetchval(
+        """
+        SELECT 1
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status = 'approved'
+         LIMIT 1
+        """,
+        UUID(request_id),
+        NOTICE_REVIEW_ACTION,
     )
     return row is not None
 

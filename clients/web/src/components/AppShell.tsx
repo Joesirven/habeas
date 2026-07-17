@@ -64,6 +64,12 @@ export function AppShell({ children }: AppShellProps) {
               Matching review
             </Link>
             <Link
+              to="/approvals/notice-review"
+              className="hover:text-white [&.active]:font-medium [&.active]:text-white"
+            >
+              Notice review
+            </Link>
+            <Link
               to="/ops/drop-pipeline"
               className="hover:text-white [&.active]:font-medium [&.active]:text-white"
             >

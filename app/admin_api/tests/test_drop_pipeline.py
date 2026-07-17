@@ -60,6 +60,15 @@ PIPELINE_FIXTURE: dict[str, Any] = {
         "approved": 0,
         "by_status": [{"status": "pending", "count": 1}],
     },
+    "notice_review": {
+        "action_type": "notice.review",
+        "pending": 2,
+        "approved": 1,
+        "by_status": [
+            {"status": "pending", "count": 2},
+            {"status": "approved", "count": 1},
+        ],
+    },
     "worker_health": {
         "drop_connector": {
             "name": "drop_connector",
@@ -95,6 +104,8 @@ def test_pipeline_status_shape(monkeypatch: pytest.MonkeyPatch):
     assert body["matching_results_recent"][0]["matched"] is True
     assert "consumer_id" not in body["matching_results_recent"][0]
     assert body["matching_review"]["action_type"] == "matching.review"
+    assert body["notice_review"]["action_type"] == "notice.review"
+    assert body["notice_review"]["pending"] == 2
     assert "worker_health" in body
     assert body["worker_health"]["drop_connector"]["ok"] is True
 
@@ -280,6 +291,59 @@ async def test_collect_pipeline_counts_shape():
     assert result["matching_attempts"]["success"] == 5
     assert result["matching_review"]["pending"] == 1
     assert result["matching_review"]["approved"] == 3
+    assert result["notice_review"]["pending"] == 1
+    assert result["notice_review"]["approved"] == 3
+
+
+def test_upload_weekly_proxy_returns_upstream_json(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "status": "ok",
+                "uploaded": 1,
+                "skipped": 0,
+                "failed": 0,
+                "batches": [
+                    {
+                        "source_csv_filename": "NDZ_20260701.csv",
+                        "outcome": "uploaded",
+                        "row_count": 12,
+                        "connector_attempt_id": 44,
+                        "reason": None,
+                    }
+                ],
+            }
+
+    class FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured["timeout"] = kwargs.get("timeout")
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url: str, json: Any = None, headers: Any = None) -> FakeResponse:
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/ops/drop/upload-weekly")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["uploaded"] == 1
+    assert captured["url"].endswith("/upload-weekly")
+    assert captured["timeout"] == drop_pipeline.DOWNLOAD_PROXY_TIMEOUT
 
 
 def test_auth_headers_skipped_for_localhost():

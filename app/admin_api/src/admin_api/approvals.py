@@ -1,4 +1,4 @@
-"""Admin API helpers for matching.review approval requests."""
+"""Admin API helpers for matching.review and notice.review approval requests."""
 
 from __future__ import annotations
 
@@ -11,9 +11,11 @@ import asyncpg
 
 from habeas_privacy_core.workflow.approval import (
     MATCHING_REVIEW_ACTION,
+    NOTICE_REVIEW_ACTION,
     check_approval_required,
     fetch_active_rule,
     is_matching_review_approved,
+    is_notice_review_approved,
 )
 
 DEFAULT_APPROVAL_TTL = timedelta(days=7)
@@ -52,6 +54,57 @@ async def create_matching_review_approval(
     return dict(row)
 
 
+async def create_notice_review_approval(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    context: dict[str, Any] | None = None,
+    expires_in: timedelta = DEFAULT_APPROVAL_TTL,
+) -> dict[str, Any]:
+    """Insert a pending notice.review approval_requests row for a request."""
+    requirement = await check_approval_required(conn, NOTICE_REVIEW_ACTION, context or {})
+    if requirement is None:
+        rule = await fetch_active_rule(conn, NOTICE_REVIEW_ACTION)
+        if rule is None:
+            raise LookupError("notice.review approval rule is not configured")
+        raise ValueError("notice.review does not currently require approval")
+
+    expires_at = datetime.now(UTC) + expires_in
+    row = await conn.fetchrow(
+        """
+        INSERT INTO approval_requests (
+            request_id, action_type, rule_id, approver_role, status, context_jsonb, expires_at
+        ) VALUES ($1, $2, $3, $4, 'pending', $5::jsonb, $6)
+        RETURNING id, request_id, action_type, status, approver_role, requested_at, expires_at
+        """,
+        UUID(request_id),
+        NOTICE_REVIEW_ACTION,
+        requirement.rule_id,
+        requirement.approver_role,
+        json.dumps(context) if context is not None else None,
+        expires_at,
+    )
+    return dict(row)
+
+
+async def _sync_notice_review_approved(
+    conn: asyncpg.Connection,
+    request_id: UUID,
+) -> None:
+    """Set drop_raw_requests.notice_review_status when notice.review is approved."""
+    await conn.execute(
+        """
+        UPDATE drop_raw_requests AS drr
+           SET notice_review_status = 'approved'
+          FROM requests AS r
+         WHERE r.id = $1
+           AND r.intake_source = 'drop'
+           AND r.raw_record_id = drr.id
+        """,
+        request_id,
+    )
+
+
 async def decide_approval(
     conn: asyncpg.Connection,
     *,
@@ -81,6 +134,8 @@ async def decide_approval(
         decided_by,
         decision_reason,
     )
+    if row is not None and status == "approved" and row["action_type"] == NOTICE_REVIEW_ACTION:
+        await _sync_notice_review_approved(conn, row["request_id"])
     return dict(row) if row else None
 
 
@@ -118,8 +173,11 @@ async def list_approvals(
 
 __all__ = [
     "MATCHING_REVIEW_ACTION",
+    "NOTICE_REVIEW_ACTION",
     "create_matching_review_approval",
+    "create_notice_review_approval",
     "decide_approval",
     "is_matching_review_approved",
+    "is_notice_review_approved",
     "list_approvals",
 ]

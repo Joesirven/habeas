@@ -91,6 +91,21 @@ export function approveMatchingReview(approvalId: number, body: ApprovalDecision
   })
 }
 
+export function listNoticeReviewApprovals(status: string = 'pending') {
+  const params = new URLSearchParams({
+    action_type: 'notice.review',
+    status,
+  })
+  return fetchAdminApi<ApprovalRecord[]>(`/approvals?${params}`)
+}
+
+export function approveNoticeReview(approvalId: number, body: ApprovalDecisionInput) {
+  return fetchAdminApi<ApprovalRecord>(`/approvals/${approvalId}/approve`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
 export type StepStatusCount = {
   step: string
   status: string
@@ -146,6 +161,12 @@ export type DropPipelineStatus = {
     approved: number
     by_status: { status: string; count: number }[]
   }
+  notice_review: {
+    action_type: string
+    pending: number
+    approved: number
+    by_status: { status: string; count: number }[]
+  }
   worker_health: Record<string, WorkerHealthProbe>
 }
 
@@ -184,4 +205,8 @@ export function postDropFulfill(body?: { request_id?: string }) {
     method: 'POST',
     body: JSON.stringify(body ?? {}),
   })
+}
+
+export function postDropUploadWeekly() {
+  return fetchAdminApi<Record<string, unknown>>('/ops/drop/upload-weekly', { method: 'POST' })
 }

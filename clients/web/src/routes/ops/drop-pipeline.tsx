@@ -10,6 +10,7 @@ import {
   postDropLand,
   postDropMatch,
   postDropPromote,
+  postDropUploadWeekly,
   type DropPipelineStatus,
   type StepStatusCount,
   type WorkerHealthProbe,
@@ -21,6 +22,7 @@ const WORKER_ORDER = [
   'request_dispatcher',
   'matching',
   'data_fulfillment',
+  'drop_notice_dispatcher',
 ] as const
 
 const ACTIONS = [
@@ -30,6 +32,7 @@ const ACTIONS = [
   { key: 'dispatch', label: 'Dispatch matching', run: () => postDropDispatch() },
   { key: 'match', label: 'Run matching', run: () => postDropMatch() },
   { key: 'fulfill', label: 'Fulfill', run: () => postDropFulfill() },
+  { key: 'upload-weekly', label: 'Weekly upload', run: () => postDropUploadWeekly() },
 ] as const
 
 type ActionKey = (typeof ACTIONS)[number]['key']
@@ -432,6 +435,57 @@ function FulfillResultSummary({ response }: { response: Record<string, unknown> 
   )
 }
 
+function UploadWeeklyResultSummary({ response }: { response: Record<string, unknown> }) {
+  const status = asString(response.status) ?? 'unknown'
+  const uploaded = asNumber(response.uploaded)
+  const skipped = asNumber(response.skipped)
+  const failed = asNumber(response.failed)
+  const batches = Array.isArray(response.batches)
+    ? response.batches.filter(
+        (item): item is Record<string, unknown> =>
+          typeof item === 'object' && item !== null && !Array.isArray(item),
+      )
+    : []
+  const uploadedFilenames = batches
+    .filter((batch) => asString(batch.outcome) === 'uploaded')
+    .map((batch) => asString(batch.source_csv_filename))
+    .filter((name): name is string => Boolean(name))
+
+  return (
+    <ActionResultCard title="Weekly upload" response={response}>
+      <ResultRow label="Status">
+        <StatusValue status={status} />
+      </ResultRow>
+      {uploaded !== undefined && <ResultRow label="Uploaded batches">{uploaded}</ResultRow>}
+      {skipped !== undefined && <ResultRow label="Skipped">{skipped}</ResultRow>}
+      {failed !== undefined && <ResultRow label="Failed">{failed}</ResultRow>}
+      <ResultRow label="Filenames">
+        {uploadedFilenames.length === 0 ? (
+          batches.length === 0 ? (
+            'none'
+          ) : (
+            <ul className="space-y-1">
+              {batches.map((batch, index) => (
+                <li key={index} className="font-mono text-xs">
+                  {asString(batch.source_csv_filename) ?? '—'}
+                  {asString(batch.outcome) ? (
+                    <span className="ml-2 text-slate-500">({batch.outcome})</span>
+                  ) : null}
+                  {asNumber(batch.row_count) !== undefined ? (
+                    <span className="ml-2 text-slate-500">{batch.row_count} rows</span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )
+        ) : (
+          uploadedFilenames.join(', ')
+        )}
+      </ResultRow>
+    </ActionResultCard>
+  )
+}
+
 function GenericResultSummary({
   title,
   response,
@@ -477,6 +531,8 @@ function ActionResultSuccess({
       return <MatchResultSummary response={response} />
     case 'fulfill':
       return <FulfillResultSummary response={response} />
+    case 'upload-weekly':
+      return <UploadWeeklyResultSummary response={response} />
     default:
       return <GenericResultSummary title={label} response={response} />
   }
@@ -792,7 +848,7 @@ export function DropPipelinePage() {
             </div>
           </div>
 
-          <div className="grid gap-6 lg:grid-cols-3">
+          <div className="grid gap-6 lg:grid-cols-2 xl:grid-cols-4">
             <div className="space-y-2 rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3">
               <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">
                 Matching attempts
@@ -827,6 +883,25 @@ export function DropPipelinePage() {
                   <dt className="text-xs text-slate-500">Approved</dt>
                   <dd className="text-lg tabular-nums text-emerald-300">
                     {data.matching_review.approved}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+            <div className="space-y-2 rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3">
+              <h3 className="text-sm font-medium uppercase tracking-wide text-slate-400">
+                Notice review
+              </h3>
+              <dl className="grid grid-cols-2 gap-2 text-sm">
+                <div>
+                  <dt className="text-xs text-slate-500">Pending</dt>
+                  <dd className="text-lg tabular-nums text-amber-200">
+                    {data.notice_review.pending}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-slate-500">Approved</dt>
+                  <dd className="text-lg tabular-nums text-emerald-300">
+                    {data.notice_review.approved}
                   </dd>
                 </div>
               </dl>

@@ -5,10 +5,11 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from habeas_privacy_core.workflow.approval import NOTICE_REVIEW_ACTION
 from data_fulfillment_dispatcher.fulfill import (
     RESPONSE_STATUS_DELETED,
     RESPONSE_STATUS_NOT_FOUND,
@@ -192,6 +193,36 @@ async def test_t9_1_rejected_when_no_matching_result():
     assert result.outcome == "rejected"
     assert result.reason == "no_matching_result"
     conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fulfill_creates_pending_notice_review_when_missing():
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={"matched": True})
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+    conn.fetchval = AsyncMock(return_value=None)
+    requirement = MagicMock(rule_id=42, approver_role="compliance_lead")
+
+    with (
+        patch(
+            "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "data_fulfillment_dispatcher.fulfill.check_approval_required",
+            new_callable=AsyncMock,
+            return_value=requirement,
+        ),
+    ):
+        result = await fulfill_one(conn, REQUEST_ID)
+
+    assert result.outcome == "fulfilled"
+    assert conn.execute.await_count == 2
+    notice_insert = conn.execute.await_args_list[1]
+    assert notice_insert.args[2] == NOTICE_REVIEW_ACTION
+    assert notice_insert.args[3] == 42
+    assert notice_insert.args[4] == "compliance_lead"
 
 
 @pytest.mark.asyncio

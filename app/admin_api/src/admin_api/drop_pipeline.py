@@ -15,7 +15,10 @@ from pydantic_settings import SettingsConfigDict
 from admin_api.cloud_run_auth import auth_headers_for
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
-from habeas_privacy_core.workflow.approval import MATCHING_REVIEW_ACTION
+from habeas_privacy_core.workflow.approval import (
+    MATCHING_REVIEW_ACTION,
+    NOTICE_REVIEW_ACTION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,7 @@ class DropPipelineSettings(CoreSettings):
     request_dispatcher_url: str = "http://127.0.0.1:8083"
     matching_url: str = "http://127.0.0.1:8084"
     data_fulfillment_url: str = "http://127.0.0.1:8085"
+    drop_notice_dispatcher_url: str = "http://127.0.0.1:8086"
 
 
 settings = DropPipelineSettings()
@@ -45,6 +49,7 @@ WORKER_KEYS = (
     ("request_dispatcher", "request_dispatcher_url"),
     ("matching", "matching_url"),
     ("data_fulfillment", "data_fulfillment_url"),
+    ("drop_notice_dispatcher", "drop_notice_dispatcher_url"),
 )
 
 
@@ -203,7 +208,7 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
          LIMIT 20
         """
     )
-    approval_rows = await conn.fetch(
+    matching_approval_rows = await conn.fetch(
         """
         SELECT status, COUNT(*)::int AS count
           FROM approval_requests
@@ -213,16 +218,37 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
         """,
         MATCHING_REVIEW_ACTION,
     )
-    approval_pending = 0
-    approval_approved = 0
-    approvals_by_status: list[dict[str, Any]] = []
-    for row in approval_rows:
+    matching_approval_pending = 0
+    matching_approval_approved = 0
+    matching_approvals_by_status: list[dict[str, Any]] = []
+    for row in matching_approval_rows:
         item = {"status": row["status"], "count": int(row["count"])}
-        approvals_by_status.append(item)
+        matching_approvals_by_status.append(item)
         if row["status"] == "pending":
-            approval_pending = item["count"]
+            matching_approval_pending = item["count"]
         elif row["status"] == "approved":
-            approval_approved = item["count"]
+            matching_approval_approved = item["count"]
+
+    notice_approval_rows = await conn.fetch(
+        """
+        SELECT status, COUNT(*)::int AS count
+          FROM approval_requests
+         WHERE action_type = $1
+         GROUP BY status
+         ORDER BY status
+        """,
+        NOTICE_REVIEW_ACTION,
+    )
+    notice_approval_pending = 0
+    notice_approval_approved = 0
+    notice_approvals_by_status: list[dict[str, Any]] = []
+    for row in notice_approval_rows:
+        item = {"status": row["status"], "count": int(row["count"])}
+        notice_approvals_by_status.append(item)
+        if row["status"] == "pending":
+            notice_approval_pending = item["count"]
+        elif row["status"] == "approved":
+            notice_approval_approved = item["count"]
 
     return {
         "connector_attempts": [
@@ -273,9 +299,15 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
         ],
         "matching_review": {
             "action_type": MATCHING_REVIEW_ACTION,
-            "pending": approval_pending,
-            "approved": approval_approved,
-            "by_status": approvals_by_status,
+            "pending": matching_approval_pending,
+            "approved": matching_approval_approved,
+            "by_status": matching_approvals_by_status,
+        },
+        "notice_review": {
+            "action_type": NOTICE_REVIEW_ACTION,
+            "pending": notice_approval_pending,
+            "approved": notice_approval_approved,
+            "by_status": notice_approvals_by_status,
         },
     }
 
@@ -366,3 +398,9 @@ async def drop_fulfill(body: FulfillProxyBody | None = None):
     url = f"{settings.data_fulfillment_url.rstrip('/')}/fulfill"
     payload = _model_dump_nonzero(body) if body is not None else {}
     return await proxy_post(url, json_body=payload)
+
+
+@router.post("/upload-weekly")
+async def drop_upload_weekly():
+    url = f"{settings.drop_notice_dispatcher_url.rstrip('/')}/upload-weekly"
+    return await proxy_post(url, timeout=DOWNLOAD_PROXY_TIMEOUT)
