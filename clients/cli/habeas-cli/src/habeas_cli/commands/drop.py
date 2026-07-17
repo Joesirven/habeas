@@ -94,18 +94,110 @@ def hash_index_process(
     emit(payload, human=human)
 
 
+def _post_spine(
+    path: str,
+    *,
+    execute: bool,
+    human: bool,
+    body: dict | None = None,
+) -> None:
+    """POST a DROP spine mutation; dry-run unless --execute."""
+    if not execute:
+        if body is None:
+            emit({"dry_run": True, "would_post": path}, human=human)
+        else:
+            emit({"dry_run": True, "would_post": body, "path": path}, human=human)
+        return
+    try:
+        kwargs = {} if body is None else {"json_body": body}
+        payload = admin_api_request("POST", path, **kwargs)
+    except AdminApiError as exc:
+        emit({"status": "error", "detail": str(exc)}, human=human)
+        raise typer.Exit(code=1) from exc
+    emit(payload, human=human)
+
+
+def _optional_body(**fields: object) -> dict:
+    """Build a JSON body from CLI options, omitting unset values."""
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+@app.command("download")
+def download(
+    execute: bool = typer.Option(False, "--execute"),
+    human: bool = typer.Option(False, "--human"),
+):
+    """Proxy DROP connector download via admin-api."""
+    _post_spine("/ops/drop/download", execute=execute, human=human)
+
+
+@app.command("land")
+def land(
+    land_attempt_id: int | None = typer.Option(None, "--land-attempt-id"),
+    gcs_uri: str | None = typer.Option(None, "--gcs-uri"),
+    zip_path: str | None = typer.Option(None, "--zip-path"),
+    source_csv_filename: str | None = typer.Option(None, "--source-csv-filename"),
+    list_type: str | None = typer.Option(None, "--list-type"),
+    execute: bool = typer.Option(False, "--execute"),
+    human: bool = typer.Option(False, "--human"),
+):
+    """Proxy DROP ingestor land via admin-api (optional LandProxyBody fields)."""
+    body = _optional_body(
+        land_attempt_id=land_attempt_id,
+        gcs_uri=gcs_uri,
+        zip_path=zip_path,
+        source_csv_filename=source_csv_filename,
+        list_type=list_type,
+    )
+    _post_spine("/ops/drop/land", execute=execute, human=human, body=body)
+
+
+@app.command("promote")
+def promote(
+    promote_attempt_id: int | None = typer.Option(None, "--promote-attempt-id"),
+    source_csv_filename: str | None = typer.Option(None, "--source-csv-filename"),
+    list_type: str | None = typer.Option(None, "--list-type"),
+    limit: int | None = typer.Option(None, "--limit", min=1, max=5000),
+    execute: bool = typer.Option(False, "--execute"),
+    human: bool = typer.Option(False, "--human"),
+):
+    """Proxy DROP ingestor promote via admin-api (optional PromoteProxyBody fields)."""
+    body = _optional_body(
+        promote_attempt_id=promote_attempt_id,
+        source_csv_filename=source_csv_filename,
+        list_type=list_type,
+        limit=limit,
+    )
+    _post_spine("/ops/drop/promote", execute=execute, human=human, body=body)
+
+
+@app.command("dispatch")
+def dispatch(
+    limit: int | None = typer.Option(None, "--limit", min=1, max=5000),
+    execute: bool = typer.Option(False, "--execute"),
+    human: bool = typer.Option(False, "--human"),
+):
+    """Proxy request dispatcher via admin-api (optional DispatchProxyBody fields)."""
+    body = _optional_body(limit=limit)
+    _post_spine("/ops/drop/dispatch", execute=execute, human=human, body=body)
+
+
 @app.command("match")
 def match(
     execute: bool = typer.Option(False, "--execute"),
     human: bool = typer.Option(False, "--human"),
 ):
     """Kick matching worker process via admin-api."""
-    if not execute:
-        emit({"dry_run": True, "would_post": "/ops/drop/match"}, human=human)
-        return
-    try:
-        payload = admin_api_request("POST", "/ops/drop/match")
-    except AdminApiError as exc:
-        emit({"status": "error", "detail": str(exc)}, human=human)
-        raise typer.Exit(code=1) from exc
-    emit(payload, human=human)
+    _post_spine("/ops/drop/match", execute=execute, human=human)
+
+
+@app.command("fulfill")
+def fulfill(
+    request_id: str | None = typer.Option(None, "--request-id"),
+    limit: int | None = typer.Option(None, "--limit", min=1, max=5000),
+    execute: bool = typer.Option(False, "--execute"),
+    human: bool = typer.Option(False, "--human"),
+):
+    """Proxy data fulfillment via admin-api (optional FulfillProxyBody fields)."""
+    body = _optional_body(request_id=request_id, limit=limit)
+    _post_spine("/ops/drop/fulfill", execute=execute, human=human, body=body)

@@ -55,3 +55,124 @@ def test_drop_match_execute():
         result = runner.invoke(app, ["drop", "match", "--execute"])
     assert result.exit_code == 0
     mock_req.assert_called_once_with("POST", "/ops/drop/match")
+
+
+def test_drop_download_dry_run():
+    result = runner.invoke(app, ["drop", "download"])
+    assert result.exit_code == 0
+    assert "dry_run" in result.stdout
+    assert "/ops/drop/download" in result.stdout
+
+
+def test_drop_download_execute():
+    with patch(
+        "habeas_cli.commands.drop.admin_api_request",
+        return_value={"status": "ok"},
+    ) as mock_req:
+        result = runner.invoke(app, ["drop", "download", "--execute"])
+    assert result.exit_code == 0
+    mock_req.assert_called_once_with("POST", "/ops/drop/download")
+
+
+def test_drop_land_dry_run():
+    result = runner.invoke(app, ["drop", "land", "--gcs-uri", "gs://bucket/file.zip"])
+    assert result.exit_code == 0
+    assert "dry_run" in result.stdout
+    assert "/ops/drop/land" in result.stdout
+    assert "gs://bucket/file.zip" in result.stdout
+
+
+def test_drop_land_execute():
+    with patch(
+        "habeas_cli.commands.drop.admin_api_request",
+        return_value={"status": "ok"},
+    ) as mock_req:
+        result = runner.invoke(
+            app,
+            [
+                "drop",
+                "land",
+                "--execute",
+                "--land-attempt-id",
+                "3",
+                "--list-type",
+                "Email",
+            ],
+        )
+    assert result.exit_code == 0
+    mock_req.assert_called_once()
+    assert mock_req.call_args.args[0] == "POST"
+    assert mock_req.call_args.args[1] == "/ops/drop/land"
+    assert mock_req.call_args.kwargs["json_body"] == {
+        "land_attempt_id": 3,
+        "list_type": "Email",
+    }
+
+
+def test_drop_promote_dry_run():
+    result = runner.invoke(app, ["drop", "promote", "--limit", "10"])
+    assert result.exit_code == 0
+    assert "dry_run" in result.stdout
+    assert "/ops/drop/promote" in result.stdout
+
+
+def test_drop_promote_execute():
+    with patch(
+        "habeas_cli.commands.drop.admin_api_request",
+        return_value={"status": "ok"},
+    ) as mock_req:
+        result = runner.invoke(
+            app,
+            ["drop", "promote", "--execute", "--limit", "25", "--list-type", "Phone"],
+        )
+    assert result.exit_code == 0
+    mock_req.assert_called_once()
+    assert mock_req.call_args.args[1] == "/ops/drop/promote"
+    assert mock_req.call_args.kwargs["json_body"] == {
+        "list_type": "Phone",
+        "limit": 25,
+    }
+
+
+def test_drop_dispatch_dry_run():
+    result = runner.invoke(app, ["drop", "dispatch"])
+    assert result.exit_code == 0
+    assert "dry_run" in result.stdout
+    assert "/ops/drop/dispatch" in result.stdout
+
+
+def test_drop_dispatch_execute():
+    with patch(
+        "habeas_cli.commands.drop.admin_api_request",
+        return_value={"status": "ok"},
+    ) as mock_req:
+        result = runner.invoke(app, ["drop", "dispatch", "--execute", "--limit", "100"])
+    assert result.exit_code == 0
+    mock_req.assert_called_once()
+    assert mock_req.call_args.args[1] == "/ops/drop/dispatch"
+    assert mock_req.call_args.kwargs["json_body"] == {"limit": 100}
+
+
+def test_drop_fulfill_dry_run():
+    result = runner.invoke(app, ["drop", "fulfill", "--request-id", "req-1"])
+    assert result.exit_code == 0
+    assert "dry_run" in result.stdout
+    assert "/ops/drop/fulfill" in result.stdout
+
+
+def test_drop_fulfill_execute():
+    with patch(
+        "habeas_cli.commands.drop.admin_api_request",
+        return_value={"status": "ok"},
+    ) as mock_req:
+        result = runner.invoke(
+            app,
+            ["drop", "fulfill", "--execute", "--request-id", "req-9", "--limit", "5"],
+        )
+    assert result.exit_code == 0
+    mock_req.assert_called_once()
+    assert mock_req.call_args.args[1] == "/ops/drop/fulfill"
+    assert mock_req.call_args.kwargs["json_body"] == {
+        "request_id": "req-9",
+        "limit": 5,
+    }
