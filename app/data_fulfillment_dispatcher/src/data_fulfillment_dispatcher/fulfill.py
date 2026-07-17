@@ -14,6 +14,7 @@ from habeas_privacy_core.workflow.approval import is_matching_review_approved
 
 # CPPA response CSV status codes (KTD-5)
 RESPONSE_STATUS_DELETED = 3
+RESPONSE_STATUS_OPTED_OUT = 4
 RESPONSE_STATUS_NOT_FOUND = 5
 
 
@@ -30,6 +31,7 @@ class FulfillItemResult:
     outcome: str  # fulfilled | skipped | rejected
     response_status: int | None = None
     matched: bool | None = None
+    match_count: int | None = None
     reason: str | None = None
 
 
@@ -87,11 +89,11 @@ async def find_requests_ready_to_fulfill(
 async def _latest_match(
     conn: DbConnection,
     request_id: str,
-) -> bool | None:
-    """Return matched flag from latest matching_results row, or None if absent."""
+) -> tuple[bool, int] | None:
+    """Return (matched, match_count) from latest matching_results, or None."""
     row = await conn.fetchrow(
         """
-        SELECT matched
+        SELECT matched, match_count
           FROM matching_results
          WHERE request_id = $1
          ORDER BY recorded_at DESC
@@ -101,7 +103,16 @@ async def _latest_match(
     )
     if row is None:
         return None
-    return bool(row["matched"])
+    return bool(row["matched"]), int(row["match_count"] or 0)
+
+
+def response_status_for_match_count(match_count: int) -> int:
+    """Map match_count → CPPA DROP response status."""
+    if match_count <= 0:
+        return RESPONSE_STATUS_NOT_FOUND
+    if match_count == 1:
+        return RESPONSE_STATUS_DELETED
+    return RESPONSE_STATUS_OPTED_OUT
 
 
 async def _set_response_status(
@@ -123,7 +134,6 @@ async def _set_response_status(
         UUID(request_id),
         response_status,
     )
-    # asyncpg returns e.g. "UPDATE 1"
     return result.endswith("1") if isinstance(result, str) else bool(result)
 
 
@@ -131,7 +141,7 @@ async def fulfill_one(
     conn: DbConnection,
     request_id: str,
 ) -> FulfillItemResult:
-    """Gate on matching.review, then map match outcome → response_status."""
+    """Gate on matching.review, then map match_count → response_status 3/4/5."""
     approved = await is_matching_review_approved(conn, request_id)  # type: ignore[arg-type]
     if not approved:
         return FulfillItemResult(
@@ -140,23 +150,23 @@ async def fulfill_one(
             reason="matching.review_not_approved",
         )
 
-    matched = await _latest_match(conn, request_id)
-    if matched is None:
+    latest = await _latest_match(conn, request_id)
+    if latest is None:
         return FulfillItemResult(
             request_id=request_id,
             outcome="rejected",
             reason="no_matching_result",
         )
 
-    response_status = (
-        RESPONSE_STATUS_DELETED if matched else RESPONSE_STATUS_NOT_FOUND
-    )
+    matched, match_count = latest
+    response_status = response_status_for_match_count(match_count)
     updated = await _set_response_status(conn, request_id, response_status)
     if not updated:
         return FulfillItemResult(
             request_id=request_id,
             outcome="skipped",
             matched=matched,
+            match_count=match_count,
             response_status=response_status,
             reason="response_status_already_set_or_not_drop",
         )
@@ -165,6 +175,7 @@ async def fulfill_one(
         request_id=request_id,
         outcome="fulfilled",
         matched=matched,
+        match_count=match_count,
         response_status=response_status,
     )
 

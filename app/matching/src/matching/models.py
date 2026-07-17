@@ -36,3 +36,5 @@ class MatchResult(BaseModel):
     consumer_id: str | None = None
     confidence: float | None = None
     matched_via: str
+    match_count: int = 0
+    consumer_ids: list[str] | None = None

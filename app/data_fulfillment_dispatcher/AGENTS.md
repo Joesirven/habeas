@@ -9,8 +9,8 @@ DROP fulfillment **stub**: after `matching.review` approval, set
 Does **not** call Tier-C suppression APIs (mailchimp, paylocity, etc.).
 
 - `POST /fulfill` — one `request_id` or batch of ready DROP rows
-- Gate: `is_matching_review_approved` (`matching.review` approved)
-- Match → `response_status=3` (Deleted); no-match → `5` (Not found)
+- Gate: `is_matching_review_approved` (`matching.review` approved) — same for statuses 3/4/5
+- `match_count` 0 → `response_status=5` (Not found); 1 → `3` (Deleted); N>1 → `4` (Opted out)
 - **No** fulfillment queue / attempts table — operates on `matching_results` +
   `drop_raw_requests` (reaper registry unchanged)
 

@@ -88,12 +88,17 @@ def test_t8_4_primary_hash_paths(list_type, hash_fields, expected_via, expected_
     ],
 )
 async def test_t8_4_drop_hash_pipeline_list_type_paths(list_type, hash_fields, expected_via):
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    client.query.return_value = []
     request = MatchRequest(
         request_id="r1",
         intake_source=IntakeSource.DROP,
         list_type=list_type,
         hash_fields=hash_fields,
     )
-    result = await DropHashPipeline().match(request)
+    result = await DropHashPipeline(bq_client=client).match(request)
     assert result.matched is False
+    assert result.match_count == 0
     assert result.matched_via == expected_via

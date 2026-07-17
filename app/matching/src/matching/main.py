@@ -19,6 +19,9 @@ from habeas_privacy_core.observability.logging import configure_logging
 from habeas_privacy_core.observability.tracing import setup_tracing
 from habeas_privacy_core.queue.claim import claim_next
 from habeas_privacy_core.queue.constants import MATCHING_ATTEMPTS_TABLE, MATCHING_STEP
+from datetime import datetime, timedelta, timezone
+
+from matching.adapters.drop_hash import BigQueryLookupError
 from matching.models import IntakeSource, MatchRequest
 from matching.results import complete_attempt_error, complete_attempt_success
 from matching.router import get_pipeline
@@ -136,7 +139,24 @@ async def process_next():
 
             pipeline = get_pipeline(IntakeSource(row["intake_source"]))
             match_request = await build_match_request(conn, row)
-            result = await pipeline.match(match_request)
+            try:
+                result = await pipeline.match(match_request)
+            except BigQueryLookupError as exc:
+                retry_after = datetime.now(timezone.utc) + timedelta(
+                    seconds=exc.retry_seconds
+                )
+                await complete_attempt_error(
+                    conn,
+                    attempt_id=attempt_id,
+                    error_code="bq_lookup_error",
+                    error_message=str(exc),
+                    retry_after=retry_after,
+                )
+                return {
+                    "status": "error",
+                    "reason": "bq_lookup_error",
+                    "retry_after": retry_after.isoformat(),
+                }
             result_id = await complete_attempt_success(
                 conn,
                 attempt_id=attempt_id,
@@ -145,6 +165,7 @@ async def process_next():
                 matched_via=result.matched_via,
                 consumer_id=result.consumer_id,
                 confidence=result.confidence,
+                match_count=result.match_count,
             )
         except Exception as exc:
             await complete_attempt_error(
@@ -161,6 +182,7 @@ async def process_next():
         "attempt_id": attempt_id,
         "request_id": request_id,
         "matched": result.matched,
+        "match_count": result.match_count,
         "result_id": result_id,
     }
 

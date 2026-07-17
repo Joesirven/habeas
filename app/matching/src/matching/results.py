@@ -18,6 +18,7 @@ async def complete_attempt_success(
     matched_via: str,
     consumer_id: str | None = None,
     confidence: float | None = None,
+    match_count: int = 0,
 ) -> int:
     """Mark attempt successful and append a matching_results row."""
     await conn.execute(
@@ -33,8 +34,8 @@ async def complete_attempt_success(
     result_id = await conn.fetchval(
         """
         INSERT INTO matching_results (
-            attempt_id, request_id, matched, consumer_id, confidence, matched_via
-        ) VALUES ($1, $2, $3, $4, $5, $6)
+            attempt_id, request_id, matched, consumer_id, confidence, matched_via, match_count
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id
         """,
         attempt_id,
@@ -43,6 +44,7 @@ async def complete_attempt_success(
         consumer_id,
         confidence,
         matched_via,
+        match_count,
     )
     return int(result_id)
 
