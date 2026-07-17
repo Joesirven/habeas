@@ -16,4 +16,8 @@ Migration adds `NOTIFY privacy_events` on **approval_requests** (and related) fo
 
 `requests_validate_raw_fk` trigger (`core_validate_requests_raw_fk`) enforces `raw_record_id` per `intake_source` (`drop` → `drop_raw_requests`, `manual` → `manual_raw_requests`). `manual` may use NULL `raw_record_id` until U12 promote wiring.
 
+## Hash index refresh queue (U2)
+
+Postgres owns the DROP hash index refresh control plane: `hash_index_refresh_attempts` (single-flight per `state`) and append-only `hash_index_refresh_runs`. Enqueue helpers live in `habeas_privacy_core.db.hash_index_refresh`.
+
 If editing → [`.agent/modules/db-migrations.md`](../.agent/modules/db-migrations.md).
