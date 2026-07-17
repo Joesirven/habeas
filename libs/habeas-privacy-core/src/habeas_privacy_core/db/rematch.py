@@ -61,6 +61,8 @@ async def enqueue_rematch_for_refresh(
     Candidates are open DROP requests (``response_status IS NULL``) whose latest
     match result is missing, ``match_count = 0`` (not-found), or ``match_count > 1``
     (prior multi-match / status 4). Single-match (``match_count = 1``) is skipped.
+    Already-fulfilled Opted-out (``response_status = 4``) is not rematched until a
+    reopen path exists.
     """
     if vertical != "drop":
         raise ValueError(f"unsupported rematch vertical: {vertical!r}")

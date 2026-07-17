@@ -10,7 +10,8 @@ optionally rematches open DROP requests when `state == 'CA'`.
 - `POST /process` — claim `hash_index_refresh_attempts`, run dbt, append run row
 - CA rematch gate lives **only** at this call site (`enqueue_rematch_for_refresh`)
 - Rematch candidates (via core helper): open DROP not-found **or** prior multi-match
-  (`match_count > 1` / status 4); single-match skipped
+  (`match_count > 1` / status 4); single-match skipped; fulfilled
+  `response_status = 4` not rematched (no reopen path yet)
 - Redact hashes/dwids from run error messages (privacy invariants)
 
 Schema: [`db/migrations/`](../../db/migrations/) — `hash_index_refresh_*`.

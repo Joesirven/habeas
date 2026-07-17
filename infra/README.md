@@ -67,12 +67,26 @@ Env on Cloud Run: `DROP_ENV=sandbox`, `DROP_API_BASE_URL=https://api.drop.privac
 
 Land/promote only — no `DROP_API_KEY`. Needs `DATABASE_URL`.
 
+### hash-index-refresh (DROP hash productionize)
+
+| File | Purpose |
+|------|---------|
+| [`cloudbuild/hash-index-refresh-dev.yaml`](cloudbuild/hash-index-refresh-dev.yaml) | Build/push/deploy `hash-index-refresh-dev` |
+
+Runs dbt under `transform/drop_hash/` against BigQuery `drop_hash_index`. Needs `DATABASE_URL` + workload identity with BigQuery **jobUser** and dataset write on `example-gcp-project.drop_hash_index` (read on MDR source datasets). Matching SA remains **select-only** on the three serving marts (`email_hash`, `phone_hash`, `ndz_hash`).
+
+```bash
+gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
+  --project=example-gcp-project \
+  --substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@/postgres?host=/cloudsql/example-gcp-project:us-east4:dpra-dev-temp'
+```
+
 ### Cloud Run auth (dev)
 
 | Surface | Invoker |
 |---------|---------|
 | `admin-api-dev` | `allUsers` (Firebase SPA CORS; IAP later) |
-| Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) |
+| Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`, `hash-index-refresh-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) |
 
 Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Localhost worker URLs skip auth.
 

@@ -1,5 +1,6 @@
 """Integration tests for hash index refresh queue helpers."""
 
+import asyncio
 import os
 
 import asyncpg
@@ -11,7 +12,7 @@ from habeas_privacy_core.db.rematch import enqueue_rematch_for_refresh
 from habeas_privacy_core.models.intake import DropListType, PromoteDropRequestInput
 from habeas_privacy_core.db.requests import promote_drop_request
 
-pytestmark = pytest.mark.skipif(
+requires_database = pytest.mark.skipif(
     not os.getenv("DATABASE_URL"),
     reason="DATABASE_URL required for hash index refresh integration tests",
 )
@@ -27,10 +28,19 @@ async def pool():
 
 
 async def _clear_refresh_attempts(conn: asyncpg.Connection) -> None:
-    await conn.execute("DELETE FROM hash_index_refresh_runs")
-    await conn.execute("DELETE FROM hash_index_refresh_attempts")
+    # Terminal rows are immutable. The terminal-guard trigger returns NEW on
+    # DELETE (null), which cancels deletes — abandon non-terminal rows instead
+    # so the single-flight unique index frees the state.
+    await conn.execute(
+        """
+        UPDATE hash_index_refresh_attempts
+           SET status = 'abandoned', completed_at = NOW()
+         WHERE status IN ('pending', 'claimed', 'in_flight')
+        """
+    )
 
 
+@requires_database
 async def test_enqueue_hash_index_refresh_single_flight(pool):
     async with pool.acquire() as conn:
         await _clear_refresh_attempts(conn)
@@ -64,6 +74,7 @@ async def test_enqueue_hash_index_refresh_single_flight(pool):
         assert row["list_types"] == ["Email", "Phone"]
 
 
+@requires_database
 async def test_enqueue_hash_index_refresh_allows_new_after_terminal(pool):
     async with pool.acquire() as conn:
         await _clear_refresh_attempts(conn)
@@ -136,6 +147,7 @@ async def _insert_matching_result(
     )
 
 
+@requires_database
 async def test_enqueue_rematch_for_refresh_attempt_two_for_not_found_skips_single(
     pool,
 ):
@@ -185,6 +197,7 @@ async def test_enqueue_rematch_for_refresh_attempt_two_for_not_found_skips_singl
         assert matched_attempts == 1
 
 
+@requires_database
 async def test_enqueue_rematch_includes_multi_match_skips_single(pool):
     async with pool.acquire() as conn:
         multi_match_id = await _promote_drop(
@@ -246,9 +259,63 @@ async def test_enqueue_rematch_includes_multi_match_skips_single(pool):
         assert single_attempts == 1
 
 
+@requires_database
+async def test_enqueue_rematch_skips_fulfilled_response_status_4(pool):
+    """Already-fulfilled Opted-out (response_status=4) must not rematch."""
+    async with pool.acquire() as conn:
+        fulfilled_id = await _promote_drop(
+            conn,
+            drop_record_id="rematch-fulfilled-4",
+            list_type=DropListType.EMAIL,
+        )
+        open_multi_id = await _promote_drop(
+            conn,
+            drop_record_id="rematch-open-multi",
+            list_type=DropListType.EMAIL,
+        )
+        await _insert_matching_result(conn, request_id=fulfilled_id, match_count=2)
+        await _insert_matching_result(conn, request_id=open_multi_id, match_count=2)
+        await conn.execute(
+            """
+            UPDATE drop_raw_requests
+               SET response_status = 4
+             WHERE id = (
+                SELECT raw_record_id FROM requests WHERE id = $1::uuid
+             )
+            """,
+            fulfilled_id,
+        )
+
+        enqueued = await enqueue_rematch_for_refresh(
+            conn,
+            vertical="drop",
+            list_types=["Email"],
+            state="CA",
+        )
+        assert enqueued >= 1
+
+        fulfilled_attempts = await conn.fetchval(
+            "SELECT COUNT(*) FROM matching_attempts WHERE request_id = $1::uuid",
+            fulfilled_id,
+        )
+        assert fulfilled_attempts == 1
+
+        open_attempt = await conn.fetchrow(
+            """
+            SELECT attempt_number, status
+              FROM matching_attempts
+             WHERE request_id = $1::uuid
+             ORDER BY attempt_number DESC
+             LIMIT 1
+            """,
+            open_multi_id,
+        )
+        assert open_attempt["attempt_number"] == 2
+        assert open_attempt["status"] == "pending"
+
+
 def test_enqueue_rematch_rejects_unsupported_vertical():
     with pytest.raises(ValueError, match="unsupported rematch vertical"):
-        import asyncio
 
         async def _run() -> None:
             await enqueue_rematch_for_refresh(
