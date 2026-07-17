@@ -12,8 +12,8 @@ from habeas_privacy_core.models.intake import DropListType
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_PROJECT = "example-gcp-project"
-_DEFAULT_DATASET = "drop_hash_index"
+DEFAULT_BQ_PROJECT = "example-gcp-project"
+DEFAULT_BQ_DATASET = "drop_hash_index"
 _TABLE_BY_LIST_TYPE = {
     DropListType.EMAIL: "email_hash",
     DropListType.PHONE: "phone_hash",
@@ -77,8 +77,8 @@ def lookup_dwids_by_hash(
         raise ValueError("lookup state is required")
 
     table = serving_table(list_type)
-    project_id = project or os.environ.get("DROP_HASH_BQ_PROJECT", _DEFAULT_PROJECT)
-    dataset_id = dataset or os.environ.get("DROP_HASH_BQ_DATASET", _DEFAULT_DATASET)
+    project_id = project or os.environ.get("DROP_HASH_BQ_PROJECT", DEFAULT_BQ_PROJECT)
+    dataset_id = dataset or os.environ.get("DROP_HASH_BQ_DATASET", DEFAULT_BQ_DATASET)
     fq_table = f"`{project_id}.{dataset_id}.{table}`"
 
     sql = f"""

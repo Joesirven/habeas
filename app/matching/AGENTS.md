@@ -17,5 +17,9 @@ Consumer record matching for privacy requests, across all intake sources — not
   DWIDs). Env `DROP_HASH_LOOKUP_STATE` is local/dev fallback only — production DROP
   path fails closed when `requestor_state` is missing. Persists
   `MatchResult.match_count` on `matching_results`.
+- Matching attempts persist allowlisted `audit_payload` JSONB on success/error
+  (adapter, duration, match_count, lookup_state, BQ table names, redacted errors —
+  never hashes/dwids/emails/phones). Reaper `max_attempts` default is **5**
+  (≥3 retries after the initial attempt).
 - Vendor adapter code in `adapters/` inside this app only — no top-level `adapters/`.
 - Schema in [`db/migrations/`](../../db/migrations/) — prefix `matching_` as appropriate.

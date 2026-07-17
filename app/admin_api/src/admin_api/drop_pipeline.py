@@ -32,6 +32,20 @@ from habeas_privacy_core.workflow.approval import MATCHING_REVIEW_ACTION
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ops/drop", tags=["drop-pipeline"])
+health_router = APIRouter(prefix="/ops/health", tags=["ops-health"])
+
+# Attempt tables keyed by WORKER_KEYS name for queue depth aggregation (U23).
+# Workers without a dedicated attempt table report empty queue depths.
+_WORKER_QUEUE_TABLES: dict[str, str | None] = {
+    "drop_connector": "drop_connector_attempts",
+    "drop_ingestor": "drop_ingest_attempts",
+    "request_dispatcher": None,
+    "matching": "matching_attempts",
+    "data_fulfillment": None,
+    "hash_index_refresh": "hash_index_refresh_attempts",
+}
+
+_TERMINAL_FAIL_STATUSES = ("submit_error", "outcome_error", "timeout", "abandoned")
 
 
 class DropPipelineSettings(CoreSettings):
@@ -743,6 +757,38 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
         row["decided_at"].isoformat() if row["decided_at"] is not None else None
     )
     detail["decision_reason"] = row["decision_reason"]
+    attempt_rows = await conn.fetch(
+        """
+        SELECT id,
+               attempt_number,
+               status,
+               attempted_at,
+               completed_at,
+               error_code,
+               audit_payload
+          FROM matching_attempts
+         WHERE request_id = $1::uuid
+         ORDER BY attempt_number ASC
+        """,
+        request_id,
+    )
+    detail["attempts"] = [
+        {
+            "id": int(a["id"]),
+            "attempt_number": int(a["attempt_number"]),
+            "status": a["status"],
+            "attempted_at": a["attempted_at"].isoformat()
+            if a["attempted_at"] is not None
+            else None,
+            "completed_at": a["completed_at"].isoformat()
+            if a["completed_at"] is not None
+            else None,
+            "error_code": a["error_code"],
+            # Allowlisted JSONB already — never add hash/dwid fields here.
+            "audit_payload": dict(a["audit_payload"] or {}),
+        }
+        for a in attempt_rows
+    ]
     return detail
 
 
@@ -793,3 +839,125 @@ async def drop_matching_result_detail(request_id: str):
     if detail is None:
         raise HTTPException(status_code=404, detail="matching result not found")
     return detail
+
+
+async def collect_queue_depths(conn: Any) -> list[dict[str, Any]]:
+    """Postgres attempt-table status counts for DROP-scoped workers (ids/counts only)."""
+    from habeas_privacy_core.queue.reap import ReapedTableConfig
+
+    queues: list[dict[str, Any]] = []
+    for worker, table in _WORKER_QUEUE_TABLES.items():
+        if table is None:
+            queues.append(
+                {
+                    "worker": worker,
+                    "table": None,
+                    "by_status": [],
+                    "pending": 0,
+                    "claimed": 0,
+                    "in_flight": 0,
+                    "failed_terminal": 0,
+                    "oldest_pending_age_seconds": None,
+                    "pool": {
+                        "configured_concurrency": None,
+                        "max_attempts": None,
+                        "note": "no_attempt_table",
+                    },
+                }
+            )
+            continue
+        status_rows = await conn.fetch(
+            f"""
+            SELECT status, COUNT(*)::int AS count
+              FROM {table}
+             GROUP BY status
+             ORDER BY status
+            """
+        )
+        by_status = [
+            {"status": r["status"], "count": int(r["count"])} for r in status_rows
+        ]
+        counts = {item["status"]: item["count"] for item in by_status}
+        oldest = await conn.fetchval(
+            f"""
+            SELECT EXTRACT(EPOCH FROM (NOW() - MIN(attempted_at)))::int
+              FROM {table}
+             WHERE status = 'pending'
+            """
+        )
+        failed_terminal = sum(
+            counts.get(status, 0) for status in _TERMINAL_FAIL_STATUSES
+        )
+        reaper_cfg = ReapedTableConfig(table=table)
+        queues.append(
+            {
+                "worker": worker,
+                "table": table,
+                "by_status": by_status,
+                "pending": counts.get("pending", 0),
+                "claimed": counts.get("claimed", 0),
+                "in_flight": counts.get("in_flight", 0),
+                "failed_terminal": failed_terminal,
+                "oldest_pending_age_seconds": int(oldest) if oldest is not None else None,
+                "pool": {
+                    "configured_concurrency": None,
+                    "max_attempts": reaper_cfg.max_attempts,
+                    "note": "configured_hint",
+                },
+            }
+        )
+    return queues
+
+
+@router.get("/workers")
+async def drop_workers():
+    """Worker readiness + queue depths (admin_api aggregate; browser never calls workers)."""
+    _require_database()
+    health = await collect_worker_health()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        queues = await collect_queue_depths(conn)
+    by_worker = {q["worker"]: q for q in queues}
+    workers = []
+    for name, _attr in WORKER_KEYS:
+        probe = health.get(name) or {}
+        queue = by_worker.get(name) or {}
+        ready_body = probe.get("body")
+        if isinstance(ready_body, dict):
+            ready_summary = {
+                "status": ready_body.get("status"),
+                "service": ready_body.get("service"),
+            }
+        else:
+            ready_summary = {"status": "unknown"}
+        workers.append(
+            {
+                "name": name,
+                "ok": bool(probe.get("ok")),
+                "status_code": probe.get("status_code"),
+                "ready": ready_summary,
+                "queue": {
+                    "table": queue.get("table"),
+                    "pending": queue.get("pending", 0),
+                    "claimed": queue.get("claimed", 0),
+                    "in_flight": queue.get("in_flight", 0),
+                    "failed_terminal": queue.get("failed_terminal", 0),
+                    "oldest_pending_age_seconds": queue.get(
+                        "oldest_pending_age_seconds"
+                    ),
+                },
+                "pool": queue.get("pool")
+                or {"configured_concurrency": None, "note": "configured_hint"},
+            }
+        )
+    return {"workers": workers}
+
+
+@health_router.get("/queues")
+async def health_queues():
+    """Global queue rollup across DROP attempt tables."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        queues = await collect_queue_depths(conn)
+    return {"queues": queues}

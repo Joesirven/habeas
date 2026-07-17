@@ -383,6 +383,84 @@ def test_hash_index_refresh_enqueue_rejects_invalid_state(monkeypatch: pytest.Mo
     assert response.status_code == 400
 
 
+def test_drop_workers_and_health_queues(monkeypatch: pytest.MonkeyPatch):
+    async def fake_health() -> dict[str, Any]:
+        return {
+            "matching": {
+                "name": "matching",
+                "ok": True,
+                "status_code": 200,
+                "body": {"status": "ok", "service": "matching"},
+            },
+            "drop_connector": {
+                "name": "drop_connector",
+                "ok": False,
+                "status_code": None,
+                "error": "timeout",
+            },
+        }
+
+    async def fake_depths(conn: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "worker": "matching",
+                "table": "matching_attempts",
+                "by_status": [{"status": "pending", "count": 2}],
+                "pending": 2,
+                "claimed": 0,
+                "in_flight": 1,
+                "failed_terminal": 0,
+                "oldest_pending_age_seconds": 12,
+                "pool": {
+                    "configured_concurrency": None,
+                    "max_attempts": 5,
+                    "note": "configured_hint",
+                },
+            },
+            {
+                "worker": "drop_connector",
+                "table": "drop_connector_attempts",
+                "by_status": [],
+                "pending": 0,
+                "claimed": 0,
+                "in_flight": 0,
+                "failed_terminal": 0,
+                "oldest_pending_age_seconds": None,
+                "pool": {"configured_concurrency": None, "max_attempts": 5, "note": "configured_hint"},
+            },
+        ]
+
+    class _Acquire:
+        async def __aenter__(self):
+            return MagicMock()
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(drop_pipeline, "collect_worker_health", fake_health)
+    monkeypatch.setattr(drop_pipeline, "collect_queue_depths", fake_depths)
+
+    with TestClient(app) as client:
+        workers = client.get("/ops/drop/workers")
+        queues = client.get("/ops/health/queues")
+
+    assert workers.status_code == 200
+    body = workers.json()
+    assert len(body["workers"]) == len(drop_pipeline.WORKER_KEYS)
+    matching = next(w for w in body["workers"] if w["name"] == "matching")
+    assert matching["ok"] is True
+    assert matching["queue"]["pending"] == 2
+    assert "email" not in str(body).lower()
+    assert queues.status_code == 200
+    assert queues.json()["queues"][0]["table"] == "matching_attempts"
+
+
 def test_auth_headers_skipped_for_localhost():
     from admin_api.cloud_run_auth import auth_headers_for, clear_id_token_cache
 
@@ -486,6 +564,19 @@ async def test_get_matching_result_detail_shape():
             decision_reason=None,
         )
     )
+    conn.fetch = AsyncMock(
+        return_value=[
+            _Row(
+                id=99,
+                attempt_number=2,
+                status="success",
+                attempted_at=recorded,
+                completed_at=recorded,
+                error_code=None,
+                audit_payload={"match_count": 4, "lookup_state": "CA"},
+            )
+        ]
+    )
 
     detail = await drop_pipeline.get_matching_result_detail(
         conn, "00000000-0000-0000-0000-000000000002"
@@ -494,7 +585,9 @@ async def test_get_matching_result_detail_shape():
     assert detail["match_type"] == "multi_match"
     assert detail["match_count"] == 4
     assert detail["attempt_id"] == 99
+    assert detail["attempts"][0]["audit_payload"]["lookup_state"] == "CA"
     assert "consumer_id" not in detail
+    assert "email" not in detail["attempts"][0]["audit_payload"]
 
 
 def test_matching_results_list_route(monkeypatch: pytest.MonkeyPatch):

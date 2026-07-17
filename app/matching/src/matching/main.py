@@ -23,6 +23,8 @@ from habeas_privacy_core.queue.constants import MATCHING_ATTEMPTS_TABLE, MATCHIN
 from datetime import datetime, timedelta, timezone
 
 from matching.adapters.drop_hash import BigQueryLookupError
+from matching.audit_payload import build_matching_audit_payload
+from matching.bq_lookup import DEFAULT_BQ_DATASET, DEFAULT_BQ_PROJECT, serving_table
 from matching.models import IntakeSource, MatchRequest
 from matching.results import complete_attempt_error, complete_attempt_success
 from matching.router import get_pipeline
@@ -130,6 +132,8 @@ async def process_next():
 
         attempt_id = int(claim["id"])
         request_id = str(claim["request_id"])
+        attempt_number = int(claim.get("attempt_number") or 1)
+        started_at = datetime.now(timezone.utc)
         await conn.execute(
             f"UPDATE {MATCHING_ATTEMPTS_TABLE} SET status = 'in_flight' WHERE id = $1",
             attempt_id,
@@ -138,16 +142,35 @@ async def process_next():
         try:
             row = await load_request_row(conn, request_id)
             if row is None:
+                audit = build_matching_audit_payload(
+                    started_at=started_at,
+                    attempt_number=attempt_number,
+                    error_code="request_missing",
+                    error_class="LookupError",
+                    error_detail="request row not found",
+                    retry_scheduled=False,
+                )
                 await complete_attempt_error(
                     conn,
                     attempt_id=attempt_id,
                     error_code="request_missing",
                     error_message="request row not found",
+                    audit_payload=audit,
                 )
                 return {"status": "error", "reason": "request_missing"}
 
             pipeline = get_pipeline(IntakeSource(row["intake_source"]))
             match_request = await build_match_request(conn, row)
+            list_type = (
+                match_request.list_type.value if match_request.list_type else None
+            )
+            lookup_state = match_request.requestor_state
+            bq_tables = None
+            if match_request.list_type is not None:
+                try:
+                    bq_tables = [serving_table(match_request.list_type)]
+                except ValueError:
+                    bq_tables = None
             try:
                 result = await pipeline.match(match_request)
             except BigQueryLookupError as exc:
@@ -155,12 +178,26 @@ async def process_next():
                     seconds=exc.retry_seconds
                 )
                 safe_message = redact_error_text(str(exc))
+                audit = build_matching_audit_payload(
+                    started_at=started_at,
+                    attempt_number=attempt_number,
+                    list_type=list_type,
+                    lookup_state=lookup_state,
+                    bq_project=DEFAULT_BQ_PROJECT,
+                    bq_dataset=DEFAULT_BQ_DATASET,
+                    bq_tables=bq_tables,
+                    error_code="bq_lookup_error",
+                    error_class=type(exc).__name__,
+                    error_detail=safe_message,
+                    retry_scheduled=True,
+                )
                 await complete_attempt_error(
                     conn,
                     attempt_id=attempt_id,
                     error_code="bq_lookup_error",
                     error_message=safe_message,
                     retry_after=retry_after,
+                    audit_payload=audit,
                 )
                 logger.error(
                     "matching_bq_lookup_error",
@@ -174,6 +211,18 @@ async def process_next():
                     "reason": "bq_lookup_error",
                     "retry_after": retry_after.isoformat(),
                 }
+            audit = build_matching_audit_payload(
+                started_at=started_at,
+                attempt_number=attempt_number,
+                list_type=list_type,
+                lookup_state=lookup_state,
+                bq_project=DEFAULT_BQ_PROJECT,
+                bq_dataset=DEFAULT_BQ_DATASET,
+                bq_tables=bq_tables,
+                match_count=result.match_count,
+                matched=result.matched,
+                matched_via=result.matched_via,
+            )
             result_id = await complete_attempt_success(
                 conn,
                 attempt_id=attempt_id,
@@ -183,14 +232,24 @@ async def process_next():
                 consumer_id=result.consumer_id,
                 confidence=result.confidence,
                 match_count=result.match_count,
+                audit_payload=audit,
             )
         except Exception as exc:
             safe_message = redact_error_text(str(exc))
+            audit = build_matching_audit_payload(
+                started_at=started_at,
+                attempt_number=attempt_number,
+                error_code="matching_error",
+                error_class=type(exc).__name__,
+                error_detail=safe_message,
+                retry_scheduled=False,
+            )
             await complete_attempt_error(
                 conn,
                 attempt_id=attempt_id,
                 error_code="matching_error",
                 error_message=safe_message,
+                audit_payload=audit,
             )
             # Avoid logger.exception — traceback embeds unredacted str(exc).
             logger.error(
