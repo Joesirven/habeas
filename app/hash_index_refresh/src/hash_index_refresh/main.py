@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException
 
 from habeas_privacy_core.db.hash_index_refresh import (
     claim_hash_index_refresh,
+    mark_hash_index_refresh_in_flight,
     record_hash_index_refresh_run,
 )
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
@@ -103,10 +104,7 @@ async def process_next():
         attempt_id = int(claim["id"])
         state = str(claim["state"]).upper()
         list_types = list(claim["list_types"] or [])
-        await conn.execute(
-            f"UPDATE {HASH_INDEX_REFRESH_ATTEMPTS_TABLE} SET status = 'in_flight' WHERE id = $1",
-            attempt_id,
-        )
+        await mark_hash_index_refresh_in_flight(conn, attempt_id)
 
         started_at = datetime.now(timezone.utc)
         rematch_count = 0

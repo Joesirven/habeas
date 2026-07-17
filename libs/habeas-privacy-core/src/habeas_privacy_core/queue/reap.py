@@ -17,6 +17,10 @@ class ReapedTableConfig:
     max_attempts: int = 5
     claim_ttl_minutes: int = 10
     in_flight_max_wait_hours: int = 4
+    # Request-grain queues insert retry rows via reenqueue_retries.
+    # State-scoped single-flight queues (hash_index_refresh_attempts) must
+    # skip that path — operator re-enqueue after terminal timeout/error.
+    supports_attempt_retry: bool = True
 
 
 async def release_dead_claims(
@@ -106,7 +110,10 @@ async def run_reap_for_table(
 ) -> dict[str, Any]:
     dead = await release_dead_claims(conn, config)
     stuck = await release_stuck_in_flight(conn, config)
-    retries = await reenqueue_retries(conn, config)
+    if config.supports_attempt_retry:
+        retries = await reenqueue_retries(conn, config)
+    else:
+        retries = {"inserted": 0, "abandoned": 0}
     return {
         "table": config.table,
         "dead_claims": dead,

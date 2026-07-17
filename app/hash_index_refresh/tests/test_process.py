@@ -42,6 +42,10 @@ async def test_process_success_ca_rematches(monkeypatch: pytest.MonkeyPatch):
             return_value=claim,
         ),
         patch(
+            "hash_index_refresh.main.mark_hash_index_refresh_in_flight",
+            new_callable=AsyncMock,
+        ) as mark_in_flight,
+        patch(
             "hash_index_refresh.main.run_dbt_build",
             return_value=DbtRunResult(ok=True, returncode=0, stdout="ok", stderr=""),
         ) as dbt,
@@ -59,6 +63,7 @@ async def test_process_success_ca_rematches(monkeypatch: pytest.MonkeyPatch):
 
     assert result["status"] == "ok"
     assert result["rematch_enqueued_count"] == 3
+    mark_in_flight.assert_awaited_once_with(conn, 7)
     rematch.assert_awaited_once()
     assert rematch.await_args.kwargs["vertical"] == "drop"
     dbt.assert_called_once()
@@ -83,6 +88,10 @@ async def test_process_success_non_ca_skips_rematch(monkeypatch: pytest.MonkeyPa
             "hash_index_refresh.main.claim_hash_index_refresh",
             new_callable=AsyncMock,
             return_value=claim,
+        ),
+        patch(
+            "hash_index_refresh.main.mark_hash_index_refresh_in_flight",
+            new_callable=AsyncMock,
         ),
         patch(
             "hash_index_refresh.main.run_dbt_build",
@@ -124,6 +133,10 @@ async def test_process_dbt_failure_no_rematch(monkeypatch: pytest.MonkeyPatch):
             return_value=claim,
         ),
         patch(
+            "hash_index_refresh.main.mark_hash_index_refresh_in_flight",
+            new_callable=AsyncMock,
+        ),
+        patch(
             "hash_index_refresh.main.run_dbt_build",
             return_value=DbtRunResult(ok=False, returncode=1, stdout="", stderr="boom"),
         ),
@@ -140,3 +153,14 @@ async def test_process_dbt_failure_no_rematch(monkeypatch: pytest.MonkeyPatch):
 
     assert result["status"] == "error"
     rematch.assert_not_awaited()
+
+
+def test_mark_in_flight_sql_sets_submitted_at():
+    """Helper SQL must stamp submitted_at so stuck-in-flight reaping works."""
+    import inspect
+
+    from habeas_privacy_core.db import hash_index_refresh as helpers
+
+    source = inspect.getsource(helpers.mark_hash_index_refresh_in_flight)
+    assert "submitted_at = NOW()" in source
+    assert "status = 'in_flight'" in source

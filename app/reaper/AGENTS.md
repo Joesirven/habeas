@@ -4,7 +4,7 @@
 
 **Kind:** automation
 
-Shared worker — releases expired leases, marks timeouts, inserts retry rows across all queue tables.
+Shared worker — releases expired leases, marks timeouts, inserts retry rows across request-grain queue tables. `hash_index_refresh_attempts` is registered with `supports_attempt_retry=False` (lease / stuck-in-flight only; operator re-enqueue).
 
 - Runs every minute; system-agnostic
 

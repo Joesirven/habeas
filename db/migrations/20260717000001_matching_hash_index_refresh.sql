@@ -59,6 +59,11 @@ CREATE INDEX ix_hash_index_refresh_runs_attempt
 ALTER TABLE matching_results
     ADD COLUMN match_count INT NOT NULL DEFAULT 0;
 
+-- Historical rows defaulted to 0; restore single-match from matched so rematch
+-- does not treat prior matched=true rows as not-found.
+UPDATE matching_results
+   SET match_count = CASE WHEN matched THEN 1 ELSE 0 END;
+
 DO $$
 BEGIN
     IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_user') THEN

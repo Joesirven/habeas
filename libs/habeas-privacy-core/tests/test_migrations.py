@@ -68,6 +68,7 @@ def test_hash_index_refresh_migration_exists():
     assert "CREATE TABLE hash_index_refresh_runs" in content
     assert "ix_hash_index_refresh_attempts_single_flight" in content
     assert "match_count" in content
+    assert "SET match_count = CASE WHEN matched THEN 1 ELSE 0 END" in content
     assert "migrate:up" in content
     assert "migrate:down" in content
 

@@ -104,6 +104,23 @@ async def claim_hash_index_refresh(
     )
 
 
+async def mark_hash_index_refresh_in_flight(
+    conn: asyncpg.Connection,
+    attempt_id: int,
+) -> None:
+    """Enter in_flight and stamp submitted_at for stuck-in-flight reaping."""
+    await conn.execute(
+        f"""
+        UPDATE {HASH_INDEX_REFRESH_ATTEMPTS_TABLE}
+           SET status = 'in_flight',
+               submitted_at = NOW()
+         WHERE id = $1
+           AND status = 'claimed'
+        """,
+        attempt_id,
+    )
+
+
 async def record_hash_index_refresh_run(
     conn: asyncpg.Connection,
     *,
