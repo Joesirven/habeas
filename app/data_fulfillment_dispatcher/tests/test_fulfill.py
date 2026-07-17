@@ -160,6 +160,43 @@ def test_response_status_for_match_count_mapping():
 
 
 @pytest.mark.asyncio
+async def test_u25_open_row_rematch_multi_to_single_fulfills_deleted():
+    """After rematch multi→1, fulfill maps latest match_count to status 3 (not 4)."""
+    conn = AsyncMock()
+    # Latest result after rematch is single-match.
+    conn.fetchrow = AsyncMock(return_value={"matched": True, "match_count": 1})
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    with patch(
+        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        result = await fulfill_one(conn, REQUEST_ID)
+
+    assert result.outcome == "fulfilled"
+    assert result.match_count == 1
+    assert result.response_status == RESPONSE_STATUS_DELETED
+    assert result.response_status != RESPONSE_STATUS_OPTED_OUT
+
+
+@pytest.mark.asyncio
+async def test_u25_open_row_rematch_multi_to_zero_fulfills_not_found():
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={"matched": False, "match_count": 0})
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    with patch(
+        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        result = await fulfill_one(conn, REQUEST_ID)
+
+    assert result.response_status == RESPONSE_STATUS_NOT_FOUND
+
+
+@pytest.mark.asyncio
 async def test_run_fulfill_batch_uses_ready_finder():
     conn = AsyncMock()
     ids = [
