@@ -614,3 +614,94 @@ export function getRunDetail(job: string, attemptId: number) {
     `/ops/runs/${encodeURIComponent(job)}/${attemptId}`,
   )
 }
+
+// --- Ops runs list (U4) ---
+
+export type OpsTimeWindow = '8h' | '24h' | '1w'
+
+export type RunSummary = {
+  run_id: string
+  job: string
+  step: string
+  status: string
+  request_id: string | null
+  started_at: string
+  completed_at: string | null
+  duration_seconds: number | null
+  attempt_number: number
+}
+
+export function listRuns(params?: {
+  job?: string
+  status?: string
+  request_id?: string
+  window?: OpsTimeWindow
+  limit?: number
+  offset?: number
+}) {
+  const search = new URLSearchParams()
+  if (params?.job) search.set('job', params.job)
+  if (params?.status) search.set('status', params.status)
+  if (params?.request_id) search.set('request_id', params.request_id)
+  if (params?.window) search.set('window', params.window)
+  if (params?.limit != null) search.set('limit', String(params.limit))
+  if (params?.offset != null) search.set('offset', String(params.offset))
+  const query = search.toString()
+  return fetchAdminApi<RunSummary[]>(`/ops/runs${query ? `?${query}` : ''}`)
+}
+
+// --- Request journey + needs attention (U5) ---
+
+export type JourneyStageStatus =
+  | 'not_started'
+  | 'skipped'
+  | 'in_progress'
+  | 'waiting'
+  | 'complete'
+  | 'failed'
+
+export type JourneyStage = {
+  stage: string
+  label: string
+  status: JourneyStageStatus
+  attempted_at: string | null
+  completed_at: string | null
+  blocker: string | null
+}
+
+export type RequestJourneyResponse = {
+  request_id: string
+  intake_source: string
+  received_at: string | null
+  current_stage: string
+  blocker: string | null
+  stages: JourneyStage[]
+}
+
+export type NeedsAttentionItem = {
+  request_id: string
+  reason: string
+  current_stage: string
+  intake_source: string
+  received_at: string | null
+  requested_at: string | null
+}
+
+export type NeedsAttentionResponse = {
+  items: NeedsAttentionItem[]
+}
+
+export function getRequestJourney(requestId: string) {
+  return fetchAdminApi<RequestJourneyResponse>(
+    `/ops/requests/${encodeURIComponent(requestId)}/journey`,
+  )
+}
+
+export function getNeedsAttention(limit?: number) {
+  const search = new URLSearchParams()
+  if (limit != null) search.set('limit', String(limit))
+  const query = search.toString()
+  return fetchAdminApi<NeedsAttentionResponse>(
+    `/ops/requests/needs-attention${query ? `?${query}` : ''}`,
+  )
+}
