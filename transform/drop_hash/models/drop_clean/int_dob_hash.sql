@@ -3,7 +3,7 @@ with source as (
         dwid,
         state,
         birthdate
-    from {{ ref('stg_ca_person') }}
+    from {{ ref('stg_person') }}
 ),
 
 parsed as (

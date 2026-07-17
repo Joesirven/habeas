@@ -9,4 +9,4 @@ select
     regaddrzip,
     emailaddress
 from {{ source('person_db', 'person') }}
-where state = 'CA'
+where state = '{{ var("state") }}'

@@ -1,5 +1,3 @@
-{{ config(materialized='table', tags=['drop_clean_ca', 'arm_udf']) }}
-
 select
     n.dwid,
     n.state,
@@ -12,8 +10,8 @@ select
             n.first_name_hash || n.last_name_hash || d.dob_hash || z.zip_hash
         ))
     end as ndz_hash
-from {{ ref('arm_udf_name_hash') }} as n
-inner join {{ ref('int_ca_dob_hash') }} as d
+from {{ ref('int_name_hash') }} as n
+inner join {{ ref('int_dob_hash') }} as d
     using (dwid, state)
-inner join {{ ref('int_ca_zip_hash') }} as z
+inner join {{ ref('int_zip_hash') }} as z
     using (dwid, state)
