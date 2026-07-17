@@ -4,6 +4,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from habeas_privacy_core.auth.roles import (
+    ALL_ROLES,
+    ROLE_ADMIN,
+    ROLE_DATA_OWNER,
+    ROLE_SUPER_ADMIN,
+    Role,
+    allowlists_configured,
+    parse_email_allowlist,
+    resolve_role_from_allowlists,
+)
+
 IAP_EMAIL_HEADER = "X-Goog-Authenticated-User-Email"
 UNKNOWN_ACTOR = "unknown"
 
@@ -35,9 +46,17 @@ def is_authenticated_actor(actor: str) -> bool:
 
 
 __all__ = [
+    "ALL_ROLES",
     "IAP_EMAIL_HEADER",
+    "ROLE_ADMIN",
+    "ROLE_DATA_OWNER",
+    "ROLE_SUPER_ADMIN",
+    "Role",
     "UNKNOWN_ACTOR",
     "actor_from_iap_header",
+    "allowlists_configured",
     "is_authenticated_actor",
+    "parse_email_allowlist",
     "parse_iap_email",
+    "resolve_role_from_allowlists",
 ]
