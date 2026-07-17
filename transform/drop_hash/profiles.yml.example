@@ -1,11 +1,11 @@
 # Copy to profiles.yml (gitignored) or set DBT_PROFILES_DIR to this directory.
-data_privacy_analytics:
+drop_hash:
   target: dev
   outputs:
     dev:
       type: bigquery
       method: oauth
       project: "{{ env_var('DBT_GCP_PROJECT', 'example-gcp-project') }}"
-      dataset: drop_hash_experiment
+      dataset: drop_hash_index
       location: us-east4
       threads: 4

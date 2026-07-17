@@ -1,5 +1,5 @@
 /**
- * DROP v1.2.0 name standardization — JS port of analytics/drop_normalize names.py
+ * DROP v1.2.0 name standardization — JS port of drop_normalize names.py
  * Maps synced from drop_normalize/data/*.json
  * BigQuery JS UDF–safe (avoid Unicode property escapes).
  */

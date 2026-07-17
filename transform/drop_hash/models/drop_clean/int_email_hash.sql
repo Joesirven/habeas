@@ -3,7 +3,7 @@ with source as (
         dwid,
         state,
         emailaddress
-    from {{ ref('stg_ca_person') }}
+    from {{ ref('stg_person') }}
 ),
 
 standardized as (
