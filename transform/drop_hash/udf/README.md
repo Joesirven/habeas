@@ -45,5 +45,5 @@ WHERE MOD(ABS(FARM_FINGERPRINT(CAST(dwid AS STRING))), 10) = 0;
 
 ## Sandbox note
 
-The experiment dataset `drop_hash_experiment` (and its `normalize_name` UDF) remain
-for the CA bake-off. Production refresh uses `drop_hash_index` only.
+Historical bake-off artifacts may still exist in BigQuery dataset
+`drop_hash_experiment`. Production refresh and this UDF target `drop_hash_index` only.

@@ -10,7 +10,6 @@ Production dbt project for DROP hash-index serving tables in BigQuery.
 | `models/marts/` | Serving marts → `email_hash`, `phone_hash`, `ndz_hash` via build+state merge |
 | `udf/` | BigQuery JS `normalize_name` in `drop_hash_index` (bake-off winner) |
 | `drop_normalize/` | Python DROP v1.2.0 standardization + CPPA vector tests |
-| `compare/` | Experiment arm comparison (reads `drop_hash_experiment` only) |
 | `macros/swap_serving_tables.sql` | Post-build state-scoped merge into serving tables |
 
 ## Invariants

@@ -61,9 +61,9 @@ UNION ALL SELECT "ndz_hash", COUNT(*) FROM `example-gcp-project.drop_hash_index.
 
 ## Experiment sandbox (non-prod)
 
-CA bake-off artifacts remain in dataset `drop_hash_experiment` (dbt/UDF code historically
-lived under `analytics/` on pre-migration branches). Compare tooling under `compare/`
-still targets that dataset for arm metrics — not used in production refresh.
+CA bake-off artifacts may still exist in BigQuery dataset `drop_hash_experiment`
+(historical code lived under `analytics/` on pre-migration branches). That dataset
+and any local experiment worktrees are **not** part of this production dbt project.
 
 ## Future triggers
 

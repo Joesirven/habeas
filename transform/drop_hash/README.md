@@ -64,7 +64,6 @@ Production lookup tables in `example-gcp-project.drop_hash_index`:
 
 `stg_phones` emits **one row per available phone type**. When MDR has both cell and
 land numbers, `phone_hash` serving gets **two rows** for that `dwid` (distinct hashes).
-The experiment coalesced cell-over-land in a single row; production preserves both.
 
 ### Serving swap
 
