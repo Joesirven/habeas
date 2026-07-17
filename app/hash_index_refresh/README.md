@@ -13,11 +13,13 @@ Non-CA refreshes are index-only (no rematch).
 
 ## IAM
 
-Workload identity / dedicated SA needs:
+Workload identity / dedicated SA needs (not yet wired in Cloud Build — see `infra/README.md` go-live checklist):
 
 - BigQuery Job User
 - Dataset write on `drop_hash_index`
 - Read on MDR sources (`person_db`)
+
+Cloud Run invoker: admin-api runtime SA only (`infra/cloudbuild/hash-index-refresh-dev-iam.yaml`). Never `allUsers`.
 
 No interactive OAuth in the worker.
 

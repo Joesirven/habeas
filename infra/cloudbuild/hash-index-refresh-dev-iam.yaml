@@ -1,0 +1,24 @@
+# One-shot: grant admin-api runtime SA invoker on hash-index-refresh-dev.
+# Never grant allUsers on workers. Requires Cloud Build SA run.services.setIamPolicy.
+substitutions:
+  _REGION: us-east4
+  _SERVICE: hash-index-refresh-dev
+  # Default compute SA used by admin-api-dev (see infra/README Cloud Run auth).
+  _ADMIN_API_RUNTIME_SA: 95660886550-compute@developer.gserviceaccount.com
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: grant-admin-api-invoker
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - add-iam-policy-binding
+      - ${_SERVICE}
+      - --region=${_REGION}
+      - --member=serviceAccount:${_ADMIN_API_RUNTIME_SA}
+      - --role=roles/run.invoker
+      - --quiet

@@ -14,25 +14,14 @@ from starlette.responses import Response
 from starlette.types import ASGIApp
 
 from habeas_privacy_core.audit.writer import write_audit
+from habeas_privacy_core.auth import actor_from_iap_header
 
 logger = logging.getLogger(__name__)
 
 _MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _DEFAULT_SKIP_PATHS = frozenset({"/healthz", "/readyz"})
-_IAP_EMAIL_HEADER = "X-Goog-Authenticated-User-Email"
 _CLIENT_HEADER = "X-Client"
 _TRACE_HEADER = "X-Cloud-Trace-Context"
-_UNKNOWN_ACTOR = "unknown"
-
-
-def actor_from_iap_header(request: Request) -> str:
-    """Parse Workspace email from Identity-Aware Proxy injected headers."""
-    raw = request.headers.get(_IAP_EMAIL_HEADER, "").strip()
-    if not raw:
-        return _UNKNOWN_ACTOR
-    if ":" in raw:
-        return raw.split(":", 1)[1]
-    return raw
 
 
 def interface_from_request(request: Request) -> str:

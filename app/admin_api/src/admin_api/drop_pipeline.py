@@ -453,34 +453,43 @@ async def drop_pipeline_status():
 
 
 @router.post("/download")
-async def drop_download():
+async def drop_download(_actor: DropMutationActor):
     url = f"{settings.drop_connector_url.rstrip('/')}/download"
     return await proxy_post(url, timeout=DOWNLOAD_PROXY_TIMEOUT)
 
 
 @router.post("/land")
-async def drop_land(body: LandProxyBody | None = None):
+async def drop_land(
+    _actor: DropMutationActor,
+    body: LandProxyBody | None = None,
+):
     url = f"{settings.drop_ingestor_url.rstrip('/')}/ingest/land"
     payload = _model_dump_nonzero(body) if body is not None else {}
     return await proxy_post(url, json_body=payload)
 
 
 @router.post("/promote")
-async def drop_promote(body: PromoteProxyBody | None = None):
+async def drop_promote(
+    _actor: DropMutationActor,
+    body: PromoteProxyBody | None = None,
+):
     url = f"{settings.drop_ingestor_url.rstrip('/')}/ingest/promote"
     payload = _model_dump_nonzero(body) if body is not None else {}
     return await proxy_post(url, json_body=payload)
 
 
 @router.post("/dispatch")
-async def drop_dispatch(body: DispatchProxyBody | None = None):
+async def drop_dispatch(
+    _actor: DropMutationActor,
+    body: DispatchProxyBody | None = None,
+):
     url = f"{settings.request_dispatcher_url.rstrip('/')}/dispatch"
     payload = _model_dump_nonzero(body) if body is not None else {}
     return await proxy_post(url, json_body=payload)
 
 
 @router.post("/match")
-async def drop_match():
+async def drop_match(_actor: DropMutationActor):
     """Proxy matching /process; on success open a matching.review gate for ops."""
     url = f"{settings.matching_url.rstrip('/')}/process"
     status_code, payload = await proxy_post_payload(url)
@@ -521,15 +530,21 @@ async def drop_match():
 
 
 @router.post("/fulfill")
-async def drop_fulfill(body: FulfillProxyBody | None = None):
+async def drop_fulfill(
+    _actor: DropMutationActor,
+    body: FulfillProxyBody | None = None,
+):
     url = f"{settings.data_fulfillment_url.rstrip('/')}/fulfill"
     payload = _model_dump_nonzero(body) if body is not None else {}
     return await proxy_post(url, json_body=payload)
 
 
 @router.post("/hash-index-refresh/enqueue")
-async def hash_index_refresh_enqueue(body: HashIndexRefreshEnqueueBody | None = None):
-    """Enqueue a hash-index refresh attempt (single-flight per state). IAP + AuditMiddleware."""
+async def hash_index_refresh_enqueue(
+    _actor: DropMutationActor,
+    body: HashIndexRefreshEnqueueBody | None = None,
+):
+    """Enqueue a hash-index refresh attempt (single-flight per state)."""
     from habeas_privacy_core.db.hash_index_refresh import enqueue_hash_index_refresh
 
     _require_database()
@@ -546,7 +561,7 @@ async def hash_index_refresh_enqueue(body: HashIndexRefreshEnqueueBody | None = 
 
 
 @router.post("/hash-index-refresh/process")
-async def hash_index_refresh_process():
+async def hash_index_refresh_process(_actor: DropMutationActor):
     """Proxy process to hash_index_refresh worker (Cloud Run invoker token)."""
     url = f"{settings.hash_index_refresh_url.rstrip('/')}/process"
     return await proxy_post(url)
@@ -715,17 +730,21 @@ async def drop_matching_results(
 
 
 @router.post("/matching-results/bulk-approve")
-async def drop_matching_results_bulk_approve(body: BulkApproveMatchingResultsBody):
-    """Bulk-approve pending matching.review filtered by match type. IAP + AuditMiddleware."""
+async def drop_matching_results_bulk_approve(
+    body: BulkApproveMatchingResultsBody,
+    actor: DropMutationActor,
+):
+    """Bulk-approve pending matching.review filtered by match type."""
     _require_database()
     if body.match_type not in MATCH_TYPE_FILTERS:
         raise HTTPException(status_code=422, detail=f"invalid match_type: {body.match_type}")
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
     pool = get_pool()
     async with pool.acquire() as conn:
         result = await bulk_approve_matching_review_by_match_type(
             conn,
             match_type=body.match_type,
-            decided_by=body.decided_by,
+            decided_by=decided_by,
             decision_reason=body.decision_reason,
         )
     return {"status": "ok", **result}

@@ -499,6 +499,22 @@ def test_matching_results_list_route(monkeypatch: pytest.MonkeyPatch):
     assert "consumer_id" not in body["results"][0]
 
 
+def _fake_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Acquire:
+        async def __aenter__(self):
+            return MagicMock()
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+
+
 def test_matching_results_bulk_approve_route(monkeypatch: pytest.MonkeyPatch):
     captured: dict[str, Any] = {}
 
@@ -522,19 +538,7 @@ def test_matching_results_bulk_approve_route(monkeypatch: pytest.MonkeyPatch):
             ],
         }
 
-    class _Acquire:
-        async def __aenter__(self):
-            return MagicMock()
-
-        async def __aexit__(self, *args: Any) -> None:
-            return None
-
-    class FakePool:
-        def acquire(self):
-            return _Acquire()
-
-    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
-    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    _fake_pool(monkeypatch)
     monkeypatch.setattr(
         "admin_api.drop_pipeline.bulk_approve_matching_review_by_match_type",
         fake_bulk,
@@ -557,6 +561,81 @@ def test_matching_results_bulk_approve_route(monkeypatch: pytest.MonkeyPatch):
     assert body["match_type"] == "multi_match"
     assert captured["match_type"] == "multi_match"
     assert captured["decided_by"] == "web-admin@habeas.com"
+
+
+def test_matching_results_bulk_approve_prefers_iap_actor(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_bulk(
+        conn: Any,
+        *,
+        match_type: str,
+        decided_by: str,
+        decision_reason: str | None = None,
+    ) -> dict[str, Any]:
+        captured["decided_by"] = decided_by
+        return {
+            "match_type": match_type,
+            "approved_count": 1,
+            "approval_ids": [9],
+            "request_ids": ["00000000-0000-0000-0000-000000000009"],
+        }
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(
+        "admin_api.drop_pipeline.bulk_approve_matching_review_by_match_type",
+        fake_bulk,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/ops/drop/matching-results/bulk-approve",
+            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
+            json={
+                "match_type": "multi_match",
+                "decided_by": "spoofed@example.com",
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured["decided_by"] == "ops@habeas.com"
+
+
+def test_drop_mutation_requires_iap_when_configured(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(drop_pipeline.settings, "require_iap_identity", True)
+
+    async def fake_enqueue(conn: Any, *, state: str, list_types: list[str]) -> int:
+        return 1
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(
+        "habeas_privacy_core.db.hash_index_refresh.enqueue_hash_index_refresh",
+        fake_enqueue,
+    )
+
+    with TestClient(app) as client:
+        denied = client.post("/ops/drop/hash-index-refresh/enqueue", json={"state": "CA"})
+        allowed = client.post(
+            "/ops/drop/hash-index-refresh/enqueue",
+            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
+            json={"state": "CA"},
+        )
+
+    assert denied.status_code == 401
+    assert allowed.status_code == 200
+    assert allowed.json()["attempt_id"] == 1
+
+
+def test_decided_by_for_mutation_helpers():
+    assert (
+        drop_pipeline.decided_by_for_mutation("ops@habeas.com", "client@example.com")
+        == "ops@habeas.com"
+    )
+    assert (
+        drop_pipeline.decided_by_for_mutation("unknown", "client@example.com")
+        == "client@example.com"
+    )
+    assert drop_pipeline.decided_by_for_mutation("unknown", None) == "unknown"
 
 
 @pytest.mark.asyncio
