@@ -30,7 +30,8 @@ def main() -> int:
             SELECT arm, started_at, finished_at, wall_seconds, rows_in, rows_out,
                    shard_count, vector_ok, notes
             FROM `{PROJECT}.{DATASET}.arm_run_metrics`
-            ORDER BY started_at
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY arm ORDER BY started_at DESC) = 1
+            ORDER BY arm
             """
         ).result()
     )

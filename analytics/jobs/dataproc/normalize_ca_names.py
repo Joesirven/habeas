@@ -1,6 +1,5 @@
 """
-Dataproc Serverless PySpark: CA names via distinct-name dictionary + BQ join.
-Avoids per-row Python UDFs over 42M rows.
+Dataproc Serverless PySpark: CA names via distinct + mapPartitions normalize.
 """
 
 from __future__ import annotations
@@ -16,6 +15,16 @@ from drop_normalize import hash_std, normalize_name
 
 PROJECT = "example-gcp-project"
 DATASET = "drop_hash_experiment"
+TEMP_BUCKET = "example-gcp-project-dataproc-staging"
+
+
+def _normalize_partition(rows):
+    for row in rows:
+        raw = row[0]
+        if raw is None:
+            continue
+        std = normalize_name(raw)
+        yield (raw, std, hash_std(std) if std else None)
 
 
 def main() -> None:
@@ -52,17 +61,16 @@ def main() -> None:
     )
 
     def dim_for(column: str):
-        distinct = [r[0] for r in person.select(column).distinct().collect()]
-        rows = []
-        for raw in distinct:
-            if raw is None:
-                continue
-            std = normalize_name(raw)
-            rows.append((raw, std, hash_std(std) if std else None))
-        return spark.createDataFrame(rows, schema=schema)
+        return (
+            person.select(column)
+            .distinct()
+            .rdd.mapPartitions(_normalize_partition)
+            .toDF(schema)
+            .withColumnRenamed("raw_name", column)
+        )
 
-    fn_dim = dim_for("firstname").withColumnRenamed("raw_name", "firstname")
-    ln_dim = dim_for("lastname").withColumnRenamed("raw_name", "lastname")
+    fn_dim = dim_for("firstname")
+    ln_dim = dim_for("lastname")
 
     names = (
         person.join(fn_dim, on="firstname", how="left")
@@ -81,11 +89,11 @@ def main() -> None:
         )
     )
 
-    rows_in = names.count()
     (
         names.write.format("bigquery")
         .option("table", f"{PROJECT}.{DATASET}.arm_spark_name_hash")
-        .option("writeMethod", "direct")
+        .option("temporaryGcsBucket", TEMP_BUCKET)
+        .option("writeMethod", "indirect")
         .mode("overwrite")
         .save()
     )
@@ -103,43 +111,44 @@ def main() -> None:
         .select("dwid", "state", "zip_hash")
     )
 
-    # Native Spark SHA-256 → Base64 (same as BQ TO_BASE64(SHA256(...)))
     ndz = (
-        names.join(dob, ["dwid", "state"], "inner")
-        .join(zip_h, ["dwid", "state"], "inner")
-        .filter(
-            F.col("first_name_hash").isNotNull()
-            & F.col("last_name_hash").isNotNull()
-            & F.col("dob_hash").isNotNull()
-            & F.col("zip_hash").isNotNull()
-        )
+        names.join(dob, ["dwid", "state"], "left")
+        .join(zip_h, ["dwid", "state"], "left")
         .withColumn(
             "ndz_hash",
-            F.base64(
-                F.unhex(
-                    F.sha2(
-                        F.concat(
-                            F.col("first_name_hash"),
-                            F.col("last_name_hash"),
-                            F.col("dob_hash"),
-                            F.col("zip_hash"),
-                        ),
-                        256,
+            F.when(
+                F.col("first_name_hash").isNotNull()
+                & F.col("last_name_hash").isNotNull()
+                & F.col("dob_hash").isNotNull()
+                & F.col("zip_hash").isNotNull(),
+                F.base64(
+                    F.unhex(
+                        F.sha2(
+                            F.concat(
+                                F.col("first_name_hash"),
+                                F.col("last_name_hash"),
+                                F.col("dob_hash"),
+                                F.col("zip_hash"),
+                            ),
+                            256,
+                        )
                     )
-                )
+                ),
             ),
         )
         .select("dwid", "state", "ndz_hash")
     )
-    rows_out = ndz.count()
     (
         ndz.write.format("bigquery")
         .option("table", f"{PROJECT}.{DATASET}.arm_spark_ndz_hash")
-        .option("writeMethod", "direct")
+        .option("temporaryGcsBucket", TEMP_BUCKET)
+        .option("writeMethod", "indirect")
         .mode("overwrite")
         .save()
     )
 
+    rows_in = names.count()
+    rows_out = ndz.count()
     wall = time.perf_counter() - t0
     finished = datetime.now(timezone.utc)
     metrics = spark.createDataFrame(
@@ -153,14 +162,15 @@ def main() -> None:
                 "rows_out": int(rows_out),
                 "shard_count": 1,
                 "vector_ok": bool(vok),
-                "notes": "dataproc serverless distinct-dict+join",
+                "notes": "dataproc mapPartitions distinct-dict+join; indirect BQ write",
             }
         ]
     )
     (
         metrics.write.format("bigquery")
         .option("table", f"{PROJECT}.{DATASET}.arm_run_metrics")
-        .option("writeMethod", "direct")
+        .option("temporaryGcsBucket", TEMP_BUCKET)
+        .option("writeMethod", "indirect")
         .mode("append")
         .save()
     )
