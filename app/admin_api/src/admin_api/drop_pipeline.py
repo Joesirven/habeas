@@ -408,6 +408,25 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
     }
 
 
+def _public_worker_health(probe: dict[str, Any]) -> dict[str, Any]:
+    """Strip worker base URLs before returning probes to the browser."""
+    ready_body = probe.get("body")
+    if isinstance(ready_body, dict):
+        ready_summary: Any = {
+            "status": ready_body.get("status"),
+            "service": ready_body.get("service"),
+        }
+    else:
+        ready_summary = {"status": "unknown"}
+    return {
+        "name": probe.get("name"),
+        "ok": bool(probe.get("ok")),
+        "status_code": probe.get("status_code"),
+        "ready": ready_summary,
+        "error": probe.get("error"),
+    }
+
+
 async def get_pipeline_status() -> dict[str, Any]:
     """Full pipeline snapshot including best-effort worker health."""
     _require_database()
@@ -415,7 +434,10 @@ async def get_pipeline_status() -> dict[str, Any]:
     async with pool.acquire() as conn:
         counts = await collect_pipeline_counts(conn)
     worker_health = await collect_worker_health()
-    return {**counts, "worker_health": worker_health}
+    public_health = {
+        name: _public_worker_health(probe) for name, probe in worker_health.items()
+    }
+    return {**counts, "worker_health": public_health}
 
 
 async def proxy_post_payload(

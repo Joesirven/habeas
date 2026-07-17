@@ -376,7 +376,7 @@ function WorkerHealthRow({ probe }: { probe: WorkerHealthProbe }) {
         </span>
       </td>
       <td className="tabular-nums text-ink-soft">{probe.status_code ?? '—'}</td>
-      <td className="font-mono text-xs text-mute">{probe.url}</td>
+      <td className="font-mono text-xs text-mute">{probe.ready?.status ?? '—'}</td>
     </tr>
   )
 }
@@ -1190,7 +1190,7 @@ export function DropPipelinePage() {
                         <th>Worker</th>
                         <th>Health</th>
                         <th>Code</th>
-                        <th>URL</th>
+                        <th>Ready</th>
                       </tr>
                     </thead>
                     <tbody>

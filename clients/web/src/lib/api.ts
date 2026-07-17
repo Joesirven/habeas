@@ -183,10 +183,9 @@ export type HashIndexRefreshStatus = {
 
 export type WorkerHealthProbe = {
   name: string
-  url: string
   ok: boolean
   status_code?: number | null
-  body?: unknown
+  ready?: { status?: string; service?: string }
   error?: string
 }
 

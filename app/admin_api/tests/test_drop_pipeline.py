@@ -70,10 +70,9 @@ PIPELINE_FIXTURE: dict[str, Any] = {
     "worker_health": {
         "drop_connector": {
             "name": "drop_connector",
-            "url": "http://127.0.0.1:8081",
             "ok": True,
             "status_code": 200,
-            "body": {"status": "ok"},
+            "ready": {"status": "ok", "service": "drop-connector"},
         }
     },
 }
@@ -106,6 +105,45 @@ def test_pipeline_status_shape(monkeypatch: pytest.MonkeyPatch):
     assert "hash_index_refresh" in body
     assert "worker_health" in body
     assert body["worker_health"]["drop_connector"]["ok"] is True
+    assert "url" not in body["worker_health"]["drop_connector"]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_status_strips_worker_urls(monkeypatch: pytest.MonkeyPatch):
+    async def fake_counts(conn: Any) -> dict[str, Any]:
+        return {"connector_attempts": []}
+
+    async def fake_health() -> dict[str, Any]:
+        return {
+            "matching": {
+                "name": "matching",
+                "url": "http://127.0.0.1:8084",
+                "ok": True,
+                "status_code": 200,
+                "body": {"status": "ok", "service": "matching"},
+            }
+        }
+
+    class _Acquire:
+        async def __aenter__(self):
+            return MagicMock()
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(drop_pipeline, "collect_pipeline_counts", fake_counts)
+    monkeypatch.setattr(drop_pipeline, "collect_worker_health", fake_health)
+
+    status = await drop_pipeline.get_pipeline_status()
+    probe = status["worker_health"]["matching"]
+    assert "url" not in probe
+    assert probe["ready"]["status"] == "ok"
 
 
 def test_download_proxy_returns_upstream_json(monkeypatch: pytest.MonkeyPatch):
