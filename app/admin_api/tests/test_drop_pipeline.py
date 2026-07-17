@@ -31,6 +31,14 @@ PIPELINE_FIXTURE: dict[str, Any] = {
             "response_status_set": 1,
         }
     ],
+    "fulfillment": {
+        "ready": 1,
+        "response_status_null": 2,
+        "by_response_status": [
+            {"response_status": None, "count": 2},
+            {"response_status": 3, "count": 1},
+        ],
+    },
     "drop_requests": {
         "count": 1,
         "recent": [
@@ -301,6 +309,11 @@ async def test_collect_pipeline_counts_shape():
                     response_status_set=1,
                 )
             ]
+        if "drop_raw_requests" in sql and "GROUP BY response_status" in sql:
+            return [
+                _Row(response_status=None, count=3),
+                _Row(response_status=3, count=1),
+            ]
         if "matching_attempts" in sql:
             return [_Row(status="pending", count=2), _Row(status="success", count=5)]
         if "matching_results" in sql:
@@ -314,6 +327,8 @@ async def test_collect_pipeline_counts_shape():
         return []
 
     async def fetchval(sql: str, *args: Any) -> int:
+        if "response_status IS NULL" in sql and "matching_results" in sql:
+            return 2
         return 7
 
     async def fetchrow(sql: str, *args: Any) -> _Row | None:
@@ -330,6 +345,9 @@ async def test_collect_pipeline_counts_shape():
     assert result["connector_attempts"][0]["count"] == 1
     assert result["ingest_attempts"][0]["step"] == "land"
     assert result["raw_requests_by_list_type"][0]["response_status_null"] == 3
+    assert result["fulfillment"]["ready"] == 2
+    assert result["fulfillment"]["response_status_null"] == 3
+    assert result["fulfillment"]["by_response_status"][1]["response_status"] == 3
     assert result["drop_requests"]["count"] == 7
     assert result["matching_attempts"]["pending"] == 2
     assert result["matching_attempts"]["success"] == 5

@@ -371,6 +371,54 @@ function StatusCountTable({
   )
 }
 
+const INGEST_OPEN_STATUSES = new Set(['pending', 'claimed', 'in_flight'])
+const INGEST_FAILED_STATUSES = new Set([
+  'submit_error',
+  'outcome_error',
+  'timeout',
+  'abandoned',
+])
+
+function summarizeIngestStep(rows: StepStatusCount[], step: string) {
+  const filtered = rows.filter((row) => row.step === step)
+  let open = 0
+  let failed = 0
+  let success = 0
+  for (const row of filtered) {
+    if (INGEST_OPEN_STATUSES.has(row.status)) open += row.count
+    else if (INGEST_FAILED_STATUSES.has(row.status)) failed += row.count
+    else if (row.status === 'success') success += row.count
+  }
+  return {
+    rows: filtered.map((row) => ({ status: row.status, count: row.count })),
+    open,
+    failed,
+    success,
+  }
+}
+
+const RESPONSE_STATUS_LABELS: Record<number, string> = {
+  2: 'Exempted',
+  3: 'Deleted',
+  4: 'Opted out',
+  5: 'Not found',
+}
+
+function responseStatusLabel(value: number | null): string {
+  if (value == null) return 'unset (null)'
+  return RESPONSE_STATUS_LABELS[value] ?? String(value)
+}
+
+function countForResponseStatus(
+  rows: { response_status: number | null; count: number }[] | undefined,
+  value: number | null,
+): number {
+  if (!rows) return 0
+  return rows
+    .filter((row) => row.response_status === value)
+    .reduce((sum, row) => sum + row.count, 0)
+}
+
 function WorkerHealthRow({ probe }: { probe: WorkerHealthProbe }) {
   return (
     <tr>
@@ -1352,6 +1400,12 @@ export function DropPipelinePage() {
   const hashPending = (data?.hash_index_refresh?.pending ?? 0) > 0
   const hashWorkerDown = data ? !data.worker_health.hash_index_refresh?.ok : false
   const lastRun = data?.hash_index_refresh?.last_run
+  const landQueue = summarizeIngestStep(data?.ingest_attempts ?? [], 'land')
+  const promoteQueue = summarizeIngestStep(data?.ingest_attempts ?? [], 'promote')
+  const fulfillmentUnset =
+    data?.fulfillment?.response_status_null ??
+    data?.raw_requests_by_list_type.reduce((sum, row) => sum + row.response_status_null, 0) ??
+    0
 
   function handlePostMatchChoice(choice: PostMatchChoice) {
     setPostMatchOpen(false)
@@ -1548,57 +1602,129 @@ export function DropPipelinePage() {
       )}
 
       {tab === 'ingest' && (
-        <div className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
-          <div className="taste-panel-soft flex flex-col gap-6 p-6 sm:p-7">
-            <div>
-              <Micro>Ingest</Micro>
-              <p className="mt-2 text-sm text-ink-soft">
-                Unzip and promote to raw — land unpacks the archive; promote writes drop_raw_requests.
-              </p>
-            </div>
-            <ActionButtons
-              keys={['land', 'promote']}
-              showSkeleton={showSkeleton}
-              postMatchOpen={postMatchOpen}
-              actionMutation={actionMutation}
-            />
-          </div>
-          {data ? (
-            <div className="space-y-6">
-              <div className="space-y-3">
-                <Micro>Ingest attempts</Micro>
-                <div className="taste-panel-soft p-4">
-                  <CountTable rows={data.ingest_attempts} empty="No ingest attempts." />
-                </div>
+        <div className="space-y-6">
+          <div className="grid gap-6 lg:grid-cols-2">
+            <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
+              <div>
+                <Micro>Unzip</Micro>
+                <p className="mt-2 text-sm text-ink-soft">
+                  Land step — unpack the DROP ZIP into staged CSVs.
+                </p>
               </div>
-              <div className="space-y-3">
-                <Micro>Raw by list type</Micro>
-                <div className="taste-panel overflow-x-auto px-2 py-1">
-                  {data.raw_requests_by_list_type.length === 0 ? (
-                    <p className="p-4 text-sm text-ink-soft">No drop_raw_requests rows.</p>
-                  ) : (
-                    <table className="taste-table">
-                      <thead>
-                        <tr>
-                          <th>List type</th>
-                          <th>Total</th>
-                          <th>response_status null</th>
-                          <th>response_status set</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {data.raw_requests_by_list_type.map((row) => (
-                          <tr key={row.list_type}>
-                            <td className="font-mono text-xs">{row.list_type}</td>
-                            <td className="tabular-nums">{row.total}</td>
-                            <td className="tabular-nums">{row.response_status_null}</td>
-                            <td className="tabular-nums">{row.response_status_set}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
+              {data ? (
+                <div className="flex flex-wrap gap-2">
+                  <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                    Open / pending{' '}
+                    <span className="tabular-nums text-ink">{landQueue.open}</span>
+                  </span>
+                  <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                    Failed / needs attention{' '}
+                    <span
+                      className={
+                        landQueue.failed > 0
+                          ? 'tabular-nums text-red-700'
+                          : 'tabular-nums text-ink'
+                      }
+                    >
+                      {landQueue.failed}
+                    </span>
+                  </span>
+                  <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                    Success <span className="tabular-nums text-ink">{landQueue.success}</span>
+                  </span>
                 </div>
+              ) : null}
+              <ActionButtons
+                keys={['land']}
+                showSkeleton={showSkeleton}
+                postMatchOpen={postMatchOpen}
+                actionMutation={actionMutation}
+              />
+              {data ? (
+                <div>
+                  <Micro>Attempts by status</Micro>
+                  <div className="mt-3">
+                    <StatusCountTable rows={landQueue.rows} empty="No land attempts." />
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
+              <div>
+                <Micro>Promote to raw</Micro>
+                <p className="mt-2 text-sm text-ink-soft">
+                  Promote step — write staged rows into drop_raw_requests.
+                </p>
+              </div>
+              {data ? (
+                <div className="flex flex-wrap gap-2">
+                  <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                    Open / pending{' '}
+                    <span className="tabular-nums text-ink">{promoteQueue.open}</span>
+                  </span>
+                  <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                    Failed / needs attention{' '}
+                    <span
+                      className={
+                        promoteQueue.failed > 0
+                          ? 'tabular-nums text-red-700'
+                          : 'tabular-nums text-ink'
+                      }
+                    >
+                      {promoteQueue.failed}
+                    </span>
+                  </span>
+                  <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                    Success <span className="tabular-nums text-ink">{promoteQueue.success}</span>
+                  </span>
+                </div>
+              ) : null}
+              <ActionButtons
+                keys={['promote']}
+                showSkeleton={showSkeleton}
+                postMatchOpen={postMatchOpen}
+                actionMutation={actionMutation}
+              />
+              {data ? (
+                <div>
+                  <Micro>Attempts by status</Micro>
+                  <div className="mt-3">
+                    <StatusCountTable rows={promoteQueue.rows} empty="No promote attempts." />
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          {data ? (
+            <div className="space-y-3">
+              <Micro>Raw by list type</Micro>
+              <div className="taste-panel overflow-x-auto px-2 py-1">
+                {data.raw_requests_by_list_type.length === 0 ? (
+                  <p className="p-4 text-sm text-ink-soft">No drop_raw_requests rows.</p>
+                ) : (
+                  <table className="taste-table">
+                    <thead>
+                      <tr>
+                        <th>List type</th>
+                        <th>Total</th>
+                        <th>response_status null</th>
+                        <th>response_status set</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.raw_requests_by_list_type.map((row) => (
+                        <tr key={row.list_type}>
+                          <td className="font-mono text-xs">{row.list_type}</td>
+                          <td className="tabular-nums">{row.total}</td>
+                          <td className="tabular-nums">{row.response_status_null}</td>
+                          <td className="tabular-nums">{row.response_status_set}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
               </div>
             </div>
           ) : null}
@@ -1633,19 +1759,122 @@ export function DropPipelinePage() {
       )}
 
       {tab === 'fulfillment' && (
-        <div className="taste-panel-soft flex max-w-xl flex-col gap-6 p-6 sm:p-7">
-          <div>
-            <Micro>Fulfillment</Micro>
-            <p className="mt-2 text-sm text-ink-soft">
-              Trigger fulfillment for approved DROP requests via the data fulfillment worker.
-            </p>
+        <div className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+          <div className="taste-panel-soft flex flex-col gap-6 p-6 sm:p-7">
+            <div>
+              <Micro>Fulfillment</Micro>
+              <p className="mt-2 text-sm text-ink-soft">
+                Dispatch sets response_status (3/4/5) for DROP rows with approved matching.review.
+                Counts only — no request-id queue table on this worker.
+              </p>
+            </div>
+            {data ? (
+              <div className="flex flex-wrap gap-2">
+                <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                  Ready{' '}
+                  <span className="tabular-nums text-ink">
+                    {data.fulfillment?.ready ?? '—'}
+                  </span>
+                </span>
+                <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                  Unset <span className="tabular-nums text-ink">{fulfillmentUnset}</span>
+                </span>
+                <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                  Review pending{' '}
+                  <span className="tabular-nums text-ink">{data.matching_review.pending}</span>
+                </span>
+                <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                  Review approved{' '}
+                  <span className="tabular-nums text-ink">{data.matching_review.approved}</span>
+                </span>
+                <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                  Worker{' '}
+                  <span
+                    className={
+                      data.worker_health.data_fulfillment?.ok
+                        ? 'text-emerald-700'
+                        : 'text-red-700'
+                    }
+                  >
+                    {data.worker_health.data_fulfillment
+                      ? data.worker_health.data_fulfillment.ok
+                        ? 'up'
+                        : 'down'
+                      : '—'}
+                  </span>
+                </span>
+              </div>
+            ) : null}
+            <ActionButtons
+              keys={['fulfill']}
+              showSkeleton={showSkeleton}
+              postMatchOpen={postMatchOpen}
+              actionMutation={actionMutation}
+            />
           </div>
-          <ActionButtons
-            keys={['fulfill']}
-            showSkeleton={showSkeleton}
-            postMatchOpen={postMatchOpen}
-            actionMutation={actionMutation}
-          />
+
+          {data ? (
+            <div className="space-y-6">
+              <div className="space-y-3">
+                <Micro>response_status distribution</Micro>
+                <p className="text-xs text-mute">
+                  CPPA codes on drop_raw_requests — 3 Deleted · 4 Opted out · 5 Not found.
+                </p>
+                <div className="taste-panel overflow-x-auto px-2 py-1">
+                  <table className="taste-table">
+                    <thead>
+                      <tr>
+                        <th>Status</th>
+                        <th>Label</th>
+                        <th>Count</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {([null, 3, 4, 5] as const).map((code) => {
+                        const count = data.fulfillment
+                          ? countForResponseStatus(data.fulfillment.by_response_status, code)
+                          : code == null
+                            ? fulfillmentUnset
+                            : 0
+                        return (
+                          <tr key={code ?? 'null'}>
+                            <td className="font-mono text-xs">{code ?? 'null'}</td>
+                            <td className="text-ink-soft">{responseStatusLabel(code)}</td>
+                            <td className="tabular-nums">{count}</td>
+                          </tr>
+                        )
+                      })}
+                      {(data.fulfillment?.by_response_status ?? [])
+                        .filter(
+                          (row) =>
+                            row.response_status != null &&
+                            ![3, 4, 5].includes(row.response_status),
+                        )
+                        .map((row) => (
+                          <tr key={`other-${row.response_status}`}>
+                            <td className="font-mono text-xs">{row.response_status}</td>
+                            <td className="text-ink-soft">
+                              {responseStatusLabel(row.response_status)}
+                            </td>
+                            <td className="tabular-nums">{row.count}</td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <Micro>Matching gate (fulfill blockers)</Micro>
+                <div className="taste-panel-soft p-4">
+                  <StatusCountTable
+                    rows={data.matching_review.by_status}
+                    empty="No matching.review gates."
+                  />
+                </div>
+              </div>
+            </div>
+          ) : null}
         </div>
       )}
 

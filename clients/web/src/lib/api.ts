@@ -212,10 +212,23 @@ export type WorkerHealthProbe = {
   error?: string
 }
 
+export type ResponseStatusCount = {
+  response_status: number | null
+  count: number
+}
+
+export type DropFulfillmentStatus = {
+  ready: number
+  response_status_null: number
+  by_response_status: ResponseStatusCount[]
+}
+
 export type DropPipelineStatus = {
   connector_attempts: StepStatusCount[]
   ingest_attempts: StepStatusCount[]
   raw_requests_by_list_type: RawListTypeCount[]
+  /** Absent on older admin-api revisions that predate fulfillment stage stats. */
+  fulfillment?: DropFulfillmentStatus
   drop_requests: {
     count: number
     recent: DropRequestThin[]

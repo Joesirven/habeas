@@ -264,6 +264,43 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
          ORDER BY list_type
         """
     )
+    response_status_rows = await conn.fetch(
+        """
+        SELECT response_status, COUNT(*)::int AS count
+          FROM drop_raw_requests
+         GROUP BY response_status
+         ORDER BY response_status NULLS FIRST
+        """
+    )
+    fulfillment_ready = await conn.fetchval(
+        """
+        SELECT COUNT(*)::int
+          FROM requests r
+          JOIN drop_raw_requests drr
+            ON drr.id = r.raw_record_id
+         WHERE r.intake_source = 'drop'
+           AND drr.response_status IS NULL
+           AND EXISTS (
+                 SELECT 1
+                   FROM matching_results mr
+                  WHERE mr.request_id = r.id
+               )
+           AND EXISTS (
+                 SELECT 1
+                   FROM approval_requests ar
+                  WHERE ar.request_id = r.id
+                    AND ar.action_type = $1
+                    AND ar.status = 'approved'
+                    AND ar.decided_at IS NOT NULL
+                    AND ar.decided_at >= (
+                          SELECT MAX(mr.recorded_at)
+                            FROM matching_results mr
+                           WHERE mr.request_id = r.id
+                        )
+               )
+        """,
+        MATCHING_REVIEW_ACTION,
+    )
     drop_request_count = await conn.fetchval(
         "SELECT COUNT(*)::int FROM requests WHERE intake_source = 'drop'"
     )
@@ -397,6 +434,25 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
             }
             for r in raw_rows
         ],
+        "fulfillment": {
+            "ready": int(fulfillment_ready or 0),
+            "response_status_null": sum(
+                int(r["count"])
+                for r in response_status_rows
+                if r["response_status"] is None
+            ),
+            "by_response_status": [
+                {
+                    "response_status": (
+                        int(r["response_status"])
+                        if r["response_status"] is not None
+                        else None
+                    ),
+                    "count": int(r["count"]),
+                }
+                for r in response_status_rows
+            ],
+        },
         "drop_requests": {
             "count": int(drop_request_count or 0),
             "recent": [
