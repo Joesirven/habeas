@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, HTTPException
 from pydantic_settings import SettingsConfigDict
 
+from habeas_privacy_core.audit.redaction import redact_error_text
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
 from habeas_privacy_core.db.request_resolver import request_resolver
@@ -145,12 +146,20 @@ async def process_next():
                 retry_after = datetime.now(timezone.utc) + timedelta(
                     seconds=exc.retry_seconds
                 )
+                safe_message = redact_error_text(str(exc))
                 await complete_attempt_error(
                     conn,
                     attempt_id=attempt_id,
                     error_code="bq_lookup_error",
-                    error_message=str(exc),
+                    error_message=safe_message,
                     retry_after=retry_after,
+                )
+                logger.error(
+                    "matching_bq_lookup_error",
+                    extra={
+                        "event": "matching_bq_lookup_error",
+                        "error_summary": safe_message,
+                    },
                 )
                 return {
                     "status": "error",
@@ -168,14 +177,19 @@ async def process_next():
                 match_count=result.match_count,
             )
         except Exception as exc:
+            safe_message = redact_error_text(str(exc))
             await complete_attempt_error(
                 conn,
                 attempt_id=attempt_id,
                 error_code="matching_error",
-                error_message=str(exc),
+                error_message=safe_message,
             )
-            logger.exception("matching_failed", extra={"event": "matching_failed"})
-            return {"status": "error", "reason": str(exc)}
+            # Avoid logger.exception — traceback embeds unredacted str(exc).
+            logger.error(
+                "matching_failed",
+                extra={"event": "matching_failed", "error_summary": safe_message},
+            )
+            return {"status": "error", "reason": "matching_error"}
 
     return {
         "status": "ok",

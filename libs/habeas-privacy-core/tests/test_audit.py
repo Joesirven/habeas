@@ -14,6 +14,7 @@ from habeas_privacy_core.audit import (
     actor_from_iap_header,
     command_from_request,
     interface_from_request,
+    redact_error_text,
     redact_payload,
     trace_id_from_request,
     write_audit,
@@ -51,6 +52,29 @@ def test_redact_payload_scrubs_known_patterns():
     assert redacted["nested"]["phone"] == "[REDACTED]"
     assert "[REDACTED]" in redacted["note"]
     assert "[REDACTED]" in redacted["ssn"]
+
+
+def test_redact_error_text_strips_hashes_dwids_and_pii():
+    raw_kv = "failed near dwid=12345 hash=YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY="
+    cleaned_kv = redact_error_text(raw_kv)
+    assert "12345" not in cleaned_kv
+    assert "YWJj" not in cleaned_kv
+    assert "dwid=[redacted]" in cleaned_kv
+    assert "[redacted]" in cleaned_kv
+    assert not cleaned_kv.endswith("=")
+
+    raw_json = '{"dwid": 999888, "hash": "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY="}'
+    cleaned_json = redact_error_text(raw_json)
+    assert "999888" not in cleaned_json
+    assert "YWJj" not in cleaned_json
+    assert '"dwid":[redacted]' in cleaned_json
+
+    assert "5551212" not in redact_error_text("lookup failed consumer_id=5551212")
+    assert "consumer_id=[redacted]" in redact_error_text("lookup failed consumer_id=5551212")
+
+    cleaned_email = redact_error_text("email=jane@example.com rejected")
+    assert "jane@example.com" not in cleaned_email
+    assert "[redacted]" in cleaned_email
 
 
 def test_actor_and_interface_helpers():

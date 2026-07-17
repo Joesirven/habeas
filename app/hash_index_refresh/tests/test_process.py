@@ -15,7 +15,19 @@ def test_redact_strips_base64ish_tokens():
     raw = "failed near dwid=12345 hash=YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY="
     cleaned = redact_error_text(raw)
     assert "YWJj" not in cleaned
+    assert "12345" not in cleaned
+    assert "dwid=[redacted]" in cleaned
     assert "[redacted]" in cleaned
+    assert not cleaned.endswith("=")
+
+
+def test_redact_strips_json_dwid_consumer_id_and_email():
+    assert "999888" not in redact_error_text('{"dwid": 999888, "hash": "x"}')
+    assert (
+        "5551212"
+        not in redact_error_text("consumer_id=5551212 boom")
+    )
+    assert "jane@example.com" not in redact_error_text("email=jane@example.com")
 
 
 @pytest.mark.asyncio

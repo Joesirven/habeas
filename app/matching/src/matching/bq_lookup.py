@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from habeas_privacy_core.audit.redaction import redact_error_text
 from habeas_privacy_core.models.intake import DropListType
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,7 @@ def lookup_dwids_by_hash(
         result = bq_client.query(sql, job_config=job_config)
         rows = list(result)
     except Exception as exc:
-        message = str(exc)
+        message = redact_error_text(str(exc))
         lower = message.lower()
         if "timeout" in lower or "deadline" in lower:
             raise BigQueryLookupError(message, retry_seconds=120) from exc
