@@ -51,6 +51,7 @@ PIPELINE_FIXTURE: dict[str, Any] = {
             "request_id": "00000000-0000-0000-0000-000000000001",
             "matched": True,
             "match_count": 1,
+            "match_type": "single_match",
             "matched_via": "drop_hash",
             "recorded_at": "2026-07-16T12:05:00+00:00",
         }
@@ -347,3 +348,238 @@ def test_auth_headers_for_cloud_run(monkeypatch: pytest.MonkeyPatch):
         "https://drop-connector-dev-hsa55rg7ja-uk.a.run.app/download"
     )
     assert headers["Authorization"].startswith("Bearer tok-for-https://drop-connector-dev")
+
+
+def test_match_type_for_count_mapping():
+    from admin_api.approvals import match_type_for_count
+
+    assert match_type_for_count(0) == "not_found"
+    assert match_type_for_count(1) == "single_match"
+    assert match_type_for_count(2) == "multi_match"
+    assert match_type_for_count(5) == "multi_match"
+
+
+@pytest.mark.asyncio
+async def test_collect_matching_results_stats_and_filter():
+    from datetime import datetime, timezone
+
+    recorded = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
+    rows = [
+        _Row(
+            request_id="00000000-0000-0000-0000-000000000001",
+            matched=True,
+            match_count=1,
+            matched_via="drop_hash",
+            recorded_at=recorded,
+            approval_id=10,
+            review_status="pending",
+        ),
+        _Row(
+            request_id="00000000-0000-0000-0000-000000000002",
+            matched=False,
+            match_count=3,
+            matched_via="drop_hash",
+            recorded_at=recorded,
+            approval_id=11,
+            review_status="pending",
+        ),
+        _Row(
+            request_id="00000000-0000-0000-0000-000000000003",
+            matched=False,
+            match_count=0,
+            matched_via="drop_hash",
+            recorded_at=recorded,
+            approval_id=None,
+            review_status="none",
+        ),
+    ]
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(return_value=rows)
+
+    all_results = await drop_pipeline.collect_matching_results(conn, limit=100)
+    assert all_results["stats"]["total"] == 3
+    assert all_results["stats"]["single_match"] == 1
+    assert all_results["stats"]["multi_match"] == 1
+    assert all_results["stats"]["not_found"] == 1
+    assert all_results["stats"]["review_pending"] == 2
+    assert all_results["results"][0]["match_type"] == "single_match"
+    assert "consumer_id" not in all_results["results"][0]
+
+    multi = await drop_pipeline.collect_matching_results(
+        conn, match_type="multi_match", limit=100
+    )
+    assert len(multi["results"]) == 1
+    assert multi["results"][0]["match_count"] == 3
+    assert multi["match_type_filter"] == "multi_match"
+
+
+@pytest.mark.asyncio
+async def test_get_matching_result_detail_shape():
+    from datetime import datetime, timezone
+
+    recorded = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_Row(
+            request_id="00000000-0000-0000-0000-000000000002",
+            matched=False,
+            match_count=4,
+            matched_via="drop_hash",
+            recorded_at=recorded,
+            attempt_id=99,
+            approval_id=11,
+            review_status="pending",
+            decided_by=None,
+            decided_at=None,
+            decision_reason=None,
+        )
+    )
+
+    detail = await drop_pipeline.get_matching_result_detail(
+        conn, "00000000-0000-0000-0000-000000000002"
+    )
+    assert detail is not None
+    assert detail["match_type"] == "multi_match"
+    assert detail["match_count"] == 4
+    assert detail["attempt_id"] == 99
+    assert "consumer_id" not in detail
+
+
+def test_matching_results_list_route(monkeypatch: pytest.MonkeyPatch):
+    async def fake_collect(conn: Any, *, match_type=None, limit: int = 100) -> dict[str, Any]:
+        return {
+            "stats": {
+                "total": 1,
+                "single_match": 0,
+                "multi_match": 1,
+                "not_found": 0,
+                "review_pending": 1,
+                "review_approved": 0,
+                "review_none": 0,
+            },
+            "results": [
+                {
+                    "request_id": "00000000-0000-0000-0000-000000000002",
+                    "matched": False,
+                    "match_count": 2,
+                    "match_type": "multi_match",
+                    "matched_via": "drop_hash",
+                    "recorded_at": "2026-07-16T12:05:00+00:00",
+                    "review_status": "pending",
+                    "approval_id": 11,
+                }
+            ],
+            "limit": limit,
+            "match_type_filter": match_type,
+        }
+
+    class _Acquire:
+        async def __aenter__(self):
+            return MagicMock()
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(drop_pipeline, "collect_matching_results", fake_collect)
+
+    with TestClient(app) as client:
+        response = client.get("/ops/drop/matching-results?match_type=multi_match")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stats"]["multi_match"] == 1
+    assert body["results"][0]["match_type"] == "multi_match"
+    assert "consumer_id" not in body["results"][0]
+
+
+def test_matching_results_bulk_approve_route(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_bulk(
+        conn: Any,
+        *,
+        match_type: str,
+        decided_by: str,
+        decision_reason: str | None = None,
+    ) -> dict[str, Any]:
+        captured["match_type"] = match_type
+        captured["decided_by"] = decided_by
+        captured["decision_reason"] = decision_reason
+        return {
+            "match_type": match_type,
+            "approved_count": 2,
+            "approval_ids": [1, 2],
+            "request_ids": [
+                "00000000-0000-0000-0000-000000000001",
+                "00000000-0000-0000-0000-000000000002",
+            ],
+        }
+
+    class _Acquire:
+        async def __aenter__(self):
+            return MagicMock()
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(
+        "admin_api.drop_pipeline.bulk_approve_matching_review_by_match_type",
+        fake_bulk,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/ops/drop/matching-results/bulk-approve",
+            json={
+                "match_type": "multi_match",
+                "decided_by": "web-admin@habeas.com",
+                "decision_reason": "bulk approve match_type=multi_match",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["approved_count"] == 2
+    assert body["match_type"] == "multi_match"
+    assert captured["match_type"] == "multi_match"
+    assert captured["decided_by"] == "web-admin@habeas.com"
+
+
+@pytest.mark.asyncio
+async def test_bulk_approve_matching_review_sql_filters_status_4():
+    from admin_api.approvals import bulk_approve_matching_review_by_match_type
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(
+        return_value=[
+            _Row(id=7, request_id="00000000-0000-0000-0000-000000000007"),
+        ]
+    )
+
+    result = await bulk_approve_matching_review_by_match_type(
+        conn,
+        match_type="multi_match",
+        decided_by="ops@habeas.com",
+        decision_reason="bulk approve match_type=multi_match",
+    )
+    assert result["approved_count"] == 1
+    assert result["approval_ids"] == [7]
+    sql = conn.fetch.await_args.args[0]
+    assert "match_count > 1" in sql
+    assert "intake_source = 'drop'" in sql
+    assert "status = 'pending'" in sql
+    assert "matching.review" in str(conn.fetch.await_args.args)

@@ -12,6 +12,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
 
+from admin_api.approvals import (
+    MATCH_TYPE_FILTERS,
+    MatchTypeFilter,
+    bulk_approve_matching_review_by_match_type,
+    match_type_for_count,
+)
 from admin_api.cloud_run_auth import auth_headers_for
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
@@ -80,6 +86,14 @@ class FulfillProxyBody(BaseModel):
 class HashIndexRefreshEnqueueBody(BaseModel):
     state: str = "CA"
     list_types: list[str] | None = None
+
+
+class BulkApproveMatchingResultsBody(BaseModel):
+    """Clear matching.review for DROP results filtered by match type."""
+
+    match_type: MatchTypeFilter
+    decided_by: str = "web-admin@habeas.com"
+    decision_reason: str | None = None
 
 
 def _require_database() -> None:
@@ -321,6 +335,7 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
                 "request_id": r["request_id"],
                 "matched": bool(r["matched"]),
                 "match_count": int(r["match_count"] or 0),
+                "match_type": match_type_for_count(int(r["match_count"] or 0)),
                 "matched_via": r["matched_via"],
                 "recorded_at": r["recorded_at"].isoformat()
                 if r["recorded_at"] is not None
@@ -453,3 +468,194 @@ async def hash_index_refresh_process():
     """Proxy process to hash_index_refresh worker (Cloud Run invoker token)."""
     url = f"{settings.hash_index_refresh_url.rstrip('/')}/process"
     return await proxy_post(url)
+
+
+def _serialize_matching_result_row(row: Any) -> dict[str, Any]:
+    """Ids/counts/status only — never consumer_id or PII."""
+    match_count = int(row["match_count"] or 0)
+    return {
+        "request_id": row["request_id"],
+        "matched": bool(row["matched"]),
+        "match_count": match_count,
+        "match_type": match_type_for_count(match_count),
+        "matched_via": row["matched_via"],
+        "recorded_at": row["recorded_at"].isoformat()
+        if row["recorded_at"] is not None
+        else None,
+        "review_status": row["review_status"],
+        "approval_id": int(row["approval_id"]) if row["approval_id"] is not None else None,
+    }
+
+
+async def collect_matching_results(
+    conn: Any,
+    *,
+    match_type: MatchTypeFilter | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Latest DROP matching_results + global stats + pending review counts."""
+    latest_rows = await conn.fetch(
+        """
+        WITH latest AS (
+            SELECT DISTINCT ON (mr.request_id)
+                   mr.request_id::text AS request_id,
+                   mr.matched,
+                   mr.match_count,
+                   mr.matched_via,
+                   mr.recorded_at
+              FROM matching_results mr
+              JOIN requests r ON r.id = mr.request_id
+             WHERE r.intake_source = 'drop'
+             ORDER BY mr.request_id, mr.recorded_at DESC
+        )
+        SELECT lr.request_id,
+               lr.matched,
+               lr.match_count,
+               lr.matched_via,
+               lr.recorded_at,
+               ar.id AS approval_id,
+               COALESCE(ar.status, 'none') AS review_status
+          FROM latest lr
+          LEFT JOIN LATERAL (
+                SELECT a.id, a.status
+                  FROM approval_requests a
+                 WHERE a.request_id = lr.request_id::uuid
+                   AND a.action_type = $1
+                 ORDER BY a.requested_at DESC
+                 LIMIT 1
+          ) ar ON TRUE
+         ORDER BY lr.recorded_at DESC
+        """,
+        MATCHING_REVIEW_ACTION,
+    )
+
+    stats = {
+        "total": 0,
+        "single_match": 0,
+        "multi_match": 0,
+        "not_found": 0,
+        "review_pending": 0,
+        "review_approved": 0,
+        "review_none": 0,
+    }
+    results: list[dict[str, Any]] = []
+    for row in latest_rows:
+        item = _serialize_matching_result_row(row)
+        stats["total"] += 1
+        stats[item["match_type"]] += 1
+        review = item["review_status"]
+        if review == "pending":
+            stats["review_pending"] += 1
+        elif review == "approved":
+            stats["review_approved"] += 1
+        elif review == "none":
+            stats["review_none"] += 1
+        if match_type is not None and item["match_type"] != match_type:
+            continue
+        results.append(item)
+
+    return {
+        "stats": stats,
+        "results": results[:limit],
+        "limit": limit,
+        "match_type_filter": match_type,
+    }
+
+
+async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, Any] | None:
+    """Single DROP matching result detail (latest row + review gate)."""
+    row = await conn.fetchrow(
+        """
+        WITH latest AS (
+            SELECT mr.request_id::text AS request_id,
+                   mr.matched,
+                   mr.match_count,
+                   mr.matched_via,
+                   mr.recorded_at,
+                   mr.attempt_id
+              FROM matching_results mr
+              JOIN requests r ON r.id = mr.request_id
+             WHERE r.intake_source = 'drop'
+               AND mr.request_id = $1::uuid
+             ORDER BY mr.recorded_at DESC
+             LIMIT 1
+        )
+        SELECT lr.request_id,
+               lr.matched,
+               lr.match_count,
+               lr.matched_via,
+               lr.recorded_at,
+               lr.attempt_id,
+               ar.id AS approval_id,
+               COALESCE(ar.status, 'none') AS review_status,
+               ar.decided_by,
+               ar.decided_at,
+               ar.decision_reason
+          FROM latest lr
+          LEFT JOIN LATERAL (
+                SELECT a.id, a.status, a.decided_by, a.decided_at, a.decision_reason
+                  FROM approval_requests a
+                 WHERE a.request_id = lr.request_id::uuid
+                   AND a.action_type = $2
+                 ORDER BY a.requested_at DESC
+                 LIMIT 1
+          ) ar ON TRUE
+        """,
+        request_id,
+        MATCHING_REVIEW_ACTION,
+    )
+    if row is None:
+        return None
+    detail = _serialize_matching_result_row(row)
+    detail["attempt_id"] = int(row["attempt_id"]) if row["attempt_id"] is not None else None
+    detail["decided_by"] = row["decided_by"]
+    detail["decided_at"] = (
+        row["decided_at"].isoformat() if row["decided_at"] is not None else None
+    )
+    detail["decision_reason"] = row["decision_reason"]
+    return detail
+
+
+@router.get("/matching-results")
+async def drop_matching_results(
+    match_type: MatchTypeFilter | None = None,
+    limit: int = 100,
+):
+    """List DROP matching results with global stats (ids/counts only)."""
+    _require_database()
+    if match_type is not None and match_type not in MATCH_TYPE_FILTERS:
+        raise HTTPException(status_code=422, detail=f"invalid match_type: {match_type}")
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=422, detail="limit must be 1..500")
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        return await collect_matching_results(conn, match_type=match_type, limit=limit)
+
+
+@router.post("/matching-results/bulk-approve")
+async def drop_matching_results_bulk_approve(body: BulkApproveMatchingResultsBody):
+    """Bulk-approve pending matching.review filtered by match type. IAP + AuditMiddleware."""
+    _require_database()
+    if body.match_type not in MATCH_TYPE_FILTERS:
+        raise HTTPException(status_code=422, detail=f"invalid match_type: {body.match_type}")
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        result = await bulk_approve_matching_review_by_match_type(
+            conn,
+            match_type=body.match_type,
+            decided_by=body.decided_by,
+            decision_reason=body.decision_reason,
+        )
+    return {"status": "ok", **result}
+
+
+@router.get("/matching-results/{request_id}")
+async def drop_matching_result_detail(request_id: str):
+    """Detail pane payload for one DROP matching result."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        detail = await get_matching_result_detail(conn, request_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="matching result not found")
+    return detail

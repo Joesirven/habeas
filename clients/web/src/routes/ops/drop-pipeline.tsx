@@ -1,19 +1,25 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import {
+  getDropMatchingResultDetail,
+  getDropMatchingResults,
   getDropPipeline,
   postDropDispatch,
   postDropDownload,
   postDropFulfill,
   postDropLand,
   postDropMatch,
+  postDropMatchingResultsBulkApprove,
   postDropPromote,
   postHashIndexRefreshEnqueue,
   postHashIndexRefreshProcess,
   type DropPipelineStatus,
+  type MatchTypeFilter,
+  type MatchingResultDetail,
+  type MatchingResultsStats,
   type StepStatusCount,
   type WorkerHealthProbe,
 } from '@/lib/api'
@@ -46,6 +52,14 @@ const ACTIONS = [
 ] as const
 
 type ActionKey = (typeof ACTIONS)[number]['key']
+
+const MATCH_TYPE_LABELS: Record<MatchTypeFilter, string> = {
+  single_match: 'Single match',
+  multi_match: 'Multi-match (status 4)',
+  not_found: 'Not found',
+}
+
+const MATCH_TYPE_OPTIONS: MatchTypeFilter[] = ['single_match', 'multi_match', 'not_found']
 
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
@@ -151,10 +165,368 @@ function AtmospherePanel({ data }: { data: DropPipelineStatus | undefined }) {
   )
 }
 
+function StatsStrip({ stats }: { stats: MatchingResultsStats }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+        Total <span className="tabular-nums text-ink">{stats.total}</span>
+      </span>
+      <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+        Single <span className="tabular-nums text-ink">{stats.single_match}</span>
+      </span>
+      <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+        Multi (4) <span className="tabular-nums text-ink">{stats.multi_match}</span>
+      </span>
+      <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+        Not found <span className="tabular-nums text-ink">{stats.not_found}</span>
+      </span>
+      <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+        Review pending <span className="tabular-nums text-ink">{stats.review_pending}</span>
+      </span>
+    </div>
+  )
+}
+
+type PostMatchChoice = 'review_results' | 'bulk_approve'
+
+function PostMatchDialog({
+  open,
+  matchSummary,
+  onChoose,
+}: {
+  open: boolean
+  matchSummary: string | null
+  onChoose: (choice: PostMatchChoice) => void
+}) {
+  const titleId = useId()
+  const firstButtonRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (open) firstButtonRef.current?.focus()
+  }, [open])
+
+  if (!open) return null
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-habeas-navy/45 p-4 backdrop-blur-sm"
+      role="presentation"
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="taste-panel w-full max-w-md p-6 sm:p-7"
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            event.stopPropagation()
+          }
+        }}
+      >
+        <Micro>Matching complete</Micro>
+        <h3 id={titleId} className="mt-3 font-display text-2xl font-medium tracking-tight text-ink">
+          Choose next action
+        </h3>
+        <p className="mt-2 text-sm leading-relaxed text-ink-soft">
+          A matching job finished. Select how to continue — this dialog stays until you choose.
+        </p>
+        {matchSummary && (
+          <pre className="mt-4 overflow-x-auto rounded-lg border border-line bg-paper-raised p-3 text-xs text-ink-soft">
+            {matchSummary}
+          </pre>
+        )}
+        <div className="mt-6 flex flex-col gap-2">
+          <button
+            ref={firstButtonRef}
+            type="button"
+            className="taste-btn-primary w-full justify-between text-left"
+            onClick={() => onChoose('review_results')}
+          >
+            Review matching results
+          </button>
+          <button
+            type="button"
+            className="taste-btn w-full justify-between text-left"
+            onClick={() => onChoose('bulk_approve')}
+          >
+            Bulk approve by match type
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function MatchingResultsPanel({
+  focusBulk,
+  highlightRequestId,
+}: {
+  focusBulk: boolean
+  highlightRequestId: string | null
+}) {
+  const queryClient = useQueryClient()
+  const [view, setView] = useState<'list' | 'detail'>('list')
+  const [selectedId, setSelectedId] = useState<string | null>(highlightRequestId)
+  const [listFilter, setListFilter] = useState<MatchTypeFilter | 'all'>('all')
+  const [bulkType, setBulkType] = useState<MatchTypeFilter>('multi_match')
+  const bulkSectionRef = useRef<HTMLDivElement>(null)
+
+  const resultsQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'drop-matching-results', listFilter],
+    queryFn: () =>
+      getDropMatchingResults({
+        match_type: listFilter === 'all' ? undefined : listFilter,
+        limit: 100,
+      }),
+    refetchInterval: 10_000,
+  })
+
+  const detailQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'drop-matching-result', selectedId],
+    queryFn: () => getDropMatchingResultDetail(selectedId!),
+    enabled: view === 'detail' && Boolean(selectedId),
+  })
+
+  const bulkMutation = useMutation({
+    mutationFn: (matchType: MatchTypeFilter) =>
+      postDropMatchingResultsBulkApprove({
+        match_type: matchType,
+        decision_reason: `bulk approve match_type=${matchType}`,
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-matching-results'] })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'approvals'] })
+      if (selectedId) {
+        void queryClient.invalidateQueries({
+          queryKey: ['admin-api', 'ops', 'drop-matching-result', selectedId],
+        })
+      }
+    },
+  })
+
+  useEffect(() => {
+    if (highlightRequestId) {
+      setSelectedId(highlightRequestId)
+      setView('detail')
+    }
+  }, [highlightRequestId])
+
+  useEffect(() => {
+    if (focusBulk) {
+      bulkSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  }, [focusBulk])
+
+  const stats = resultsQuery.data?.stats
+  const rows = resultsQuery.data?.results ?? []
+  const detail: MatchingResultDetail | undefined = detailQuery.data
+
+  function openDetail(requestId: string) {
+    setSelectedId(requestId)
+    setView('detail')
+  }
+
+  return (
+    <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <Micro>Matching results</Micro>
+          <p className="mt-2 max-w-xl text-sm text-ink-soft">
+            Global stats by match type. Open a row for detail. Bulk approve clears pending
+            matching.review for a filtered set (including multi-match / status 4).
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            className={view === 'list' ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'}
+            onClick={() => setView('list')}
+          >
+            List
+          </button>
+          <button
+            type="button"
+            className={view === 'detail' ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'}
+            disabled={!selectedId}
+            onClick={() => setView('detail')}
+          >
+            Detail
+          </button>
+        </div>
+      </div>
+
+      {stats && <StatsStrip stats={stats} />}
+
+      {resultsQuery.isError && (
+        <p className="text-sm text-red-700">Could not load matching results.</p>
+      )}
+
+      {view === 'list' && (
+        <>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className={listFilter === 'all' ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'}
+              onClick={() => setListFilter('all')}
+            >
+              All
+            </button>
+            {MATCH_TYPE_OPTIONS.map((type) => (
+              <button
+                key={type}
+                type="button"
+                className={listFilter === type ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'}
+                onClick={() => setListFilter(type)}
+              >
+                {MATCH_TYPE_LABELS[type]}
+              </button>
+            ))}
+          </div>
+          <div className="taste-panel overflow-x-auto px-2 py-1">
+            {resultsQuery.isPending && <SkeletonLines lines={4} />}
+            {resultsQuery.isSuccess && rows.length === 0 && (
+              <p className="p-4 text-sm text-ink-soft">No matching results for this filter.</p>
+            )}
+            {rows.length > 0 && (
+              <table className="taste-table">
+                <thead>
+                  <tr>
+                    <th>Recorded</th>
+                    <th>Request ID</th>
+                    <th>Type</th>
+                    <th>Count</th>
+                    <th>Via</th>
+                    <th>Review</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <tr
+                      key={`${row.request_id}-${row.recorded_at}`}
+                      className="cursor-pointer hover:bg-paper-raised/80"
+                      onClick={() => openDetail(row.request_id)}
+                    >
+                      <td>
+                        {row.recorded_at ? new Date(row.recorded_at).toLocaleString() : '—'}
+                      </td>
+                      <td className="font-mono text-xs">{row.request_id}</td>
+                      <td>{MATCH_TYPE_LABELS[row.match_type]}</td>
+                      <td className="tabular-nums">{row.match_count}</td>
+                      <td className="font-mono text-xs">{row.matched_via}</td>
+                      <td>{row.review_status}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
+
+      {view === 'detail' && (
+        <div className="taste-panel space-y-4 p-5">
+          {!selectedId && <p className="text-sm text-ink-soft">Select a result from the list.</p>}
+          {selectedId && detailQuery.isPending && <SkeletonLines lines={4} />}
+          {selectedId && detailQuery.isError && (
+            <p className="text-sm text-red-700">Could not load detail for this request.</p>
+          )}
+          {detail && (
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="font-mono text-xs text-ink-soft">{detail.request_id}</p>
+                <button type="button" className="taste-btn text-xs" onClick={() => setView('list')}>
+                  Back to list
+                </button>
+              </div>
+              <dl className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <dt className="taste-micro">Match type</dt>
+                  <dd className="mt-1 text-sm text-ink">{MATCH_TYPE_LABELS[detail.match_type]}</dd>
+                </div>
+                <div>
+                  <dt className="taste-micro">Match count</dt>
+                  <dd className="mt-1 tabular-nums text-sm text-ink">{detail.match_count}</dd>
+                </div>
+                <div>
+                  <dt className="taste-micro">Matched via</dt>
+                  <dd className="mt-1 font-mono text-xs text-ink">{detail.matched_via}</dd>
+                </div>
+                <div>
+                  <dt className="taste-micro">Review status</dt>
+                  <dd className="mt-1 text-sm text-ink">{detail.review_status}</dd>
+                </div>
+                <div>
+                  <dt className="taste-micro">Attempt</dt>
+                  <dd className="mt-1 tabular-nums text-sm text-ink">{detail.attempt_id ?? '—'}</dd>
+                </div>
+                <div>
+                  <dt className="taste-micro">Recorded</dt>
+                  <dd className="mt-1 text-sm text-ink">
+                    {detail.recorded_at ? new Date(detail.recorded_at).toLocaleString() : '—'}
+                  </dd>
+                </div>
+              </dl>
+            </>
+          )}
+        </div>
+      )}
+
+      <div ref={bulkSectionRef} className="border-t border-line pt-5">
+        <Micro>Bulk approve</Micro>
+        <p className="mt-2 max-w-xl text-sm text-ink-soft">
+          Approve all pending matching.review gates whose latest result matches the selected type.
+        </p>
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+          <select
+            className="glass rounded-lg px-3 py-2 text-sm text-ink"
+            value={bulkType}
+            onChange={(event) => setBulkType(event.target.value as MatchTypeFilter)}
+            aria-label="Bulk approve match type"
+          >
+            {MATCH_TYPE_OPTIONS.map((type) => (
+              <option key={type} value={type}>
+                {MATCH_TYPE_LABELS[type]}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="taste-btn-primary"
+            disabled={bulkMutation.isPending}
+            onClick={() => bulkMutation.mutate(bulkType)}
+          >
+            {bulkMutation.isPending ? 'Approving…' : `Approve ${MATCH_TYPE_LABELS[bulkType]}`}
+          </button>
+        </div>
+        {bulkMutation.isSuccess && (
+          <p className="mt-3 text-sm text-emerald-700">
+            Approved {bulkMutation.data.approved_count} pending review
+            {bulkMutation.data.approved_count === 1 ? '' : 's'} for {bulkMutation.data.match_type}.
+          </p>
+        )}
+        {bulkMutation.isError && (
+          <p className="mt-3 text-sm text-red-700">
+            {bulkMutation.error instanceof Error
+              ? bulkMutation.error.message
+              : String(bulkMutation.error)}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function DropPipelinePage() {
   const queryClient = useQueryClient()
   const [lastAction, setLastAction] = useState<string | null>(null)
   const [actionResult, setActionResult] = useState<string | null>(null)
+  const [postMatchOpen, setPostMatchOpen] = useState(false)
+  const [postMatchSummary, setPostMatchSummary] = useState<string | null>(null)
+  const [resultsFocusBulk, setResultsFocusBulk] = useState(false)
+  const [highlightRequestId, setHighlightRequestId] = useState<string | null>(null)
+  const resultsAnchorRef = useRef<HTMLDivElement>(null)
 
   const pipelineQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-pipeline'],
@@ -168,11 +540,24 @@ export function DropPipelinePage() {
       const action = ACTIONS.find((item) => item.key === key)
       if (!action) throw new Error(`unknown action ${key}`)
       setLastAction(action.label)
-      return action.run()
+      return { key, data: await action.run() }
     },
-    onSuccess: (data) => {
+    onSuccess: ({ key, data }) => {
       setActionResult(JSON.stringify(data, null, 2))
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-matching-results'] })
+      if (key === 'match' && data && typeof data === 'object' && 'status' in data) {
+        const status = String((data as { status?: unknown }).status ?? '')
+        if (status === 'ok') {
+          const requestId =
+            'request_id' in data && typeof (data as { request_id?: unknown }).request_id === 'string'
+              ? (data as { request_id: string }).request_id
+              : null
+          setHighlightRequestId(requestId)
+          setPostMatchSummary(JSON.stringify(data, null, 2))
+          setPostMatchOpen(true)
+        }
+      }
     },
     onError: (error) => {
       setActionResult(error instanceof Error ? error.message : String(error))
@@ -201,8 +586,20 @@ export function DropPipelinePage() {
   const hashWorkerDown = data ? !data.worker_health.hash_index_refresh?.ok : false
   const lastRun = data?.hash_index_refresh.last_run
 
+  function handlePostMatchChoice(choice: PostMatchChoice) {
+    setPostMatchOpen(false)
+    setResultsFocusBulk(choice === 'bulk_approve')
+    resultsAnchorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
   return (
     <section className="space-y-16">
+      <PostMatchDialog
+        open={postMatchOpen}
+        matchSummary={postMatchSummary}
+        onChoose={handlePostMatchChoice}
+      />
+
       <header className="grid gap-10 lg:grid-cols-[1.15fr_0.85fr] lg:items-end">
         <div>
           <Micro>Operations</Micro>
@@ -235,7 +632,8 @@ export function DropPipelinePage() {
           <div>
             <Micro>Actions</Micro>
             <p className="mt-2 max-w-sm text-sm text-ink-soft">
-              Run one step at a time. Results stay on this page — ids and counts only.
+              Run one step at a time. After matching completes, choose the next ops action in the
+              required dialog.
             </p>
           </div>
 
@@ -252,7 +650,7 @@ export function DropPipelinePage() {
                       ? 'taste-btn-primary w-full justify-between gap-3 text-left'
                       : 'taste-btn w-full justify-between gap-3 text-left'
                   }
-                  disabled={actionMutation.isPending || showSkeleton}
+                  disabled={actionMutation.isPending || showSkeleton || postMatchOpen}
                   onClick={() => actionMutation.mutate(action.key)}
                 >
                   <span>{action.label}</span>
@@ -315,7 +713,11 @@ export function DropPipelinePage() {
             type="button"
             className="taste-btn"
             disabled={
-              showSkeleton || hashPending || hashIndexMutation.isPending || actionMutation.isPending
+              showSkeleton ||
+              hashPending ||
+              hashIndexMutation.isPending ||
+              actionMutation.isPending ||
+              postMatchOpen
             }
             onClick={() => hashIndexMutation.mutate('enqueue')}
           >
@@ -324,12 +726,21 @@ export function DropPipelinePage() {
           <button
             type="button"
             className="taste-btn"
-            disabled={showSkeleton || hashIndexMutation.isPending || actionMutation.isPending}
+            disabled={
+              showSkeleton || hashIndexMutation.isPending || actionMutation.isPending || postMatchOpen
+            }
             onClick={() => hashIndexMutation.mutate('process')}
           >
             Process refresh
           </button>
         </div>
+      </div>
+
+      <div ref={resultsAnchorRef}>
+        <MatchingResultsPanel
+          focusBulk={resultsFocusBulk}
+          highlightRequestId={highlightRequestId}
+        />
       </div>
 
       {showSkeleton && (
@@ -466,44 +877,6 @@ export function DropPipelinePage() {
                         </td>
                         <td className="font-mono text-xs">{row.id}</td>
                         <td className="tabular-nums">{row.raw_record_id ?? '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            <Micro>Matching results</Micro>
-            <div className="taste-panel overflow-x-auto px-2 py-1">
-              {data.matching_results_recent.length === 0 ? (
-                <p className="p-4 text-sm text-ink-soft">No matching results for DROP requests.</p>
-              ) : (
-                <table className="taste-table">
-                  <thead>
-                    <tr>
-                      <th>Recorded</th>
-                      <th>Request ID</th>
-                      <th>Matched</th>
-                      <th>Count</th>
-                      <th>Via</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.matching_results_recent.map((row) => (
-                      <tr key={`${row.request_id}-${row.recorded_at}`}>
-                        <td>
-                          {row.recorded_at ? new Date(row.recorded_at).toLocaleString() : '—'}
-                        </td>
-                        <td className="font-mono text-xs">{row.request_id}</td>
-                        <td>
-                          <span className={row.matched ? 'text-emerald-700' : 'text-mute'}>
-                            {row.matched ? 'yes' : 'no'}
-                          </span>
-                        </td>
-                        <td className="tabular-nums">{row.match_count}</td>
-                        <td className="font-mono text-xs">{row.matched_via}</td>
                       </tr>
                     ))}
                   </tbody>

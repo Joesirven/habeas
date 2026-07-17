@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import asyncpg
@@ -17,6 +17,31 @@ from habeas_privacy_core.workflow.approval import (
 )
 
 DEFAULT_APPROVAL_TTL = timedelta(days=7)
+
+MatchTypeFilter = Literal["single_match", "multi_match", "not_found"]
+MATCH_TYPE_FILTERS: tuple[MatchTypeFilter, ...] = (
+    "single_match",
+    "multi_match",
+    "not_found",
+)
+
+
+def match_type_for_count(match_count: int) -> MatchTypeFilter:
+    """Map match_count → ops match type (status 4 ≡ multi_match)."""
+    if match_count <= 0:
+        return "not_found"
+    if match_count == 1:
+        return "single_match"
+    return "multi_match"
+
+
+def match_count_predicate_sql(match_type: MatchTypeFilter, column: str = "match_count") -> str:
+    """SQL fragment filtering latest match_count by match type."""
+    if match_type == "not_found":
+        return f"{column} = 0"
+    if match_type == "single_match":
+        return f"{column} = 1"
+    return f"{column} > 1"
 
 
 async def create_matching_review_approval(
@@ -116,10 +141,73 @@ async def list_approvals(
     return [dict(row) for row in rows]
 
 
+async def bulk_approve_matching_review_by_match_type(
+    conn: asyncpg.Connection,
+    *,
+    match_type: MatchTypeFilter,
+    decided_by: str,
+    decision_reason: str | None = None,
+) -> dict[str, Any]:
+    """Approve pending matching.review rows for DROP requests of a match type.
+
+    Filter uses latest ``matching_results.match_count`` per request:
+    not_found=0, single_match=1, multi_match>1 (DROP status 4).
+    Audit payloads must stay ids/counts only — no PII.
+    """
+    if match_type not in MATCH_TYPE_FILTERS:
+        raise ValueError(f"invalid match_type: {match_type!r}")
+
+    predicate = match_count_predicate_sql(match_type, "lr.match_count")
+    reason = decision_reason or f"bulk approve match_type={match_type}"
+    rows = await conn.fetch(
+        f"""
+        WITH latest AS (
+            SELECT DISTINCT ON (mr.request_id)
+                   mr.request_id,
+                   mr.match_count
+              FROM matching_results mr
+              JOIN requests r ON r.id = mr.request_id
+             WHERE r.intake_source = 'drop'
+             ORDER BY mr.request_id, mr.recorded_at DESC
+        ),
+        filtered AS (
+            SELECT lr.request_id
+              FROM latest lr
+             WHERE {predicate}
+        )
+        UPDATE approval_requests AS ar
+           SET status = 'approved',
+               decided_by = $1,
+               decided_at = NOW(),
+               decision_reason = $2
+          FROM filtered
+         WHERE ar.request_id = filtered.request_id
+           AND ar.action_type = $3
+           AND ar.status = 'pending'
+        RETURNING ar.id, ar.request_id::text AS request_id
+        """,
+        decided_by,
+        reason,
+        MATCHING_REVIEW_ACTION,
+    )
+    approved_ids = [int(row["id"]) for row in rows]
+    return {
+        "match_type": match_type,
+        "approved_count": len(approved_ids),
+        "approval_ids": approved_ids,
+        "request_ids": [row["request_id"] for row in rows],
+    }
+
+
 __all__ = [
     "MATCHING_REVIEW_ACTION",
+    "MATCH_TYPE_FILTERS",
+    "MatchTypeFilter",
+    "bulk_approve_matching_review_by_match_type",
     "create_matching_review_approval",
     "decide_approval",
     "is_matching_review_approved",
     "list_approvals",
+    "match_count_predicate_sql",
+    "match_type_for_count",
 ]

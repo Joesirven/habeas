@@ -110,12 +110,59 @@ export type DropRequestThin = {
   raw_record_id: number | null
 }
 
+export type MatchTypeFilter = 'single_match' | 'multi_match' | 'not_found'
+
 export type MatchingResultSummary = {
   request_id: string
   matched: boolean
   match_count: number
+  match_type?: MatchTypeFilter
   matched_via: string
   recorded_at: string | null
+}
+
+export type MatchingResultRow = MatchingResultSummary & {
+  match_type: MatchTypeFilter
+  review_status: string
+  approval_id: number | null
+}
+
+export type MatchingResultsStats = {
+  total: number
+  single_match: number
+  multi_match: number
+  not_found: number
+  review_pending: number
+  review_approved: number
+  review_none: number
+}
+
+export type MatchingResultsPayload = {
+  stats: MatchingResultsStats
+  results: MatchingResultRow[]
+  limit: number
+  match_type_filter: MatchTypeFilter | null
+}
+
+export type MatchingResultDetail = MatchingResultRow & {
+  attempt_id: number | null
+  decided_by: string | null
+  decided_at: string | null
+  decision_reason: string | null
+}
+
+export type BulkApproveMatchingResultsInput = {
+  match_type: MatchTypeFilter
+  decided_by?: string
+  decision_reason?: string
+}
+
+export type BulkApproveMatchingResultsResult = {
+  status: string
+  match_type: MatchTypeFilter
+  approved_count: number
+  approval_ids: number[]
+  request_ids: string[]
 }
 
 export type HashIndexRefreshStatus = {
@@ -213,5 +260,32 @@ export function postHashIndexRefreshEnqueue(body?: { state?: string; list_types?
 export function postHashIndexRefreshProcess() {
   return fetchAdminApi<Record<string, unknown>>('/ops/drop/hash-index-refresh/process', {
     method: 'POST',
+  })
+}
+
+export function getDropMatchingResults(params?: {
+  match_type?: MatchTypeFilter
+  limit?: number
+}) {
+  const search = new URLSearchParams()
+  if (params?.match_type) search.set('match_type', params.match_type)
+  if (params?.limit != null) search.set('limit', String(params.limit))
+  const query = search.toString()
+  return fetchAdminApi<MatchingResultsPayload>(
+    `/ops/drop/matching-results${query ? `?${query}` : ''}`,
+  )
+}
+
+export function getDropMatchingResultDetail(requestId: string) {
+  return fetchAdminApi<MatchingResultDetail>(`/ops/drop/matching-results/${requestId}`)
+}
+
+export function postDropMatchingResultsBulkApprove(body: BulkApproveMatchingResultsInput) {
+  return fetchAdminApi<BulkApproveMatchingResultsResult>('/ops/drop/matching-results/bulk-approve', {
+    method: 'POST',
+    body: JSON.stringify({
+      decided_by: 'web-admin@habeas.com',
+      ...body,
+    }),
   })
 }
