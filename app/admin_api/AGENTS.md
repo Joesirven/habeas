@@ -17,6 +17,11 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
 - Matching result detail includes attempt history + allowlisted `audit_payload`
 - `POST /ops/drop/match` proxies matching worker and opens a pending `matching.review` gate on success
 - Matching results (Unit 8b / U15): `GET /ops/drop/matching-results` (list + global stats),
+  filters: `match_type`, `q`/`request_id` (substring on uuid text), `state` (normalized
+  `requests.requestor_state`), `recorded_after`/`recorded_before` (ISO date/datetime on
+  latest `matching_results.recorded_at`). Stats stay **global** (`filters.stats_scope=global`);
+  list items include `requestor_state` (2-letter only). Deadline / approaching-SLA list
+  filters skipped — no deadline column without new schema.
   `GET /ops/drop/matching-results/{request_id}` (detail + attempt audit drill-down),
   `POST .../bulk-approve` (bulk promote), `POST .../bulk-decline`,
   `POST .../{request_id}/promote`, `POST .../{request_id}/decline`

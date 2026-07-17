@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import date, datetime, time, timezone
 from typing import Annotated, Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
@@ -727,8 +728,10 @@ async def hash_index_refresh_process(_actor: DropMutationActor):
 
 
 def _serialize_matching_result_row(row: Any) -> dict[str, Any]:
-    """Ids/counts/status only — never consumer_id or PII."""
+    """Ids/counts/status/state acronym only — never consumer_id or PII."""
     match_count = int(row["match_count"] or 0)
+    raw_state = row["requestor_state"] if "requestor_state" in row else None
+    state_acronym = str(raw_state).strip().upper()[:2] if raw_state else None
     return {
         "request_id": row["request_id"],
         "matched": bool(row["matched"]),
@@ -738,18 +741,48 @@ def _serialize_matching_result_row(row: Any) -> dict[str, Any]:
         "recorded_at": row["recorded_at"].isoformat()
         if row["recorded_at"] is not None
         else None,
+        "requestor_state": state_acronym,
         "review_status": row["review_status"],
         "approval_id": int(row["approval_id"]) if row["approval_id"] is not None else None,
     }
+
+
+def _parse_recorded_bound(value: str, *, end_of_day: bool) -> datetime:
+    """Parse ISO date or datetime for recorded_at filters (UTC when naive)."""
+    raw = value.strip()
+    try:
+        if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
+            day = date.fromisoformat(raw)
+            if end_of_day:
+                return datetime.combine(day, time(23, 59, 59, 999999), tzinfo=timezone.utc)
+            return datetime.combine(day, time.min, tzinfo=timezone.utc)
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid ISO date/datetime: {value!r}",
+        ) from exc
 
 
 async def collect_matching_results(
     conn: Any,
     *,
     match_type: MatchTypeFilter | None = None,
+    q: str | None = None,
+    request_id: str | None = None,
+    state: str | None = None,
+    recorded_after: datetime | None = None,
+    recorded_before: datetime | None = None,
     limit: int = 100,
 ) -> dict[str, Any]:
-    """Latest DROP matching_results + global stats + pending review counts."""
+    """Latest DROP matching_results + global stats + pending review counts.
+
+    ``stats`` are always unfiltered (global DROP totals). List filters only
+    narrow ``results``; echoed under ``filters`` with ``stats_scope=global``.
+    """
     from habeas_privacy_core.workflow.approval import WORKFLOW_ASSIGNMENT_ACTION
 
     latest_rows = await conn.fetch(
@@ -760,7 +793,8 @@ async def collect_matching_results(
                    mr.matched,
                    mr.match_count,
                    mr.matched_via,
-                   mr.recorded_at
+                   mr.recorded_at,
+                   UPPER(TRIM(r.requestor_state)) AS requestor_state
               FROM matching_results mr
               JOIN requests r ON r.id = mr.request_id
              WHERE r.intake_source = 'drop'
@@ -771,6 +805,7 @@ async def collect_matching_results(
                lr.match_count,
                lr.matched_via,
                lr.recorded_at,
+               lr.requestor_state,
                ar.id AS approval_id,
                COALESCE(ar.status, 'none') AS review_status,
                wa.approver_role AS assignment_target,
@@ -798,6 +833,9 @@ async def collect_matching_results(
         MATCHING_REVIEW_ACTION,
         WORKFLOW_ASSIGNMENT_ACTION,
     )
+
+    id_query = (request_id or q or "").strip() or None
+    state_norm = state.strip().upper() if state else None
 
     stats = {
         "total": 0,
@@ -833,15 +871,37 @@ async def collect_matching_results(
             stats["review_approved"] += 1
         elif review == "none":
             stats["review_none"] += 1
+
         if match_type is not None and item["match_type"] != match_type:
             continue
+        if id_query is not None and id_query.lower() not in str(item["request_id"]).lower():
+            continue
+        if state_norm is not None and item.get("requestor_state") != state_norm:
+            continue
+        recorded_at = row["recorded_at"]
+        if recorded_after is not None:
+            if recorded_at is None or recorded_at < recorded_after:
+                continue
+        if recorded_before is not None:
+            if recorded_at is None or recorded_at > recorded_before:
+                continue
         results.append(item)
 
+    filters_echo = {
+        "match_type": match_type,
+        "q": q.strip() if q else None,
+        "request_id": request_id.strip() if request_id else None,
+        "state": state_norm,
+        "recorded_after": recorded_after.isoformat() if recorded_after else None,
+        "recorded_before": recorded_before.isoformat() if recorded_before else None,
+        "stats_scope": "global",
+    }
     return {
         "stats": stats,
         "results": results[:limit],
         "limit": limit,
         "match_type_filter": match_type,
+        "filters": filters_echo,
     }
 
 
@@ -855,7 +915,8 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
                    mr.match_count,
                    mr.matched_via,
                    mr.recorded_at,
-                   mr.attempt_id
+                   mr.attempt_id,
+                   UPPER(TRIM(r.requestor_state)) AS requestor_state
               FROM matching_results mr
               JOIN requests r ON r.id = mr.request_id
              WHERE r.intake_source = 'drop'
@@ -869,6 +930,7 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
                lr.matched_via,
                lr.recorded_at,
                lr.attempt_id,
+               lr.requestor_state,
                ar.id AS approval_id,
                COALESCE(ar.status, 'none') AS review_status,
                ar.decided_by,
@@ -935,17 +997,73 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
 @router.get("/matching-results")
 async def drop_matching_results(
     match_type: MatchTypeFilter | None = None,
+    q: str | None = Query(default=None, description="Substring search on request_id"),
+    request_id: str | None = Query(
+        default=None,
+        description="Alias of q — substring/prefix search on request_id",
+    ),
+    state: str | None = Query(
+        default=None,
+        description="Normalized 2-letter requestor_state filter",
+    ),
+    recorded_after: str | None = Query(
+        default=None,
+        description="ISO date or datetime — latest recorded_at >= bound",
+    ),
+    recorded_before: str | None = Query(
+        default=None,
+        description="ISO date or datetime — latest recorded_at <= bound",
+    ),
     limit: int = 100,
 ):
-    """List DROP matching results with global stats (ids/counts only)."""
+    """List DROP matching results with global stats (ids/counts/state only).
+
+    Stats stay global (unfiltered); ``filters.stats_scope`` documents that.
+    Deadline / approaching-SLA filters are not available without new schema.
+    """
+    from habeas_privacy_core.geo.state import (
+        InvalidStateAcronymError,
+        normalize_state_acronym,
+    )
+
     _require_database()
     if match_type is not None and match_type not in MATCH_TYPE_FILTERS:
         raise HTTPException(status_code=422, detail=f"invalid match_type: {match_type}")
     if limit < 1 or limit > 500:
         raise HTTPException(status_code=422, detail="limit must be 1..500")
+    state_norm: str | None = None
+    if state is not None and state.strip():
+        try:
+            state_norm = normalize_state_acronym(state, require_served=False)
+        except InvalidStateAcronymError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    after_dt = (
+        _parse_recorded_bound(recorded_after, end_of_day=False)
+        if recorded_after and recorded_after.strip()
+        else None
+    )
+    before_dt = (
+        _parse_recorded_bound(recorded_before, end_of_day=True)
+        if recorded_before and recorded_before.strip()
+        else None
+    )
+    if after_dt is not None and before_dt is not None and after_dt > before_dt:
+        raise HTTPException(
+            status_code=422,
+            detail="recorded_after must be <= recorded_before",
+        )
     pool = get_pool()
     async with pool.acquire() as conn:
-        return await collect_matching_results(conn, match_type=match_type, limit=limit)
+        return await collect_matching_results(
+            conn,
+            match_type=match_type,
+            q=q,
+            request_id=request_id,
+            state=state_norm,
+            recorded_after=after_dt,
+            recorded_before=before_dt,
+            limit=limit,
+        )
 
 
 @router.post("/matching-results/bulk-approve")

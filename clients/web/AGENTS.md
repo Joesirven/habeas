@@ -25,8 +25,10 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
 - Hash-index: per-state enqueue + enqueue-all served states (USPS 50+DC); rematch-on-refresh for every successful state.
 - After **Run matching** completes (`status=ok`), required post-match dialog (review / bulk approve); `useBlocker` until choice.
 - Matching tab: stats, list ↔ detail (attempt history + allowlisted `audit_payload`),
+  filters (request_id search, state select, recorded date range + match_type),
   promote/decline (individual + bulk by match type), assign to reviewer / escalate to
   legal|data_owner (IAP actor; `workflow.assignment` via admin-api).
+  No deadline / approaching-SLA UI — requires schema not present.
 
 ## Rules
 

@@ -119,6 +119,8 @@ export type MatchingResultSummary = {
   match_type?: MatchTypeFilter
   matched_via: string
   recorded_at: string | null
+  /** 2-letter USPS acronym only — not PII */
+  requestor_state?: string | null
 }
 
 export type WorkflowAssignmentTarget = 'reviewer' | 'legal' | 'data_owner'
@@ -158,11 +160,23 @@ export type MatchingResultsStats = {
   review_none: number
 }
 
+export type MatchingResultsFilters = {
+  match_type: MatchTypeFilter | null
+  q: string | null
+  request_id: string | null
+  state: string | null
+  recorded_after: string | null
+  recorded_before: string | null
+  /** Stats are global unfiltered totals; list filters only narrow results */
+  stats_scope: 'global' | string
+}
+
 export type MatchingResultsPayload = {
   stats: MatchingResultsStats
   results: MatchingResultRow[]
   limit: number
   match_type_filter: MatchTypeFilter | null
+  filters?: MatchingResultsFilters
 }
 
 export type MatchingResultDetail = MatchingResultRow & {
@@ -405,10 +419,20 @@ export function postHashIndexRefreshProcess() {
 
 export function getDropMatchingResults(params?: {
   match_type?: MatchTypeFilter
+  q?: string
+  request_id?: string
+  state?: string
+  recorded_after?: string
+  recorded_before?: string
   limit?: number
 }) {
   const search = new URLSearchParams()
   if (params?.match_type) search.set('match_type', params.match_type)
+  if (params?.q) search.set('q', params.q)
+  if (params?.request_id) search.set('request_id', params.request_id)
+  if (params?.state) search.set('state', params.state)
+  if (params?.recorded_after) search.set('recorded_after', params.recorded_after)
+  if (params?.recorded_before) search.set('recorded_before', params.recorded_before)
   if (params?.limit != null) search.set('limit', String(params.limit))
   const query = search.toString()
   return fetchAdminApi<MatchingResultsPayload>(

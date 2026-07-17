@@ -660,6 +660,10 @@ function MatchingResultsPanel({
   const [view, setView] = useState<'list' | 'detail'>('list')
   const [selectedId, setSelectedId] = useState<string | null>(highlightRequestId)
   const [listFilter, setListFilter] = useState<MatchTypeFilter | 'all'>('all')
+  const [requestIdQuery, setRequestIdQuery] = useState('')
+  const [stateFilter, setStateFilter] = useState<string>('all')
+  const [recordedAfter, setRecordedAfter] = useState('')
+  const [recordedBefore, setRecordedBefore] = useState('')
   const [bulkType, setBulkType] = useState<MatchTypeFilter>('multi_match')
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set())
   const [assigneeEmail, setAssigneeEmail] = useState('')
@@ -677,11 +681,25 @@ function MatchingResultsPanel({
     }
   }
 
+  const trimmedRequestId = requestIdQuery.trim()
   const resultsQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'drop-matching-results', listFilter],
+    queryKey: [
+      'admin-api',
+      'ops',
+      'drop-matching-results',
+      listFilter,
+      trimmedRequestId,
+      stateFilter,
+      recordedAfter,
+      recordedBefore,
+    ],
     queryFn: () =>
       getDropMatchingResults({
         match_type: listFilter === 'all' ? undefined : listFilter,
+        q: trimmedRequestId || undefined,
+        state: stateFilter === 'all' ? undefined : stateFilter,
+        recorded_after: recordedAfter || undefined,
+        recorded_before: recordedBefore || undefined,
         limit: 100,
       }),
     refetchInterval: 10_000,
@@ -853,6 +871,55 @@ function MatchingResultsPanel({
             ))}
           </div>
 
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+            <label className="flex min-w-[14rem] flex-1 flex-col gap-1 text-xs text-ink-soft">
+              Request ID
+              <input
+                className="glass rounded-lg px-3 py-2 font-mono text-sm text-ink"
+                value={requestIdQuery}
+                onChange={(e) => setRequestIdQuery(e.target.value)}
+                placeholder="Substring or prefix…"
+                aria-label="Filter by request ID"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-ink-soft">
+              State
+              <select
+                className="glass rounded-lg px-3 py-2 text-sm text-ink"
+                value={stateFilter}
+                onChange={(e) => setStateFilter(e.target.value)}
+                aria-label="Filter by requestor state"
+              >
+                <option value="all">All</option>
+                {SERVED_STATE_ACRONYMS.map((state) => (
+                  <option key={state} value={state}>
+                    {state}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-ink-soft">
+              Recorded after
+              <input
+                type="date"
+                className="glass rounded-lg px-3 py-2 text-sm text-ink"
+                value={recordedAfter}
+                onChange={(e) => setRecordedAfter(e.target.value)}
+                aria-label="Recorded after date"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-ink-soft">
+              Recorded before
+              <input
+                type="date"
+                className="glass rounded-lg px-3 py-2 text-sm text-ink"
+                value={recordedBefore}
+                onChange={(e) => setRecordedBefore(e.target.value)}
+                aria-label="Recorded before date"
+              />
+            </label>
+          </div>
+
           {selectedIds.length > 0 && (
             <div className="flex flex-col gap-3 rounded-lg border border-line p-4 sm:flex-row sm:flex-wrap sm:items-end">
               <p className="text-sm text-ink-soft">{selectedIds.length} selected</p>
@@ -906,6 +973,7 @@ function MatchingResultsPanel({
                     <th className="w-8" aria-label="Select" />
                     <th>Recorded</th>
                     <th>Request ID</th>
+                    <th>State</th>
                     <th>Type</th>
                     <th>Count</th>
                     <th>Review</th>
@@ -937,6 +1005,12 @@ function MatchingResultsPanel({
                         onClick={() => openDetail(row.request_id)}
                       >
                         {row.request_id}
+                      </td>
+                      <td
+                        className="cursor-pointer font-mono text-xs"
+                        onClick={() => openDetail(row.request_id)}
+                      >
+                        {row.requestor_state ?? '—'}
                       </td>
                       <td
                         className="cursor-pointer"
@@ -1004,6 +1078,12 @@ function MatchingResultsPanel({
                 <div>
                   <dt className="taste-micro">Match count</dt>
                   <dd className="mt-1 tabular-nums text-sm text-ink">{detail.match_count}</dd>
+                </div>
+                <div>
+                  <dt className="taste-micro">State</dt>
+                  <dd className="mt-1 font-mono text-xs text-ink">
+                    {detail.requestor_state ?? '—'}
+                  </dd>
                 </div>
                 <div>
                   <dt className="taste-micro">Matched via</dt>

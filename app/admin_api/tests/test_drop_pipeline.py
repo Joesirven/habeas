@@ -618,6 +618,7 @@ async def test_collect_matching_results_stats_and_filter():
     from datetime import datetime, timezone
 
     recorded = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
+    recorded_old = datetime(2026, 7, 10, 8, 0, tzinfo=timezone.utc)
     rows = [
         _Row(
             request_id="00000000-0000-0000-0000-000000000001",
@@ -625,6 +626,7 @@ async def test_collect_matching_results_stats_and_filter():
             match_count=1,
             matched_via="drop_hash",
             recorded_at=recorded,
+            requestor_state="CA",
             approval_id=10,
             review_status="pending",
             assignment_target="reviewer",
@@ -636,6 +638,7 @@ async def test_collect_matching_results_stats_and_filter():
             match_count=3,
             matched_via="drop_hash",
             recorded_at=recorded,
+            requestor_state="TX",
             approval_id=11,
             review_status="pending",
             assignment_target=None,
@@ -646,7 +649,8 @@ async def test_collect_matching_results_stats_and_filter():
             matched=False,
             match_count=0,
             matched_via="drop_hash",
-            recorded_at=recorded,
+            recorded_at=recorded_old,
+            requestor_state="NY",
             approval_id=None,
             review_status="none",
             assignment_target=None,
@@ -664,9 +668,11 @@ async def test_collect_matching_results_stats_and_filter():
     assert all_results["stats"]["not_found"] == 1
     assert all_results["stats"]["review_pending"] == 2
     assert all_results["results"][0]["match_type"] == "single_match"
+    assert all_results["results"][0]["requestor_state"] == "CA"
     assert all_results["results"][0]["assignment"]["assignee_identity"] == "rev@habeas.com"
     assert all_results["results"][1]["assignment"] is None
     assert "consumer_id" not in all_results["results"][0]
+    assert all_results["filters"]["stats_scope"] == "global"
 
     multi = await drop_pipeline.collect_matching_results(
         conn, match_type="multi_match", limit=100
@@ -674,6 +680,29 @@ async def test_collect_matching_results_stats_and_filter():
     assert len(multi["results"]) == 1
     assert multi["results"][0]["match_count"] == 3
     assert multi["match_type_filter"] == "multi_match"
+    # Stats remain global even when list is filtered.
+    assert multi["stats"]["total"] == 3
+
+    by_q = await drop_pipeline.collect_matching_results(
+        conn, q="000000000002", limit=100
+    )
+    assert len(by_q["results"]) == 1
+    assert by_q["results"][0]["request_id"].endswith("0002")
+    assert by_q["filters"]["q"] == "000000000002"
+
+    by_state = await drop_pipeline.collect_matching_results(conn, state="tx", limit=100)
+    assert len(by_state["results"]) == 1
+    assert by_state["results"][0]["requestor_state"] == "TX"
+    assert by_state["filters"]["state"] == "TX"
+
+    after = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    by_date = await drop_pipeline.collect_matching_results(
+        conn, recorded_after=after, limit=100
+    )
+    assert len(by_date["results"]) == 2
+    assert all(
+        r["request_id"] != "00000000-0000-0000-0000-000000000003" for r in by_date["results"]
+    )
 
 
 @pytest.mark.asyncio
@@ -689,6 +718,7 @@ async def test_get_matching_result_detail_shape(monkeypatch: pytest.MonkeyPatch)
             match_count=4,
             matched_via="drop_hash",
             recorded_at=recorded,
+            requestor_state="TX",
             attempt_id=99,
             approval_id=11,
             review_status="pending",
@@ -729,6 +759,7 @@ async def test_get_matching_result_detail_shape(monkeypatch: pytest.MonkeyPatch)
     assert detail is not None
     assert detail["match_type"] == "multi_match"
     assert detail["match_count"] == 4
+    assert detail["requestor_state"] == "TX"
     assert detail["attempt_id"] == 99
     assert detail["attempts"][0]["audit_payload"]["lookup_state"] == "CA"
     assert detail["assignment"]["target_role"] == "legal"
@@ -737,7 +768,10 @@ async def test_get_matching_result_detail_shape(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_matching_results_list_route(monkeypatch: pytest.MonkeyPatch):
-    async def fake_collect(conn: Any, *, match_type=None, limit: int = 100) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    async def fake_collect(conn: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
         return {
             "stats": {
                 "total": 1,
@@ -756,12 +790,22 @@ def test_matching_results_list_route(monkeypatch: pytest.MonkeyPatch):
                     "match_type": "multi_match",
                     "matched_via": "drop_hash",
                     "recorded_at": "2026-07-16T12:05:00+00:00",
+                    "requestor_state": "TX",
                     "review_status": "pending",
                     "approval_id": 11,
                 }
             ],
-            "limit": limit,
-            "match_type_filter": match_type,
+            "limit": kwargs.get("limit", 100),
+            "match_type_filter": kwargs.get("match_type"),
+            "filters": {
+                "match_type": kwargs.get("match_type"),
+                "q": kwargs.get("q"),
+                "request_id": kwargs.get("request_id"),
+                "state": kwargs.get("state"),
+                "recorded_after": None,
+                "recorded_before": None,
+                "stats_scope": "global",
+            },
         }
 
     class _Acquire:
@@ -780,13 +824,22 @@ def test_matching_results_list_route(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(drop_pipeline, "collect_matching_results", fake_collect)
 
     with TestClient(app) as client:
-        response = client.get("/ops/drop/matching-results?match_type=multi_match")
+        response = client.get(
+            "/ops/drop/matching-results"
+            "?match_type=multi_match&q=0002&state=tx&recorded_after=2026-07-01"
+        )
 
     assert response.status_code == 200
     body = response.json()
     assert body["stats"]["multi_match"] == 1
     assert body["results"][0]["match_type"] == "multi_match"
+    assert body["results"][0]["requestor_state"] == "TX"
     assert "consumer_id" not in body["results"][0]
+    assert captured["match_type"] == "multi_match"
+    assert captured["q"] == "0002"
+    assert captured["state"] == "TX"
+    assert captured["recorded_after"] is not None
+    assert body["filters"]["stats_scope"] == "global"
 
 
 def _fake_pool(monkeypatch: pytest.MonkeyPatch) -> None:
