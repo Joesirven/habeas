@@ -15,7 +15,7 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
 ## DROP ops (Unit 8 / 8b)
 
 - Hash-index refresh lane on `/ops/drop-pipeline` (enqueue / process).
-- After **Run matching** completes (`status=ok`), admin-api opens a `matching.review` gate; a **required** post-match dialog forces a next action (review results or bulk approve) — not dismissible without a choice.
+- After **Run matching** completes (`status=ok`), admin-api opens a `matching.review` gate; a **required** post-match dialog forces a next action (review results or bulk approve) — not dismissible without a choice (Escape/backdrop blocked; TanStack `useBlocker` blocks AppShell nav until a choice).
 - Matching results panel: global stats, list ↔ detail, bulk approve by match type (`single_match` / `multi_match` status-4 / `not_found`) via admin-api.
 
 ## Rules

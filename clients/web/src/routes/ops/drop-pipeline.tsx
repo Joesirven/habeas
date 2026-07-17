@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
+import { Link, useBlocker } from '@tanstack/react-router'
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 
 import { SkeletonLines } from '@/components/AppShell'
 import {
@@ -90,6 +91,36 @@ function CountTable({ rows, empty }: { rows: StepStatusCount[]; empty: string })
           <tr key={`${row.step}-${row.status}`}>
             <td className="!px-0 font-mono text-xs">{row.step}</td>
             <td className="!px-0">{row.status}</td>
+            <td className="!px-0 tabular-nums">{row.count}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+function StatusCountTable({
+  rows,
+  empty,
+}: {
+  rows: { status: string; count: number }[]
+  empty: string
+}) {
+  if (rows.length === 0) {
+    return <p className="text-sm text-ink-soft">{empty}</p>
+  }
+  return (
+    <table className="taste-table">
+      <thead>
+        <tr>
+          <th className="!px-0">Status</th>
+          <th className="!px-0">Count</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row) => (
+          <tr key={row.status}>
+            <td className="!px-0 font-mono text-xs">{row.status}</td>
             <td className="!px-0 tabular-nums">{row.count}</td>
           </tr>
         ))}
@@ -214,9 +245,10 @@ function PostMatchDialog({
 
   if (!open) return null
 
-  return (
+  // Portal above AppShell sticky header (header z-20 + backdrop-filter stacking context).
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-habeas-navy/45 p-4 backdrop-blur-sm"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-habeas-navy/45 p-4 backdrop-blur-sm"
       role="presentation"
     >
       <div
@@ -237,6 +269,7 @@ function PostMatchDialog({
         </h3>
         <p className="mt-2 text-sm leading-relaxed text-ink-soft">
           A matching job finished. Select how to continue — this dialog stays until you choose.
+          Navigation is blocked until you pick an action.
         </p>
         {matchSummary && (
           <pre className="mt-4 overflow-x-auto rounded-lg border border-line bg-paper-raised p-3 text-xs text-ink-soft">
@@ -261,7 +294,8 @@ function PostMatchDialog({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -591,6 +625,13 @@ export function DropPipelinePage() {
   const [preferredBulkType, setPreferredBulkType] = useState<MatchTypeFilter | null>(null)
   const resultsAnchorRef = useRef<HTMLDivElement>(null)
 
+  // Hard-block AppShell / in-page Links while the required post-match dialog is open.
+  useBlocker({
+    shouldBlockFn: () => true,
+    disabled: !postMatchOpen,
+    enableBeforeUnload: postMatchOpen,
+  })
+
   const pipelineQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-pipeline'],
     queryFn: getDropPipeline,
@@ -777,15 +818,18 @@ export function DropPipelinePage() {
             <span className="text-sm text-red-700">{lastRun.error_message}</span>
           )}
         </div>
-        {(data?.hash_index_refresh.attempts_by_status.length ?? 0) > 0 && (
-          <div className="flex flex-wrap gap-2">
-            {data!.hash_index_refresh.attempts_by_status.map((row) => (
-              <span key={row.status} className="glass px-2.5 py-1 text-xs text-ink-soft">
-                {row.status} <span className="tabular-nums text-ink">{row.count}</span>
-              </span>
-            ))}
+        <div>
+          <Micro>Attempts by status</Micro>
+          <p className="mt-1 text-xs text-mute">
+            Immutable attempt history counts — pending through terminal statuses.
+          </p>
+          <div className="mt-3">
+            <StatusCountTable
+              rows={data?.hash_index_refresh.attempts_by_status ?? []}
+              empty="No hash-index refresh attempts yet."
+            />
           </div>
-        )}
+        </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:gap-3">
           <button
             type="button"
