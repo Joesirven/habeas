@@ -30,7 +30,11 @@ from admin_api.approvals import (
     promote_matching_review_for_request,
 )
 from admin_api.cloud_run_auth import auth_headers_for
+from admin_api.roles import RolePrincipal, require_roles
 from habeas_privacy_core.auth import (
+    ROLE_ADMIN,
+    ROLE_DATA_OWNER,
+    ROLE_SUPER_ADMIN,
     UNKNOWN_ACTOR,
     actor_from_iap_header,
     is_authenticated_actor,
@@ -176,6 +180,15 @@ async def require_drop_mutation_actor(request: Request) -> str:
 
 
 DropMutationActor = Annotated[str, Depends(require_drop_mutation_actor)]
+
+SuperAdminPrincipal = Annotated[
+    RolePrincipal, Depends(require_roles(ROLE_SUPER_ADMIN))
+]
+
+MatchingReviewPrincipal = Annotated[
+    RolePrincipal,
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_DATA_OWNER)),
+]
 
 
 def decided_by_for_mutation(actor: str, client_decided_by: str | None) -> str:
@@ -579,18 +592,22 @@ def _model_dump_nonzero(model: BaseModel) -> dict[str, Any]:
 
 
 @router.get("/pipeline")
-async def drop_pipeline_status():
+async def drop_pipeline_status(_principal: SuperAdminPrincipal):
     return await get_pipeline_status()
 
 
 @router.post("/download")
-async def drop_download(_actor: DropMutationActor):
+async def drop_download(
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
+):
     url = f"{settings.drop_connector_url.rstrip('/')}/download"
     return await proxy_post(url, timeout=DOWNLOAD_PROXY_TIMEOUT)
 
 
 @router.post("/land")
 async def drop_land(
+    _principal: SuperAdminPrincipal,
     _actor: DropMutationActor,
     body: LandProxyBody | None = None,
 ):
@@ -601,6 +618,7 @@ async def drop_land(
 
 @router.post("/promote")
 async def drop_promote(
+    _principal: SuperAdminPrincipal,
     _actor: DropMutationActor,
     body: PromoteProxyBody | None = None,
 ):
@@ -611,6 +629,7 @@ async def drop_promote(
 
 @router.post("/dispatch")
 async def drop_dispatch(
+    _principal: SuperAdminPrincipal,
     _actor: DropMutationActor,
     body: DispatchProxyBody | None = None,
 ):
@@ -620,7 +639,10 @@ async def drop_dispatch(
 
 
 @router.post("/match")
-async def drop_match(_actor: DropMutationActor):
+async def drop_match(
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
+):
     """Proxy matching /process; on success open a matching.review gate for ops."""
     url = f"{settings.matching_url.rstrip('/')}/process"
     status_code, payload = await proxy_post_payload(url)
@@ -662,6 +684,7 @@ async def drop_match(_actor: DropMutationActor):
 
 @router.post("/fulfill")
 async def drop_fulfill(
+    _principal: SuperAdminPrincipal,
     _actor: DropMutationActor,
     body: FulfillProxyBody | None = None,
 ):
@@ -672,6 +695,7 @@ async def drop_fulfill(
 
 @router.post("/hash-index-refresh/enqueue")
 async def hash_index_refresh_enqueue(
+    _principal: SuperAdminPrincipal,
     _actor: DropMutationActor,
     body: HashIndexRefreshEnqueueBody | None = None,
 ):
@@ -701,6 +725,7 @@ async def hash_index_refresh_enqueue(
 
 @router.post("/hash-index-refresh/enqueue-all")
 async def hash_index_refresh_enqueue_all(
+    _principal: SuperAdminPrincipal,
     _actor: DropMutationActor,
     body: HashIndexRefreshEnqueueAllBody | None = None,
 ):
@@ -721,7 +746,10 @@ async def hash_index_refresh_enqueue_all(
 
 
 @router.post("/hash-index-refresh/process")
-async def hash_index_refresh_process(_actor: DropMutationActor):
+async def hash_index_refresh_process(
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
+):
     """Proxy process to hash_index_refresh worker (Cloud Run invoker token)."""
     url = f"{settings.hash_index_refresh_url.rstrip('/')}/process"
     return await proxy_post(url)
@@ -996,6 +1024,7 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
 
 @router.get("/matching-results")
 async def drop_matching_results(
+    _principal: MatchingReviewPrincipal,
     match_type: MatchTypeFilter | None = None,
     q: str | None = Query(default=None, description="Substring search on request_id"),
     request_id: str | None = Query(
@@ -1068,6 +1097,7 @@ async def drop_matching_results(
 
 @router.post("/matching-results/bulk-approve")
 async def drop_matching_results_bulk_approve(
+    _principal: MatchingReviewPrincipal,
     body: BulkApproveMatchingResultsBody,
     actor: DropMutationActor,
 ):
