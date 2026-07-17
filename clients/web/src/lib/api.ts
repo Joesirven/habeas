@@ -252,6 +252,13 @@ export function postDropFulfill(body?: { request_id?: string }) {
   })
 }
 
+export function postHashIndexRefreshEnqueueAll(body?: { list_types?: string[] }) {
+  return fetchAdminApi<Record<string, unknown>>('/ops/drop/hash-index-refresh/enqueue-all', {
+    method: 'POST',
+    body: JSON.stringify(body ?? {}),
+  })
+}
+
 export function postHashIndexRefreshEnqueue(body?: { state?: string; list_types?: string[] }) {
   return fetchAdminApi<Record<string, unknown>>('/ops/drop/hash-index-refresh/enqueue', {
     method: 'POST',

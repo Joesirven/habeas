@@ -330,6 +330,57 @@ def test_hash_index_refresh_enqueue(monkeypatch: pytest.MonkeyPatch):
 
     assert response.status_code == 200
     assert response.json()["attempt_id"] == 42
+    assert response.json()["state"] == "CA"
+
+
+def test_hash_index_refresh_enqueue_all(monkeypatch: pytest.MonkeyPatch):
+    async def fake_enqueue_all(conn: Any, *, list_types: list[str] | None = None) -> dict:
+        assert list_types is None or list_types == ["NDZ", "Email", "Phone"]
+        return {
+            "states": [{"state": "CA", "attempt_id": 1, "reused": False}],
+            "created": 1,
+            "reused": 0,
+            "total": 1,
+        }
+
+    class _Acquire:
+        async def __aenter__(self):
+            return MagicMock()
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(
+        "habeas_privacy_core.db.hash_index_refresh.enqueue_hash_index_refresh_all_states",
+        fake_enqueue_all,
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/ops/drop/hash-index-refresh/enqueue-all", json={})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["total"] == 1
+    assert body["states"][0]["state"] == "CA"
+
+
+def test_hash_index_refresh_enqueue_rejects_invalid_state(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/ops/drop/hash-index-refresh/enqueue",
+            json={"state": "XX"},
+        )
+
+    assert response.status_code == 400
 
 
 def test_auth_headers_skipped_for_localhost():

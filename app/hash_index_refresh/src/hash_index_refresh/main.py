@@ -161,14 +161,13 @@ async def process_next():
                 "returncode": dbt_result.returncode,
             }
 
-        # CA-only rematch gate (single call site).
-        if state == "CA":
-            rematch_count = await enqueue_rematch_for_refresh(
-                conn,
-                vertical="drop",
-                list_types=list_types,
-                state=state,
-            )
+        # Rematch open candidates whose source state matches this refresh (any state).
+        rematch_count = await enqueue_rematch_for_refresh(
+            conn,
+            vertical="drop",
+            list_types=list_types,
+            state=state,
+        )
 
         await record_hash_index_refresh_run(
             conn,

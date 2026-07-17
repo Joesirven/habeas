@@ -97,6 +97,10 @@ class HashIndexRefreshEnqueueBody(BaseModel):
     list_types: list[str] | None = None
 
 
+class HashIndexRefreshEnqueueAllBody(BaseModel):
+    list_types: list[str] | None = None
+
+
 class BulkApproveMatchingResultsBody(BaseModel):
     """Clear matching.review for DROP results filtered by match type."""
 
@@ -546,18 +550,47 @@ async def hash_index_refresh_enqueue(
 ):
     """Enqueue a hash-index refresh attempt (single-flight per state)."""
     from habeas_privacy_core.db.hash_index_refresh import enqueue_hash_index_refresh
+    from habeas_privacy_core.geo.state import (
+        InvalidStateAcronymError,
+        normalize_state_acronym,
+    )
 
     _require_database()
     payload = body or HashIndexRefreshEnqueueBody()
     list_types = payload.list_types or ["NDZ", "Email", "Phone"]
+    try:
+        state = normalize_state_acronym(payload.state)
+    except InvalidStateAcronymError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     pool = get_pool()
     async with pool.acquire() as conn:
         attempt_id = await enqueue_hash_index_refresh(
             conn,
-            state=payload.state,
+            state=state,
             list_types=list_types,
         )
-    return {"status": "ok", "attempt_id": attempt_id, "state": payload.state.upper()}
+    return {"status": "ok", "attempt_id": attempt_id, "state": state}
+
+
+@router.post("/hash-index-refresh/enqueue-all")
+async def hash_index_refresh_enqueue_all(
+    _actor: DropMutationActor,
+    body: HashIndexRefreshEnqueueAllBody | None = None,
+):
+    """Enqueue one hash-index refresh attempt per served state (USPS 50+DC)."""
+    from habeas_privacy_core.db.hash_index_refresh import (
+        enqueue_hash_index_refresh_all_states,
+    )
+
+    _require_database()
+    payload = body or HashIndexRefreshEnqueueAllBody()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        result = await enqueue_hash_index_refresh_all_states(
+            conn,
+            list_types=payload.list_types,
+        )
+    return {"status": "ok", **result}
 
 
 @router.post("/hash-index-refresh/process")

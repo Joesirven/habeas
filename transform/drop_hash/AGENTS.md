@@ -21,7 +21,10 @@ Production dbt project for DROP hash-index serving tables in BigQuery.
 - No MDR PII in tests — CPPA vectors use literals only.
 - Serving columns: `(hash_value, dwid, state, built_at)`; clustered `(state, hash_value)`.
 - Phone mart: two rows per dwid when both cell and land exist.
-- Worker invokes dbt from this directory with `--vars '{state: ...}'`.
+- Worker invokes dbt from this directory with `--vars '{state: ...}'` per state.
+  Shared marts are filled for all MDR/DROP-served states (USPS 50+DC allowlist
+  until Jose confirms Q6). Default `state: CA` in `dbt_project.yml` is local
+  convenience only — production passes the attempt’s state.
 - UDF body must stay the bake-off winner (`normalizeName` + LATIN_EXTENDED).
 
 ## Commands
@@ -30,6 +33,7 @@ Production dbt project for DROP hash-index serving tables in BigQuery.
 cd transform/drop_hash
 cp profiles.yml.example profiles.yml   # once; gitignored
 DBT_PROFILES_DIR=. dbt build --vars '{state: CA}'
+DBT_PROFILES_DIR=. dbt build --vars '{state: NY}'   # another state into shared marts
 cd drop_normalize && uv run pytest tests -q
 ```
 

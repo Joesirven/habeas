@@ -3,6 +3,7 @@
 from habeas_privacy_core.db.hash_index_refresh import (
     claim_hash_index_refresh,
     enqueue_hash_index_refresh,
+    enqueue_hash_index_refresh_all_states,
     record_hash_index_refresh_run,
 )
 from habeas_privacy_core.db.migrations import migration_status, migrations_dir, run_migrations
@@ -23,6 +24,7 @@ __all__ = [
     "close_pool",
     "create_pool",
     "enqueue_hash_index_refresh",
+    "enqueue_hash_index_refresh_all_states",
     "enqueue_matching",
     "enqueue_rematch_for_refresh",
     "get_pool",

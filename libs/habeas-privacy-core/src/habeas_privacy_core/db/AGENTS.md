@@ -9,8 +9,11 @@ asyncpg connection pool and table helpers (`pool.py`, `requests.py`, `hash_index
 - Hash index refresh attempts are immutable/auditable: no DELETE; updates only via
   queue lifecycle transitions; tests free single-flight by abandoning non-terminal rows.
 - Rematch (`enqueue_rematch_for_refresh`, MVP `vertical=drop`): open DROP
-  (`response_status IS NULL`) with latest result missing / `match_count = 0` or
-  `> 1`; skips single-match (`match_count = 1`) and fulfilled `response_status = 4`.
+  (`response_status IS NULL`) whose normalized `requestor_state` equals the
+  refreshed state, with latest result missing / `match_count = 0` or `> 1`;
+  skips single-match (`match_count = 1`) and fulfilled `response_status = 4`.
+- `enqueue_hash_index_refresh_all_states` enqueues one attempt per served state
+  (single-flight reuse when non-terminal already exists).
 - State codes for enqueue/rematch use `habeas_privacy_core.geo.normalize_state_acronym`
   (USPS 50+DC allowlist; A10 until Jose confirms Q6).
 - No vendor-specific logic in this module.

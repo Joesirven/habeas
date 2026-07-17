@@ -1,4 +1,4 @@
-"""Unit tests for hash index refresh CA rematch gate and dbt outcomes."""
+"""Unit tests for hash index refresh rematch-on-success and dbt outcomes."""
 
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ async def test_process_success_ca_rematches(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_process_success_non_ca_skips_rematch(monkeypatch: pytest.MonkeyPatch):
+async def test_process_success_non_ca_also_rematches(monkeypatch: pytest.MonkeyPatch):
     from hash_index_refresh import main as worker
 
     claim = {"id": 8, "state": "NY", "list_types": ["Email"]}
@@ -112,6 +112,7 @@ async def test_process_success_non_ca_skips_rematch(monkeypatch: pytest.MonkeyPa
         patch(
             "hash_index_refresh.main.enqueue_rematch_for_refresh",
             new_callable=AsyncMock,
+            return_value=2,
         ) as rematch,
         patch(
             "hash_index_refresh.main.record_hash_index_refresh_run",
@@ -121,8 +122,10 @@ async def test_process_success_non_ca_skips_rematch(monkeypatch: pytest.MonkeyPa
         result = await worker.process_next()
 
     assert result["status"] == "ok"
-    assert result["rematch_enqueued_count"] == 0
-    rematch.assert_not_awaited()
+    assert result["rematch_enqueued_count"] == 2
+    rematch.assert_awaited_once()
+    assert rematch.await_args.kwargs["state"] == "NY"
+    assert rematch.await_args.kwargs["vertical"] == "drop"
 
 
 @pytest.mark.asyncio

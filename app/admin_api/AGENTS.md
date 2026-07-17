@@ -7,7 +7,8 @@
 Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Server-Sent Events live stream, mutation routes for web and Habeas CLI.
 
 - Routes: approvals, dashboard, admin rules, ops, `GET /live/events`
-- DROP ops: `GET /ops/drop/pipeline`, spine proxies, hash-index refresh enqueue/process
+- DROP ops: `GET /ops/drop/pipeline`, spine proxies, hash-index refresh enqueue /
+  enqueue-all (USPS 50+DC) / process
 - `POST /ops/drop/match` proxies matching worker and opens a pending `matching.review` gate on success
 - Matching results (Unit 8b): `GET /ops/drop/matching-results` (list + global stats),
   `GET /ops/drop/matching-results/{request_id}` (detail),

@@ -47,23 +47,28 @@ def hash_index_status(human: bool = typer.Option(False, "--human")):
 @hash_index_app.command("enqueue")
 def hash_index_enqueue(
     state: str = typer.Option("CA", "--state"),
+    all_states: bool = typer.Option(
+        False,
+        "--all-states",
+        help="Enqueue refresh for every served state (USPS 50+DC)",
+    ),
     execute: bool = typer.Option(False, "--execute"),
     human: bool = typer.Option(False, "--human"),
 ):
-    """Enqueue hash-index refresh (single-flight per state)."""
-    if state.upper() != "CA":
-        typer.echo(
-            "warning: non-CA refresh is index-only (no rematch) in this phase",
-            err=True,
-        )
-    body = {"state": state, "list_types": ["NDZ", "Email", "Phone"]}
+    """Enqueue hash-index refresh (single-flight per state, or all served states)."""
+    if all_states:
+        body: dict = {"list_types": ["NDZ", "Email", "Phone"]}
+        path = "/ops/drop/hash-index-refresh/enqueue-all"
+    else:
+        body = {"state": state, "list_types": ["NDZ", "Email", "Phone"]}
+        path = "/ops/drop/hash-index-refresh/enqueue"
     if not execute:
-        emit({"dry_run": True, "would_post": body}, human=human)
+        emit({"dry_run": True, "would_post": body, "path": path}, human=human)
         return
     try:
         payload = admin_api_request(
             "POST",
-            "/ops/drop/hash-index-refresh/enqueue",
+            path,
             json_body=body,
         )
     except AdminApiError as exc:

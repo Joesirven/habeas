@@ -360,6 +360,17 @@ async def test_enqueue_rematch_skips_fulfilled_response_status_4(pool):
         assert open_attempt["status"] == "pending"
 
 
+def test_rematch_sql_filters_requestor_state():
+    """Candidate SQL must scope rematch to the refreshed requester state."""
+    import inspect
+
+    from habeas_privacy_core.db import rematch as rematch_mod
+
+    source = inspect.getsource(rematch_mod)
+    assert "requestor_state" in source
+    assert "UPPER(TRIM(r.requestor_state))" in source
+
+
 def test_enqueue_rematch_rejects_unsupported_vertical():
     with pytest.raises(ValueError, match="unsupported rematch vertical"):
 

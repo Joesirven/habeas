@@ -36,16 +36,23 @@ bq query --use_legacy_sql=false < transform/drop_hash/udf/tests/test_udf_vectors
 
 Expect **0 rows** from the vector query.
 
-## 3. Full dbt build + serving swap
+## 3. Full dbt build + serving swap (per state)
+
+Shared marts hold all served states; each dbt run fills **one** state:
 
 ```bash
 cd transform/drop_hash
 cp profiles.yml.example profiles.yml   # if needed
 DBT_PROFILES_DIR=. dbt build --vars '{state: CA}'
+DBT_PROFILES_DIR=. dbt build --vars '{state: TX}'
+# Or enqueue the full wave via admin-api:
+#   POST /ops/drop/hash-index-refresh/enqueue-all
 ```
 
-Writes intermediates, builds `*_hash__build` marts, then swaps to `email_hash`,
-`phone_hash`, `ndz_hash`.
+Writes intermediates, builds `*_hash__build` marts, then merges that state’s rows
+into `email_hash`, `phone_hash`, `ndz_hash`. Parallel per-state jobs are OK;
+watch BigQuery slots/cost. Confirm served-state list with Jose (Q6) before first
+prod enqueue-all wave.
 
 **Timeout (name UDF):** chunk by `FARM_FINGERPRINT(dwid) % N` — see `udf/README.md`.
 

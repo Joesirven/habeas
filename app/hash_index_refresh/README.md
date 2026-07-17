@@ -7,9 +7,11 @@ Cloud Run worker that rebuilds BigQuery DROP hash index marts via dbt.
 1. Claim next `hash_index_refresh_attempts` row (`step=refresh`)
 2. `dbt build --vars '{state: <STATE>}'` from `DROP_HASH_DBT_DIR` (default `transform/drop_hash`)
 3. Append `hash_index_refresh_runs` outcome
-4. If success **and** `state == 'CA'`: `enqueue_rematch_for_refresh(vertical='drop', ...)`
+4. If success: `enqueue_rematch_for_refresh(vertical='drop', state=<STATE>, ...)` for
+   open DROP candidates whose `requestor_state` matches that refreshed state
 
-Non-CA refreshes are index-only (no rematch).
+Ops can enqueue one state or all served states (USPS 50+DC) via admin-api
+`POST /ops/drop/hash-index-refresh/enqueue` and `.../enqueue-all`.
 
 ## IAM
 

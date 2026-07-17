@@ -6,7 +6,7 @@ from typing import Any
 
 import asyncpg
 
-from habeas_privacy_core.geo.state import normalize_state_acronym
+from habeas_privacy_core.geo.state import normalize_state_acronym, served_state_acronyms
 from habeas_privacy_core.queue.claim import claim_next
 from habeas_privacy_core.queue.constants import (
     HASH_INDEX_REFRESH_ATTEMPTS_TABLE,
@@ -16,6 +16,7 @@ from habeas_privacy_core.queue.constants import (
 from habeas_privacy_core.queue.status import NON_TERMINAL_STATUSES
 
 _VALID_LIST_TYPES = frozenset({"NDZ", "Email", "Phone"})
+_DEFAULT_LIST_TYPES = ["NDZ", "Email", "Phone"]
 
 
 def _validate_list_types(list_types: list[str]) -> list[str]:
@@ -85,6 +86,59 @@ async def enqueue_hash_index_refresh(
         if attempt_id is None:
             raise
     return int(attempt_id)
+
+
+async def enqueue_hash_index_refresh_all_states(
+    conn: asyncpg.Connection,
+    *,
+    list_types: list[str] | None = None,
+) -> dict[str, Any]:
+    """Enqueue one refresh attempt per served state (USPS 50+DC).
+
+    Single-flight per state: if a non-terminal attempt already exists, that
+    attempt id is reused and the state is marked ``reused`` rather than failing
+    the whole wave.
+    """
+    validated = _validate_list_types(list_types or list(_DEFAULT_LIST_TYPES))
+    states: list[dict[str, Any]] = []
+    created = 0
+    reused = 0
+    for state in sorted(served_state_acronyms()):
+        existing_id = await conn.fetchval(
+            f"""
+            SELECT id
+              FROM {HASH_INDEX_REFRESH_ATTEMPTS_TABLE}
+             WHERE state = $1
+               AND status = ANY($2::text[])
+             ORDER BY attempted_at
+             LIMIT 1
+            """,
+            state,
+            list(NON_TERMINAL_STATUSES),
+        )
+        attempt_id = await enqueue_hash_index_refresh(
+            conn,
+            state=state,
+            list_types=validated,
+        )
+        was_reused = existing_id is not None
+        if was_reused:
+            reused += 1
+        else:
+            created += 1
+        states.append(
+            {
+                "state": state,
+                "attempt_id": attempt_id,
+                "reused": was_reused,
+            }
+        )
+    return {
+        "states": states,
+        "created": created,
+        "reused": reused,
+        "total": len(states),
+    }
 
 
 async def claim_hash_index_refresh(

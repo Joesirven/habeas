@@ -6,6 +6,7 @@ from typing import Literal
 
 import asyncpg
 
+from habeas_privacy_core.geo.state import normalize_state_acronym
 from habeas_privacy_core.queue.constants import MATCHING_ATTEMPTS_TABLE, MATCHING_STEP
 
 _DROP_CANDIDATES_SQL = f"""
@@ -24,6 +25,7 @@ candidates AS (
      WHERE r.intake_source = 'drop'
        AND dr.response_status IS NULL
        AND dr.list_type = ANY($1::text[])
+       AND UPPER(TRIM(r.requestor_state)) = $3
        AND (lr.request_id IS NULL OR lr.match_count <> 1)
 ),
 numbered AS (
@@ -56,13 +58,12 @@ async def enqueue_rematch_for_refresh(
 ) -> int:
     """Enqueue follow-up matching attempts after a successful hash index refresh.
 
-    MVP supports ``vertical='drop'`` only. The ``state`` parameter is reserved
-    for future request-level state filtering and is not applied in DROP SQL yet.
-    Candidates are open DROP requests (``response_status IS NULL``) whose latest
-    match result is missing, ``match_count = 0`` (not-found), or ``match_count > 1``
-    (prior multi-match / status 4). Single-match (``match_count = 1``) is skipped.
-    Already-fulfilled Opted-out (``response_status = 4``) is not rematched until a
-    reopen path exists.
+    MVP supports ``vertical='drop'`` only. Candidates are open DROP requests
+    (``response_status IS NULL``) whose normalized ``requestor_state`` equals
+    the refreshed ``state``, and whose latest match result is missing,
+    ``match_count = 0``, or ``match_count > 1``. Single-match (``match_count = 1``)
+    is skipped. Already-fulfilled Opted-out (``response_status = 4``) is not
+    rematched until a reopen path exists.
     """
     if vertical != "drop":
         raise ValueError(f"unsupported rematch vertical: {vertical!r}")
@@ -70,8 +71,12 @@ async def enqueue_rematch_for_refresh(
     if not list_types:
         raise ValueError("list_types must contain at least one value")
 
-    # state is intentionally unused in DROP MVP — kept for future vertical filters.
-    _ = state
+    normalized_state = normalize_state_acronym(state)
 
-    rows = await conn.fetch(_DROP_CANDIDATES_SQL, list_types, MATCHING_STEP)
+    rows = await conn.fetch(
+        _DROP_CANDIDATES_SQL,
+        list_types,
+        MATCHING_STEP,
+        normalized_state,
+    )
     return len(rows)

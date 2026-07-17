@@ -24,13 +24,27 @@ def test_hash_index_enqueue_execute_posts():
     ) as mock_req:
         result = runner.invoke(
             app,
-            ["drop", "hash-index-refresh", "enqueue", "--execute"],
+            ["drop", "hash-index-refresh", "enqueue", "--execute", "--state", "TX"],
         )
     assert result.exit_code == 0
     assert "attempt_id" in result.stdout
     mock_req.assert_called_once()
     assert mock_req.call_args.args[0] == "POST"
     assert mock_req.call_args.args[1] == "/ops/drop/hash-index-refresh/enqueue"
+    assert mock_req.call_args.kwargs["json_body"]["state"] == "TX"
+
+
+def test_hash_index_enqueue_all_states():
+    with patch(
+        "habeas_cli.commands.drop.admin_api_request",
+        return_value={"status": "ok", "total": 51},
+    ) as mock_req:
+        result = runner.invoke(
+            app,
+            ["drop", "hash-index-refresh", "enqueue", "--all-states", "--execute"],
+        )
+    assert result.exit_code == 0
+    assert mock_req.call_args.args[1] == "/ops/drop/hash-index-refresh/enqueue-all"
 
 
 def test_drop_match_execute():
