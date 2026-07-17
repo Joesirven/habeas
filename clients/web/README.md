@@ -30,9 +30,15 @@ Vite proxies `/api/*` to `http://127.0.0.1:8000` so the dashboard can call `/api
 
 Optional: copy `.env.example` to `.env` and set `VITE_ADMIN_API_URL` when not using the dev proxy.
 
+### Drop ops navigation
+
+- **Pipeline** (`/ops/drop-pipeline?tab=`) — tabbed Download / Ingest / Matching / Fulfillment; home tab is Configurations (hash-index enqueue / enqueue-all).
+- **Health** (`/ops/health`) — workers + queues from admin_api; Escalations/retries and Configuration (retry `max_attempts`) under the Health hover menu.
+- Browser never calls worker URLs — only admin-api aggregates.
+
 ### Local DROP pipeline stack (ports)
 
-The ops console at `/ops/drop-pipeline` talks only to admin-api. Admin-api proxies workers:
+The ops console talks only to admin-api. Admin-api proxies workers:
 
 | Worker | Default URL | Typical local port |
 |--------|-------------|--------------------|

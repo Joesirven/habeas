@@ -76,5 +76,6 @@ and any local experiment worktrees are **not** part of this production dbt proje
 
 | Entrypoint | Invoker |
 |------------|---------|
-| `dbt build --vars '{state: CA}'` from `transform/drop_hash/` | Hash-index refresh worker (Unit 3) |
+| `dbt build --vars '{state: <STATE>}'` from `transform/drop_hash/` | Hash-index refresh worker (`app/hash_index_refresh`) — rematch-on-refresh for that state |
+| `POST /ops/drop/hash-index-refresh/enqueue-all` | Admin-api full wave (confirm A10/Q6 with Jose before prod) |
 | `./udf/apply_udf.sh` | When `normalize_name.js` changes |

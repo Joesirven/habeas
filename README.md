@@ -17,15 +17,17 @@ data-privacy/
 ├── pyproject.toml              # UV workspace root
 ├── uv.lock
 ├── libs/habeas-privacy-core/ # shared Python library
+├── transform/drop_hash/        # production dbt DROP hash-index marts
 ├── app/                        # Cloud Run FastAPI apps
 │   ├── admin_api/              # control plane (Identity-Aware Proxy)
-│   ├── drop_connector/         # CA DROP Type-I connector (U6 — planned)
-│   ├── drop_ingestor/          # CA DROP land/promote only (U7 — planned)
+│   ├── drop_connector/         # DROP Type-I download / upload
+│   ├── drop_ingestor/          # land (unzip) + promote to raw
+│   ├── hash_index_refresh/     # per-state dbt refresh + rematch enqueue
 │   ├── matching/               # hash + plaintext matching (all sources)
 │   ├── mailchimp/ …            # per-system automation apps
 │   └── reaper/ …
 ├── clients/
-│   ├── web/                    # admin UI — Vite + TanStack Router + Query
+│   ├── web/                    # admin UI — Pipeline + Health Drop ops
 │   └── cli/habeas-cli/       # Habeas Typer CLI
 ├── db/migrations/              # unified dbmate SQL
 ├── infra/

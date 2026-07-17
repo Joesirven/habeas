@@ -23,8 +23,11 @@ uv run --package data-fulfillment-dispatcher uvicorn data_fulfillment_dispatcher
 | 1 | `3` (Deleted) |
 | N > 1 | `4` (Opted out) |
 
-Clear `matching.review` via admin Unit 8b bulk-approve-by-match-type when
-operators approve multi-match (status-4 path) or other match types in bulk.
+Clear `matching.review` via admin Matching tab promote/decline (individual or
+bulk by match type) when operators approve multi-match (status-4 path) or other
+match types. Fulfill always maps from the **latest** `match_count`, so open-row
+rematch multi→1 / multi→0 cannot ship as stale Opted-out (4). Already-fulfilled
+`response_status=4` is not auto-rematched (known gap).
 
 **Queue table:** none. No new reaper registry entry. Candidates are DROP
 `requests` with approved `matching.review`, a `matching_results` row, and

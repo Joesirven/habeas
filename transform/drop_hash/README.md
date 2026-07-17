@@ -31,11 +31,17 @@ chmod +x udf/apply_udf.sh
 ./udf/apply_udf.sh
 ```
 
-## Build for a state (default CA)
+## Build for a state
+
+Shared marts hold all served states; each dbt run fills **one** state. Default
+`state: CA` in `dbt_project.yml` is local convenience only — production passes the
+attempt’s state (ops can enqueue one state or all via admin-api
+`POST /ops/drop/hash-index-refresh/enqueue` / `.../enqueue-all`).
 
 ```bash
 cd transform/drop_hash
 DBT_PROFILES_DIR=. dbt build --vars '{state: CA}'
+DBT_PROFILES_DIR=. dbt build --vars '{state: NY}'
 ```
 
 `state` filters MDR staging (`stg_person`, `stg_phones`). Intermediate models keep
@@ -58,7 +64,8 @@ Production lookup tables in `example-gcp-project.drop_hash_index`:
 | `ndz_hash` | same | same |
 
 `hash_value` is Base64(SHA-256) of the DROP-standardized field (or NDZ composite).
-`app/matching` lookups filter on `(hash_value, state)`.
+`app/matching` lookups filter on `(hash_value, state)` with `@lookup_state` = the
+requester’s normalized source state (never out-of-state DWIDs).
 
 ### Phone rows
 
@@ -84,10 +91,13 @@ uv run pytest tests -q
 
 ## Worker contract
 
-Hash-index refresh worker (Unit 3) runs from this directory:
+Hash-index refresh worker runs from this directory with the attempt’s state:
 
 ```bash
-dbt build --vars '{state: CA}'
+dbt build --vars '{state: <STATE>}'
 ```
+
+After each successful refresh, the worker enqueues rematch matching attempts for
+open DROP candidates whose normalized source state equals that refreshed state.
 
 See [RUNBOOK.md](RUNBOOK.md) for operator steps.
