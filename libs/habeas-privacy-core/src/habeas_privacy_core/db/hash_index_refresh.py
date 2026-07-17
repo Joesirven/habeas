@@ -6,6 +6,7 @@ from typing import Any
 
 import asyncpg
 
+from habeas_privacy_core.geo.state import normalize_state_acronym
 from habeas_privacy_core.queue.claim import claim_next
 from habeas_privacy_core.queue.constants import (
     HASH_INDEX_REFRESH_ATTEMPTS_TABLE,
@@ -37,9 +38,7 @@ async def enqueue_hash_index_refresh(
     If a pending, claimed, or in-flight attempt already exists for ``state``,
     returns that attempt id instead of inserting a duplicate row.
     """
-    normalized_state = state.strip().upper()
-    if len(normalized_state) != 2:
-        raise ValueError(f"state must be a two-letter code, got {state!r}")
+    normalized_state = normalize_state_acronym(state)
 
     validated_list_types = _validate_list_types(list_types)
 

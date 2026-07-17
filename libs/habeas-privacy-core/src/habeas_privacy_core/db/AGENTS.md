@@ -11,4 +11,6 @@ asyncpg connection pool and table helpers (`pool.py`, `requests.py`, `hash_index
 - Rematch (`enqueue_rematch_for_refresh`, MVP `vertical=drop`): open DROP
   (`response_status IS NULL`) with latest result missing / `match_count = 0` or
   `> 1`; skips single-match (`match_count = 1`) and fulfilled `response_status = 4`.
+- State codes for enqueue/rematch use `habeas_privacy_core.geo.normalize_state_acronym`
+  (USPS 50+DC allowlist; A10 until Jose confirms Q6).
 - No vendor-specific logic in this module.
