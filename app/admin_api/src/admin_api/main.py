@@ -20,6 +20,7 @@ from admin_api.approvals import (
     is_matching_review_approved,
     list_approvals,
 )
+from admin_api.drop_pipeline import health_router as ops_health_router
 from admin_api.drop_pipeline import router as drop_pipeline_router
 from habeas_privacy_core.audit import AuditMiddleware
 from habeas_privacy_core.config import CoreSettings
@@ -112,6 +113,7 @@ app.add_middleware(
 )
 app.add_middleware(AuditMiddleware)
 app.include_router(drop_pipeline_router)
+app.include_router(ops_health_router)
 
 
 def _approval_record(row: dict[str, Any]) -> ApprovalRecord:

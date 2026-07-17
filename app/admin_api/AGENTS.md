@@ -9,6 +9,9 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
 - Routes: approvals, dashboard, admin rules, ops, `GET /live/events`
 - DROP ops: `GET /ops/drop/pipeline`, spine proxies, hash-index refresh enqueue /
   enqueue-all (USPS 50+DC) / process
+- Fleet visibility (U23): `GET /ops/drop/workers`, `GET /ops/health/queues` —
+  admin_api aggregates `/readyz` + Postgres depths; browser never calls workers
+- Matching result detail includes attempt history + allowlisted `audit_payload`
 - `POST /ops/drop/match` proxies matching worker and opens a pending `matching.review` gate on success
 - Matching results (Unit 8b): `GET /ops/drop/matching-results` (list + global stats),
   `GET /ops/drop/matching-results/{request_id}` (detail),
