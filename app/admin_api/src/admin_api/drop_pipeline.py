@@ -961,3 +961,151 @@ async def health_queues():
     async with pool.acquire() as conn:
         queues = await collect_queue_depths(conn)
     return {"queues": queues}
+
+
+class RetryConfigPatchBody(BaseModel):
+    table_name: str = Field(min_length=1, max_length=100)
+    max_attempts: int = Field(ge=4, le=20)
+
+
+_RETRY_CONFIG_TABLES = (
+    "matching_attempts",
+    "drop_connector_attempts",
+    "drop_ingest_attempts",
+    "hash_index_refresh_attempts",
+)
+
+
+@health_router.get("/retry-config")
+async def get_retry_config():
+    """Current per-table max_attempts (defaults + ops_retry_config overrides)."""
+    from habeas_privacy_core.queue.reap import ReapedTableConfig
+
+    _require_database()
+    pool = get_pool()
+    overrides: dict[str, dict[str, Any]] = {}
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT table_name, max_attempts, updated_at, updated_by
+                  FROM ops_retry_config
+                 ORDER BY table_name
+                """
+            )
+        overrides = {r["table_name"]: dict(r) for r in rows}
+    except Exception as exc:
+        logger.warning(
+            "ops_retry_config_unavailable",
+            extra={
+                "event": "ops_retry_config_unavailable",
+                "error_type": type(exc).__name__,
+            },
+        )
+    tables = []
+    for table in _RETRY_CONFIG_TABLES:
+        default = ReapedTableConfig(table=table).max_attempts
+        override = overrides.get(table)
+        tables.append(
+            {
+                "table_name": table,
+                "max_attempts": int(override["max_attempts"])
+                if override
+                else default,
+                "default_max_attempts": default,
+                "overridden": override is not None,
+                "updated_at": override["updated_at"].isoformat()
+                if override and override.get("updated_at")
+                else None,
+                "updated_by": override.get("updated_by") if override else None,
+                "apply_note": "reaper_reads_on_next_cycle",
+            }
+        )
+    return {"tables": tables, "floor": 4}
+
+
+@health_router.patch("/retry-config")
+async def patch_retry_config(
+    body: RetryConfigPatchBody,
+    actor: DropMutationActor,
+):
+    """Persist max_attempts override (≥4). Matching must stay ≥4 (A6)."""
+    if body.table_name not in _RETRY_CONFIG_TABLES:
+        raise HTTPException(status_code=422, detail=f"unknown table: {body.table_name}")
+    if body.table_name == "matching_attempts" and body.max_attempts < 4:
+        raise HTTPException(status_code=422, detail="matching max_attempts floor is 4")
+    _require_database()
+    decided_by = decided_by_for_mutation(actor, None)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO ops_retry_config (table_name, max_attempts, updated_at, updated_by)
+            VALUES ($1, $2, NOW(), $3)
+            ON CONFLICT (table_name) DO UPDATE
+               SET max_attempts = EXCLUDED.max_attempts,
+                   updated_at = NOW(),
+                   updated_by = EXCLUDED.updated_by
+            """,
+            body.table_name,
+            body.max_attempts,
+            decided_by,
+        )
+    return {
+        "status": "ok",
+        "table_name": body.table_name,
+        "max_attempts": body.max_attempts,
+        "apply_note": "reaper_reads_on_next_cycle",
+    }
+
+
+@router.get("/stats/global")
+async def drop_stats_global():
+    """Home dashboard DROP summary — ids/counts only."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        open_drop = await conn.fetchval(
+            """
+            SELECT COUNT(*)::int
+              FROM requests r
+              JOIN drop_raw_requests d ON d.id = r.raw_record_id
+             WHERE r.intake_source = 'drop'
+               AND d.response_status IS NULL
+            """
+        )
+        review_pending = await conn.fetchval(
+            """
+            SELECT COUNT(*)::int
+              FROM approval_requests
+             WHERE action_type = $1
+               AND status = 'pending'
+            """,
+            MATCHING_REVIEW_ACTION,
+        )
+        matching_failed = await conn.fetchval(
+            """
+            SELECT COUNT(*)::int
+              FROM matching_attempts
+             WHERE status = ANY($1::text[])
+            """,
+            list(_TERMINAL_FAIL_STATUSES),
+        )
+        hash_inflight = await conn.fetchval(
+            """
+            SELECT COUNT(*)::int
+              FROM hash_index_refresh_attempts
+             WHERE status = ANY($1::text[])
+            """,
+            ["pending", "claimed", "in_flight"],
+        )
+    worker_health = await collect_worker_health()
+    workers_down = sum(1 for probe in worker_health.values() if not probe.get("ok"))
+    return {
+        "open_drop_requests": int(open_drop or 0),
+        "matching_review_pending": int(review_pending or 0),
+        "matching_failed_terminal": int(matching_failed or 0),
+        "hash_index_refresh_inflight": int(hash_inflight or 0),
+        "workers_down": workers_down,
+        "workers_total": len(WORKER_KEYS),
+    }

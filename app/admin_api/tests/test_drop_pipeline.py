@@ -383,6 +383,75 @@ def test_hash_index_refresh_enqueue_rejects_invalid_state(monkeypatch: pytest.Mo
     assert response.status_code == 400
 
 
+def test_retry_config_get_and_patch_floor(monkeypatch: pytest.MonkeyPatch):
+    class _Acquire:
+        async def __aenter__(self):
+            conn = MagicMock()
+            conn.fetch = AsyncMock(return_value=[])
+            conn.execute = AsyncMock()
+            return conn
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+
+    with TestClient(app) as client:
+        got = client.get("/ops/health/retry-config")
+        assert got.status_code == 200
+        matching = next(t for t in got.json()["tables"] if t["table_name"] == "matching_attempts")
+        assert matching["max_attempts"] >= 4
+
+        rejected = client.patch(
+            "/ops/health/retry-config",
+            json={"table_name": "matching_attempts", "max_attempts": 2},
+        )
+        assert rejected.status_code == 422
+
+        ok = client.patch(
+            "/ops/health/retry-config",
+            json={"table_name": "matching_attempts", "max_attempts": 6},
+        )
+        assert ok.status_code == 200
+        assert ok.json()["max_attempts"] == 6
+
+
+def test_drop_stats_global(monkeypatch: pytest.MonkeyPatch):
+    class _Acquire:
+        async def __aenter__(self):
+            conn = MagicMock()
+            conn.fetchval = AsyncMock(side_effect=[10, 3, 1, 2])
+            return conn
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    async def fake_health() -> dict[str, Any]:
+        return {"matching": {"ok": True}, "drop_connector": {"ok": False}}
+
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(drop_pipeline, "collect_worker_health", fake_health)
+
+    with TestClient(app) as client:
+        response = client.get("/ops/drop/stats/global")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["open_drop_requests"] == 10
+    assert body["matching_review_pending"] == 3
+    assert body["workers_down"] == 1
+    assert "email" not in body
+
+
 def test_drop_workers_and_health_queues(monkeypatch: pytest.MonkeyPatch):
     async def fake_health() -> dict[str, Any]:
         return {

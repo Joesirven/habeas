@@ -14,7 +14,7 @@ from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
 from habeas_privacy_core.health import health_payload, ready_payload
 from habeas_privacy_core.observability.logging import configure_logging
 from habeas_privacy_core.observability.tracing import setup_tracing
-from habeas_privacy_core.queue.reap import run_reap
+from habeas_privacy_core.queue.reap import ReapedTableConfig, run_reap
 from reaper.config import DEFAULT_REAPED_TABLES
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,33 @@ async def readyz():
     return payload
 
 
+async def _reaped_tables_with_overrides(pool) -> list[ReapedTableConfig]:
+    """Merge DEFAULT_REAPED_TABLES with ops_retry_config overrides when present."""
+    overrides: dict[str, int] = {}
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT table_name, max_attempts FROM ops_retry_config"
+            )
+        overrides = {str(r["table_name"]): int(r["max_attempts"]) for r in rows}
+    except Exception:
+        # Table may not exist until migration applied — use defaults.
+        logger.info(
+            "reaper_retry_config_unavailable",
+            extra={"event": "reaper_retry_config_unavailable"},
+        )
+    return [
+        ReapedTableConfig(
+            table=cfg.table,
+            max_attempts=overrides.get(cfg.table, cfg.max_attempts),
+            claim_ttl_minutes=cfg.claim_ttl_minutes,
+            in_flight_max_wait_hours=cfg.in_flight_max_wait_hours,
+            supports_attempt_retry=cfg.supports_attempt_retry,
+        )
+        for cfg in DEFAULT_REAPED_TABLES
+    ]
+
+
 @app.post("/reap")
 async def reap():
     """Run queue sweeps — invoked by Cloud Scheduler every minute."""
@@ -92,7 +119,8 @@ async def reap():
         raise HTTPException(status_code=503, detail="database not configured")
 
     pool = get_pool()
-    results = await run_reap(pool, DEFAULT_REAPED_TABLES)
+    tables = await _reaped_tables_with_overrides(pool)
+    results = await run_reap(pool, tables)
     logger.info("reap_complete", extra={"event": "reap_complete", "results": results})
     return {"status": "ok", "results": results}
 

@@ -11,6 +11,9 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
   enqueue-all (USPS 50+DC) / process
 - Fleet visibility (U23): `GET /ops/drop/workers`, `GET /ops/health/queues` —
   admin_api aggregates `/readyz` + Postgres depths; browser never calls workers
+- Health Configuration (U24): `GET/PATCH /ops/health/retry-config` persists
+  `ops_retry_config` overrides (floor 4); reaper merges on next `/reap` cycle
+- Home summary: `GET /ops/drop/stats/global` (ids/counts only)
 - Matching result detail includes attempt history + allowlisted `audit_payload`
 - `POST /ops/drop/match` proxies matching worker and opens a pending `matching.review` gate on success
 - Matching results (Unit 8b): `GET /ops/drop/matching-results` (list + global stats),
