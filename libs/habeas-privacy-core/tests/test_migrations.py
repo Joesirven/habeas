@@ -60,6 +60,18 @@ def test_u4_migrations_exist():
     assert "requests_validate_raw_fk" in spine_sql
 
 
+def test_hash_index_refresh_migration_exists():
+    migration = migrations_dir() / "20260717000001_matching_hash_index_refresh.sql"
+    assert migration.exists()
+    content = migration.read_text()
+    assert "CREATE TABLE hash_index_refresh_attempts" in content
+    assert "CREATE TABLE hash_index_refresh_runs" in content
+    assert "ix_hash_index_refresh_attempts_single_flight" in content
+    assert "match_count" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+
+
 @pytest.fixture
 async def migrated_pool():
     database_url = os.environ["DATABASE_URL"]
