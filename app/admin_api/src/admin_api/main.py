@@ -46,6 +46,9 @@ class AdminSettings(CoreSettings):
     # Pipe-separated browser origins (commas break gcloud --substitutions).
     cors_origins: str = (
         "http://127.0.0.1:5173|http://localhost:5173|"
+        "http://127.0.0.1:5174|http://localhost:5174|"
+        "https://admin-web-dev-hsa55rg7ja-uk.a.run.app|"
+        "https://ops-ia-web-dev-hsa55rg7ja-uk.a.run.app|"
         "https://example-gcp-project-dev.web.app|https://example-gcp-project-data-privacy-dev.web.app"
     )
     # DROP pipeline worker proxies (ops console). Overridable via env.
@@ -135,6 +138,12 @@ def _approval_record(row: dict[str, Any]) -> ApprovalRecord:
 
 @app.get("/me", response_model=MeResponse)
 async def me(principal: CurrentRolePrincipal) -> MeResponse:
+    return MeResponse(email=principal.email, role=principal.role)
+
+
+@app.get("/auth/me", response_model=MeResponse)
+async def auth_me(principal: CurrentRolePrincipal) -> MeResponse:
+    """Alias for /me — primary IAP branch used /auth/me as the identity probe."""
     return MeResponse(email=principal.email, role=principal.role)
 
 

@@ -1,4 +1,5 @@
-const API_BASE = import.meta.env.VITE_ADMIN_API_URL ?? '/api'
+// Empty string (Cloud Run same-origin front door) must fall back to /api — not ??.
+const API_BASE = import.meta.env.VITE_ADMIN_API_URL || '/api'
 
 export type UserRole = 'super_admin' | 'admin' | 'data_owner'
 
