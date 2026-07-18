@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 
 import { NavMenu } from '@/components/NavMenu'
-import { AuthProvider } from '@/lib/auth'
+import { AuthProvider, useAuth } from '@/lib/auth'
 import { useLiveEvents } from '@/lib/live-events'
 
 type AppShellProps = {
@@ -34,6 +34,30 @@ export function SkeletonLines({
   )
 }
 
+function RoleStatusBanner() {
+  const { me, isError, error, isLoading } = useAuth()
+  if (isLoading || (!isError && !me)) return null
+  if (isError) {
+    return (
+      <div
+        className="border-b border-amber-500/40 bg-amber-50 px-6 py-2 text-center text-xs text-amber-950"
+        role="status"
+      >
+        Role API unavailable ({error?.message ?? 'GET /me failed'}). Ops nav is shown for
+        discovery; pages stay gated until admin-api identity works.
+      </div>
+    )
+  }
+  return (
+    <div
+      className="border-b border-[var(--glass-border)] bg-paper-raised/80 px-6 py-1.5 text-center text-[0.65rem] uppercase tracking-[0.14em] text-mute"
+      role="status"
+    >
+      Signed in as {me.email} · role {me.role.replaceAll('_', ' ')}
+    </div>
+  )
+}
+
 function AppShellFrame({ children }: AppShellProps) {
   useLiveEvents()
 
@@ -57,6 +81,7 @@ function AppShellFrame({ children }: AppShellProps) {
           </div>
           <NavMenu />
         </div>
+        <RoleStatusBanner />
       </header>
 
       <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-12">{children}</main>
