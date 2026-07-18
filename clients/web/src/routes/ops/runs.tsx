@@ -81,24 +81,21 @@ function isInFlightStatus(status: string): boolean {
   )
 }
 
-function statusPillClass(status: string): string {
-  if (isFailedStatus(status)) {
-    return 'border-red-200/80 bg-red-50 text-red-800'
-  }
-  if (isSuccessStatus(status)) {
-    return 'border-emerald-200/80 bg-emerald-50 text-emerald-800'
-  }
-  if (isInFlightStatus(status)) {
-    return 'border-habeas-light/40 bg-habeas-mid/10 text-habeas-navy'
-  }
-  return 'border-line bg-panel/60 text-ink-soft'
+function statusPillVariant(status: string): 'ok' | 'fail' | 'run' | 'wait' {
+  if (isFailedStatus(status)) return 'fail'
+  if (isSuccessStatus(status)) return 'ok'
+  if (isInFlightStatus(status)) return 'run'
+  return 'wait'
 }
 
-function statusDotClass(status: string): string {
-  if (isFailedStatus(status)) return 'bg-red-600'
-  if (isSuccessStatus(status)) return 'bg-emerald-600'
-  if (isInFlightStatus(status)) return 'bg-habeas-light animate-pulse'
-  return 'bg-line-strong'
+function StatusPill({ status }: { status: string }) {
+  const variant = statusPillVariant(status)
+  return (
+    <span className={`taste-status-pill taste-status-${variant}`}>
+      <span className="taste-status-dot" aria-hidden />
+      {status.replaceAll('_', ' ')}
+    </span>
+  )
 }
 
 function formatDuration(seconds: number | null | undefined): string {
@@ -151,17 +148,6 @@ function buildRunsSearch(
   if (status) next.status = status
   if (requestId) next.request_id = requestId
   return next
-}
-
-function StatusPill({ status }: { status: string }) {
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[0.62rem] font-medium uppercase tracking-[0.08em] ${statusPillClass(status)}`}
-    >
-      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDotClass(status)}`} aria-hidden />
-      {status.replaceAll('_', ' ')}
-    </span>
-  )
 }
 
 function RunsToolbar({
@@ -253,7 +239,7 @@ function RunsTable({ runs }: { runs: RunSummary[] }) {
 
   return (
     <div className="overflow-x-auto">
-      <table className="taste-table text-xs [&_td]:px-3 [&_td]:py-2 [&_th]:px-3 [&_th]:py-2">
+      <table className="taste-table">
         <thead>
           <tr>
             <th>Run</th>
@@ -340,7 +326,7 @@ function RunsContent() {
   const loading = runsQuery.isPending && !runsQuery.data
 
   return (
-    <section className="space-y-4">
+    <section className="taste-ops-page">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <Micro>Ops · Run</Micro>
