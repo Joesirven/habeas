@@ -61,8 +61,8 @@ steps:
       - -c
       - |
         set -euo pipefail
-        gcloud components install beta --quiet
         # Browser IAP belongs on ops-ia-web-dev / admin-web-dev, not here.
+        # cloud-sdk:slim already ships beta; do not run components install.
         gcloud beta run services update ${_SERVICE} --region=${_REGION} --project=${_PROJECT} --no-iap --quiet || true
         PROJECT_NUMBER=95660886550
         COMPUTE_SA="$${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"

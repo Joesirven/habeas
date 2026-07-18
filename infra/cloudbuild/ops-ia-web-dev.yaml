@@ -57,7 +57,7 @@ steps:
     args:
       - -c
       - |
-        gcloud components install beta --quiet
+        # cloud-sdk:slim already ships beta; do not run components install.
         gcloud beta run services update ${_SERVICE} --region=${_REGION} --project=${_PROJECT} --iap --quiet
         gcloud run services add-iam-policy-binding ${_SERVICE} --region=${_REGION} --project=${_PROJECT} \
           --member=serviceAccount:service-95660886550@gcp-sa-iap.iam.gserviceaccount.com \
