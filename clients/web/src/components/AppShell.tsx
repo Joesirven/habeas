@@ -36,7 +36,7 @@ export function SkeletonLines({
 
 function RoleStatusBanner() {
   const { me, isError, error, isLoading } = useAuth()
-  if (isLoading || (!isError && !me)) return null
+  if (isLoading) return null
   if (isError) {
     return (
       <div
@@ -48,12 +48,13 @@ function RoleStatusBanner() {
       </div>
     )
   }
+  if (!me) return null
   return (
     <div
       className="border-b border-[var(--glass-border)] bg-paper-raised/80 px-6 py-1.5 text-center text-[0.65rem] uppercase tracking-[0.14em] text-mute"
       role="status"
     >
-      Signed in as {me.email} · role {me.role.replaceAll('_', ' ')}
+      Signed in as {me.email} · role {me.role.replace(/_/g, ' ')}
     </div>
   )
 }
