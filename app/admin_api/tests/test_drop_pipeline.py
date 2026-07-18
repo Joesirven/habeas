@@ -54,6 +54,18 @@ PIPELINE_FIXTURE: dict[str, Any] = {
         "success": 0,
         "by_status": [{"status": "pending", "count": 1}],
     },
+    "approaching_sla": {
+        "connector": 0,
+        "ingest": 0,
+        "matching": 1,
+        "matching_review": 0,
+        "thresholds_hours": {
+            "connector": 24,
+            "ingest": 12,
+            "matching": 4,
+            "matching_review": 48,
+        },
+    },
     "matching_results_recent": [
         {
             "request_id": "00000000-0000-0000-0000-000000000001",
@@ -105,6 +117,14 @@ def test_pipeline_status_shape(monkeypatch: pytest.MonkeyPatch):
     assert len(body["drop_requests"]["recent"]) == 1
     assert "matching_attempts" in body
     assert body["matching_attempts"]["pending"] == 1
+    assert "approaching_sla" in body
+    assert body["approaching_sla"]["matching"] == 1
+    assert set(body["approaching_sla"]["thresholds_hours"]) == {
+        "connector",
+        "ingest",
+        "matching",
+        "matching_review",
+    }
     assert "matching_results_recent" in body
     assert body["matching_results_recent"][0]["matched"] is True
     assert body["matching_results_recent"][0]["match_count"] == 1
@@ -327,6 +347,8 @@ async def test_collect_pipeline_counts_shape():
         return []
 
     async def fetchval(sql: str, *args: Any) -> int:
+        if "approaching_sla:" in sql:
+            return 0
         if "response_status IS NULL" in sql and "matching_results" in sql:
             return 2
         return 7
@@ -355,6 +377,110 @@ async def test_collect_pipeline_counts_shape():
     assert result["matching_review"]["approved"] == 3
     assert result["hash_index_refresh"]["pending"] == 1
     assert result["hash_index_refresh"]["last_run"] is None
+    assert result["approaching_sla"] == {
+        "connector": 0,
+        "ingest": 0,
+        "matching": 0,
+        "matching_review": 0,
+        "thresholds_hours": dict(drop_pipeline.APPROACHING_SLA_THRESHOLD_HOURS),
+    }
+
+
+@pytest.mark.asyncio
+async def test_collect_pipeline_counts_approaching_sla_math():
+    """Old open matching attempt increments approaching_sla.matching (counts only)."""
+    fetchval_calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        if "drop_connector_attempts" in sql and "GROUP BY" in sql:
+            return []
+        if "drop_ingest_attempts" in sql and "GROUP BY" in sql:
+            return []
+        if "drop_raw_requests" in sql and "list_type" in sql:
+            return []
+        if "drop_raw_requests" in sql and "GROUP BY response_status" in sql:
+            return []
+        if "matching_attempts" in sql and "GROUP BY" in sql:
+            return [_Row(status="pending", count=1)]
+        if "matching_results" in sql:
+            return []
+        if "approval_requests" in sql and "GROUP BY" in sql:
+            return []
+        if "hash_index_refresh_attempts" in sql:
+            return []
+        if "FROM requests" in sql and "LIMIT" in sql:
+            return []
+        return []
+
+    async def fetchval(sql: str, *args: Any) -> int:
+        fetchval_calls.append((sql, args))
+        if "-- approaching_sla:matching\n" in sql:
+            # Seeded: one DROP matching attempt older than matching threshold.
+            assert args[0] == list(drop_pipeline._OPEN_ATTEMPT_STATUSES)
+            assert args[1] == str(drop_pipeline.APPROACHING_SLA_THRESHOLD_HOURS["matching"])
+            assert "intake_source = 'drop'" in sql
+            assert "($2 || ' hours')::interval" in sql
+            return 1
+        if "approaching_sla:" in sql:
+            return 0
+        if "response_status IS NULL" in sql and "matching_results" in sql:
+            return 0
+        return 0
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        return None
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchval = AsyncMock(side_effect=fetchval)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+
+    result = await drop_pipeline.collect_pipeline_counts(conn)
+    sla = result["approaching_sla"]
+    assert sla["matching"] == 1
+    assert sla["connector"] == 0
+    assert sla["ingest"] == 0
+    assert sla["matching_review"] == 0
+    assert sla["thresholds_hours"]["matching"] == 4
+    # Counts-only contract — no row ids / PII nested under approaching_sla.
+    assert set(sla.keys()) == {
+        "connector",
+        "ingest",
+        "matching",
+        "matching_review",
+        "thresholds_hours",
+    }
+    assert any("-- approaching_sla:matching\n" in sql for sql, _ in fetchval_calls)
+    matching_sql = next(
+        sql for sql, _ in fetchval_calls if "-- approaching_sla:matching\n" in sql
+    )
+    assert "JOIN requests" in matching_sql
+    assert "attempted_at < NOW()" in matching_sql
+
+
+@pytest.mark.asyncio
+async def test_collect_pipeline_counts_approaching_sla_empty_zeros():
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        return []
+
+    async def fetchval(sql: str, *args: Any) -> int | None:
+        if "approaching_sla:" in sql:
+            return None
+        return 0
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        return None
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchval = AsyncMock(side_effect=fetchval)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+
+    result = await drop_pipeline.collect_pipeline_counts(conn)
+    assert result["approaching_sla"]["connector"] == 0
+    assert result["approaching_sla"]["ingest"] == 0
+    assert result["approaching_sla"]["matching"] == 0
+    assert result["approaching_sla"]["matching_review"] == 0
 
 
 def test_hash_index_refresh_enqueue(monkeypatch: pytest.MonkeyPatch):

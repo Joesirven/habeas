@@ -41,6 +41,10 @@ type PipelineTab =
   | 'fulfillment'
   | 'configurations'
 
+function approachingSlaFrom(data: DropPipelineStatus | undefined) {
+  return data?.approaching_sla
+}
+
 function matchTypeFromCount(matchCount: number): MatchTypeFilter {
   if (matchCount <= 0) return 'not_found'
   if (matchCount === 1) return 'single_match'
@@ -1476,6 +1480,7 @@ export function DropPipelinePage() {
   })
 
   const data: DropPipelineStatus | undefined = pipelineQuery.data
+  const approachingSla = approachingSlaFrom(data)
   const showSkeleton = pipelineQuery.isPending && !data
   const hashPending = (data?.hash_index_refresh?.pending ?? 0) > 0
   const hashWorkerDown = data ? !data.worker_health.hash_index_refresh?.ok : false
@@ -1567,6 +1572,40 @@ export function DropPipelinePage() {
                         <td className="!px-0 text-ink-soft">Matching attempts pending</td>
                         <td className="!px-0 tabular-nums">{data.matching_attempts.pending}</td>
                       </tr>
+                      {approachingSla ? (
+                        <>
+                          <tr>
+                            <td className="!px-0 text-ink-soft">
+                              Download approaching (age policy)
+                            </td>
+                            <td className="!px-0 tabular-nums">
+                              {approachingSla.connector}
+                            </td>
+                          </tr>
+                          <tr>
+                            <td className="!px-0 text-ink-soft">
+                              Ingest approaching (age policy)
+                            </td>
+                            <td className="!px-0 tabular-nums">{approachingSla.ingest}</td>
+                          </tr>
+                          <tr>
+                            <td className="!px-0 text-ink-soft">
+                              Matching approaching (age policy)
+                            </td>
+                            <td className="!px-0 tabular-nums">
+                              {approachingSla.matching}
+                            </td>
+                          </tr>
+                          <tr>
+                            <td className="!px-0 text-ink-soft">
+                              Review approaching (age policy)
+                            </td>
+                            <td className="!px-0 tabular-nums">
+                              {approachingSla.matching_review}
+                            </td>
+                          </tr>
+                        </>
+                      ) : null}
                       <tr>
                         <td className="!px-0 text-ink-soft">DROP requests</td>
                         <td className="!px-0 tabular-nums">{data.drop_requests.count}</td>
@@ -1676,6 +1715,24 @@ export function DropPipelinePage() {
               <div className="taste-panel-soft p-4">
                 <CountTable rows={data.connector_attempts} empty="No connector attempts." />
               </div>
+              {approachingSla ? (
+                <div className="taste-panel-soft p-4">
+                  <Micro>Approaching (age policy)</Micro>
+                  <p className="mt-1 text-xs text-ink-soft">
+                    Open connector attempts older than{' '}
+                    {approachingSla.thresholds_hours.connector}h — not legal DROP deadline
+                    clocks.
+                  </p>
+                  <table className="taste-table mt-3">
+                    <tbody>
+                      <tr>
+                        <td className="!px-0 text-ink-soft">Connector</td>
+                        <td className="!px-0 tabular-nums">{approachingSla.connector}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -1683,6 +1740,23 @@ export function DropPipelinePage() {
 
       {tab === 'ingest' && (
         <div className="space-y-6">
+          {approachingSla ? (
+            <div className="taste-panel-soft p-4">
+              <Micro>Approaching (age policy)</Micro>
+              <p className="mt-1 text-xs text-ink-soft">
+                Open ingest attempts older than {approachingSla.thresholds_hours.ingest}h —
+                age policy, not legal DROP deadline clocks.
+              </p>
+              <table className="taste-table mt-3">
+                <tbody>
+                  <tr>
+                    <td className="!px-0 text-ink-soft">Ingest (land + promote)</td>
+                    <td className="!px-0 tabular-nums">{approachingSla.ingest}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          ) : null}
           <div className="grid gap-6 lg:grid-cols-2">
             <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
               <div>
@@ -1813,20 +1887,56 @@ export function DropPipelinePage() {
 
       {tab === 'matching' && (
         <>
-          <div className="taste-panel-soft flex max-w-xl flex-col gap-6 p-6 sm:p-7">
-            <div>
-              <Micro>Matching</Micro>
-              <p className="mt-2 text-sm text-ink-soft">
-                Dispatch thin requests to the matcher, then run matching. After success, the required
-                dialog forces review or bulk approve.
-              </p>
+          <div className="grid items-start gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+            <div className="taste-panel-soft flex max-w-xl flex-col gap-6 p-6 sm:p-7">
+              <div>
+                <Micro>Matching</Micro>
+                <p className="mt-2 text-sm text-ink-soft">
+                  Dispatch thin requests to the matcher, then run matching. After success, the
+                  required dialog forces review or bulk approve.
+                </p>
+              </div>
+              <ActionButtons
+                keys={['dispatch', 'match']}
+                showSkeleton={showSkeleton}
+                postMatchOpen={postMatchOpen}
+                actionMutation={actionMutation}
+              />
             </div>
-            <ActionButtons
-              keys={['dispatch', 'match']}
-              showSkeleton={showSkeleton}
-              postMatchOpen={postMatchOpen}
-              actionMutation={actionMutation}
-            />
+            {approachingSla ? (
+              <div className="taste-panel-soft flex flex-col gap-4 p-6 sm:p-7">
+                <div>
+                  <Micro>Approaching (age policy)</Micro>
+                  <p className="mt-2 max-w-md text-sm text-ink-soft">
+                    Open work older than stage age thresholds — not legal DROP deadline breach
+                    clocks. Thresholds: matching {approachingSla.thresholds_hours.matching}h ·
+                    review {approachingSla.thresholds_hours.matching_review}h.
+                  </p>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="taste-table">
+                    <thead>
+                      <tr>
+                        <th className="!px-0">Stage</th>
+                        <th className="!px-0">Count</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td className="!px-0 text-ink-soft">Matching attempts</td>
+                        <td className="!px-0 tabular-nums">{approachingSla.matching}</td>
+                      </tr>
+                      <tr>
+                        <td className="!px-0 text-ink-soft">Matching review</td>
+                        <td className="!px-0 tabular-nums">
+                          {approachingSla.matching_review}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : null}
           </div>
           <div ref={resultsAnchorRef}>
             <MatchingResultsPanel

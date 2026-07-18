@@ -28,7 +28,10 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
   filters (request_id search, state select, recorded date range + match_type),
   promote/decline (individual + bulk by match type), assign to reviewer / escalate to
   legal|data_owner (IAP actor; `workflow.assignment` via admin-api).
-  No deadline / approaching-SLA UI — requires schema not present.
+  Approaching-SLA *aggregates* on Pipeline (`approaching_sla` from admin-api): age-policy
+  counts of open work older than stage thresholds (matching 4h, review 48h, ingest 12h,
+  connector 24h) — label as derived age policy, not legal breach clocks. List *filters*
+  by deadline remain deferred (no deadline column).
 
 ## Rules
 

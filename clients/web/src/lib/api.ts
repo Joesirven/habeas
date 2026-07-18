@@ -253,6 +253,20 @@ export type DropFulfillmentStatus = {
   by_response_status: ResponseStatusCount[]
 }
 
+/** Age-policy approaching counts (not legal DROP deadline / sla_monitor clocks). */
+export type ApproachingSlaCounts = {
+  connector: number
+  ingest: number
+  matching: number
+  matching_review: number
+  thresholds_hours: {
+    connector: number
+    ingest: number
+    matching: number
+    matching_review: number
+  }
+}
+
 export type DropPipelineStatus = {
   connector_attempts: StepStatusCount[]
   ingest_attempts: StepStatusCount[]
@@ -277,6 +291,8 @@ export type DropPipelineStatus = {
   }
   /** Absent on older admin-api revisions that predate hash-index ops. */
   hash_index_refresh?: HashIndexRefreshStatus
+  /** Absent on older admin-api revisions that predate approaching-SLA aggregates. */
+  approaching_sla?: ApproachingSlaCounts
   worker_health: Record<string, WorkerHealthProbe>
 }
 
