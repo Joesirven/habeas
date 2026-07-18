@@ -65,11 +65,11 @@ steps:
         # Browser IAP belongs on ops-ia-web-dev / admin-web-dev, not here.
         gcloud beta run services update ${_SERVICE} --region=${_REGION} --project=${_PROJECT} --no-iap --quiet || true
         PROJECT_NUMBER=95660886550
-        COMPUTE_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
-        IAP_SA="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
+        COMPUTE_SA="$${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+        IAP_SA="service-$${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
         for member in \
-          "serviceAccount:${COMPUTE_SA}" \
-          "serviceAccount:${IAP_SA}" \
+          "serviceAccount:$${COMPUTE_SA}" \
+          "serviceAccount:$${IAP_SA}" \
           "user:dev-owner-1@example.com"
         do
           gcloud run services add-iam-policy-binding ${_SERVICE} \
