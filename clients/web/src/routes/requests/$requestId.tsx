@@ -4,6 +4,7 @@ import { useState, type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import { RunTimeline } from '@/components/ops/RunTimeline'
+import { useMe } from '@/lib/auth'
 import {
   getRequestJourney,
   type JourneyStage,
@@ -33,7 +34,7 @@ function journeyStageToTimelineStep(stage: JourneyStage): RunTimelineStep {
     not_started: 'pending',
     skipped: 'skipped',
     in_progress: 'running',
-    waiting: 'running',
+    waiting: 'waiting',
     complete: 'completed',
     failed: 'failed',
   }
@@ -226,6 +227,7 @@ function MatchingPanel({ requestId, currentStage }: { requestId: string; current
 
 export function RequestDetailPage() {
   const { requestId } = useParams({ from: '/requests/$requestId' })
+  const { isSuperAdmin } = useMe()
   const [tab, setTab] = useState<RequestTab>('overview')
 
   const journeyQuery = useQuery({
@@ -255,9 +257,20 @@ export function RequestDetailPage() {
             ) : null}
           </div>
         </div>
-        <Link to="/requests/needs-attention" className="taste-btn text-xs">
-          Needs attention
-        </Link>
+        <div className="flex flex-wrap items-center gap-2">
+          {isSuperAdmin ? (
+            <Link
+              to="/ops/runs"
+              search={{ request_id: requestId, window: '1w' }}
+              className="taste-btn text-xs"
+            >
+              Runs for request
+            </Link>
+          ) : null}
+          <Link to="/requests/needs-attention" className="taste-btn text-xs">
+            Needs attention
+          </Link>
+        </div>
       </header>
 
       {loading ? (

@@ -8,6 +8,8 @@ function stepStatusClass(status: RunTimelineStep['status']): string {
       return 'bg-red-700/70'
     case 'running':
       return 'bg-habeas-light animate-pulse ring-2 ring-habeas-mid/40'
+    case 'waiting':
+      return 'border-2 border-habeas-mid bg-paper'
     case 'skipped':
       return 'bg-line-strong'
     default:
@@ -23,6 +25,8 @@ function stepLabelClass(status: RunTimelineStep['status']): string {
       return 'text-red-800'
     case 'running':
       return 'text-habeas-navy font-semibold'
+    case 'waiting':
+      return 'text-habeas-mid'
     default:
       return 'text-ink-soft'
   }
@@ -138,10 +142,15 @@ function HorizontalRunTimeline({
               <p className={`text-[0.65rem] font-medium leading-tight ${stepLabelClass(step.status)}`}>
                 {step.label}
               </p>
+              <time className="mt-0.5 block text-[0.55rem] tabular-nums text-mute">
+                {formatTimestamp(step.timestamp)}
+              </time>
               {step.status === 'failed' && step.detail ? (
                 <p className="mt-0.5 text-[0.6rem] leading-tight text-red-700">{step.detail}</p>
               ) : step.status === 'running' ? (
                 <p className="mt-0.5 text-[0.6rem] text-habeas-mid">In progress</p>
+              ) : step.status === 'waiting' ? (
+                <p className="mt-0.5 text-[0.6rem] text-habeas-mid">Waiting</p>
               ) : null}
             </div>
           </li>
