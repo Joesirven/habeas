@@ -4,7 +4,7 @@ React admin UI for Legal, Operations, and Data Owners.
 
 **Stack (locked):** Vite, React, TypeScript, TanStack Router, TanStack Query, Tailwind, Bun.
 
-Deploy target: Firebase Hosting in front of Identity-Aware Proxy.
+Deploy target: Cloud Run `admin-web-*` behind Identity-Aware Proxy (Workspace SSO).
 
 **Agent rules:** [`AGENTS.md`](AGENTS.md)
 
@@ -26,9 +26,17 @@ bun install
 bun run dev
 ```
 
-Vite proxies `/api/*` to `http://127.0.0.1:8000` so the dashboard can call `/api/healthz` without cross-origin setup.
+Vite proxies `/api/*` to `http://127.0.0.1:8000` by default (no IAP).
 
-Optional: copy `.env.example` to `.env` and set `VITE_ADMIN_API_URL` when not using the dev proxy.
+Optional: copy `.env.example` to `.env`. To hit **deployed** admin-api through the same proxy with IAP:
+
+```bash
+export VITE_PROXY_TARGET=https://admin-api-dev-hsa55rg7ja-uk.a.run.app
+export IAP_ID_TOKEN="$(gcloud auth print-identity-token --audiences="$IAP_OAUTH_CLIENT_ID")"
+bun run dev   # keep VITE_ADMIN_API_URL unset
+```
+
+Setting `VITE_ADMIN_API_URL` to the Cloud Run URL bypasses the proxy (browser must satisfy IAP; cross-origin is best-effort).
 
 ### Drop ops navigation
 

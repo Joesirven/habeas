@@ -85,23 +85,49 @@ gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
 
 | Surface | Invoker |
 |---------|---------|
-| `admin-api-dev` | `allUsers` (Firebase SPA CORS; **residual** until Identity-Aware Proxy) |
-| Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`, `hash-index-refresh-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) |
+| `admin-api-dev` | **IAP service agent only** (`service-95660886550@gcp-sa-iap.iam.gserviceaccount.com`); no `allUsers`; no compute SA invoker |
+| `admin-web-dev` | Same IAP pattern (Workspace SSO front door for the SPA) |
+| Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`, `hash-index-refresh-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) — never user/IAP direct |
 
-Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Localhost worker URLs skip auth.
+Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Operators never call workers directly — process/enqueue goes through admin-api with IAP. Localhost worker URLs skip auth.
+
+One-shot re-lock admin-api invoker to IAP SA: `infra/cloudbuild/admin-api-dev-iam.yaml`.
 
 #### DROP mutation identity (app layer)
 
-Mutating `/ops/drop/*` routes call `require_drop_mutation_actor`. Set `REQUIRE_IAP_IDENTITY=true` on admin-api (Cloud Build `_REQUIRE_IAP_IDENTITY`) so headerless callers get **401**. Local default is `false` so Vite/CLI against localhost keep working.
+Mutating `/ops/drop/*` routes call `require_drop_mutation_actor`. Deployed admin-api sets `REQUIRE_IAP_IDENTITY=true` (`_REQUIRE_IAP_IDENTITY` in `admin-api-dev.yaml`) so headerless callers get **401**. Local default is `false` so Vite/CLI against localhost keep working.
 
 `decided_by` on bulk-approve prefers `X-Goog-Authenticated-User-Email` when present (ignores client spoof).
 
-**Residual (do not waive for shared/prod without this checklist):**
+#### Calling admin-api with IAP (CLI / curl)
 
-1. Put Identity-Aware Proxy in front of `admin-api` (Architecture: IAP at edge; JWT assertion strips client-forged email headers).
-2. Flip `_REQUIRE_IAP_IDENTITY=true` on `admin-api-dev` deploy.
-3. Remove `allUsers` invoker (`admin-api-dev-iam.yaml` is the opposite of the end state — do not copy that pattern to workers).
-4. Grant worker invoker only to the admin-api runtime SA:
+OAuth client ID: Cloud Console → Security → Identity-Aware Proxy → `admin-api-dev` (or `gcloud beta iap settings get`).
+
+```bash
+export ADMIN_API_URL=https://admin-api-dev-hsa55rg7ja-uk.a.run.app
+export IAP_OAUTH_CLIENT_ID=<iap-oauth-client-id>
+# CLI mints via google-auth ADC, or prefetch:
+export IAP_ID_TOKEN="$(gcloud auth print-identity-token --audiences="$IAP_OAUTH_CLIENT_ID")"
+
+curl -sS -H "Authorization: Bearer $IAP_ID_TOKEN" "$ADMIN_API_URL/auth/me"
+uv run --package habeas-cli habeas-cli drop pipeline
+uv run --package habeas-cli habeas-cli drop hash-index-refresh process --execute
+```
+
+Local web against remote admin-api (Vite proxy injects the bearer):
+
+```bash
+cd clients/web
+export VITE_PROXY_TARGET="$ADMIN_API_URL"
+export IAP_ID_TOKEN  # as above
+bun run dev   # leave VITE_ADMIN_API_URL unset so the app uses /api
+```
+
+**Residual:**
+
+1. Full IAP JWT assertion verification in admin-api (email header alone is trusted at the edge today — see `habeas_privacy_core.auth` README).
+2. Deployed SPA→admin-api is cross-origin; cookie IAP is best-effort (`credentials: 'include'`). Prefer CLI + IAP token for mutations until a same-origin `/api` BFF exists.
+3. Grant worker invoker only to the admin-api runtime SA:
 
 ```bash
 gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev-iam.yaml \

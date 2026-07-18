@@ -27,7 +27,8 @@ Production dbt project for DROP hash-index serving tables in BigQuery.
   **state-suffixed** so parallel per-state jobs are safe; only
   `email_hash` / `phone_hash` / `ndz_hash` are shared. Default `state: CA` in
   `dbt_project.yml` is local convenience only — production passes the attempt’s
-  state. Full-wave enqueue is admin-api `.../enqueue-all`; live BQ coverage +
+  state. Full-wave enqueue/process is admin-api behind Identity-Aware Proxy
+  (`.../enqueue-all`, `.../process`) — never user→worker. Live BQ coverage +
   blockers are in [RUNBOOK.md](RUNBOOK.md) (“Live multi-state builds”). No prod
   dbt / enqueue-all without Jose.
 - UDF body must stay the bake-off winner (`normalizeName` + LATIN_EXTENDED).

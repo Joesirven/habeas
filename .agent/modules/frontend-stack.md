@@ -22,8 +22,15 @@ Visual design: also load [`design-taste.md`](design-taste.md).
 2. admin-api `LISTEN privacy_events` → forwards to Server-Sent Events clients.
 3. Web `EventSource` → TanStack Query `invalidateQueries` for affected resources.
 
+## Admin-api access (Identity-Aware Proxy)
+
+- Local: leave `VITE_ADMIN_API_URL` unset → Vite proxies `/api` → `http://127.0.0.1:8000` (no IAP).
+- Local against deployed admin-api: set `VITE_PROXY_TARGET` + `IAP_ID_TOKEN` (see `infra/README.md`); keep `VITE_ADMIN_API_URL` unset.
+- Deployed SPA may set `VITE_ADMIN_API_URL` to admin-api; `fetch` uses `credentials: 'include'` for IAP cookies. Cross-origin IAP is best-effort — use CLI for reliable mutations.
+- Never call worker Cloud Run URLs from the browser.
+
 ## Rules
 
 - Thin client — no business rules in browser; all authorization on admin-api.
-- Not Next.js — single-page app on Firebase Hosting behind Identity-Aware Proxy.
+- Not Next.js — single-page app on Cloud Run (`admin-web-*`) behind Identity-Aware Proxy.
 - Mutations never bypass admin-api.

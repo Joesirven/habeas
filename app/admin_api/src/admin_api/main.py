@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
@@ -43,7 +43,8 @@ class AdminSettings(CoreSettings):
     # Pipe-separated browser origins (commas break gcloud --substitutions).
     cors_origins: str = (
         "http://127.0.0.1:5173|http://localhost:5173|"
-        "https://example-gcp-project-dev.web.app|https://example-gcp-project-data-privacy-dev.web.app"
+        "http://127.0.0.1:8080|http://localhost:8080|"
+        "https://admin-web-dev-hsa55rg7ja-uk.a.run.app"
     )
     # DROP pipeline worker proxies (ops console). Overridable via env.
     drop_connector_url: str = "http://127.0.0.1:8081"
@@ -141,6 +142,31 @@ async def readyz():
     if payload["status"] != "ok":
         raise HTTPException(status_code=503, detail=payload)
     return payload
+
+
+@app.get("/auth/me")
+async def auth_me(request: Request):
+    """Identity probe for IAP / Workspace SSO testing.
+
+    Returns the actor parsed from ``X-Goog-Authenticated-User-Email`` when
+    Identity-Aware Proxy fronts admin-api. Without IAP headers the actor is
+    ``unknown`` and ``authenticated`` is false.
+    """
+    from habeas_privacy_core.auth import (
+        IAP_EMAIL_HEADER,
+        actor_from_iap_header,
+        is_authenticated_actor,
+    )
+
+    actor = actor_from_iap_header(request)
+    raw = request.headers.get(IAP_EMAIL_HEADER)
+    return {
+        "authenticated": is_authenticated_actor(actor),
+        "email": actor if is_authenticated_actor(actor) else None,
+        "actor": actor,
+        "iap_header_present": bool(raw and raw.strip()),
+        "service": settings.service_name,
+    }
 
 
 @app.get("/live/events")

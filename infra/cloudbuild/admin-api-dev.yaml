@@ -10,9 +10,9 @@ substitutions:
   _MATCHING_URL: https://matching-dev-hsa55rg7ja-uk.a.run.app
   _DATA_FULFILLMENT_URL: https://data-fulfillment-dispatcher-dev-hsa55rg7ja-uk.a.run.app
   _HASH_INDEX_REFRESH_URL: https://hash-index-refresh-dev-hsa55rg7ja-uk.a.run.app
-  # Set true once Identity-Aware Proxy fronts admin-api (rejects headerless DROP mutations).
-  _REQUIRE_IAP_IDENTITY: "false"
-  _CORS_ORIGINS: "https://example-gcp-project-dev.web.app|https://example-gcp-project-data-privacy-dev.web.app|http://127.0.0.1:5173"
+  # App-layer gate: DROP mutations require X-Goog-Authenticated-User-Email (IAP).
+  _REQUIRE_IAP_IDENTITY: "true"
+  _CORS_ORIGINS: "https://admin-web-dev-hsa55rg7ja-uk.a.run.app|http://127.0.0.1:5173|http://localhost:5173|http://127.0.0.1:8080|http://localhost:8080"
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -44,9 +44,31 @@ steps:
       - --image=us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
       - --region=${_REGION}
       - --platform=managed
-      - --allow-unauthenticated
+      - --no-allow-unauthenticated
       - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
+      - --timeout=3600
       - --set-env-vars=SERVICE_NAME=admin-api,WORKER_ID=admin-api-dev,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},DROP_CONNECTOR_URL=${_DROP_CONNECTOR_URL},DROP_INGESTOR_URL=${_DROP_INGESTOR_URL},REQUEST_DISPATCHER_URL=${_REQUEST_DISPATCHER_URL},MATCHING_URL=${_MATCHING_URL},DATA_FULFILLMENT_URL=${_DATA_FULFILLMENT_URL},HASH_INDEX_REFRESH_URL=${_HASH_INDEX_REFRESH_URL},REQUIRE_IAP_IDENTITY=${_REQUIRE_IAP_IDENTITY},CORS_ORIGINS=${_CORS_ORIGINS}
+
+  # Invoker = IAP service agent only (no allUsers). Do not grant compute SA
+  # run.invoker here — that would let headerless Cloud Run tokens skip IAP.
+  # One-shot re-lock: infra/cloudbuild/admin-api-dev-iam.yaml
+  - id: enable-iap
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud components install beta --quiet
+        gcloud beta run services update ${_SERVICE} --region=${_REGION} --project=${_PROJECT} --iap --quiet
+        gcloud run services add-iam-policy-binding ${_SERVICE} --region=${_REGION} --project=${_PROJECT} \
+          --member=serviceAccount:service-95660886550@gcp-sa-iap.iam.gserviceaccount.com \
+          --role=roles/run.invoker --quiet || true
+        gcloud run services remove-iam-policy-binding ${_SERVICE} --region=${_REGION} --project=${_PROJECT} \
+          --member=allUsers --role=roles/run.invoker --quiet || true
+        gcloud beta iap web add-iam-policy-binding --project=${_PROJECT} --region=${_REGION} \
+          --resource-type=cloud-run --service=${_SERVICE} \
+          --member=user:dev-owner-1@example.com --role=roles/iap.httpsResourceAccessor \
+          --condition=None --quiet || true
 
 images:
   - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}

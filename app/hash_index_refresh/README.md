@@ -12,12 +12,12 @@ Cloud Run worker that rebuilds BigQuery DROP hash index marts via dbt.
    DROP candidates whose `requestor_state` matches that refreshed state (status-4
    is reopened to NULL before enqueue)
 
-Ops can enqueue one state or all served states (A10: USPS 50+DC, 51 codes) via
-admin-api `POST /ops/drop/hash-index-refresh/enqueue` and `.../enqueue-all`
-(web Configurations “Enqueue all states”, CLI `--all-states`). Do **not** run
-prod enqueue-all or multi-state dbt without Jose — see
-[`transform/drop_hash/RUNBOOK.md`](../../transform/drop_hash/RUNBOOK.md)
-(“Live multi-state builds”).
+Ops enqueue/process only via admin-api behind Identity-Aware Proxy
+(`POST /ops/drop/hash-index-refresh/enqueue`, `.../enqueue-all`, `.../process` —
+web Configurations, or CLI with IAP token). Do **not** invoke this worker’s
+`/process` as a user. Do **not** run prod enqueue-all or multi-state dbt without
+Jose — see [`transform/drop_hash/RUNBOOK.md`](../../transform/drop_hash/RUNBOOK.md)
+(“Live multi-state builds”) and `infra/README.md` (IAP call flow).
 
 ## IAM
 

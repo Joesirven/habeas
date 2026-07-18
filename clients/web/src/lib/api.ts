@@ -1,8 +1,12 @@
 const API_BASE = import.meta.env.VITE_ADMIN_API_URL ?? '/api'
+const API_IS_ABSOLUTE = /^https?:\/\//i.test(API_BASE)
 
 export async function fetchAdminApi<T>(path: string, init?: RequestInit): Promise<T> {
+  // Absolute admin-api hosts sit behind Identity-Aware Proxy — send cookies when present.
+  // Local Vite uses same-origin `/api` (optionally injects IAP_ID_TOKEN via vite.config proxy).
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
+    credentials: init?.credentials ?? (API_IS_ABSOLUTE ? 'include' : 'same-origin'),
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -47,6 +51,18 @@ export type ManualRequestInput = {
 export function getHealth() {
   // Prefer /readyz: Cloud Run's public edge returns a Google HTML 404 for /healthz.
   return fetchAdminApi<HealthPayload>('/readyz')
+}
+
+export type AuthMePayload = {
+  authenticated: boolean
+  email: string | null
+  actor: string
+  iap_header_present: boolean
+  service?: string
+}
+
+export function getAuthMe() {
+  return fetchAdminApi<AuthMePayload>('/auth/me')
 }
 
 export function listRequests(intakeSource?: IntakeSource) {
