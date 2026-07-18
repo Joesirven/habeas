@@ -130,10 +130,12 @@ export function RoleGate({ allow, children }: RoleGateProps) {
           Cannot load role
         </h2>
         <p className="max-w-lg text-sm leading-relaxed text-ink-soft">
-          The UI called <code className="text-ink">GET /me</code> on admin-api and failed. With
-          Identity-Aware Proxy on a separate API host, the browser often cannot send that
-          identity. Fix IAP/CORS for admin-api, or run the UI locally against{' '}
-          <code className="text-ink">http://127.0.0.1:5174</code> (proxies to local admin-api).
+          The UI called <code className="text-ink">GET /api/me</code> (same-origin proxy to
+          admin-api) and failed. On Cloud Run, confirm IAP is only on{' '}
+          <code className="text-ink">ops-ia-web-dev</code>, admin-api has{' '}
+          <code className="text-ink">--no-iap</code>, and the web runtime SA has{' '}
+          <code className="text-ink">roles/run.invoker</code>. Locally use{' '}
+          <code className="text-ink">http://127.0.0.1:5174</code> with admin-api on :8000.
         </p>
         {error ? (
           <p className="max-w-lg text-xs text-mute">{error.message}</p>

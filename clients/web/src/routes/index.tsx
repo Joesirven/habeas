@@ -38,11 +38,11 @@ export function DashboardPage() {
   const attentionLoading = attentionQuery.isPending && !attentionQuery.data
 
   return (
-    <section className="space-y-8">
-      <header className="flex flex-wrap items-end justify-between gap-4">
+    <section className="taste-ops-page">
+      <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="taste-micro">Home</p>
-          <h2 className="mt-2 font-display text-[2.25rem] font-medium leading-none tracking-tight text-ink sm:text-[2.5rem]">
+          <h2 className="font-display text-2xl font-medium leading-none tracking-tight text-ink">
             Needs me
           </h2>
         </div>

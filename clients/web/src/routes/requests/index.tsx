@@ -7,11 +7,7 @@ import { getNeedsAttention, listRequests } from '@/lib/api'
 
 function RequestsTableSkeleton({ rows = 8 }: { rows?: number }) {
   return (
-    <table
-      className="taste-table text-xs [&_td]:py-2 [&_th]:py-2"
-      role="status"
-      aria-label="Loading requests"
-    >
+    <table className="taste-table" role="status" aria-label="Loading requests">
       <thead>
         <tr>
           <th>
@@ -86,7 +82,7 @@ export function RequestsPage() {
   }, [attentionQuery.data?.items])
 
   return (
-    <section className="space-y-4">
+    <section className="taste-ops-page">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="taste-micro">Requests</p>
@@ -131,7 +127,7 @@ export function RequestsPage() {
         )}
         {requestsQuery.isSuccess && requestsQuery.data.length > 0 && (
           <div className="overflow-x-auto">
-            <table className="taste-table text-xs [&_td]:py-2 [&_th]:py-2">
+            <table className="taste-table">
               <thead>
                 <tr>
                   <th>Received</th>

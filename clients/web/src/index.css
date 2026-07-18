@@ -4,7 +4,7 @@
   --color-habeas-navy: #1e4191;
   --color-habeas-mid: #2b7bb9;
   --color-habeas-light: #428bca;
-  --color-paper: #f7f8fa;
+  --color-paper: #f7f9fc;
   --color-paper-raised: #ffffff;
   --color-ink: #121820;
   --color-ink-soft: #3d4a5c;
@@ -17,6 +17,12 @@
 }
 
 :root {
+  /* Habeas brand hex — ops canvas + inline references */
+  --habeas-navy: #1e4191;
+  --habeas-mid: #2b7bb9;
+  --habeas-light: #428bca;
+  --habeas-canvas: #f7f9fc;
+
   /* Amigo frosted glass — matte overlay recipe (blur / fill / border) */
   --glass-blur: 30.15px;
   --glass-gradient-start: hsla(20, 8%, 77%, 0.2);
@@ -30,7 +36,8 @@
 }
 
 body {
-  @apply m-0 min-h-screen bg-paper font-body text-ink antialiased;
+  @apply m-0 min-h-screen font-body text-ink antialiased;
+  background-color: var(--habeas-canvas);
 }
 
 /* Amigo glass — warm-gray translucent gradient + ~30px blur + #909090 border */
@@ -171,15 +178,15 @@ body {
 }
 
 .taste-table {
-  @apply min-w-full text-left text-sm;
+  @apply min-w-full text-left text-xs leading-snug;
 }
 
 .taste-table thead {
-  @apply border-b border-line text-[0.65rem] font-medium uppercase tracking-[0.14em] text-mute;
+  @apply border-b border-line text-[0.62rem] font-medium uppercase tracking-[0.14em] text-mute;
 }
 
 .taste-table th {
-  @apply px-4 py-3 font-medium;
+  @apply px-3 py-1.5 font-medium;
 }
 
 .taste-table tbody tr {
@@ -187,7 +194,65 @@ body {
 }
 
 .taste-table td {
-  @apply px-4 py-3;
+  @apply px-3 py-1.5;
+}
+
+/* Ops route rhythm — compact section stacking (Prefect/Dagster density) */
+.taste-ops-page {
+  @apply space-y-4;
+}
+
+.taste-ops-page > header {
+  @apply gap-2;
+}
+
+.taste-ops-page > header h2 {
+  @apply mt-1;
+}
+
+/* Status pills — success / fail / in-flight / waiting */
+.taste-status-pill {
+  @apply inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[0.62rem] font-medium uppercase tracking-[0.08em];
+}
+
+.taste-status-ok {
+  @apply border-emerald-200/80 bg-emerald-50 text-emerald-800;
+}
+
+.taste-status-fail {
+  @apply border-red-200/80 bg-red-50 text-red-800;
+}
+
+.taste-status-run {
+  @apply border-habeas-light/40 bg-habeas-mid/10 text-habeas-navy;
+}
+
+.taste-status-wait {
+  @apply border-habeas-mid/45 bg-transparent text-habeas-mid;
+}
+
+.taste-status-dot {
+  @apply h-1.5 w-1.5 shrink-0 rounded-full;
+}
+
+.taste-status-ok .taste-status-dot,
+.taste-status-dot-ok {
+  @apply bg-emerald-600;
+}
+
+.taste-status-fail .taste-status-dot,
+.taste-status-dot-fail {
+  @apply bg-red-600;
+}
+
+.taste-status-run .taste-status-dot,
+.taste-status-dot-run {
+  @apply animate-pulse bg-habeas-light;
+}
+
+.taste-status-wait .taste-status-dot,
+.taste-status-dot-wait {
+  @apply border border-habeas-mid/60 bg-transparent;
 }
 
 .taste-atmosphere-orb {

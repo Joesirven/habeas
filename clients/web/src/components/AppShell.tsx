@@ -51,7 +51,7 @@ function RoleStatusBanner() {
   if (!me) return null
   return (
     <div
-      className="border-b border-[var(--glass-border)] bg-paper-raised/80 px-6 py-1.5 text-center text-[0.65rem] uppercase tracking-[0.14em] text-mute"
+      className="border-b border-[var(--glass-border)] bg-[var(--habeas-canvas)]/90 px-6 py-1 text-center text-[0.62rem] uppercase tracking-[0.14em] text-mute"
       role="status"
     >
       Signed in as {me.email} · role {me.role.replace(/_/g, ' ')}
@@ -63,7 +63,7 @@ function AppShellFrame({ children }: AppShellProps) {
   useLiveEvents()
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen flex-col bg-[var(--habeas-canvas)]">
       <header
         className="sticky top-0 z-20 border-b border-[var(--glass-border)]"
         style={{
@@ -73,10 +73,10 @@ function AppShellFrame({ children }: AppShellProps) {
             'linear-gradient(to right, var(--glass-gradient-start), var(--glass-gradient-end))',
         }}
       >
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-6 py-5">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-3">
           <div className="min-w-0">
             <p className="taste-micro">Habeas</p>
-            <h1 className="mt-1 font-display text-[1.35rem] font-medium leading-none tracking-tight text-ink">
+            <h1 className="mt-0.5 font-display text-[1.2rem] font-medium leading-none tracking-tight text-ink">
               Data Privacy
             </h1>
           </div>
@@ -85,7 +85,7 @@ function AppShellFrame({ children }: AppShellProps) {
         <RoleStatusBanner />
       </header>
 
-      <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-12">{children}</main>
+      <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-6">{children}</main>
 
       <footer className="mt-auto bg-ink">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">

@@ -237,12 +237,12 @@ function DashboardContent() {
   const failedRunsSearch = { status: 'failed' as const, window }
 
   return (
-    <section className="space-y-6">
-      <header className="flex flex-wrap items-end justify-between gap-4">
+    <section className="taste-ops-page">
+      <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <Micro>Ops</Micro>
-          <div className="mt-2 flex flex-wrap items-baseline gap-2">
-            <h2 className="font-display text-[1.75rem] font-medium leading-none tracking-tight text-ink sm:text-[2rem]">
+          <div className="flex flex-wrap items-baseline gap-2">
+            <h2 className="font-display text-xl font-medium tracking-tight text-ink">
               Ops dashboard
             </h2>
             {(runsQuery.isFetching || pipelineQuery.isFetching) && !loading ? (

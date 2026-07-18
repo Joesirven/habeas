@@ -29,7 +29,8 @@ Keep Habeas Amigo/`taste-*` tokens (navy, frost chips, matte panels). On **Runs,
 - One volume strip/chart on ops dashboard (Prefect overview) — not four equal marketing KPI tiles as the whole page.
 - Do **not** invent a second design system or copy Prefect dark/purple chrome.
 
-See also [`.agent/modules/design-taste.md`](../../.agent/modules/design-taste.md) § Ops surfaces.
+Ops visual system: [`.agent/modules/design-taste-ops-ia.md`](../../.agent/modules/design-taste-ops-ia.md) (`habeas-ops-amigo-prefect-dagster`).  
+General Amigo frost: [`.agent/modules/design-taste.md`](../../.agent/modules/design-taste.md).
 
 ## DROP pipeline
 
