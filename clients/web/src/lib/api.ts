@@ -575,6 +575,7 @@ export function getDropWorkflowAssignments(params?: {
 export type RunTimelineStepStatus =
   | 'pending'
   | 'running'
+  | 'waiting'
   | 'completed'
   | 'failed'
   | 'skipped'
