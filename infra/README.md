@@ -108,9 +108,22 @@ One-shot re-lock admin-api invoker to IAP SA: `infra/cloudbuild/admin-api-dev-ia
 
 #### DROP mutation identity (app layer)
 
-Mutating `/ops/drop/*` routes call `require_drop_mutation_actor`. Deployed admin-api sets `REQUIRE_IAP_IDENTITY=true` (`_REQUIRE_IAP_IDENTITY` in `admin-api-dev.yaml`) so headerless callers get **401**. Local default is `false` so Vite/CLI against localhost keep working.
+Mutating `/ops/drop/*` routes and the power console require a DROP ops role. Deployed admin-api sets `REQUIRE_IAP_IDENTITY=true` (`_REQUIRE_IAP_IDENTITY` in `admin-api-dev.yaml`) so headerless callers get **401**; authenticated emails not on an allowlist get **403**. Local default is `false` so Vite/CLI against localhost keep working (role from `DROP_OPS_LOCAL_ROLE`, default `super_admin`).
 
 `decided_by` on bulk-approve prefers `X-Goog-Authenticated-User-Email` when present (ignores client spoof).
+
+#### DROP ops role allowlists
+
+Map IAP email → role (pipe- or comma-separated). Highest privilege wins if an email is on multiple lists.
+
+| Env | Role | Typical access |
+|-----|------|----------------|
+| `DROP_OPS_SUPER_ADMIN_EMAILS` | `super_admin` | Spine proxies, `GET /ops/drop/pipeline`, workers/queues, hash-index enqueue/process |
+| `DROP_OPS_ADMIN_EMAILS` | `admin` | Matching-results GET/bulk-approve, assign/escalate, matching.review decide |
+| `DROP_OPS_DATA_OWNER_EMAILS` | `data_owner` | Same review paths as `admin` |
+| `DROP_OPS_LOCAL_ROLE` | any of the three | Local-only default when `REQUIRE_IAP_IDENTITY` is false (default `super_admin`) |
+
+**Web session contract:** `GET /me` → `{ "email", "role" }`. `GET /auth/me` remains an identity probe (also includes `role` when resolvable).
 
 #### Calling admin-api with IAP (CLI / curl) — machine path
 
@@ -133,8 +146,9 @@ export IAP_ID_TOKEN="$(gcloud auth print-identity-token \
   --impersonate-service-account="$IAP_IMPERSONATE_SERVICE_ACCOUNT" \
   --include-email)"
 
-curl -sS -H "Authorization: Bearer $IAP_ID_TOKEN" "$ADMIN_API_URL/auth/me"
-# Expect email = compute SA and a role from ADMIN_API_SUPER_ADMINS / ADMINS allowlists.
+curl -sS -H "Authorization: Bearer $IAP_ID_TOKEN" "$ADMIN_API_URL/me"
+# Expect { "email": "<ops SA or user>", "role": "super_admin"|"admin"|"data_owner" }
+# Ensure that email is on DROP_OPS_SUPER_ADMIN_EMAILS (or ADMIN / DATA_OWNER).
 
 uv run --package habeas-cli habeas-cli drop pipeline
 uv run --package habeas-cli habeas-cli drop hash-index-refresh process --execute
@@ -147,7 +161,7 @@ Prerequisites Jose must keep granted:
 | `roles/iam.serviceAccountTokenCreator` | `user:jsirven@…` (agents) | ops SA (`95660886550-compute@…`) |
 | `roles/iap.httpsResourceAccessor` | ops SA + Jose | IAP on `admin-api-dev` |
 | `roles/run.invoker` | **only** `service-…@gcp-sa-iap.iam.gserviceaccount.com` | `admin-api-dev` |
-| `ADMIN_API_SUPER_ADMINS` (or `ADMINS`) env | include ops SA email | Cloud Run env on admin-api |
+| `DROP_OPS_SUPER_ADMIN_EMAILS` (etc.) env | include ops SA / operator emails | Cloud Run env on admin-api |
 | Worker `roles/run.invoker` | **only** admin-api runtime SA | `hash-index-refresh-dev`, `matching-dev`, … |
 
 Do **not** use `DATABASE_URL` for ops mutations — SELECT-only analysis only.

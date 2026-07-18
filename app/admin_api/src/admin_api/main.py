@@ -20,9 +20,15 @@ from admin_api.approvals import (
     is_matching_review_approved,
     list_approvals,
 )
-from admin_api.drop_pipeline import health_router as ops_health_router
+from admin_api.drop_pipeline import (
+    RequireDropOpsRole,
+    RequireMe,
+    decided_by_for_me,
+    health_router as ops_health_router,
+)
 from admin_api.drop_pipeline import router as drop_pipeline_router
 from habeas_privacy_core.audit import AuditMiddleware
+from habeas_privacy_core.auth import Me, is_authenticated_actor
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
 from habeas_privacy_core.db.requests import get_request, insert_request, list_requests
@@ -144,26 +150,54 @@ async def readyz():
     return payload
 
 
+@app.get("/me", response_model=Me)
+async def me(principal: RequireMe) -> Me:
+    """DROP ops principal for the admin web (U4 contract).
+
+    Returns ``{ email, role }``. Role comes from ``DROP_OPS_*_EMAILS`` allowlists
+    when IAP identity is required; locally uses ``DROP_OPS_LOCAL_ROLE``
+    (default ``super_admin``) when no allowlist match.
+    """
+    return principal
+
+
 @app.get("/auth/me")
 async def auth_me(request: Request):
     """Identity probe for IAP / Workspace SSO testing.
 
     Returns the actor parsed from ``X-Goog-Authenticated-User-Email`` when
     Identity-Aware Proxy fronts admin-api. Without IAP headers the actor is
-    ``unknown`` and ``authenticated`` is false.
+    ``unknown`` and ``authenticated`` is false. Includes ``role`` when a DROP
+    ops role can be resolved (same rules as ``GET /me``). Prefer ``GET /me``
+    for the admin web session contract.
     """
     from habeas_privacy_core.auth import (
         IAP_EMAIL_HEADER,
         actor_from_iap_header,
-        is_authenticated_actor,
+        resolve_me,
+        role_config_from_settings,
     )
+    from admin_api import drop_pipeline
+
+    from starlette.exceptions import HTTPException as StarletteHTTPException
 
     actor = actor_from_iap_header(request)
     raw = request.headers.get(IAP_EMAIL_HEADER)
+    role = None
+    try:
+        principal = resolve_me(
+            request, role_config_from_settings(drop_pipeline.settings)
+        )
+        role = principal.role
+    except StarletteHTTPException:
+        # Probe stays 200 for missing/unknown identity; role gates use GET /me.
+        role = None
+
     return {
         "authenticated": is_authenticated_actor(actor),
         "email": actor if is_authenticated_actor(actor) else None,
         "actor": actor,
+        "role": role,
         "iap_header_present": bool(raw and raw.strip()),
         "service": settings.service_name,
     }
@@ -227,6 +261,7 @@ async def requests_create(_body: ManualRequestBody):
 
 @app.get("/approvals", response_model=list[ApprovalRecord])
 async def approvals_list(
+    _me: RequireDropOpsRole,
     action_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
@@ -245,7 +280,10 @@ async def approvals_list(
 
 
 @app.post("/approvals/matching-review", response_model=ApprovalRecord, status_code=201)
-async def approvals_create_matching_review(body: MatchingReviewCreateBody):
+async def approvals_create_matching_review(
+    body: MatchingReviewCreateBody,
+    _me: RequireDropOpsRole,
+):
     """Create a pending matching.review approval gate for a request."""
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
@@ -273,16 +311,21 @@ async def approvals_create_matching_review(body: MatchingReviewCreateBody):
 
 
 @app.post("/approvals/{approval_id}/approve", response_model=ApprovalRecord)
-async def approvals_approve(approval_id: int, body: ApprovalDecisionBody):
+async def approvals_approve(
+    approval_id: int,
+    body: ApprovalDecisionBody,
+    me: RequireDropOpsRole,
+):
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
+    decided_by = decided_by_for_me(me, body.decided_by)
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await decide_approval(
             conn,
             approval_id=approval_id,
             status="approved",
-            decided_by=body.decided_by,
+            decided_by=decided_by,
             decision_reason=body.decision_reason,
         )
     if row is None:
@@ -291,16 +334,21 @@ async def approvals_approve(approval_id: int, body: ApprovalDecisionBody):
 
 
 @app.post("/approvals/{approval_id}/reject", response_model=ApprovalRecord)
-async def approvals_reject(approval_id: int, body: ApprovalDecisionBody):
+async def approvals_reject(
+    approval_id: int,
+    body: ApprovalDecisionBody,
+    me: RequireDropOpsRole,
+):
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
+    decided_by = decided_by_for_me(me, body.decided_by)
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await decide_approval(
             conn,
             approval_id=approval_id,
             status="rejected",
-            decided_by=body.decided_by,
+            decided_by=decided_by,
             decision_reason=body.decision_reason,
         )
     if row is None:

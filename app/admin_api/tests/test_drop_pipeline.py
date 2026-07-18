@@ -1080,6 +1080,11 @@ def test_matching_results_bulk_approve_prefers_iap_actor(monkeypatch: pytest.Mon
 
 def test_drop_mutation_requires_iap_when_configured(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(drop_pipeline.settings, "require_iap_identity", True)
+    monkeypatch.setattr(
+        drop_pipeline.settings,
+        "drop_ops_super_admin_emails",
+        "ops@habeas.com",
+    )
 
     async def fake_enqueue(conn: Any, *, state: str, list_types: list[str]) -> int:
         return 1
@@ -1092,6 +1097,13 @@ def test_drop_mutation_requires_iap_when_configured(monkeypatch: pytest.MonkeyPa
 
     with TestClient(app) as client:
         denied = client.post("/ops/drop/hash-index-refresh/enqueue", json={"state": "CA"})
+        unknown = client.post(
+            "/ops/drop/hash-index-refresh/enqueue",
+            headers={
+                "X-Goog-Authenticated-User-Email": "accounts.google.com:stranger@habeas.com"
+            },
+            json={"state": "CA"},
+        )
         allowed = client.post(
             "/ops/drop/hash-index-refresh/enqueue",
             headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
@@ -1099,8 +1111,32 @@ def test_drop_mutation_requires_iap_when_configured(monkeypatch: pytest.MonkeyPa
         )
 
     assert denied.status_code == 401
+    assert unknown.status_code == 403
     assert allowed.status_code == 200
     assert allowed.json()["attempt_id"] == 1
+
+
+def test_data_owner_cannot_read_pipeline_console(monkeypatch: pytest.MonkeyPatch):
+    """AE3 — non–super_admin deep-link to power console is API 403."""
+    monkeypatch.setattr(drop_pipeline.settings, "require_iap_identity", True)
+    monkeypatch.setattr(
+        drop_pipeline.settings, "drop_ops_data_owner_emails", "owner@habeas.com"
+    )
+
+    async def fake_status() -> dict[str, Any]:
+        return {"ok": True}
+
+    monkeypatch.setattr(drop_pipeline, "get_pipeline_status", fake_status)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/drop/pipeline",
+            headers={
+                "X-Goog-Authenticated-User-Email": "accounts.google.com:owner@habeas.com"
+            },
+        )
+
+    assert response.status_code == 403
 
 
 def test_decided_by_for_mutation_helpers():

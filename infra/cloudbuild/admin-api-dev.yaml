@@ -12,8 +12,10 @@ substitutions:
   _HASH_INDEX_REFRESH_URL: https://hash-index-refresh-dev-hsa55rg7ja-uk.a.run.app
   # App-layer gate: DROP mutations require X-Goog-Authenticated-User-Email (IAP).
   _REQUIRE_IAP_IDENTITY: "true"
-  # When role allowlists are deployed, keep ops SA on ADMIN_API_SUPER_ADMINS
-  # (set via Console or --env-vars-file — commas break --set-env-vars).
+  # Role allowlists (DROP_OPS_SUPER_ADMIN_EMAILS / DROP_OPS_ADMIN_EMAILS /
+  # DROP_OPS_DATA_OWNER_EMAILS): set via Console or --env-vars-file — pipe-separate
+  # emails; commas break --set-env-vars. Include ops SA email on super_admin list
+  # or all gated routes 403 after deploy (fail-closed).
   _CORS_ORIGINS: "https://admin-web-dev-hsa55rg7ja-uk.a.run.app|http://127.0.0.1:5173|http://localhost:5173|http://127.0.0.1:8080|http://localhost:8080"
 
 options:
