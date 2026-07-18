@@ -1,34 +1,40 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
-import { useState, type ReactNode } from 'react'
+import { Link, useNavigate, useSearch } from '@tanstack/react-router'
+import { type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import { listRuns, type OpsTimeWindow, type RunSummary } from '@/lib/api'
 import { RoleGate } from '@/lib/auth'
+import {
+  DEFAULT_RUNS_WINDOW,
+  RUNS_JOB_FILTERS,
+  RUNS_WINDOWS,
+  type RunsJobFilter,
+  type RunsSearch,
+  type RunsStatusFilter,
+  type RunsWindow,
+} from '@/router'
 
-const JOB_OPTIONS = [
+const JOB_OPTIONS: { value: RunsJobFilter | ''; label: string }[] = [
   { value: '', label: 'All jobs' },
   { value: 'drop_connector', label: 'Download' },
   { value: 'drop_ingestor', label: 'Ingest' },
   { value: 'matching', label: 'Matching' },
   { value: 'hash_index_refresh', label: 'Hash index refresh' },
-] as const
-
-const STATUS_OPTIONS = [
-  { value: '', label: 'All statuses' },
-  { value: 'failed', label: 'Failed (terminal)' },
-  { value: 'success', label: 'Success' },
-  { value: 'claimed', label: 'Claimed' },
-  { value: 'in_flight', label: 'In flight' },
-] as const
-
-const WINDOW_OPTIONS: { value: OpsTimeWindow; label: string }[] = [
-  { value: '8h', label: '8h' },
-  { value: '24h', label: '24h' },
-  { value: '1w', label: '1w' },
 ]
 
-const JOB_LABELS: Record<string, string> = {
+const STATUS_TABS: {
+  key: 'all' | RunsStatusFilter
+  label: string
+  apiStatus?: RunsStatusFilter
+}[] = [
+  { key: 'all', label: 'All' },
+  { key: 'failed', label: 'Failed', apiStatus: 'failed' },
+  { key: 'in_flight', label: 'In progress', apiStatus: 'in_flight' },
+  { key: 'success', label: 'Success', apiStatus: 'success' },
+]
+
+const JOB_LABELS: Record<RunsJobFilter, string> = {
   drop_connector: 'Download',
   drop_ingestor: 'Ingest',
   matching: 'Matching',
@@ -40,56 +46,58 @@ function Micro({ children }: { children: ReactNode }) {
 }
 
 function jobLabel(job: string): string {
-  return JOB_LABELS[job] ?? job.replaceAll('_', ' ')
+  if (job in JOB_LABELS) return JOB_LABELS[job as RunsJobFilter]
+  return job.replaceAll('_', ' ')
 }
 
-function runStatusClass(status: string): string {
+function isFailedStatus(status: string): boolean {
   const normalized = status.toLowerCase()
-  if (
+  return (
     normalized.includes('fail') ||
     normalized.includes('error') ||
     normalized === 'failed_terminal' ||
     normalized === 'abandoned' ||
     normalized === 'timeout'
-  ) {
-    return 'text-red-700'
-  }
-  if (
-    normalized.includes('success') ||
-    normalized.includes('complete') ||
-    normalized === 'ok' ||
-    normalized === 'succeeded'
-  ) {
-    return 'text-emerald-700'
-  }
-  if (normalized.includes('pending') || normalized.includes('claimed') || normalized === 'running') {
-    return 'text-habeas-mid'
-  }
-  return 'text-ink-soft'
+  )
 }
 
-function runStatusDotClass(status: string): string {
+function isSuccessStatus(status: string): boolean {
   const normalized = status.toLowerCase()
-  if (
-    normalized.includes('fail') ||
-    normalized.includes('error') ||
-    normalized === 'failed_terminal' ||
-    normalized === 'abandoned' ||
-    normalized === 'timeout'
-  ) {
-    return 'bg-red-600'
-  }
-  if (
+  return (
     normalized.includes('success') ||
     normalized.includes('complete') ||
     normalized === 'ok' ||
     normalized === 'succeeded'
-  ) {
-    return 'bg-emerald-600'
+  )
+}
+
+function isInFlightStatus(status: string): boolean {
+  const normalized = status.toLowerCase()
+  return (
+    normalized.includes('claimed') ||
+    normalized === 'running' ||
+    normalized === 'in_flight' ||
+    normalized.includes('pending')
+  )
+}
+
+function statusPillClass(status: string): string {
+  if (isFailedStatus(status)) {
+    return 'border-red-200/80 bg-red-50 text-red-800'
   }
-  if (normalized.includes('claimed') || normalized === 'running' || normalized === 'in_flight') {
-    return 'bg-habeas-light animate-pulse'
+  if (isSuccessStatus(status)) {
+    return 'border-emerald-200/80 bg-emerald-50 text-emerald-800'
   }
+  if (isInFlightStatus(status)) {
+    return 'border-habeas-light/40 bg-habeas-mid/10 text-habeas-navy'
+  }
+  return 'border-line bg-panel/60 text-ink-soft'
+}
+
+function statusDotClass(status: string): string {
+  if (isFailedStatus(status)) return 'bg-red-600'
+  if (isSuccessStatus(status)) return 'bg-emerald-600'
+  if (isInFlightStatus(status)) return 'bg-habeas-light animate-pulse'
   return 'bg-line-strong'
 }
 
@@ -106,7 +114,12 @@ function formatDuration(seconds: number | null | undefined): string {
 
 function formatTimestamp(value: string | null | undefined): string {
   if (!value) return '—'
-  return new Date(value).toLocaleString()
+  return new Date(value).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
 }
 
 function parseAttemptId(run: RunSummary): string {
@@ -114,84 +127,140 @@ function parseAttemptId(run: RunSummary): string {
   return parts.length > 1 ? parts[parts.length - 1]! : String(run.attempt_number)
 }
 
-function RunsFilters({
-  job,
-  status,
-  window,
-  onJobChange,
-  onStatusChange,
-  onWindowChange,
-}: {
-  job: string
-  status: string
-  window: OpsTimeWindow
-  onJobChange: (value: string) => void
-  onStatusChange: (value: string) => void
-  onWindowChange: (value: OpsTimeWindow) => void
-}) {
+function activeStatusTab(status: RunsStatusFilter | undefined): (typeof STATUS_TABS)[number]['key'] {
+  if (!status) return 'all'
+  return status
+}
+
+function buildRunsSearch(
+  current: RunsSearch,
+  patch: Partial<{
+    status: RunsStatusFilter | undefined
+    job: RunsJobFilter | undefined
+    window: RunsWindow
+    request_id: string | undefined
+  }>,
+): RunsSearch {
+  const next: RunsSearch = {
+    window: patch.window ?? current.window ?? DEFAULT_RUNS_WINDOW,
+  }
+  const job = patch.job !== undefined ? patch.job : current.job
+  const status = patch.status !== undefined ? patch.status : current.status
+  const requestId = patch.request_id !== undefined ? patch.request_id : current.request_id
+  if (job) next.job = job
+  if (status) next.status = status
+  if (requestId) next.request_id = requestId
+  return next
+}
+
+function StatusPill({ status }: { status: string }) {
   return (
-    <div className="flex flex-wrap items-end gap-4">
-      <label className="flex flex-col gap-1.5">
-        <span className="taste-micro">Window</span>
-        <div className="flex gap-1">
-          {WINDOW_OPTIONS.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              className={window === option.value ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'}
-              onClick={() => onWindowChange(option.value)}
-            >
-              {option.label}
-            </button>
-          ))}
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[0.62rem] font-medium uppercase tracking-[0.08em] ${statusPillClass(status)}`}
+    >
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusDotClass(status)}`} aria-hidden />
+      {status.replaceAll('_', ' ')}
+    </span>
+  )
+}
+
+function RunsToolbar({
+  search,
+  onSearchChange,
+}: {
+  search: RunsSearch
+  onSearchChange: (next: RunsSearch) => void
+}) {
+  const activeTab = activeStatusTab(search.status)
+
+  return (
+    <div className="flex flex-col gap-3 border-b border-line pb-3">
+      <div className="flex flex-wrap items-center gap-2">
+        {STATUS_TABS.map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            className={activeTab === tab.key ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'}
+            onClick={() =>
+              onSearchChange(buildRunsSearch(search, { status: tab.apiStatus }))
+            }
+          >
+            {tab.label}
+          </button>
+        ))}
+        <span className="mx-1 hidden h-4 w-px bg-line sm:inline" aria-hidden />
+        {RUNS_WINDOWS.map((windowOption) => (
+          <button
+            key={windowOption}
+            type="button"
+            className={
+              (search.window ?? DEFAULT_RUNS_WINDOW) === windowOption
+                ? 'taste-btn-primary text-xs'
+                : 'taste-btn text-xs'
+            }
+            onClick={() => onSearchChange(buildRunsSearch(search, { window: windowOption }))}
+          >
+            {windowOption}
+          </button>
+        ))}
+        <label className="ml-auto flex items-center gap-2">
+          <span className="taste-micro">Job</span>
+          <select
+            className="glass rounded-lg px-2 py-1.5 text-xs text-ink"
+            value={search.job ?? ''}
+            onChange={(event) => {
+              const value = event.target.value
+              onSearchChange(
+                buildRunsSearch(search, {
+                  job: RUNS_JOB_FILTERS.includes(value as RunsJobFilter)
+                    ? (value as RunsJobFilter)
+                    : undefined,
+                }),
+              )
+            }}
+          >
+            {JOB_OPTIONS.map((option) => (
+              <option key={option.value || 'all'} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      {search.request_id ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="taste-micro">Request filter</span>
+          <span className="taste-frost-chip font-mono normal-case tracking-normal">
+            {search.request_id}
+          </span>
+          <button
+            type="button"
+            className="taste-btn text-xs"
+            onClick={() => onSearchChange(buildRunsSearch(search, { request_id: undefined }))}
+          >
+            Clear
+          </button>
         </div>
-      </label>
-      <label className="flex flex-col gap-1.5">
-        <span className="taste-micro">Job</span>
-        <select
-          className="glass rounded-lg px-3 py-2 text-sm text-ink"
-          value={job}
-          onChange={(event) => onJobChange(event.target.value)}
-        >
-          {JOB_OPTIONS.map((option) => (
-            <option key={option.value || 'all'} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="flex flex-col gap-1.5">
-        <span className="taste-micro">Status</span>
-        <select
-          className="glass rounded-lg px-3 py-2 text-sm text-ink"
-          value={status}
-          onChange={(event) => onStatusChange(event.target.value)}
-        >
-          {STATUS_OPTIONS.map((option) => (
-            <option key={option.value || 'all'} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </label>
+      ) : null}
     </div>
   )
 }
 
 function RunsTable({ runs }: { runs: RunSummary[] }) {
   if (runs.length === 0) {
-    return <p className="p-6 text-sm text-ink-soft">No runs in this window.</p>
+    return <p className="px-3 py-5 text-xs text-ink-soft">No runs in this window.</p>
   }
 
   return (
     <div className="overflow-x-auto">
-      <table className="taste-table">
+      <table className="taste-table text-xs [&_td]:px-3 [&_td]:py-2 [&_th]:px-3 [&_th]:py-2">
         <thead>
           <tr>
-            <th>Time</th>
+            <th>Run</th>
             <th>Status</th>
             <th>Job</th>
             <th>Request</th>
+            <th>Started</th>
             <th>Duration</th>
           </tr>
         </thead>
@@ -199,45 +268,40 @@ function RunsTable({ runs }: { runs: RunSummary[] }) {
           {runs.map((run) => {
             const attemptId = parseAttemptId(run)
             return (
-              <tr key={run.run_id}>
-                <td className="whitespace-nowrap tabular-nums text-ink-soft">
+              <tr key={run.run_id} className="hover:bg-panel/40">
+                <td className="whitespace-nowrap font-mono text-[0.7rem]">
                   <Link
                     to="/ops/runs/$job/$attemptId"
                     params={{ job: run.job, attemptId }}
                     className="taste-link"
                   >
-                    {formatTimestamp(run.started_at)}
+                    {run.run_id}
                   </Link>
                 </td>
                 <td>
-                  <span className="inline-flex items-center gap-2">
-                    <span
-                      className={`h-2 w-2 shrink-0 rounded-full ${runStatusDotClass(run.status)}`}
-                      aria-hidden="true"
-                    />
-                    <span className={`text-xs font-medium ${runStatusClass(run.status)}`}>
-                      {run.status}
-                    </span>
-                  </span>
+                  <StatusPill status={run.status} />
                 </td>
-                <td>
-                  <span className="taste-frost-chip text-xs">{jobLabel(run.job)}</span>
-                  <span className="ml-2 font-mono text-[0.65rem] text-mute">{run.step}</span>
+                <td className="whitespace-nowrap">
+                  <span className="font-medium text-ink">{jobLabel(run.job)}</span>
+                  <span className="ml-1.5 font-mono text-[0.62rem] text-mute">{run.step}</span>
                 </td>
                 <td>
                   {run.request_id ? (
                     <Link
                       to="/requests/$requestId"
                       params={{ requestId: run.request_id }}
-                      className="taste-link font-mono text-xs"
+                      className="taste-link font-mono text-[0.7rem]"
                     >
-                      {run.request_id}
+                      {run.request_id.slice(0, 8)}…
                     </Link>
                   ) : (
                     <span className="text-ink-soft">—</span>
                   )}
                 </td>
-                <td className="tabular-nums text-ink-soft">
+                <td className="whitespace-nowrap tabular-nums text-ink-soft">
+                  {formatTimestamp(run.started_at)}
+                </td>
+                <td className="whitespace-nowrap tabular-nums text-ink-soft">
                   {formatDuration(run.duration_seconds)}
                 </td>
               </tr>
@@ -250,60 +314,59 @@ function RunsTable({ runs }: { runs: RunSummary[] }) {
 }
 
 function RunsContent() {
-  const [job, setJob] = useState('')
-  const [status, setStatus] = useState('')
-  const [window, setWindow] = useState<OpsTimeWindow>('24h')
+  const navigate = useNavigate()
+  const search = useSearch({ from: '/ops/runs' })
+  const { job, status, request_id: requestId } = search
+  const window = search.window ?? DEFAULT_RUNS_WINDOW
 
   const runsQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'runs', { job, status, window }],
+    queryKey: ['admin-api', 'ops', 'runs', { job, status, window, requestId }],
     queryFn: () =>
       listRuns({
-        job: job || undefined,
-        status: status || undefined,
-        window,
+        job,
+        status,
+        request_id: requestId,
+        window: window as OpsTimeWindow,
         limit: 100,
       }),
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })
 
+  function updateSearch(next: RunsSearch) {
+    void navigate({ to: '/ops/runs', search: next, replace: true })
+  }
+
   const loading = runsQuery.isPending && !runsQuery.data
 
   return (
-    <section className="space-y-10">
-      <header className="grid gap-8 lg:grid-cols-[1.1fr_0.9fr] lg:items-end">
+    <section className="space-y-4">
+      <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <Micro>Ops · Run</Micro>
-          <div className="mt-3 flex flex-wrap items-baseline gap-3">
-            <h2 className="font-display text-[2.5rem] font-medium leading-none tracking-tight text-ink">
-              Runs
-            </h2>
+          <div className="mt-1 flex flex-wrap items-baseline gap-2">
+            <h2 className="font-display text-xl font-medium tracking-tight text-ink">Runs</h2>
             {runsQuery.isFetching && !runsQuery.isPending ? (
               <span className="taste-frost-chip">Refreshing</span>
             ) : null}
           </div>
-          <p className="mt-3 max-w-md text-sm text-ink-soft">
-            Job attempts across DROP workers — ids, statuses, and durations only.
+          <p className="mt-1 text-xs text-ink-soft">
+            Job attempts across DROP workers — filter by status, job, and time window.
           </p>
         </div>
-        <RunsFilters
-          job={job}
-          status={status}
-          window={window}
-          onJobChange={setJob}
-          onStatusChange={setStatus}
-          onWindowChange={setWindow}
-        />
       </header>
 
       <div className="taste-panel overflow-hidden">
+        <div className="border-b border-line px-3 pt-3">
+          <RunsToolbar search={search} onSearchChange={updateSearch} />
+        </div>
         {loading ? (
-          <div className="p-6">
+          <div className="p-4">
             <SkeletonLines lines={8} />
           </div>
         ) : null}
         {runsQuery.isError ? (
-          <p className="p-6 text-sm text-red-700">Could not load runs.</p>
+          <p className="px-3 py-5 text-xs text-red-700">Could not load runs.</p>
         ) : null}
         {!loading && !runsQuery.isError && runsQuery.data ? (
           <RunsTable runs={runsQuery.data} />
