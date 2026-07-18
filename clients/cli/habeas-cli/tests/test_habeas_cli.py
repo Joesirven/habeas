@@ -60,3 +60,29 @@ def test_oauth_client_id_mints_bearer(monkeypatch: pytest.MonkeyPatch):
         headers = _auth_headers("https://admin-api-dev-hsa55rg7ja-uk.a.run.app")
     mint.assert_called_once_with("123.apps.googleusercontent.com")
     assert headers["Authorization"] == "Bearer minted.jwt"
+
+
+def test_gcloud_mint_uses_impersonation_and_include_email():
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003
+        assert "--include-email" in cmd
+        assert (
+            "--impersonate-service-account=ops@example-gcp-project.iam.gserviceaccount.com"
+            in cmd
+        )
+        assert "--audiences=123.apps.googleusercontent.com" in cmd
+
+        class Completed:
+            stdout = "sa.jwt.token\n"
+            stderr = ""
+            returncode = 0
+
+        return Completed()
+
+    with patch("habeas_cli.admin_api_client.subprocess.run", side_effect=fake_run):
+        from habeas_cli.admin_api_client import _token_via_gcloud
+
+        token = _token_via_gcloud(
+            "123.apps.googleusercontent.com",
+            impersonate_sa="ops@example-gcp-project.iam.gserviceaccount.com",
+        )
+    assert token == "sa.jwt.token"

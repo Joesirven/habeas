@@ -427,6 +427,14 @@ def test_hash_index_refresh_enqueue_all(monkeypatch: pytest.MonkeyPatch):
     assert body["states"][0]["state"] == "CA"
 
 
+def test_hash_index_refresh_enqueue_rejects_empty_body():
+    """Empty POST must not silently enqueue CA (wave confusion)."""
+    with TestClient(app) as client:
+        response = client.post("/ops/drop/hash-index-refresh/enqueue", json={})
+
+    assert response.status_code == 422
+
+
 def test_hash_index_refresh_enqueue_rejects_invalid_state(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
 

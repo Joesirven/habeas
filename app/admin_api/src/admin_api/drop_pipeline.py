@@ -119,11 +119,15 @@ class FulfillProxyBody(BaseModel):
 
 
 class HashIndexRefreshEnqueueBody(BaseModel):
-    state: str = "CA"
+    """Single-state enqueue — ``state`` is required (no CA default on empty POST)."""
+
+    state: str = Field(min_length=2, max_length=32)
     list_types: list[str] | None = None
 
 
 class HashIndexRefreshEnqueueAllBody(BaseModel):
+    """Wave enqueue — empty body is OK; use this path, not bare ``/enqueue``."""
+
     list_types: list[str] | None = None
 
 
@@ -675,9 +679,13 @@ async def drop_fulfill(
 @router.post("/hash-index-refresh/enqueue")
 async def hash_index_refresh_enqueue(
     _actor: DropMutationActor,
-    body: HashIndexRefreshEnqueueBody | None = None,
+    body: HashIndexRefreshEnqueueBody,
 ):
-    """Enqueue a hash-index refresh attempt (single-flight per state)."""
+    """Enqueue a hash-index refresh attempt (single-flight per state).
+
+    Requires an explicit ``state`` — empty POST does not default to CA.
+    For all served states use ``/hash-index-refresh/enqueue-all``.
+    """
     from habeas_privacy_core.db.hash_index_refresh import enqueue_hash_index_refresh
     from habeas_privacy_core.geo.state import (
         InvalidStateAcronymError,
@@ -685,10 +693,9 @@ async def hash_index_refresh_enqueue(
     )
 
     _require_database()
-    payload = body or HashIndexRefreshEnqueueBody()
-    list_types = payload.list_types or ["NDZ", "Email", "Phone"]
+    list_types = body.list_types or ["NDZ", "Email", "Phone"]
     try:
-        state = normalize_state_acronym(payload.state)
+        state = normalize_state_acronym(body.state)
     except InvalidStateAcronymError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     pool = get_pool()

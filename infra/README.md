@@ -99,27 +99,53 @@ Mutating `/ops/drop/*` routes call `require_drop_mutation_actor`. Deployed admin
 
 `decided_by` on bulk-approve prefers `X-Goog-Authenticated-User-Email` when present (ignores client spoof).
 
-#### Calling admin-api with IAP (CLI / curl)
+#### Calling admin-api with IAP (CLI / curl) — machine path
 
-OAuth client ID: Cloud Console → Security → Identity-Aware Proxy → `admin-api-dev` (or `gcloud beta iap settings get`).
+User ADC **cannot** mint `--audiences` ID tokens. Mint via the ops/runtime
+service account (impersonation). Audience = IAP OAuth client ID for
+`admin-api-dev` (not the Cloud Run URL).
+
+Dev client ID (custom OAuth applied to Cloud Run IAP):
+
+`95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com`
 
 ```bash
 export ADMIN_API_URL=https://admin-api-dev-hsa55rg7ja-uk.a.run.app
-export IAP_OAUTH_CLIENT_ID=<iap-oauth-client-id>
-# CLI mints via google-auth ADC, or prefetch:
-export IAP_ID_TOKEN="$(gcloud auth print-identity-token --audiences="$IAP_OAUTH_CLIENT_ID")"
+export IAP_OAUTH_CLIENT_ID=95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com
+export IAP_IMPERSONATE_SERVICE_ACCOUNT=95660886550-compute@developer.gserviceaccount.com
+
+# Prefetch (CLI also mints this automatically when IAP_OAUTH_CLIENT_ID is set):
+export IAP_ID_TOKEN="$(gcloud auth print-identity-token \
+  --audiences="$IAP_OAUTH_CLIENT_ID" \
+  --impersonate-service-account="$IAP_IMPERSONATE_SERVICE_ACCOUNT" \
+  --include-email)"
 
 curl -sS -H "Authorization: Bearer $IAP_ID_TOKEN" "$ADMIN_API_URL/auth/me"
+# Expect email = compute SA and a role from ADMIN_API_SUPER_ADMINS / ADMINS allowlists.
+
 uv run --package habeas-cli habeas-cli drop pipeline
 uv run --package habeas-cli habeas-cli drop hash-index-refresh process --execute
 ```
+
+Prerequisites Jose must keep granted:
+
+| Grant | Principal | Resource |
+|-------|-----------|----------|
+| `roles/iam.serviceAccountTokenCreator` | `user:jsirven@…` (agents) | ops SA (`95660886550-compute@…`) |
+| `roles/iap.httpsResourceAccessor` | ops SA + Jose | IAP on `admin-api-dev` |
+| `roles/run.invoker` | **only** `service-…@gcp-sa-iap.iam.gserviceaccount.com` | `admin-api-dev` |
+| `ADMIN_API_SUPER_ADMINS` (or `ADMINS`) env | include ops SA email | Cloud Run env on admin-api |
+| Worker `roles/run.invoker` | **only** admin-api runtime SA | `hash-index-refresh-dev`, `matching-dev`, … |
+
+Do **not** use `DATABASE_URL` for ops mutations — SELECT-only analysis only.
+Do **not** curl workers or grant yourself worker `run.invoker`.
 
 Local web against remote admin-api (Vite proxy injects the bearer):
 
 ```bash
 cd clients/web
 export VITE_PROXY_TARGET="$ADMIN_API_URL"
-export IAP_ID_TOKEN  # as above
+export IAP_ID_TOKEN  # as above (must be SA-impersonated + --include-email)
 bun run dev   # leave VITE_ADMIN_API_URL unset so the app uses /api
 ```
 
@@ -127,9 +153,10 @@ bun run dev   # leave VITE_ADMIN_API_URL unset so the app uses /api
 
 1. Full IAP JWT assertion verification in admin-api (email header alone is trusted at the edge today — see `habeas_privacy_core.auth` README).
 2. Deployed SPA→admin-api is cross-origin; cookie IAP is best-effort (`credentials: 'include'`). Prefer CLI + IAP token for mutations until a same-origin `/api` BFF exists.
-3. Grant worker invoker only to the admin-api runtime SA:
+3. Re-lock admin-api invoker / grant worker invoker:
 
 ```bash
+gcloud builds submit --config=infra/cloudbuild/admin-api-dev-iam.yaml --project=example-gcp-project
 gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev-iam.yaml \
   --project=example-gcp-project
 ```

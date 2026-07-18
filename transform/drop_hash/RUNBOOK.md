@@ -81,16 +81,28 @@ MDR/DROP source of truth (**Q6**).
 **Enqueue-all wave (code complete — do not fire against prod without Jose):**
 
 All enqueue/process calls go through **admin-api behind Identity-Aware Proxy**.
-Do not curl workers or use headerless Cloud Run invoker tokens against admin-api-dev.
-See `infra/README.md` (“Calling admin-api with IAP”).
+Do not curl workers, grant yourself worker `run.invoker`, or use `DATABASE_URL` for
+mutations. Empty `POST /enqueue` does **not** default to CA — use `--state` or
+`--all-states` / `enqueue-all`. See `infra/README.md` (“Calling admin-api with IAP”).
+
+```bash
+export ADMIN_API_URL=https://admin-api-dev-hsa55rg7ja-uk.a.run.app
+export IAP_OAUTH_CLIENT_ID=95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com
+export IAP_IMPERSONATE_SERVICE_ACCOUNT=95660886550-compute@developer.gserviceaccount.com
+export IAP_ID_TOKEN="$(gcloud auth print-identity-token \
+  --audiences="$IAP_OAUTH_CLIENT_ID" \
+  --impersonate-service-account="$IAP_IMPERSONATE_SERVICE_ACCOUNT" \
+  --include-email)"
+curl -sS -H "Authorization: Bearer $IAP_ID_TOKEN" "$ADMIN_API_URL/auth/me"
+```
 
 | Surface | Entry |
 |---------|--------|
 | Admin-api | `POST /ops/drop/hash-index-refresh/enqueue-all` (IAP bearer) → `enqueue_hash_index_refresh_all_states` |
 | Web | Drop ops → Pipeline → Configurations → **Enqueue all states** (local: Vite `/api`; remote needs IAP) |
-| CLI | `habeas-cli drop hash-index-refresh enqueue --all-states --execute` with `ADMIN_API_URL` + `IAP_OAUTH_CLIENT_ID` or `IAP_ID_TOKEN` |
+| CLI | `habeas-cli drop hash-index-refresh enqueue --all-states --execute` with `ADMIN_API_URL` + IAP SA token |
 | Process | `habeas-cli drop hash-index-refresh process --execute` (admin-api proxies the worker; never call worker `/process` as a user) |
-| Worker | Invoked only by admin-api runtime SA after each successful per-state dbt build (rematch for that state) |
+| Worker | Invoked only by admin-api runtime SA (`roles/run.invoker` on workers — never user/IAP) |
 
 Parallel per-state `dbt build --vars '{state: …}'` into shared serving marts is
 supported (staging/int/build relations are state-suffixed). Watch BigQuery
@@ -103,6 +115,7 @@ tables racing under parallel workers. Fixed via state-suffixed aliases; re-enque
 FL only after the fix is deployed:
 
 ```bash
+# Requires IAP SA token (see copy-paste block above) — not DATABASE_URL.
 habeas-cli drop hash-index-refresh enqueue --state FL --execute
 ```
 

@@ -4,7 +4,7 @@
 
 Typer package `habeas-cli`. UV workspace member.
 
-- Mutations → admin-api (Identity-Aware Proxy via `IAP_OAUTH_CLIENT_ID` / `IAP_ID_TOKEN`); send `X-Client: habeas-cli`
+- Mutations → admin-api (Identity-Aware Proxy via `IAP_OAUTH_CLIENT_ID` + SA impersonation / `IAP_ID_TOKEN`); send `X-Client: habeas-cli`
 - Reads → Postgres read-only role
 - Entrypoint: `habeas-cli` console script
 - DROP ops: `drop pipeline` (read); mutations require `--execute` (dry-run default):

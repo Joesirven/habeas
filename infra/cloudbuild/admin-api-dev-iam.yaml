@@ -1,9 +1,12 @@
 # One-shot: lock down admin-api-dev invoker to IAP service agent only.
-# Do NOT grant allUsers — use admin-web-dev (Cloud Run + IAP) as the SSO front door.
+# Do NOT grant allUsers, user:*, or compute SA run.invoker — that bypasses IAP.
+# Operators call via IAP bearer (SA impersonation); see infra/README.md.
 substitutions:
   _REGION: us-east4
   _PROJECT: example-gcp-project
   _SERVICE: admin-api-dev
+  _IAP_SA: service-95660886550@gcp-sa-iap.iam.gserviceaccount.com
+  _OPS_SA: 95660886550-compute@developer.gserviceaccount.com
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -18,11 +21,19 @@ steps:
         gcloud components install beta --quiet
         gcloud beta run services update ${_SERVICE} --region=${_REGION} --project=${_PROJECT} --iap --quiet
         gcloud run services add-iam-policy-binding ${_SERVICE} --region=${_REGION} --project=${_PROJECT} \
-          --member=serviceAccount:service-95660886550@gcp-sa-iap.iam.gserviceaccount.com \
+          --member=serviceAccount:${_IAP_SA} \
           --role=roles/run.invoker --quiet || true
         gcloud run services remove-iam-policy-binding ${_SERVICE} --region=${_REGION} --project=${_PROJECT} \
           --member=allUsers --role=roles/run.invoker --quiet || true
+        gcloud run services remove-iam-policy-binding ${_SERVICE} --region=${_REGION} --project=${_PROJECT} \
+          --member=user:dev-owner-1@example.com --role=roles/run.invoker --quiet || true
+        gcloud run services remove-iam-policy-binding ${_SERVICE} --region=${_REGION} --project=${_PROJECT} \
+          --member=serviceAccount:${_OPS_SA} --role=roles/run.invoker --quiet || true
         gcloud beta iap web add-iam-policy-binding --project=${_PROJECT} --region=${_REGION} \
           --resource-type=cloud-run --service=${_SERVICE} \
           --member=user:dev-owner-1@example.com --role=roles/iap.httpsResourceAccessor \
+          --condition=None --quiet || true
+        gcloud beta iap web add-iam-policy-binding --project=${_PROJECT} --region=${_REGION} \
+          --resource-type=cloud-run --service=${_SERVICE} \
+          --member=serviceAccount:${_OPS_SA} --role=roles/iap.httpsResourceAccessor \
           --condition=None --quiet || true

@@ -46,7 +46,11 @@ def hash_index_status(human: bool = typer.Option(False, "--human")):
 
 @hash_index_app.command("enqueue")
 def hash_index_enqueue(
-    state: str = typer.Option("CA", "--state"),
+    state: str | None = typer.Option(
+        None,
+        "--state",
+        help="USPS state acronym (required unless --all-states)",
+    ),
     all_states: bool = typer.Option(
         False,
         "--all-states",
@@ -57,9 +61,28 @@ def hash_index_enqueue(
 ):
     """Enqueue hash-index refresh (single-flight per state, or all served states)."""
     if all_states:
+        if state is not None:
+            emit(
+                {
+                    "status": "error",
+                    "detail": "Do not pass --state with --all-states",
+                },
+                human=human,
+            )
+            raise typer.Exit(code=1)
         body: dict = {"list_types": ["NDZ", "Email", "Phone"]}
         path = "/ops/drop/hash-index-refresh/enqueue-all"
     else:
+        if not state:
+            emit(
+                {
+                    "status": "error",
+                    "detail": "Pass --state XX or --all-states "
+                    "(no implicit CA default)",
+                },
+                human=human,
+            )
+            raise typer.Exit(code=1)
         body = {"state": state, "list_types": ["NDZ", "Email", "Phone"]}
         path = "/ops/drop/hash-index-refresh/enqueue"
     if not execute:

@@ -32,7 +32,12 @@ Optional: copy `.env.example` to `.env`. To hit **deployed** admin-api through t
 
 ```bash
 export VITE_PROXY_TARGET=https://admin-api-dev-hsa55rg7ja-uk.a.run.app
-export IAP_ID_TOKEN="$(gcloud auth print-identity-token --audiences="$IAP_OAUTH_CLIENT_ID")"
+export IAP_OAUTH_CLIENT_ID=95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com
+export IAP_IMPERSONATE_SERVICE_ACCOUNT=95660886550-compute@developer.gserviceaccount.com
+export IAP_ID_TOKEN="$(gcloud auth print-identity-token \
+  --audiences="$IAP_OAUTH_CLIENT_ID" \
+  --impersonate-service-account="$IAP_IMPERSONATE_SERVICE_ACCOUNT" \
+  --include-email)"
 bun run dev   # keep VITE_ADMIN_API_URL unset
 ```
 
