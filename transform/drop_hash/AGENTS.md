@@ -10,7 +10,7 @@ Production dbt project for DROP hash-index serving tables in BigQuery.
 | `models/marts/` | Serving marts → `email_hash`, `phone_hash`, `ndz_hash` via build+state merge |
 | `udf/` | BigQuery JS `normalize_name` in `drop_hash_index` (bake-off winner) |
 | `drop_normalize/` | Python DROP v1.2.0 standardization + CPPA vector tests |
-| `macros/swap_serving_tables.sql` | Post-build state-scoped merge into serving tables |
+| `macros/swap_serving_tables.sql` | `generate_alias_name` (state-suffixed physical tables) + serving merge |
 
 ## Invariants
 
@@ -22,12 +22,14 @@ Production dbt project for DROP hash-index serving tables in BigQuery.
 - Serving columns: `(hash_value, dwid, state, built_at)`; clustered `(state, hash_value)`.
 - Phone mart: two rows per dwid when both cell and land exist.
 - Worker invokes dbt from this directory with `--vars '{state: ...}'` per state.
-  Shared marts are filled for all MDR/DROP-served states (A10: USPS 50+DC = 51
-  codes until Jose confirms Q6). Default `state: CA` in `dbt_project.yml` is
-  local convenience only — production passes the attempt’s state. Full-wave
-  enqueue is admin-api `.../enqueue-all`; live BQ coverage + blockers are in
-  [RUNBOOK.md](RUNBOOK.md) (“Live multi-state builds”). No prod dbt /
-  enqueue-all without Jose.
+  Shared serving marts hold all MDR/DROP-served states (A10: USPS 50+DC = 51
+  codes until Jose confirms Q6). Physical staging/int/build tables are
+  **state-suffixed** so parallel per-state jobs are safe; only
+  `email_hash` / `phone_hash` / `ndz_hash` are shared. Default `state: CA` in
+  `dbt_project.yml` is local convenience only — production passes the attempt’s
+  state. Full-wave enqueue is admin-api `.../enqueue-all`; live BQ coverage +
+  blockers are in [RUNBOOK.md](RUNBOOK.md) (“Live multi-state builds”). No prod
+  dbt / enqueue-all without Jose.
 - UDF body must stay the bake-off winner (`normalizeName` + LATIN_EXTENDED).
 
 ## Commands

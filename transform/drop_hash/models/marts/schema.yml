@@ -3,8 +3,8 @@ version: 2
 models:
   - name: mart_email_hash
     description: >
-      Serving staging for email hashes (materializes as email_hash__build, then
-      merged into email_hash). Clustered (state, hash_value).
+      Serving staging for email hashes (materializes as email_hash__build_<state>,
+      then merged into email_hash). Clustered (state, hash_value).
     columns:
       - name: hash_value
         description: Base64(SHA-256) of DROP-standardized email
@@ -25,8 +25,8 @@ models:
 
   - name: mart_phone_hash
     description: >
-      Serving staging for phone hashes (phone_hash__build → phone_hash). Cell and
-      land are separate rows when both exist. Clustered (state, hash_value).
+      Serving staging for phone hashes (phone_hash__build_<state> → phone_hash).
+      Cell and land are separate rows when both exist. Clustered (state, hash_value).
     columns:
       - name: hash_value
         description: Base64(SHA-256) of DROP-standardized 10-digit phone
@@ -44,7 +44,7 @@ models:
 
   - name: mart_ndz_hash
     description: >
-      Serving staging for NDZ composite hashes (ndz_hash__build → ndz_hash).
+      Serving staging for NDZ composite hashes (ndz_hash__build_<state> → ndz_hash).
       Built from name UDF + dob/zip ints. Clustered (state, hash_value).
     columns:
       - name: hash_value

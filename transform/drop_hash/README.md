@@ -75,9 +75,12 @@ land numbers, `phone_hash` serving gets **two rows** for that `dwid` (distinct h
 
 ### Serving swap
 
-Mart models write to `email_hash__build`, `phone_hash__build`, `ndz_hash__build`.
-On successful `dbt build`, `perform_serving_swap()` renames build tables into the live
-serving names so a failed run never replaces live tables with empty results.
+Mart models write to state-scoped builds (`email_hash__build_<state>`,
+`phone_hash__build_<state>`, `ndz_hash__build_<state>`). Staging and intermediate
+tables are likewise suffixed (`stg_phones_fl`, `int_phone_hash_fl`, …) via
+`generate_alias_name` so parallel per-state workers cannot clobber each other.
+On successful `dbt build`, `perform_serving_swap()` merges that state’s build into
+the shared serving tables (`DELETE`/`INSERT` filtered by `state`).
 
 Disable swap (e.g. dry run): `--vars '{perform_serving_swap: false}'`.
 
