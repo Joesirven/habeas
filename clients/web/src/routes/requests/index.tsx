@@ -110,7 +110,15 @@ export function RequestsPage() {
                       {SOURCE_LABELS[request.intake_source] ?? request.intake_source}
                     </span>
                   </td>
-                  <td className="font-mono text-xs text-ink-soft">{request.id}</td>
+                  <td className="font-mono text-xs text-ink-soft">
+                    <Link
+                      to="/requests/$requestId"
+                      params={{ requestId: request.id }}
+                      className="text-habeas-mid hover:underline"
+                    >
+                      {request.id}
+                    </Link>
+                  </td>
                   <td className="font-mono text-xs text-ink-soft">
                     {request.raw_record_id ?? '—'}
                   </td>
