@@ -553,6 +553,45 @@ def test_hash_index_refresh_enqueue_all(monkeypatch: pytest.MonkeyPatch):
     assert body["states"][0]["state"] == "CA"
 
 
+def test_hash_index_refresh_process_uses_long_proxy_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """dbt builds exceed DEFAULT_PROXY_TIMEOUT (60s); process must use 3300s."""
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, str]:
+            return {"status": "idle"}
+
+    class FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured["timeout"] = kwargs.get("timeout")
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url: str, json: Any = None, headers: Any = None) -> FakeResponse:
+            captured["url"] = url
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(drop_pipeline, "auth_headers_for", lambda _url: {})
+
+    with TestClient(app) as client:
+        response = client.post("/ops/drop/hash-index-refresh/process")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "idle"
+    assert captured["url"].endswith("/process")
+    assert captured["timeout"] == drop_pipeline.HASH_INDEX_REFRESH_PROXY_TIMEOUT
+    assert captured["timeout"] > drop_pipeline.DEFAULT_PROXY_TIMEOUT
+
+
 def test_hash_index_refresh_enqueue_rejects_empty_body():
     """Empty POST must not silently enqueue CA (wave confusion)."""
     with TestClient(app) as client:

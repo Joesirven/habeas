@@ -671,10 +671,19 @@ async def proxy_post_payload(
                 payload = {"raw": response.text}
             return response.status_code, payload
     except httpx.RequestError as exc:
-        logger.warning("drop_pipeline_proxy_unreachable", extra={"url": url, "error": str(exc)})
+        # Prefer type name — httpx timeouts often have empty str(exc).
+        upstream_error = str(exc) or type(exc).__name__
+        logger.warning(
+            "drop_pipeline_proxy_unreachable",
+            extra={
+                "url": url,
+                "upstream_error": upstream_error,
+                "timeout_seconds": timeout,
+            },
+        )
         return 502, {
             "status": "error",
-            "detail": f"upstream unreachable: {exc}",
+            "detail": f"upstream unreachable: {upstream_error}",
             "url": url,
         }
 

@@ -16,7 +16,10 @@ substitutions:
   # DROP_OPS_DATA_OWNER_EMAILS): set via Console or --env-vars-file — pipe-separate
   # emails; commas break --set-env-vars. Include ops SA email on super_admin list
   # or all gated routes 403 after deploy (fail-closed).
-  _CORS_ORIGINS: "https://admin-web-dev-hsa55rg7ja-uk.a.run.app|http://127.0.0.1:5173|http://localhost:5173|http://127.0.0.1:8080|http://localhost:8080"
+  _CORS_ORIGINS: "https://ops-ia-web-dev-hsa55rg7ja-uk.a.run.app|https://admin-web-dev-hsa55rg7ja-uk.a.run.app|http://127.0.0.1:5174|http://localhost:5174|http://127.0.0.1:5173|http://localhost:5173|http://127.0.0.1:8080|http://localhost:8080"
+  # Pipe-separated (commas also parse in app); keep out of CSV --set-env-vars.
+  _ADMIN_API_SUPER_ADMINS: "dev-owner-1@example.com|95660886550-compute@developer.gserviceaccount.com"
+  _DROP_OPS_SUPER_ADMIN_EMAILS: "dev-owner-1@example.com|95660886550-compute@developer.gserviceaccount.com"
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -40,18 +43,36 @@ steps:
 
   - id: deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    entrypoint: gcloud
+    entrypoint: bash
     args:
-      - run
-      - deploy
-      - ${_SERVICE}
-      - --image=us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
-      - --region=${_REGION}
-      - --platform=managed
-      - --no-allow-unauthenticated
-      - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
-      - --timeout=3600
-      - --set-env-vars=SERVICE_NAME=admin-api,WORKER_ID=admin-api-dev,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},DROP_CONNECTOR_URL=${_DROP_CONNECTOR_URL},DROP_INGESTOR_URL=${_DROP_INGESTOR_URL},REQUEST_DISPATCHER_URL=${_REQUEST_DISPATCHER_URL},MATCHING_URL=${_MATCHING_URL},DATA_FULFILLMENT_URL=${_DATA_FULFILLMENT_URL},HASH_INDEX_REFRESH_URL=${_HASH_INDEX_REFRESH_URL},REQUIRE_IAP_IDENTITY=${_REQUIRE_IAP_IDENTITY},CORS_ORIGINS=${_CORS_ORIGINS}
+      - -c
+      - |
+        # env-vars-file avoids --set-env-vars CSV breakage on commas (emails) and pipes (CORS).
+        cat > /tmp/admin-api-env.yaml <<EOF
+        SERVICE_NAME: "admin-api"
+        WORKER_ID: "admin-api-dev"
+        GCP_PROJECT: "${_PROJECT}"
+        LOG_LEVEL: "INFO"
+        DATABASE_URL: "${_DATABASE_URL}"
+        DROP_CONNECTOR_URL: "${_DROP_CONNECTOR_URL}"
+        DROP_INGESTOR_URL: "${_DROP_INGESTOR_URL}"
+        REQUEST_DISPATCHER_URL: "${_REQUEST_DISPATCHER_URL}"
+        MATCHING_URL: "${_MATCHING_URL}"
+        DATA_FULFILLMENT_URL: "${_DATA_FULFILLMENT_URL}"
+        HASH_INDEX_REFRESH_URL: "${_HASH_INDEX_REFRESH_URL}"
+        REQUIRE_IAP_IDENTITY: "${_REQUIRE_IAP_IDENTITY}"
+        CORS_ORIGINS: "${_CORS_ORIGINS}"
+        ADMIN_API_SUPER_ADMINS: "${_ADMIN_API_SUPER_ADMINS}"
+        DROP_OPS_SUPER_ADMIN_EMAILS: "${_DROP_OPS_SUPER_ADMIN_EMAILS}"
+        EOF
+        gcloud run deploy ${_SERVICE} \
+          --image=us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG} \
+          --region=${_REGION} \
+          --platform=managed \
+          --no-allow-unauthenticated \
+          --add-cloudsql-instances=${_CLOUDSQL_INSTANCE} \
+          --timeout=3600 \
+          --env-vars-file=/tmp/admin-api-env.yaml
 
   # Invoker = IAP service agent only. Never grant user/compute run.invoker —
   # that lets headerless Cloud Run tokens skip IAP. Re-lock:
