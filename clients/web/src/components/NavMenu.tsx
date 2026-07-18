@@ -158,9 +158,11 @@ function NavDropdown({ group }: { group: NavGroup }) {
 }
 
 export function NavMenu() {
-  const { role, isLoading } = useAuth()
-  const showOps = canAccessOpsSurfaces(role)
-  const showInsights = canAccessInsights(role)
+  const { role, isLoading, isError } = useAuth()
+  // When /me fails (common with IAP on a separate admin-api host), still surface
+  // Ops links so the IA is visible; RoleGate on each route enforces access.
+  const showOps = canAccessOpsSurfaces(role) || isError
+  const showInsights = canAccessInsights(role) || isError
 
   return (
     <nav

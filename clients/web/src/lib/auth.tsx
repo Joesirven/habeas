@@ -112,13 +112,33 @@ type RoleGateProps = {
 }
 
 export function RoleGate({ allow, children }: RoleGateProps) {
-  const { role, isLoading } = useAuth()
+  const { role, isLoading, isError, error } = useAuth()
 
   if (isLoading) {
     return (
       <div role="status" aria-label="Loading access">
         <SkeletonLines lines={4} />
       </div>
+    )
+  }
+
+  if (isError) {
+    return (
+      <section className="space-y-4">
+        <p className="taste-micro">Access</p>
+        <h2 className="font-display text-[2rem] font-medium tracking-tight text-ink">
+          Cannot load role
+        </h2>
+        <p className="max-w-lg text-sm leading-relaxed text-ink-soft">
+          The UI called <code className="text-ink">GET /me</code> on admin-api and failed. With
+          Identity-Aware Proxy on a separate API host, the browser often cannot send that
+          identity. Fix IAP/CORS for admin-api, or run the UI locally against{' '}
+          <code className="text-ink">http://127.0.0.1:5174</code> (proxies to local admin-api).
+        </p>
+        {error ? (
+          <p className="max-w-lg text-xs text-mute">{error.message}</p>
+        ) : null}
+      </section>
     )
   }
 
