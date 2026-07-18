@@ -201,6 +201,9 @@ def _normalize_detail(row: Any) -> dict[str, Any]:
     return {k: dto[k] for k in _DETAIL_KEYS}
 
 
+_IN_PROGRESS_STATUSES = ("pending", "claimed", "in_flight")
+
+
 def _status_clause(
     status: str | None, *, arg_index: int
 ) -> tuple[str, list[Any], int]:
@@ -211,6 +214,12 @@ def _status_clause(
         return (
             f" AND status = ANY(${arg_index}::text[])",
             [list(_TERMINAL_FAIL_STATUSES)],
+            arg_index + 1,
+        )
+    if normalized == "in_progress":
+        return (
+            f" AND status = ANY(${arg_index}::text[])",
+            [list(_IN_PROGRESS_STATUSES)],
             arg_index + 1,
         )
     return f" AND status = ${arg_index}", [normalized], arg_index + 1

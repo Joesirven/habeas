@@ -574,3 +574,14 @@ def test_get_run_response_excludes_pii_and_filenames(monkeypatch: pytest.MonkeyP
     }
     assert forbidden.isdisjoint(body.keys())
     assert "gs://" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_collect_runs_in_progress_filter_expands_open_statuses():
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+    await runs.collect_runs(conn, status="in_progress", job="matching", request_id=None, window=None, limit=10)
+    sql, *args = conn.fetch.await_args.args
+    assert "matching_attempts" in sql
+    flat = list(args)
+    assert any(isinstance(a, list) and set(a) >= {"pending", "claimed", "in_flight"} for a in flat)
