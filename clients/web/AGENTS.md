@@ -12,11 +12,24 @@ Vite · React · TypeScript · TanStack Router · TanStack Query · shadcn · Bu
 
 Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStack Query cache on `privacy_events` payloads.
 
-## Navigation (Pipeline + Health)
+## Navigation (Ops IA — Request / Job / Run)
 
-- **Pipeline** hover menu → `/ops/drop-pipeline?tab=` (`home` | `download` | `ingest` | `matching` | `fulfillment`). Configurations is the home tab (hash-index enqueue / enqueue-all).
-- **Health** click → `/ops/health` (workers + queues from admin_api). Hover → Escalations/retries (`/ops/health/escalations`) and Configuration (`/ops/health/configuration` — retry `max_attempts` via `/ops/health/retry-config`).
+- **Requests** → list (row opens journey), Needs attention, SLAs (shell).
+- **Ops** (super_admin): Dashboard, Runs, Jobs (shell), Insights (`/ops/health`), Incidents (shell → failed Runs), Configuration.
+- **Console** (super_admin): `/ops/drop-pipeline?tab=` mutation power surface.
 - Browser never calls worker URLs — only admin-api aggregates.
+
+## Ops density (Prefect / Dagster feel)
+
+Keep Habeas Amigo/`taste-*` tokens (navy, frost chips, matte panels). On **Runs, Requests, Ops dashboard, request journey**:
+
+- Table-first / rail-first composition — not landing-page heroes.
+- Compact rows (`text-xs`, tight `py`), status tabs/filters, URL search params.
+- Horizontal stage rail for request journey; dense run list like Dagster Runs.
+- One volume strip/chart on ops dashboard (Prefect overview) — not four equal marketing KPI tiles as the whole page.
+- Do **not** invent a second design system or copy Prefect dark/purple chrome.
+
+See also [`.agent/modules/design-taste.md`](../../.agent/modules/design-taste.md) § Ops surfaces.
 
 ## DROP pipeline
 

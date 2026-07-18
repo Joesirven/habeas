@@ -37,6 +37,71 @@ function parsePipelineTab(value: unknown): PipelineTab {
   return 'home'
 }
 
+export const RUNS_WINDOWS = ['8h', '24h', '1w'] as const
+export type RunsWindow = (typeof RUNS_WINDOWS)[number]
+
+export const RUNS_STATUS_FILTERS = ['failed', 'success', 'claimed', 'in_flight'] as const
+export type RunsStatusFilter = (typeof RUNS_STATUS_FILTERS)[number]
+
+export const RUNS_JOB_FILTERS = [
+  'drop_connector',
+  'drop_ingestor',
+  'matching',
+  'hash_index_refresh',
+] as const
+export type RunsJobFilter = (typeof RUNS_JOB_FILTERS)[number]
+
+export type RunsSearch = {
+  window?: RunsWindow
+  status?: RunsStatusFilter
+  job?: RunsJobFilter
+  request_id?: string
+}
+
+export const DEFAULT_RUNS_WINDOW: RunsWindow = '24h'
+
+function parseRunsWindow(value: unknown): RunsWindow | undefined {
+  if (typeof value === 'string' && RUNS_WINDOWS.includes(value as RunsWindow)) {
+    return value as RunsWindow
+  }
+  return undefined
+}
+
+function parseRunsStatus(value: unknown): RunsStatusFilter | undefined {
+  if (typeof value === 'string' && RUNS_STATUS_FILTERS.includes(value as RunsStatusFilter)) {
+    return value as RunsStatusFilter
+  }
+  return undefined
+}
+
+function parseRunsJob(value: unknown): RunsJobFilter | undefined {
+  if (typeof value === 'string' && RUNS_JOB_FILTERS.includes(value as RunsJobFilter)) {
+    return value as RunsJobFilter
+  }
+  return undefined
+}
+
+function parseRunsRequestId(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed) return trimmed
+  }
+  return undefined
+}
+
+function parseRunsSearch(search: Record<string, unknown>): RunsSearch {
+  const parsed: RunsSearch = {}
+  const window = parseRunsWindow(search.window)
+  if (window) parsed.window = window
+  const status = parseRunsStatus(search.status)
+  if (status) parsed.status = status
+  const job = parseRunsJob(search.job)
+  if (job) parsed.job = job
+  const requestId = parseRunsRequestId(search.request_id)
+  if (requestId) parsed.request_id = requestId
+  return parsed
+}
+
 const rootRoute = createRootRoute({
   component: () => (
     <AppShell>
@@ -97,6 +162,7 @@ const opsDashboardRoute = createRoute({
 const opsRunsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/runs',
+  validateSearch: (search: Record<string, unknown>) => parseRunsSearch(search),
   component: OpsRunsPage,
 })
 
