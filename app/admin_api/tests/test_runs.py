@@ -1,4 +1,4 @@
-"""U5 — Unified Runs API (GET /ops/runs) — proof-first."""
+"""U5/U6 — Unified Runs API (list + detail) — proof-first."""
 
 from __future__ import annotations
 
@@ -12,11 +12,12 @@ from fastapi.testclient import TestClient
 
 from admin_api import drop_pipeline, runs
 from admin_api.main import app
-from habeas_privacy_core.auth import ROLE_ADMIN
+from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_DATA_OWNER
 
 IAP_HEADER = "X-Goog-Authenticated-User-Email"
 SUPER = "super@habeas.com"
 ADMIN = "admin@habeas.com"
+OWNER = "owner@habeas.com"
 
 RID = UUID("00000000-0000-0000-0000-0000000000aa")
 
@@ -28,7 +29,20 @@ def _iap(email: str) -> dict[str, str]:
 def _configure_allowlists(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(drop_pipeline.settings, "drop_ops_super_admin_emails", SUPER)
     monkeypatch.setattr(drop_pipeline.settings, "drop_ops_admin_emails", ADMIN)
-    monkeypatch.setattr(drop_pipeline.settings, "drop_ops_data_owner_emails", "")
+    monkeypatch.setattr(drop_pipeline.settings, "drop_ops_data_owner_emails", OWNER)
+
+
+class _Acquire:
+    async def __aenter__(self):
+        return MagicMock()
+
+    async def __aexit__(self, *args: Any) -> None:
+        return None
+
+
+class FakePool:
+    def acquire(self):
+        return _Acquire()
 
 
 class _Row(dict):
@@ -366,3 +380,197 @@ def test_list_runs_response_excludes_pii_keys(monkeypatch: pytest.MonkeyPatch):
     assert forbidden.isdisjoint(row.keys())
     assert "5551212" not in response.text
     assert "jane@" not in response.text
+
+
+# --- U6 run detail -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_run_detail_timeline_and_redacted_error():
+    started = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
+    finished = datetime(2026, 7, 17, 12, 0, 45, tzinfo=timezone.utc)
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_Row(
+            id=3,
+            job="hash_index",
+            status="submit_error",
+            request_id=None,
+            attempted_at=started,
+            completed_at=finished,
+            error_message=(
+                "lookup failed consumer_id=5551212 email=jane@example.com "
+                "gs://bucket/path/file.csv /var/tmp/drop/batch.csv"
+            ),
+        )
+    )
+
+    detail = await runs.fetch_run_detail(conn, job="hash_index", attempt_id=3)
+
+    assert detail["id"] == 3
+    assert detail["job"] == "hash_index"
+    assert detail["status"] == "submit_error"
+    assert detail["request_id"] is None
+    assert detail["attempted_at"] == "2026-07-17T12:00:00+00:00"
+    assert detail["claimed_at"] is None
+    assert detail["completed_at"] == "2026-07-17T12:00:45+00:00"
+    assert detail["duration_seconds"] == 45.0
+    assert detail["has_error"] is True
+    assert detail["error_redacted"] is not None
+    assert "5551212" not in detail["error_redacted"]
+    assert "jane@" not in detail["error_redacted"]
+    assert "gs://" not in detail["error_redacted"]
+    assert "file.csv" not in detail["error_redacted"]
+    assert "/var/tmp" not in detail["error_redacted"]
+    assert detail["timeline"] == [
+        {"event": "attempted", "at": "2026-07-17T12:00:00+00:00"},
+        {"event": "completed", "at": "2026-07-17T12:00:45+00:00"},
+    ]
+    assert detail["console_href"] == "/ops/drop-pipeline?tab=home"
+    sql, attempt_id = conn.fetchrow.await_args.args
+    assert "hash_index_refresh_attempts" in sql
+    assert attempt_id == 3
+
+
+@pytest.mark.asyncio
+async def test_fetch_run_detail_missing_error_empty_panel():
+    started = datetime(2026, 7, 17, 11, 0, 0, tzinfo=timezone.utc)
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_Row(
+            id=7,
+            job="connector",
+            status="pending",
+            request_id=None,
+            attempted_at=started,
+            completed_at=None,
+            error_message=None,
+        )
+    )
+
+    detail = await runs.fetch_run_detail(conn, job="connector", attempt_id=7)
+
+    assert detail["has_error"] is False
+    assert detail["error_redacted"] is None
+    assert detail["completed_at"] is None
+    assert detail["duration_seconds"] is None
+    assert detail["timeline"] == [
+        {"event": "attempted", "at": "2026-07-17T11:00:00+00:00"},
+    ]
+    assert detail["console_href"] == "/ops/drop-pipeline?tab=download"
+
+
+def test_get_run_route_seeded(monkeypatch: pytest.MonkeyPatch):
+    async def fake_detail(conn: Any, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs["job"] == "matching"
+        assert kwargs["attempt_id"] == 11
+        return {
+            "id": 11,
+            "job": "matching",
+            "status": "success",
+            "request_id": str(RID),
+            "attempted_at": "2026-07-17T12:00:00+00:00",
+            "claimed_at": None,
+            "completed_at": "2026-07-17T12:00:30+00:00",
+            "duration_seconds": 30.0,
+            "error_redacted": None,
+            "has_error": False,
+            "timeline": [
+                {"event": "attempted", "at": "2026-07-17T12:00:00+00:00"},
+                {"event": "completed", "at": "2026-07-17T12:00:30+00:00"},
+            ],
+            "console_href": "/ops/drop-pipeline?tab=matching",
+        }
+
+    monkeypatch.setattr(runs, "_require_database", lambda: None)
+    monkeypatch.setattr(runs, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(runs, "fetch_run_detail", fake_detail)
+
+    with TestClient(app) as client:
+        response = client.get("/ops/runs/matching/11")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == 11
+    assert body["timeline"][0]["event"] == "attempted"
+    assert body["console_href"] == "/ops/drop-pipeline?tab=matching"
+    assert "gcs_uri" not in body
+    assert "source_csv_filename" not in body
+    assert "error_message" not in body
+
+
+def test_get_run_data_owner_forbidden(monkeypatch: pytest.MonkeyPatch):
+    _configure_allowlists(monkeypatch)
+    monkeypatch.setattr(drop_pipeline.settings, "require_iap_identity", True)
+
+    async def fake_detail(conn: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "id": 1,
+            "job": "matching",
+            "status": "success",
+            "request_id": str(RID),
+            "attempted_at": "2026-07-17T12:00:00+00:00",
+            "claimed_at": None,
+            "completed_at": None,
+            "duration_seconds": None,
+            "error_redacted": None,
+            "has_error": False,
+            "timeline": [],
+            "console_href": "/ops/drop-pipeline?tab=matching",
+        }
+
+    monkeypatch.setattr(runs, "_require_database", lambda: None)
+    monkeypatch.setattr(runs, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(runs, "fetch_run_detail", fake_detail)
+
+    with TestClient(app) as client:
+        denied = client.get("/ops/runs/matching/11", headers=_iap(OWNER))
+        allowed = client.get("/ops/runs/matching/11", headers=_iap(SUPER))
+
+    assert denied.status_code == 403
+    assert ROLE_DATA_OWNER == "data_owner"
+    assert allowed.status_code == 200
+
+
+def test_get_run_response_excludes_pii_and_filenames(monkeypatch: pytest.MonkeyPatch):
+    async def fake_detail(conn: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "id": 3,
+            "job": "ingest",
+            "status": "outcome_error",
+            "request_id": None,
+            "attempted_at": "2026-07-17T12:00:00+00:00",
+            "claimed_at": None,
+            "completed_at": "2026-07-17T12:00:30+00:00",
+            "duration_seconds": 30.0,
+            "error_redacted": "promote failed [path-redacted]",
+            "has_error": True,
+            "timeline": [
+                {"event": "attempted", "at": "2026-07-17T12:00:00+00:00"},
+                {"event": "completed", "at": "2026-07-17T12:00:30+00:00"},
+            ],
+            "console_href": "/ops/drop-pipeline?tab=ingest",
+        }
+
+    monkeypatch.setattr(runs, "_require_database", lambda: None)
+    monkeypatch.setattr(runs, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(runs, "fetch_run_detail", fake_detail)
+
+    with TestClient(app) as client:
+        response = client.get("/ops/runs/ingest/3")
+
+    assert response.status_code == 200
+    body = response.json()
+    forbidden = {
+        "gcs_uri",
+        "source_csv_filename",
+        "response_file_name",
+        "consumer_id",
+        "email",
+        "phone",
+        "error_message",
+        "list_types",
+        "state",
+    }
+    assert forbidden.isdisjoint(body.keys())
+    assert "gs://" not in response.text

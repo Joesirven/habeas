@@ -1,6 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 
+import { opsRunsSearch } from '@/lib/ops-runs-search'
+
 import { SkeletonLines } from '@/components/AppShell'
 import { getDropGlobalStats, getHealth } from '@/lib/api'
 import {
@@ -96,7 +98,7 @@ export function DashboardPage() {
                 <Link to="/ops/dashboard" className="taste-frost-chip">
                   Ops dashboard →
                 </Link>
-                <Link to="/ops/runs" className="taste-frost-chip">
+                <Link to="/ops/runs" search={opsRunsSearch()} className="taste-frost-chip">
                   Runs →
                 </Link>
                 <Link to="/ops/drop-pipeline" search={{ tab: 'home' }} className="taste-frost-chip">

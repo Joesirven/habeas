@@ -10,6 +10,7 @@ import type { ReactNode } from 'react'
 
 import { AppShell } from '@/components/AppShell'
 import { RequireRole } from '@/lib/auth'
+import { parseOpsRunsSearch } from '@/lib/ops-runs-search'
 import { SplashLabPage } from '@/routes/dev/splash-lab'
 import { DashboardPage } from '@/routes/index'
 import { OpsConfigurationPage } from '@/routes/ops/configuration'
@@ -21,7 +22,9 @@ import { HealthLandingPage } from '@/routes/ops/health/index'
 import { OpsIncidentsPage } from '@/routes/ops/incidents'
 import { OpsInsightsPage } from '@/routes/ops/insights'
 import { OpsJobsPage } from '@/routes/ops/jobs'
+import { OpsRunDetailPage } from '@/routes/ops/run-detail'
 import { OpsRunsPage } from '@/routes/ops/runs'
+import { RequestJourneyPage } from '@/routes/requests/$requestId'
 import { NeedsAttentionPage } from '@/routes/requests/needs-attention'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
@@ -81,6 +84,15 @@ const needsAttentionRoute = createRoute({
   component: NeedsAttentionPage,
 })
 
+const requestJourneyRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/requests/$requestId',
+  component: function RequestJourneyRouteComp() {
+    const { requestId } = requestJourneyRoute.useParams()
+    return <RequestJourneyPage requestId={requestId} />
+  },
+})
+
 const manualRequestRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests/new',
@@ -105,7 +117,25 @@ const opsDashboardRoute = createRoute({
 const opsRunsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/runs',
-  component: OpsRunsPage,
+  validateSearch: (search: Record<string, unknown>) => parseOpsRunsSearch(search),
+  component: () => (
+    <SuperAdminGate>
+      <OpsRunsPage />
+    </SuperAdminGate>
+  ),
+})
+
+const opsRunDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/runs/$job/$attemptId',
+  component: function OpsRunDetailRouteComp() {
+    const { job, attemptId } = opsRunDetailRoute.useParams()
+    return (
+      <SuperAdminGate>
+        <OpsRunDetailPage job={job} attemptId={attemptId} />
+      </SuperAdminGate>
+    )
+  },
 })
 
 const opsJobsRoute = createRoute({
@@ -180,10 +210,12 @@ const routeTree = rootRoute.addChildren([
   splashLabRoute,
   requestsRoute,
   needsAttentionRoute,
+  requestJourneyRoute,
   manualRequestRoute,
   matchingReviewRoute,
   opsDashboardRoute,
   opsRunsRoute,
+  opsRunDetailRoute,
   opsJobsRoute,
   opsInsightsRoute,
   opsIncidentsRoute,

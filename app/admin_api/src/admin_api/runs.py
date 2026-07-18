@@ -1,7 +1,8 @@
-"""Unified Runs API — list DROP attempt families (ids/status only, no PII)."""
+"""Unified Runs API — list/detail DROP attempt families (ids/status only, no PII)."""
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID
@@ -13,6 +14,7 @@ from admin_api.drop_pipeline import (
     _TERMINAL_FAIL_STATUSES,
     settings,
 )
+from habeas_privacy_core.audit.redaction import redact_error_text
 from habeas_privacy_core.db.pool import get_pool
 
 router = APIRouter(prefix="/ops", tags=["ops-runs"])
@@ -25,6 +27,14 @@ _JOB_TABLES: dict[str, str] = {
     "ingest": "drop_ingest_attempts",
     "matching": "matching_attempts",
     "hash_index": "hash_index_refresh_attempts",
+}
+
+# Deep-link query context for /ops/drop-pipeline (no auto-mutate).
+_JOB_CONSOLE_TAB: dict[str, str] = {
+    "connector": "download",
+    "ingest": "ingest",
+    "matching": "matching",
+    "hash_index": "home",
 }
 
 _WINDOW_HOURS: dict[str, int] = {
@@ -44,6 +54,30 @@ _DTO_KEYS = (
     "error_redacted",
     "has_error",
 )
+
+_DETAIL_KEYS = (
+    "id",
+    "job",
+    "status",
+    "request_id",
+    "attempted_at",
+    "claimed_at",
+    "completed_at",
+    "duration_seconds",
+    "error_redacted",
+    "has_error",
+    "timeline",
+    "console_href",
+)
+
+# Extra scrub for privileged error panel — redact_error_text does not strip URIs/paths (R14).
+_GS_URI = re.compile(r"gs://\S+", re.IGNORECASE)
+_ABS_PATH = re.compile(r"(?<![\w.-])/(?:[\w.-]+/){1,}[\w.-]+")
+_FILENAME_TOKEN = re.compile(
+    r"\b[\w.-]+\.(?:csv|json|parquet|txt|log|gz|zip|tsv)\b",
+    re.IGNORECASE,
+)
+_PATH_REDACTED = "[path-redacted]"
 
 
 def _require_database() -> None:
@@ -67,6 +101,54 @@ def _duration_seconds(
     return (completed_at - attempted_at).total_seconds()
 
 
+def _scrub_uris_and_paths(text: str) -> str:
+    """Strip gs:// URIs, absolute paths, and filename-like tokens from error text."""
+    cleaned = _GS_URI.sub(_PATH_REDACTED, text)
+    cleaned = _ABS_PATH.sub(_PATH_REDACTED, cleaned)
+    cleaned = _FILENAME_TOKEN.sub(_PATH_REDACTED, cleaned)
+    return cleaned
+
+
+def _privileged_error_redacted(raw_error: Any) -> str | None:
+    """Super-admin-only error panel: PII redact + URI/path scrub. Empty → None."""
+    if raw_error is None:
+        return None
+    text = str(raw_error).strip()
+    if not text:
+        return None
+    cleaned = redact_error_text(text)
+    cleaned = _scrub_uris_and_paths(cleaned).strip()
+    return cleaned or None
+
+
+def _timeline(
+    *,
+    attempted_at: datetime | None,
+    claimed_at: datetime | None,
+    completed_at: datetime | None,
+) -> list[dict[str, str]]:
+    """Build timeline from real attempt timestamps only — never invent steps."""
+    events: list[dict[str, str]] = []
+    if attempted_at is not None:
+        at = _iso(attempted_at)
+        if at:
+            events.append({"event": "attempted", "at": at})
+    if claimed_at is not None:
+        at = _iso(claimed_at)
+        if at:
+            events.append({"event": "claimed", "at": at})
+    if completed_at is not None:
+        at = _iso(completed_at)
+        if at:
+            events.append({"event": "completed", "at": at})
+    return events
+
+
+def _console_href(job: str) -> str:
+    tab = _JOB_CONSOLE_TAB.get(job, "home")
+    return f"/ops/drop-pipeline?tab={tab}"
+
+
 def _normalize_row(row: Any) -> dict[str, Any]:
     request_id = row["request_id"]
     if request_id is not None:
@@ -88,6 +170,35 @@ def _normalize_row(row: Any) -> dict[str, Any]:
         "has_error": has_error,
     }
     return {k: dto[k] for k in _DTO_KEYS}
+
+
+def _normalize_detail(row: Any) -> dict[str, Any]:
+    request_id = row["request_id"]
+    if request_id is not None:
+        request_id = str(request_id)
+    raw_error = row["error_message"]
+    has_error = bool(raw_error is not None and str(raw_error).strip())
+    # Attempt tables have no claimed_at column — always null; do not invent.
+    claimed_at: datetime | None = None
+    dto = {
+        "id": int(row["id"]),
+        "job": row["job"],
+        "status": row["status"],
+        "request_id": request_id,
+        "attempted_at": _iso(row["attempted_at"]),
+        "claimed_at": None,
+        "completed_at": _iso(row["completed_at"]),
+        "duration_seconds": _duration_seconds(row["attempted_at"], row["completed_at"]),
+        "error_redacted": _privileged_error_redacted(raw_error),
+        "has_error": has_error,
+        "timeline": _timeline(
+            attempted_at=row["attempted_at"],
+            claimed_at=claimed_at,
+            completed_at=row["completed_at"],
+        ),
+        "console_href": _console_href(row["job"]),
+    }
+    return {k: dto[k] for k in _DETAIL_KEYS}
 
 
 def _status_clause(
@@ -213,6 +324,43 @@ async def collect_runs(
     }
 
 
+async def fetch_run_detail(
+    conn: Any,
+    *,
+    job: str,
+    attempt_id: int,
+) -> dict[str, Any]:
+    """Load one attempt by job family + id into the privileged detail DTO."""
+    if job not in _JOB_TABLES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid job: {job} (use connector|ingest|matching|hash_index)",
+        )
+    if attempt_id < 1:
+        raise HTTPException(status_code=422, detail="attempt_id must be >= 1")
+
+    table = _JOB_TABLES[job]
+    has_request_id = job == "matching"
+    request_expr = "request_id" if has_request_id else "NULL::uuid"
+    row = await conn.fetchrow(
+        f"""
+        SELECT id,
+               '{job}'::text AS job,
+               status,
+               {request_expr} AS request_id,
+               attempted_at,
+               completed_at,
+               error_message
+          FROM {table}
+         WHERE id = $1
+        """,
+        attempt_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return _normalize_detail(row)
+
+
 @router.get("/runs")
 async def list_runs(
     _me: RequireSuperAdmin,
@@ -246,3 +394,16 @@ async def list_runs(
             window=window,
             limit=limit,
         )
+
+
+@router.get("/runs/{job}/{attempt_id}")
+async def get_run(
+    _me: RequireSuperAdmin,
+    job: JobFilter,
+    attempt_id: int,
+):
+    """Run detail — timeline + privileged redacted error (super_admin only)."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        return await fetch_run_detail(conn, job=job, attempt_id=attempt_id)

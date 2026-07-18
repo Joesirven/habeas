@@ -603,3 +603,138 @@ export function getDropWorkflowAssignments(params?: {
     `/ops/drop/workflow/assignments${query ? `?${query}` : ''}`,
   )
 }
+
+/** DROP attempt family for unified Runs list (GET /ops/runs). */
+export type OpsRunJob = 'connector' | 'ingest' | 'matching' | 'hash_index'
+
+/** Lookback window for GET /ops/runs. */
+export type OpsRunWindow = '8h' | '24h' | '1w'
+
+export type OpsRunRecord = {
+  id: number
+  job: OpsRunJob
+  status: string
+  request_id: string | null
+  attempted_at: string | null
+  completed_at: string | null
+  duration_seconds: number | null
+  /** Always null on list — error bodies deferred to run detail (U6). */
+  error_redacted: null
+  has_error: boolean
+}
+
+export type OpsRunsPayload = {
+  runs: OpsRunRecord[]
+  limit: number
+  filters: {
+    status: string | null
+    job: OpsRunJob | null
+    request_id: string | null
+    window: OpsRunWindow | null
+  }
+}
+
+export type ListOpsRunsParams = {
+  /** Exact attempt status, or `failed` for terminal fail statuses. */
+  status?: string
+  job?: OpsRunJob
+  request_id?: string
+  window?: OpsRunWindow
+  limit?: number
+}
+
+export function listOpsRuns(params?: ListOpsRunsParams) {
+  const search = new URLSearchParams()
+  if (params?.status) search.set('status', params.status)
+  if (params?.job) search.set('job', params.job)
+  if (params?.request_id) search.set('request_id', params.request_id)
+  if (params?.window) search.set('window', params.window)
+  if (params?.limit != null) search.set('limit', String(params.limit))
+  const query = search.toString()
+  return fetchAdminApi<OpsRunsPayload>(`/ops/runs${query ? `?${query}` : ''}`)
+}
+
+// # U6 — run detail (GET /ops/runs/{job}/{attempt_id})
+export type OpsRunTimelineEvent = {
+  event: string
+  at: string
+}
+
+export type OpsRunDetail = {
+  id: number
+  job: OpsRunJob
+  status: string
+  request_id: string | null
+  attempted_at: string | null
+  claimed_at: string | null
+  completed_at: string | null
+  duration_seconds: number | null
+  error_redacted: string | null
+  has_error: boolean
+  timeline: OpsRunTimelineEvent[]
+  /** Relative DROP console deep-link (query context only; no auto-mutate). */
+  console_href: string
+}
+
+export function getOpsRunDetail(job: OpsRunJob | string, attemptId: number | string) {
+  return fetchAdminApi<OpsRunDetail>(`/ops/runs/${job}/${attemptId}`)
+}
+
+// # U7 — request journey + needs-attention
+export type JourneyStageStatus = 'complete' | 'current' | 'waiting'
+
+export type RequestJourneyStage = {
+  key: string
+  label: string
+  status: JourneyStageStatus
+  at: string | null
+}
+
+export type RequestJourneyPayload = {
+  request_id: string
+  intake_source: string
+  requestor_state: string | null
+  received_at: string | null
+  current_stage_key: string
+  stages: RequestJourneyStage[]
+  matching: {
+    match_count: number | null
+    match_type: string | null
+    matched: boolean | null
+    review_status: string | null
+    approval_id: number | null
+    attempt_status?: string | null
+    attempt_id?: number | null
+  } | null
+  needs_attention: boolean
+  attention_reasons: string[]
+}
+
+export type NeedsAttentionItem = {
+  request_id: string
+  attention_reason: string
+  stage_key: string
+  approval_id: number
+  requested_at: string | null
+  requestor_state: string | null
+  match_count: number | null
+  match_type: string | null
+  matched: boolean | null
+  intake_source: string
+}
+
+export type NeedsAttentionPayload = {
+  items: NeedsAttentionItem[]
+  count: number
+  limit: number
+}
+
+export function getRequestJourney(requestId: string) {
+  return fetchAdminApi<RequestJourneyPayload>(`/ops/requests/${requestId}/journey`)
+}
+
+export function listNeedsAttention(limit = 100) {
+  const search = new URLSearchParams()
+  search.set('limit', String(limit))
+  return fetchAdminApi<NeedsAttentionPayload>(`/ops/requests/needs-attention?${search}`)
+}
