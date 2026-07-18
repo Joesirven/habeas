@@ -1,13 +1,28 @@
-import { createRootRoute, createRoute, createRouter, Outlet } from '@tanstack/react-router'
+import {
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Outlet,
+  redirect,
+} from '@tanstack/react-router'
 import { TanStackRouterDevtools } from '@tanstack/router-devtools'
+import type { ReactNode } from 'react'
 
 import { AppShell } from '@/components/AppShell'
-import { MatchingReviewPage } from '@/routes/approvals/matching-review'
+import { RequireRole } from '@/lib/auth'
+import { SplashLabPage } from '@/routes/dev/splash-lab'
 import { DashboardPage } from '@/routes/index'
+import { OpsConfigurationPage } from '@/routes/ops/configuration'
+import { OpsDashboardPage } from '@/routes/ops/dashboard'
 import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
 import { HealthConfigurationPage } from '@/routes/ops/health/configuration'
 import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
 import { HealthLandingPage } from '@/routes/ops/health/index'
+import { OpsIncidentsPage } from '@/routes/ops/incidents'
+import { OpsInsightsPage } from '@/routes/ops/insights'
+import { OpsJobsPage } from '@/routes/ops/jobs'
+import { OpsRunsPage } from '@/routes/ops/runs'
+import { NeedsAttentionPage } from '@/routes/requests/needs-attention'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
 
@@ -29,6 +44,10 @@ function parsePipelineTab(value: unknown): PipelineTab {
   return 'home'
 }
 
+function SuperAdminGate({ children }: { children: ReactNode }) {
+  return <RequireRole allow={['super_admin']}>{children}</RequireRole>
+}
+
 const rootRoute = createRootRoute({
   component: () => (
     <AppShell>
@@ -44,10 +63,22 @@ const indexRoute = createRoute({
   component: DashboardPage,
 })
 
+const splashLabRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/dev/splash-lab',
+  component: SplashLabPage,
+})
+
 const requestsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests',
   component: RequestsPage,
+})
+
+const needsAttentionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/requests/needs-attention',
+  component: NeedsAttentionPage,
 })
 
 const manualRequestRoute = createRoute({
@@ -56,10 +87,49 @@ const manualRequestRoute = createRoute({
   component: ManualRequestPage,
 })
 
+/** Compat: Matching review → Needs attention. */
 const matchingReviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/approvals/matching-review',
-  component: MatchingReviewPage,
+  beforeLoad: () => {
+    throw redirect({ to: '/requests/needs-attention' })
+  },
+})
+
+const opsDashboardRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/dashboard',
+  component: OpsDashboardPage,
+})
+
+const opsRunsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/runs',
+  component: OpsRunsPage,
+})
+
+const opsJobsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/jobs',
+  component: OpsJobsPage,
+})
+
+const opsInsightsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/insights',
+  component: OpsInsightsPage,
+})
+
+const opsIncidentsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/incidents',
+  component: OpsIncidentsPage,
+})
+
+const opsConfigurationRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/configuration',
+  component: OpsConfigurationPage,
 })
 
 const dropPipelineRoute = createRoute({
@@ -68,32 +138,56 @@ const dropPipelineRoute = createRoute({
   validateSearch: (search: Record<string, unknown>) => ({
     tab: parsePipelineTab(search.tab),
   }),
-  component: DropPipelinePage,
+  component: () => (
+    <SuperAdminGate>
+      <DropPipelinePage />
+    </SuperAdminGate>
+  ),
 })
 
 const healthRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/health',
-  component: HealthLandingPage,
+  component: () => (
+    <SuperAdminGate>
+      <HealthLandingPage />
+    </SuperAdminGate>
+  ),
 })
 
 const healthEscalationsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/health/escalations',
-  component: HealthEscalationsPage,
+  component: () => (
+    <SuperAdminGate>
+      <HealthEscalationsPage />
+    </SuperAdminGate>
+  ),
 })
 
 const healthConfigurationRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/health/configuration',
-  component: HealthConfigurationPage,
+  component: () => (
+    <SuperAdminGate>
+      <HealthConfigurationPage />
+    </SuperAdminGate>
+  ),
 })
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  splashLabRoute,
   requestsRoute,
+  needsAttentionRoute,
   manualRequestRoute,
   matchingReviewRoute,
+  opsDashboardRoute,
+  opsRunsRoute,
+  opsJobsRoute,
+  opsInsightsRoute,
+  opsIncidentsRoute,
+  opsConfigurationRoute,
   dropPipelineRoute,
   healthRoute,
   healthEscalationsRoute,

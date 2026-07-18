@@ -1,6 +1,8 @@
 import { Link, useRouterState } from '@tanstack/react-router'
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 
+import { canAccessNeedsAttention, isSuperAdmin, useOpsRole } from '@/lib/auth'
+
 const navClass =
   'text-mute transition-colors hover:text-ink [&.active]:text-ink [&.active]:underline [&.active]:decoration-ink/25 [&.active]:underline-offset-4'
 
@@ -36,6 +38,18 @@ const HEALTH_GROUP: NavGroup = {
   children: [
     { label: 'Escalations / retries', to: '/ops/health/escalations' },
     { label: 'Configuration', to: '/ops/health/configuration' },
+  ],
+}
+
+const OPS_GROUP: NavGroup = {
+  label: 'Ops',
+  to: '/ops/dashboard',
+  children: [
+    { label: 'Dashboard', to: '/ops/dashboard' },
+    { label: 'Runs', to: '/ops/runs' },
+    { label: 'Jobs', to: '/ops/jobs' },
+    { label: 'Incidents', to: '/ops/incidents' },
+    { label: 'Configuration', to: '/ops/configuration' },
   ],
 }
 
@@ -129,19 +143,34 @@ function NavDropdown({ group }: { group: NavGroup }) {
 }
 
 export function NavMenu() {
+  const role = useOpsRole()
+  const superAdmin = isSuperAdmin(role)
+  const needsAttention = canAccessNeedsAttention(role)
+
   return (
     <nav className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2 text-[0.8125rem]">
       <Link to="/" className={navClass}>
-        Dashboard
+        Needs me
       </Link>
-      <NavDropdown group={PIPELINE_GROUP} />
-      <NavDropdown group={HEALTH_GROUP} />
       <Link to="/requests" className={navClass}>
         Requests
       </Link>
-      <Link to="/approvals/matching-review" className={navClass}>
-        Matching review
+      {needsAttention ? (
+        <Link to="/requests/needs-attention" className={navClass}>
+          Needs attention
+        </Link>
+      ) : null}
+      <Link to="/ops/insights" className={navClass}>
+        Insights
       </Link>
+      {superAdmin ? <NavDropdown group={OPS_GROUP} /> : null}
+      {superAdmin ? <NavDropdown group={PIPELINE_GROUP} /> : null}
+      {superAdmin ? <NavDropdown group={HEALTH_GROUP} /> : null}
+      {import.meta.env.DEV ? (
+        <Link to="/dev/splash-lab" className={navClass}>
+          Splash lab
+        </Link>
+      ) : null}
     </nav>
   )
 }

@@ -53,16 +53,30 @@ export function getHealth() {
   return fetchAdminApi<HealthPayload>('/readyz')
 }
 
+export type OpsRole = 'super_admin' | 'admin' | 'data_owner'
+
+/** U3/U4 session contract — prefer over `/auth/me` for role-aware UI. */
+export type MePayload = {
+  email: string
+  role: OpsRole
+}
+
 export type AuthMePayload = {
   authenticated: boolean
   email: string | null
   actor: string
   iap_header_present: boolean
+  /** Present when DROP ops role resolves (same rules as GET /me). */
+  role?: OpsRole | null
   service?: string
 }
 
 export function getAuthMe() {
   return fetchAdminApi<AuthMePayload>('/auth/me')
+}
+
+export function getMe() {
+  return fetchAdminApi<MePayload>('/me')
 }
 
 export function listRequests(intakeSource?: IntakeSource) {

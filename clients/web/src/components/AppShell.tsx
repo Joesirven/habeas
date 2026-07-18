@@ -1,6 +1,15 @@
-import type { ReactNode } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { useRouterState } from '@tanstack/react-router'
+import { useCallback, useState, type ReactNode } from 'react'
 
 import { NavMenu } from '@/components/NavMenu'
+import {
+  PostAuthSplash,
+  markPostAuthSplashSeen,
+  shouldPlayPostAuthSplash,
+} from '@/components/PostAuthSplash'
+import { getAuthMe } from '@/lib/api'
+import { useMeQuery } from '@/lib/auth'
 import { useLiveEvents } from '@/lib/live-events'
 
 type AppShellProps = {
@@ -35,6 +44,39 @@ export function SkeletonLines({
 
 export function AppShell({ children }: AppShellProps) {
   useLiveEvents()
+  const pathname = useRouterState({ select: (state) => state.location.pathname })
+  const isSplashLab = pathname.startsWith('/dev/splash-lab')
+
+  const identityQuery = useQuery({
+    queryKey: ['admin-api', 'auth', 'me'],
+    queryFn: getAuthMe,
+    retry: false,
+    staleTime: 60_000,
+    enabled: !isSplashLab,
+  })
+
+  // Warm GET /me for role-aware nav + route gates (shared TanStack Query cache).
+  useMeQuery({ enabled: !isSplashLab })
+
+  const [splashOpen, setSplashOpen] = useState(() => shouldPlayPostAuthSplash())
+
+  const finishSplash = useCallback(() => {
+    markPostAuthSplashSeen()
+    setSplashOpen(false)
+  }, [])
+
+  const showSplash =
+    !isSplashLab &&
+    splashOpen &&
+    !identityQuery.isPending &&
+    Boolean(identityQuery.data?.authenticated)
+
+  if (showSplash) {
+    // Default bumper: CRT Snow Lock (variant 1). Lab at /dev/splash-lab.
+    return (
+      <PostAuthSplash variant={1} autoFinish durationMs={3400} onDone={finishSplash} />
+    )
+  }
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -47,10 +89,10 @@ export function AppShell({ children }: AppShellProps) {
             'linear-gradient(to right, var(--glass-gradient-start), var(--glass-gradient-end))',
         }}
       >
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-6 py-5">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-6 py-4">
           <div className="min-w-0">
             <p className="taste-micro">Habeas</p>
-            <h1 className="mt-1 font-display text-[1.35rem] font-medium leading-none tracking-tight text-ink">
+            <h1 className="mt-1 font-display text-[1.25rem] font-medium leading-none tracking-tight text-ink">
               Data Privacy
             </h1>
           </div>
@@ -58,7 +100,7 @@ export function AppShell({ children }: AppShellProps) {
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-12">{children}</main>
+      <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">{children}</main>
 
       <footer className="mt-auto bg-ink">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">

@@ -12,6 +12,24 @@ Vite · React · TypeScript · TanStack Router · TanStack Query · shadcn · Bu
 
 Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStack Query cache on `privacy_events` payloads.
 
+## Role-aware navigation (IA matrix)
+
+Session: `GET /me` → `{ email, role }` via `getMe` / `useMeQuery` (`super_admin` | `admin` | `data_owner`). Probe `GET /auth/me` remains for splash identity only.
+
+| Nav / route | Roles |
+|-------------|--------|
+| `/` Needs me | all |
+| `/requests` | all |
+| `/requests/needs-attention` (compat redirect from `/approvals/matching-review`) | all resolved ops roles |
+| `/ops/insights` (thin) | all |
+| `/ops/dashboard`, `/ops/runs`, `/ops/jobs`, `/ops/incidents`, `/ops/configuration` | `super_admin` |
+| `/ops/drop-pipeline` (Pipeline) + `/ops/health/*` | `super_admin` |
+| Splash lab (`/dev/splash-lab`) | DEV only |
+
+`data_owner` / `admin`: no Runs, Pipeline, Jobs, Health, or ops Configuration power paths. Deep links to gated routes show a forbidden empty state (API 403 remains authoritative).
+
+Ops chrome: `.agent/modules/design-taste-ops-ia.md` — micro eyebrow, compact title, `taste-panel` / table-first (not marketing heroes).
+
 ## Navigation (Pipeline + Health)
 
 - **Pipeline** hover menu → `/ops/drop-pipeline?tab=` (`home` | `download` | `ingest` | `matching` | `fulfillment`). Configurations is the home tab (hash-index enqueue / enqueue-all).
