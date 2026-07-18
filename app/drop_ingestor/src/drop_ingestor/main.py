@@ -15,6 +15,7 @@ from habeas_privacy_core.observability.logging import configure_logging
 from habeas_privacy_core.observability.tracing import setup_tracing
 from drop_ingestor.config import DropIngestorSettings
 from drop_ingestor.land import run_land
+from habeas_privacy_core.geo.state import InvalidStateAcronymError
 from drop_ingestor.promote import run_promote
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,8 @@ async def ingest_promote(body: PromoteRequest | None = None):
                 list_type=req.list_type,
                 limit=req.limit,
             )
+        except InvalidStateAcronymError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception:
             logger.exception("drop_promote_failed", extra={"event": "drop_promote_failed"})
             raise HTTPException(status_code=500, detail="promote failed") from None

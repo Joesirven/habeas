@@ -67,6 +67,19 @@ Env on Cloud Run: `DROP_ENV=sandbox`, `DROP_API_BASE_URL=https://api.drop.privac
 
 Land/promote only — no `DROP_API_KEY`. Needs `DATABASE_URL`.
 
+**Requester state on promote:** `requestor_state` comes from `raw_payload.state` /
+`raw_payload.requestor_state`, else a USPS token in the CSV filename
+(e.g. `broker_TX_EMAIL.csv`). If both omit state, promote **fails closed** — it
+does **not** invent `CA`. For local CA DROP sandbox filenames that omit state
+(e.g. `20260716_1_NDZ.csv`), set opt-in env on the worker only:
+
+```bash
+DROP_ALLOW_DEFAULT_REQUESTOR_STATE=CA
+```
+
+Never enable that override in deployed/IAP environments. When it is set, promote
+logs `drop_promote_requestor_state_default` (no PII) with `sandbox_override=true`.
+
 ### hash-index-refresh (DROP hash productionize)
 
 | File | Purpose |

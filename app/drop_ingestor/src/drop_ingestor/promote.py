@@ -146,6 +146,8 @@ async def run_promote(
             raw_id = int(raw["id"])
             payload = _payload_as_dict(raw.get("raw_payload"))
             filename = raw.get("source_csv_filename")
+            # resolve_drop_requestor_state fails closed (InvalidStateAcronymError)
+            # when state is omitted — callers map that to 4xx; never invent CA.
             requestor_state, state_source = resolve_drop_requestor_state(
                 raw_payload=payload,
                 source_csv_filename=str(filename) if filename else None,
@@ -160,6 +162,7 @@ async def run_promote(
                         "list_type": raw.get("list_type"),
                         # Filename shape only — no PII / hash values.
                         "filename_has_state_token": False,
+                        "sandbox_override": True,
                     },
                 )
             request_id = await insert_request(
