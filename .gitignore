@@ -34,3 +34,6 @@ tmp/
 # dbmate
 dbmate.env
 .worktrees/
+
+# Cursor IDE / agent local files
+.cursor/
