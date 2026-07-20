@@ -68,7 +68,7 @@ Branch tip used for this consolidation: `feat/drop-hash-index-prod` @ `4273a4b` 
 | IAP on admin-api + SA ID token CLI | Done | `b969b42`, `4273a4b` — SA impersonation `--include-email`; worker invoker lock |
 | Docs sweep | Done (minor drift OK) | `d357df0` + IAP/RUNBOOK notes |
 
-**Residual code units U1–U10:** landed on this branch (soft-CA; approaching-SLA; roles/`/me`; Requests/Runs/Dashboard IA; IAP E2E + rematch — see scoreboard + `tmp/reviews/drop-hash-e2e-*-iap.md`). **Still open (non-code / Jose):** formal allowlist confirm (Q1/Q6); sparse `email_hash` (Q2); optional status-4 reopen rematch candidate; merge/PR on ask. Prior CA live match (`tmp/reviews/drop-hash-ca-matching-test.md`) remains non-DoD (DB bypass).
+**Residual code units U1–U10:** landed on this branch (soft-CA; approaching-SLA; roles/`/me`; Requests/Runs/Dashboard IA; IAP E2E + rematch — see scoreboard + `tmp/reviews/drop-hash-e2e-*-iap.md`). **Settled (2026-07-20):** Q1/Q6 = USPS 50+DC; Q2 = keep `person.emailaddress`, accept sparse MDR fill (see RUNBOOK email investigation). **Still open:** merge/PR on ask. Prior CA live match (`tmp/reviews/drop-hash-ca-matching-test.md`) remains non-DoD (DB bypass).
 
 ---
 
@@ -161,7 +161,7 @@ Hash-index and Pipeline/Health Wave B landed, but soft-CA defaults can mis-scope
 - Hash-index attempt DELETE-for-cleanup (held forever)
 - Firebase Auth custom claims (IAP email → role map for v1)
 - Editable concurrency Configuration API; Incidents ack product; tags on runs
-- `email_hash` MDR completeness (product/data — Open Question Q2)
+- Alternate MDR email warehouse beyond `person_db.person.emailaddress` (Q2 settled: none in dataset; sparse fill accepted)
 - Intake-spine worker delivery (sibling plan)
 - Claiming DoD via `DATABASE_URL` / in-process matching bypass (allowed for local debug only)
 - Prod writes / merge/PR without explicit Jose ask
@@ -170,9 +170,10 @@ Hash-index and Pipeline/Health Wave B landed, but soft-CA defaults can mis-scope
 
 | ID | Question | Status |
 |----|----------|--------|
-| Q1 | Canonical US state list for enqueue-all (50+DC vs BQ distinct `person.state` vs MDR config) | **Needs Jose** — code uses USPS 50+DC; live wave ran on that allowlist |
-| Q2 | Alternate MDR email source vs accept sparse `email_hash` | Deferred product/data |
+| Q1 | Canonical US state list for enqueue-all (50+DC vs BQ distinct `person.state` vs MDR config) | **Settled (Jose 2026-07-20)** — USPS 50+DC; not a separate MDR jurisdiction config |
+| Q2 | Alternate MDR email source vs accept sparse `email_hash` | **Settled (2026-07-20)** — sole column `person.emailaddress`; no email/contact table; accept sparse (~9.9M / 9 states); dbt unchanged |
 | Q3 | Raise dbt error redact `max_len` / structured exit summary | Deferred ops DX |
+| Q6 | Served-state source of truth for hash refresh | **Settled (Jose 2026-07-20)** — same as Q1: USPS 50+DC (`USPS_STATES_PLUS_DC`) |
 
 ### Sources
 
@@ -680,6 +681,7 @@ DONE:     U0–U25 · CLI P1+P2 · status-4 reopen · all-state 51/51 · IAP SA 
           Pipeline+Health · requester lookup_state · FL phone fix ·
           U1–U10 residual (soft-CA · approaching SLA · ops IA · E2E IAP · rematch)
 HELD:     attempt DELETE · Eventarc · Tier-C HTTP · full sla_monitor · name-hash
-OPEN:     Jose Q1/Q6 allowlist confirm · email_hash sparsity (Q2) · PR on ask
+SETTLED:  Q1/Q6 USPS 50+DC · Q2 person.emailaddress only / sparse OK (2026-07-20)
+OPEN:     PR on ask
 NOTE:     prior CA live match ≠ E2E DoD (DB bypass, no fulfill) — superseded by U9/U10
 ```
