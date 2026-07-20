@@ -1,0 +1,65 @@
+substitutions:
+  _REGION: us-east4
+  _PROJECT: example-gcp-project
+  _SERVICE: admin-web-dev
+  _TAG: latest
+  _VITE_ADMIN_API_URL: https://admin-api-dev-hsa55rg7ja-uk.a.run.app
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+      - --build-arg
+      - VITE_ADMIN_API_URL=${_VITE_ADMIN_API_URL}
+      - -f
+      - clients/web/Dockerfile
+      - clients/web
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --port=8080
+      - --memory=256Mi
+      - --cpu=1
+      - --max-instances=3
+
+  - id: enable-iap
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud components install beta --quiet
+        gcloud beta run services update ${_SERVICE} --region=${_REGION} --project=${_PROJECT} --iap --quiet
+        gcloud run services add-iam-policy-binding ${_SERVICE} --region=${_REGION} --project=${_PROJECT} \
+          --member=serviceAccount:service-95660886550@gcp-sa-iap.iam.gserviceaccount.com \
+          --role=roles/run.invoker --quiet || true
+        gcloud run services remove-iam-policy-binding ${_SERVICE} --region=${_REGION} --project=${_PROJECT} \
+          --member=allUsers --role=roles/run.invoker --quiet || true
+        gcloud beta iap web add-iam-policy-binding --project=${_PROJECT} --region=${_REGION} \
+          --resource-type=cloud-run --service=${_SERVICE} \
+          --member=user:dev-owner-1@example.com --role=roles/iap.httpsResourceAccessor \
+          --condition=None --quiet || true
+
+images:
+  - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
