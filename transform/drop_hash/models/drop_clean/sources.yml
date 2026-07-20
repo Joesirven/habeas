@@ -4,6 +4,11 @@ sources:
   - name: person_db
     database: example-gcp-project
     schema: person_db
+    description: >
+      Habeas MDR in example-gcp-project. Sole email field is person.emailaddress
+      (no email/contact table). Phones are in phones (dwid, state).
     tables:
       - name: person
+        description: Person spine; emailaddress feeds email_hash (often sparse by state).
       - name: phones
+        description: Cell/land phones keyed by dwid + state; feeds phone_hash.

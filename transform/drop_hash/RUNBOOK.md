@@ -51,8 +51,7 @@ DBT_PROFILES_DIR=. dbt build --vars '{state: TX}'
 
 Writes intermediates, builds `*_hash__build` marts, then merges that state’s rows
 into `email_hash`, `phone_hash`, `ndz_hash`. Parallel per-state jobs are OK;
-watch BigQuery slots/cost. Confirm served-state list with Jose (Q6) before first
-prod enqueue-all wave.
+watch BigQuery slots/cost. Served-state list is **USPS 50 + DC** (settled).
 
 **Timeout (name UDF):** chunk by `FARM_FINGERPRINT(dwid) % N` — see `udf/README.md`.
 
@@ -74,9 +73,26 @@ and any local experiment worktrees are **not** part of this production dbt proje
 
 ## Live multi-state builds (A10)
 
-**Allowlist:** USPS 50 states + DC (**51** codes) in
-`habeas_privacy_core.geo.state.USPS_STATES_PLUS_DC` until Jose confirms a different
-MDR/DROP source of truth (**Q6**).
+**Allowlist (settled):** USPS 50 states + DC (**51** codes) in
+`habeas_privacy_core.geo.state.USPS_STATES_PLUS_DC`. That list is the prod
+source of truth for enqueue-all / hash refresh — not a separate MDR jurisdiction
+config. Every state must be hashed and ready to match; sparse marts (email) still
+run per state and simply yield zero serving rows when MDR has no values.
+
+### Email MDR source (investigation 2026-07-20)
+
+| Finding | Detail |
+|---------|--------|
+| Dataset | `example-gcp-project.person_db` (dbt `source('person_db', …)`) |
+| Email tables | **None** named email/contact — only `person` holds an email field |
+| Email column | Sole column: `person.emailaddress` (join keys `dwid`, `state`) |
+| Other “mail*” columns | Postal/mail **address** fields on `person` / household / models — not emails |
+| Phones | Separate table `phones` (`dwid`, `state`, cell/land) — no email columns |
+| Fill rate | ~9.9M nonempty / ~377M person rows (~97% null or empty) |
+| States with any email | **9:** NY, IN, IL, WI, RI, SD, FL, AZ, MT — remaining 42 (incl. **CA**) have zero nonempty |
+| dbt recommendation | Keep `stg_person` → `int_email_hash` on `emailaddress`; **no union** needed |
+
+Sparse `email_hash` is an MDR completeness property, not a wrong dbt source.
 
 **Enqueue-all wave (code complete — do not fire against prod without Jose):**
 
@@ -119,26 +135,28 @@ FL only after the fix is deployed:
 habeas-cli drop hash-index-refresh enqueue --state FL --execute
 ```
 
-### Read-only BQ probe (2026-07-17, operator ADC)
+### Read-only BQ probe (2026-07-20, operator ADC)
 
-Project `example-gcp-project` · account `dev-owner-1@example.com` · `bq ls` / metadata queries OK.
+Project `example-gcp-project` · `bq ls` / metadata + count queries OK (no PII selected).
 
 | Mart | Row count | Distinct `state` | Notes |
 |------|-----------|------------------|--------|
-| `email_hash` | 0 | 0 | Empty — CA email rebuild incomplete or never swapped |
-| `phone_hash` | ~37.9M | 1 (`CA`) | Multi-state not loaded |
-| `ndz_hash` | ~35.9M | 1 (`CA`) | Multi-state not loaded |
+| `email_hash` | ~9.91M | **9** | Exact match to MDR nonempty `person.emailaddress`; states NY/IN/IL/WI/RI/SD/FL/AZ/MT. CA and 41 others correctly absent (MDR zero fill). |
+| `phone_hash` | ~411.7M | **51** | Full USPS 50+DC coverage |
+| `ndz_hash` | ~276.9M | **51** | Full USPS 50+DC coverage |
 
 Dataset `drop_hash_index` lists serving + intermediate tables; experiment dataset
-`drop_hash_experiment` still present (sandbox only).
+`drop_hash_experiment` still present (sandbox only). No re-enqueue needed for
+email after the 2026-07-20 investigation — serving already equals MDR fill.
 
-### Blockers before first prod enqueue-all / multi-state dbt wave
+### Blockers / notes for prod enqueue-all
 
 1. **Prod-write gate** — no prod dbt build and no prod `enqueue-all` without Jose
-   approval (see `.agent/modules/prod-write-gate.md`).
-2. **Q6 / A10** — confirm 50+DC is the served-state source of truth.
-3. **CA completeness** — `email_hash` is empty while phone/ndz are CA-only; fix CA
-   email before scaling the wave.
+   approval (see `.agent/modules/prod-write-gate.md`). Prior waves approved separately.
+2. **Served states** — **settled:** USPS 50+DC. Re-enqueue only when MDR updates or
+   a mart gap appears (phone/ndz currently 51/51).
+3. **Email sparsity** — expected; not a rebuild blocker. Matching on email only
+   works in the 9 MDR-filled states until Habeas loads more `emailaddress` values.
 4. **Worker workload identity** — Cloud Build does not yet attach a dedicated
    `hash-index-refresh` runtime SA with BigQuery `jobUser` + dataset write on
    `drop_hash_index` + MDR read (see `infra/README.md` go-live checklist). Invoker
@@ -152,5 +170,5 @@ Dataset `drop_hash_index` lists serving + intermediate tables; experiment datase
 | Entrypoint | Invoker |
 |------------|---------|
 | `dbt build --vars '{state: <STATE>}'` from `transform/drop_hash/` | Hash-index refresh worker (`app/hash_index_refresh`) — rematch-on-refresh for that state |
-| `POST /ops/drop/hash-index-refresh/enqueue-all` | Admin-api full wave (A10 allowlist; confirm Q6 + Jose before prod) |
+| `POST /ops/drop/hash-index-refresh/enqueue-all` | Admin-api full wave (A10 allowlist = USPS 50+DC; Jose before prod) |
 | `./udf/apply_udf.sh` | When `normalize_name.js` changes |

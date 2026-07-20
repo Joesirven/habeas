@@ -22,8 +22,9 @@ Production dbt project for DROP hash-index serving tables in BigQuery.
 - Serving columns: `(hash_value, dwid, state, built_at)`; clustered `(state, hash_value)`.
 - Phone mart: two rows per dwid when both cell and land exist.
 - Worker invokes dbt from this directory with `--vars '{state: ...}'` per state.
-  Shared serving marts hold all MDR/DROP-served states (A10: USPS 50+DC = 51
-  codes until Jose confirms Q6). Physical staging/int/build tables are
+  Shared serving marts hold **all US states + DC** (USPS 50+DC = 51 codes in
+  `habeas_privacy_core.geo.state.USPS_STATES_PLUS_DC` — settled; not a separate
+  MDR jurisdiction config). Physical staging/int/build tables are
   **state-suffixed** so parallel per-state jobs are safe; only
   `email_hash` / `phone_hash` / `ndz_hash` are shared. Default `state: CA` in
   `dbt_project.yml` is local convenience only — production passes the attempt’s
@@ -31,6 +32,9 @@ Production dbt project for DROP hash-index serving tables in BigQuery.
   (`.../enqueue-all`, `.../process`) — never user→worker. Live BQ coverage +
   blockers are in [RUNBOOK.md](RUNBOOK.md) (“Live multi-state builds”). No prod
   dbt / enqueue-all without Jose.
+- **Email source:** `person_db.person.emailaddress` only — no dedicated email /
+  contact table in the MDR dataset. Sparse fill is MDR data (many states have
+  zero nonempty emails); dbt does not union alternate email columns.
 - UDF body must stay the bake-off winner (`normalizeName` + LATIN_EXTENDED).
 
 ## Commands
