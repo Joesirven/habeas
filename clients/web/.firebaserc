@@ -1,7 +1,0 @@
-{
-  "projects": {
-    "default": "example-gcp-project"
-  },
-  "targets": {},
-  "etags": {}
-}

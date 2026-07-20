@@ -6,16 +6,41 @@
 
 | Operation | Path |
 |-----------|------|
-| Mutations (approve, reject, retry, rule changes) | HTTP → **admin-api** via Identity-Aware Proxy bearer token |
+| Mutations (approve, reject, retry, rule changes, DROP process/enqueue) | HTTP → **admin-api** via Identity-Aware Proxy bearer token |
 | Analysis reads (SELECT, joins, state inspection) | Postgres **read-only role** via Cloud SQL Auth Proxy |
-| Forbidden | insert, update, delete, truncate, data definition language |
+| Forbidden | insert, update, delete, truncate, data definition language; direct user→worker Cloud Run calls; `DATABASE_URL` as a mutation path |
+
+## Identity-Aware Proxy (required for remote admin-api)
+
+Deployed `admin-api-dev` has IAP on, `REQUIRE_IAP_IDENTITY=true`, invoker = IAP SA only.
+User ADC cannot mint audience tokens — impersonate the ops/runtime SA.
+Localhost admin-api needs no token.
+
+```bash
+export ADMIN_API_URL=https://admin-api-dev-hsa55rg7ja-uk.a.run.app
+export IAP_OAUTH_CLIENT_ID=95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com
+export IAP_IMPERSONATE_SERVICE_ACCOUNT=95660886550-compute@developer.gserviceaccount.com
+# Optional prefetch (CLI mints the same way when IAP_OAUTH_CLIENT_ID is set):
+export IAP_ID_TOKEN="$(gcloud auth print-identity-token \
+  --audiences="$IAP_OAUTH_CLIENT_ID" \
+  --impersonate-service-account="$IAP_IMPERSONATE_SERVICE_ACCOUNT" \
+  --include-email)"
+
+uv run --package habeas-cli habeas-cli drop hash-index-refresh process --execute
+curl -sS -H "Authorization: Bearer $IAP_ID_TOKEN" "$ADMIN_API_URL/auth/me"
+```
+
+There is no `--no-iap` escape. Missing token against `*.run.app` fails closed.
+`--include-email` is required for service-account IAP tokens.
 
 ## Agent rules
 
-- Use `habeas-cli` subcommands — never raw `psql` or curl without the CLI wrapper.
+- Use `habeas-cli` subcommands — never raw `psql`; prefer CLI over ad-hoc curl (curl only with IAP bearer as above).
 - Default output: `--json` for machine parsing.
 - `--execute` required for mutation subcommands; without it, dry-run only.
 - Send header `X-Client: habeas-cli` on admin-api calls (audit surface tagging).
+- Worker process/enqueue always via admin-api — never grant yourself worker `run.invoker`.
+- Hash-index enqueue: pass `--state XX` or `--all-states` — no implicit CA default.
 
 ## Distribution
 

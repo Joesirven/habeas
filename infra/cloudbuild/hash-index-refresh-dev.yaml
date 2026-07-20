@@ -37,7 +37,10 @@ steps:
       - --platform=managed
       - --no-allow-unauthenticated
       - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
-      - --set-env-vars=SERVICE_NAME=hash-index-refresh,WORKER_ID=hash-index-refresh-dev,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DROP_HASH_DBT_DIR=/app/transform/drop_hash,DATABASE_URL=${_DATABASE_URL}
+      - --timeout=3600
+      - --cpu=2
+      - --memory=4Gi
+      - --set-env-vars=SERVICE_NAME=hash-index-refresh,WORKER_ID=hash-index-refresh-dev,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DROP_HASH_DBT_DIR=/app/transform/drop_hash,DBT_PROFILES_DIR=/app/transform/drop_hash,DBT_TIMEOUT_SECONDS=3300,DATABASE_URL=${_DATABASE_URL}
 
 images:
   - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}

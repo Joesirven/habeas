@@ -11,8 +11,16 @@ from habeas_cli.main import app
 runner = CliRunner()
 
 
-def test_hash_index_enqueue_dry_run():
+def test_hash_index_enqueue_requires_state_or_all_states():
     result = runner.invoke(app, ["drop", "hash-index-refresh", "enqueue"])
+    assert result.exit_code == 1
+    assert "no implicit CA default" in result.stdout
+
+
+def test_hash_index_enqueue_dry_run():
+    result = runner.invoke(
+        app, ["drop", "hash-index-refresh", "enqueue", "--state", "CA"]
+    )
     assert result.exit_code == 0
     assert "dry_run" in result.stdout
 

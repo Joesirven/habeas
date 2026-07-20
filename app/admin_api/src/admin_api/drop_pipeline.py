@@ -60,6 +60,18 @@ _WORKER_QUEUE_TABLES: dict[str, str | None] = {
 }
 
 _TERMINAL_FAIL_STATUSES = ("submit_error", "outcome_error", "timeout", "abandoned")
+_OPEN_ATTEMPT_STATUSES = ("pending", "claimed", "in_flight")
+
+# Approaching-SLA MVP (R8 / AE2): age-policy thresholds on open queue rows.
+# No DROP legal-deadline column exists yet — these are ops attention windows
+# derived from stage-family expectations (automation stages shorter than the
+# human matching.review gate), not sla_monitor breach clocks. Counts only.
+APPROACHING_SLA_THRESHOLD_HOURS: dict[str, int] = {
+    "connector": 24,  # drop_connector_attempts open age (attempted_at)
+    "ingest": 12,  # drop_ingest_attempts open age (attempted_at)
+    "matching": 4,  # DROP matching_attempts open age (attempted_at)
+    "matching_review": 48,  # matching.review pending age (requested_at)
+}
 
 
 class DropPipelineSettings(CoreSettings):
@@ -82,6 +94,8 @@ settings = DropPipelineSettings()
 
 DEFAULT_PROXY_TIMEOUT = 60.0
 DOWNLOAD_PROXY_TIMEOUT = 120.0
+# dbt per-state builds can run nearly an hour; keep under worker Cloud Run timeout.
+HASH_INDEX_REFRESH_PROXY_TIMEOUT = 3300.0
 
 WORKER_KEYS = (
     ("drop_connector", "drop_connector_url"),
@@ -121,11 +135,15 @@ class FulfillProxyBody(BaseModel):
 
 
 class HashIndexRefreshEnqueueBody(BaseModel):
-    state: str = "CA"
+    """Single-state enqueue — ``state`` is required (no CA default on empty POST)."""
+
+    state: str = Field(min_length=2, max_length=32)
     list_types: list[str] | None = None
 
 
 class HashIndexRefreshEnqueueAllBody(BaseModel):
+    """Wave enqueue — empty body is OK; use this path, not bare ``/enqueue``."""
+
     list_types: list[str] | None = None
 
 
@@ -430,6 +448,55 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
             "rematch_enqueued_count": int(last_run_row["rematch_enqueued_count"] or 0),
         }
 
+    open_statuses = list(_OPEN_ATTEMPT_STATUSES)
+    approaching_connector = await conn.fetchval(
+        """
+        -- approaching_sla:connector
+        SELECT COUNT(*)::int
+          FROM drop_connector_attempts
+         WHERE status = ANY($1::text[])
+           AND attempted_at < NOW() - ($2 || ' hours')::interval
+        """,
+        open_statuses,
+        str(APPROACHING_SLA_THRESHOLD_HOURS["connector"]),
+    )
+    approaching_ingest = await conn.fetchval(
+        """
+        -- approaching_sla:ingest
+        SELECT COUNT(*)::int
+          FROM drop_ingest_attempts
+         WHERE status = ANY($1::text[])
+           AND attempted_at < NOW() - ($2 || ' hours')::interval
+        """,
+        open_statuses,
+        str(APPROACHING_SLA_THRESHOLD_HOURS["ingest"]),
+    )
+    approaching_matching = await conn.fetchval(
+        """
+        -- approaching_sla:matching
+        SELECT COUNT(*)::int
+          FROM matching_attempts ma
+          JOIN requests r ON r.id = ma.request_id
+         WHERE r.intake_source = 'drop'
+           AND ma.status = ANY($1::text[])
+           AND ma.attempted_at < NOW() - ($2 || ' hours')::interval
+        """,
+        open_statuses,
+        str(APPROACHING_SLA_THRESHOLD_HOURS["matching"]),
+    )
+    approaching_matching_review = await conn.fetchval(
+        """
+        -- approaching_sla:matching_review
+        SELECT COUNT(*)::int
+          FROM approval_requests
+         WHERE action_type = $1
+           AND status = 'pending'
+           AND requested_at < NOW() - ($2 || ' hours')::interval
+        """,
+        MATCHING_REVIEW_ACTION,
+        str(APPROACHING_SLA_THRESHOLD_HOURS["matching_review"]),
+    )
+
     return {
         "connector_attempts": [
             {"step": r["step"], "status": r["status"], "count": int(r["count"])}
@@ -484,6 +551,13 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
             "pending": matching_pending,
             "success": matching_success,
             "by_status": matching_by_status,
+        },
+        "approaching_sla": {
+            "connector": int(approaching_connector or 0),
+            "ingest": int(approaching_ingest or 0),
+            "matching": int(approaching_matching or 0),
+            "matching_review": int(approaching_matching_review or 0),
+            "thresholds_hours": dict(APPROACHING_SLA_THRESHOLD_HOURS),
         },
         "matching_results_recent": [
             {
@@ -752,7 +826,7 @@ async def hash_index_refresh_process(
 ):
     """Proxy process to hash_index_refresh worker (Cloud Run invoker token)."""
     url = f"{settings.hash_index_refresh_url.rstrip('/')}/process"
-    return await proxy_post(url)
+    return await proxy_post(url, timeout=HASH_INDEX_REFRESH_PROXY_TIMEOUT)
 
 
 def _serialize_matching_result_row(row: Any) -> dict[str, Any]:

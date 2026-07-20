@@ -81,6 +81,19 @@ gcloud builds submit --config=infra/cloudbuild/admin-web-dev.yaml --project=exam
 
 After first deploy, append the `admin-web-dev` `*.run.app` origin to `admin-api-dev` `_CORS_ORIGINS` and redeploy admin-api so the browser can call the API cross-origin.
 
+**Requester state on promote:** `requestor_state` comes from `raw_payload.state` /
+`raw_payload.requestor_state`, else a USPS token in the CSV filename
+(e.g. `broker_TX_EMAIL.csv`). If both omit state, promote **fails closed** — it
+does **not** invent `CA`. For local CA DROP sandbox filenames that omit state
+(e.g. `20260716_1_NDZ.csv`), set opt-in env on the worker only:
+
+```bash
+DROP_ALLOW_DEFAULT_REQUESTOR_STATE=CA
+```
+
+Never enable that override in deployed/IAP environments. When it is set, promote
+logs `drop_promote_requestor_state_default` (no PII) with `sandbox_override=true`.
+
 ### hash-index-refresh (DROP hash productionize)
 
 | File | Purpose |
@@ -99,26 +112,92 @@ gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
 
 | Surface | Invoker |
 |---------|---------|
-| `admin-api-dev` | `allUsers` (Firebase SPA CORS; **residual** until Identity-Aware Proxy) |
-| `admin-web-dev` | `allUsers` (static SPA; CORS origin must be listed on admin-api) |
-| Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`, `hash-index-refresh-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) |
+| `admin-api-dev` | Compute SA (`95660886550-compute@developer.gserviceaccount.com`) — ops-ia / admin-web nginx mints identity tokens; app-level `REQUIRE_IAP_IDENTITY` |
+| `admin-web-dev` / `ops-ia-web-dev` | Public Cloud Run + browser IAP front door (see `admin-web-dev.yaml` / ops-ia deploy) |
+| Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`, `hash-index-refresh-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) — never user/IAP direct |
 
-Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Localhost worker URLs skip auth.
+Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Operators never call workers directly — process/enqueue goes through admin-api with IAP. Localhost worker URLs skip auth.
+
+One-shot re-lock admin-api invoker to IAP SA: `infra/cloudbuild/admin-api-dev-iam.yaml`.
 
 #### DROP mutation identity (app layer)
 
-Mutating `/ops/drop/*` routes call `require_drop_mutation_actor`. Set `REQUIRE_IAP_IDENTITY=true` on admin-api (Cloud Build `_REQUIRE_IAP_IDENTITY`) so headerless callers get **401**. Local default is `false` so Vite/CLI against localhost keep working.
+Mutating `/ops/drop/*` routes and the power console require a DROP ops role. Deployed admin-api sets `REQUIRE_IAP_IDENTITY=true` (`_REQUIRE_IAP_IDENTITY` in `admin-api-dev.yaml`) so headerless callers get **401**; authenticated emails not on an allowlist get **403**. Local default is `false` so Vite/CLI against localhost keep working (role from `DROP_OPS_LOCAL_ROLE`, default `super_admin`).
 
 `decided_by` on bulk-approve prefers `X-Goog-Authenticated-User-Email` when present (ignores client spoof).
 
-**Residual (do not waive for shared/prod without this checklist):**
+#### DROP ops role allowlists
 
-1. Put Identity-Aware Proxy in front of `admin-api` (Architecture: IAP at edge; JWT assertion strips client-forged email headers).
-2. Flip `_REQUIRE_IAP_IDENTITY=true` on `admin-api-dev` deploy.
-3. Remove `allUsers` invoker (`admin-api-dev-iam.yaml` is the opposite of the end state — do not copy that pattern to workers).
-4. Grant worker invoker only to the admin-api runtime SA:
+Map IAP email → role (pipe- or comma-separated). Highest privilege wins if an email is on multiple lists.
+
+| Env | Role | Typical access |
+|-----|------|----------------|
+| `DROP_OPS_SUPER_ADMIN_EMAILS` | `super_admin` | Spine proxies, `GET /ops/drop/pipeline`, workers/queues, hash-index enqueue/process |
+| `DROP_OPS_ADMIN_EMAILS` | `admin` | Matching-results GET/bulk-approve, assign/escalate, matching.review decide |
+| `DROP_OPS_DATA_OWNER_EMAILS` | `data_owner` | Same review paths as `admin` |
+| `DROP_OPS_LOCAL_ROLE` | any of the three | Local-only default when `REQUIRE_IAP_IDENTITY` is false (default `super_admin`) |
+
+**Web session contract:** `GET /me` → `{ "email", "role" }`. `GET /auth/me` remains an identity probe (also includes `role` when resolvable).
+
+#### Calling admin-api with IAP (CLI / curl) — machine path
+
+User ADC **cannot** mint `--audiences` ID tokens. Mint via the ops/runtime
+service account (impersonation). Audience = IAP OAuth client ID for
+`admin-api-dev` (not the Cloud Run URL).
+
+Dev client ID (custom OAuth applied to Cloud Run IAP):
+
+`95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com`
 
 ```bash
+export ADMIN_API_URL=https://admin-api-dev-hsa55rg7ja-uk.a.run.app
+export IAP_OAUTH_CLIENT_ID=95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com
+export IAP_IMPERSONATE_SERVICE_ACCOUNT=95660886550-compute@developer.gserviceaccount.com
+
+# Prefetch (CLI also mints this automatically when IAP_OAUTH_CLIENT_ID is set):
+export IAP_ID_TOKEN="$(gcloud auth print-identity-token \
+  --audiences="$IAP_OAUTH_CLIENT_ID" \
+  --impersonate-service-account="$IAP_IMPERSONATE_SERVICE_ACCOUNT" \
+  --include-email)"
+
+curl -sS -H "Authorization: Bearer $IAP_ID_TOKEN" "$ADMIN_API_URL/me"
+# Expect { "email": "<ops SA or user>", "role": "super_admin"|"admin"|"data_owner" }
+# Ensure that email is on DROP_OPS_SUPER_ADMIN_EMAILS (or ADMIN / DATA_OWNER).
+
+uv run --package habeas-cli habeas-cli drop pipeline
+uv run --package habeas-cli habeas-cli drop hash-index-refresh process --execute
+```
+
+Prerequisites Jose must keep granted:
+
+| Grant | Principal | Resource |
+|-------|-----------|----------|
+| `roles/iam.serviceAccountTokenCreator` | `user:jsirven@…` (agents) | ops SA (`95660886550-compute@…`) |
+| `roles/iap.httpsResourceAccessor` | ops SA + Jose | IAP on `admin-api-dev` |
+| `roles/run.invoker` | **only** `service-…@gcp-sa-iap.iam.gserviceaccount.com` | `admin-api-dev` |
+| `DROP_OPS_SUPER_ADMIN_EMAILS` (etc.) env | include ops SA / operator emails | Cloud Run env on admin-api |
+| Worker `roles/run.invoker` | **only** admin-api runtime SA | `hash-index-refresh-dev`, `matching-dev`, … |
+
+Do **not** use `DATABASE_URL` for ops mutations — SELECT-only analysis only.
+Do **not** curl workers or grant yourself worker `run.invoker`.
+
+Local web against remote admin-api (Vite proxy injects the bearer):
+
+```bash
+cd clients/web
+export VITE_PROXY_TARGET="$ADMIN_API_URL"
+export IAP_ID_TOKEN  # as above (must be SA-impersonated + --include-email)
+bun run dev   # leave VITE_ADMIN_API_URL unset so the app uses /api
+```
+
+**Residual:**
+
+1. Full IAP JWT assertion verification in admin-api (email header alone is trusted at the edge today — see `habeas_privacy_core.auth` README).
+2. Deployed SPA→admin-api is cross-origin; cookie IAP is best-effort (`credentials: 'include'`). Prefer CLI + IAP token for mutations until a same-origin `/api` BFF exists.
+3. Re-lock admin-api invoker / grant worker invoker:
+
+```bash
+gcloud builds submit --config=infra/cloudbuild/admin-api-dev-iam.yaml --project=example-gcp-project
 gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev-iam.yaml \
   --project=example-gcp-project
 ```

@@ -44,7 +44,7 @@ data-privacy/
 | Web | Vite, React, TypeScript, TanStack Router, TanStack Query, shadcn, Bun |
 | Live updates | Server-Sent Events on admin-api; Postgres LISTEN/NOTIFY on approval tables |
 | Database | Cloud SQL PostgreSQL 16, dbmate migrations |
-| Deploy | Cloud Run (apps), Firebase Hosting (web), Cloud Build |
+| Deploy | Cloud Run (apps + admin web), Cloud Build |
 
 ---
 

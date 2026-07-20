@@ -159,6 +159,7 @@ async def _promote_drop(
             drop_record_id=drop_record_id,
             list_type=list_type,
             source_csv_filename=f"20260717_broker_{list_type.value}.csv",
+            raw_payload={"state": "CA"},
         ),
     )
     return request_id

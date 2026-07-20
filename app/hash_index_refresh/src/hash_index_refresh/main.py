@@ -97,7 +97,13 @@ async def process_next():
 
     pool = get_pool()
     async with pool.acquire() as conn:
-        claim = await claim_hash_index_refresh(conn, worker_id=settings.worker_id)
+        # dbt per-state builds often exceed the default 10m queue lease; keep
+        # claim alive for the worker Cloud Run / DBT timeout window.
+        claim = await claim_hash_index_refresh(
+            conn,
+            worker_id=settings.worker_id,
+            lease_minutes=60,
+        )
         if claim is None:
             return {"status": "idle"}
 

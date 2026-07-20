@@ -1,0 +1,353 @@
+.splash-b-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  min-height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: var(--cat-black);
+  color: var(--cat-silver-hi);
+}
+
+.splash-b-phase-out {
+  animation: splash-b-fade-out 0.45s ease both;
+}
+
+@keyframes splash-b-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+/* ─── v4 Orb Spin: continuous wireframe rotation ─── */
+
+.splash-b-v4-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.1rem;
+  z-index: 1;
+}
+
+.splash-b-v4-orb-wrap {
+  position: relative;
+  width: 180px;
+  height: 165px;
+  display: grid;
+  place-items: center;
+}
+
+.splash-b-v4-orb-wrap .splash-b-wire-orb {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+}
+
+.splash-b-v4-orb-wrap .splash-shared-orb {
+  position: relative;
+  z-index: 1;
+  opacity: 0.55;
+  transform: scale(0.55) translateY(28px);
+}
+
+.splash-b-wire-spin {
+  perspective: 480px;
+  transform-style: preserve-3d;
+}
+
+.splash-b-wire-spin .splash-b-wire-orb {
+  display: block;
+  transform-origin: 50% 48%;
+  animation: splash-b-wire-yaw 2.8s linear infinite;
+}
+
+@keyframes splash-b-wire-yaw {
+  0% {
+    transform: rotateY(0deg) rotateZ(-6deg);
+  }
+  50% {
+    transform: rotateY(180deg) rotateZ(6deg);
+  }
+  100% {
+    transform: rotateY(360deg) rotateZ(-6deg);
+  }
+}
+
+.splash-b-silver-mark {
+  margin: 0;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: clamp(1.6rem, 5vw, 2.4rem);
+  font-weight: 700;
+  letter-spacing: 0.42em;
+  text-indent: 0.42em;
+  color: var(--cat-silver);
+  text-shadow: 0 0 0 var(--cat-silver-hi);
+  animation: splash-b-v4-mark 0.7s steps(5) both;
+}
+
+.splash-b-v4 .splash-shared-dpp {
+  animation: splash-b-v4-dpp 0.55s steps(4) 0.55s both;
+}
+
+@keyframes splash-b-v4-mark {
+  from {
+    opacity: 0;
+    letter-spacing: 0.9em;
+    color: var(--cat-blue);
+  }
+  to {
+    opacity: 1;
+    letter-spacing: 0.42em;
+    color: var(--cat-silver);
+  }
+}
+
+@keyframes splash-b-v4-dpp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.splash-b-phase-in.splash-b-v4 .splash-b-v4-orb-wrap {
+  animation: splash-b-v4-bloom 0.5s ease both;
+}
+
+@keyframes splash-b-v4-bloom {
+  from {
+    opacity: 0;
+    filter: brightness(2.4);
+    transform: scale(0.7);
+  }
+  to {
+    opacity: 1;
+    filter: none;
+    transform: none;
+  }
+}
+
+/* ─── v5 Arrow Loader: dashoffset progress, then snap ─── */
+
+.splash-b-v5-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.75rem;
+  min-width: min(320px, 88vw);
+}
+
+.splash-b-arrow-loader {
+  overflow: visible;
+}
+
+.splash-b-arrow-progress {
+  stroke-dasharray: 8 6;
+  stroke-dashoffset: 152;
+  animation: splash-b-arrow-fill 2.1s steps(14) forwards;
+}
+
+.splash-b-arrow-head {
+  opacity: 0.25;
+  animation: splash-b-arrow-head-on 0.2s steps(2) 1.9s forwards;
+}
+
+@keyframes splash-b-arrow-fill {
+  0% {
+    stroke-dashoffset: 152;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes splash-b-arrow-head-on {
+  to {
+    opacity: 1;
+  }
+}
+
+.splash-b-v5-reveal {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.85rem;
+  opacity: 0;
+  animation: splash-b-v5-snap 0.18s steps(2) 2.15s forwards;
+}
+
+.splash-b-v5-reveal .splash-shared-logo {
+  max-width: min(240px, 68vw);
+  filter: contrast(1.2) saturate(0.85) brightness(1.05);
+}
+
+@keyframes splash-b-v5-snap {
+  from {
+    opacity: 0;
+    transform: scale(1.08);
+    filter: brightness(3);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+
+.splash-b-phase-in.splash-b-v5 .splash-b-arrow-loader {
+  animation: splash-b-v5-enter 0.35s ease both;
+}
+
+@keyframes splash-b-v5-enter {
+  from {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ─── v6 Chrome Build: static orb + stroke/clip wordmark draw ─── */
+
+.splash-b-v6-frame {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 1.25rem 1.75rem;
+  max-width: min(560px, 92vw);
+  padding: 0 1rem;
+}
+
+.splash-b-v6-orb-slot {
+  grid-row: 1 / span 2;
+  opacity: 0.9;
+  animation: splash-b-v6-orb-hold 0.4s ease both;
+}
+
+.splash-b-v6-orb-slot .splash-shared-orb {
+  /* Static — no spin; slight CRT float only */
+  animation: splash-b-v6-float 3.2s ease-in-out infinite;
+}
+
+@keyframes splash-b-v6-orb-hold {
+  from {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+  to {
+    opacity: 0.9;
+    transform: none;
+  }
+}
+
+@keyframes splash-b-v6-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.splash-b-v6-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.splash-b-v6-draw {
+  position: relative;
+  overflow: hidden;
+  clip-path: inset(0 100% 0 0);
+  animation: splash-b-v6-clip 1.6s cubic-bezier(0.4, 0, 0.2, 1) 0.35s forwards;
+}
+
+@keyframes splash-b-v6-clip {
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+.splash-b-wordmark {
+  display: block;
+  overflow: visible;
+}
+
+.splash-b-wordmark text {
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: 0.28em;
+}
+
+.splash-b-wordmark-stroke {
+  stroke-dasharray: 480;
+  stroke-dashoffset: 480;
+  animation: splash-b-v6-stroke 1.4s ease 0.2s forwards;
+}
+
+.splash-b-wordmark-fill {
+  opacity: 0;
+  animation: splash-b-v6-fill 0.35s steps(3) 1.45s forwards;
+}
+
+@keyframes splash-b-v6-stroke {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes splash-b-v6-fill {
+  to {
+    opacity: 1;
+  }
+}
+
+.splash-b-v6 .splash-shared-dpp {
+  text-align: left;
+  letter-spacing: 0.14em;
+  opacity: 0;
+  animation: splash-b-v6-dpp 0.5s ease 1.75s forwards;
+}
+
+@keyframes splash-b-v6-dpp {
+  from {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .splash-b-v6-frame {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    text-align: center;
+  }
+
+  .splash-b-v6-orb-slot {
+    grid-row: auto;
+  }
+
+  .splash-b-v6-copy {
+    align-items: center;
+  }
+
+  .splash-b-v6 .splash-shared-dpp {
+    text-align: center;
+  }
+}

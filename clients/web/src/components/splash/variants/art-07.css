@@ -1,0 +1,485 @@
+/* Executor 7 — TYPE LOCKUP v3: orb + dashed arrow support hero type (ids 13–14) */
+
+.art-07-lockup {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.15rem;
+  padding: 1.5rem;
+  text-align: center;
+}
+
+.art-07-glow {
+  pointer-events: none;
+  position: absolute;
+  inset: -12% -8%;
+  z-index: 0;
+  background: radial-gradient(
+    ellipse 52% 42% at 50% 38%,
+    color-mix(in srgb, var(--cat-blue) 26%, transparent) 0%,
+    color-mix(in srgb, var(--cat-blue-deep) 10%, transparent) 44%,
+    transparent 72%
+  );
+  opacity: 0;
+}
+
+.art-07-type {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.art-07-brand,
+.art-07-product,
+.art-07-dpp {
+  margin: 0;
+  font-family: 'Courier New', Courier, monospace;
+  font-weight: 700;
+  line-height: 0.95;
+  text-transform: none;
+}
+
+.art-07-brand {
+  font-size: clamp(2.4rem, 9.5vw, 4.8rem);
+  letter-spacing: 0.06em;
+  color: var(--cat-silver-hi);
+  background: linear-gradient(
+    168deg,
+    var(--cat-silver-hi) 0%,
+    var(--cat-silver) 40%,
+    var(--cat-blue) 78%,
+    var(--cat-silver-hi) 100%
+  );
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 8px color-mix(in srgb, var(--cat-blue) 40%, transparent));
+}
+
+.art-07-product {
+  font-size: clamp(0.85rem, 2.8vw, 1.35rem);
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--cat-silver);
+}
+
+.art-07-dpp {
+  font-size: clamp(0.62rem, 1.8vw, 0.78rem);
+  letter-spacing: 0.42em;
+  text-transform: uppercase;
+  color: var(--cat-blue);
+  opacity: 0.85;
+}
+
+.art-07-support {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+}
+
+.art-07-orb-arrow {
+  display: block;
+  overflow: visible;
+  max-width: min(160px, 42vw);
+  height: auto;
+}
+
+.art-07-orb-wash {
+  fill: var(--cat-blue-deep);
+  opacity: 0;
+}
+
+.art-07-orb-root,
+.art-07-orb,
+.art-07-orb-rim,
+.art-07-orb-spec,
+.art-07-arrow-dash,
+.art-07-arrow-head {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.art-07-orb-root {
+  transform-origin: 36px 34px;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   v13 — TYPE LEAD → orb bloom → dashed arrow draw
+   ═══════════════════════════════════════════════════════════ */
+
+.art-07-v13 .art-07-glow {
+  animation: art-07-glow-in 0.7s ease-out 0.05s forwards;
+}
+
+.art-07-v13 .art-07-brand {
+  opacity: 0;
+  transform: translateY(14px) scale(0.94);
+  animation: art-07-type-lock 0.7s cubic-bezier(0.2, 1.15, 0.32, 1) 0.12s forwards;
+}
+
+.art-07-v13 .art-07-product {
+  opacity: 0;
+  transform: translateY(12px);
+  animation: art-07-line-rise 0.55s ease-out 0.55s forwards;
+}
+
+.art-07-v13 .art-07-dpp {
+  opacity: 0;
+  letter-spacing: 0.12em;
+  animation: art-07-dpp-expand 0.5s ease-out 0.95s forwards;
+}
+
+.art-07-v13 .art-07-orb-wash {
+  animation: art-07-fade-soft 0.45s ease-out 1.15s forwards;
+}
+
+.art-07-v13 .art-07-orb-root {
+  opacity: 0;
+  transform: scale(0.2);
+  animation: art-07-orb-bloom 0.65s cubic-bezier(0.2, 1.3, 0.35, 1) 1.2s forwards;
+}
+
+.art-07-v13 .art-07-orb-spec {
+  animation: art-07-spec-glint 2.2s ease-in-out 1.9s infinite;
+}
+
+.art-07-v13 .art-07-arrow-dash {
+  opacity: 0;
+  stroke-dasharray: 7 5;
+  stroke-dashoffset: 72;
+  animation: art-07-dash-draw 0.7s ease-out 1.55s forwards;
+}
+
+.art-07-v13 .art-07-arrow-head {
+  opacity: 0;
+  transform: translateX(-8px);
+  animation: art-07-head-snap 0.35s ease-out 2.1s forwards;
+}
+
+.art-07-v13.badge-phase-hold .art-07-brand,
+.art-07-v13.badge-phase-hold .art-07-product,
+.art-07-v13.badge-phase-hold .art-07-dpp,
+.art-07-v13.badge-phase-hold .art-07-orb-root,
+.art-07-v13.badge-phase-hold .art-07-arrow-dash,
+.art-07-v13.badge-phase-hold .art-07-arrow-head {
+  opacity: 1;
+  transform: none;
+  stroke-dashoffset: 0;
+}
+
+.art-07-v13.badge-phase-hold .art-07-dpp {
+  opacity: 0.85;
+  letter-spacing: 0.42em;
+}
+
+.art-07-v13.badge-phase-hold .art-07-support {
+  animation: art-07-hold-breathe 2s ease-in-out infinite;
+}
+
+.art-07-v13.badge-phase-out .art-07-lockup {
+  opacity: 0;
+  transition: opacity 0.4s ease-in;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   v14 — ARROW RAIL → orb seat → type drops onto lockup
+   ═══════════════════════════════════════════════════════════ */
+
+.art-07-v14 .art-07-glow {
+  animation: art-07-glow-in 0.65s ease-out 0.55s forwards;
+}
+
+.art-07-v14 .art-07-support {
+  order: -1;
+  margin-bottom: 0.15rem;
+}
+
+.art-07-v14 .art-07-arrow-dash {
+  opacity: 1;
+  stroke-dasharray: 7 5;
+  stroke-dashoffset: 72;
+  animation: art-07-dash-draw 0.85s cubic-bezier(0.22, 1, 0.36, 1) 0.08s forwards;
+}
+
+.art-07-v14 .art-07-arrow-head {
+  opacity: 0;
+  transform: scale(0.6);
+  animation: art-07-head-snap 0.35s cubic-bezier(0.2, 1.2, 0.35, 1) 0.75s forwards;
+}
+
+.art-07-v14 .art-07-orb-wash {
+  animation: art-07-fade-soft 0.4s ease-out 0.85s forwards;
+}
+
+.art-07-v14 .art-07-orb-root {
+  opacity: 0;
+  transform: translateX(-18px) scale(0.55);
+  animation: art-07-orb-seat 0.6s cubic-bezier(0.2, 1.15, 0.3, 1) 0.9s forwards;
+}
+
+.art-07-v14 .art-07-orb-spec {
+  animation: art-07-spec-glint 2.4s ease-in-out 1.6s infinite;
+}
+
+.art-07-v14 .art-07-brand {
+  opacity: 0;
+  transform: translateY(-28px) scale(1.06);
+  animation: art-07-type-drop 0.7s cubic-bezier(0.18, 1.2, 0.32, 1) 1.35s forwards;
+}
+
+.art-07-v14 .art-07-product {
+  opacity: 0;
+  transform: translateY(-16px);
+  animation: art-07-line-rise 0.5s ease-out 1.7s forwards;
+}
+
+.art-07-v14 .art-07-dpp {
+  opacity: 0;
+  transform: translateY(-8px);
+  animation: art-07-dpp-expand 0.45s ease-out 2s forwards;
+}
+
+.art-07-v14.badge-phase-hold .art-07-type {
+  animation: art-07-type-hold-pulse 2.1s ease-in-out infinite;
+}
+
+.art-07-v14.badge-phase-hold .art-07-brand,
+.art-07-v14.badge-phase-hold .art-07-product,
+.art-07-v14.badge-phase-hold .art-07-dpp {
+  opacity: 1;
+  transform: none;
+}
+
+.art-07-v14.badge-phase-hold .art-07-dpp {
+  opacity: 0.85;
+  letter-spacing: 0.42em;
+}
+
+.art-07-v14.badge-phase-hold .art-07-product {
+  letter-spacing: 0.28em;
+}
+
+.art-07-v14.badge-phase-hold .art-07-orb-root,
+.art-07-v14.badge-phase-hold .art-07-arrow-dash,
+.art-07-v14.badge-phase-hold .art-07-arrow-head {
+  opacity: 1;
+  transform: none;
+  stroke-dashoffset: 0;
+}
+
+.art-07-v14.badge-phase-out .art-07-lockup {
+  opacity: 0;
+  transition: opacity 0.4s ease-in;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Keyframes
+   ═══════════════════════════════════════════════════════════ */
+
+@keyframes art-07-glow-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes art-07-type-lock {
+  0% {
+    opacity: 0;
+    transform: translateY(14px) scale(0.94);
+  }
+  70% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1.02);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes art-07-line-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes art-07-dpp-expand {
+  from {
+    opacity: 0;
+    letter-spacing: 0.12em;
+  }
+  to {
+    opacity: 0.85;
+    letter-spacing: 0.42em;
+  }
+}
+
+@keyframes art-07-orb-bloom {
+  0% {
+    opacity: 0;
+    transform: scale(0.2);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes art-07-orb-seat {
+  0% {
+    opacity: 0;
+    transform: translateX(-18px) scale(0.55);
+  }
+  75% {
+    opacity: 1;
+    transform: translateX(3px) scale(1.06);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes art-07-dash-draw {
+  0% {
+    opacity: 0;
+    stroke-dashoffset: 72;
+  }
+  12% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes art-07-head-snap {
+  from {
+    opacity: 0;
+    transform: translateX(-8px) scale(0.6);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes art-07-type-drop {
+  0% {
+    opacity: 0;
+    transform: translateY(-28px) scale(1.06);
+  }
+  72% {
+    opacity: 1;
+    transform: translateY(4px) scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes art-07-fade-soft {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 0.28;
+  }
+}
+
+@keyframes art-07-spec-glint {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 0.88;
+  }
+}
+
+@keyframes art-07-hold-breathe {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 10px color-mix(in srgb, var(--cat-blue) 55%, transparent));
+  }
+  50% {
+    filter: drop-shadow(0 0 18px color-mix(in srgb, var(--cat-blue) 80%, transparent))
+      drop-shadow(0 0 28px color-mix(in srgb, var(--cat-silver-hi) 28%, transparent));
+  }
+}
+
+@keyframes art-07-type-hold-pulse {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 8px color-mix(in srgb, var(--cat-blue) 40%, transparent));
+  }
+  50% {
+    filter: drop-shadow(0 0 16px color-mix(in srgb, var(--cat-blue) 70%, transparent))
+      drop-shadow(0 0 24px color-mix(in srgb, var(--cat-silver-hi) 30%, transparent));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .art-07-v13 .art-07-glow,
+  .art-07-v13 .art-07-brand,
+  .art-07-v13 .art-07-product,
+  .art-07-v13 .art-07-dpp,
+  .art-07-v13 .art-07-orb-wash,
+  .art-07-v13 .art-07-orb-root,
+  .art-07-v13 .art-07-orb-spec,
+  .art-07-v13 .art-07-arrow-dash,
+  .art-07-v13 .art-07-arrow-head,
+  .art-07-v14 .art-07-glow,
+  .art-07-v14 .art-07-arrow-dash,
+  .art-07-v14 .art-07-arrow-head,
+  .art-07-v14 .art-07-orb-wash,
+  .art-07-v14 .art-07-orb-root,
+  .art-07-v14 .art-07-orb-spec,
+  .art-07-v14 .art-07-brand,
+  .art-07-v14 .art-07-product,
+  .art-07-v14 .art-07-dpp,
+  .art-07-v13.badge-phase-hold .art-07-support,
+  .art-07-v14.badge-phase-hold .art-07-type {
+    animation: none !important;
+    opacity: 1;
+    transform: none;
+    stroke-dashoffset: 0;
+    letter-spacing: 0.42em;
+    -webkit-text-fill-color: unset;
+  }
+
+  .art-07-v13 .art-07-brand,
+  .art-07-v14 .art-07-brand {
+    -webkit-text-fill-color: transparent;
+  }
+
+  .art-07-v13 .art-07-orb-wash,
+  .art-07-v14 .art-07-orb-wash {
+    opacity: 0.28;
+  }
+
+  .art-07-v13 .art-07-dpp,
+  .art-07-v14 .art-07-dpp {
+    opacity: 0.85;
+  }
+}

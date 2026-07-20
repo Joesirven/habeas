@@ -1,0 +1,418 @@
+/* Executor 10 — TYPE LOCKUP v3: split HABEAS + DPP */
+
+.art-10-stage {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+}
+
+.art-10-lockup {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.85rem;
+  text-align: center;
+}
+
+.art-10-glow {
+  pointer-events: none;
+  position: absolute;
+  inset: -18% -12%;
+  z-index: 0;
+  background: radial-gradient(
+    ellipse 55% 45% at 50% 42%,
+    color-mix(in srgb, var(--cat-blue) 28%, transparent) 0%,
+    color-mix(in srgb, var(--cat-blue-deep) 12%, transparent) 42%,
+    transparent 72%
+  );
+  opacity: 0;
+}
+
+.art-10-row {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.55rem 1rem;
+}
+
+.art-10-habeas,
+.art-10-dpp {
+  margin: 0;
+  display: flex;
+  font-family: 'Courier New', Courier, monospace;
+  font-weight: 700;
+  line-height: 0.92;
+  text-transform: uppercase;
+}
+
+.art-10-habeas {
+  font-size: clamp(2.6rem, 11vw, 5.4rem);
+  letter-spacing: 0.08em;
+  color: var(--cat-silver-hi);
+  background: linear-gradient(
+    168deg,
+    var(--cat-silver-hi) 0%,
+    var(--cat-silver) 42%,
+    var(--cat-blue) 78%,
+    var(--cat-silver-hi) 100%
+  );
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 8px color-mix(in srgb, var(--cat-blue) 45%, transparent));
+}
+
+.art-10-dpp {
+  font-size: clamp(2.6rem, 11vw, 5.4rem);
+  letter-spacing: 0.22em;
+  color: var(--cat-blue);
+  background: linear-gradient(
+    155deg,
+    var(--cat-blue) 0%,
+    var(--cat-silver-hi) 48%,
+    var(--cat-blue-deep) 100%
+  );
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--cat-blue) 55%, transparent));
+}
+
+.art-10-letter {
+  display: inline-block;
+  will-change: transform, opacity;
+}
+
+.art-10-rule {
+  display: block;
+  width: 2px;
+  height: clamp(1.6rem, 5vw, 2.8rem);
+  align-self: center;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    var(--cat-silver) 20%,
+    var(--cat-blue) 50%,
+    var(--cat-silver) 80%,
+    transparent 100%
+  );
+  opacity: 0;
+  transform-origin: center;
+}
+
+.art-10-secondary {
+  position: relative;
+  z-index: 1;
+  margin: 0;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: clamp(0.58rem, 1.8vw, 0.85rem);
+  letter-spacing: 0.42em;
+  text-transform: uppercase;
+  color: var(--cat-silver);
+  opacity: 0;
+}
+
+.art-10-v19.badge-phase-out .art-10-lockup,
+.art-10-v20.badge-phase-out .art-10-lockup {
+  opacity: 0;
+  transition: opacity 0.45s ease;
+}
+
+.art-10-v19.badge-phase-hold .art-10-stage,
+.art-10-v20.badge-phase-hold .art-10-stage {
+  filter: drop-shadow(0 0 14px color-mix(in srgb, var(--cat-blue) 50%, transparent))
+    drop-shadow(0 0 28px color-mix(in srgb, var(--cat-silver-hi) 22%, transparent));
+  transition: filter 0.5s ease;
+}
+
+/* ==========================================================================
+   v19 — HORIZONTAL SHEAR: HABEAS ← | → DPP, rule draws, secondary rises
+   ========================================================================== */
+
+.art-10-v19 .art-10-glow {
+  animation: art-10-v19-glow 0.7s ease 0.05s forwards;
+}
+
+@keyframes art-10-v19-glow {
+  to {
+    opacity: 1;
+  }
+}
+
+.art-10-v19 .art-10-letter-cat {
+  opacity: 0;
+  transform: translateX(-72px) skewX(12deg);
+  animation: art-10-v19-shear-in-l 0.65s cubic-bezier(0.22, 1.25, 0.36, 1) forwards;
+  animation-delay: calc(0.12s + var(--i) * 0.05s);
+}
+
+.art-10-v19 .art-10-letter-dpp {
+  opacity: 0;
+  transform: translateX(72px) skewX(-12deg);
+  animation: art-10-v19-shear-in-r 0.65s cubic-bezier(0.22, 1.25, 0.36, 1) forwards;
+  animation-delay: calc(0.22s + var(--i) * 0.07s);
+}
+
+@keyframes art-10-v19-shear-in-l {
+  0% {
+    opacity: 0;
+    transform: translateX(-72px) skewX(12deg);
+  }
+  70% {
+    opacity: 1;
+    transform: translateX(4px) skewX(-2deg);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0) skewX(0deg);
+  }
+}
+
+@keyframes art-10-v19-shear-in-r {
+  0% {
+    opacity: 0;
+    transform: translateX(72px) skewX(-12deg);
+  }
+  70% {
+    opacity: 1;
+    transform: translateX(-4px) skewX(2deg);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0) skewX(0deg);
+  }
+}
+
+.art-10-v19 .art-10-rule {
+  transform: scaleY(0);
+  animation: art-10-v19-rule 0.45s cubic-bezier(0.34, 1.4, 0.64, 1) 0.85s forwards;
+}
+
+@keyframes art-10-v19-rule {
+  to {
+    opacity: 0.9;
+    transform: scaleY(1);
+  }
+}
+
+.art-10-v19 .art-10-secondary {
+  transform: translateY(18px);
+  animation: art-10-v19-secondary 0.55s ease 1.15s forwards;
+}
+
+@keyframes art-10-v19-secondary {
+  to {
+    opacity: 0.85;
+    transform: translateY(0);
+  }
+}
+
+.art-10-v19.badge-phase-hold .art-10-letter-cat,
+.art-10-v19.badge-phase-hold .art-10-letter-dpp {
+  opacity: 1;
+  transform: none;
+  animation: art-10-v19-letter-pulse 2.4s ease-in-out infinite;
+  animation-delay: calc(var(--i) * 0.08s);
+}
+
+@keyframes art-10-v19-letter-pulse {
+  0%,
+  100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.18);
+  }
+}
+
+.art-10-v19.badge-phase-hold .art-10-rule {
+  opacity: 0.9;
+  transform: scaleY(1);
+  animation: art-10-v19-rule-breathe 2.2s ease-in-out infinite;
+}
+
+@keyframes art-10-v19-rule-breathe {
+  0%,
+  100% {
+    opacity: 0.75;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.art-10-v19.badge-phase-hold .art-10-secondary {
+  opacity: 0.85;
+  transform: none;
+  animation: none;
+}
+
+/* ==========================================================================
+   v20 — VERTICAL STACK: HABEAS ↓  DPP ↑  cascade + secondary expand
+   ========================================================================== */
+
+.art-10-v20 .art-10-row {
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.art-10-v20 .art-10-rule {
+  width: clamp(4.5rem, 28vw, 9rem);
+  height: 2px;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    var(--cat-silver) 18%,
+    var(--cat-blue) 50%,
+    var(--cat-silver) 82%,
+    transparent 100%
+  );
+}
+
+.art-10-v20 .art-10-glow {
+  animation: art-10-v20-glow 0.6s ease 0.08s forwards;
+}
+
+@keyframes art-10-v20-glow {
+  to {
+    opacity: 1;
+  }
+}
+
+.art-10-v20 .art-10-letter-cat {
+  opacity: 0;
+  transform: translateY(-56px) scale(0.88);
+  animation: art-10-v20-drop 0.7s cubic-bezier(0.22, 1.3, 0.36, 1) forwards;
+  animation-delay: calc(0.1s + var(--i) * 0.055s);
+}
+
+.art-10-v20 .art-10-letter-dpp {
+  opacity: 0;
+  transform: translateY(56px) scale(0.88);
+  animation: art-10-v20-rise 0.7s cubic-bezier(0.22, 1.3, 0.36, 1) forwards;
+  animation-delay: calc(0.35s + var(--i) * 0.09s);
+}
+
+@keyframes art-10-v20-drop {
+  0% {
+    opacity: 0;
+    transform: translateY(-56px) scale(0.88);
+  }
+  72% {
+    opacity: 1;
+    transform: translateY(5px) scale(1.03);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes art-10-v20-rise {
+  0% {
+    opacity: 0;
+    transform: translateY(56px) scale(0.88);
+  }
+  72% {
+    opacity: 1;
+    transform: translateY(-5px) scale(1.03);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.art-10-v20 .art-10-rule {
+  transform: scaleX(0);
+  animation: art-10-v20-rule 0.5s cubic-bezier(0.34, 1.35, 0.64, 1) 0.95s forwards;
+}
+
+@keyframes art-10-v20-rule {
+  to {
+    opacity: 0.95;
+    transform: scaleX(1);
+  }
+}
+
+.art-10-v20 .art-10-secondary {
+  letter-spacing: 0.08em;
+  animation: art-10-v20-secondary 0.7s cubic-bezier(0.22, 1.1, 0.36, 1) 1.2s forwards;
+}
+
+@keyframes art-10-v20-secondary {
+  0% {
+    opacity: 0;
+    letter-spacing: 0.08em;
+  }
+  100% {
+    opacity: 0.85;
+    letter-spacing: 0.42em;
+  }
+}
+
+.art-10-v20.badge-phase-hold .art-10-letter-cat,
+.art-10-v20.badge-phase-hold .art-10-letter-dpp {
+  opacity: 1;
+  transform: none;
+  animation: none;
+}
+
+.art-10-v20.badge-phase-hold .art-10-habeas {
+  animation: art-10-v20-chrome-shimmer 2.6s ease-in-out infinite;
+}
+
+.art-10-v20.badge-phase-hold .art-10-dpp {
+  animation: art-10-v20-dpp-glow 2.2s ease-in-out infinite;
+}
+
+@keyframes art-10-v20-chrome-shimmer {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 8px color-mix(in srgb, var(--cat-blue) 40%, transparent));
+  }
+  50% {
+    filter: drop-shadow(0 0 16px color-mix(in srgb, var(--cat-silver-hi) 50%, transparent));
+  }
+}
+
+@keyframes art-10-v20-dpp-glow {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 10px color-mix(in srgb, var(--cat-blue) 50%, transparent));
+    letter-spacing: 0.22em;
+  }
+  50% {
+    filter: drop-shadow(0 0 18px color-mix(in srgb, var(--cat-blue) 75%, transparent));
+    letter-spacing: 0.28em;
+  }
+}
+
+.art-10-v20.badge-phase-hold .art-10-rule {
+  opacity: 0.95;
+  transform: scaleX(1);
+  animation: art-10-v20-rule-pulse 2s ease-in-out infinite;
+}
+
+@keyframes art-10-v20-rule-pulse {
+  0%,
+  100% {
+    opacity: 0.7;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.art-10-v20.badge-phase-hold .art-10-secondary {
+  opacity: 0.85;
+  letter-spacing: 0.42em;
+  animation: none;
+}

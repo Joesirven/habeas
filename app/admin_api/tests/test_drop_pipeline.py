@@ -56,6 +56,18 @@ PIPELINE_FIXTURE: dict[str, Any] = {
         "success": 0,
         "by_status": [{"status": "pending", "count": 1}],
     },
+    "approaching_sla": {
+        "connector": 0,
+        "ingest": 0,
+        "matching": 1,
+        "matching_review": 0,
+        "thresholds_hours": {
+            "connector": 24,
+            "ingest": 12,
+            "matching": 4,
+            "matching_review": 48,
+        },
+    },
     "matching_results_recent": [
         {
             "request_id": "00000000-0000-0000-0000-000000000001",
@@ -107,6 +119,14 @@ def test_pipeline_status_shape(monkeypatch: pytest.MonkeyPatch):
     assert len(body["drop_requests"]["recent"]) == 1
     assert "matching_attempts" in body
     assert body["matching_attempts"]["pending"] == 1
+    assert "approaching_sla" in body
+    assert body["approaching_sla"]["matching"] == 1
+    assert set(body["approaching_sla"]["thresholds_hours"]) == {
+        "connector",
+        "ingest",
+        "matching",
+        "matching_review",
+    }
     assert "matching_results_recent" in body
     assert body["matching_results_recent"][0]["matched"] is True
     assert body["matching_results_recent"][0]["match_count"] == 1
@@ -329,6 +349,8 @@ async def test_collect_pipeline_counts_shape():
         return []
 
     async def fetchval(sql: str, *args: Any) -> int:
+        if "approaching_sla:" in sql:
+            return 0
         if "response_status IS NULL" in sql and "matching_results" in sql:
             return 2
         return 7
@@ -357,6 +379,110 @@ async def test_collect_pipeline_counts_shape():
     assert result["matching_review"]["approved"] == 3
     assert result["hash_index_refresh"]["pending"] == 1
     assert result["hash_index_refresh"]["last_run"] is None
+    assert result["approaching_sla"] == {
+        "connector": 0,
+        "ingest": 0,
+        "matching": 0,
+        "matching_review": 0,
+        "thresholds_hours": dict(drop_pipeline.APPROACHING_SLA_THRESHOLD_HOURS),
+    }
+
+
+@pytest.mark.asyncio
+async def test_collect_pipeline_counts_approaching_sla_math():
+    """Old open matching attempt increments approaching_sla.matching (counts only)."""
+    fetchval_calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        if "drop_connector_attempts" in sql and "GROUP BY" in sql:
+            return []
+        if "drop_ingest_attempts" in sql and "GROUP BY" in sql:
+            return []
+        if "drop_raw_requests" in sql and "list_type" in sql:
+            return []
+        if "drop_raw_requests" in sql and "GROUP BY response_status" in sql:
+            return []
+        if "matching_attempts" in sql and "GROUP BY" in sql:
+            return [_Row(status="pending", count=1)]
+        if "matching_results" in sql:
+            return []
+        if "approval_requests" in sql and "GROUP BY" in sql:
+            return []
+        if "hash_index_refresh_attempts" in sql:
+            return []
+        if "FROM requests" in sql and "LIMIT" in sql:
+            return []
+        return []
+
+    async def fetchval(sql: str, *args: Any) -> int:
+        fetchval_calls.append((sql, args))
+        if "-- approaching_sla:matching\n" in sql:
+            # Seeded: one DROP matching attempt older than matching threshold.
+            assert args[0] == list(drop_pipeline._OPEN_ATTEMPT_STATUSES)
+            assert args[1] == str(drop_pipeline.APPROACHING_SLA_THRESHOLD_HOURS["matching"])
+            assert "intake_source = 'drop'" in sql
+            assert "($2 || ' hours')::interval" in sql
+            return 1
+        if "approaching_sla:" in sql:
+            return 0
+        if "response_status IS NULL" in sql and "matching_results" in sql:
+            return 0
+        return 0
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        return None
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchval = AsyncMock(side_effect=fetchval)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+
+    result = await drop_pipeline.collect_pipeline_counts(conn)
+    sla = result["approaching_sla"]
+    assert sla["matching"] == 1
+    assert sla["connector"] == 0
+    assert sla["ingest"] == 0
+    assert sla["matching_review"] == 0
+    assert sla["thresholds_hours"]["matching"] == 4
+    # Counts-only contract — no row ids / PII nested under approaching_sla.
+    assert set(sla.keys()) == {
+        "connector",
+        "ingest",
+        "matching",
+        "matching_review",
+        "thresholds_hours",
+    }
+    assert any("-- approaching_sla:matching\n" in sql for sql, _ in fetchval_calls)
+    matching_sql = next(
+        sql for sql, _ in fetchval_calls if "-- approaching_sla:matching\n" in sql
+    )
+    assert "JOIN requests" in matching_sql
+    assert "attempted_at < NOW()" in matching_sql
+
+
+@pytest.mark.asyncio
+async def test_collect_pipeline_counts_approaching_sla_empty_zeros():
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        return []
+
+    async def fetchval(sql: str, *args: Any) -> int | None:
+        if "approaching_sla:" in sql:
+            return None
+        return 0
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        return None
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchval = AsyncMock(side_effect=fetchval)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+
+    result = await drop_pipeline.collect_pipeline_counts(conn)
+    assert result["approaching_sla"]["connector"] == 0
+    assert result["approaching_sla"]["ingest"] == 0
+    assert result["approaching_sla"]["matching"] == 0
+    assert result["approaching_sla"]["matching_review"] == 0
 
 
 def test_hash_index_refresh_enqueue(monkeypatch: pytest.MonkeyPatch):
@@ -427,6 +553,53 @@ def test_hash_index_refresh_enqueue_all(monkeypatch: pytest.MonkeyPatch):
     assert body["status"] == "ok"
     assert body["total"] == 1
     assert body["states"][0]["state"] == "CA"
+
+
+def test_hash_index_refresh_process_uses_long_proxy_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """dbt builds exceed DEFAULT_PROXY_TIMEOUT (60s); process must use 3300s."""
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, str]:
+            return {"status": "idle"}
+
+    class FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured["timeout"] = kwargs.get("timeout")
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url: str, json: Any = None, headers: Any = None) -> FakeResponse:
+            captured["url"] = url
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(drop_pipeline, "auth_headers_for", lambda _url: {})
+
+    with TestClient(app) as client:
+        response = client.post("/ops/drop/hash-index-refresh/process")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "idle"
+    assert captured["url"].endswith("/process")
+    assert captured["timeout"] == drop_pipeline.HASH_INDEX_REFRESH_PROXY_TIMEOUT
+    assert captured["timeout"] > drop_pipeline.DEFAULT_PROXY_TIMEOUT
+
+
+def test_hash_index_refresh_enqueue_rejects_empty_body():
+    """Empty POST must not silently enqueue CA (wave confusion)."""
+    with TestClient(app) as client:
+        response = client.post("/ops/drop/hash-index-refresh/enqueue", json={})
+
+    assert response.status_code == 422
 
 
 def test_hash_index_refresh_enqueue_rejects_invalid_state(monkeypatch: pytest.MonkeyPatch):
@@ -948,6 +1121,8 @@ def test_matching_results_bulk_approve_prefers_iap_actor(monkeypatch: pytest.Mon
 
 def test_drop_mutation_requires_iap_when_configured(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(drop_pipeline.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@habeas.com")
 
     async def fake_enqueue(conn: Any, *, state: str, list_types: list[str]) -> int:
         return 1
@@ -960,6 +1135,13 @@ def test_drop_mutation_requires_iap_when_configured(monkeypatch: pytest.MonkeyPa
 
     with TestClient(app) as client:
         denied = client.post("/ops/drop/hash-index-refresh/enqueue", json={"state": "CA"})
+        unknown = client.post(
+            "/ops/drop/hash-index-refresh/enqueue",
+            headers={
+                "X-Goog-Authenticated-User-Email": "accounts.google.com:stranger@habeas.com"
+            },
+            json={"state": "CA"},
+        )
         allowed = client.post(
             "/ops/drop/hash-index-refresh/enqueue",
             headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
@@ -967,8 +1149,31 @@ def test_drop_mutation_requires_iap_when_configured(monkeypatch: pytest.MonkeyPa
         )
 
     assert denied.status_code == 401
+    assert unknown.status_code == 403
     assert allowed.status_code == 200
     assert allowed.json()["attempt_id"] == 1
+
+
+def test_data_owner_cannot_read_pipeline_console(monkeypatch: pytest.MonkeyPatch):
+    """AE3 — non–super_admin deep-link to power console is API 403."""
+    monkeypatch.setattr(drop_pipeline.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "owner@habeas.com")
+
+    async def fake_status() -> dict[str, Any]:
+        return {"ok": True}
+
+    monkeypatch.setattr(drop_pipeline, "get_pipeline_status", fake_status)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/drop/pipeline",
+            headers={
+                "X-Goog-Authenticated-User-Email": "accounts.google.com:owner@habeas.com"
+            },
+        )
+
+    assert response.status_code == 403
 
 
 def test_decided_by_for_mutation_helpers():

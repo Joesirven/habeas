@@ -1,0 +1,499 @@
+/* Executor 4: Teletext / Typewriter CRT type lockups — ids 7–8 */
+
+.art-04-lockup {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: min(720px, 94vw);
+  padding: 0 0.5rem;
+}
+
+.art-04-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* —— Shared CRT shell —— */
+
+.art-04-crt {
+  width: 100%;
+  display: grid;
+  place-items: center;
+}
+
+.art-04-crt-bezel {
+  position: relative;
+  width: min(640px, 92vw);
+  padding: 1.1rem 1.25rem 1.35rem;
+  border: 2px solid var(--cat-silver);
+  background: color-mix(in srgb, var(--cat-black) 88%, var(--cat-blue-deep) 12%);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--cat-blue) 35%, transparent),
+    0 0 28px color-mix(in srgb, var(--cat-blue) 28%, transparent);
+  overflow: hidden;
+}
+
+.art-04-crt-type {
+  padding: 2rem 1.5rem 1.5rem;
+}
+
+/* Stage exit */
+.art-04-v7.badge-phase-out,
+.art-04-v8.badge-phase-out {
+  animation: art-04-stage-out 0.45s ease-in forwards;
+}
+
+@keyframes art-04-stage-out {
+  to {
+    opacity: 0;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   v7 — TELETEXT: blocky cell snap-in + soft scan hold
+   ═══════════════════════════════════════════════════════════ */
+
+.art-04-tt-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin: 0 0 0.85rem;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--cat-blue);
+  opacity: 0;
+}
+
+.art-04-tt-page {
+  color: var(--cat-silver-hi);
+}
+
+.art-04-tt-grid {
+  position: relative;
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.65rem 0.35rem 0.5rem;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 3px,
+    color-mix(in srgb, var(--cat-blue-deep) 22%, transparent) 3px,
+    color-mix(in srgb, var(--cat-blue-deep) 22%, transparent) 4px
+  );
+}
+
+.art-04-tt-scan {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    color-mix(in srgb, var(--cat-silver-hi) 14%, transparent) 48%,
+    transparent 56%
+  );
+  opacity: 0;
+  transform: translateY(-120%);
+}
+
+.art-04-tt-line {
+  display: block;
+}
+
+.art-04-tt-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 3px;
+  margin: 0;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: clamp(1.15rem, 3.6vw, 1.85rem);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+
+.art-04-tt-cell {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.05em;
+  height: 1.35em;
+  padding: 0 0.08em;
+  color: var(--cat-silver-hi);
+  background: color-mix(in srgb, var(--cat-blue-deep) 55%, var(--cat-black) 45%);
+  border: 1px solid color-mix(in srgb, var(--cat-blue) 55%, transparent);
+  opacity: 0;
+  transform: scale(0.55);
+}
+
+.art-04-tt-space {
+  background: transparent;
+  border-color: transparent;
+  min-width: 0.55em;
+}
+
+.art-04-tt-tag {
+  margin: 0.9rem 0 0;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.58rem;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--cat-silver);
+  opacity: 0;
+}
+
+/* Assemble */
+.art-04-v7 .art-04-crt-bezel {
+  opacity: 0;
+  transform: scale(0.96);
+  animation: art-04-bezel-in 0.45s cubic-bezier(0.22, 1, 0.36, 1) 0.05s forwards;
+}
+
+.art-04-v7 .art-04-tt-bar {
+  animation: art-04-fade-in 0.35s ease-out 0.28s forwards;
+}
+
+.art-04-v7 .art-04-tt-cell {
+  animation: art-04-cell-snap 0.22s steps(2, end) forwards;
+  animation-delay: calc(0.4s + (var(--row) * 0.18s) + (var(--i) * 0.045s));
+}
+
+.art-04-v7 .art-04-tt-space {
+  animation-name: art-04-space-snap;
+}
+
+.art-04-v7 .art-04-tt-tag {
+  animation: art-04-fade-in 0.35s ease-out 1.85s forwards;
+}
+
+.art-04-v7 .art-04-tt-scan {
+  animation: art-04-scan-pass 0.7s ease-in-out 1.7s forwards;
+}
+
+/* Hold / out — keep assembled, soft scan/blink */
+.art-04-v7.badge-phase-hold .art-04-crt-bezel,
+.art-04-v7.badge-phase-out .art-04-crt-bezel {
+  opacity: 1;
+  transform: none;
+}
+
+.art-04-v7.badge-phase-hold .art-04-tt-bar,
+.art-04-v7.badge-phase-out .art-04-tt-bar {
+  opacity: 1;
+}
+
+.art-04-v7.badge-phase-hold .art-04-tt-cell,
+.art-04-v7.badge-phase-out .art-04-tt-cell {
+  opacity: 1;
+  transform: none;
+}
+
+.art-04-v7.badge-phase-hold .art-04-tt-tag,
+.art-04-v7.badge-phase-out .art-04-tt-tag {
+  opacity: 0.85;
+}
+
+.art-04-v7.badge-phase-hold .art-04-tt-scan {
+  opacity: 0.55;
+  animation: art-04-scan-loop 2.4s linear infinite;
+}
+
+.art-04-v7.badge-phase-hold .art-04-tt-cell:not(.art-04-tt-space) {
+  animation: art-04-cell-blink 2.8s steps(1, end) infinite;
+  animation-delay: calc(var(--i) * 0.07s);
+}
+
+.art-04-v7.badge-phase-hold .art-04-crt-bezel {
+  filter: drop-shadow(0 0 16px color-mix(in srgb, var(--cat-blue) 45%, transparent));
+}
+
+@keyframes art-04-bezel-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes art-04-cell-snap {
+  from {
+    opacity: 0;
+    transform: scale(0.55);
+    color: var(--cat-blue);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+    color: var(--cat-silver-hi);
+  }
+}
+
+@keyframes art-04-space-snap {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes art-04-scan-pass {
+  from {
+    opacity: 0.7;
+    transform: translateY(-120%);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(120%);
+  }
+}
+
+@keyframes art-04-scan-loop {
+  from {
+    transform: translateY(-120%);
+  }
+  to {
+    transform: translateY(120%);
+  }
+}
+
+@keyframes art-04-cell-blink {
+  0%,
+  92%,
+  100% {
+    color: var(--cat-silver-hi);
+    border-color: color-mix(in srgb, var(--cat-blue) 55%, transparent);
+  }
+  94%,
+  98% {
+    color: var(--cat-blue);
+    border-color: var(--cat-silver);
+  }
+}
+
+@keyframes art-04-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   v8 — TYPEWRITER: letter-by-letter + caret blink hold
+   ═══════════════════════════════════════════════════════════ */
+
+.art-04-tw-plate {
+  display: grid;
+  gap: 1rem;
+  justify-items: start;
+  min-height: 4.5rem;
+}
+
+.art-04-tw-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 0;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: clamp(1.05rem, 3.2vw, 1.7rem);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1.35;
+  color: var(--cat-silver-hi);
+}
+
+.art-04-tw-char {
+  display: inline-block;
+  opacity: 0;
+  color: var(--cat-silver-hi);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--cat-blue) 40%, transparent);
+}
+
+.art-04-tw-space {
+  width: 0.45em;
+}
+
+.art-04-tw-caret {
+  display: inline-block;
+  width: 0.55em;
+  height: 1.1em;
+  margin-left: 0.08em;
+  background: var(--cat-blue);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--cat-blue) 70%, transparent);
+  opacity: 0;
+  vertical-align: text-bottom;
+}
+
+.art-04-tw-tag {
+  margin: 0;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.58rem;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--cat-silver);
+  opacity: 0;
+}
+
+/* Assemble — bezel, then type chars, caret leads */
+.art-04-v8 .art-04-crt-bezel {
+  opacity: 0;
+  transform: translateY(8px);
+  animation: art-04-tw-bezel 0.4s cubic-bezier(0.22, 1, 0.36, 1) 0.08s forwards;
+}
+
+.art-04-v8 .art-04-tw-caret {
+  animation:
+    art-04-caret-show 0.01s linear 0.35s forwards,
+    art-04-caret-blink 0.7s steps(1, end) 0.35s infinite;
+}
+
+.art-04-v8 .art-04-tw-char {
+  animation: art-04-type-char 0.05s steps(1, end) forwards;
+  animation-delay: calc(0.42s + var(--i) * 0.055s);
+}
+
+.art-04-v8 .art-04-tw-tag {
+  animation: art-04-fade-in 0.35s ease-out 2.15s forwards;
+}
+
+/* Hold / out */
+.art-04-v8.badge-phase-hold .art-04-crt-bezel,
+.art-04-v8.badge-phase-out .art-04-crt-bezel {
+  opacity: 1;
+  transform: none;
+}
+
+.art-04-v8.badge-phase-hold .art-04-tw-char,
+.art-04-v8.badge-phase-out .art-04-tw-char {
+  opacity: 1;
+}
+
+.art-04-v8.badge-phase-hold .art-04-tw-tag,
+.art-04-v8.badge-phase-out .art-04-tw-tag {
+  opacity: 0.85;
+}
+
+.art-04-v8.badge-phase-hold .art-04-tw-caret {
+  opacity: 1;
+  animation: art-04-caret-blink 0.85s steps(1, end) infinite;
+}
+
+.art-04-v8.badge-phase-hold .art-04-tw-line {
+  animation: art-04-phosphor 2.2s ease-in-out infinite;
+}
+
+.art-04-v8.badge-phase-hold .art-04-crt-bezel {
+  filter: drop-shadow(0 0 18px color-mix(in srgb, var(--cat-blue) 50%, transparent));
+}
+
+.art-04-v8.badge-phase-out .art-04-tw-caret {
+  opacity: 1;
+  animation: none;
+}
+
+@keyframes art-04-tw-bezel {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes art-04-type-char {
+  from {
+    opacity: 0;
+    color: var(--cat-blue);
+  }
+  to {
+    opacity: 1;
+    color: var(--cat-silver-hi);
+  }
+}
+
+@keyframes art-04-caret-show {
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes art-04-caret-blink {
+  0%,
+  49% {
+    opacity: 1;
+    background: var(--cat-blue);
+  }
+  50%,
+  100% {
+    opacity: 0.15;
+    background: var(--cat-blue-deep);
+  }
+}
+
+@keyframes art-04-phosphor {
+  0%,
+  100% {
+    text-shadow: 0 0 6px color-mix(in srgb, var(--cat-blue) 25%, transparent);
+  }
+  50% {
+    text-shadow: 0 0 14px color-mix(in srgb, var(--cat-blue) 55%, transparent);
+  }
+}
+
+/* Prefer reduced motion: snap to final assembled state */
+@media (prefers-reduced-motion: reduce) {
+  .art-04-v7 .art-04-crt-bezel,
+  .art-04-v7 .art-04-tt-bar,
+  .art-04-v7 .art-04-tt-cell,
+  .art-04-v7 .art-04-tt-tag,
+  .art-04-v7 .art-04-tt-scan,
+  .art-04-v8 .art-04-crt-bezel,
+  .art-04-v8 .art-04-tw-char,
+  .art-04-v8 .art-04-tw-caret,
+  .art-04-v8 .art-04-tw-tag,
+  .art-04-v8 .art-04-tw-line {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+    filter: none !important;
+  }
+
+  .art-04-tt-scan {
+    opacity: 0 !important;
+  }
+
+  .art-04-tw-caret {
+    opacity: 1 !important;
+    background: var(--cat-blue) !important;
+  }
+
+  .art-04-tt-tag,
+  .art-04-tw-tag {
+    opacity: 0.85 !important;
+  }
+
+  .art-04-v7.badge-phase-out,
+  .art-04-v8.badge-phase-out {
+    animation: art-04-stage-out 0.3s ease-in forwards;
+  }
+}

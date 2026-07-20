@@ -1,0 +1,288 @@
+/* Executor 3: TYPE LOCKUP — giant DPP → Habeas Data Privacy Platform */
+
+.art-03-lockup {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  gap: 0;
+  width: min(92vw, 42rem);
+  text-align: center;
+}
+
+/* ── Giant monogram ── */
+
+.art-03-mono {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0;
+  margin: 0;
+  font-family: 'Courier New', Courier, monospace;
+  font-weight: 700;
+  font-size: clamp(5.5rem, 22vw, 9.5rem);
+  line-height: 0.85;
+  letter-spacing: 0.02em;
+  color: var(--cat-silver-hi);
+  background: linear-gradient(
+    165deg,
+    var(--cat-silver-hi) 0%,
+    var(--cat-silver) 36%,
+    var(--cat-blue) 58%,
+    var(--cat-silver-hi) 100%
+  );
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 12px color-mix(in srgb, var(--cat-blue) 55%, transparent))
+    drop-shadow(0 2px 0 color-mix(in srgb, var(--cat-blue-deep) 65%, transparent));
+}
+
+.art-03-glyph {
+  display: inline-block;
+  transform-origin: center bottom;
+}
+
+/* ── Full name reveal ── */
+
+.art-03-full {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  font-family: 'Courier New', Courier, monospace;
+  text-transform: uppercase;
+  color: var(--cat-silver-hi);
+}
+
+.art-03-brand {
+  display: block;
+  font-size: clamp(1.15rem, 3.6vw, 1.85rem);
+  font-weight: 700;
+  letter-spacing: 0.28em;
+  color: var(--cat-silver-hi);
+}
+
+.art-03-product {
+  display: block;
+  font-size: clamp(0.72rem, 2.1vw, 1rem);
+  font-weight: 400;
+  letter-spacing: 0.22em;
+  color: var(--cat-blue);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   v5 — SPREAD: slam → track-out → name blooms in the gap
+   ═══════════════════════════════════════════════════════════ */
+
+.art-03-spread .art-03-mono {
+  opacity: 0;
+  transform: scale(0.55);
+  animation: art-03-mono-slam 0.55s cubic-bezier(0.16, 0.9, 0.28, 1) 0.08s both;
+}
+
+.art-03-spread .art-03-glyph[data-i='0'] {
+  animation: art-03-track-l 1.05s cubic-bezier(0.2, 0.85, 0.25, 1) 0.72s both;
+}
+
+.art-03-spread .art-03-glyph[data-i='1'] {
+  animation: art-03-track-c 1.05s cubic-bezier(0.2, 0.85, 0.25, 1) 0.72s both;
+}
+
+.art-03-spread .art-03-glyph[data-i='2'] {
+  animation: art-03-track-r 1.05s cubic-bezier(0.2, 0.85, 0.25, 1) 0.72s both;
+}
+
+.art-03-spread .art-03-full {
+  position: absolute;
+  inset: auto 0 0;
+  top: 52%;
+  opacity: 0;
+  transform: scaleX(0.35);
+  transform-origin: center;
+  animation: art-03-bloom-in 0.85s cubic-bezier(0.18, 0.88, 0.28, 1) 1.15s both;
+}
+
+.art-03-spread .art-03-mono {
+  margin-bottom: 2.6rem;
+}
+
+.art-03-v5.badge-phase-hold .art-03-lockup,
+.art-03-v5.badge-phase-out .art-03-lockup {
+  filter: drop-shadow(0 0 16px color-mix(in srgb, var(--cat-blue) 45%, transparent));
+  transition: filter 0.45s ease;
+}
+
+.art-03-v5.badge-phase-out .art-03-lockup {
+  opacity: 0;
+  transition: opacity 0.45s ease, filter 0.45s ease;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   v6 — CASCADE: hold → lift → stacked name unfolds below
+   ═══════════════════════════════════════════════════════════ */
+
+.art-03-cascade {
+  gap: 1.1rem;
+}
+
+.art-03-cascade .art-03-mono {
+  opacity: 0;
+  transform: scale(1.35);
+  animation: art-03-mono-settle-lift 1.65s cubic-bezier(0.22, 0.82, 0.28, 1) 0.06s both;
+}
+
+.art-03-cascade .art-03-glyph[data-i='0'],
+.art-03-cascade .art-03-glyph[data-i='1'],
+.art-03-cascade .art-03-glyph[data-i='2'] {
+  /* No horizontal track — vertical cascade owns the second beat */
+  transform: none;
+}
+
+.art-03-cascade .art-03-full {
+  opacity: 1;
+  clip-path: inset(0 0 100% 0);
+  animation: art-03-cascade-open 0.9s cubic-bezier(0.18, 0.88, 0.28, 1) 1.15s both;
+}
+
+.art-03-cascade .art-03-brand {
+  opacity: 0;
+  transform: translateY(-0.55rem);
+  animation: art-03-line-in 0.55s ease-out 1.25s both;
+}
+
+.art-03-cascade .art-03-product {
+  opacity: 0;
+  transform: translateY(-0.45rem);
+  animation: art-03-line-in 0.55s ease-out 1.48s both;
+}
+
+.art-03-v6.badge-phase-hold .art-03-lockup,
+.art-03-v6.badge-phase-out .art-03-lockup {
+  filter: drop-shadow(0 0 18px color-mix(in srgb, var(--cat-blue) 50%, transparent))
+    drop-shadow(0 0 28px color-mix(in srgb, var(--cat-silver-hi) 22%, transparent));
+  transition: filter 0.5s ease;
+}
+
+.art-03-v6.badge-phase-out .art-03-lockup {
+  opacity: 0;
+  transition: opacity 0.45s ease, filter 0.5s ease;
+}
+
+/* ── Keyframes ── */
+
+@keyframes art-03-mono-slam {
+  0% {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.06);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes art-03-mono-settle-lift {
+  0% {
+    opacity: 0;
+    transform: scale(1.35) translateY(0);
+  }
+  42% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(0.72) translateY(-0.35rem);
+  }
+}
+
+@keyframes art-03-track-l {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-0.55em);
+  }
+}
+
+@keyframes art-03-track-c {
+  0% {
+    transform: translateX(0) scale(1);
+  }
+  100% {
+    transform: translateX(0) scale(0.92);
+  }
+}
+
+@keyframes art-03-track-r {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(0.55em);
+  }
+}
+
+@keyframes art-03-bloom-in {
+  0% {
+    opacity: 0;
+    transform: scaleX(0.35);
+  }
+  55% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+}
+
+@keyframes art-03-cascade-open {
+  0% {
+    clip-path: inset(0 0 100% 0);
+  }
+  100% {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@keyframes art-03-line-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-0.55rem);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .art-03-spread .art-03-mono,
+  .art-03-spread .art-03-glyph,
+  .art-03-spread .art-03-full,
+  .art-03-cascade .art-03-mono,
+  .art-03-cascade .art-03-full,
+  .art-03-cascade .art-03-brand,
+  .art-03-cascade .art-03-product {
+    animation: none !important;
+    opacity: 1;
+    transform: none;
+    clip-path: none;
+  }
+
+  .art-03-spread .art-03-mono,
+  .art-03-cascade .art-03-mono {
+    margin-bottom: 0.75rem;
+    transform: scale(0.85);
+  }
+
+  .art-03-spread .art-03-full {
+    position: static;
+  }
+}

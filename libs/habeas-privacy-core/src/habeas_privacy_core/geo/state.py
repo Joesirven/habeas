@@ -6,6 +6,7 @@ a different MDR/DROP source of truth (Q6).
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Literal, Mapping
@@ -83,8 +84,10 @@ class InvalidStateAcronymError(ValueError):
     """Raised when a value cannot be normalized to a served USPS state code."""
 
 
-# CA DROP sandbox / MDR MVP default when payload and filename omit state.
+# CA DROP sandbox default when payload and filename omit state — only if
+# DROP_ALLOW_DEFAULT_REQUESTOR_STATE=CA is set (local sandbox; never default-on).
 DEFAULT_DROP_REQUESTOR_STATE = "CA"
+DROP_ALLOW_DEFAULT_REQUESTOR_STATE_ENV = "DROP_ALLOW_DEFAULT_REQUESTOR_STATE"
 
 _FILENAME_STATE_TOKEN = re.compile(r"(?:^|_)([A-Za-z]{2})(?=_|\.|$)")
 
@@ -106,8 +109,12 @@ def resolve_drop_requestor_state(
     Preference order:
     1. ``raw_payload`` keys ``requestor_state`` / ``state`` (normalized)
     2. USPS token in ``source_csv_filename`` (e.g. ``broker_TX_EMAIL.csv``)
-    3. ``DEFAULT_DROP_REQUESTOR_STATE`` (``CA``) for CA DROP sandbox filenames
-       that omit state (e.g. ``20260716_1_NDZ.csv``)
+    3. Explicit sandbox override only: env ``DROP_ALLOW_DEFAULT_REQUESTOR_STATE=CA``
+       → ``DEFAULT_DROP_REQUESTOR_STATE`` with source ``default``
+
+    Raises:
+        InvalidStateAcronymError: state missing from payload and filename and
+            sandbox override is off or not ``CA``.
     """
     if raw_payload:
         for key in ("requestor_state", "state"):
@@ -128,6 +135,24 @@ def resolve_drop_requestor_state(
             except InvalidStateAcronymError:
                 continue
 
+    override_raw = os.environ.get(DROP_ALLOW_DEFAULT_REQUESTOR_STATE_ENV, "").strip()
+    if not override_raw:
+        raise InvalidStateAcronymError(
+            "requestor_state is required when payload and filename omit state; "
+            f"set {DROP_ALLOW_DEFAULT_REQUESTOR_STATE_ENV}=CA for local sandbox only"
+        )
+    try:
+        override = normalize_state_acronym(override_raw)
+    except InvalidStateAcronymError as exc:
+        raise InvalidStateAcronymError(
+            f"{DROP_ALLOW_DEFAULT_REQUESTOR_STATE_ENV} must be "
+            f"{DEFAULT_DROP_REQUESTOR_STATE}; got {override_raw!r}"
+        ) from exc
+    if override != DEFAULT_DROP_REQUESTOR_STATE:
+        raise InvalidStateAcronymError(
+            f"{DROP_ALLOW_DEFAULT_REQUESTOR_STATE_ENV} must be "
+            f"{DEFAULT_DROP_REQUESTOR_STATE}; got {override}"
+        )
     return DEFAULT_DROP_REQUESTOR_STATE, "default"
 
 

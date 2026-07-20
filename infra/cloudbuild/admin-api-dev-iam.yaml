@@ -1,22 +1,39 @@
-# One-shot: allow unauthenticated invoke on admin-api-dev (Firebase SPA v0).
-# Requires Cloud Build SA to have run.services.setIamPolicy (or run.admin).
+# One-shot: lock down admin-api-dev invoker to IAP service agent only.
+# Do NOT grant allUsers, user:*, or compute SA run.invoker — that bypasses IAP.
+# Operators call via IAP bearer (SA impersonation); see infra/README.md.
 substitutions:
   _REGION: us-east4
+  _PROJECT: example-gcp-project
   _SERVICE: admin-api-dev
+  _IAP_SA: service-95660886550@gcp-sa-iap.iam.gserviceaccount.com
+  _OPS_SA: 95660886550-compute@developer.gserviceaccount.com
 
 options:
   logging: CLOUD_LOGGING_ONLY
 
 steps:
-  - id: allow-unauthenticated
+  - id: lock-invoker-to-iap
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    entrypoint: gcloud
+    entrypoint: bash
     args:
-      - run
-      - services
-      - add-iam-policy-binding
-      - ${_SERVICE}
-      - --region=${_REGION}
-      - --member=allUsers
-      - --role=roles/run.invoker
-      - --quiet
+      - -c
+      - |
+        gcloud components install beta --quiet
+        gcloud beta run services update ${_SERVICE} --region=${_REGION} --project=${_PROJECT} --iap --quiet
+        gcloud run services add-iam-policy-binding ${_SERVICE} --region=${_REGION} --project=${_PROJECT} \
+          --member=serviceAccount:${_IAP_SA} \
+          --role=roles/run.invoker --quiet || true
+        gcloud run services remove-iam-policy-binding ${_SERVICE} --region=${_REGION} --project=${_PROJECT} \
+          --member=allUsers --role=roles/run.invoker --quiet || true
+        gcloud run services remove-iam-policy-binding ${_SERVICE} --region=${_REGION} --project=${_PROJECT} \
+          --member=user:dev-owner-1@example.com --role=roles/run.invoker --quiet || true
+        gcloud run services remove-iam-policy-binding ${_SERVICE} --region=${_REGION} --project=${_PROJECT} \
+          --member=serviceAccount:${_OPS_SA} --role=roles/run.invoker --quiet || true
+        gcloud beta iap web add-iam-policy-binding --project=${_PROJECT} --region=${_REGION} \
+          --resource-type=cloud-run --service=${_SERVICE} \
+          --member=user:dev-owner-1@example.com --role=roles/iap.httpsResourceAccessor \
+          --condition=None --quiet || true
+        gcloud beta iap web add-iam-policy-binding --project=${_PROJECT} --region=${_REGION} \
+          --resource-type=cloud-run --service=${_SERVICE} \
+          --member=serviceAccount:${_OPS_SA} --role=roles/iap.httpsResourceAccessor \
+          --condition=None --quiet || true

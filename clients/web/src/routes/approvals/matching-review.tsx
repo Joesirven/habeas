@@ -48,7 +48,12 @@ function MatchingReviewTableSkeleton({ rows = 5 }: { rows?: number }) {
   )
 }
 
-export function MatchingReviewPage() {
+type MatchingReviewPageProps = {
+  /** When embedded under Needs attention chrome, skip the legacy hero. */
+  embedded?: boolean
+}
+
+export function MatchingReviewPage({ embedded = false }: MatchingReviewPageProps) {
   const queryClient = useQueryClient()
   const approvalsQuery = useQuery({
     queryKey: ['admin-api', 'approvals', 'matching.review'],
@@ -66,16 +71,18 @@ export function MatchingReviewPage() {
   })
 
   return (
-    <section className="space-y-10">
-      <header>
-        <p className="taste-micro">Approvals</p>
-        <h2 className="mt-3 font-display text-[2.5rem] font-medium leading-none tracking-tight text-ink">
-          Matching review
-        </h2>
-        <p className="mt-3 max-w-xl text-sm text-ink-soft">
-          Approve matching.review gates before fulfillment dispatch can proceed.
-        </p>
-      </header>
+    <section className={embedded ? 'space-y-4' : 'space-y-10'}>
+      {embedded ? null : (
+        <header>
+          <p className="taste-micro">Approvals</p>
+          <h2 className="mt-3 font-display text-[2.5rem] font-medium leading-none tracking-tight text-ink">
+            Matching review
+          </h2>
+          <p className="mt-3 max-w-xl text-sm text-ink-soft">
+            Approve matching.review gates before fulfillment dispatch can proceed.
+          </p>
+        </header>
+      )}
 
       <div className="taste-panel overflow-hidden">
         {approvalsQuery.isPending && <MatchingReviewTableSkeleton />}

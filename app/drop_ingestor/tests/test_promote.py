@@ -9,12 +9,16 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 import drop_ingestor.promote as promote_mod
+from habeas_privacy_core.geo.state import InvalidStateAcronymError
 from drop_ingestor.promote import run_promote
 
 
 @pytest.mark.asyncio
-async def test_t7_2_promote_inserts_raw_fk_per_list_type():
+async def test_t7_2_promote_inserts_raw_fk_per_list_type(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """T7.2 Promote inserts valid raw FK for each list type."""
+    monkeypatch.setenv("DROP_ALLOW_DEFAULT_REQUESTOR_STATE", "CA")
     raw_rows = [
         {
             "id": 11,
@@ -68,8 +72,41 @@ async def test_t7_2_promote_inserts_raw_fk_per_list_type():
     assert result.raw_record_ids == [11, 12, 13]
     assert {p.raw_record_id for p in inserted} == {11, 12, 13}
     assert all(p.intake_source.value == "drop" for p in inserted)
-    # CA DROP sandbox filenames omit state → default CA
+    # Sandbox override on → default CA when filename omits state
     assert all(p.requestor_state == "CA" for p in inserted)
+
+
+@pytest.mark.asyncio
+async def test_promote_fails_closed_when_state_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("DROP_ALLOW_DEFAULT_REQUESTOR_STATE", raising=False)
+    raw_rows = [
+        {
+            "id": 99,
+            "drop_record_id": "e99",
+            "list_type": "Email",
+            "source_csv_filename": "20260716_1_EMAIL.csv",
+            "raw_payload": {"hash": "x"},
+        }
+    ]
+    inserted: list[Any] = []
+
+    async def fake_insert_request(conn: Any, payload: Any) -> str:
+        inserted.append(payload)
+        return "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=raw_rows)
+    conn.fetchval = AsyncMock(return_value=0)
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    with patch("drop_ingestor.promote.insert_request", side_effect=fake_insert_request):
+        with patch("drop_ingestor.promote.claim_next", AsyncMock(return_value=None)):
+            with pytest.raises(InvalidStateAcronymError, match="requestor_state is required"):
+                await run_promote(conn=conn, worker_id="drop-ingestor-test")
+
+    assert inserted == []
 
 
 @pytest.mark.asyncio
@@ -140,7 +177,7 @@ async def test_t7_3_promote_does_not_enqueue_matching():
             "drop_record_id": "e42",
             "list_type": "Email",
             "source_csv_filename": "20260716_1_EMAIL.csv",
-            "raw_payload": {},
+            "raw_payload": {"state": "CA"},
         }
     ]
 

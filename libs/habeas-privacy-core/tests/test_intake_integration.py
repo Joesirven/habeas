@@ -61,7 +61,7 @@ async def test_t5_3_promote_drop_request_writes_raw_and_thin_atomically(pool):
         drop_record_id="opaque-promote-id",
         list_type=DropListType.NDZ,
         source_csv_filename="20260716_broker_NDZ.csv",
-        raw_payload={"hashed_name": "xyz", "list_row": 7},
+        raw_payload={"hashed_name": "xyz", "list_row": 7, "state": "CA"},
     )
     async with pool.acquire() as conn:
         raw_record_id, request_id = await promote_drop_request(conn, promote_input)
