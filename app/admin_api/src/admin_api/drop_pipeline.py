@@ -30,17 +30,14 @@ from admin_api.approvals import (
     promote_matching_review_for_request,
 )
 from admin_api.cloud_run_auth import auth_headers_for
+from admin_api.roles import RolePrincipal, require_roles
 from habeas_privacy_core.auth import (
-    LOCAL_DEV_EMAIL,
     ROLE_ADMIN,
     ROLE_DATA_OWNER,
     ROLE_SUPER_ADMIN,
     UNKNOWN_ACTOR,
-    Me,
-    bind_role_dependencies,
+    actor_from_iap_header,
     is_authenticated_actor,
-    me_actor,
-    role_config_from_settings,
 )
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
@@ -91,12 +88,6 @@ class DropPipelineSettings(CoreSettings):
     # When true, mutating /ops/drop/* requires X-Goog-Authenticated-User-Email.
     # Local default false; enable with IAP in front of admin-api (see infra/README).
     require_iap_identity: bool = False
-    # Pipe- or comma-separated IAP emails → DROP ops roles (see auth/README).
-    drop_ops_super_admin_emails: str = ""
-    drop_ops_admin_emails: str = ""
-    drop_ops_data_owner_emails: str = ""
-    # When require_iap_identity is false, default role for local DX (explicit env).
-    drop_ops_local_role: str = ROLE_SUPER_ADMIN
 
 
 settings = DropPipelineSettings()
@@ -114,20 +105,6 @@ WORKER_KEYS = (
     ("data_fulfillment", "data_fulfillment_url"),
     ("hash_index_refresh", "hash_index_refresh_url"),
 )
-
-_require_me, require_role, require_any_role = bind_role_dependencies(
-    lambda: role_config_from_settings(settings)
-)
-
-# Power console / spine — super_admin only.
-RequireSuperAdmin = Annotated[Me, Depends(require_role(ROLE_SUPER_ADMIN))]
-# Matching review + workflow — any DROP ops role.
-RequireDropOpsRole = Annotated[
-    Me,
-    Depends(require_any_role(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_DATA_OWNER)),
-]
-# Any authenticated /me principal (role resolved; used by GET /me).
-RequireMe = Annotated[Me, Depends(_require_me)]
 
 
 class LandProxyBody(BaseModel):
@@ -210,23 +187,26 @@ def _require_database() -> None:
 
 
 async def require_drop_mutation_actor(request: Request) -> str:
-    """Require IAP principal on mutating /ops/drop routes when configured.
-
-    Prefer role deps (``RequireSuperAdmin`` / ``RequireDropOpsRole``) for new
-    gates; this helper remains for decided_by attribution compatibility.
-    """
-    me = resolve_me_for_settings(request)
-    return me_actor(me)
-
-
-def resolve_me_for_settings(request: Request) -> Me:
-    """Resolve ``Me`` using current DROP pipeline settings (test monkeypatches)."""
-    from habeas_privacy_core.auth import resolve_me
-
-    return resolve_me(request, role_config_from_settings(settings))
+    """Require IAP principal on mutating /ops/drop routes when configured."""
+    actor = actor_from_iap_header(request)
+    if settings.require_iap_identity and not is_authenticated_actor(actor):
+        raise HTTPException(
+            status_code=401,
+            detail="Identity-Aware Proxy identity required for DROP mutations",
+        )
+    return actor
 
 
 DropMutationActor = Annotated[str, Depends(require_drop_mutation_actor)]
+
+SuperAdminPrincipal = Annotated[
+    RolePrincipal, Depends(require_roles(ROLE_SUPER_ADMIN))
+]
+
+MatchingReviewPrincipal = Annotated[
+    RolePrincipal,
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_DATA_OWNER)),
+]
 
 
 def decided_by_for_mutation(actor: str, client_decided_by: str | None) -> str:
@@ -236,18 +216,6 @@ def decided_by_for_mutation(actor: str, client_decided_by: str | None) -> str:
     if client_decided_by and client_decided_by.strip():
         return client_decided_by.strip()
     return UNKNOWN_ACTOR
-
-
-def decided_by_for_me(me: Me, client_decided_by: str | None) -> str:
-    """Prefer resolved principal email over client-supplied decided_by.
-
-    Local DX without an IAP header uses ``LOCAL_DEV_EMAIL`` — treat that like
-    unknown so client ``decided_by`` still applies.
-    """
-    actor = me_actor(me)
-    if actor == LOCAL_DEV_EMAIL:
-        return decided_by_for_mutation(UNKNOWN_ACTOR, client_decided_by)
-    return decided_by_for_mutation(actor, client_decided_by)
 
 
 async def _probe_worker_health(name: str, base_url: str) -> dict[str, Any]:
@@ -671,19 +639,10 @@ async def proxy_post_payload(
                 payload = {"raw": response.text}
             return response.status_code, payload
     except httpx.RequestError as exc:
-        # Prefer type name — httpx timeouts often have empty str(exc).
-        upstream_error = str(exc) or type(exc).__name__
-        logger.warning(
-            "drop_pipeline_proxy_unreachable",
-            extra={
-                "url": url,
-                "upstream_error": upstream_error,
-                "timeout_seconds": timeout,
-            },
-        )
+        logger.warning("drop_pipeline_proxy_unreachable", extra={"url": url, "error": str(exc)})
         return 502, {
             "status": "error",
-            "detail": f"upstream unreachable: {upstream_error}",
+            "detail": f"upstream unreachable: {exc}",
             "url": url,
         }
 
@@ -707,19 +666,23 @@ def _model_dump_nonzero(model: BaseModel) -> dict[str, Any]:
 
 
 @router.get("/pipeline")
-async def drop_pipeline_status(_me: RequireSuperAdmin):
+async def drop_pipeline_status(_principal: SuperAdminPrincipal):
     return await get_pipeline_status()
 
 
 @router.post("/download")
-async def drop_download(_me: RequireSuperAdmin):
+async def drop_download(
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
+):
     url = f"{settings.drop_connector_url.rstrip('/')}/download"
     return await proxy_post(url, timeout=DOWNLOAD_PROXY_TIMEOUT)
 
 
 @router.post("/land")
 async def drop_land(
-    _me: RequireSuperAdmin,
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
     body: LandProxyBody | None = None,
 ):
     url = f"{settings.drop_ingestor_url.rstrip('/')}/ingest/land"
@@ -729,7 +692,8 @@ async def drop_land(
 
 @router.post("/promote")
 async def drop_promote(
-    _me: RequireSuperAdmin,
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
     body: PromoteProxyBody | None = None,
 ):
     url = f"{settings.drop_ingestor_url.rstrip('/')}/ingest/promote"
@@ -739,7 +703,8 @@ async def drop_promote(
 
 @router.post("/dispatch")
 async def drop_dispatch(
-    _me: RequireSuperAdmin,
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
     body: DispatchProxyBody | None = None,
 ):
     url = f"{settings.request_dispatcher_url.rstrip('/')}/dispatch"
@@ -748,7 +713,10 @@ async def drop_dispatch(
 
 
 @router.post("/match")
-async def drop_match(_me: RequireSuperAdmin):
+async def drop_match(
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
+):
     """Proxy matching /process; on success open a matching.review gate for ops."""
     url = f"{settings.matching_url.rstrip('/')}/process"
     status_code, payload = await proxy_post_payload(url)
@@ -790,7 +758,8 @@ async def drop_match(_me: RequireSuperAdmin):
 
 @router.post("/fulfill")
 async def drop_fulfill(
-    _me: RequireSuperAdmin,
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
     body: FulfillProxyBody | None = None,
 ):
     url = f"{settings.data_fulfillment_url.rstrip('/')}/fulfill"
@@ -800,14 +769,11 @@ async def drop_fulfill(
 
 @router.post("/hash-index-refresh/enqueue")
 async def hash_index_refresh_enqueue(
-    _me: RequireSuperAdmin,
-    body: HashIndexRefreshEnqueueBody,
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
+    body: HashIndexRefreshEnqueueBody | None = None,
 ):
-    """Enqueue a hash-index refresh attempt (single-flight per state).
-
-    Requires an explicit ``state`` — empty POST does not default to CA.
-    For all served states use ``/hash-index-refresh/enqueue-all``.
-    """
+    """Enqueue a hash-index refresh attempt (single-flight per state)."""
     from habeas_privacy_core.db.hash_index_refresh import enqueue_hash_index_refresh
     from habeas_privacy_core.geo.state import (
         InvalidStateAcronymError,
@@ -815,9 +781,10 @@ async def hash_index_refresh_enqueue(
     )
 
     _require_database()
-    list_types = body.list_types or ["NDZ", "Email", "Phone"]
+    payload = body or HashIndexRefreshEnqueueBody()
+    list_types = payload.list_types or ["NDZ", "Email", "Phone"]
     try:
-        state = normalize_state_acronym(body.state)
+        state = normalize_state_acronym(payload.state)
     except InvalidStateAcronymError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     pool = get_pool()
@@ -832,7 +799,8 @@ async def hash_index_refresh_enqueue(
 
 @router.post("/hash-index-refresh/enqueue-all")
 async def hash_index_refresh_enqueue_all(
-    _me: RequireSuperAdmin,
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
     body: HashIndexRefreshEnqueueAllBody | None = None,
 ):
     """Enqueue one hash-index refresh attempt per served state (USPS 50+DC)."""
@@ -852,7 +820,10 @@ async def hash_index_refresh_enqueue_all(
 
 
 @router.post("/hash-index-refresh/process")
-async def hash_index_refresh_process(_me: RequireSuperAdmin):
+async def hash_index_refresh_process(
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
+):
     """Proxy process to hash_index_refresh worker (Cloud Run invoker token)."""
     url = f"{settings.hash_index_refresh_url.rstrip('/')}/process"
     return await proxy_post(url, timeout=HASH_INDEX_REFRESH_PROXY_TIMEOUT)
@@ -1127,7 +1098,7 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
 
 @router.get("/matching-results")
 async def drop_matching_results(
-    _me: RequireDropOpsRole,
+    _principal: MatchingReviewPrincipal,
     match_type: MatchTypeFilter | None = None,
     q: str | None = Query(default=None, description="Substring search on request_id"),
     request_id: str | None = Query(
@@ -1151,8 +1122,7 @@ async def drop_matching_results(
     """List DROP matching results with global stats (ids/counts/state only).
 
     Stats stay global (unfiltered); ``filters.stats_scope`` documents that.
-    Approaching-SLA *list filters* remain deferred (no deadline column).
-    Age-policy approaching *aggregates* are on ``GET /ops/drop/pipeline``.
+    Deadline / approaching-SLA filters are not available without new schema.
     """
     from habeas_privacy_core.geo.state import (
         InvalidStateAcronymError,
@@ -1201,14 +1171,15 @@ async def drop_matching_results(
 
 @router.post("/matching-results/bulk-approve")
 async def drop_matching_results_bulk_approve(
+    _principal: MatchingReviewPrincipal,
     body: BulkApproveMatchingResultsBody,
-    me: RequireDropOpsRole,
+    actor: DropMutationActor,
 ):
     """Bulk-promote: approve pending matching.review filtered by match type."""
     _require_database()
     if body.match_type not in MATCH_TYPE_FILTERS:
         raise HTTPException(status_code=422, detail=f"invalid match_type: {body.match_type}")
-    decided_by = decided_by_for_me(me, body.decided_by)
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
     pool = get_pool()
     async with pool.acquire() as conn:
         result = await bulk_approve_matching_review_by_match_type(
@@ -1223,13 +1194,13 @@ async def drop_matching_results_bulk_approve(
 @router.post("/matching-results/bulk-decline")
 async def drop_matching_results_bulk_decline(
     body: BulkApproveMatchingResultsBody,
-    me: RequireDropOpsRole,
+    actor: DropMutationActor,
 ):
     """Bulk-decline: reject pending matching.review filtered by match type."""
     _require_database()
     if body.match_type not in MATCH_TYPE_FILTERS:
         raise HTTPException(status_code=422, detail=f"invalid match_type: {body.match_type}")
-    decided_by = decided_by_for_me(me, body.decided_by)
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
     pool = get_pool()
     async with pool.acquire() as conn:
         result = await bulk_decline_matching_review_by_match_type(
@@ -1245,11 +1216,11 @@ async def drop_matching_results_bulk_decline(
 async def drop_matching_result_promote(
     request_id: str,
     body: MatchingReviewDecisionBody,
-    me: RequireDropOpsRole,
+    actor: DropMutationActor,
 ):
     """Promote one request to fulfillment (approve matching.review)."""
     _require_database()
-    decided_by = decided_by_for_me(me, body.decided_by)
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
     pool = get_pool()
     async with pool.acquire() as conn:
         try:
@@ -1268,11 +1239,11 @@ async def drop_matching_result_promote(
 async def drop_matching_result_decline(
     request_id: str,
     body: MatchingReviewDecisionBody,
-    me: RequireDropOpsRole,
+    actor: DropMutationActor,
 ):
     """Decline one request (reject matching.review — not fulfill-ready)."""
     _require_database()
-    decided_by = decided_by_for_me(me, body.decided_by)
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
     pool = get_pool()
     async with pool.acquire() as conn:
         try:
@@ -1288,10 +1259,7 @@ async def drop_matching_result_decline(
 
 
 @router.get("/matching-results/{request_id}")
-async def drop_matching_result_detail(
-    request_id: str,
-    _me: RequireDropOpsRole,
-):
+async def drop_matching_result_detail(request_id: str):
     """Detail pane payload for one DROP matching result."""
     _require_database()
     pool = get_pool()
@@ -1305,20 +1273,17 @@ async def drop_matching_result_detail(
 @router.post("/workflow/assign")
 async def drop_workflow_assign(
     body: AssignBody,
-    me: RequireDropOpsRole,
+    actor: DropMutationActor,
 ):
     """Assign request(s) to a reviewer (assignee = IAP email / explicit identity)."""
     _require_database()
     if body.target_role not in ASSIGNMENT_TARGETS:
         raise HTTPException(status_code=422, detail=f"invalid target_role: {body.target_role}")
-    actor = me_actor(me)
-    decided_by = decided_by_for_me(me, body.decided_by)
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
     # Prefer IAP actor as assignee when authenticated and client omits a distinct email.
     assignee = body.assignee_identity.strip()
-    if (
-        actor != LOCAL_DEV_EMAIL
-        and is_authenticated_actor(actor)
-        and (not assignee or assignee == "web-admin@habeas.com")
+    if is_authenticated_actor(actor) and (
+        not assignee or assignee == "web-admin@habeas.com"
     ):
         assignee = actor
     pool = get_pool()
@@ -1339,7 +1304,7 @@ async def drop_workflow_assign(
 @router.post("/workflow/escalate")
 async def drop_workflow_escalate(
     body: EscalateBody,
-    me: RequireDropOpsRole,
+    actor: DropMutationActor,
 ):
     """Escalate request(s) to legal or data_owner."""
     _require_database()
@@ -1348,7 +1313,7 @@ async def drop_workflow_escalate(
             status_code=422,
             detail="escalate target_role must be legal or data_owner",
         )
-    decided_by = decided_by_for_me(me, body.decided_by)
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
     pool = get_pool()
     async with pool.acquire() as conn:
         try:
@@ -1366,7 +1331,6 @@ async def drop_workflow_escalate(
 
 @router.get("/workflow/assignments")
 async def drop_workflow_assignments(
-    _me: RequireDropOpsRole,
     assignee: str | None = None,
     target_role: str | None = None,
     status: str = "pending",
@@ -1458,7 +1422,7 @@ async def collect_queue_depths(conn: Any) -> list[dict[str, Any]]:
 
 
 @router.get("/workers")
-async def drop_workers(_me: RequireSuperAdmin):
+async def drop_workers():
     """Worker readiness + queue depths (admin_api aggregate; browser never calls workers)."""
     _require_database()
     health = await collect_worker_health()
@@ -1502,7 +1466,7 @@ async def drop_workers(_me: RequireSuperAdmin):
 
 
 @health_router.get("/queues")
-async def health_queues(_me: RequireSuperAdmin):
+async def health_queues():
     """Global queue rollup across DROP attempt tables."""
     _require_database()
     pool = get_pool()
@@ -1525,7 +1489,7 @@ _RETRY_CONFIG_TABLES = (
 
 
 @health_router.get("/retry-config")
-async def get_retry_config(_me: RequireSuperAdmin):
+async def get_retry_config():
     """Current per-table max_attempts (defaults + ops_retry_config overrides)."""
     from habeas_privacy_core.queue.reap import ReapedTableConfig
 
@@ -1575,7 +1539,7 @@ async def get_retry_config(_me: RequireSuperAdmin):
 @health_router.patch("/retry-config")
 async def patch_retry_config(
     body: RetryConfigPatchBody,
-    me: RequireSuperAdmin,
+    actor: DropMutationActor,
 ):
     """Persist max_attempts override (≥4). Matching must stay ≥4 (A6)."""
     if body.table_name not in _RETRY_CONFIG_TABLES:
@@ -1583,7 +1547,7 @@ async def patch_retry_config(
     if body.table_name == "matching_attempts" and body.max_attempts < 4:
         raise HTTPException(status_code=422, detail="matching max_attempts floor is 4")
     _require_database()
-    decided_by = decided_by_for_me(me, None)
+    decided_by = decided_by_for_mutation(actor, None)
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -1608,8 +1572,8 @@ async def patch_retry_config(
 
 
 @router.get("/stats/global")
-async def drop_stats_global(_me: RequireDropOpsRole):
-    """Home dashboard DROP summary — ids/counts only (all ops roles)."""
+async def drop_stats_global():
+    """Home dashboard DROP summary — ids/counts only."""
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:

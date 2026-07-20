@@ -12,29 +12,25 @@ Vite · React · TypeScript · TanStack Router · TanStack Query · shadcn · Bu
 
 Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStack Query cache on `privacy_events` payloads.
 
-## Role-aware navigation (IA matrix)
+## Navigation (Ops IA — Request / Job / Run)
 
-Session: `GET /me` → `{ email, role }` via `getMe` / `useMeQuery` (`super_admin` | `admin` | `data_owner`). Probe `GET /auth/me` remains for splash identity only.
-
-| Nav / route | Roles |
-|-------------|--------|
-| `/` Needs me | all |
-| `/requests` | all |
-| `/requests/needs-attention` (compat redirect from `/approvals/matching-review`) | all resolved ops roles |
-| `/ops/insights` (thin) | all |
-| `/ops/dashboard`, `/ops/runs`, `/ops/jobs`, `/ops/incidents`, `/ops/configuration` | `super_admin` |
-| `/ops/drop-pipeline` (Pipeline) + `/ops/health/*` | `super_admin` |
-| Splash lab (`/dev/splash-lab`) | DEV only |
-
-`data_owner` / `admin`: no Runs, Pipeline, Jobs, Health, or ops Configuration power paths. Deep links to gated routes show a forbidden empty state (API 403 remains authoritative).
-
-Ops chrome: `.agent/modules/design-taste-ops-ia.md` — micro eyebrow, compact title, `taste-panel` / table-first (not marketing heroes).
-
-## Navigation (Pipeline + Health)
-
-- **Pipeline** hover menu → `/ops/drop-pipeline?tab=` (`home` | `download` | `ingest` | `matching` | `fulfillment`). Configurations is the home tab (hash-index enqueue / enqueue-all).
-- **Health** click → `/ops/health` (workers + queues from admin_api). Hover → Escalations/retries (`/ops/health/escalations`) and Configuration (`/ops/health/configuration` — retry `max_attempts` via `/ops/health/retry-config`).
+- **Requests** → list (row opens journey), Needs attention, SLAs (shell).
+- **Ops** (super_admin): Dashboard, Runs, Jobs (shell), Insights (`/ops/health`), Incidents (shell → failed Runs), Configuration.
+- **Console** (super_admin): `/ops/drop-pipeline?tab=` mutation power surface.
 - Browser never calls worker URLs — only admin-api aggregates.
+
+## Ops density (Prefect / Dagster feel)
+
+Keep Habeas Amigo/`taste-*` tokens (navy, frost chips, matte panels). On **Runs, Requests, Ops dashboard, request journey**:
+
+- Table-first / rail-first composition — not landing-page heroes.
+- Compact rows (`text-xs`, tight `py`), status tabs/filters, URL search params.
+- Horizontal stage rail for request journey; dense run list like Dagster Runs.
+- One volume strip/chart on ops dashboard (Prefect overview) — not four equal marketing KPI tiles as the whole page.
+- Do **not** invent a second design system or copy Prefect dark/purple chrome.
+
+Ops visual system: [`.agent/modules/design-taste-ops-ia.md`](../../.agent/modules/design-taste-ops-ia.md) (`habeas-ops-amigo-prefect-dagster`).  
+General Amigo frost: [`.agent/modules/design-taste.md`](../../.agent/modules/design-taste.md).
 
 ## DROP pipeline
 
@@ -46,10 +42,7 @@ Ops chrome: `.agent/modules/design-taste-ops-ia.md` — micro eyebrow, compact t
   filters (request_id search, state select, recorded date range + match_type),
   promote/decline (individual + bulk by match type), assign to reviewer / escalate to
   legal|data_owner (IAP actor; `workflow.assignment` via admin-api).
-  Approaching-SLA *aggregates* on Pipeline (`approaching_sla` from admin-api): age-policy
-  counts of open work older than stage thresholds (matching 4h, review 48h, ingest 12h,
-  connector 24h) — label as derived age policy, not legal breach clocks. List *filters*
-  by deadline remain deferred (no deadline column).
+  No deadline / approaching-SLA UI — requires schema not present.
 
 ## Rules
 

@@ -2,7 +2,7 @@
 
 > Gate: editing `clients/web/`.
 
-Visual design: also load [`design-taste.md`](design-taste.md).
+Visual design: load [`design-taste.md`](design-taste.md). For DROP Ops IA (Runs / Requests / ops dashboard / journey), also load [`design-taste-ops-ia.md`](design-taste-ops-ia.md).
 
 ## Locked stack
 

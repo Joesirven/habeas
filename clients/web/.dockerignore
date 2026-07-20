@@ -5,3 +5,13 @@ dist
 !.env.example
 *.log
 .DS_Store
+.git
+.gitignore
+README.md
+AGENTS.md
+docker-compose.yml
+Dockerfile
+Dockerfile.dev
+firebase.json
+.firebaserc
+.oxlintrc.json

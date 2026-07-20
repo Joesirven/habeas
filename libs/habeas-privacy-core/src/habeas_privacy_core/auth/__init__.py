@@ -1,4 +1,4 @@
-"""Identity-Aware Proxy identity helpers and DROP ops roles for admin-api."""
+"""Identity-Aware Proxy identity helpers for admin-api."""
 
 from __future__ import annotations
 
@@ -10,42 +10,28 @@ from habeas_privacy_core.auth.iap import (
     parse_iap_email,
 )
 from habeas_privacy_core.auth.roles import (
-    LOCAL_DEV_EMAIL,
-    OPS_ROLES,
+    ALL_ROLES,
     ROLE_ADMIN,
     ROLE_DATA_OWNER,
     ROLE_SUPER_ADMIN,
-    Me,
-    OpsRole,
-    RoleConfig,
-    bind_role_dependencies,
-    me_actor,
-    normalize_ops_role,
+    Role,
+    allowlists_configured,
     parse_email_allowlist,
-    resolve_me,
-    resolve_ops_role,
-    role_config_from_settings,
+    resolve_role_from_allowlists,
 )
 
 __all__ = [
+    "ALL_ROLES",
     "IAP_EMAIL_HEADER",
-    "LOCAL_DEV_EMAIL",
-    "Me",
-    "OPS_ROLES",
-    "OpsRole",
     "ROLE_ADMIN",
     "ROLE_DATA_OWNER",
     "ROLE_SUPER_ADMIN",
-    "RoleConfig",
+    "Role",
     "UNKNOWN_ACTOR",
     "actor_from_iap_header",
-    "bind_role_dependencies",
+    "allowlists_configured",
     "is_authenticated_actor",
-    "me_actor",
-    "normalize_ops_role",
     "parse_email_allowlist",
     "parse_iap_email",
-    "resolve_me",
-    "resolve_ops_role",
-    "role_config_from_settings",
+    "resolve_role_from_allowlists",
 ]

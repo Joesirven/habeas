@@ -1,418 +1,343 @@
-"""Unified Runs API — list/detail DROP attempt families (ids/status only, no PII)."""
+"""Unified DROP Runs list and detail over Postgres attempt tables."""
 
 from __future__ import annotations
 
-import re
-from datetime import datetime, timezone
-from typing import Any, Literal
-from uuid import UUID
+from datetime import datetime, timedelta, timezone
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
-from admin_api.drop_pipeline import (
-    RequireSuperAdmin,
-    _TERMINAL_FAIL_STATUSES,
-    settings,
-)
+from admin_api.roles import RolePrincipal, require_roles, settings as role_settings
 from habeas_privacy_core.audit.redaction import redact_error_text
+from habeas_privacy_core.auth import ROLE_SUPER_ADMIN
 from habeas_privacy_core.db.pool import get_pool
 
-router = APIRouter(prefix="/ops", tags=["ops-runs"])
+router = APIRouter(prefix="/ops/runs", tags=["runs"])
 
-JobFilter = Literal["connector", "ingest", "matching", "hash_index"]
-WindowFilter = Literal["8h", "24h", "1w"]
+RUN_JOBS = frozenset(
+    {"drop_connector", "drop_ingestor", "matching", "hash_index_refresh"}
+)
+_FAILED_STATUSES = ("submit_error", "outcome_error", "timeout", "abandoned")
+_TIME_WINDOWS: dict[str, int] = {"8h": 8, "24h": 24, "1w": 168}
 
-_JOB_TABLES: dict[str, str] = {
-    "connector": "drop_connector_attempts",
-    "ingest": "drop_ingest_attempts",
-    "matching": "matching_attempts",
-    "hash_index": "hash_index_refresh_attempts",
+_UNION_BODY = """
+SELECT 'drop_connector'::text AS job,
+       id AS attempt_id,
+       step,
+       status,
+       NULL::uuid AS request_id,
+       attempted_at,
+       completed_at,
+       attempt_number,
+       NULL::varchar(2) AS state,
+       NULL::text[] AS list_types
+  FROM drop_connector_attempts
+UNION ALL
+SELECT 'drop_ingestor',
+       id,
+       step,
+       status,
+       NULL::uuid,
+       attempted_at,
+       completed_at,
+       attempt_number,
+       NULL::varchar(2),
+       NULL::text[]
+  FROM drop_ingest_attempts
+UNION ALL
+SELECT 'matching',
+       id,
+       step,
+       status,
+       request_id,
+       attempted_at,
+       completed_at,
+       attempt_number,
+       NULL::varchar(2),
+       NULL::text[]
+  FROM matching_attempts
+UNION ALL
+SELECT 'hash_index_refresh',
+       id,
+       step,
+       status,
+       NULL::uuid,
+       attempted_at,
+       completed_at,
+       1 AS attempt_number,
+       state,
+       list_types
+  FROM hash_index_refresh_attempts
+"""
+
+_DETAIL_SQL: dict[str, str] = {
+    "drop_connector": """
+        SELECT id, step, status, attempted_at, completed_at, submitted_at,
+               attempt_number, worker_id, error_code, error_message,
+               NULL::varchar(2) AS state, NULL::text[] AS list_types
+          FROM drop_connector_attempts
+         WHERE id = $1
+    """,
+    "drop_ingestor": """
+        SELECT id, step, status, attempted_at, completed_at, submitted_at,
+               attempt_number, worker_id, error_code, error_message,
+               NULL::varchar(2) AS state, NULL::text[] AS list_types
+          FROM drop_ingest_attempts
+         WHERE id = $1
+    """,
+    "matching": """
+        SELECT id, step, status, attempted_at, completed_at, submitted_at,
+               attempt_number, worker_id, error_code, error_message,
+               request_id, NULL::varchar(2) AS state, NULL::text[] AS list_types
+          FROM matching_attempts
+         WHERE id = $1
+    """,
+    "hash_index_refresh": """
+        SELECT id, step, status, attempted_at, completed_at, submitted_at,
+               1 AS attempt_number, worker_id, error_code, error_message,
+               NULL::uuid AS request_id, state, list_types
+          FROM hash_index_refresh_attempts
+         WHERE id = $1
+    """,
 }
 
-# Deep-link query context for /ops/drop-pipeline (no auto-mutate).
-_JOB_CONSOLE_TAB: dict[str, str] = {
-    "connector": "download",
-    "ingest": "ingest",
-    "matching": "matching",
-    "hash_index": "home",
-}
+SuperAdminPrincipal = Annotated[
+    RolePrincipal, Depends(require_roles(ROLE_SUPER_ADMIN))
+]
 
-_WINDOW_HOURS: dict[str, int] = {
-    "8h": 8,
-    "24h": 24,
-    "1w": 168,
-}
 
-_DTO_KEYS = (
-    "id",
-    "job",
-    "status",
-    "request_id",
-    "attempted_at",
-    "completed_at",
-    "duration_seconds",
-    "error_redacted",
-    "has_error",
-)
+class RunSummary(BaseModel):
+    run_id: str
+    job: str
+    step: str
+    status: str
+    request_id: str | None = None
+    started_at: datetime
+    completed_at: datetime | None = None
+    duration_seconds: float | None = None
+    attempt_number: int = 1
 
-_DETAIL_KEYS = (
-    "id",
-    "job",
-    "status",
-    "request_id",
-    "attempted_at",
-    "claimed_at",
-    "completed_at",
-    "duration_seconds",
-    "error_redacted",
-    "has_error",
-    "timeline",
-    "console_href",
-)
 
-# Extra scrub for privileged error panel — redact_error_text does not strip URIs/paths (R14).
-_GS_URI = re.compile(r"gs://\S+", re.IGNORECASE)
-_ABS_PATH = re.compile(r"(?<![\w.-])/(?:[\w.-]+/){1,}[\w.-]+")
-_FILENAME_TOKEN = re.compile(
-    r"\b[\w.-]+\.(?:csv|json|parquet|txt|log|gz|zip|tsv)\b",
-    re.IGNORECASE,
-)
-_PATH_REDACTED = "[path-redacted]"
+class TimelineEvent(BaseModel):
+    event: str
+    at: datetime
+
+
+class RunDetail(RunSummary):
+    worker_id: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    submitted_at: datetime | None = None
+    state: str | None = None
+    list_types: list[str] | None = None
+    timeline: list[TimelineEvent] = Field(default_factory=list)
 
 
 def _require_database() -> None:
-    if not settings.database_url:
+    if not role_settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
 
 
-def _iso(value: datetime | None) -> str | None:
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.isoformat()
+def _run_id(job: str, attempt_id: int) -> str:
+    return f"{job}:{attempt_id}"
+
+
+def _parse_run_id(run_id: str) -> tuple[str, int]:
+    if ":" not in run_id:
+        raise HTTPException(status_code=400, detail="invalid run_id")
+    job, _, raw_id = run_id.partition(":")
+    if job not in RUN_JOBS:
+        raise HTTPException(status_code=400, detail="invalid run_id job")
+    try:
+        attempt_id = int(raw_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid run_id") from exc
+    if attempt_id < 1:
+        raise HTTPException(status_code=400, detail="invalid run_id")
+    return job, attempt_id
 
 
 def _duration_seconds(
-    attempted_at: datetime | None, completed_at: datetime | None
+    started_at: datetime, completed_at: datetime | None
 ) -> float | None:
-    if attempted_at is None or completed_at is None:
+    if completed_at is None:
         return None
-    return (completed_at - attempted_at).total_seconds()
+    return (completed_at - started_at).total_seconds()
 
 
-def _scrub_uris_and_paths(text: str) -> str:
-    """Strip gs:// URIs, absolute paths, and filename-like tokens from error text."""
-    cleaned = _GS_URI.sub(_PATH_REDACTED, text)
-    cleaned = _ABS_PATH.sub(_PATH_REDACTED, cleaned)
-    cleaned = _FILENAME_TOKEN.sub(_PATH_REDACTED, cleaned)
-    return cleaned
+def _summary_from_row(row: Any) -> RunSummary:
+    job = str(row["job"])
+    attempt_id = int(row["attempt_id"])
+    started_at = row["attempted_at"]
+    completed_at = row["completed_at"]
+    request_id = row["request_id"]
+    return RunSummary(
+        run_id=_run_id(job, attempt_id),
+        job=job,
+        step=str(row["step"]),
+        status=str(row["status"]),
+        request_id=str(request_id) if request_id is not None else None,
+        started_at=started_at,
+        completed_at=completed_at,
+        duration_seconds=_duration_seconds(started_at, completed_at),
+        attempt_number=int(row["attempt_number"]),
+    )
 
 
-def _privileged_error_redacted(raw_error: Any) -> str | None:
-    """Super-admin-only error panel: PII redact + URI/path scrub. Empty → None."""
-    if raw_error is None:
-        return None
-    text = str(raw_error).strip()
-    if not text:
-        return None
-    cleaned = redact_error_text(text)
-    cleaned = _scrub_uris_and_paths(cleaned).strip()
-    return cleaned or None
-
-
-def _timeline(
-    *,
-    attempted_at: datetime | None,
-    claimed_at: datetime | None,
-    completed_at: datetime | None,
-) -> list[dict[str, str]]:
-    """Build timeline from real attempt timestamps only — never invent steps."""
-    events: list[dict[str, str]] = []
-    if attempted_at is not None:
-        at = _iso(attempted_at)
-        if at:
-            events.append({"event": "attempted", "at": at})
-    if claimed_at is not None:
-        at = _iso(claimed_at)
-        if at:
-            events.append({"event": "claimed", "at": at})
-    if completed_at is not None:
-        at = _iso(completed_at)
-        if at:
-            events.append({"event": "completed", "at": at})
+def _timeline_from_row(row: Any) -> list[TimelineEvent]:
+    events: list[TimelineEvent] = []
+    if row["attempted_at"] is not None:
+        events.append(TimelineEvent(event="attempted", at=row["attempted_at"]))
+    if row.get("submitted_at") is not None:
+        events.append(TimelineEvent(event="submitted", at=row["submitted_at"]))
+    if row.get("completed_at") is not None:
+        events.append(TimelineEvent(event="completed", at=row["completed_at"]))
+    events.sort(key=lambda item: item.at)
     return events
 
 
-def _console_href(job: str) -> str:
-    tab = _JOB_CONSOLE_TAB.get(job, "home")
-    return f"/ops/drop-pipeline?tab={tab}"
-
-
-def _normalize_row(row: Any) -> dict[str, Any]:
-    request_id = row["request_id"]
-    if request_id is not None:
-        request_id = str(request_id)
-    raw_error = row["error_message"]
-    # List never returns error bodies — ingest/connector messages often embed
-    # filenames / gs:// URIs that redact_error_text does not scrub (R14). U6
-    # run detail may expose a privileged redacted panel separately.
-    has_error = bool(raw_error is not None and str(raw_error).strip())
-    dto = {
-        "id": int(row["id"]),
-        "job": row["job"],
-        "status": row["status"],
-        "request_id": request_id,
-        "attempted_at": _iso(row["attempted_at"]),
-        "completed_at": _iso(row["completed_at"]),
-        "duration_seconds": _duration_seconds(row["attempted_at"], row["completed_at"]),
-        "error_redacted": None,
-        "has_error": has_error,
-    }
-    return {k: dto[k] for k in _DTO_KEYS}
-
-
-def _normalize_detail(row: Any) -> dict[str, Any]:
-    request_id = row["request_id"]
-    if request_id is not None:
-        request_id = str(request_id)
-    raw_error = row["error_message"]
-    has_error = bool(raw_error is not None and str(raw_error).strip())
-    # Attempt tables have no claimed_at column — always null; do not invent.
-    claimed_at: datetime | None = None
-    dto = {
-        "id": int(row["id"]),
-        "job": row["job"],
-        "status": row["status"],
-        "request_id": request_id,
-        "attempted_at": _iso(row["attempted_at"]),
-        "claimed_at": None,
-        "completed_at": _iso(row["completed_at"]),
-        "duration_seconds": _duration_seconds(row["attempted_at"], row["completed_at"]),
-        "error_redacted": _privileged_error_redacted(raw_error),
-        "has_error": has_error,
-        "timeline": _timeline(
-            attempted_at=row["attempted_at"],
-            claimed_at=claimed_at,
-            completed_at=row["completed_at"],
-        ),
-        "console_href": _console_href(row["job"]),
-    }
-    return {k: dto[k] for k in _DETAIL_KEYS}
-
-
-_IN_PROGRESS_STATUSES = ("pending", "claimed", "in_flight")
-
-
-def _status_clause(
-    status: str | None, *, arg_index: int
-) -> tuple[str, list[Any], int]:
-    if status is None or not status.strip():
-        return "", [], arg_index
-    normalized = status.strip().lower()
-    if normalized == "failed":
-        return (
-            f" AND status = ANY(${arg_index}::text[])",
-            [list(_TERMINAL_FAIL_STATUSES)],
-            arg_index + 1,
-        )
-    if normalized == "in_progress":
-        return (
-            f" AND status = ANY(${arg_index}::text[])",
-            [list(_IN_PROGRESS_STATUSES)],
-            arg_index + 1,
-        )
-    return f" AND status = ${arg_index}", [normalized], arg_index + 1
-
-
-def _window_clause(
-    window: str | None, *, arg_index: int
-) -> tuple[str, list[Any], int]:
-    if window is None:
-        return "", [], arg_index
-    hours = _WINDOW_HOURS.get(window)
-    if hours is None:
-        raise HTTPException(
-            status_code=422,
-            detail=f"invalid window: {window} (use 8h|24h|1w)",
-        )
-    return (
-        f" AND attempted_at >= NOW() - (${arg_index} || ' hours')::interval",
-        [str(hours)],
-        arg_index + 1,
+def _detail_from_row(job: str, row: Any) -> RunDetail:
+    attempt_id = int(row["id"])
+    started_at = row["attempted_at"]
+    completed_at = row["completed_at"]
+    request_id = row.get("request_id")
+    raw_error = row.get("error_message")
+    list_types = row.get("list_types")
+    return RunDetail(
+        run_id=_run_id(job, attempt_id),
+        job=job,
+        step=str(row["step"]),
+        status=str(row["status"]),
+        request_id=str(request_id) if request_id is not None else None,
+        started_at=started_at,
+        completed_at=completed_at,
+        duration_seconds=_duration_seconds(started_at, completed_at),
+        attempt_number=int(row["attempt_number"]),
+        worker_id=row.get("worker_id"),
+        error_code=row.get("error_code"),
+        error_message=redact_error_text(raw_error) if raw_error else None,
+        submitted_at=row.get("submitted_at"),
+        state=row.get("state"),
+        list_types=list(list_types) if list_types is not None else None,
+        timeline=_timeline_from_row(row),
     )
 
 
-def _request_id_clause(
-    request_id: str | None, *, has_request_id: bool, arg_index: int
-) -> tuple[str, list[Any], int]:
-    if request_id is None or not request_id.strip():
-        return "", [], arg_index
-    if not has_request_id:
-        # Non-matching families never have request_id — exclude them when filtered.
-        return " AND FALSE", [], arg_index
-    try:
-        rid = UUID(request_id.strip())
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail="invalid request_id") from exc
-    return f" AND request_id = ${arg_index}::uuid", [rid], arg_index + 1
-
-
-async def collect_runs(
+async def fetch_run_summaries(
     conn: Any,
     *,
-    status: str | None = None,
-    job: str | None = None,
-    request_id: str | None = None,
-    window: str | None = None,
-    limit: int = 100,
-) -> dict[str, Any]:
-    """Aggregate attempt rows across DROP families into a normalized Runs DTO."""
-    if job is not None and job not in _JOB_TABLES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"invalid job: {job} (use connector|ingest|matching|hash_index)",
-        )
-    if limit < 1 or limit > 500:
-        raise HTTPException(status_code=422, detail="limit must be 1..500")
+    job: str | None,
+    status: str | None,
+    request_id: str | None,
+    since: datetime | None,
+    limit: int,
+    offset: int,
+) -> list[RunSummary]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    idx = 1
 
-    jobs = [job] if job else list(_JOB_TABLES)
-    union_parts: list[str] = []
-    args: list[Any] = []
-    arg_i = 1
+    if job is not None:
+        clauses.append(f"job = ${idx}")
+        params.append(job)
+        idx += 1
 
-    for job_name in jobs:
-        table = _JOB_TABLES[job_name]
-        has_request_id = job_name == "matching"
-        request_expr = "request_id" if has_request_id else "NULL::uuid"
-        where = "TRUE"
-        status_sql, status_args, arg_i = _status_clause(status, arg_index=arg_i)
-        where += status_sql
-        args.extend(status_args)
-        window_sql, window_args, arg_i = _window_clause(window, arg_index=arg_i)
-        where += window_sql
-        args.extend(window_args)
-        rid_sql, rid_args, arg_i = _request_id_clause(
-            request_id, has_request_id=has_request_id, arg_index=arg_i
-        )
-        where += rid_sql
-        args.extend(rid_args)
-        union_parts.append(
-            f"""
-            SELECT id,
-                   '{job_name}'::text AS job,
-                   status,
-                   {request_expr} AS request_id,
-                   attempted_at,
-                   completed_at,
-                   error_message
-              FROM {table}
-             WHERE {where}
-            """
-        )
+    if status is not None:
+        if status == "failed":
+            placeholders = ", ".join(f"${idx + i}" for i in range(len(_FAILED_STATUSES)))
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(_FAILED_STATUSES)
+            idx += len(_FAILED_STATUSES)
+        else:
+            clauses.append(f"status = ${idx}")
+            params.append(status)
+            idx += 1
 
+    if request_id is not None:
+        clauses.append(f"request_id = ${idx}::uuid")
+        params.append(request_id)
+        idx += 1
+
+    if since is not None:
+        clauses.append(f"attempted_at >= ${idx}")
+        params.append(since)
+        idx += 1
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = f"""
-        SELECT id, job, status, request_id, attempted_at, completed_at, error_message
-          FROM (
-            {" UNION ALL ".join(union_parts)}
-          ) AS runs
-         ORDER BY attempted_at DESC, id DESC
-         LIMIT ${arg_i}
+        SELECT job, attempt_id, step, status, request_id, attempted_at, completed_at,
+               attempt_number
+          FROM ({_UNION_BODY}) AS unified
+         {where}
+         ORDER BY attempted_at DESC
+         LIMIT ${idx} OFFSET ${idx + 1}
     """
-    args.append(limit)
-    rows = await conn.fetch(sql, *args)
-    return {
-        "runs": [_normalize_row(row) for row in rows],
-        "limit": limit,
-        "filters": {
-            "status": status,
-            "job": job,
-            "request_id": request_id,
-            "window": window,
-        },
-    }
+    params.extend([limit, offset])
+    rows = await conn.fetch(sql, *params)
+    return [_summary_from_row(row) for row in rows]
 
 
-async def fetch_run_detail(
-    conn: Any,
-    *,
-    job: str,
-    attempt_id: int,
-) -> dict[str, Any]:
-    """Load one attempt by job family + id into the privileged detail DTO."""
-    if job not in _JOB_TABLES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"invalid job: {job} (use connector|ingest|matching|hash_index)",
-        )
-    if attempt_id < 1:
-        raise HTTPException(status_code=422, detail="attempt_id must be >= 1")
-
-    table = _JOB_TABLES[job]
-    has_request_id = job == "matching"
-    request_expr = "request_id" if has_request_id else "NULL::uuid"
-    row = await conn.fetchrow(
-        f"""
-        SELECT id,
-               '{job}'::text AS job,
-               status,
-               {request_expr} AS request_id,
-               attempted_at,
-               completed_at,
-               error_message
-          FROM {table}
-         WHERE id = $1
-        """,
-        attempt_id,
-    )
+async def fetch_run_detail(conn: Any, *, job: str, attempt_id: int) -> RunDetail | None:
+    sql = _DETAIL_SQL[job]
+    row = await conn.fetchrow(sql, attempt_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="run not found")
-    return _normalize_detail(row)
+        return None
+    return _detail_from_row(job, row)
 
 
-@router.get("/runs")
+def _resolve_since(
+    *,
+    since: datetime | None,
+    window: Literal["8h", "24h", "1w"] | None,
+) -> datetime | None:
+    if since is not None:
+        return since
+    if window is None:
+        return None
+    hours = _TIME_WINDOWS[window]
+    return datetime.now(timezone.utc) - timedelta(hours=hours)
+
+
+@router.get("", response_model=list[RunSummary])
 async def list_runs(
-    _me: RequireSuperAdmin,
-    status: str | None = Query(
-        default=None,
-        description="Exact attempt status, or failed for terminal fail statuses",
-    ),
-    job: JobFilter | None = Query(
-        default=None,
-        description="Attempt family: connector|ingest|matching|hash_index",
-    ),
-    request_id: str | None = Query(
-        default=None,
-        description="Exact matching attempt request_id (UUID); other jobs excluded",
-    ),
-    window: WindowFilter | None = Query(
-        default=None,
-        description="attempted_at lookback: 8h|24h|1w",
-    ),
-    limit: int = Query(default=100, ge=1, le=500),
-):
-    """List job attempts across DROP attempt families (super_admin only)."""
+    _principal: SuperAdminPrincipal,
+    job: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    request_id: str | None = Query(default=None),
+    since: datetime | None = Query(default=None),
+    window: Literal["8h", "24h", "1w"] | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[RunSummary]:
     _require_database()
+    if job is not None and job not in RUN_JOBS:
+        raise HTTPException(status_code=400, detail="invalid job")
+
+    effective_since = _resolve_since(since=since, window=window)
     pool = get_pool()
     async with pool.acquire() as conn:
-        return await collect_runs(
+        return await fetch_run_summaries(
             conn,
-            status=status,
             job=job,
+            status=status,
             request_id=request_id,
-            window=window,
+            since=effective_since,
             limit=limit,
+            offset=offset,
         )
 
 
-@router.get("/runs/{job}/{attempt_id}")
+@router.get("/{run_id}", response_model=RunDetail)
 async def get_run(
-    _me: RequireSuperAdmin,
-    job: JobFilter,
-    attempt_id: int,
-):
-    """Run detail — timeline + privileged redacted error (super_admin only)."""
+    run_id: str,
+    _principal: SuperAdminPrincipal,
+) -> RunDetail:
     _require_database()
+    job, attempt_id = _parse_run_id(run_id)
     pool = get_pool()
     async with pool.acquire() as conn:
-        return await fetch_run_detail(conn, job=job, attempt_id=attempt_id)
+        detail = await fetch_run_detail(conn, job=job, attempt_id=attempt_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    return detail

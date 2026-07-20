@@ -67,6 +67,20 @@ Env on Cloud Run: `DROP_ENV=sandbox`, `DROP_API_BASE_URL=https://api.drop.privac
 
 Land/promote only — no `DROP_API_KEY`. Needs `DATABASE_URL`.
 
+### admin-web-dev (static admin SPA)
+
+| File | Purpose |
+|------|---------|
+| [`cloudbuild/admin-web-dev.yaml`](cloudbuild/admin-web-dev.yaml) | Build/push/deploy `admin-web-dev` |
+
+Bun/Vite multi-stage build → nginx on port 8080. `VITE_ADMIN_API_URL` is a **build arg** (default: dev admin-api Cloud Run URL). No runtime secrets.
+
+```bash
+gcloud builds submit --config=infra/cloudbuild/admin-web-dev.yaml --project=example-gcp-project .
+```
+
+After first deploy, append the `admin-web-dev` `*.run.app` origin to `admin-api-dev` `_CORS_ORIGINS` and redeploy admin-api so the browser can call the API cross-origin.
+
 **Requester state on promote:** `requestor_state` comes from `raw_payload.state` /
 `raw_payload.requestor_state`, else a USPS token in the CSV filename
 (e.g. `broker_TX_EMAIL.csv`). If both omit state, promote **fails closed** — it
@@ -98,8 +112,8 @@ gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
 
 | Surface | Invoker |
 |---------|---------|
-| `admin-api-dev` | **IAP service agent only** (`service-95660886550@gcp-sa-iap.iam.gserviceaccount.com`); no `allUsers`; no compute SA invoker |
-| `admin-web-dev` | Same IAP pattern (Workspace SSO front door for the SPA) |
+| `admin-api-dev` | Compute SA (`95660886550-compute@developer.gserviceaccount.com`) — ops-ia / admin-web nginx mints identity tokens; app-level `REQUIRE_IAP_IDENTITY` |
+| `admin-web-dev` / `ops-ia-web-dev` | Public Cloud Run + browser IAP front door (see `admin-web-dev.yaml` / ops-ia deploy) |
 | Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`, `hash-index-refresh-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) — never user/IAP direct |
 
 Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Operators never call workers directly — process/enqueue goes through admin-api with IAP. Localhost worker URLs skip auth.

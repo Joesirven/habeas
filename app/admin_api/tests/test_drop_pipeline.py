@@ -10,7 +10,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from admin_api import drop_pipeline
+from admin_api import roles
 from admin_api.main import app
+from habeas_privacy_core.auth import IAP_EMAIL_HEADER
 
 
 class _Row(dict):
@@ -1119,11 +1121,8 @@ def test_matching_results_bulk_approve_prefers_iap_actor(monkeypatch: pytest.Mon
 
 def test_drop_mutation_requires_iap_when_configured(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(drop_pipeline.settings, "require_iap_identity", True)
-    monkeypatch.setattr(
-        drop_pipeline.settings,
-        "drop_ops_super_admin_emails",
-        "ops@habeas.com",
-    )
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@habeas.com")
 
     async def fake_enqueue(conn: Any, *, state: str, list_types: list[str]) -> int:
         return 1
@@ -1158,9 +1157,8 @@ def test_drop_mutation_requires_iap_when_configured(monkeypatch: pytest.MonkeyPa
 def test_data_owner_cannot_read_pipeline_console(monkeypatch: pytest.MonkeyPatch):
     """AE3 — non–super_admin deep-link to power console is API 403."""
     monkeypatch.setattr(drop_pipeline.settings, "require_iap_identity", True)
-    monkeypatch.setattr(
-        drop_pipeline.settings, "drop_ops_data_owner_emails", "owner@habeas.com"
-    )
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "owner@habeas.com")
 
     async def fake_status() -> dict[str, Any]:
         return {"ok": True}
@@ -1484,3 +1482,164 @@ async def test_create_workflow_assignment_validation():
             target_role="reviewer",
             decided_by="ops@habeas.com",
         )
+
+
+@pytest.fixture
+def _admin_headers() -> dict[str, str]:
+    return {IAP_EMAIL_HEADER: "admin@example.com"}
+
+
+@pytest.fixture
+def _data_owner_headers() -> dict[str, str]:
+    return {IAP_EMAIL_HEADER: "owner@example.com"}
+
+
+def test_drop_pipeline_read_requires_super_admin(
+    monkeypatch: pytest.MonkeyPatch,
+    _admin_headers: dict[str, str],
+) -> None:
+    roles.settings.admin_api_admins = "admin@example.com"
+
+    async def fake_status() -> dict[str, Any]:
+        return PIPELINE_FIXTURE
+
+    monkeypatch.setattr(drop_pipeline, "get_pipeline_status", fake_status)
+
+    with TestClient(app) as client:
+        response = client.get("/ops/drop/pipeline", headers=_admin_headers)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "insufficient role"
+
+
+def test_drop_spine_proxy_requires_super_admin(
+    monkeypatch: pytest.MonkeyPatch,
+    _admin_headers: dict[str, str],
+) -> None:
+    roles.settings.admin_api_admins = "admin@example.com"
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, Any]:
+            return {"status": "ok"}
+
+    class FakeClient:
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url: str, json: Any = None, headers: Any = None) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/ops/drop/download", headers=_admin_headers)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "insufficient role"
+
+
+def test_drop_matching_results_allowed_for_admin(
+    monkeypatch: pytest.MonkeyPatch,
+    _admin_headers: dict[str, str],
+) -> None:
+    roles.settings.admin_api_admins = "admin@example.com"
+
+    async def fake_collect(conn: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "stats": {
+                "total": 0,
+                "single_match": 0,
+                "multi_match": 0,
+                "not_found": 0,
+                "review_pending": 0,
+                "review_approved": 0,
+                "review_none": 0,
+            },
+            "results": [],
+            "limit": 100,
+            "match_type_filter": None,
+            "filters": {"stats_scope": "global"},
+        }
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "collect_matching_results", fake_collect)
+
+    with TestClient(app) as client:
+        response = client.get("/ops/drop/matching-results", headers=_admin_headers)
+
+    assert response.status_code == 200
+    assert response.json()["stats"]["total"] == 0
+
+
+def test_drop_matching_results_bulk_approve_allowed_for_data_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    _data_owner_headers: dict[str, str],
+) -> None:
+    roles.settings.admin_api_data_owners = "owner@example.com"
+
+    async def fake_bulk(
+        conn: Any,
+        *,
+        match_type: str,
+        decided_by: str,
+        decision_reason: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "match_type": match_type,
+            "approved_count": 1,
+            "approval_ids": [3],
+            "request_ids": ["00000000-0000-0000-0000-000000000003"],
+        }
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(
+        "admin_api.drop_pipeline.bulk_approve_matching_review_by_match_type",
+        fake_bulk,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/ops/drop/matching-results/bulk-approve",
+            headers=_data_owner_headers,
+            json={"match_type": "single_match"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["approved_count"] == 1
+
+
+def test_drop_spine_composes_super_admin_role_with_iap_actor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Super_admin spine routes still enforce DropMutationActor when IAP is required."""
+    roles.settings.admin_api_super_admins = "ops@habeas.com"
+    monkeypatch.setattr(drop_pipeline.settings, "require_iap_identity", True)
+
+    async def fake_enqueue(conn: Any, *, state: str, list_types: list[str]) -> int:
+        return 42
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(
+        "habeas_privacy_core.db.hash_index_refresh.enqueue_hash_index_refresh",
+        fake_enqueue,
+    )
+    headers = {IAP_EMAIL_HEADER: "accounts.google.com:ops@habeas.com"}
+
+    with TestClient(app) as client:
+        denied = client.post("/ops/drop/hash-index-refresh/enqueue", json={"state": "CA"})
+        allowed = client.post(
+            "/ops/drop/hash-index-refresh/enqueue",
+            headers=headers,
+            json={"state": "CA"},
+        )
+
+    # Role gate runs first (unknown email ∉ allowlist → 403). With IAP header, both
+    # require_roles(super_admin) and DropMutationActor succeed → 200.
+    assert denied.status_code == 403
+    assert allowed.status_code == 200
+    assert allowed.json()["attempt_id"] == 42

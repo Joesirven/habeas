@@ -1,50 +1,56 @@
 import { Link } from '@tanstack/react-router'
 
-import { opsRunsSearch } from '@/lib/ops-runs-search'
+import { RoleGate } from '@/lib/auth'
+import type { RunsJobFilter } from '@/router'
 
-import { OpsPageChrome, RequireRole } from '@/lib/auth'
-import type { OpsRunJob } from '@/lib/api'
-
-const CATALOG: { job: OpsRunJob; label: string; family: string }[] = [
-  { job: 'connector', label: 'DROP download', family: 'connector' },
-  { job: 'ingest', label: 'Land / promote', family: 'ingest' },
-  { job: 'matching', label: 'Matching', family: 'matching' },
-  { job: 'hash_index', label: 'Hash index refresh', family: 'hash_index' },
+const JOB_CATALOG: {
+  key: RunsJobFilter
+  label: string
+  step: string
+}[] = [
+  { key: 'drop_connector', label: 'Download', step: 'drop_connector' },
+  { key: 'drop_ingestor', label: 'Ingest', step: 'drop_ingestor' },
+  { key: 'matching', label: 'Matching', step: 'matching' },
+  { key: 'hash_index_refresh', label: 'Hash index refresh', step: 'hash_index_refresh' },
 ]
 
-export function OpsJobsPage() {
+function Micro({ children }: { children: React.ReactNode }) {
+  return <p className="taste-micro">{children}</p>
+}
+
+function JobsContent() {
   return (
-    <RequireRole allow={['super_admin']}>
-      <OpsPageChrome
-        eyebrow="OPS · JOBS"
-        title="Jobs"
-        support="Static DROP job catalog — open filtered Runs for live attempts."
-      >
-        <div className="taste-panel overflow-hidden">
-          <table className="taste-table">
+    <section className="space-y-4">
+      <header>
+        <Micro>Ops · Job</Micro>
+        <h2 className="mt-1 font-display text-xl font-medium tracking-tight text-ink">Jobs</h2>
+        <p className="mt-1 text-xs text-ink-soft">
+          Static DROP worker catalog — open filtered Runs for each job.
+        </p>
+      </header>
+
+      <div className="taste-panel overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="taste-table text-xs [&_td]:px-3 [&_td]:py-2 [&_th]:px-3 [&_th]:py-2">
             <thead>
               <tr>
                 <th>Job</th>
-                <th>Family</th>
+                <th>Worker key</th>
                 <th>Runs</th>
               </tr>
             </thead>
             <tbody>
-              {CATALOG.map((row) => (
-                <tr key={row.job}>
-                  <td className="!py-2 text-ink">{row.label}</td>
-                  <td className="!py-2">
-                    <span className="taste-frost-chip !normal-case !tracking-normal">
-                      {row.family}
-                    </span>
-                  </td>
-                  <td className="!py-2">
+              {JOB_CATALOG.map((job) => (
+                <tr key={job.key} className="hover:bg-panel/40">
+                  <td className="font-medium text-ink">{job.label}</td>
+                  <td className="font-mono text-[0.7rem] text-ink-soft">{job.step}</td>
+                  <td>
                     <Link
                       to="/ops/runs"
-                      search={opsRunsSearch({ job: row.job })}
-                      className="text-xs text-habeas-mid hover:underline"
+                      search={{ job: job.key, window: '24h' }}
+                      className="taste-link text-xs"
                     >
-                      Filtered runs →
+                      View runs →
                     </Link>
                   </td>
                 </tr>
@@ -52,7 +58,15 @@ export function OpsJobsPage() {
             </tbody>
           </table>
         </div>
-      </OpsPageChrome>
-    </RequireRole>
+      </div>
+    </section>
+  )
+}
+
+export function OpsJobsPage() {
+  return (
+    <RoleGate allow={(role) => role === 'super_admin'}>
+      <JobsContent />
+    </RoleGate>
   )
 }

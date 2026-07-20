@@ -1,7 +1,11 @@
 import { Link, useRouterState } from '@tanstack/react-router'
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 
-import { canAccessNeedsAttention, isSuperAdmin, useOpsRole } from '@/lib/auth'
+import {
+  canAccessInsights,
+  canAccessOpsSurfaces,
+  useAuth,
+} from '@/lib/auth'
 
 const navClass =
   'text-mute transition-colors hover:text-ink [&.active]:text-ink [&.active]:underline [&.active]:decoration-ink/25 [&.active]:underline-offset-4'
@@ -19,8 +23,31 @@ type NavGroup = {
   children: NavChild[]
 }
 
-const PIPELINE_GROUP: NavGroup = {
-  label: 'Pipeline',
+const REQUESTS_GROUP: NavGroup = {
+  label: 'Requests',
+  to: '/requests',
+  children: [
+    { label: 'All requests', to: '/requests' },
+    { label: 'Needs attention', to: '/requests/needs-attention' },
+    { label: 'SLAs', to: '/requests/slas' },
+  ],
+}
+
+const OPS_GROUP: NavGroup = {
+  label: 'Ops',
+  to: '/ops/dashboard',
+  children: [
+    { label: 'Dashboard', to: '/ops/dashboard' },
+    { label: 'Runs', to: '/ops/runs' },
+    { label: 'Jobs', to: '/ops/jobs' },
+    { label: 'Insights', to: '/ops/health' },
+    { label: 'Incidents', to: '/ops/incidents' },
+    { label: 'Configuration', to: '/ops/health/configuration' },
+  ],
+}
+
+const CONSOLE_GROUP: NavGroup = {
+  label: 'Console',
   to: '/ops/drop-pipeline',
   search: { tab: 'home' },
   children: [
@@ -32,24 +59,12 @@ const PIPELINE_GROUP: NavGroup = {
   ],
 }
 
-const HEALTH_GROUP: NavGroup = {
-  label: 'Health',
+const INSIGHTS_GROUP: NavGroup = {
+  label: 'Insights',
   to: '/ops/health',
   children: [
+    { label: 'Workers & queues', to: '/ops/health' },
     { label: 'Escalations / retries', to: '/ops/health/escalations' },
-    { label: 'Configuration', to: '/ops/health/configuration' },
-  ],
-}
-
-const OPS_GROUP: NavGroup = {
-  label: 'Ops',
-  to: '/ops/dashboard',
-  children: [
-    { label: 'Dashboard', to: '/ops/dashboard' },
-    { label: 'Runs', to: '/ops/runs' },
-    { label: 'Jobs', to: '/ops/jobs' },
-    { label: 'Incidents', to: '/ops/incidents' },
-    { label: 'Configuration', to: '/ops/configuration' },
   ],
 }
 
@@ -143,34 +158,31 @@ function NavDropdown({ group }: { group: NavGroup }) {
 }
 
 export function NavMenu() {
-  const role = useOpsRole()
-  const superAdmin = isSuperAdmin(role)
-  const needsAttention = canAccessNeedsAttention(role)
+  const { role, isLoading, isError } = useAuth()
+  // When /me fails (common with IAP on a separate admin-api host), still surface
+  // Ops links so the IA is visible; RoleGate on each route enforces access.
+  const showOps = canAccessOpsSurfaces(role) || isError
+  const showInsights = canAccessInsights(role) || isError
 
   return (
-    <nav className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2 text-[0.8125rem]">
+    <nav
+      className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2 text-[0.8125rem]"
+      aria-busy={isLoading}
+    >
       <Link to="/" className={navClass}>
-        Needs me
+        Dashboard
       </Link>
-      <Link to="/requests" className={navClass}>
-        Requests
-      </Link>
-      {needsAttention ? (
-        <Link to="/requests/needs-attention" className={navClass}>
-          Needs attention
-        </Link>
+      <NavDropdown group={REQUESTS_GROUP} />
+      {showOps ? (
+        <>
+          <NavDropdown group={OPS_GROUP} />
+          <NavDropdown group={CONSOLE_GROUP} />
+        </>
       ) : null}
-      <Link to="/ops/insights" className={navClass}>
-        Insights
+      {!showOps && showInsights ? <NavDropdown group={INSIGHTS_GROUP} /> : null}
+      <Link to="/approvals/matching-review" className={navClass}>
+        Matching review
       </Link>
-      {superAdmin ? <NavDropdown group={OPS_GROUP} /> : null}
-      {superAdmin ? <NavDropdown group={PIPELINE_GROUP} /> : null}
-      {superAdmin ? <NavDropdown group={HEALTH_GROUP} /> : null}
-      {import.meta.env.DEV ? (
-        <Link to="/dev/splash-lab" className={navClass}>
-          Splash lab
-        </Link>
-      ) : null}
     </nav>
   )
 }

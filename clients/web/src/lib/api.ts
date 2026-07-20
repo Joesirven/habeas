@@ -1,12 +1,16 @@
-const API_BASE = import.meta.env.VITE_ADMIN_API_URL ?? '/api'
-const API_IS_ABSOLUTE = /^https?:\/\//i.test(API_BASE)
+// Empty string (Cloud Run same-origin front door) must fall back to /api — not ??.
+const API_BASE = import.meta.env.VITE_ADMIN_API_URL || '/api'
+
+export type UserRole = 'super_admin' | 'admin' | 'data_owner'
+
+export type MePayload = {
+  email: string
+  role: UserRole
+}
 
 export async function fetchAdminApi<T>(path: string, init?: RequestInit): Promise<T> {
-  // Absolute admin-api hosts sit behind Identity-Aware Proxy — send cookies when present.
-  // Local Vite uses same-origin `/api` (optionally injects IAP_ID_TOKEN via vite.config proxy).
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
-    credentials: init?.credentials ?? (API_IS_ABSOLUTE ? 'include' : 'same-origin'),
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -48,35 +52,13 @@ export type ManualRequestInput = {
   external_id?: string
 }
 
+export function getMe() {
+  return fetchAdminApi<MePayload>('/me')
+}
+
 export function getHealth() {
   // Prefer /readyz: Cloud Run's public edge returns a Google HTML 404 for /healthz.
   return fetchAdminApi<HealthPayload>('/readyz')
-}
-
-export type OpsRole = 'super_admin' | 'admin' | 'data_owner'
-
-/** U3/U4 session contract — prefer over `/auth/me` for role-aware UI. */
-export type MePayload = {
-  email: string
-  role: OpsRole
-}
-
-export type AuthMePayload = {
-  authenticated: boolean
-  email: string | null
-  actor: string
-  iap_header_present: boolean
-  /** Present when DROP ops role resolves (same rules as GET /me). */
-  role?: OpsRole | null
-  service?: string
-}
-
-export function getAuthMe() {
-  return fetchAdminApi<AuthMePayload>('/auth/me')
-}
-
-export function getMe() {
-  return fetchAdminApi<MePayload>('/me')
 }
 
 export function listRequests(intakeSource?: IntakeSource) {
@@ -267,20 +249,6 @@ export type DropFulfillmentStatus = {
   by_response_status: ResponseStatusCount[]
 }
 
-/** Age-policy approaching counts (not legal DROP deadline / sla_monitor clocks). */
-export type ApproachingSlaCounts = {
-  connector: number
-  ingest: number
-  matching: number
-  matching_review: number
-  thresholds_hours: {
-    connector: number
-    ingest: number
-    matching: number
-    matching_review: number
-  }
-}
-
 export type DropPipelineStatus = {
   connector_attempts: StepStatusCount[]
   ingest_attempts: StepStatusCount[]
@@ -305,8 +273,6 @@ export type DropPipelineStatus = {
   }
   /** Absent on older admin-api revisions that predate hash-index ops. */
   hash_index_refresh?: HashIndexRefreshStatus
-  /** Absent on older admin-api revisions that predate approaching-SLA aggregates. */
-  approaching_sla?: ApproachingSlaCounts
   worker_health: Record<string, WorkerHealthProbe>
 }
 
@@ -604,137 +570,139 @@ export function getDropWorkflowAssignments(params?: {
   )
 }
 
-/** DROP attempt family for unified Runs list (GET /ops/runs). */
-export type OpsRunJob = 'connector' | 'ingest' | 'matching' | 'hash_index'
+// --- Ops runs detail (U4) — append-only for parallel agent merges ---
 
-/** Lookback window for GET /ops/runs. */
-export type OpsRunWindow = '8h' | '24h' | '1w'
+export type RunTimelineStepStatus =
+  | 'pending'
+  | 'running'
+  | 'waiting'
+  | 'completed'
+  | 'failed'
+  | 'skipped'
 
-export type OpsRunRecord = {
-  id: number
-  job: OpsRunJob
+export type RunTimelineStep = {
+  key: string
+  label: string
+  status: RunTimelineStepStatus
+  timestamp: string | null
+  detail?: string | null
+}
+
+export type RunEvent = {
+  id: string
+  event_type: string
+  occurred_at: string
+  summary?: string | null
+}
+
+export type RunDetail = {
+  run_id: string
+  attempt_id: number
+  job: string
   status: string
   request_id: string | null
-  attempted_at: string | null
+  attempt_number?: number | null
+  started_at: string | null
   completed_at: string | null
   duration_seconds: number | null
-  /** Always null on list — error bodies deferred to run detail (U6). */
-  error_redacted: null
-  has_error: boolean
+  error_code?: string | null
+  error_message?: string | null
+  timeline: RunTimelineStep[]
+  events: RunEvent[]
 }
 
-export type OpsRunsPayload = {
-  runs: OpsRunRecord[]
-  limit: number
-  filters: {
-    status: string | null
-    job: OpsRunJob | null
-    request_id: string | null
-    window: OpsRunWindow | null
-  }
+export function getRunDetail(job: string, attemptId: number) {
+  const runId = `${job}:${attemptId}`
+  return fetchAdminApi<RunDetail>(`/ops/runs/${encodeURIComponent(runId)}`)
 }
 
-export type ListOpsRunsParams = {
-  /** Exact attempt status, or `failed` for terminal fail statuses. */
+// --- Ops runs list (U4) ---
+
+export type OpsTimeWindow = '8h' | '24h' | '1w'
+
+export type RunSummary = {
+  run_id: string
+  job: string
+  step: string
+  status: string
+  request_id: string | null
+  started_at: string
+  completed_at: string | null
+  duration_seconds: number | null
+  attempt_number: number
+}
+
+export function listRuns(params?: {
+  job?: string
   status?: string
-  job?: OpsRunJob
   request_id?: string
-  window?: OpsRunWindow
+  window?: OpsTimeWindow
   limit?: number
-}
-
-export function listOpsRuns(params?: ListOpsRunsParams) {
+  offset?: number
+}) {
   const search = new URLSearchParams()
-  if (params?.status) search.set('status', params.status)
   if (params?.job) search.set('job', params.job)
+  if (params?.status) search.set('status', params.status)
   if (params?.request_id) search.set('request_id', params.request_id)
   if (params?.window) search.set('window', params.window)
   if (params?.limit != null) search.set('limit', String(params.limit))
+  if (params?.offset != null) search.set('offset', String(params.offset))
   const query = search.toString()
-  return fetchAdminApi<OpsRunsPayload>(`/ops/runs${query ? `?${query}` : ''}`)
+  return fetchAdminApi<RunSummary[]>(`/ops/runs${query ? `?${query}` : ''}`)
 }
 
-// # U6 — run detail (GET /ops/runs/{job}/{attempt_id})
-export type OpsRunTimelineEvent = {
-  event: string
-  at: string
-}
+// --- Request journey + needs attention (U5) ---
 
-export type OpsRunDetail = {
-  id: number
-  job: OpsRunJob
-  status: string
-  request_id: string | null
-  attempted_at: string | null
-  claimed_at: string | null
-  completed_at: string | null
-  duration_seconds: number | null
-  error_redacted: string | null
-  has_error: boolean
-  timeline: OpsRunTimelineEvent[]
-  /** Relative DROP console deep-link (query context only; no auto-mutate). */
-  console_href: string
-}
+export type JourneyStageStatus =
+  | 'not_started'
+  | 'skipped'
+  | 'in_progress'
+  | 'waiting'
+  | 'complete'
+  | 'failed'
 
-export function getOpsRunDetail(job: OpsRunJob | string, attemptId: number | string) {
-  return fetchAdminApi<OpsRunDetail>(`/ops/runs/${job}/${attemptId}`)
-}
-
-// # U7 — request journey + needs-attention
-export type JourneyStageStatus = 'complete' | 'current' | 'waiting'
-
-export type RequestJourneyStage = {
-  key: string
+export type JourneyStage = {
+  stage: string
   label: string
   status: JourneyStageStatus
-  at: string | null
+  attempted_at: string | null
+  completed_at: string | null
+  blocker: string | null
 }
 
-export type RequestJourneyPayload = {
+export type RequestJourneyResponse = {
   request_id: string
   intake_source: string
-  requestor_state: string | null
   received_at: string | null
-  current_stage_key: string
-  stages: RequestJourneyStage[]
-  matching: {
-    match_count: number | null
-    match_type: string | null
-    matched: boolean | null
-    review_status: string | null
-    approval_id: number | null
-    attempt_status?: string | null
-    attempt_id?: number | null
-  } | null
-  needs_attention: boolean
-  attention_reasons: string[]
+  current_stage: string
+  blocker: string | null
+  stages: JourneyStage[]
 }
 
 export type NeedsAttentionItem = {
   request_id: string
-  attention_reason: string
-  stage_key: string
-  approval_id: number
-  requested_at: string | null
-  requestor_state: string | null
-  match_count: number | null
-  match_type: string | null
-  matched: boolean | null
+  reason: string
+  current_stage: string
   intake_source: string
+  received_at: string | null
+  requested_at: string | null
 }
 
-export type NeedsAttentionPayload = {
+export type NeedsAttentionResponse = {
   items: NeedsAttentionItem[]
-  count: number
-  limit: number
 }
 
 export function getRequestJourney(requestId: string) {
-  return fetchAdminApi<RequestJourneyPayload>(`/ops/requests/${requestId}/journey`)
+  return fetchAdminApi<RequestJourneyResponse>(
+    `/ops/requests/${encodeURIComponent(requestId)}/journey`,
+  )
 }
 
-export function listNeedsAttention(limit = 100) {
+export function getNeedsAttention(limit?: number) {
   const search = new URLSearchParams()
-  search.set('limit', String(limit))
-  return fetchAdminApi<NeedsAttentionPayload>(`/ops/requests/needs-attention?${search}`)
+  if (limit != null) search.set('limit', String(limit))
+  const query = search.toString()
+  return fetchAdminApi<NeedsAttentionResponse>(
+    `/ops/requests/needs-attention${query ? `?${query}` : ''}`,
+  )
 }

@@ -1,205 +1,333 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
+import { Link, useParams } from '@tanstack/react-router'
+import { useState, type ReactNode } from 'react'
 
-import { opsRunsSearch } from '@/lib/ops-runs-search'
+import { SkeletonLines } from '@/components/AppShell'
+import { RunTimeline } from '@/components/ops/RunTimeline'
+import { getRunDetail, type RunDetail, type RunEvent } from '@/lib/api'
+import { ForbiddenState, useMe } from '@/lib/auth'
+import type { PipelineTab } from '@/router'
 
-import { RequireRole, OpsPageChrome } from '@/lib/auth'
-import {
-  getOpsRunDetail,
-  type OpsRunJob,
-  type OpsRunTimelineEvent,
-} from '@/lib/api'
+type DetailTab = 'timeline' | 'events'
 
-const JOB_LABELS: Record<OpsRunJob, string> = {
-  connector: 'Connector',
-  ingest: 'Ingest',
+const JOB_LABELS: Record<string, string> = {
+  drop_connector: 'Download',
+  drop_ingest: 'Ingest',
   matching: 'Matching',
-  hash_index: 'Hash index',
+  hash_index_refresh: 'Hash index refresh',
 }
 
-const JOBS = new Set<string>(['connector', 'ingest', 'matching', 'hash_index'])
-
-/** DROP console tab query — mirrors API console_href (no auto-mutate). */
-const CONSOLE_TAB = {
-  connector: 'download',
-  ingest: 'ingest',
+const CONSOLE_TAB_BY_JOB: Record<string, PipelineTab> = {
+  drop_connector: 'download',
+  drop_ingest: 'ingest',
   matching: 'matching',
-  hash_index: 'home',
-} as const
-
-function isOpsRunJob(value: string): value is OpsRunJob {
-  return JOBS.has(value)
+  hash_index_refresh: 'configurations',
 }
 
-function formatWhen(iso: string | null | undefined): string {
-  if (!iso) return '—'
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return '—'
-  return date.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  })
+function Micro({ children }: { children: ReactNode }) {
+  return <p className="taste-micro">{children}</p>
 }
 
-function formatDuration(seconds: number | null): string {
+function jobLabel(job: string): string {
+  return JOB_LABELS[job] ?? job.replaceAll('_', ' ')
+}
+
+function runStatusClass(status: string): string {
+  const normalized = status.toLowerCase()
+  if (
+    normalized.includes('fail') ||
+    normalized.includes('error') ||
+    normalized === 'failed_terminal'
+  ) {
+    return 'text-red-700'
+  }
+  if (
+    normalized.includes('success') ||
+    normalized.includes('complete') ||
+    normalized === 'ok' ||
+    normalized === 'succeeded'
+  ) {
+    return 'text-emerald-700'
+  }
+  if (normalized.includes('pending') || normalized.includes('claimed') || normalized === 'running') {
+    return 'text-habeas-mid'
+  }
+  return 'text-ink-soft'
+}
+
+function formatDuration(seconds: number | null | undefined): string {
   if (seconds == null || Number.isNaN(seconds)) return '—'
-  if (seconds < 60) return `${Math.round(seconds)}s`
+  if (seconds < 60) return `${seconds}s`
   const minutes = Math.floor(seconds / 60)
-  const rem = Math.round(seconds % 60)
-  if (minutes < 60) return rem > 0 ? `${minutes}m ${rem}s` : `${minutes}m`
+  const remainder = seconds % 60
+  if (minutes < 60) return remainder > 0 ? `${minutes}m ${remainder}s` : `${minutes}m`
   const hours = Math.floor(minutes / 60)
-  const remMin = minutes % 60
-  return remMin > 0 ? `${hours}h ${remMin}m` : `${hours}h`
+  const mins = minutes % 60
+  return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`
 }
 
-function timelineLabel(event: OpsRunTimelineEvent['event']): string {
-  if (event === 'attempted') return 'Attempted'
-  if (event === 'claimed') return 'Claimed'
-  if (event === 'completed') return 'Completed'
-  return event
+function formatTimestamp(value: string | null | undefined): string {
+  if (!value) return '—'
+  return new Date(value).toLocaleString()
 }
 
-export function OpsRunDetailPage({
-  job,
-  attemptId,
-}: {
-  job: string
-  attemptId: string
-}) {
-  const jobValid = isOpsRunJob(job)
-  const attemptNum = Number.parseInt(attemptId, 10)
-  const idValid = Number.isFinite(attemptNum) && attemptNum >= 1
-
-  const detailQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'runs', job, attemptId],
-    queryFn: () => getOpsRunDetail(job, attemptNum),
-    enabled: jobValid && idValid,
-    retry: false,
-  })
-
-  const detail = detailQuery.data
-  const jobLabel = jobValid ? JOB_LABELS[job] : job
-  const consoleTab = jobValid ? CONSOLE_TAB[job] : 'home'
+function RunDetailHeader({ detail }: { detail: RunDetail }) {
+  const consoleTab = CONSOLE_TAB_BY_JOB[detail.job]
 
   return (
-    <RequireRole allow={['super_admin']}>
-      <OpsPageChrome
-        eyebrow="OPS · RUN DETAIL"
-        title={`${jobLabel} · #${attemptId}`}
-        support="Timeline from attempt timestamps. Privileged redacted errors only — no filenames or storage URIs."
-      >
-        <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
-          <Link
-            to="/ops/runs" search={opsRunsSearch()}
-            className="text-habeas-mid underline decoration-ink/20 underline-offset-4 hover:decoration-habeas-mid"
-          >
-            ← Runs
-          </Link>
-          {jobValid ? (
-            <Link
-              to="/ops/drop-pipeline"
-              search={{ tab: consoleTab }}
-              className="taste-frost-chip"
-            >
-              Open DROP console
-            </Link>
-          ) : null}
+    <header className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <Link to="/ops/runs" className="taste-link text-xs">
+          ← Runs
+        </Link>
+        <span className="taste-frost-chip">{jobLabel(detail.job)}</span>
+        <span className={`taste-frost-chip ${runStatusClass(detail.status)}`}>{detail.status}</span>
+      </div>
+      <div>
+        <Micro>Run detail</Micro>
+        <h2 className="mt-2 font-display text-3xl font-medium tracking-tight text-ink">
+          Attempt #{detail.attempt_id}
+        </h2>
+        <p className="mt-2 text-sm text-ink-soft">
+          Run <span className="font-mono text-xs">{detail.run_id}</span>
+          {detail.request_id ? (
+            <>
+              {' '}
+              · Request{' '}
+              <Link
+                to="/requests/$requestId"
+                params={{ requestId: detail.request_id }}
+                className="taste-link font-mono text-xs"
+              >
+                {detail.request_id}
+              </Link>
+            </>
+          ) : (
+            ' · No request (batch job)'
+          )}
+        </p>
+      </div>
+      <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="taste-panel-soft px-4 py-3">
+          <dt className="taste-micro">Started</dt>
+          <dd className="mt-1 text-sm tabular-nums">{formatTimestamp(detail.started_at)}</dd>
         </div>
+        <div className="taste-panel-soft px-4 py-3">
+          <dt className="taste-micro">Completed</dt>
+          <dd className="mt-1 text-sm tabular-nums">{formatTimestamp(detail.completed_at)}</dd>
+        </div>
+        <div className="taste-panel-soft px-4 py-3">
+          <dt className="taste-micro">Duration</dt>
+          <dd className="mt-1 text-sm tabular-nums">{formatDuration(detail.duration_seconds)}</dd>
+        </div>
+        <div className="taste-panel-soft px-4 py-3">
+          <dt className="taste-micro">Attempt</dt>
+          <dd className="mt-1 text-sm tabular-nums">
+            {detail.attempt_number != null ? `#${detail.attempt_number}` : detail.attempt_id}
+          </dd>
+        </div>
+      </dl>
+      {consoleTab ? (
+        <div>
+          <Link
+            to="/ops/drop-pipeline"
+            search={{ tab: consoleTab }}
+            className="taste-btn text-xs"
+          >
+            Open DROP console · {jobLabel(detail.job)}
+          </Link>
+        </div>
+      ) : null}
+    </header>
+  )
+}
 
-        {!jobValid || !idValid ? (
-          <div className="taste-panel p-5">
-            <p className="text-sm text-ink-soft">Invalid run path — expected /ops/runs/&lt;job&gt;/&lt;attemptId&gt;.</p>
-          </div>
-        ) : null}
+function RunEventsTable({ events }: { events: RunEvent[] }) {
+  if (events.length === 0) {
+    return <p className="text-sm text-ink-soft">No audit events recorded for this run.</p>
+  }
 
-        {jobValid && idValid && detailQuery.isPending ? (
-          <div className="taste-panel space-y-3 p-5" role="status" aria-label="Loading run">
-            <div className="h-4 w-full animate-pulse rounded-md bg-line/80" aria-hidden />
-            <div className="h-4 w-2/3 animate-pulse rounded-md bg-line/80" aria-hidden />
-          </div>
-        ) : null}
+  return (
+    <div className="overflow-x-auto">
+      <table className="taste-table">
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>Event</th>
+            <th>Summary</th>
+          </tr>
+        </thead>
+        <tbody>
+          {events.map((event) => (
+            <tr key={event.id}>
+              <td className="whitespace-nowrap tabular-nums text-ink-soft">
+                {formatTimestamp(event.occurred_at)}
+              </td>
+              <td className="font-mono text-xs">{event.event_type}</td>
+              <td className="text-ink-soft">{event.summary ?? '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
 
-        {jobValid && idValid && detailQuery.isError ? (
-          <div className="taste-panel p-5">
-            <p className="text-sm text-red-700">
-              {detailQuery.error instanceof Error
-                ? detailQuery.error.message
-                : 'Could not load run detail.'}
-            </p>
-          </div>
-        ) : null}
+function PrivilegedErrorPanel({ detail, visible }: { detail: RunDetail; visible: boolean }) {
+  if (!visible) return null
 
-        {detail ? (
-          <div className="space-y-5">
-            <div className="taste-panel overflow-x-auto p-5">
-              <table className="taste-table">
-                <tbody>
-                  <tr>
-                    <th className="w-40">Status</th>
-                    <td className="font-medium uppercase tracking-[0.06em]">{detail.status}</td>
-                  </tr>
-                  <tr>
-                    <th>Job</th>
-                    <td>{JOB_LABELS[detail.job] ?? detail.job}</td>
-                  </tr>
-                  <tr>
-                    <th>Attempt id</th>
-                    <td className="tabular-nums">{detail.id}</td>
-                  </tr>
-                  <tr>
-                    <th>Request</th>
-                    <td className="tabular-nums">{detail.request_id ?? '—'}</td>
-                  </tr>
-                  <tr>
-                    <th>Duration</th>
-                    <td className="tabular-nums">{formatDuration(detail.duration_seconds)}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+  const hasError = Boolean(detail.error_message || detail.error_code)
 
-            <div className="taste-panel p-5">
-              <p className="taste-micro">Timeline</p>
-              {detail.timeline.length === 0 ? (
-                <p className="mt-3 text-sm text-ink-soft">No timestamps on this attempt.</p>
-              ) : (
-                <ol className="mt-4 space-y-3 border-l border-line pl-4">
-                  {detail.timeline.map((step) => (
-                    <li key={`${step.event}-${step.at}`} className="relative">
-                      <span
-                        className="absolute -left-[1.15rem] top-1.5 size-2 rounded-full bg-habeas-mid"
-                        aria-hidden
-                      />
-                      <p className="text-sm font-medium text-ink">{timelineLabel(step.event)}</p>
-                      <p className="text-xs tabular-nums text-ink-soft">{formatWhen(step.at)}</p>
-                    </li>
-                  ))}
-                </ol>
-              )}
-              {detail.claimed_at == null ? (
-                <p className="mt-4 text-xs text-ink-soft">
-                  Claimed time is not stored on attempt rows — only attempted / completed when present.
-                </p>
-              ) : null}
-            </div>
+  return (
+    <section className="taste-panel border-red-200/80 p-5 sm:p-6" aria-label="Privileged error details">
+      <div>
+        <Micro>Privileged · super admin</Micro>
+        <h3 className="mt-1 font-display text-lg font-medium text-ink">Error panel</h3>
+        <p className="mt-1 text-xs text-ink-soft">
+          Redacted operator message only — stdout/stderr not persisted in v1.
+        </p>
+      </div>
+      <dl className="mt-4 grid gap-4 sm:grid-cols-2">
+        <div>
+          <dt className="taste-micro">Error code</dt>
+          <dd className="mt-1 font-mono text-sm">{detail.error_code ?? '—'}</dd>
+        </div>
+        <div className="sm:col-span-2">
+          <dt className="taste-micro">Error message (redacted)</dt>
+          <dd className="mt-2 rounded-lg border border-line bg-paper/80 p-3 font-mono text-xs text-ink-soft">
+            {hasError ? (
+              <pre className="whitespace-pre-wrap break-words">{detail.error_message ?? '—'}</pre>
+            ) : (
+              <span>No error message on record.</span>
+            )}
+          </dd>
+        </div>
+      </dl>
+    </section>
+  )
+}
 
-            <div className="taste-panel p-5">
-              <p className="taste-micro">Privileged error</p>
-              {!detail.has_error || !detail.error_redacted ? (
-                <p className="mt-3 text-sm text-ink-soft">No error on this attempt.</p>
-              ) : (
-                <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line bg-line/20 p-3 text-xs leading-relaxed text-ink">
-                  {detail.error_redacted}
-                </pre>
-              )}
-            </div>
-          </div>
-        ) : null}
-      </OpsPageChrome>
-    </RequireRole>
+function RunDetailTabs({
+  tab,
+  onTabChange,
+  detail,
+}: {
+  tab: DetailTab
+  onTabChange: (tab: DetailTab) => void
+  detail: RunDetail
+}) {
+  return (
+    <div className="taste-panel-soft flex flex-col gap-5 p-5 sm:p-6">
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          className={tab === 'timeline' ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'}
+          onClick={() => onTabChange('timeline')}
+        >
+          Timeline
+        </button>
+        <button
+          type="button"
+          className={tab === 'events' ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'}
+          onClick={() => onTabChange('events')}
+        >
+          Events
+          {detail.events.length > 0 ? (
+            <span className="ml-1.5 tabular-nums text-[0.65rem] opacity-70">
+              ({detail.events.length})
+            </span>
+          ) : null}
+        </button>
+      </div>
+      {tab === 'timeline' ? (
+        <RunTimeline steps={detail.timeline} />
+      ) : (
+        <RunEventsTable events={detail.events} />
+      )}
+    </div>
+  )
+}
+
+function RunForbiddenState() {
+  return (
+    <div className="taste-panel p-8">
+      <ForbiddenState />
+    </div>
+  )
+}
+
+export function RunDetailPage() {
+  const { job, attemptId } = useParams({ strict: false }) as {
+    job?: string
+    attemptId?: string
+  }
+  const parsedAttemptId = attemptId ? Number.parseInt(attemptId, 10) : Number.NaN
+  const [tab, setTab] = useState<DetailTab>('timeline')
+  const { isSuperAdmin, isLoading: meLoading } = useMe()
+
+  const detailQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'runs', job, parsedAttemptId],
+    queryFn: () => getRunDetail(job!, parsedAttemptId),
+    enabled: Boolean(job) && Number.isFinite(parsedAttemptId) && parsedAttemptId > 0,
+    retry: (failureCount, error) => {
+      if (error instanceof Error && error.message.includes('403')) return false
+      return failureCount < 2
+    },
+  })
+
+  const isForbidden =
+    detailQuery.error instanceof Error && detailQuery.error.message.includes('403')
+
+  if (!job || !Number.isFinite(parsedAttemptId) || parsedAttemptId <= 0) {
+    return (
+      <div className="taste-panel p-8 text-center">
+        <p className="text-sm text-ink-soft">Invalid run route — job and attempt id are required.</p>
+        <Link to="/ops/runs" className="taste-link mt-4 inline-block text-sm">
+          Back to runs
+        </Link>
+      </div>
+    )
+  }
+
+  if (meLoading || detailQuery.isLoading) {
+    return (
+      <div className="space-y-6">
+        <SkeletonLines lines={2} />
+        <div className="taste-panel p-6">
+          <SkeletonLines lines={5} />
+        </div>
+      </div>
+    )
+  }
+
+  if (isForbidden) {
+    return <RunForbiddenState />
+  }
+
+  if (detailQuery.isError) {
+    return (
+      <div className="taste-panel p-8">
+        <p className="text-sm text-red-700">Could not load run detail.</p>
+        <p className="mt-2 font-mono text-xs text-ink-soft">
+          {detailQuery.error instanceof Error ? detailQuery.error.message : 'Unknown error'}
+        </p>
+        <Link to="/ops/runs" className="taste-link mt-4 inline-block text-sm">
+          Back to runs
+        </Link>
+      </div>
+    )
+  }
+
+  const detail = detailQuery.data
+  if (!detail) {
+    return null
+  }
+
+  return (
+    <div className="space-y-8">
+      <RunDetailHeader detail={detail} />
+      <RunDetailTabs tab={tab} onTabChange={setTab} detail={detail} />
+      <PrivilegedErrorPanel detail={detail} visible={isSuperAdmin} />
+    </div>
   )
 }

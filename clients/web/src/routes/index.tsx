@@ -1,22 +1,19 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 
-import { opsRunsSearch } from '@/lib/ops-runs-search'
-
-import { SkeletonLines } from '@/components/AppShell'
-import { getDropGlobalStats, getHealth } from '@/lib/api'
-import {
-  canAccessNeedsAttention,
-  isSuperAdmin,
-  useMeQuery,
-  useOpsRole,
-} from '@/lib/auth'
+import { Skeleton, SkeletonLines } from '@/components/AppShell'
+import { useMe } from '@/lib/auth'
+import { getDropGlobalStats, getHealth, getNeedsAttention } from '@/lib/api'
 
 export function DashboardPage() {
-  const meQuery = useMeQuery()
-  const role = useOpsRole()
-  const superAdmin = isSuperAdmin(role)
-  const opsRole = canAccessNeedsAttention(role)
+  const { isSuperAdmin, isAdmin } = useMe()
+
+  const attentionQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'home'],
+    queryFn: () => getNeedsAttention(100),
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  })
 
   const healthQuery = useQuery({
     queryKey: ['admin-api', 'health'],
@@ -31,174 +28,175 @@ export function DashboardPage() {
     queryKey: ['admin-api', 'ops', 'drop-stats-global'],
     queryFn: getDropGlobalStats,
     refetchInterval: 15_000,
+    enabled: isAdmin,
     retry: 2,
-    enabled: opsRole,
     placeholderData: (previous) => previous,
   })
 
+  const attentionCount = attentionQuery.data?.items.length
   const dropStats = dropStatsQuery.data
-  const pendingReview = dropStats?.matching_review_pending
+  const attentionLoading = attentionQuery.isPending && !attentionQuery.data
 
   return (
-    <section className="space-y-8">
-      <header className="max-w-2xl">
-        <p className="taste-micro">HOME · NEEDS ME</p>
-        <h2 className="mt-2 font-display text-xl font-medium tracking-tight text-ink sm:text-2xl">
-          Needs me
-        </h2>
-        <p className="mt-2 text-sm leading-relaxed text-ink-soft">
-          {meQuery.data?.email
-            ? `${meQuery.data.email} · ${meQuery.data.role}`
-            : meQuery.isPending
-              ? 'Loading session…'
-              : 'Session role from GET /me'}
-        </p>
+    <section className="taste-ops-page">
+      <header className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p className="taste-micro">Home</p>
+          <h2 className="font-display text-2xl font-medium leading-none tracking-tight text-ink">
+            Needs me
+          </h2>
+        </div>
+        <div className="flex items-center gap-2">
+          {(attentionQuery.isFetching || dropStatsQuery.isFetching) &&
+          !attentionLoading &&
+          attentionQuery.data ? (
+            <span className="taste-frost-chip">Refreshing</span>
+          ) : null}
+          {healthQuery.data ? (
+            <span className="taste-frost-chip tabular-nums">
+              API {healthQuery.data.status}
+            </span>
+          ) : healthQuery.isPending ? (
+            <span className="taste-frost-chip">Checking API</span>
+          ) : null}
+        </div>
       </header>
 
-      <div className="taste-panel p-5 sm:p-6">
+      <div className="taste-panel-soft p-6 sm:p-7">
         <p className="taste-micro">Needs attention</p>
-        {opsRole && dropStatsQuery.isPending && !dropStats ? (
-          <div className="mt-4">
-            <SkeletonLines lines={2} />
-          </div>
-        ) : (
-          <div className="mt-3 flex flex-wrap items-end justify-between gap-4">
-            <div>
-              <p className="font-display text-3xl tabular-nums text-habeas-navy">
-                {opsRole && pendingReview != null ? pendingReview : '—'}
-              </p>
-              <p className="mt-1 text-sm text-ink-soft">Pending matching.review gates</p>
-            </div>
-            {opsRole ? (
-              <Link to="/requests/needs-attention" className="taste-btn-primary text-xs">
-                Open queue →
-              </Link>
-            ) : null}
-          </div>
-        )}
-      </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <div className="taste-panel-soft p-5">
-          <p className="taste-micro">Shortcuts</p>
-          <div className="mt-4 flex flex-wrap gap-2">
-            <Link to="/requests" className="taste-frost-chip">
-              Requests →
-            </Link>
-            {opsRole ? (
-              <Link to="/requests/needs-attention" className="taste-frost-chip">
-                Needs attention →
-              </Link>
-            ) : null}
-            <Link to="/ops/insights" className="taste-frost-chip">
-              Insights →
-            </Link>
-            {superAdmin ? (
-              <>
-                <Link to="/ops/dashboard" className="taste-frost-chip">
-                  Ops dashboard →
-                </Link>
-                <Link to="/ops/runs" search={opsRunsSearch()} className="taste-frost-chip">
-                  Runs →
-                </Link>
-                <Link to="/ops/drop-pipeline" search={{ tab: 'home' }} className="taste-frost-chip">
-                  Pipeline →
-                </Link>
-                <Link to="/ops/health" className="taste-frost-chip">
-                  Health →
-                </Link>
-              </>
-            ) : null}
-          </div>
-        </div>
-
-        <div className="taste-panel-soft p-5">
-          <div className="flex items-center justify-between gap-3">
-            <p className="taste-micro">Admin API</p>
-            {(healthQuery.isPending || healthQuery.isFetching) && (
-              <span className="taste-frost-chip">Checking</span>
-            )}
-          </div>
-          {healthQuery.isPending && !healthQuery.data ? (
+        {attentionLoading ? (
+          <div className="mt-5" role="status" aria-label="Loading needs-attention queue">
+            <Skeleton className="h-14 w-24" />
             <div className="mt-4">
               <SkeletonLines lines={2} />
             </div>
-          ) : null}
-          {healthQuery.isError && !healthQuery.data ? (
-            <p className="mt-4 text-sm text-red-700">Could not reach admin-api.</p>
-          ) : null}
-          {healthQuery.data ? (
-            <dl className="mt-4 grid gap-3 sm:grid-cols-2">
-              <div>
-                <dt className="taste-micro">Status</dt>
-                <dd className="mt-1 font-display text-xl text-habeas-navy">
-                  {healthQuery.data.status}
-                </dd>
-              </div>
-              {healthQuery.data.service ? (
-                <div>
-                  <dt className="taste-micro">Service</dt>
-                  <dd className="mt-1 font-display text-xl text-ink">{healthQuery.data.service}</dd>
-                </div>
-              ) : null}
-            </dl>
-          ) : null}
-        </div>
+          </div>
+        ) : null}
+
+        {attentionQuery.isError && !attentionQuery.data ? (
+          <p className="mt-4 text-sm text-red-700">Could not load needs-attention queue.</p>
+        ) : null}
+
+        {attentionQuery.data ? (
+          <div className="mt-4 flex flex-wrap items-end justify-between gap-6">
+            <div>
+              <p className="font-display text-5xl font-medium tabular-nums text-habeas-navy sm:text-6xl">
+                {attentionCount}
+              </p>
+              <p className="mt-2 text-sm text-ink-soft">
+                {attentionCount === 0
+                  ? 'Nothing blocking right now.'
+                  : 'Requests waiting on human gates or blockers.'}
+              </p>
+            </div>
+            <Link to="/requests/needs-attention" className="taste-btn-primary">
+              Open queue →
+            </Link>
+          </div>
+        ) : null}
+
+        {attentionQuery.data && attentionQuery.data.items.length > 0 ? (
+          <ul className="mt-6 space-y-2 border-t border-line pt-5">
+            {attentionQuery.data.items.slice(0, 4).map((item) => (
+              <li key={item.request_id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
+                <Link
+                  to="/requests/$requestId"
+                  params={{ requestId: item.request_id }}
+                  className="taste-link font-mono text-xs"
+                >
+                  {item.request_id}
+                </Link>
+                <span className="text-ink-soft">{item.reason}</span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
       </div>
 
-      {superAdmin ? (
-        <div className="taste-panel p-5 sm:p-6">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="taste-micro">DROP ops summary</p>
-            {(dropStatsQuery.isPending || dropStatsQuery.isFetching) && dropStatsQuery.data ? (
-              <span className="taste-frost-chip">Refreshing</span>
-            ) : null}
-          </div>
-          <p className="mt-2 max-w-xl text-sm text-ink-soft">
-            Global counts from admin-api — ids and counts only.
-          </p>
+      <div className="flex flex-wrap gap-2">
+        <Link to="/requests" className="taste-btn text-xs">
+          All requests →
+        </Link>
+        {isAdmin ? (
+          <Link to="/approvals/matching-review" className="taste-btn text-xs">
+            Matching review →
+          </Link>
+        ) : null}
+        {isAdmin ? (
+          <Link to="/ops/health" className="taste-btn text-xs">
+            Insights →
+          </Link>
+        ) : null}
+      </div>
 
-          {dropStatsQuery.isPending && !dropStats ? (
-            <div className="mt-5">
-              <SkeletonLines lines={4} />
+      {isAdmin && dropStats ? (
+        <div className="taste-panel-soft px-5 py-4">
+          <p className="taste-micro">Pipeline signals</p>
+          <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-sm">
+            <div className="flex items-baseline gap-2">
+              <dt className="text-ink-soft">Review pending</dt>
+              <dd className="font-medium tabular-nums">{dropStats.matching_review_pending}</dd>
             </div>
-          ) : null}
-
-          {dropStatsQuery.isError && !dropStats ? (
-            <p className="mt-5 text-sm text-red-700">Could not load DROP summary.</p>
-          ) : null}
-
-          {dropStats ? (
-            <div className="mt-5 overflow-x-auto">
-              <table className="taste-table">
-                <tbody>
-                  <tr>
-                    <td className="!px-0 text-ink-soft">Matching review pending</td>
-                    <td className="!px-0 tabular-nums">{dropStats.matching_review_pending}</td>
-                  </tr>
-                  <tr>
-                    <td className="!px-0 text-ink-soft">Hash index refresh in flight</td>
-                    <td className="!px-0 tabular-nums">{dropStats.hash_index_refresh_inflight}</td>
-                  </tr>
-                  <tr>
-                    <td className="!px-0 text-ink-soft">Workers down</td>
-                    <td className="!px-0 tabular-nums">
-                      {dropStats.workers_down} / {dropStats.workers_total}
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="!px-0 text-ink-soft">Open DROP requests</td>
-                    <td className="!px-0 tabular-nums">{dropStats.open_drop_requests}</td>
-                  </tr>
-                  <tr>
-                    <td className="!px-0 text-ink-soft">Matching failed terminal</td>
-                    <td className="!px-0 tabular-nums">{dropStats.matching_failed_terminal}</td>
-                  </tr>
-                </tbody>
-              </table>
+            <div className="flex items-baseline gap-2">
+              <dt className="text-ink-soft">Open DROP</dt>
+              <dd className="font-medium tabular-nums">{dropStats.open_drop_requests}</dd>
             </div>
-          ) : null}
+            <div className="flex items-baseline gap-2">
+              <dt className="text-ink-soft">Workers down</dt>
+              <dd className="font-medium tabular-nums">
+                {dropStats.workers_down}/{dropStats.workers_total}
+              </dd>
+            </div>
+          </dl>
         </div>
+      ) : null}
+
+      {isAdmin && dropStatsQuery.isPending && !dropStats ? (
+        <div className="taste-panel-soft p-5">
+          <SkeletonLines lines={2} />
+        </div>
+      ) : null}
+
+      {isSuperAdmin ? (
+        <div className="relative overflow-hidden rounded-[1.1rem] bg-habeas-navy p-5 sm:p-6">
+          <div
+            aria-hidden
+            className="taste-atmosphere-orb pointer-events-none absolute -right-6 top-0 h-36 w-36 rounded-full bg-habeas-light/30 blur-2xl"
+          />
+          <div className="relative">
+            <p className="taste-micro text-white/55">Ops shortcuts</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Link to="/ops/dashboard" className="taste-frost-chip-dark">
+                Ops dashboard →
+              </Link>
+              <Link to="/ops/runs" search={{ window: '24h' }} className="taste-frost-chip-dark">
+                Runs →
+              </Link>
+              <Link
+                to="/ops/drop-pipeline"
+                search={{ tab: 'home' }}
+                className="taste-frost-chip-dark"
+              >
+                Console →
+              </Link>
+              <Link
+                to="/ops/drop-pipeline"
+                search={{ tab: 'matching' }}
+                className="taste-frost-chip-dark"
+              >
+                Pipeline matching →
+              </Link>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {healthQuery.isError && !healthQuery.data ? (
+        <p className="text-sm text-red-700">
+          Admin API unreachable — retries automatically.
+          {healthQuery.error instanceof Error ? ` ${healthQuery.error.message}` : ''}
+        </p>
       ) : null}
     </section>
   )

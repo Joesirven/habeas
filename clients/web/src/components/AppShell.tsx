@@ -1,15 +1,7 @@
-import { useQuery } from '@tanstack/react-query'
-import { useRouterState } from '@tanstack/react-router'
-import { useCallback, useState, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 
 import { NavMenu } from '@/components/NavMenu'
-import {
-  PostAuthSplash,
-  markPostAuthSplashSeen,
-  shouldPlayPostAuthSplash,
-} from '@/components/PostAuthSplash'
-import { getAuthMe } from '@/lib/api'
-import { useMeQuery } from '@/lib/auth'
+import { AuthProvider, useAuth } from '@/lib/auth'
 import { useLiveEvents } from '@/lib/live-events'
 
 type AppShellProps = {
@@ -42,44 +34,36 @@ export function SkeletonLines({
   )
 }
 
-export function AppShell({ children }: AppShellProps) {
-  useLiveEvents()
-  const pathname = useRouterState({ select: (state) => state.location.pathname })
-  const isSplashLab = pathname.startsWith('/dev/splash-lab')
-
-  const identityQuery = useQuery({
-    queryKey: ['admin-api', 'auth', 'me'],
-    queryFn: getAuthMe,
-    retry: false,
-    staleTime: 60_000,
-    enabled: !isSplashLab,
-  })
-
-  // Warm GET /me for role-aware nav + route gates (shared TanStack Query cache).
-  useMeQuery({ enabled: !isSplashLab })
-
-  const [splashOpen, setSplashOpen] = useState(() => shouldPlayPostAuthSplash())
-
-  const finishSplash = useCallback(() => {
-    markPostAuthSplashSeen()
-    setSplashOpen(false)
-  }, [])
-
-  const showSplash =
-    !isSplashLab &&
-    splashOpen &&
-    !identityQuery.isPending &&
-    Boolean(identityQuery.data?.authenticated)
-
-  if (showSplash) {
-    // Default bumper: CRT Snow Lock (variant 1). Lab at /dev/splash-lab.
+function RoleStatusBanner() {
+  const { me, isError, error, isLoading } = useAuth()
+  if (isLoading) return null
+  if (isError) {
     return (
-      <PostAuthSplash variant={1} autoFinish durationMs={3400} onDone={finishSplash} />
+      <div
+        className="border-b border-amber-500/40 bg-amber-50 px-6 py-2 text-center text-xs text-amber-950"
+        role="status"
+      >
+        Role API unavailable ({error?.message ?? 'GET /me failed'}). Ops nav is shown for
+        discovery; pages stay gated until admin-api identity works.
+      </div>
     )
   }
+  if (!me) return null
+  return (
+    <div
+      className="border-b border-[var(--glass-border)] bg-[var(--habeas-canvas)]/90 px-6 py-1 text-center text-[0.62rem] uppercase tracking-[0.14em] text-mute"
+      role="status"
+    >
+      Signed in as {me.email} · role {me.role.replace(/_/g, ' ')}
+    </div>
+  )
+}
+
+function AppShellFrame({ children }: AppShellProps) {
+  useLiveEvents()
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen flex-col bg-[var(--habeas-canvas)]">
       <header
         className="sticky top-0 z-20 border-b border-[var(--glass-border)]"
         style={{
@@ -89,18 +73,19 @@ export function AppShell({ children }: AppShellProps) {
             'linear-gradient(to right, var(--glass-gradient-start), var(--glass-gradient-end))',
         }}
       >
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-6 px-6 py-4">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-3">
           <div className="min-w-0">
             <p className="taste-micro">Habeas</p>
-            <h1 className="mt-1 font-display text-[1.25rem] font-medium leading-none tracking-tight text-ink">
+            <h1 className="mt-0.5 font-display text-[1.2rem] font-medium leading-none tracking-tight text-ink">
               Data Privacy
             </h1>
           </div>
           <NavMenu />
         </div>
+        <RoleStatusBanner />
       </header>
 
-      <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">{children}</main>
+      <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-6">{children}</main>
 
       <footer className="mt-auto bg-ink">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
@@ -111,5 +96,13 @@ export function AppShell({ children }: AppShellProps) {
         </div>
       </footer>
     </div>
+  )
+}
+
+export function AppShell({ children }: AppShellProps) {
+  return (
+    <AuthProvider>
+      <AppShellFrame>{children}</AppShellFrame>
+    </AuthProvider>
   )
 }
