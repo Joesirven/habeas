@@ -1,0 +1,317 @@
+/* Executor 5: Extruded stripe 3D lettering — silver/blue only (no rainbow) */
+
+.art-05-lockup {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  gap: 1.1rem;
+  padding: 0 1.25rem;
+  text-align: center;
+}
+
+.art-05-extrude {
+  position: relative;
+  display: grid;
+  place-items: center;
+  /* Stack all layers on the same cell */
+  grid-template: 1fr / 1fr;
+  perspective: 900px;
+  transform-style: preserve-3d;
+}
+
+.art-05-layer {
+  grid-area: 1 / 1;
+  margin: 0;
+  font-family: Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif;
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: 0.06em;
+  line-height: 0.9;
+  text-transform: uppercase;
+  white-space: nowrap;
+  user-select: none;
+  transform-origin: center center;
+  will-change: transform, opacity;
+}
+
+.art-05-layer-depth {
+  color: var(--cat-blue-deep);
+  opacity: 0;
+}
+
+/* Alternate depth hues for slab read (still palette-only) */
+.art-05-layer-depth:nth-child(even) {
+  color: var(--cat-blue);
+}
+
+.art-05-layer-depth:nth-child(3n) {
+  color: var(--cat-silver);
+}
+
+.art-05-layer-face {
+  /* Google-stripe energy — silver/blue bands only */
+  background-image: repeating-linear-gradient(
+    180deg,
+    var(--cat-silver-hi) 0 5px,
+    var(--cat-blue) 5px 10px,
+    var(--cat-silver) 10px 15px,
+    var(--cat-blue-deep) 15px 20px
+  );
+  background-size: 100% 20px;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  opacity: 0;
+  filter: drop-shadow(0 0 12px color-mix(in srgb, var(--cat-blue) 45%, transparent));
+}
+
+.art-05-sub {
+  margin: 0;
+  max-width: min(34rem, 92vw);
+  font-family: 'Courier New', Courier, monospace;
+  font-size: clamp(0.55rem, 1.6vw, 0.78rem);
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--cat-silver);
+  opacity: 0;
+}
+
+.art-05-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   v9 — EXTRUDE PUSH: depth punches toward camera along SE axis
+   ═══════════════════════════════════════════════════════════ */
+
+.art-05-v9 .art-05-mode-push .art-05-layer {
+  font-size: clamp(4.8rem, 22vw, 9.5rem);
+}
+
+.art-05-v9 .art-05-mode-push .art-05-layer-depth {
+  animation: art-05-push-depth 0.85s cubic-bezier(0.18, 1.1, 0.32, 1) forwards;
+  animation-delay: calc(0.06s + var(--i) * 0.055s);
+}
+
+.art-05-v9 .art-05-mode-push .art-05-layer-face {
+  animation:
+    art-05-push-face 0.7s cubic-bezier(0.22, 1.25, 0.36, 1) 0.72s forwards,
+    art-05-stripe-scroll 1.8s linear 1.55s infinite;
+}
+
+.art-05-v9 .art-05-sub {
+  animation: art-05-sub-in 0.45s ease 1.35s forwards;
+}
+
+.art-05-v9.badge-phase-hold .art-05-extrude {
+  filter: drop-shadow(0 0 18px color-mix(in srgb, var(--cat-blue) 55%, transparent))
+    drop-shadow(0 0 36px color-mix(in srgb, var(--cat-silver-hi) 22%, transparent));
+  transition: filter 0.45s ease;
+}
+
+.art-05-v9.badge-phase-out {
+  animation: art-05-stage-out 0.45s ease-in forwards;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   v10 — EXTRUDE SWEEP: stripes wipe L→R; depth cascades SE
+   ═══════════════════════════════════════════════════════════ */
+
+.art-05-v10 .art-05-mode-sweep .art-05-layer {
+  font-size: clamp(2.6rem, 11vw, 5.2rem);
+  letter-spacing: 0.12em;
+}
+
+.art-05-v10 .art-05-mode-sweep .art-05-layer-depth {
+  animation: art-05-sweep-depth 0.9s cubic-bezier(0.2, 0.9, 0.25, 1) forwards;
+  animation-delay: calc(0.04s + (var(--n) - var(--i)) * 0.048s);
+}
+
+.art-05-v10 .art-05-mode-sweep .art-05-layer-face {
+  /* Stripe wipe via background-size grow */
+  background-size: 0% 20px;
+  background-repeat: no-repeat;
+  animation:
+    art-05-sweep-face 1.05s cubic-bezier(0.22, 1, 0.36, 1) 0.35s forwards,
+    art-05-face-breathe 2.2s ease-in-out 1.55s infinite;
+}
+
+.art-05-v10 .art-05-sub {
+  letter-spacing: 0.34em;
+  animation: art-05-sub-in 0.5s ease 1.4s forwards;
+}
+
+.art-05-v10.badge-phase-hold .art-05-extrude {
+  filter: drop-shadow(0 0 14px color-mix(in srgb, var(--cat-silver-hi) 35%, transparent))
+    drop-shadow(0 0 28px color-mix(in srgb, var(--cat-blue) 40%, transparent));
+  transition: filter 0.45s ease;
+}
+
+.art-05-v10.badge-phase-out {
+  animation: art-05-stage-out 0.45s ease-in forwards;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Keyframes
+   ═══════════════════════════════════════════════════════════ */
+
+/* Push: layers start collapsed at origin, punch out along +x/+y with slight Z */
+@keyframes art-05-push-depth {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 0, -80px) scale(0.55);
+  }
+  55% {
+    opacity: 0.95;
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(
+        calc(var(--i) * -2.2px),
+        calc(var(--i) * 2.2px),
+        calc(var(--i) * -4px)
+      )
+      scale(1);
+  }
+}
+
+@keyframes art-05-push-face {
+  0% {
+    opacity: 0;
+    transform: translate3d(18px, -18px, 40px) scale(1.18);
+    filter: blur(4px);
+  }
+  70% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(
+        calc(var(--n) * -2.2px),
+        calc(var(--n) * 2.2px),
+        0
+      )
+      scale(1);
+    filter: drop-shadow(0 0 12px color-mix(in srgb, var(--cat-blue) 45%, transparent));
+  }
+}
+
+/* Sweep: depth enters from left, settles on SE cascade (front→back delay) */
+@keyframes art-05-sweep-depth {
+  0% {
+    opacity: 0;
+    transform: translate3d(-72px, calc(var(--i) * 1.5px), -40px) skewX(-12deg);
+  }
+  65% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(
+        calc(var(--i) * 2.4px),
+        calc(var(--i) * 2.4px),
+        calc(var(--i) * -3px)
+      )
+      skewX(0deg);
+  }
+}
+
+@keyframes art-05-sweep-face {
+  0% {
+    opacity: 0;
+    background-size: 0% 20px;
+    transform: translate3d(-40px, calc(var(--n) * 2.4px), 0) skewX(-8deg);
+  }
+  40% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    background-size: 100% 20px;
+    transform: translate3d(
+        calc(var(--n) * 2.4px),
+        calc(var(--n) * 2.4px),
+        0
+      )
+      skewX(0deg);
+  }
+}
+
+@keyframes art-05-stripe-scroll {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 0 20px;
+  }
+}
+
+@keyframes art-05-face-breathe {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 10px color-mix(in srgb, var(--cat-blue) 40%, transparent));
+  }
+  50% {
+    filter: drop-shadow(0 0 18px color-mix(in srgb, var(--cat-silver-hi) 35%, transparent));
+  }
+}
+
+@keyframes art-05-sub-in {
+  from {
+    opacity: 0;
+    letter-spacing: 0.5em;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 0.85;
+    letter-spacing: 0.28em;
+    transform: translateY(0);
+  }
+}
+
+@keyframes art-05-stage-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .art-05-v9 .art-05-layer,
+  .art-05-v10 .art-05-layer,
+  .art-05-v9 .art-05-sub,
+  .art-05-v10 .art-05-sub {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+    background-size: 100% 20px !important;
+    filter: none !important;
+  }
+
+  .art-05-v9 .art-05-layer-depth,
+  .art-05-v10 .art-05-layer-depth {
+    transform: translate3d(
+      calc(var(--i) * -2px),
+      calc(var(--i) * 2px),
+      0
+    ) !important;
+  }
+
+  .art-05-v10 .art-05-layer-depth {
+    transform: translate3d(
+      calc(var(--i) * 2px),
+      calc(var(--i) * 2px),
+      0
+    ) !important;
+  }
+}

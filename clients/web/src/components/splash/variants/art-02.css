@@ -1,0 +1,332 @@
+/* Executor 2: TYPE LOCKUP — stacked 3-line Habeas assemble (Cascade + Converge) */
+
+.art-02-lockup {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: min(92vw, 520px);
+  padding: 1.5rem 1.25rem;
+}
+
+.art-02-glow {
+  pointer-events: none;
+  position: absolute;
+  inset: 8% 12%;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse at center,
+    color-mix(in srgb, var(--cat-blue) 38%, transparent) 0%,
+    transparent 68%
+  );
+  opacity: 0;
+  filter: blur(22px);
+}
+
+.art-02-spine {
+  pointer-events: none;
+  position: absolute;
+  top: 18%;
+  bottom: 18%;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%) scaleY(0);
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    var(--cat-blue) 18%,
+    var(--cat-silver) 50%,
+    var(--cat-blue) 82%,
+    transparent
+  );
+  opacity: 0;
+  transform-origin: center top;
+}
+
+.art-02-stack {
+  position: relative;
+  z-index: 1;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  text-align: center;
+}
+
+.art-02-line {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  margin: 0;
+  opacity: 0;
+}
+
+.art-02-line-text {
+  display: block;
+  font-family: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.28em;
+  line-height: 1.05;
+  color: var(--cat-silver-hi);
+  white-space: nowrap;
+}
+
+.art-02-line-brand .art-02-line-text {
+  font-family: 'Fraunces', ui-serif, Georgia, 'Times New Roman', serif;
+  font-size: clamp(2.4rem, 9vw, 4.4rem);
+  font-weight: 650;
+  letter-spacing: 0.18em;
+  color: var(--cat-silver-hi);
+  text-shadow:
+    0 0 18px color-mix(in srgb, var(--cat-blue) 45%, transparent),
+    0 0 2px color-mix(in srgb, var(--cat-silver-hi) 35%, transparent);
+}
+
+.art-02-line-mid .art-02-line-text {
+  font-size: clamp(0.95rem, 3.4vw, 1.45rem);
+  letter-spacing: 0.42em;
+  color: var(--cat-silver);
+}
+
+.art-02-line-base .art-02-line-text {
+  font-size: clamp(0.78rem, 2.6vw, 1.05rem);
+  letter-spacing: 0.52em;
+  color: var(--cat-blue);
+}
+
+.art-02-rule {
+  display: block;
+  width: min(72%, 280px);
+  height: 1px;
+  margin-top: 0.55rem;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--cat-silver) 18%,
+    var(--cat-blue) 50%,
+    var(--cat-silver) 82%,
+    transparent 100%
+  );
+  transform: scaleX(0);
+  transform-origin: center;
+  opacity: 0;
+}
+
+/* ============================================================
+   v3 — CASCADE: lines fall top→bottom with overshoot, rules snap
+   ============================================================ */
+
+.art-02-v3 .art-02-glow {
+  animation: art-02-glow-in 0.7s ease 0.04s forwards;
+}
+
+.art-02-v3 .art-02-spine {
+  opacity: 0;
+}
+
+.art-02-v3 .art-02-line {
+  animation: art-02-cascade-drop 0.72s cubic-bezier(0.18, 1.35, 0.28, 1) forwards;
+  animation-delay: calc(0.12s + var(--i) * 0.22s);
+}
+
+.art-02-v3 .art-02-rule {
+  animation: art-02-rule-snap 0.38s cubic-bezier(0.2, 1.2, 0.36, 1) forwards;
+  animation-delay: calc(0.78s + var(--i) * 0.22s);
+}
+
+.art-02-v3.badge-phase-out .art-02-lockup {
+  animation: art-02-exit-up 0.42s ease forwards;
+}
+
+/* ============================================================
+   v4 — CONVERGE: alternating L/R slides + center spine + rules
+   ============================================================ */
+
+.art-02-v4 .art-02-glow {
+  animation: art-02-glow-in 0.9s ease 0.06s forwards;
+}
+
+.art-02-v4 .art-02-spine {
+  animation: art-02-spine-drop 0.85s cubic-bezier(0.22, 1, 0.36, 1) 0.08s forwards;
+}
+
+.art-02-v4 .art-02-line-brand {
+  animation: art-02-converge-from-left 0.78s cubic-bezier(0.16, 1.1, 0.28, 1) 0.18s forwards;
+}
+
+.art-02-v4 .art-02-line-mid {
+  animation: art-02-converge-from-right 0.78s cubic-bezier(0.16, 1.1, 0.28, 1) 0.38s forwards;
+}
+
+.art-02-v4 .art-02-line-base {
+  animation: art-02-converge-from-left 0.78s cubic-bezier(0.16, 1.1, 0.28, 1) 0.58s forwards;
+}
+
+.art-02-v4 .art-02-rule {
+  transform-origin: left center;
+  animation: art-02-rule-draw 0.55s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  animation-delay: calc(0.92s + var(--i) * 0.16s);
+}
+
+.art-02-v4 .art-02-line-mid .art-02-rule {
+  transform-origin: right center;
+}
+
+.art-02-v4.badge-phase-out .art-02-lockup {
+  animation: art-02-exit-split 0.48s ease forwards;
+}
+
+/* —— Keyframes —— */
+
+@keyframes art-02-glow-in {
+  from {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes art-02-cascade-drop {
+  0% {
+    opacity: 0;
+    transform: translateY(-52px) scale(0.96);
+  }
+  68% {
+    opacity: 1;
+    transform: translateY(6px) scale(1.02);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes art-02-rule-snap {
+  0% {
+    opacity: 0;
+    transform: scaleX(0);
+  }
+  55% {
+    opacity: 1;
+    transform: scaleX(1.06);
+  }
+  100% {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+}
+
+@keyframes art-02-spine-drop {
+  0% {
+    opacity: 0;
+    transform: translateX(-50%) scaleY(0);
+  }
+  100% {
+    opacity: 0.55;
+    transform: translateX(-50%) scaleY(1);
+  }
+}
+
+@keyframes art-02-converge-from-left {
+  0% {
+    opacity: 0;
+    transform: translateX(-72px);
+    clip-path: inset(0 100% 0 0);
+  }
+  70% {
+    opacity: 1;
+    transform: translateX(5px);
+    clip-path: inset(0 0 0 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@keyframes art-02-converge-from-right {
+  0% {
+    opacity: 0;
+    transform: translateX(72px);
+    clip-path: inset(0 0 0 100%);
+  }
+  70% {
+    opacity: 1;
+    transform: translateX(-5px);
+    clip-path: inset(0 0 0 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@keyframes art-02-rule-draw {
+  0% {
+    opacity: 0;
+    transform: scaleX(0);
+  }
+  100% {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+}
+
+@keyframes art-02-exit-up {
+  to {
+    opacity: 0;
+    transform: translateY(-18px) scale(0.96);
+  }
+}
+
+@keyframes art-02-exit-split {
+  to {
+    opacity: 0;
+    transform: scale(0.94);
+    filter: blur(2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .art-02-v3 .art-02-glow,
+  .art-02-v3 .art-02-line,
+  .art-02-v3 .art-02-rule,
+  .art-02-v4 .art-02-glow,
+  .art-02-v4 .art-02-spine,
+  .art-02-v4 .art-02-line,
+  .art-02-v4 .art-02-rule,
+  .art-02-v3.badge-phase-out .art-02-lockup,
+  .art-02-v4.badge-phase-out .art-02-lockup {
+    animation: none !important;
+    opacity: 1;
+    transform: none;
+    clip-path: none;
+    filter: none;
+  }
+
+  .art-02-glow {
+    opacity: 1;
+  }
+
+  .art-02-v4 .art-02-spine {
+    opacity: 0.55;
+    transform: translateX(-50%) scaleY(1);
+  }
+
+  .art-02-rule {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+}

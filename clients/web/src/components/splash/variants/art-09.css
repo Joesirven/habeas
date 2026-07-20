@@ -1,0 +1,607 @@
+/* Executor 9: Circular / arced type lockup — arc-draw seal */
+
+.art-09-badge {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+}
+
+.art-09-svg {
+  overflow: visible;
+  transform-origin: 50% 50%;
+}
+
+.art-09-glow {
+  fill: var(--cat-blue-deep);
+  opacity: 0.22;
+}
+
+.art-09-ring {
+  transform-box: fill-box;
+  transform-origin: center;
+  fill: none;
+}
+
+.art-09-ring-outer {
+  stroke: var(--cat-silver-hi);
+  stroke-width: 1.75;
+  opacity: 0.85;
+}
+
+.art-09-ring-mid {
+  stroke: var(--cat-blue);
+  stroke-width: 1.35;
+  opacity: 0.75;
+}
+
+.art-09-ring-inner {
+  stroke: var(--cat-silver);
+  stroke-width: 1.1;
+  opacity: 0.55;
+}
+
+.art-09-plate {
+  fill: color-mix(in srgb, var(--cat-black) 78%, var(--cat-blue-deep) 22%);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.art-09-plate-stroke {
+  stroke: var(--cat-silver-hi);
+  stroke-width: 2;
+  opacity: 0.9;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.art-09-plate-inner {
+  stroke: var(--cat-blue);
+  stroke-width: 1;
+  opacity: 0.55;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.art-09-ticks {
+  stroke: var(--cat-silver);
+  stroke-width: 1.5;
+  opacity: 0.7;
+}
+
+.art-09-type {
+  font-family: 'Courier New', Courier, monospace;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  fill: var(--cat-silver-hi);
+}
+
+.art-09-type-habeas {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.42em;
+  fill: var(--cat-silver-hi);
+}
+
+.art-09-type-platform {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  fill: var(--cat-blue);
+}
+
+.art-09-type-dpp {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 0.28em;
+  fill: var(--cat-silver-hi);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+/* —— Shared hide before assemble —— */
+.art-09-v17 .art-09-glow,
+.art-09-v17 .art-09-ring,
+.art-09-v17 .art-09-plate,
+.art-09-v17 .art-09-plate-stroke,
+.art-09-v17 .art-09-plate-inner,
+.art-09-v17 .art-09-ticks,
+.art-09-v17 .art-09-type,
+.art-09-v18 .art-09-glow,
+.art-09-v18 .art-09-ring,
+.art-09-v18 .art-09-plate,
+.art-09-v18 .art-09-plate-stroke,
+.art-09-v18 .art-09-plate-inner,
+.art-09-v18 .art-09-ticks,
+.art-09-v18 .art-09-type {
+  opacity: 0;
+}
+
+/* Circumference ≈ 2πr — dash lengths for full ring draw */
+.art-09-v17 .art-09-ring-outer,
+.art-09-v18 .art-09-ring-outer {
+  stroke-dasharray: 742;
+  stroke-dashoffset: 742;
+}
+
+.art-09-v17 .art-09-ring-mid,
+.art-09-v18 .art-09-ring-mid {
+  stroke-dasharray: 578;
+  stroke-dashoffset: 578;
+}
+
+.art-09-v17 .art-09-ring-inner,
+.art-09-v18 .art-09-ring-inner {
+  stroke-dasharray: 364;
+  stroke-dashoffset: 364;
+}
+
+/* —— V17: clockwise arc-draw from 12 o’clock —— */
+.art-09-v17.badge-phase-in .art-09-glow {
+  animation: art-09-fade 0.4s ease 0.05s both;
+}
+
+.art-09-v17.badge-phase-in .art-09-ring-outer {
+  animation: art-09-draw-cw-outer 1.05s cubic-bezier(0.4, 0, 0.2, 1) 0.12s both;
+}
+
+.art-09-v17.badge-phase-in .art-09-ring-mid {
+  animation: art-09-draw-cw-mid 1s cubic-bezier(0.4, 0, 0.2, 1) 0.28s both;
+}
+
+.art-09-v17.badge-phase-in .art-09-ring-inner {
+  animation: art-09-draw-cw-inner 0.85s cubic-bezier(0.4, 0, 0.2, 1) 0.42s both;
+}
+
+.art-09-v17.badge-phase-in .art-09-type-habeas {
+  animation: art-09-type-sweep-habeas 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.55s both;
+}
+
+.art-09-v17.badge-phase-in .art-09-type-platform {
+  animation: art-09-type-sweep-platform 0.95s cubic-bezier(0.22, 1, 0.36, 1) 0.75s both;
+}
+
+.art-09-v17.badge-phase-in .art-09-plate,
+.art-09-v17.badge-phase-in .art-09-plate-stroke,
+.art-09-v17.badge-phase-in .art-09-plate-inner {
+  animation: art-09-plate-in 0.45s cubic-bezier(0.34, 1.4, 0.45, 1) 1.05s both;
+}
+
+.art-09-v17.badge-phase-in .art-09-ticks {
+  animation: art-09-fade 0.35s ease 1.2s both;
+}
+
+.art-09-v17.badge-phase-in .art-09-type-dpp {
+  animation: art-09-dpp-lock 0.5s cubic-bezier(0.22, 1.45, 0.36, 1) 1.25s both;
+}
+
+.art-09-v17.badge-phase-hold .art-09-glow,
+.art-09-v17.badge-phase-hold .art-09-ring,
+.art-09-v17.badge-phase-hold .art-09-plate,
+.art-09-v17.badge-phase-hold .art-09-plate-stroke,
+.art-09-v17.badge-phase-hold .art-09-plate-inner,
+.art-09-v17.badge-phase-hold .art-09-ticks,
+.art-09-v17.badge-phase-hold .art-09-type,
+.art-09-v17.badge-phase-out .art-09-glow,
+.art-09-v17.badge-phase-out .art-09-ring,
+.art-09-v17.badge-phase-out .art-09-plate,
+.art-09-v17.badge-phase-out .art-09-plate-stroke,
+.art-09-v17.badge-phase-out .art-09-plate-inner,
+.art-09-v17.badge-phase-out .art-09-ticks,
+.art-09-v17.badge-phase-out .art-09-type {
+  opacity: 1;
+}
+
+.art-09-v17.badge-phase-hold .art-09-ring-outer,
+.art-09-v17.badge-phase-hold .art-09-ring-mid,
+.art-09-v17.badge-phase-hold .art-09-ring-inner,
+.art-09-v17.badge-phase-out .art-09-ring-outer,
+.art-09-v17.badge-phase-out .art-09-ring-mid,
+.art-09-v17.badge-phase-out .art-09-ring-inner {
+  stroke-dashoffset: 0;
+}
+
+.art-09-v17.badge-phase-hold .art-09-svg {
+  animation: art-09-seal-breathe 2.8s ease-in-out infinite;
+}
+
+.art-09-v17.badge-phase-out .art-09-badge {
+  animation: art-09-exit 0.45s ease forwards;
+}
+
+/* —— V18: counter-clockwise meet-in-middle —— */
+.art-09-v18.badge-phase-in .art-09-glow {
+  animation: art-09-fade 0.35s ease 0.04s both;
+}
+
+.art-09-v18.badge-phase-in .art-09-plate,
+.art-09-v18.badge-phase-in .art-09-plate-stroke,
+.art-09-v18.badge-phase-in .art-09-plate-inner {
+  animation: art-09-plate-pulse 0.55s cubic-bezier(0.34, 1.5, 0.45, 1) 0.08s both;
+}
+
+.art-09-v18.badge-phase-in .art-09-ring-inner {
+  animation: art-09-draw-ccw-inner 0.9s cubic-bezier(0.4, 0, 0.2, 1) 0.2s both;
+}
+
+.art-09-v18.badge-phase-in .art-09-ring-mid {
+  animation: art-09-draw-ccw-mid 1.05s cubic-bezier(0.4, 0, 0.2, 1) 0.35s both;
+}
+
+.art-09-v18.badge-phase-in .art-09-ring-outer {
+  animation: art-09-draw-ccw-outer 1.15s cubic-bezier(0.4, 0, 0.2, 1) 0.5s both;
+}
+
+.art-09-v18.badge-phase-in .art-09-type-platform {
+  animation: art-09-type-meet-left 0.85s cubic-bezier(0.22, 1, 0.36, 1) 0.7s both;
+}
+
+.art-09-v18.badge-phase-in .art-09-type-habeas {
+  animation: art-09-type-meet-right 0.85s cubic-bezier(0.22, 1, 0.36, 1) 0.85s both;
+}
+
+.art-09-v18.badge-phase-in .art-09-ticks {
+  animation: art-09-fade 0.3s ease 1.15s both;
+}
+
+.art-09-v18.badge-phase-in .art-09-type-dpp {
+  animation: art-09-dpp-punch 0.55s cubic-bezier(0.22, 1.55, 0.36, 1) 1.3s both;
+}
+
+.art-09-v18.badge-phase-hold .art-09-glow,
+.art-09-v18.badge-phase-hold .art-09-ring,
+.art-09-v18.badge-phase-hold .art-09-plate,
+.art-09-v18.badge-phase-hold .art-09-plate-stroke,
+.art-09-v18.badge-phase-hold .art-09-plate-inner,
+.art-09-v18.badge-phase-hold .art-09-ticks,
+.art-09-v18.badge-phase-hold .art-09-type,
+.art-09-v18.badge-phase-out .art-09-glow,
+.art-09-v18.badge-phase-out .art-09-ring,
+.art-09-v18.badge-phase-out .art-09-plate,
+.art-09-v18.badge-phase-out .art-09-plate-stroke,
+.art-09-v18.badge-phase-out .art-09-plate-inner,
+.art-09-v18.badge-phase-out .art-09-ticks,
+.art-09-v18.badge-phase-out .art-09-type {
+  opacity: 1;
+}
+
+.art-09-v18.badge-phase-hold .art-09-ring-outer,
+.art-09-v18.badge-phase-hold .art-09-ring-mid,
+.art-09-v18.badge-phase-hold .art-09-ring-inner,
+.art-09-v18.badge-phase-out .art-09-ring-outer,
+.art-09-v18.badge-phase-out .art-09-ring-mid,
+.art-09-v18.badge-phase-out .art-09-ring-inner {
+  stroke-dashoffset: 0;
+}
+
+.art-09-v18.badge-phase-hold .art-09-ring-outer {
+  animation: art-09-ring-spin-ccw 8s linear infinite;
+}
+
+.art-09-v18.badge-phase-hold .art-09-ring-mid {
+  animation: art-09-ring-spin-cw 6.5s linear infinite;
+}
+
+.art-09-v18.badge-phase-out .art-09-badge {
+  animation: art-09-exit 0.45s ease forwards;
+}
+
+/* —— Keyframes —— */
+
+@keyframes art-09-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* CW draw: dashoffset → 0 (path paints clockwise from 3 o’clock default;
+   rotate -90deg origin so visual start is 12) */
+@keyframes art-09-draw-cw-outer {
+  from {
+    opacity: 1;
+    stroke-dashoffset: 742;
+    transform: rotate(-90deg);
+  }
+  to {
+    opacity: 1;
+    stroke-dashoffset: 0;
+    transform: rotate(-90deg);
+  }
+}
+
+@keyframes art-09-draw-cw-mid {
+  from {
+    opacity: 1;
+    stroke-dashoffset: 578;
+    transform: rotate(-90deg);
+  }
+  to {
+    opacity: 1;
+    stroke-dashoffset: 0;
+    transform: rotate(-90deg);
+  }
+}
+
+@keyframes art-09-draw-cw-inner {
+  from {
+    opacity: 1;
+    stroke-dashoffset: 364;
+    transform: rotate(-90deg);
+  }
+  to {
+    opacity: 1;
+    stroke-dashoffset: 0;
+    transform: rotate(-90deg);
+  }
+}
+
+/* CCW draw: negative dashoffset paints the opposite direction */
+@keyframes art-09-draw-ccw-outer {
+  from {
+    opacity: 1;
+    stroke-dashoffset: -742;
+    transform: rotate(-90deg);
+  }
+  to {
+    opacity: 1;
+    stroke-dashoffset: 0;
+    transform: rotate(-90deg);
+  }
+}
+
+@keyframes art-09-draw-ccw-mid {
+  from {
+    opacity: 1;
+    stroke-dashoffset: -578;
+    transform: rotate(-90deg);
+  }
+  to {
+    opacity: 1;
+    stroke-dashoffset: 0;
+    transform: rotate(-90deg);
+  }
+}
+
+@keyframes art-09-draw-ccw-inner {
+  from {
+    opacity: 1;
+    stroke-dashoffset: -364;
+    transform: rotate(-90deg);
+  }
+  to {
+    opacity: 1;
+    stroke-dashoffset: 0;
+    transform: rotate(-90deg);
+  }
+}
+
+@keyframes art-09-type-sweep-habeas {
+  0% {
+    opacity: 0;
+    letter-spacing: 0.7em;
+    filter: blur(2px);
+  }
+  55% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    letter-spacing: 0.42em;
+    filter: blur(0);
+  }
+}
+
+@keyframes art-09-type-sweep-platform {
+  0% {
+    opacity: 0;
+    letter-spacing: 0.4em;
+    filter: blur(2px);
+  }
+  55% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    letter-spacing: 0.18em;
+    filter: blur(0);
+  }
+}
+
+@keyframes art-09-type-meet-left {
+  0% {
+    opacity: 0;
+    transform: translateX(-18px);
+    letter-spacing: 0.4em;
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+    letter-spacing: 0.18em;
+  }
+}
+
+@keyframes art-09-type-meet-right {
+  0% {
+    opacity: 0;
+    transform: translateX(18px);
+    letter-spacing: 0.65em;
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+    letter-spacing: 0.42em;
+  }
+}
+
+@keyframes art-09-plate-in {
+  from {
+    opacity: 0;
+    transform: scale(0.72);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes art-09-plate-pulse {
+  0% {
+    opacity: 0;
+    transform: scale(1.18);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes art-09-dpp-lock {
+  from {
+    opacity: 0;
+    transform: scale(0.55);
+    letter-spacing: 0.55em;
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+    letter-spacing: 0.28em;
+  }
+}
+
+@keyframes art-09-dpp-punch {
+  0% {
+    opacity: 0;
+    transform: scale(1.65);
+    filter: brightness(1.6);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(0.92);
+    filter: brightness(1);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+    filter: brightness(1);
+  }
+}
+
+@keyframes art-09-seal-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.018);
+  }
+}
+
+@keyframes art-09-ring-spin-cw {
+  from {
+    transform: rotate(-90deg);
+  }
+  to {
+    transform: rotate(270deg);
+  }
+}
+
+@keyframes art-09-ring-spin-ccw {
+  from {
+    transform: rotate(-90deg);
+  }
+  to {
+    transform: rotate(-450deg);
+  }
+}
+
+@keyframes art-09-exit {
+  to {
+    opacity: 0;
+    transform: scale(0.94);
+    filter: brightness(0.45);
+  }
+}
+
+/* Lab / idle: fully assembled */
+.art-09-v17:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-glow,
+.art-09-v17:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-ring,
+.art-09-v17:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-plate,
+.art-09-v17:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-plate-stroke,
+.art-09-v17:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-plate-inner,
+.art-09-v17:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-ticks,
+.art-09-v17:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-type,
+.art-09-v18:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-glow,
+.art-09-v18:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-ring,
+.art-09-v18:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-plate,
+.art-09-v18:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-plate-stroke,
+.art-09-v18:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-plate-inner,
+.art-09-v18:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-ticks,
+.art-09-v18:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-type {
+  opacity: 1;
+}
+
+.art-09-v17:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-ring-outer,
+.art-09-v17:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-ring-mid,
+.art-09-v17:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-ring-inner,
+.art-09-v18:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-ring-outer,
+.art-09-v18:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-ring-mid,
+.art-09-v18:not(.badge-phase-in):not(.badge-phase-hold):not(.badge-phase-out) .art-09-ring-inner {
+  stroke-dashoffset: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .art-09-v17 .art-09-glow,
+  .art-09-v17 .art-09-ring,
+  .art-09-v17 .art-09-plate,
+  .art-09-v17 .art-09-plate-stroke,
+  .art-09-v17 .art-09-plate-inner,
+  .art-09-v17 .art-09-ticks,
+  .art-09-v17 .art-09-type,
+  .art-09-v17 .art-09-svg,
+  .art-09-v17 .art-09-badge,
+  .art-09-v18 .art-09-glow,
+  .art-09-v18 .art-09-ring,
+  .art-09-v18 .art-09-plate,
+  .art-09-v18 .art-09-plate-stroke,
+  .art-09-v18 .art-09-plate-inner,
+  .art-09-v18 .art-09-ticks,
+  .art-09-v18 .art-09-type,
+  .art-09-v18 .art-09-svg,
+  .art-09-v18 .art-09-badge {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+    filter: none !important;
+    letter-spacing: inherit;
+  }
+
+  .art-09-v17 .art-09-ring-outer,
+  .art-09-v17 .art-09-ring-mid,
+  .art-09-v17 .art-09-ring-inner,
+  .art-09-v18 .art-09-ring-outer,
+  .art-09-v18 .art-09-ring-mid,
+  .art-09-v18 .art-09-ring-inner {
+    stroke-dashoffset: 0 !important;
+  }
+
+  .art-09-type-habeas {
+    letter-spacing: 0.42em !important;
+  }
+
+  .art-09-type-platform {
+    letter-spacing: 0.18em !important;
+  }
+
+  .art-09-type-dpp {
+    letter-spacing: 0.28em !important;
+  }
+}
