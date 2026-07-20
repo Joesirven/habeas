@@ -2,7 +2,7 @@
 
 Control-plane clients for the privacy automation system.
 
-- [`web/`](web/) — admin web application (Firebase Hosting)
+- [`web/`](web/) — admin web application (Cloud Run + Identity-Aware Proxy)
 - [`cli/habeas-cli/`](cli/habeas-cli/) — Habeas command-line for developers and coding agents
 
 Backend apps live under [`app/`](../app/). **Agent rules:** [`AGENTS.md`](AGENTS.md)

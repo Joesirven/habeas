@@ -22,6 +22,16 @@ Neutrals: cool off-white / pale blue-gray grounds; charcoal or deep navy for tex
 - Do **not** use glossy glassmorphism (heavy shadows, reflections, bevels, mirror glass).
 - Do **not** treat pale circle-overlap bokeh as a substitute for frosted UI overlays.
 
+### Ops surfaces (DROP admin — Prefect / Dagster density)
+
+For `clients/web` **Runs, Requests list/detail, Ops dashboard, request journey** only:
+
+- Keep Habeas Amigo tokens (navy / mid / light blue, frost chips, matte `taste-panel`).
+- Prefer **table-first / rail-first** composition over editorial landing heroes and equal-weight KPI tile grids.
+- Allow denser tabular chrome (compact rows, status tabs, sticky filter bars, one volume strip/chart).
+- Horizontal stage rails for request journey (Dagster lineage mental model) — still matte, no dark SaaS skin.
+- Do **not** copy Prefect dark theme or purple Dagster chrome. Do **not** treat “no dense SaaS” above as a ban on ops tables.
+
 ---
 
 # amigo-habeas-frosted

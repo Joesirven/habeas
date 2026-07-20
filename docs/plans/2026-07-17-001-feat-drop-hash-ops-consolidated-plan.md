@@ -9,7 +9,7 @@ type: feat
 date: 2026-07-17
 updated: 2026-07-17
 origin: consolidation of drop_hash_productionize_2e1e0332 + drop-ops-ia + session unlocks; inventory tmp/reviews/drop-hash-plans-inventory.md; status tmp/reviews/drop-hash-implementation-status.md
-overview: "U0–U25 hash-index + Pipeline/Health + all-state rematch + IAP SA path are shipped on feat/drop-hash-index-prod. This plan is the single source of truth for residuals: soft-CA intake harden, approaching-SLA stats, role-aware Requests/Runs/Dashboard ops IA, and verification/evidence hygiene. Do not re-implement finished foundation or Wave B units."
+overview: "U0–U25 hash-index + Pipeline/Health + all-state rematch + IAP SA path are shipped on feat/drop-hash-index-prod. This plan is the single source of truth for residuals: soft-CA intake harden, approaching-SLA stats, role-aware Requests/Runs/Dashboard ops IA, a first-class IAP-backed end-to-end matching journey (through role-aware UI/API — not DATABASE_URL bypass), and verification/evidence hygiene. Do not re-implement finished foundation or Wave B units."
 ---
 
 # feat: DROP hash + ops — consolidated residual plan
@@ -17,17 +17,17 @@ overview: "U0–U25 hash-index + Pipeline/Health + all-state rematch + IAP SA pa
 **Target repo:** `data-privacy` (Bitbucket `dsts/data-privacy`)
 **Canonical plan path:** `docs/plans/2026-07-17-001-feat-drop-hash-ops-consolidated-plan.md`
 **Sibling plans:** `docs/plans/2026-07-16-001-feat-intake-spine-mvp-plan.md` (intake/spine MVP — keep separate). Superseded Cursor/worktree DROP-hash plans deleted 2026-07-17.
-**Product Contract preservation:** Consolidation resume — Product outcomes for shipped U0–U25 preserved as “What’s shipped”; residual product scope = hash polish + role-aware ops IA (former drop-ops-ia plan folded here).
+**Product Contract preservation:** Consolidation resume — Product outcomes for shipped U0–U25 preserved as “What’s shipped”; residual product scope = hash polish + role-aware ops IA (former drop-ops-ia plan folded here) + formal E2E matching journey (IAP SA path).
 
 ---
 
 ## Goal Capsule
 
-**Objective:** Close residual DROP hash/ops gaps after the productionize + Pipeline/Health wave, then ship role-aware ops information architecture (Requests / Runs / Dashboard) without re-opening finished U0–U25 work.
+**Objective:** Close residual DROP hash/ops gaps after the productionize + Pipeline/Health wave, ship role-aware ops information architecture (Requests / Runs / Dashboard), and prove a full end-to-end matching journey through that IA over the IAP-required admin-api path — without re-opening finished U0–U25 work.
 
 **Authority hierarchy:** Session-settled decisions (this plan) → `AGENTS.md` + `.agent/modules/` (privacy-invariants, frontend-stack, design-taste, python-uv, prod-write-gate, orchestration) → SirvenOS Data Privacy project folder → this plan.
 
-**Stop conditions:** Do not re-implement U0–U25 as greenfield. No production writes without Jose approval. No PII/hashes/dwids in logs, audit JSONB, or operator payloads beyond ids/counts. Mutations only through `app/admin_api`. Browser never calls workers. Never return out-of-state DWIDs from hash lookup. Intake-spine delivery stays on the sibling intake plan.
+**Stop conditions:** Do not re-implement U0–U25 as greenfield. No production writes without Jose approval. No PII/hashes/dwids in logs, audit JSONB, or operator payloads beyond ids/counts. Mutations only through `app/admin_api`. Browser never calls workers. Never return out-of-state DWIDs from hash lookup. Intake-spine delivery stays on the sibling intake plan. Do not claim E2E matching DoD via `DATABASE_URL` / in-process worker bypass (KTD14).
 
 **Execution profile:** Master plans → parallel executors on disjoint files → separate review/test waves. UV for Python; Bun for web.
 
@@ -68,7 +68,7 @@ Branch tip used for this consolidation: `feat/drop-hash-index-prod` @ `4273a4b` 
 | IAP on admin-api + SA ID token CLI | Done | `b969b42`, `4273a4b` — SA impersonation `--include-email`; worker invoker lock |
 | Docs sweep | Done (minor drift OK) | `d357df0` + IAP/RUNBOOK notes |
 
-**Not shipped on this branch (remaining below):** approaching-SLA stage stats; soft-CA promote harden; role-aware Requests/Runs/Dashboard IA; formal Jose confirmation of served-state allowlist; merge/PR.
+**Residual code units U1–U10:** landed on this branch (soft-CA; approaching-SLA; roles/`/me`; Requests/Runs/Dashboard IA; IAP E2E + rematch — see scoreboard + `tmp/reviews/drop-hash-e2e-*-iap.md`). **Still open (non-code / Jose):** formal allowlist confirm (Q1/Q6); sparse `email_hash` (Q2); optional status-4 reopen rematch candidate; merge/PR on ask. Prior CA live match (`tmp/reviews/drop-hash-ca-matching-test.md`) remains non-DoD (DB bypass).
 
 ---
 
@@ -76,11 +76,11 @@ Branch tip used for this consolidation: `feat/drop-hash-index-prod` @ `4273a4b` 
 
 ### Summary
 
-Operators already have a tabbed DROP Pipeline + Health console backed by all-state hash refresh and requester-state matching. Remaining product work is (1) close correctness/ops polish on multi-state intake and SLA visibility, and (2) introduce role-aware Requests / Runs / Dashboard so product operators can answer “where is my DROP?” without living in the power console.
+Operators already have a tabbed DROP Pipeline + Health console backed by all-state hash refresh and requester-state matching. Remaining product work is (1) close correctness/ops polish on multi-state intake and SLA visibility, (2) introduce role-aware Requests / Runs / Dashboard so product operators can answer “where is my DROP?” without living in the power console, and (3) run a formal end-to-end matching journey through that IA on the IAP SA ID-token path — not a Postgres/`DATABASE_URL` mutation bypass.
 
 ### Problem Frame
 
-Hash-index and Pipeline/Health Wave B landed, but soft-CA defaults can mis-scope multi-state matching, approaching-SLA stats were never wired, and the next UX leap (role-separated Requests/Runs/Dashboard) was planned separately and is still pending.
+Hash-index and Pipeline/Health Wave B landed, but soft-CA defaults can mis-scope multi-state matching, approaching-SLA stats were never wired, the next UX leap (role-separated Requests/Runs/Dashboard) was planned separately and is still pending, and **no full E2E matching process has been proven** from DROP request through match → review → fulfill with `response_status` 3/4/5 over the production mutation path (IAP-required admin-api). A scoped CA live match proved BQ lookup + `matching_results` + pending `matching.review`, but stopped short of fulfill and used `DATABASE_URL` when IAP blocked agents.
 
 ### Requirements
 
@@ -103,6 +103,8 @@ Hash-index and Pipeline/Health Wave B landed, but soft-CA defaults can mis-scope
 - R12. Prefect-style ops Dashboard (super_admin) + needs-me home (all roles); Insights thin; Incidents/Configuration/SLAs as shells in v1.
 - R13. Keep `/ops/drop-pipeline` as gated power console (super_admin mutations); matching approve remains available to admin + data_owner.
 - R14. No PII in journey/Runs/lineage UI (`consumer_id`, contacts, filenames, `gcs_uri` excluded).
+- R15. **E2E matching journey (first-class):** CA (or multi-state once R7 lands) DROP request → enqueue match → matching worker (live BQ, requester-state `@lookup_state`) → `matching_results` + pending `matching.review` → ops UI promote/decline + assign/escalate as applicable → fulfill → `response_status` ∈ {3, 4, 5}. Exercised through **role-aware** Requests journey, Runs, Dashboard, `GET /me`, and console gate — not only Pipeline console or DB bypass.
+- R16. **E2E rematch-after-refresh (second scenario):** After a successful hash-index refresh for the requester state, rematch candidates (including status-4 reopen per KTD10) re-enter match → review → fulfill; observable on Requests journey and Runs.
 
 ### Actors
 
@@ -115,10 +117,12 @@ Hash-index and Pipeline/Health Wave B landed, but soft-CA defaults can mis-scope
 ### Key Flows
 
 - F1. (Shipped) Enqueue-all / per-state refresh → rematch for matching source state → BQ `@lookup_state` = requester state → review → fulfill 3/4/5; status-4 reopen eligible for rematch after refresh.
-- F2. (Remaining) Intake/promote without state → hard fail or explicit ops choice (no silent CA).
-- F3. (Remaining) Data owner opens Requests → journey → needs attention → approve match without seeing Runs/console.
-- F4. (Remaining) Super admin opens Runs → failed filter → detail → optional deep-link to DROP console.
-- F5. (Remaining) Super admin ops Dashboard window (8h/24h/1w) → failed escalation + worker pool cards from admin-api probes.
+- F2. (Shipped on branch) Intake/promote without state → hard fail (no silent CA) — U1.
+- F3. (Shipped on branch) Data owner Requests → journey → needs attention → approve without Runs/console — U3/U4/U7 (+ role gates; live E2E used super_admin).
+- F4. (Shipped on branch) Super admin Runs → filters → detail → optional console deep-link — U5/U6.
+- F5. (Shipped on branch) Super admin ops Dashboard window + worker pool cards — U8.
+- F6. (Shipped — evidence) **Primary E2E** via IAP SA → admin-api → fulfill `response_status` 5 — U9 (`tmp/reviews/drop-hash-e2e-matching-iap.md`). Live data_owner path optional residual.
+- F7. (Shipped — evidence) **Rematch E2E** after CA hash refresh → rematch → review → fulfill — U10 (`tmp/reviews/drop-hash-e2e-rematch-iap.md`). Status-4 reopen optional when safe candidate exists.
 
 ### Acceptance Examples
 
@@ -128,6 +132,8 @@ Hash-index and Pipeline/Health Wave B landed, but soft-CA defaults can mis-scope
 - AE4. Super admin Lists Runs backed by connector/ingest/matching/hash-index attempt families with ids/counts only.
 - AE5. DROP request journey shows ordered stages with current stage highlighted without opening the power console.
 - AE6. Ops Dashboard 24h shows failed count escalation and at least one worker-pool card from admin-api aggregates.
+- AE7. **Primary E2E (IAP):** Using SA-impersonated ID token against deployed (or IAP-required local) admin-api — not `DATABASE_URL` worker injection — a DROP request completes match → review action → fulfill with terminal `response_status` ∈ {3, 4, 5}; audit shows `@lookup_state` = requester state; Requests journey and (for super_admin) matching Run reflect the same `request_id` / attempt ids. Evidence under `tmp/reviews/` (ids/counts only).
+- AE8. **Rematch E2E (IAP):** After a successful hash-index refresh for that state, a rematch candidate (open or status-4 reopen) produces a new matching attempt that again reaches review/fulfill via admin-api + role-aware UI; prior pending `matching.review` superseded when required by KTD10.
 
 ### Success Criteria
 
@@ -135,6 +141,7 @@ Hash-index and Pipeline/Health Wave B landed, but soft-CA defaults can mis-scope
 - Approaching-SLA visibility exists at MVP depth (not full sla_monitor).
 - Role matrix enforced at API + nav; power console remains super_admin-only for spine mutations.
 - Shipped hash/matching invariants (requester-state, rematch-on-refresh including status-4 reopen, IAP/SA path) remain green under Verification Contract.
+- **Full E2E matching journey proven on IAP SA path through role-aware ops IA** (AE7); rematch-after-refresh proven when material (AE8). `DATABASE_URL` / in-process worker bypass is diagnostic-only and never satisfies DoD.
 
 ### Scope Boundaries
 
@@ -143,6 +150,8 @@ Hash-index and Pipeline/Health Wave B landed, but soft-CA defaults can mis-scope
 - Soft-CA promote harden (R7)
 - Approaching-SLA stage aggregates (R8)
 - Role-aware ops IA U3–U8 below (former drop-ops-ia U1–U6)
+- E2E matching journey + rematch scenario U9–U10 (R15–R16, F6–F7, AE7–AE8) over IAP-required admin-api
+- Post-implementation Test + QC persona gates for U9–U10
 - Verification evidence refresh after IAP + FL fix tips
 
 **Deferred / out**
@@ -154,6 +163,7 @@ Hash-index and Pipeline/Health Wave B landed, but soft-CA defaults can mis-scope
 - Editable concurrency Configuration API; Incidents ack product; tags on runs
 - `email_hash` MDR completeness (product/data — Open Question Q2)
 - Intake-spine worker delivery (sibling plan)
+- Claiming DoD via `DATABASE_URL` / in-process matching bypass (allowed for local debug only)
 - Prod writes / merge/PR without explicit Jose ask
 
 ### Outstanding Questions
@@ -168,7 +178,7 @@ Hash-index and Pipeline/Health Wave B landed, but soft-CA defaults can mis-scope
 
 - Prior: Cursor `drop_hash_productionize_2e1e0332` (deleted after consolidation); `docs/plans/2026-07-17-001-feat-drop-ops-ia-plan.md` (folded + removed).
 - Status: `tmp/reviews/drop-hash-implementation-status.md`, `tmp/reviews/drop-hash-plans-inventory.md`.
-- Evidence: `tmp/reviews/drop-hash-{Q-wave-b,held-Q,held-R,held-T,all-states-prod,fl-phone-zero,ca-matching-test}.md`.
+- Evidence: `tmp/reviews/drop-hash-{Q-wave-b,held-Q,held-R,held-T,all-states-prod,fl-phone-zero,ca-matching-test}.md` (CA matching-test = partial proof only; U9 supersedes for E2E DoD).
 
 ---
 
@@ -193,6 +203,7 @@ Carry forward unless Jose explicitly reopens:
 | KTD11 | Open-row rematch + fulfill from **latest** `match_count` prevents stale Opted-out | `(session-settled: user-directed — open-row coherence)` |
 | KTD12 | Ops IA: live Runs from Postgres attempts via admin-api; keep `/ops/drop-pipeline` as mutation power console; three roles with API enforcement | `(session-settled: user-directed — chosen over shells-only Runs / UI-hide-only RBAC)` |
 | KTD13 | Parallel per-state dbt must use state-suffixed build tables (FL phone race lesson) | `(session-settled: user-approved — chosen after live incident: shared unsuffixed build tables)` |
+| KTD14 | E2E matching DoD requires **IAP-required admin-api** with SA-impersonated audience ID token (`--include-email`); role-aware UI/API exercises the journey. `DATABASE_URL` / in-process worker claim is diagnostic-only and never the success criterion | `(session-settled: user-directed — 2026-07-17 — chosen over accepting prior CA match evidence that used DB bypass)` |
 
 ### Assumptions
 
@@ -201,6 +212,8 @@ Carry forward unless Jose explicitly reopens:
 - A3. Assignee identity remains IAP email until a user directory exists.
 - A4. Ops IA v1 Jobs/Incidents/Configuration/SLAs are shells where noted; failed work reachable via Runs filters.
 - A5. USPS 50+DC allowlist stands until Jose answers Q1.
+- A6. Primary E2E may use an existing open sandbox DROP request with known `requestor_state` (prefer CA first); multi-state variant after U1. Scoped claim/process only — never drain unrelated pending matching queues.
+- A7. SA credentials + `IAP_OAUTH_CLIENT_ID` + impersonation path are available for the E2E evidence run (or Jose provides them); without them U9 is blocked, not satisfied by DB bypass.
 
 ### High-Level Technical Design
 
@@ -219,6 +232,8 @@ flowchart TB
     Req[Requests journey]
     Runs[Runs list/detail]
     Dash[Ops Dashboard]
+    E2E[E2E match journey IAP]
+    RematchE2E[Rematch-after-refresh E2E]
   end
   Hash --> Match
   Match --> Pipe
@@ -229,6 +244,12 @@ flowchart TB
   Roles --> Pipe
   Runs --> Attempts[(Postgres *_attempts)]
   Dash --> AdminAgg[admin_api workers/queues]
+  Req --> E2E
+  Runs --> E2E
+  Pipe --> E2E
+  Match --> E2E
+  E2E --> RematchE2E
+  Hash --> RematchE2E
 ```
 
 ### Sequencing
@@ -239,7 +260,9 @@ flowchart TB
 4. **U5 Runs API/UI** ‖ **U7 Requests journey** after U3/U4 (disjoint routes/modules).
 5. **U6 Run detail** after U5.
 6. **U8 Dashboard/shells/console gate** after U3–U5.
-7. **Verification refresh** after code lands (Wave T evidence).
+7. **U9 Primary E2E matching journey** after U3–U8 (needs role-aware surfaces) and preferably after U1 for multi-state variant; CA-only primary can proceed once U3–U8 + IAP SA creds are ready.
+8. **U10 Rematch-after-refresh E2E** after U9 (+ hash refresh path already shipped).
+9. **Test + QC persona gates** on U9–U10 evidence, then **Verification refresh** (Wave T / E2E evidence under `tmp/reviews/`).
 
 ### Alternative Approaches Considered
 
@@ -250,6 +273,8 @@ flowchart TB
 | Browser→worker health | Rejects IAP/CORS (KTD6/KTD7) |
 | Treat status-4 reopen as still held | Superseded by unlock + `cf514db` |
 | Merge intake-spine into this plan | Separate delivery track; keep sibling plan |
+| Accept prior CA live match as E2E DoD | Stopped before fulfill; used `DATABASE_URL` bypass when IAP blocked (KTD14) |
+| E2E only via Pipeline console / CLI | Misses role-aware Requests/Runs/Dashboard/`/me` matrix (R15) |
 
 ### Risks
 
@@ -260,6 +285,9 @@ flowchart TB
 | Role map misconfig locks operators | Env docs + local override; fail closed only when IAP required |
 | Deep links bypass SPA nav | API checks on every gated route |
 | PII in journey/Runs | DTO allowlists + privacy tests |
+| IAP SA creds unavailable in agent session | Block U9; Jose provides impersonation SA + `IAP_OAUTH_CLIENT_ID`; never “pass” via DB bypass |
+| Mass matching queue drain during E2E | Scoped claim/process by `attempt_id` / `request_id` only; document in evidence |
+| `match_count=0` (status 5) looks like failure | Treat as valid fulfill outcome when lookup_state + live BQ proven; note domain mismatch vs code failure |
 
 ---
 
@@ -279,6 +307,8 @@ Do **not** reopen U0–U25. Units below are residual-only.
 | U6 | Run detail — timeline + gated logs | U5 |
 | U7 | Requests journey, lineage, needs attention | U3, U4 |
 | U8 | Ops Dashboard, Insights, Jobs, shells, console gate | U3–U5 |
+| U9 | Primary E2E matching journey (IAP + role-aware IA) | U3–U8 (U1 for multi-state variant) |
+| U10 | Rematch-after-refresh E2E + Test/QC persona Accept | U9 |
 
 ---
 
@@ -478,7 +508,7 @@ Do **not** reopen U0–U25. Units below are residual-only.
 - Integration: journey payload has no PII.
 - Edge: no attempts yet → received stage.
 
-**Verification:** AE5 manual path; API tests for journey shape.
+**Verification:** AE5 manual path; API tests for journey shape. U9 exercises this surface on the live IAP path (do not treat unit tests alone as E2E DoD).
 
 ---
 
@@ -507,7 +537,72 @@ Do **not** reopen U0–U25. Units below are residual-only.
 - Edge: all workers down → pool cards not-ok without crash.
 - Shells: route render smoke only.
 
-**Verification:** AE6 path; console hidden/403 for non–super_admin.
+**Verification:** AE6 path; console hidden/403 for non–super_admin. U9 checks Dashboard/Runs visibility for super_admin during the live journey.
+
+---
+
+### U9. Primary E2E matching journey (IAP + role-aware IA)
+
+**Goal:** Prove a full matching process — enqueue → live BQ match (requester-state filter) → `matching_results` + `matching.review` → ops UI (promote/decline, assign/escalate as applicable) → fulfill → `response_status` 3/4/5 — through **role-aware** Requests / Runs / Dashboard / `/me` / console gate, using **IAP-required admin-api + SA ID token** only.
+
+**Requirements:** R15, R6, R9–R14, F6, AE7, KTD14
+
+**Dependencies:** U3–U8 (role-aware surfaces must exist to exercise); U1 required only for multi-state promote variant. Shipped matching/fulfill/IAP foundation assumed.
+
+**Files (evidence + harness; prefer extend over invent):**
+- Evidence: `tmp/reviews/drop-hash-e2e-matching-iap.md` (new evidence file — create only when running U9)
+- Optional thin smoke: `app/admin_api/tests/` or CLI docs already covering IAP token mint — extend only if a durable automated gate is missing
+- Do **not** treat `tmp/reviews/drop-hash-ca-matching-test.md` as U9 pass (DB bypass + no fulfill)
+
+**Approach:**
+1. Preconditions: SA impersonation + `IAP_OAUTH_CLIENT_ID`; role allowlists for at least `super_admin` and `data_owner` (or `admin`); live BQ serving marts for target state.
+2. Select existing open DROP request with `requestor_state` set (CA first; multi-state after U1) — no new PII; scoped attempt claim only.
+3. Mutate exclusively via admin-api (CLI Phase 2 proxies or web with IAP identity): enqueue/process match → confirm `matching_results` + pending `matching.review` + audit `lookup_state`.
+4. Through **role-aware UI**: `data_owner`/`admin` — Requests needs-attention → journey stage highlight → approve/decline (and assign/escalate if in scope for the row); `super_admin` — confirm Runs list/detail shows matching attempt; console gate still blocks non–super_admin.
+5. Fulfill via admin-api → assert `response_status` ∈ {3, 4, 5} per `match_count` (0→5, 1→3, N→4).
+6. Record evidence (ids/counts/redacted hashes only). Explicitly log that path was IAP SA — not `DATABASE_URL`.
+
+**Patterns to follow:** `tmp/reviews/drop-hash-ca-matching-test.md` scope discipline (no queue drain); CLI IAP SA path from `4273a4b`; privacy invariants; KTD5/KTD7/KTD14.
+
+**Test scenarios:**
+- Happy: CA open request → IAP match → review approve → fulfill → status 3 or 5 (or 4 if multi); journey + Runs coherent.
+- Happy (role): `data_owner` completes review path without Runs/console access; API 403 on gated routes.
+- Error: missing IAP token → mutation fails; must not fall back to DB bypass for “pass.”
+- Edge: `match_count=0` → fulfill status 5 still counts as E2E pass when lookup_state + live BQ proven.
+- Integration: audit JSONB has no PII; browser never called workers.
+
+**Verification:** AE7 evidence file; `/me` role matrix spot-check during run; paired **Test** persona gate (below) before U10.
+
+---
+
+### U10. Rematch-after-refresh E2E + Test/QC persona Accept
+
+**Goal:** Second material scenario — rematch after successful hash-index refresh (including status-4 reopen when applicable) — then run Test + QC persona Accept on U9–U10 evidence.
+
+**Requirements:** R16, R3, F7, AE8, KTD4, KTD10, KTD14
+
+**Dependencies:** U9
+
+**Files:**
+- Evidence: `tmp/reviews/drop-hash-e2e-rematch-iap.md` (create when running U10)
+- Persona notes: `tmp/reviews/drop-hash-e2e-persona-qc.md` (or section in the rematch evidence file)
+
+**Approach:**
+1. Trigger or await successful hash-index refresh for the requester state (admin-api / CLI IAP — not direct worker invoke).
+2. Confirm rematch candidate enqueue (open and/or status-4 reopen → NULL then rematch per KTD10).
+3. Repeat match → review → fulfill via IAP admin-api; observe Requests journey + Runs lineage for new attempt.
+4. **Test persona:** scenario coverage vs AE7–AE8; scoped claim; role matrix exercised; no queue drain.
+5. **QC persona** (`.agent/modules/review-personas.md`): privacy (no PII in evidence/UI payloads) + security (IAP path, no browser→worker, no DB-bypass DoD) + data quality (lookup_state / response_status mapping) minimum before Accept.
+
+**Patterns to follow:** Shipped rematch-on-refresh + status-4 reopen (`cf514db`); U9 evidence discipline.
+
+**Test scenarios:**
+- Happy: refresh success → rematch attempt → review → fulfill; journey shows updated stage.
+- Happy: fulfilled status-4 candidate reopens then rematches (when such a row is available without inventing PII).
+- Edge: single-match (`match_count=1`) skipped for rematch per KTD4 — document skip, do not force.
+- Error: IAP failure mid-rematch → evidence records block; no DB-bypass Accept.
+
+**Verification:** AE8 evidence; Test + QC Accept recorded; residual pytest/lint gates still green.
 
 ---
 
@@ -522,6 +617,20 @@ Do **not** reopen U0–U25. Units below are residual-only.
 - Privacy spot-check: journey/Runs JSON contain no `consumer_id` / contact / `gcs_uri` fields
 - Evidence hygiene: refresh `tmp/verification-drop-hash-prod.log` (or successor) after IAP + FL tips if claiming Wave T closeout
 
+**E2E matching gates (U9–U10)**
+
+- AE7 primary journey evidence at `tmp/reviews/drop-hash-e2e-matching-iap.md` — path must be IAP SA ID token → admin-api (KTD14); explicit “not DATABASE_URL” attestation
+- AE8 rematch evidence at `tmp/reviews/drop-hash-e2e-rematch-iap.md` when material
+- Role-aware exercise checklist during AE7: `GET /me` + Requests journey/needs-attention + (super_admin) Runs + console 403 for non–super_admin
+- Terminal `response_status` ∈ {3, 4, 5} observed after fulfill on primary path
+- Prior `tmp/reviews/drop-hash-ca-matching-test.md` is **not** sufficient for U9 Accept
+
+**Post-implementation persona gates (after U9–U10)**
+
+- Separate reviewer(s) — not the implementer — run **Test** + **QC** lenses per `.agent/modules/review-personas.md` (privacy + security minimum on any production path; data quality on matching/fulfill outcomes; UX on role-aware surfaces)
+- Record Accept / findings in `tmp/reviews/drop-hash-e2e-persona-qc.md` (or equivalent section)
+- Unresolved privacy or security findings block DoD
+
 **Shipped invariants smoke (do not regress)**
 
 - Requester-state BQ filter / fail-closed without `requestor_state`
@@ -535,10 +644,12 @@ Do **not** reopen U0–U25. Units below are residual-only.
 
 **Global**
 
-- R7–R14 satisfied at v1 depth (shells explicitly marked)
-- U1–U8 landed with cited tests/smoke
-- Session-settled KTDs KTD1–KTD13 still hold (including unlocks KTD9–KTD10)
+- R7–R16 satisfied at v1 depth (shells explicitly marked; E2E evidence cited)
+- U1–U10 landed with cited tests/smoke/evidence
+- Session-settled KTDs KTD1–KTD14 still hold (including unlocks KTD9–KTD10; E2E IAP criterion KTD14)
 - No PII in new surfaces; mutations via admin-api + IAP; no browser→worker
+- E2E Accept is **not** claimed via `DATABASE_URL` / in-process matching bypass
+- Test + QC persona Accept recorded for U9–U10
 - Intake spine remains on sibling plan; no accidental scope merge
 - PR/push only on Jose ask
 
@@ -566,8 +677,9 @@ Do **not** reopen U0–U25. Units below are residual-only.
 
 ```
 DONE:     U0–U25 · CLI P1+P2 · status-4 reopen · all-state 51/51 · IAP SA path ·
-          Pipeline+Health · requester lookup_state · FL phone fix
-REMAIN:   soft-CA harden · approaching SLA · ops IA roles/Requests/Runs/Dashboard
+          Pipeline+Health · requester lookup_state · FL phone fix ·
+          U1–U10 residual (soft-CA · approaching SLA · ops IA · E2E IAP · rematch)
 HELD:     attempt DELETE · Eventarc · Tier-C HTTP · full sla_monitor · name-hash
-OPEN:     Jose Q1 allowlist confirm · email_hash sparsity (Q2)
+OPEN:     Jose Q1/Q6 allowlist confirm · email_hash sparsity (Q2) · PR on ask
+NOTE:     prior CA live match ≠ E2E DoD (DB bypass, no fulfill) — superseded by U9/U10
 ```
