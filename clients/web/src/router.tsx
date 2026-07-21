@@ -1,15 +1,18 @@
-import { createRootRoute, createRoute, createRouter, Outlet } from '@tanstack/react-router'
+import { createRootRoute, createRoute, createRouter, Outlet, redirect } from '@tanstack/react-router'
 import { TanStackRouterDevtools } from '@tanstack/router-devtools'
 
 import { AppShell } from '@/components/AppShell'
-import { MatchingReviewPage } from '@/routes/approvals/matching-review'
 import { DashboardPage } from '@/routes/index'
 import { OpsDashboardPage } from '@/routes/ops/dashboard'
+import { DeMonitorPage } from '@/routes/ops/de-monitor'
 import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
 import { OpsIncidentsPage } from '@/routes/ops/incidents'
 import { OpsJobsPage } from '@/routes/ops/jobs'
 import { OpsRunsPage } from '@/routes/ops/runs'
 import { RunDetailPage } from '@/routes/ops/run-detail'
+import { WorkersPage } from '@/routes/ops/workers'
+import { WorkersFailedPage } from '@/routes/ops/workers/failed'
+import { WorkersSettingsPage } from '@/routes/ops/workers/settings'
 import { HealthConfigurationPage } from '@/routes/ops/health/configuration'
 import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
 import { HealthLandingPage } from '@/routes/ops/health/index'
@@ -37,8 +40,9 @@ function parsePipelineTab(value: unknown): PipelineTab {
   return 'home'
 }
 
-export const RUNS_WINDOWS = ['8h', '24h', '1w'] as const
-export type RunsWindow = (typeof RUNS_WINDOWS)[number]
+/** Primary filter pills (legacy `24h` still parseable from URLs). */
+export const RUNS_WINDOWS = ['8h', '1w', '3m', 'custom'] as const
+export type RunsWindow = (typeof RUNS_WINDOWS)[number] | '24h'
 
 export const RUNS_STATUS_FILTERS = ['failed', 'success', 'claimed', 'in_flight'] as const
 export type RunsStatusFilter = (typeof RUNS_STATUS_FILTERS)[number]
@@ -58,10 +62,11 @@ export type RunsSearch = {
   request_id?: string
 }
 
-export const DEFAULT_RUNS_WINDOW: RunsWindow = '24h'
+export const DEFAULT_RUNS_WINDOW: RunsWindow = '1w'
 
 function parseRunsWindow(value: unknown): RunsWindow | undefined {
-  if (typeof value === 'string' && RUNS_WINDOWS.includes(value as RunsWindow)) {
+  if (typeof value !== 'string') return undefined
+  if ((RUNS_WINDOWS as readonly string[]).includes(value) || value === '24h') {
     return value as RunsWindow
   }
   return undefined
@@ -100,6 +105,97 @@ function parseRunsSearch(search: Record<string, unknown>): RunsSearch {
   const requestId = parseRunsRequestId(search.request_id)
   if (requestId) parsed.request_id = requestId
   return parsed
+}
+
+/** Workers overview — URL filters only. */
+export const WORKERS_WINDOWS = ['8h', '1w', '3m', 'custom'] as const
+export type WorkersWindow = (typeof WORKERS_WINDOWS)[number]
+
+export const WORKERS_TABS = ['failed', 'in_flight', 'waiting', 'all'] as const
+export type WorkersStatusTab = (typeof WORKERS_TABS)[number]
+
+export type WorkersSearch = {
+  window?: WorkersWindow
+  since?: string
+  tab?: WorkersStatusTab
+  job?: string
+}
+
+export type WorkersFailedSearch = {
+  window?: WorkersWindow
+  since?: string
+}
+
+function parseWorkersWindow(value: unknown): WorkersWindow | undefined {
+  if (typeof value === 'string' && WORKERS_WINDOWS.includes(value as WorkersWindow)) {
+    return value as WorkersWindow
+  }
+  return undefined
+}
+
+function parseWorkersSearch(search: Record<string, unknown>): WorkersSearch {
+  const parsed: WorkersSearch = {}
+  const window = parseWorkersWindow(search.window)
+  if (window) parsed.window = window
+  if (
+    typeof search.tab === 'string' &&
+    WORKERS_TABS.includes(search.tab as WorkersStatusTab)
+  ) {
+    parsed.tab = search.tab as WorkersStatusTab
+  }
+  if (typeof search.job === 'string' && search.job.trim()) {
+    parsed.job = search.job.trim()
+  }
+  if (typeof search.since === 'string' && search.since.trim()) {
+    parsed.since = search.since.trim()
+  }
+  return parsed
+}
+
+function parseWorkersFailedSearch(search: Record<string, unknown>): WorkersFailedSearch {
+  const parsed: WorkersFailedSearch = {}
+  const window = parseWorkersWindow(search.window)
+  if (window) parsed.window = window
+  if (typeof search.since === 'string' && search.since.trim()) {
+    parsed.since = search.since.trim()
+  }
+  return parsed
+}
+
+/** @deprecated Use WorkersSearch — kept for /ops/de-monitor redirect. */
+export const DE_MONITOR_TABS = WORKERS_TABS
+export type DeMonitorStatusTab = WorkersStatusTab
+
+export type DeMonitorSearch = {
+  window?: RunsWindow
+  tab?: DeMonitorStatusTab
+  job?: string
+}
+
+function parseDeMonitorSearch(search: Record<string, unknown>): DeMonitorSearch {
+  const parsed: DeMonitorSearch = {}
+  const window = parseRunsWindow(search.window)
+  if (window) parsed.window = window
+  if (
+    typeof search.tab === 'string' &&
+    DE_MONITOR_TABS.includes(search.tab as DeMonitorStatusTab)
+  ) {
+    parsed.tab = search.tab as DeMonitorStatusTab
+  }
+  if (typeof search.job === 'string' && search.job.trim()) {
+    parsed.job = search.job.trim()
+  }
+  return parsed
+}
+
+function deMonitorToWorkersSearch(search: DeMonitorSearch): WorkersSearch {
+  const mappedWindow: WorkersWindow | undefined =
+    search.window === '24h' ? '1w' : search.window === '8h' ? '8h' : search.window === '1w' ? '1w' : undefined
+  return {
+    window: mappedWindow,
+    tab: search.tab,
+    job: search.job,
+  }
 }
 
 const rootRoute = createRootRoute({
@@ -150,13 +246,49 @@ const requestDetailRoute = createRoute({
 const matchingReviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/approvals/matching-review',
-  component: MatchingReviewPage,
+  beforeLoad: () => {
+    throw redirect({ to: '/requests/needs-attention' })
+  },
+  component: () => null,
 })
 
 const opsDashboardRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/dashboard',
   component: OpsDashboardPage,
+})
+
+const opsWorkersRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/workers',
+  validateSearch: (search: Record<string, unknown>) => parseWorkersSearch(search),
+  component: WorkersPage,
+})
+
+const opsWorkersFailedRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/workers/failed',
+  validateSearch: (search: Record<string, unknown>) => parseWorkersFailedSearch(search),
+  component: WorkersFailedPage,
+})
+
+const opsWorkersSettingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/workers/settings',
+  component: WorkersSettingsPage,
+})
+
+const opsDeMonitorRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/de-monitor',
+  validateSearch: (search: Record<string, unknown>) => parseDeMonitorSearch(search),
+  beforeLoad: ({ search }) => {
+    throw redirect({
+      to: '/ops/workers',
+      search: deMonitorToWorkersSearch(search as DeMonitorSearch),
+    })
+  },
+  component: DeMonitorPage,
 })
 
 const opsRunsRoute = createRoute({
@@ -220,6 +352,10 @@ const routeTree = rootRoute.addChildren([
   requestDetailRoute,
   matchingReviewRoute,
   opsDashboardRoute,
+  opsWorkersRoute,
+  opsWorkersFailedRoute,
+  opsWorkersSettingsRoute,
+  opsDeMonitorRoute,
   opsRunsRoute,
   opsJobsRoute,
   opsIncidentsRoute,

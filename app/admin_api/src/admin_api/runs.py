@@ -19,7 +19,7 @@ RUN_JOBS = frozenset(
     {"drop_connector", "drop_ingestor", "matching", "hash_index_refresh"}
 )
 _FAILED_STATUSES = ("submit_error", "outcome_error", "timeout", "abandoned")
-_TIME_WINDOWS: dict[str, int] = {"8h": 8, "24h": 24, "1w": 168}
+_TIME_WINDOWS: dict[str, int] = {"8h": 8, "24h": 24, "1w": 168, "3m": 2160}
 
 _UNION_BODY = """
 SELECT 'drop_connector'::text AS job,
@@ -289,7 +289,7 @@ async def fetch_run_detail(conn: Any, *, job: str, attempt_id: int) -> RunDetail
 def _resolve_since(
     *,
     since: datetime | None,
-    window: Literal["8h", "24h", "1w"] | None,
+    window: Literal["8h", "24h", "1w", "3m"] | None,
 ) -> datetime | None:
     if since is not None:
         return since
@@ -306,7 +306,7 @@ async def list_runs(
     status: str | None = Query(default=None),
     request_id: str | None = Query(default=None),
     since: datetime | None = Query(default=None),
-    window: Literal["8h", "24h", "1w"] | None = Query(default=None),
+    window: Literal["8h", "24h", "1w", "3m"] | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[RunSummary]:

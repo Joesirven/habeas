@@ -255,6 +255,19 @@ export type DropPipelineStatus = {
   raw_requests_by_list_type: RawListTypeCount[]
   /** Absent on older admin-api revisions that predate fulfillment stage stats. */
   fulfillment?: DropFulfillmentStatus
+  /** Absent on older admin-api revisions. */
+  approaching_sla?: {
+    connector: number
+    ingest: number
+    matching: number
+    matching_review: number
+    thresholds_hours: {
+      connector: number
+      ingest: number
+      matching: number
+      matching_review: number
+    }
+  }
   drop_requests: {
     count: number
     recent: DropRequestThin[]
@@ -611,14 +624,69 @@ export type RunDetail = {
   events: RunEvent[]
 }
 
-export function getRunDetail(job: string, attemptId: number) {
-  const runId = `${job}:${attemptId}`
-  return fetchAdminApi<RunDetail>(`/ops/runs/${encodeURIComponent(runId)}`)
+/** Deployed /ops/runs job query literals ↔ UI / local worker names. */
+const RUN_JOB_TO_API: Record<string, string> = {
+  drop_connector: 'connector',
+  connector: 'connector',
+  drop_ingestor: 'ingest',
+  drop_ingest: 'ingest',
+  ingest: 'ingest',
+  matching: 'matching',
+  hash_index_refresh: 'hash_index',
+  hash_index: 'hash_index',
+}
+
+const RUN_JOB_FROM_API: Record<string, string> = {
+  connector: 'drop_connector',
+  ingest: 'drop_ingestor',
+  matching: 'matching',
+  hash_index: 'hash_index_refresh',
+}
+
+function toApiRunJob(job: string | undefined): string | undefined {
+  if (!job) return undefined
+  return RUN_JOB_TO_API[job] ?? job
+}
+
+function fromApiRunJob(job: string): string {
+  return RUN_JOB_FROM_API[job] ?? job
+}
+
+export async function getRunDetail(job: string, attemptId: number) {
+  // Deployed admin-api: /ops/runs/{job}/{id}. Legacy encoded "job:id" 404s remotely.
+  const apiJob = toApiRunJob(job) ?? job
+  const raw = await fetchAdminApi<Record<string, unknown>>(
+    `/ops/runs/${encodeURIComponent(apiJob)}/${encodeURIComponent(String(attemptId))}`,
+  )
+  return normalizeRunDetail(raw)
 }
 
 // --- Ops runs list (U4) ---
 
-export type OpsTimeWindow = '8h' | '24h' | '1w'
+/** Prefer these pills across Workers / Runs / Dashboard. */
+export type OpsTimeWindow = '8h' | '1w' | '3m' | 'custom' | '24h'
+
+/** Workers UI windows — `8h`/`1w`/`3m` map to API `window` when supported; custom uses `since`. */
+export type WorkersTimeWindow = '8h' | '1w' | '3m' | 'custom'
+
+export function resolveRunsTimeParams(
+  window: WorkersTimeWindow | OpsTimeWindow,
+  since?: string,
+): { window?: '8h' | '24h' | '1w' | '3m'; since?: string } {
+  if (window === '8h' || window === '1w' || window === '24h' || window === '3m') {
+    // Send both window and since for 3m so older admin-api (no 3m literal) still filters via since.
+    if (window === '3m') {
+      const anchor = new Date()
+      anchor.setMonth(anchor.getMonth() - 3)
+      return { window: '3m', since: since ?? anchor.toISOString() }
+    }
+    return { window }
+  }
+  if (window === 'custom' && since) {
+    return { since }
+  }
+  return { window: '1w' }
+}
 
 export type RunSummary = {
   run_id: string
@@ -632,23 +700,108 @@ export type RunSummary = {
   attempt_number: number
 }
 
-export function listRuns(params?: {
+/** Normalize deployed envelope/field names onto the UI RunSummary contract. */
+function normalizeRunSummary(raw: Record<string, unknown>): RunSummary {
+  const apiJob = String(raw.job ?? '')
+  const job = fromApiRunJob(apiJob)
+  const id = raw.id ?? raw.attempt_id ?? raw.attempt_number
+  const attemptNumber = typeof id === 'number' ? id : Number(id) || 0
+  const runId =
+    typeof raw.run_id === 'string' && raw.run_id
+      ? raw.run_id
+      : `${job}:${attemptNumber}`
+  const startedAt = String(raw.started_at ?? raw.attempted_at ?? '')
+  return {
+    run_id: runId,
+    job,
+    step: String(raw.step ?? job),
+    status: String(raw.status ?? ''),
+    request_id: (raw.request_id as string | null | undefined) ?? null,
+    started_at: startedAt,
+    completed_at: (raw.completed_at as string | null | undefined) ?? null,
+    duration_seconds:
+      typeof raw.duration_seconds === 'number' ? raw.duration_seconds : null,
+    attempt_number: attemptNumber,
+  }
+}
+
+function normalizeTimelineStatus(value: unknown): RunTimelineStepStatus {
+  const normalized = String(value ?? 'pending').toLowerCase()
+  if (normalized === 'completed' || normalized === 'complete' || normalized === 'ok') {
+    return 'completed'
+  }
+  if (normalized.includes('fail') || normalized.includes('error')) return 'failed'
+  if (normalized === 'running' || normalized === 'in_flight' || normalized === 'claimed') {
+    return 'running'
+  }
+  if (normalized === 'waiting' || normalized.includes('awaiting')) return 'waiting'
+  if (normalized === 'skipped') return 'skipped'
+  return 'pending'
+}
+
+function normalizeRunDetail(raw: Record<string, unknown>): RunDetail {
+  const summary = normalizeRunSummary(raw)
+  const timelineRaw = Array.isArray(raw.timeline) ? raw.timeline : []
+  const eventsRaw = Array.isArray(raw.events) ? raw.events : []
+  return {
+    ...summary,
+    attempt_id: summary.attempt_number,
+    error_code: (raw.error_code as string | null | undefined) ?? null,
+    error_message:
+      (raw.error_message as string | null | undefined) ??
+      (raw.error_redacted as string | null | undefined) ??
+      null,
+    timeline: timelineRaw.map((step, index) => {
+      const row = step as Record<string, unknown>
+      const key = String(row.key ?? row.event ?? row.step ?? `step-${index}`)
+      return {
+        key,
+        label: String(row.label ?? row.event ?? row.step ?? key),
+        status: normalizeTimelineStatus(row.status ?? 'completed'),
+        timestamp: (row.timestamp as string | null | undefined) ?? (row.at as string | null | undefined) ?? null,
+        detail: (row.detail as string | null | undefined) ?? null,
+      }
+    }),
+    events: eventsRaw.map((event, index) => {
+      const row = event as Record<string, unknown>
+      return {
+        id: String(row.id ?? `event-${index}`),
+        event_type: String(row.event_type ?? row.kind ?? row.event ?? 'event'),
+        occurred_at: String(row.occurred_at ?? row.at ?? ''),
+        summary: (row.summary as string | null | undefined) ?? (row.detail as string | null | undefined) ?? null,
+      }
+    }),
+  }
+}
+
+export async function listRuns(params?: {
   job?: string
   status?: string
   request_id?: string
   window?: OpsTimeWindow
+  since?: string
   limit?: number
   offset?: number
 }) {
   const search = new URLSearchParams()
-  if (params?.job) search.set('job', params.job)
+  const apiJob = toApiRunJob(params?.job)
+  if (apiJob) search.set('job', apiJob)
   if (params?.status) search.set('status', params.status)
   if (params?.request_id) search.set('request_id', params.request_id)
-  if (params?.window) search.set('window', params.window)
+  if (params?.window && params.window !== 'custom') {
+    search.set('window', params.window)
+  }
+  if (params?.since) search.set('since', params.since)
   if (params?.limit != null) search.set('limit', String(params.limit))
   if (params?.offset != null) search.set('offset', String(params.offset))
   const query = search.toString()
-  return fetchAdminApi<RunSummary[]>(`/ops/runs${query ? `?${query}` : ''}`)
+  const raw = await fetchAdminApi<unknown>(`/ops/runs${query ? `?${query}` : ''}`)
+  const rows = Array.isArray(raw)
+    ? raw
+    : Array.isArray((raw as { runs?: unknown }).runs)
+      ? ((raw as { runs: unknown[] }).runs)
+      : []
+  return rows.map((row) => normalizeRunSummary(row as Record<string, unknown>))
 }
 
 // --- Request journey + needs attention (U5) ---

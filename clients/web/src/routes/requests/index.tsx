@@ -1,9 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 
 import { Skeleton } from '@/components/AppShell'
-import { getNeedsAttention, listRequests } from '@/lib/api'
+import { RequestDetailDrawer } from '@/components/requests/RequestTriageDialog'
+import { Badge } from '@/components/ui/badge'
+import { getDropGlobalStats, getNeedsAttention, listRequests } from '@/lib/api'
 
 function RequestsTableSkeleton({ rows = 8 }: { rows?: number }) {
   return (
@@ -59,7 +61,22 @@ const SOURCE_LABELS: Record<string, string> = {
   manual: 'Manual',
 }
 
+function StatTile({ label, value, hint }: { label: string; value: number | string; hint?: string }) {
+  return (
+    <div className="rounded-lg border border-line/80 bg-paper/60 px-4 py-3">
+      <p className="taste-micro">{label}</p>
+      <p className="mt-1 font-display text-2xl font-medium tabular-nums text-habeas-navy">
+        {value}
+      </p>
+      {hint ? <p className="mt-1 text-[0.65rem] text-mute">{hint}</p> : null}
+    </div>
+  )
+}
+
 export function RequestsPage() {
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [dialogRequestId, setDialogRequestId] = useState<string | null>(null)
+
   const requestsQuery = useQuery({
     queryKey: ['admin-api', 'requests'],
     queryFn: () => listRequests(),
@@ -73,6 +90,13 @@ export function RequestsPage() {
     staleTime: 10_000,
   })
 
+  const statsQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'drop-stats-global'],
+    queryFn: getDropGlobalStats,
+    refetchInterval: 15_000,
+    staleTime: 10_000,
+  })
+
   const attentionByRequestId = useMemo(() => {
     const map = new Map<string, string>()
     for (const item of attentionQuery.data?.items ?? []) {
@@ -81,14 +105,21 @@ export function RequestsPage() {
     return map
   }, [attentionQuery.data?.items])
 
+  function openTriage(requestId: string) {
+    setDialogRequestId(requestId)
+    setDialogOpen(true)
+  }
+
+  const stats = statsQuery.data
+
   return (
-    <section className="taste-ops-page">
+    <section className="taste-ops-page space-y-4">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="taste-micro">Requests</p>
-          <div className="mt-1.5 flex flex-wrap items-baseline gap-2">
+          <div className="mt-1 flex flex-wrap items-baseline gap-2">
             <h2 className="font-display text-xl font-medium tracking-tight text-ink">
-              Where is my DROP?
+              All requests
             </h2>
             {requestsQuery.isFetching && !requestsQuery.isPending && (
               <span className="taste-frost-chip text-[0.65rem]">Refreshing</span>
@@ -114,6 +145,31 @@ export function RequestsPage() {
           </Link>
         </div>
       </header>
+
+      {stats ? (
+        <div className="grid gap-3 sm:grid-cols-3">
+          <StatTile label="Open DROP requests" value={stats.open_drop_requests} />
+          <StatTile label="Matching review pending" value={stats.matching_review_pending} />
+          <StatTile
+            label="Matching failed terminal"
+            value={stats.matching_failed_terminal}
+            hint={
+              stats.workers_down > 0
+                ? `${stats.workers_down}/${stats.workers_total} workers down`
+                : undefined
+            }
+          />
+        </div>
+      ) : statsQuery.isPending ? (
+        <div className="grid gap-3 sm:grid-cols-3">
+          {Array.from({ length: 3 }, (_, index) => (
+            <div key={index} className="rounded-lg border border-line/80 bg-paper/60 px-4 py-3">
+              <Skeleton className="h-3 w-24" />
+              <Skeleton className="mt-3 h-7 w-12" />
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       <div className="taste-panel overflow-hidden">
         {requestsQuery.isPending && <RequestsTableSkeleton />}
@@ -143,15 +199,10 @@ export function RequestsPage() {
                   return (
                     <tr
                       key={request.id}
-                      className="group relative transition-colors hover:bg-panel/50"
+                      className="group cursor-pointer transition-colors hover:bg-panel/50"
+                      onClick={() => openTriage(request.id)}
                     >
                       <td className="whitespace-nowrap tabular-nums text-ink-soft">
-                        <Link
-                          to="/requests/$requestId"
-                          params={{ requestId: request.id }}
-                          className="absolute inset-0 z-10"
-                          aria-label={`Open request ${request.id}`}
-                        />
                         {new Date(request.received_at).toLocaleString()}
                       </td>
                       <td>
@@ -163,7 +214,8 @@ export function RequestsPage() {
                         <Link
                           to="/requests/$requestId"
                           params={{ requestId: request.id }}
-                          className="relative z-20 font-mono text-xs text-habeas-mid group-hover:text-habeas-navy"
+                          className="relative z-10 font-mono text-xs text-habeas-mid group-hover:text-habeas-navy"
+                          onClick={(event) => event.stopPropagation()}
                         >
                           {request.id}
                         </Link>
@@ -173,9 +225,9 @@ export function RequestsPage() {
                       </td>
                       <td>
                         {attentionReason ? (
-                          <span className="taste-frost-chip text-[0.65rem] text-red-800">
+                          <Badge variant="fail" className="normal-case tracking-normal">
                             {attentionReason}
-                          </span>
+                          </Badge>
                         ) : (
                           <span className="text-ink-soft">—</span>
                         )}
@@ -188,6 +240,12 @@ export function RequestsPage() {
           </div>
         )}
       </div>
+
+      <RequestDetailDrawer
+        requestId={dialogRequestId}
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+      />
     </section>
   )
 }

@@ -14,8 +14,8 @@ import { RoleGate } from '@/lib/auth'
 
 const WINDOW_OPTIONS: { value: OpsTimeWindow; label: string }[] = [
   { value: '8h', label: '8h' },
-  { value: '24h', label: '24h' },
   { value: '1w', label: '1w' },
+  { value: '3m', label: '3m' },
 ]
 
 const WORKER_ORDER = [
@@ -70,13 +70,14 @@ type VolumeBucket = {
 function windowDurationMs(window: OpsTimeWindow): number {
   if (window === '8h') return 8 * 3_600_000
   if (window === '24h') return 24 * 3_600_000
+  if (window === '3m') return 90 * 24 * 3_600_000
   return 7 * 24 * 3_600_000
 }
 
 function bucketRunsByTime(runs: RunSummary[], window: OpsTimeWindow): VolumeBucket[] {
   const now = Date.now()
   const durationMs = windowDurationMs(window)
-  const bucketCount = window === '1w' ? 7 : window === '24h' ? 12 : 8
+  const bucketCount = window === '3m' ? 12 : window === '1w' ? 7 : window === '24h' ? 12 : 8
   const bucketMs = durationMs / bucketCount
   const windowStart = now - durationMs
 
@@ -86,9 +87,11 @@ function bucketRunsByTime(runs: RunSummary[], window: OpsTimeWindow): VolumeBuck
     const label =
       window === '1w'
         ? date.toLocaleDateString(undefined, { weekday: 'short' })
-        : window === '24h'
-          ? date.toLocaleTimeString(undefined, { hour: 'numeric' })
-          : date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+        : window === '3m'
+          ? date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+          : window === '24h'
+            ? date.toLocaleTimeString(undefined, { hour: 'numeric' })
+            : date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
     return { label, count: 0 }
   })
 
@@ -208,7 +211,7 @@ function WindowSelector({
 }
 
 function DashboardContent() {
-  const [window, setWindow] = useState<OpsTimeWindow>('24h')
+  const [window, setWindow] = useState<OpsTimeWindow>('1w')
 
   const runsQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'runs', 'dashboard', window],

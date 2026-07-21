@@ -1,21 +1,21 @@
-import { OpsPageChrome, RequireRole } from '@/lib/auth'
+import { Link } from '@tanstack/react-router'
+
+import { RoleGate, RouteShell, isSuperAdmin } from '@/lib/auth'
 
 export function OpsConfigurationPage() {
   return (
-    <RequireRole allow={['super_admin']}>
-      <OpsPageChrome
-        eyebrow="OPS · CONFIGURATION"
+    <RoleGate allow={isSuperAdmin}>
+      <RouteShell
+        eyebrow="Workers · Configuration"
         title="Configuration"
-        support="Infra-owned until an editable concurrency API exists. Retry knobs live under Health."
-      >
-        <div className="taste-panel p-5">
-          <p className="taste-micro">Shell</p>
-          <p className="mt-3 text-sm text-ink-soft">
-            Role allowlists and worker URLs are deployed via Cloud Build / Console env — not edited
-            here in v1.
-          </p>
-        </div>
-      </OpsPageChrome>
-    </RequireRole>
+        description="Infra-owned until an editable concurrency API exists. Retry knobs live under Workers → Settings."
+        note="Prefer Workers → Settings for retry config. Role allowlists and worker URLs are deployed via Cloud Build."
+      />
+      <p className="mt-4 text-xs">
+        <Link to="/ops/workers/settings" className="taste-link">
+          Open Workers Settings
+        </Link>
+      </p>
+    </RoleGate>
   )
 }

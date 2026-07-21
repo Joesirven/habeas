@@ -42,7 +42,7 @@ export function DashboardPage() {
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="taste-micro">Home</p>
-          <h2 className="font-display text-2xl font-medium leading-none tracking-tight text-ink">
+          <h2 className="font-display text-xl font-medium leading-none tracking-tight text-ink">
             Needs me
           </h2>
         </div>
@@ -119,8 +119,8 @@ export function DashboardPage() {
           All requests →
         </Link>
         {isAdmin ? (
-          <Link to="/approvals/matching-review" className="taste-btn text-xs">
-            Matching review →
+          <Link to="/requests/needs-attention" className="taste-btn text-xs">
+            Needs attention →
           </Link>
         ) : null}
         {isAdmin ? (
@@ -165,27 +165,23 @@ export function DashboardPage() {
             className="taste-atmosphere-orb pointer-events-none absolute -right-6 top-0 h-36 w-36 rounded-full bg-habeas-light/30 blur-2xl"
           />
           <div className="relative">
-            <p className="taste-micro text-white/55">Ops shortcuts</p>
+            <p className="taste-micro text-white/55">Shortcuts</p>
             <div className="mt-3 flex flex-wrap gap-2">
-              <Link to="/ops/dashboard" className="taste-frost-chip-dark">
-                Ops dashboard →
+              <Link to="/ops/workers" className="taste-frost-chip-dark">
+                Workers →
               </Link>
-              <Link to="/ops/runs" search={{ window: '24h' }} className="taste-frost-chip-dark">
-                Runs →
+              <Link to="/ops/workers/failed" className="taste-frost-chip-dark">
+                Failed runs →
               </Link>
-              <Link
-                to="/ops/drop-pipeline"
-                search={{ tab: 'home' }}
-                className="taste-frost-chip-dark"
-              >
-                Console →
+              <Link to="/requests/needs-attention" className="taste-frost-chip-dark">
+                Inbox →
               </Link>
               <Link
                 to="/ops/drop-pipeline"
                 search={{ tab: 'matching' }}
                 className="taste-frost-chip-dark"
               >
-                Pipeline matching →
+                Matching pipeline →
               </Link>
             </div>
           </div>

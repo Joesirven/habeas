@@ -1,11 +1,10 @@
-import { Link, useRouterState } from '@tanstack/react-router'
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
-
 import {
-  canAccessInsights,
   canAccessOpsSurfaces,
   useAuth,
 } from '@/lib/auth'
+
+import { Link, useRouterState } from '@tanstack/react-router'
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 
 const navClass =
   'text-mute transition-colors hover:text-ink [&.active]:text-ink [&.active]:underline [&.active]:decoration-ink/25 [&.active]:underline-offset-4'
@@ -29,42 +28,17 @@ const REQUESTS_GROUP: NavGroup = {
   children: [
     { label: 'All requests', to: '/requests' },
     { label: 'Needs attention', to: '/requests/needs-attention' },
-    { label: 'SLAs', to: '/requests/slas' },
+    { label: 'DROP pipeline', to: '/ops/drop-pipeline' },
   ],
 }
 
-const OPS_GROUP: NavGroup = {
-  label: 'Ops',
-  to: '/ops/dashboard',
+const WORKERS_GROUP: NavGroup = {
+  label: 'Workers',
+  to: '/ops/workers',
   children: [
-    { label: 'Dashboard', to: '/ops/dashboard' },
-    { label: 'Runs', to: '/ops/runs' },
-    { label: 'Jobs', to: '/ops/jobs' },
-    { label: 'Insights', to: '/ops/health' },
-    { label: 'Incidents', to: '/ops/incidents' },
-    { label: 'Configuration', to: '/ops/health/configuration' },
-  ],
-}
-
-const CONSOLE_GROUP: NavGroup = {
-  label: 'Console',
-  to: '/ops/drop-pipeline',
-  search: { tab: 'home' },
-  children: [
-    { label: 'Download', to: '/ops/drop-pipeline', search: { tab: 'download' } },
-    { label: 'Ingest', to: '/ops/drop-pipeline', search: { tab: 'ingest' } },
-    { label: 'Matching', to: '/ops/drop-pipeline', search: { tab: 'matching' } },
-    { label: 'Fulfillment', to: '/ops/drop-pipeline', search: { tab: 'fulfillment' } },
-    { label: 'Configurations', to: '/ops/drop-pipeline', search: { tab: 'configurations' } },
-  ],
-}
-
-const INSIGHTS_GROUP: NavGroup = {
-  label: 'Insights',
-  to: '/ops/health',
-  children: [
-    { label: 'Workers & queues', to: '/ops/health' },
-    { label: 'Escalations / retries', to: '/ops/health/escalations' },
+    { label: 'Overview', to: '/ops/workers' },
+    { label: 'Failed runs', to: '/ops/workers/failed' },
+    { label: 'Settings', to: '/ops/workers/settings' },
   ],
 }
 
@@ -80,11 +54,34 @@ function groupIsActive(pathname: string, group: NavGroup) {
 function NavDropdown({ group }: { group: NavGroup }) {
   const menuId = useId()
   const rootRef = useRef<HTMLDivElement>(null)
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [open, setOpen] = useState(false)
   const pathname = useRouterState({ select: (state) => state.location.pathname })
   const active = groupIsActive(pathname, group)
 
-  const close = useCallback(() => setOpen(false), [])
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimerRef.current != null) {
+      clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = null
+    }
+  }, [])
+
+  const close = useCallback(() => {
+    clearCloseTimer()
+    setOpen(false)
+  }, [clearCloseTimer])
+
+  const openMenu = useCallback(() => {
+    clearCloseTimer()
+    setOpen(true)
+  }, [clearCloseTimer])
+
+  const scheduleClose = useCallback(() => {
+    clearCloseTimer()
+    closeTimerRef.current = setTimeout(() => setOpen(false), 120)
+  }, [clearCloseTimer])
+
+  useEffect(() => () => clearCloseTimer(), [clearCloseTimer])
 
   useEffect(() => {
     if (!open) return
@@ -108,8 +105,8 @@ function NavDropdown({ group }: { group: NavGroup }) {
     <div
       ref={rootRef}
       className="relative"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
+      onMouseEnter={openMenu}
+      onMouseLeave={scheduleClose}
       onKeyDown={onKeyDown}
     >
       <div className="flex items-center gap-1">
@@ -137,20 +134,22 @@ function NavDropdown({ group }: { group: NavGroup }) {
         <div
           id={menuId}
           role="menu"
-          className="absolute right-0 top-full z-30 mt-2 min-w-[11rem] rounded-lg border border-[var(--glass-border)] bg-paper-raised/95 py-1 shadow-sm backdrop-blur-md lg:left-0 lg:right-auto"
+          className="absolute right-0 top-full z-30 min-w-[11rem] pt-2 lg:left-0 lg:right-auto"
         >
-          {group.children.map((child) => (
-            <Link
-              key={child.label}
-              to={child.to}
-              search={child.search}
-              role="menuitem"
-              className="block px-3 py-2 text-[0.8125rem] text-ink-soft transition-colors hover:bg-paper hover:text-ink"
-              onClick={() => close()}
-            >
-              {child.label}
-            </Link>
-          ))}
+          <div className="rounded-lg border border-[var(--glass-border)] bg-paper-raised/95 py-1 shadow-sm backdrop-blur-md">
+            {group.children.map((child) => (
+              <Link
+                key={child.label}
+                to={child.to}
+                search={child.search}
+                role="menuitem"
+                className="block px-3 py-2 text-[0.8125rem] text-ink-soft transition-colors hover:bg-paper hover:text-ink"
+                onClick={() => close()}
+              >
+                {child.label}
+              </Link>
+            ))}
+          </div>
         </div>
       ) : null}
     </div>
@@ -159,10 +158,7 @@ function NavDropdown({ group }: { group: NavGroup }) {
 
 export function NavMenu() {
   const { role, isLoading, isError } = useAuth()
-  // When /me fails (common with IAP on a separate admin-api host), still surface
-  // Ops links so the IA is visible; RoleGate on each route enforces access.
-  const showOps = canAccessOpsSurfaces(role) || isError
-  const showInsights = canAccessInsights(role) || isError
+  const showWorkers = canAccessOpsSurfaces(role) || isError
 
   return (
     <nav
@@ -173,16 +169,7 @@ export function NavMenu() {
         Dashboard
       </Link>
       <NavDropdown group={REQUESTS_GROUP} />
-      {showOps ? (
-        <>
-          <NavDropdown group={OPS_GROUP} />
-          <NavDropdown group={CONSOLE_GROUP} />
-        </>
-      ) : null}
-      {!showOps && showInsights ? <NavDropdown group={INSIGHTS_GROUP} /> : null}
-      <Link to="/approvals/matching-review" className={navClass}>
-        Matching review
-      </Link>
+      {showWorkers ? <NavDropdown group={WORKERS_GROUP} /> : null}
     </nav>
   )
 }

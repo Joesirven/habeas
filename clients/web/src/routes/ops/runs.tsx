@@ -3,7 +3,12 @@ import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
-import { listRuns, type OpsTimeWindow, type RunSummary } from '@/lib/api'
+import {
+  listRuns,
+  resolveRunsTimeParams,
+  type OpsTimeWindow,
+  type RunSummary,
+} from '@/lib/api'
 import { RoleGate } from '@/lib/auth'
 import {
   DEFAULT_RUNS_WINDOW,
@@ -305,14 +310,15 @@ function RunsContent() {
   const { job, status, request_id: requestId } = search
   const window = search.window ?? DEFAULT_RUNS_WINDOW
 
+  const timeParams = resolveRunsTimeParams(window as OpsTimeWindow)
   const runsQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'runs', { job, status, window, requestId }],
+    queryKey: ['admin-api', 'ops', 'runs', { job, status, window, requestId, timeParams }],
     queryFn: () =>
       listRuns({
         job,
         status,
         request_id: requestId,
-        window: window as OpsTimeWindow,
+        ...timeParams,
         limit: 100,
       }),
     refetchInterval: 10_000,

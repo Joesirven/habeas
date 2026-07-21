@@ -61,21 +61,13 @@ const WORKER_ORDER = [
   'hash_index_refresh',
 ] as const
 
-const PIPELINE_STAGES = [
-  '01 Download',
-  '02 Land',
-  '03 Promote',
-  '04 Match',
-  '05 Review',
-  '06 Fulfill',
-] as const
-
 const PIPELINE_TAB_BAR: { key: PipelineTab; label: string }[] = [
   { key: 'home', label: 'Home' },
   { key: 'download', label: 'Download' },
   { key: 'ingest', label: 'Ingest' },
   { key: 'matching', label: 'Matching' },
   { key: 'fulfillment', label: 'Fulfillment' },
+  { key: 'configurations', label: 'Configurations' },
 ]
 
 const SERVED_STATE_ACRONYMS = [
@@ -252,23 +244,31 @@ function PipelineTabBar({
   active: PipelineTab
   onSelect: (tab: PipelineTab) => void
 }) {
-  const tabs =
-    active === 'configurations'
-      ? [...PIPELINE_TAB_BAR, { key: 'configurations' as const, label: 'Configurations' }]
-      : PIPELINE_TAB_BAR
-
   return (
-    <div className="flex flex-wrap gap-2 border-b border-line pb-4">
-      {tabs.map((tab) => (
-        <button
-          key={tab.key}
-          type="button"
-          className={active === tab.key ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'}
-          onClick={() => onSelect(tab.key)}
-        >
-          {tab.label}
-        </button>
-      ))}
+    <div
+      role="tablist"
+      aria-label="DROP pipeline stages"
+      className="flex gap-0 overflow-x-auto border-b border-line"
+    >
+      {PIPELINE_TAB_BAR.map((tab) => {
+        const selected = active === tab.key
+        return (
+          <button
+            key={tab.key}
+            type="button"
+            role="tab"
+            aria-selected={selected}
+            className={
+              selected
+                ? 'relative shrink-0 px-3.5 py-2.5 text-xs font-medium text-habeas-navy after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:rounded-full after:bg-habeas-navy'
+                : 'shrink-0 px-3.5 py-2.5 text-xs font-medium text-mute transition-colors hover:text-ink'
+            }
+            onClick={() => onSelect(tab.key)}
+          >
+            {tab.label}
+          </button>
+        )
+      })}
     </div>
   )
 }
@@ -1511,38 +1511,23 @@ function DropPipelinePageInner() {
     tab === 'download' || tab === 'ingest' || tab === 'matching' || tab === 'fulfillment'
 
   return (
-    <section className="space-y-16">
+    <section className="taste-ops-page space-y-5">
       <PostMatchDialog
         open={postMatchOpen}
         matchSummary={postMatchSummary}
         onChoose={handlePostMatchChoice}
       />
 
-      <header className="grid gap-10 lg:grid-cols-[1.15fr_0.85fr] lg:items-end">
+      <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <Micro>Operations</Micro>
-          <h2 className="mt-4 max-w-md font-display text-[3.25rem] font-medium leading-[1.02] tracking-tight text-ink sm:text-[3.75rem]">
-            DROP
-            <br />
-            pipeline
+          <Micro>Requests · Pipeline</Micro>
+          <h2 className="mt-1 font-display text-xl font-medium tracking-tight text-ink">
+            DROP pipeline
           </h2>
         </div>
-        <div className="border-l border-line pl-5">
-          <p className="max-w-sm text-sm leading-relaxed text-ink-soft">
-            Super-admin console for DROP download → unzip/promote to raw → match → matching review →
-            fulfill. Counts and ids only.
-          </p>
-          <div className="mt-5 flex flex-wrap gap-2">
-            {PIPELINE_STAGES.map((stage) => (
-              <span
-                key={stage}
-                className="glass px-2.5 py-1 font-mono text-[0.65rem] uppercase tracking-[0.08em] text-ink-soft"
-              >
-                {stage}
-              </span>
-            ))}
-          </div>
-        </div>
+        {pipelineQuery.isFetching && !pipelineQuery.isPending ? (
+          <span className="taste-frost-chip text-[0.65rem]">Refreshing</span>
+        ) : null}
       </header>
 
       <PipelineTabBar active={tab} onSelect={setTab} />
@@ -1627,8 +1612,8 @@ function DropPipelinePageInner() {
                   </table>
                 </div>
               ) : null}
-              <Link to="/approvals/matching-review" className="taste-btn w-fit text-xs">
-                Matching review →
+              <Link to="/requests/needs-attention" className="taste-btn w-fit text-xs">
+                Needs attention →
               </Link>
             </div>
             <AtmospherePanel data={data} />
