@@ -36,22 +36,39 @@ bq query --use_legacy_sql=false < transform/drop_hash/udf/tests/test_udf_vectors
 
 Expect **0 rows** from the vector query.
 
-## 3. Full dbt build + serving swap (per state)
+## 3. Per-state refresh (durable int/build → patch serving)
 
-Shared marts hold all served states; each dbt run fills **one** state:
+Shared serving marts hold all served states; each dbt run rebuilds **one** state
+only — it does **not** re-hash the other 50.
+
+| Layer | Physical tables (example `state=CA`) | Lifetime |
+|-------|--------------------------------------|----------|
+| Staging / int | `stg_person_ca`, `int_email_hash_ca`, `int_phone_hash_ca`, `int_ndz_hash_ca`, … | Durable; overwritten only when that state refreshes |
+| Mart build | `email_hash__build_ca`, `phone_hash__build_ca`, `ndz_hash__build_ca` | Durable; retained after serving merge (parallel-safe) |
+| Serving (national) | `email_hash`, `phone_hash`, `ndz_hash` | Patched: `DELETE`/`INSERT` (or first-create `COPY`) for `WHERE state='CA'` only |
 
 ```bash
 cd transform/drop_hash
 cp profiles.yml.example profiles.yml   # if needed
 DBT_PROFILES_DIR=. dbt build --vars '{state: CA}'
 DBT_PROFILES_DIR=. dbt build --vars '{state: TX}'
-# Or enqueue the full wave via admin-api:
+# Or enqueue one state / full wave via admin-api:
+#   POST /ops/drop/hash-index-refresh/enqueue   (body: state)
 #   POST /ops/drop/hash-index-refresh/enqueue-all
 ```
 
-Writes intermediates, builds `*_hash__build` marts, then merges that state’s rows
-into `email_hash`, `phone_hash`, `ndz_hash`. Parallel per-state jobs are OK;
-watch BigQuery slots/cost. Served-state list is **USPS 50 + DC** (settled).
+Flow for a single-state refresh (e.g. CA):
+
+1. `generate_alias_name` suffixes every model alias with `_<state>` so parallel
+   workers cannot clobber each other (FL phone race lesson).
+2. Staging filters MDR with `state = var('state')`; int models hash that slice.
+3. Mart models write `*_hash__build_<state>`.
+4. `perform_serving_swap()` patches national serving for that state only and
+   **keeps** the build tables (first create uses `CREATE TABLE … COPY`, not rename).
+
+Parallel per-state jobs are OK; watch BigQuery slots/cost. Served-state list is
+**USPS 50 + DC** (settled). Dry-run without patching serving:
+`--vars '{state: CA, perform_serving_swap: false}'`.
 
 **Timeout (name UDF):** chunk by `FARM_FINGERPRINT(dwid) % N` — see `udf/README.md`.
 
@@ -121,8 +138,9 @@ curl -sS -H "Authorization: Bearer $IAP_ID_TOKEN" "$ADMIN_API_URL/auth/me"
 | Worker | Invoked only by admin-api runtime SA (`roles/run.invoker` on workers — never user/IAP) |
 
 Parallel per-state `dbt build --vars '{state: …}'` into shared serving marts is
-supported (staging/int/build relations are state-suffixed). Watch BigQuery
-slots/cost. Prefer the queue/worker path over ad-hoc prod dbt.
+supported (staging/int/build relations are state-suffixed and **retained** after
+the serving patch). Watch BigQuery slots/cost. Prefer the queue/worker path over
+ad-hoc prod dbt. See “Per-state refresh” above.
 
 **FL phone gap (2026-07-17):** After the first enqueue-all wave, `phone_hash`
 had every served state except `FL` while MDR `person_db.phones` had ~20.5M FL

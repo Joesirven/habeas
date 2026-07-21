@@ -73,14 +73,21 @@ requester’s normalized source state (never out-of-state DWIDs).
 `stg_phones` emits **one row per available phone type**. When MDR has both cell and
 land numbers, `phone_hash` serving gets **two rows** for that `dwid` (distinct hashes).
 
-### Serving swap
+### Per-state artifacts + serving patch
 
-Mart models write to state-scoped builds (`email_hash__build_<state>`,
+Mart models write to durable state-scoped builds (`email_hash__build_<state>`,
 `phone_hash__build_<state>`, `ndz_hash__build_<state>`). Staging and intermediate
 tables are likewise suffixed (`stg_phones_fl`, `int_phone_hash_fl`, …) via
 `generate_alias_name` so parallel per-state workers cannot clobber each other.
-On successful `dbt build`, `perform_serving_swap()` merges that state’s build into
-the shared serving tables (`DELETE`/`INSERT` filtered by `state`).
+
+On successful `dbt build`, `perform_serving_swap()` patches shared serving
+(`email_hash` / `phone_hash` / `ndz_hash`) for that state only:
+
+- First create: `CREATE TABLE … COPY` from the state build (build retained).
+- Later refreshes: `DELETE`/`INSERT` filtered by `state` (build retained).
+
+A CA refresh therefore rebuilds only CA’s int/build and merges the CA slice —
+other states’ serving rows and durable artifacts are untouched.
 
 Disable swap (e.g. dry run): `--vars '{perform_serving_swap: false}'`.
 

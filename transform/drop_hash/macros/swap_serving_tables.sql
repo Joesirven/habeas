@@ -27,9 +27,13 @@
 
 {% macro perform_serving_swap() %}
     {# State-scoped merge: replace only var('state') rows so other states stay intact.
-       Build tables are written by mart_* as *_hash__build_<state> (see
-       generate_alias_name). First create renames build → serving; later runs
-       DELETE state + INSERT from that state's build only. #}
+       Durable per-state artifacts (see generate_alias_name):
+         - stg_*_<state>, int_*_<state>  — hashing work for one state
+         - *_hash__build_<state>         — mart build for one state
+       National contract: email_hash / phone_hash / ndz_hash stay shared.
+       Refresh CA = rebuild CA int/build, then patch serving WHERE state='CA'.
+       Build tables are retained after merge (not renamed away or dropped) so
+       parallel refreshes stay isolated and ops can inspect the last good slice. #}
     {% if not execute or not var('perform_serving_swap', true) %}
         {{ return('') }}
     {% endif %}
@@ -47,10 +51,11 @@
         {% if not table_exists(schema, build_name) %}
             {{ log('Skip serving swap for ' ~ name ~ ': ' ~ build_name ~ ' not found', info=true) }}
         {% elif not table_exists(schema, name) %}
+            {# COPY keeps the durable build; rename would destroy the per-state artifact. #}
             {% do run_query(
-                'alter table `' ~ fq ~ '.' ~ build_name ~ '` rename to `' ~ name ~ '`'
+                'create table `' ~ fq ~ '.' ~ name ~ '` copy `' ~ fq ~ '.' ~ build_name ~ '`'
             ) %}
-            {{ log('Serving create: ' ~ build_name ~ ' -> ' ~ name ~ ' (state=' ~ state ~ ')', info=true) }}
+            {{ log('Serving create: copy ' ~ build_name ~ ' -> ' ~ name ~ ' (state=' ~ state ~ '; build retained)', info=true) }}
         {% else %}
             {% do run_query(
                 'delete from `' ~ fq ~ '.' ~ name ~ '` where state = \'' ~ state ~ '\''
@@ -60,8 +65,7 @@
                  select hash_value, dwid, state, built_at from `' ~ fq ~ '.' ~ build_name ~ '`
                  where state = \'' ~ state ~ '\''
             ) %}
-            {% do run_query('drop table if exists `' ~ fq ~ '.' ~ build_name ~ '`') %}
-            {{ log('Serving merge: ' ~ build_name ~ ' into ' ~ name ~ ' for state=' ~ state, info=true) }}
+            {{ log('Serving merge: ' ~ build_name ~ ' into ' ~ name ~ ' for state=' ~ state ~ ' (build retained)', info=true) }}
         {% endif %}
     {% endfor %}
 {% endmacro %}
