@@ -4,6 +4,14 @@ with source as (
         state,
         emailaddress
     from {{ ref('stg_person') }}
+
+    union all
+
+    select
+        dwid,
+        state,
+        emailaddress
+    from {{ ref('stg_emails_digital_only') }}
 ),
 
 standardized as (
@@ -14,7 +22,8 @@ standardized as (
     from source
 )
 
-select
+-- Grain: one row per (dwid, state, email_std) across MDR person + digital source.
+select distinct
     dwid,
     state,
     email_std,

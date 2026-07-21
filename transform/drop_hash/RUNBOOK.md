@@ -96,20 +96,19 @@ source of truth for enqueue-all / hash refresh — not a separate MDR jurisdicti
 config. Every state must be hashed and ready to match; sparse marts (email) still
 run per state and simply yield zero serving rows when MDR has no values.
 
-### Email MDR source (investigation 2026-07-20)
+### Email sources (MDR + digital)
 
-| Finding | Detail |
-|---------|--------|
-| Dataset | `example-gcp-project.person_db` (dbt `source('person_db', …)`) |
-| Email tables | **None** named email/contact — only `person` holds an email field |
-| Email column | Sole column: `person.emailaddress` (join keys `dwid`, `state`) |
-| Other “mail*” columns | Postal/mail **address** fields on `person` / household / models — not emails |
-| Phones | Separate table `phones` (`dwid`, `state`, cell/land) — no email columns |
-| Fill rate | ~9.9M nonempty / ~377M person rows (~97% null or empty) |
-| States with any email | **9:** NY, IN, IL, WI, RI, SD, FL, AZ, MT — remaining 42 (incl. **CA**) have zero nonempty |
-| dbt recommendation | Keep `stg_person` → `int_email_hash` on `emailaddress`; **no union** needed |
+**MDR (investigation 2026-07-20):** Dataset `example-gcp-project.person_db` — no
+email/contact table; sole field `person.emailaddress` (~9.9M nonempty / ~377M
+rows; **9** states with any fill: NY/IN/IL/WI/RI/SD/FL/AZ/MT). Sparse fill is an
+MDR completeness property.
 
-Sparse `email_hash` is an MDR completeness property, not a wrong dbt source.
+**Digital supplement:** `example-gcp-project.production_datasets.emails_digital_only_24q2`
+→ `stg_emails_digital_only` (projects `email` → `emailaddress`, `var('state')`
+filter) → unioned in `int_email_hash` with `stg_person`, one standardize + hash
+path, dedupe on `(dwid, state, email_std)`. Mart/serving contract unchanged.
+
+Re-enqueue hash refresh only after Jose approves (fills more states than MDR alone).
 
 **Enqueue-all wave (code complete — do not fire against prod without Jose):**
 
@@ -159,13 +158,13 @@ Project `example-gcp-project` · `bq ls` / metadata + count queries OK (no PII s
 
 | Mart | Row count | Distinct `state` | Notes |
 |------|-----------|------------------|--------|
-| `email_hash` | ~9.91M | **9** | Exact match to MDR nonempty `person.emailaddress`; states NY/IN/IL/WI/RI/SD/FL/AZ/MT. CA and 41 others correctly absent (MDR zero fill). |
+| `email_hash` | ~9.91M | **9** | Pre-digital-union: matched MDR nonempty `person.emailaddress` only (NY/IN/IL/WI/RI/SD/FL/AZ/MT). Post-union counts rise after next approved refresh. |
 | `phone_hash` | ~411.7M | **51** | Full USPS 50+DC coverage |
 | `ndz_hash` | ~276.9M | **51** | Full USPS 50+DC coverage |
 
 Dataset `drop_hash_index` lists serving + intermediate tables; experiment dataset
-`drop_hash_experiment` still present (sandbox only). No re-enqueue needed for
-email after the 2026-07-20 investigation — serving already equals MDR fill.
+`drop_hash_experiment` still present (sandbox only). Email serving still reflects
+MDR-only fill until a Jose-approved refresh runs the digital union.
 
 ### Blockers / notes for prod enqueue-all
 
@@ -173,8 +172,8 @@ email after the 2026-07-20 investigation — serving already equals MDR fill.
    approval (see `.agent/modules/prod-write-gate.md`). Prior waves approved separately.
 2. **Served states** — **settled:** USPS 50+DC. Re-enqueue only when MDR updates or
    a mart gap appears (phone/ndz currently 51/51).
-3. **Email sparsity** — expected; not a rebuild blocker. Matching on email only
-   works in the 9 MDR-filled states until Habeas loads more `emailaddress` values.
+3. **Email sparsity** — MDR-only fill is sparse (9 states); digital source
+   (`emails_digital_only_24q2`) widens coverage after the next approved refresh.
 4. **Worker workload identity** — Cloud Build does not yet attach a dedicated
    `hash-index-refresh` runtime SA with BigQuery `jobUser` + dataset write on
    `drop_hash_index` + MDR read (see `infra/README.md` go-live checklist). Invoker

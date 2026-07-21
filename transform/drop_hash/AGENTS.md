@@ -34,9 +34,10 @@ Production dbt project for DROP hash-index serving tables in BigQuery.
   user→worker. Live BQ coverage + blockers are in [RUNBOOK.md](RUNBOOK.md)
   (“Per-state refresh” / “Live multi-state builds”). No prod dbt / enqueue-all
   without Jose.
-- **Email source:** `person_db.person.emailaddress` only — no dedicated email /
-  contact table in the MDR dataset. Sparse fill is MDR data (many states have
-  zero nonempty emails); dbt does not union alternate email columns.
+- **Email sources:** MDR `person_db.person.emailaddress` (sparse; no MDR
+  email/contact table) **plus** `production_datasets.emails_digital_only_24q2`
+  via `stg_emails_digital_only`. `int_email_hash` unions both, one standardize +
+  hash path, dedupe on `(dwid, state, email_std)`.
 - UDF body must stay the bake-off winner (`normalizeName` + LATIN_EXTENDED).
 
 ## Commands

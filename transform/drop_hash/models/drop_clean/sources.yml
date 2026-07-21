@@ -5,10 +5,24 @@ sources:
     database: example-gcp-project
     schema: person_db
     description: >
-      Habeas MDR in example-gcp-project. Sole email field is person.emailaddress
-      (no email/contact table). Phones are in phones (dwid, state).
+      Habeas MDR in example-gcp-project. Person.emailaddress is the sole MDR email
+      field (often sparse by state). Phones are in phones (dwid, state).
+      Additional digital emails come from production_datasets (see
+      stg_emails_digital_only → int_email_hash union).
     tables:
       - name: person
         description: Person spine; emailaddress feeds email_hash (often sparse by state).
       - name: phones
         description: Cell/land phones keyed by dwid + state; feeds phone_hash.
+
+  - name: production_datasets
+    database: example-gcp-project
+    schema: production_datasets
+    description: >
+      Production datasets in example-gcp-project. Digital-only emails supplement sparse
+      MDR person.emailaddress for the email_hash path.
+    tables:
+      - name: emails_digital_only_24q2
+        description: >
+          Digital emails (dwid, state, email, …); clustered on state.
+          Staged as stg_emails_digital_only and unioned in int_email_hash.

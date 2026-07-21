@@ -45,13 +45,14 @@ DBT_PROFILES_DIR=. dbt build --vars '{state: CA}'
 DBT_PROFILES_DIR=. dbt build --vars '{state: NY}'
 ```
 
-`state` filters MDR staging (`stg_person`, `stg_phones`). Intermediate models keep
-`*_std` columns plus per-field hashes; serving marts expose `(hash_value, dwid, state, built_at)`.
+`state` filters staging (`stg_person`, `stg_phones`, `stg_emails_digital_only`).
+Intermediate models keep `*_std` columns plus per-field hashes; serving marts
+expose `(hash_value, dwid, state, built_at)`.
 
 | Layer | Examples | Notes |
 |-------|----------|-------|
-| Staging | `stg_person`, `stg_phones` | `state = var('state')` |
-| Intermediate | `int_email_hash`, `int_phone_hash`, `int_dob_hash`, `int_zip_hash`, `int_name_hash`, `int_ndz_hash` | `*_std` + hash columns |
+| Staging | `stg_person`, `stg_phones`, `stg_emails_digital_only` | `state = var('state')` |
+| Intermediate | `int_email_hash`, `int_phone_hash`, `int_dob_hash`, `int_zip_hash`, `int_name_hash`, `int_ndz_hash` | `*_std` + hash columns; email unions person + digital |
 | Serving | `email_hash`, `phone_hash`, `ndz_hash` | Built as `*_build` then swapped in |
 
 ### Serving schema
