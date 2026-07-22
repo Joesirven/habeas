@@ -1808,7 +1808,15 @@ async def test_collect_bulk_process_progress_shape():
 def test_bulk_processes_route(monkeypatch: pytest.MonkeyPatch):
     from admin_api import main as admin_main
 
-    async def fake_list(conn: Any, *, day: Any = None) -> list[dict[str, Any]]:
+    async def fake_list(
+        conn: Any,
+        *,
+        day: Any = None,
+        days: int = 1,
+        intake_source: str | None = None,
+        download_status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
         return [
             {
                 "process_id": 1,
@@ -1823,11 +1831,18 @@ def test_bulk_processes_route(monkeypatch: pytest.MonkeyPatch):
 
     # Avoid lifespan create_pool when DATABASE_URL points at an unreachable host.
     monkeypatch.setattr(admin_main.settings, "database_url", "")
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
     _fake_pool(monkeypatch)
     monkeypatch.setattr(drop_pipeline, "list_bulk_processes", fake_list)
 
     with TestClient(app) as client:
-        response = client.get("/ops/drop/processes")
+        response = client.get(
+            "/ops/drop/processes",
+            headers={IAP_EMAIL_HEADER: "accounts.google.com:ops@example.com"},
+        )
 
     assert response.status_code == 200
     body = response.json()
