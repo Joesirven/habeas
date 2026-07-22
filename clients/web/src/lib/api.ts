@@ -651,6 +651,34 @@ export function postDropFulfill(body?: { request_id?: string }) {
   })
 }
 
+export type FulfillmentArtifact = {
+  request_id: string
+  kind: 'access' | 'suppression' | null
+  fulfillment_artifact_uri: string | null
+  shareable_url: string | null
+  access_delivery_status: string | null
+  attempt_status: string | null
+}
+
+export function getFulfillmentArtifact(requestId: string) {
+  return fetchAdminApi<FulfillmentArtifact>(
+    `/ops/fulfillment/requests/${encodeURIComponent(requestId)}/artifact`,
+  )
+}
+
+export function patchAccessDeliveryStatus(
+  requestId: string,
+  body: { status: 'pending' | 'delivered' | 'failed' | 'recalled'; notes?: string },
+) {
+  return fetchAdminApi<FulfillmentArtifact>(
+    `/ops/fulfillment/requests/${encodeURIComponent(requestId)}/delivery-status`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
 export function postHashIndexRefreshEnqueueAll(body?: { list_types?: string[] }) {
   return fetchAdminApi<Record<string, unknown>>('/ops/drop/hash-index-refresh/enqueue-all', {
     method: 'POST',

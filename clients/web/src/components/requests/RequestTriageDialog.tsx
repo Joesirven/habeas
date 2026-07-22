@@ -17,9 +17,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useMe } from '@/lib/auth'
 import {
   getDropMatchingResultDetail,
+  getFulfillmentArtifact,
   getRequestJourney,
+  patchAccessDeliveryStatus,
   postDropMatchingResultDecline,
   postDropMatchingResultPromote,
+  type FulfillmentArtifact,
   type JourneyStage,
   type MatchingResultDetail,
   type RunTimelineStep,
@@ -238,10 +241,106 @@ export function MatchingReviewPanel({
   )
 }
 
+function AccessHandoffPanel({
+  requestId,
+  artifact,
+  isPending,
+  isError,
+  canMutate,
+  onCopy,
+  onSetStatus,
+  busy,
+}: {
+  requestId: string
+  artifact: FulfillmentArtifact | null | undefined
+  isPending: boolean
+  isError: boolean
+  canMutate: boolean
+  onCopy: () => void
+  onSetStatus: (status: 'delivered' | 'failed' | 'recalled') => void
+  busy: boolean
+}) {
+  if (isPending) {
+    return <p className="py-4 text-xs text-ink-soft">Loading fulfillment artifact…</p>
+  }
+  if (isError) {
+    return (
+      <p className="py-4 text-xs text-ink-soft">
+        No fulfillment artifact yet for <span className="font-mono">{requestId}</span>.
+      </p>
+    )
+  }
+  if (!artifact?.shareable_url && !artifact?.fulfillment_artifact_uri) {
+    return (
+      <p className="py-4 text-xs text-ink-soft">
+        Artifact not ready — run fulfillment after matching.review.
+      </p>
+    )
+  }
+  const url = artifact.shareable_url ?? artifact.fulfillment_artifact_uri ?? ''
+  return (
+    <div className="space-y-3 py-2 text-xs">
+      <p className="text-ink-soft">
+        Copy this URL into an email you draft outside the platform. Update delivery status after
+        send — the platform does not email requesters.
+      </p>
+      <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
+        <dt className="taste-micro">Shareable URL</dt>
+        <dd className="mt-1 break-all font-mono text-[0.7rem] text-ink">{url}</dd>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" type="button" onClick={onCopy} disabled={!url}>
+          Copy URL
+        </Button>
+        {artifact.kind === 'access' && canMutate ? (
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              type="button"
+              disabled={busy}
+              onClick={() => onSetStatus('delivered')}
+            >
+              Mark delivered
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              type="button"
+              disabled={busy}
+              onClick={() => onSetStatus('failed')}
+            >
+              Mark failed
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              type="button"
+              disabled={busy}
+              onClick={() => onSetStatus('recalled')}
+            >
+              Mark recalled
+            </Button>
+          </>
+        ) : null}
+      </div>
+      {artifact.access_delivery_status ? (
+        <p className="text-mute">
+          Delivery status:{' '}
+          <span className="taste-frost-chip text-[0.65rem] capitalize">
+            {artifact.access_delivery_status}
+          </span>
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
 export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDetailDrawerProps) {
   const queryClient = useQueryClient()
   const { isAdmin, isSuperAdmin } = useMe()
   const [actionError, setActionError] = useState<string | null>(null)
+  const [copyNote, setCopyNote] = useState<string | null>(null)
 
   const journeyQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', requestId, 'journey'],
@@ -257,6 +356,23 @@ export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDe
     enabled: open && Boolean(requestId),
     refetchInterval: open ? 10_000 : false,
     placeholderData: (previous) => previous,
+  })
+
+  const artifactQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', requestId],
+    queryFn: () => getFulfillmentArtifact(requestId!),
+    enabled: open && Boolean(requestId) && isSuperAdmin,
+    retry: false,
+  })
+
+  const deliveryMutation = useMutation({
+    mutationFn: (status: 'delivered' | 'failed' | 'recalled') =>
+      patchAccessDeliveryStatus(requestId!, { status }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', requestId],
+      })
+    },
   })
 
   const promoteMutation = useMutation({
@@ -361,6 +477,9 @@ export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDe
                 <TabsList>
                   <TabsTrigger value="history">History</TabsTrigger>
                   <TabsTrigger value="matching">Matching</TabsTrigger>
+                  {isSuperAdmin ? (
+                    <TabsTrigger value="handoff">Handoff</TabsTrigger>
+                  ) : null}
                 </TabsList>
 
                 <TabsContent value="history">
@@ -412,6 +531,38 @@ export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDe
                     onDecline={() => declineMutation.mutate()}
                   />
                 </TabsContent>
+
+                {isSuperAdmin ? (
+                  <TabsContent value="handoff">
+                    <AccessHandoffPanel
+                      requestId={journeyQuery.data.request_id}
+                      artifact={artifactQuery.data}
+                      isPending={artifactQuery.isPending}
+                      isError={artifactQuery.isError}
+                      canMutate={isSuperAdmin}
+                      busy={deliveryMutation.isPending}
+                      onCopy={() => {
+                        const url =
+                          artifactQuery.data?.shareable_url ??
+                          artifactQuery.data?.fulfillment_artifact_uri
+                        if (!url) return
+                        void navigator.clipboard.writeText(url).then(() => {
+                          setCopyNote('Copied')
+                          window.setTimeout(() => setCopyNote(null), 2000)
+                        })
+                      }}
+                      onSetStatus={(status) => deliveryMutation.mutate(status)}
+                    />
+                    {copyNote ? <p className="taste-micro text-mute">{copyNote}</p> : null}
+                    {deliveryMutation.isError ? (
+                      <p className="text-[0.65rem] text-red-700">
+                        {deliveryMutation.error instanceof Error
+                          ? deliveryMutation.error.message
+                          : 'Delivery status update failed'}
+                      </p>
+                    ) : null}
+                  </TabsContent>
+                ) : null}
               </Tabs>
             </div>
           ) : null}

@@ -27,6 +27,7 @@ members = [
     "data-privacy",
     "drop-connector",
     "drop-ingestor",
+    "drop-notice-dispatcher",
     "google-sheets-worker",
     "hash-index-refresh",
     "lever-worker",
@@ -812,6 +813,27 @@ dependencies = [
 requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+]
+
+[[package]]
+name = "drop-notice-dispatcher"
+version = "0.1.0"
+source = { editable = "app/drop_notice_dispatcher" }
+dependencies = [
+    { name = "habeas-privacy-core" },
+    { name = "fastapi" },
+    { name = "google-auth" },
+    { name = "httpx" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "google-auth", specifier = ">=2.36" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 

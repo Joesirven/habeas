@@ -12,6 +12,7 @@ from habeas_privacy_core.workflow.approval import (
     ASSIGNMENT_TARGETS,
     DEFAULT_MATCHING_REVIEW_TTL,
     MATCHING_REVIEW_ACTION,
+    NOTICE_REVIEW_ACTION,
     WORKFLOW_ASSIGNMENT_ACTION,
     create_pending_matching_review,
     create_workflow_assignment,
@@ -94,7 +95,22 @@ async def decide_approval(
         decided_by,
         decision_reason,
     )
-    return dict(row) if row else None
+    if row is None:
+        return None
+    result = dict(row)
+    if status == "approved" and result["action_type"] == NOTICE_REVIEW_ACTION:
+        await conn.execute(
+            """
+            UPDATE drop_raw_requests AS drr
+               SET notice_review_status = 'approved'
+              FROM requests AS r
+             WHERE r.id = $1
+               AND r.intake_source = 'drop'
+               AND r.raw_record_id = drr.id
+            """,
+            result["request_id"],
+        )
+    return result
 
 
 async def list_approvals(

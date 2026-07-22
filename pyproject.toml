@@ -28,6 +28,7 @@ members = [
     "app/data_fulfillment_dispatcher",
     "app/drop_connector",
     "app/drop_ingestor",
+    "app/drop_notice_dispatcher",
     "app/hash_index_refresh",
     "app/sla_monitor",
     # suppression (tier C — scaffold)
@@ -52,6 +53,7 @@ root_packages = [
     "data_fulfillment_dispatcher",
     "drop_connector",
     "drop_ingestor",
+    "drop_notice_dispatcher",
     "hash_index_refresh",
     "mailchimp",
     "paylocity",
@@ -75,6 +77,7 @@ source_modules = [
     "data_fulfillment_dispatcher",
     "drop_connector",
     "drop_ingestor",
+    "drop_notice_dispatcher",
     "hash_index_refresh",
     "mailchimp",
     "paylocity",
