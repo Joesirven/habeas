@@ -14,7 +14,7 @@ from habeas_privacy_core.health import health_payload, ready_payload
 from habeas_privacy_core.observability.logging import configure_logging
 from habeas_privacy_core.observability.tracing import setup_tracing
 from data_fulfillment_dispatcher.config import DataFulfillmentDispatcherSettings
-from data_fulfillment_dispatcher.fulfill import run_fulfill
+from data_fulfillment_dispatcher.fulfill import FulfillDeps, run_fulfill
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,10 @@ async def fulfill(body: FulfillRequest | None = None):
                 conn,
                 request_id=req.request_id,
                 limit=req.limit,
+                deps=FulfillDeps(
+                    gcs_bucket=settings.fulfillment_gcs_bucket,
+                    worker_id=settings.worker_id,
+                ),
             )
         except Exception:
             logger.exception("fulfill_failed", extra={"event": "fulfill_failed"})

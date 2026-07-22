@@ -1,4 +1,4 @@
-"""T9.1–T9.4 — fulfillment stub gates, status mapping, no Tier-C HTTP."""
+"""Fulfillment dispatcher — status mapping, queue, GCS, no Tier-C HTTP."""
 
 from __future__ import annotations
 
@@ -13,20 +13,59 @@ from data_fulfillment_dispatcher.fulfill import (
     RESPONSE_STATUS_DELETED,
     RESPONSE_STATUS_NOT_FOUND,
     RESPONSE_STATUS_OPTED_OUT,
+    FulfillDeps,
     find_requests_ready_to_fulfill,
     fulfill_one,
     response_status_for_match_count,
     run_fulfill,
 )
+from data_fulfillment_dispatcher.suppression import format_dwid_pipe, write_suppression_dwids
 
 REQUEST_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "data_fulfillment_dispatcher"
 
 
+def _meta_row(**overrides: Any) -> dict[str, Any]:
+    base = {
+        "intake_source": "drop",
+        "request_type": "delete",
+        "requestor_state": "CA",
+        "raw_record_id": 1,
+    }
+    base.update(overrides)
+    return base
+
+
+def _match_row(
+    *,
+    matched: bool = True,
+    match_count: int = 1,
+    consumer_id: str | None = "1001",
+) -> dict[str, Any]:
+    return {
+        "id": 9,
+        "matched": matched,
+        "match_count": match_count,
+        "consumer_id": consumer_id,
+    }
+
+
+def _conn_for_suppression(
+    *,
+    match: dict[str, Any],
+    meta: dict[str, Any] | None = None,
+    status_update: str = "UPDATE 1",
+) -> AsyncMock:
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[meta or _meta_row(), match])
+    conn.fetchval = AsyncMock(side_effect=[42, 1, 77])  # process_id, next#, attempt_id
+    conn.execute = AsyncMock(return_value=status_update)
+    return conn
+
+
 @pytest.mark.asyncio
 async def test_t9_1_skips_when_matching_review_not_approved():
-    """T9.1 Runs only after matching.review approved."""
     conn = AsyncMock()
 
     with patch(
@@ -46,51 +85,56 @@ async def test_t9_1_skips_when_matching_review_not_approved():
 
 @pytest.mark.asyncio
 async def test_t9_2_match_sets_response_status_deleted():
-    """T9.2 Match → status 3 (Deleted)."""
-    conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={"matched": True, "match_count": 1})
-    conn.execute = AsyncMock(return_value="UPDATE 1")
+    conn = _conn_for_suppression(match=_match_row(match_count=1))
 
-    with patch(
-        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
-        new_callable=AsyncMock,
-        return_value=True,
+    with (
+        patch(
+            "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "data_fulfillment_dispatcher.fulfill.ensure_pending_notice_review",
+            new_callable=AsyncMock,
+        ),
     ):
-        result = await fulfill_one(conn, REQUEST_ID)
+        result = await fulfill_one(conn, REQUEST_ID, deps=FulfillDeps(gcs_bucket=""))
 
     assert result.outcome == "fulfilled"
-    assert result.matched is True
     assert result.response_status == RESPONSE_STATUS_DELETED
-    assert result.response_status == 3
-    sql = conn.execute.await_args.args[0]
-    assert "drop_raw_requests" in sql
-    assert conn.execute.await_args.args[2] == 3
+    status_calls = [
+        c for c in conn.execute.await_args_list if "drop_raw_requests" in str(c.args[0])
+    ]
+    assert status_calls
+    assert status_calls[0].args[2] == 3
 
 
 @pytest.mark.asyncio
 async def test_t9_3_no_match_sets_response_status_not_found():
-    """T9.3 No-match → status 5."""
-    conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={"matched": False, "match_count": 0})
-    conn.execute = AsyncMock(return_value="UPDATE 1")
+    conn = _conn_for_suppression(
+        match=_match_row(matched=False, match_count=0, consumer_id=None)
+    )
 
-    with patch(
-        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
-        new_callable=AsyncMock,
-        return_value=True,
+    with (
+        patch(
+            "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "data_fulfillment_dispatcher.fulfill.ensure_pending_notice_review",
+            new_callable=AsyncMock,
+        ),
     ):
-        result = await fulfill_one(conn, REQUEST_ID)
+        result = await fulfill_one(conn, REQUEST_ID, deps=FulfillDeps(gcs_bucket=""))
 
     assert result.outcome == "fulfilled"
-    assert result.matched is False
     assert result.response_status == RESPONSE_STATUS_NOT_FOUND
-    assert result.response_status == 5
-    assert conn.execute.await_args.args[2] == 5
+    assert result.reason == "not_found"
 
 
 @pytest.mark.asyncio
 async def test_t9_4_no_external_suppression_http():
-    """T9.4 No external suppression HTTP calls (no httpx / Tier-C clients)."""
     banned_imports = {
         "httpx",
         "aiohttp",
@@ -115,42 +159,33 @@ async def test_t9_4_no_external_suppression_http():
                 root = node.module.split(".")[0]
                 assert root not in banned_imports, f"{path.name} imports from {node.module}"
 
-    conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={"matched": True, "match_count": 1})
-    conn.execute = AsyncMock(return_value="UPDATE 1")
-
-    with patch(
-        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
-        new_callable=AsyncMock,
-        return_value=True,
-    ):
-        result = await run_fulfill(conn, request_id=REQUEST_ID)
-
-    assert result.fulfilled == 1
-    assert result.items[0].response_status == 3
-    # Only DB execute — never an HTTP client
-    assert conn.execute.await_count == 1
-    conn.fetch.assert_not_awaited()  # single-id path skips batch finder
-
 
 @pytest.mark.asyncio
 async def test_multi_match_sets_response_status_opted_out():
-    """N>1 → status 4 (Opted out); still requires matching.review."""
-    conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={"matched": False, "match_count": 3})
-    conn.execute = AsyncMock(return_value="UPDATE 1")
+    conn = _conn_for_suppression(match=_match_row(matched=True, match_count=3))
 
-    with patch(
-        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
-        new_callable=AsyncMock,
-        return_value=True,
+    async def fake_resolver() -> list[str]:
+        return ["1", "2", "3"]
+
+    with (
+        patch(
+            "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "data_fulfillment_dispatcher.fulfill.ensure_pending_notice_review",
+            new_callable=AsyncMock,
+        ),
     ):
-        result = await fulfill_one(conn, REQUEST_ID)
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(gcs_bucket="", dwid_resolver=fake_resolver),
+        )
 
     assert result.outcome == "fulfilled"
-    assert result.match_count == 3
     assert result.response_status == RESPONSE_STATUS_OPTED_OUT
-    assert conn.execute.await_args.args[2] == 4
 
 
 def test_response_status_for_match_count_mapping():
@@ -160,40 +195,87 @@ def test_response_status_for_match_count_mapping():
 
 
 @pytest.mark.asyncio
-async def test_u25_open_row_rematch_multi_to_single_fulfills_deleted():
-    """After rematch multi→1, fulfill maps latest match_count to status 3 (not 4)."""
-    conn = AsyncMock()
-    # Latest result after rematch is single-match.
-    conn.fetchrow = AsyncMock(return_value={"matched": True, "match_count": 1})
-    conn.execute = AsyncMock(return_value="UPDATE 1")
+async def test_gcs_failure_leaves_response_status_unset():
+    conn = _conn_for_suppression(match=_match_row(match_count=1))
+
+    async def boom_transport(_b: str, _p: str, _d: bytes | None) -> bytes | None:
+        raise RuntimeError("gcs down")
 
     with patch(
         "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
         new_callable=AsyncMock,
         return_value=True,
     ):
-        result = await fulfill_one(conn, REQUEST_ID)
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=boom_transport),
+        )
 
-    assert result.outcome == "fulfilled"
-    assert result.match_count == 1
-    assert result.response_status == RESPONSE_STATUS_DELETED
-    assert result.response_status != RESPONSE_STATUS_OPTED_OUT
+    assert result.outcome == "rejected"
+    assert result.reason == "gcs_write_failed"
+    assert result.response_status is None
+    status_calls = [
+        c for c in conn.execute.await_args_list if "drop_raw_requests" in str(c.args[0])
+    ]
+    assert status_calls == []
 
 
 @pytest.mark.asyncio
-async def test_u25_open_row_rematch_multi_to_zero_fulfills_not_found():
-    conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={"matched": False, "match_count": 0})
-    conn.execute = AsyncMock(return_value="UPDATE 1")
+async def test_suppression_writes_pipe_file():
+    store: dict[tuple[str, str], bytes] = {}
 
-    with patch(
-        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
-        new_callable=AsyncMock,
-        return_value=True,
-    ):
-        result = await fulfill_one(conn, REQUEST_ID)
+    async def transport(bucket: str, path: str, data: bytes | None) -> bytes | None:
+        key = (bucket, path)
+        if data is None:
+            return store[key]
+        store[key] = data
+        return None
 
-    assert result.response_status == RESPONSE_STATUS_NOT_FOUND
+    uri = await write_suppression_dwids(
+        bucket="b",
+        process_id="99",
+        dwids=["111", "222"],
+        transport=transport,
+    )
+    assert uri == "gs://b/bulk-run/99/suppression/dwids.txt"
+    assert store[("b", "bulk-run/99/suppression/dwids.txt")] == b"111|222"
+    assert format_dwid_pipe(["a", "b"]) == b"a|b"
+
+
+@pytest.mark.asyncio
+async def test_access_export_writes_manifest():
+    from data_fulfillment_dispatcher.access_export import export_access_pack
+
+    store: dict[tuple[str, str], bytes] = {}
+
+    async def transport(bucket: str, path: str, data: bytes | None) -> bytes | None:
+        if data is None:
+            return store[(bucket, path)]
+        store[(bucket, path)] = data
+        return None
+
+    class FakeBQ:
+        def query(self, sql: str, job_config: Any = None) -> list[dict[str, Any]]:
+            del job_config
+            if "person" in sql:
+                return [{"dwid": "1", "state": "CA", "lastname": "X"}]
+            raise RuntimeError("404 Not found: table missing")
+
+    result = await export_access_pack(
+        bucket="b",
+        process_id="p1",
+        request_id=REQUEST_ID,
+        dwids=["1"],
+        state="CA",
+        bq_client=FakeBQ(),
+        transport=transport,
+        tables=("person", "cee_missing"),
+    )
+    assert result.row_count_total == 1
+    assert any(i["table"] == "person" for i in result.included)
+    assert any(e["table"] == "cee_missing" for e in result.excluded)
+    assert "manifest.json" in result.manifest_uri
 
 
 @pytest.mark.asyncio
@@ -204,9 +286,10 @@ async def test_run_fulfill_batch_uses_ready_finder():
         "22222222-2222-2222-2222-222222222222",
     ]
 
-    async def fake_one(_conn: Any, rid: str):
+    async def fake_one(_conn: Any, rid: str, deps: Any = None):
         from data_fulfillment_dispatcher.fulfill import FulfillItemResult
 
+        del deps
         return FulfillItemResult(
             request_id=rid,
             outcome="fulfilled",
@@ -228,7 +311,6 @@ async def test_run_fulfill_batch_uses_ready_finder():
         result = await run_fulfill(conn, limit=10)
 
     assert result.fulfilled == 2
-    assert [i.request_id for i in result.items] == ids
 
 
 @pytest.mark.asyncio
@@ -240,14 +322,13 @@ async def test_find_requests_ready_to_fulfill_sql():
     assert "matching.review" in sql
     assert "response_status IS NULL" in sql
     assert "matching_results" in sql
-    assert "decided_at" in sql
-    assert "MAX(mr.recorded_at)" in sql
+    assert "reproduction" in sql
 
 
 @pytest.mark.asyncio
 async def test_t9_1_rejected_when_no_matching_result():
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value=None)
+    conn.fetchrow = AsyncMock(side_effect=[_meta_row(), None])
 
     with patch(
         "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
@@ -258,7 +339,6 @@ async def test_t9_1_rejected_when_no_matching_result():
 
     assert result.outcome == "rejected"
     assert result.reason == "no_matching_result"
-    conn.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio

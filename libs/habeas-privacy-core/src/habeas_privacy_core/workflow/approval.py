@@ -18,7 +18,9 @@ _rule_cache: dict[str, tuple[dict[str, Any] | None, datetime]] = {}
 _logger = logging.getLogger(__name__)
 
 MATCHING_REVIEW_ACTION = "matching.review"
+NOTICE_REVIEW_ACTION = "notice.review"
 DEFAULT_MATCHING_REVIEW_TTL = timedelta(days=7)
+DEFAULT_NOTICE_REVIEW_TTL = timedelta(days=7)
 
 # Assign/escalate workflow (U17) — reuses approval_requests; no new table.
 # Pending rows are the current pointer; re-assign supersedes prior pending.
@@ -245,6 +247,104 @@ async def ensure_pending_matching_review(
             "matching_review_ensure_skipped",
             extra={
                 "event": "matching_review_ensure_skipped",
+                "request_id": request_id,
+                "reason": str(exc),
+            },
+        )
+        return None
+
+
+async def is_notice_review_approved(
+    conn: asyncpg.Connection,
+    request_id: str,
+) -> bool:
+    """Return True when notice.review has an approved approval_requests row."""
+    row = await conn.fetchval(
+        """
+        SELECT 1
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status = 'approved'
+         LIMIT 1
+        """,
+        UUID(request_id),
+        NOTICE_REVIEW_ACTION,
+    )
+    return row is not None
+
+
+async def create_pending_notice_review(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    context: dict[str, Any] | None = None,
+    expires_in: timedelta = DEFAULT_NOTICE_REVIEW_TTL,
+) -> dict[str, Any]:
+    """Insert a pending notice.review approval_requests row for a request."""
+    requirement = await check_approval_required(conn, NOTICE_REVIEW_ACTION, context or {})
+    if requirement is None:
+        rule = await fetch_active_rule(conn, NOTICE_REVIEW_ACTION)
+        if rule is None:
+            raise LookupError("notice.review approval rule is not configured")
+        raise ValueError("notice.review does not currently require approval")
+
+    expires_at = datetime.now(UTC) + expires_in
+    row = await conn.fetchrow(
+        """
+        INSERT INTO approval_requests (
+            request_id, action_type, rule_id, approver_role, status, context_jsonb, expires_at
+        ) VALUES ($1, $2, $3, $4, 'pending', $5::jsonb, $6)
+        RETURNING id, request_id, action_type, status, approver_role, requested_at, expires_at
+        """,
+        UUID(request_id),
+        NOTICE_REVIEW_ACTION,
+        requirement.rule_id,
+        requirement.approver_role,
+        json.dumps(context) if context is not None else None,
+        expires_at,
+    )
+    return dict(row)
+
+
+async def ensure_pending_notice_review(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    context: dict[str, Any] | None = None,
+    expires_in: timedelta = DEFAULT_NOTICE_REVIEW_TTL,
+) -> dict[str, Any] | None:
+    """Open pending notice.review after DROP suppression fulfill when absent."""
+    if await is_notice_review_approved(conn, request_id):
+        return None
+
+    pending = await conn.fetchval(
+        """
+        SELECT 1
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status IN ('pending', 'approved')
+         LIMIT 1
+        """,
+        UUID(request_id),
+        NOTICE_REVIEW_ACTION,
+    )
+    if pending is not None:
+        return None
+
+    try:
+        return await create_pending_notice_review(
+            conn,
+            request_id=request_id,
+            context=context,
+            expires_in=expires_in,
+        )
+    except (LookupError, ValueError) as exc:
+        _logger.warning(
+            "notice_review_ensure_skipped",
+            extra={
+                "event": "notice_review_ensure_skipped",
                 "request_id": request_id,
                 "reason": str(exc),
             },
