@@ -16,3 +16,6 @@ class DataFulfillmentDispatcherSettings(CoreSettings):
     port: int = 8080
     worker_id: str = "data-fulfillment-dispatcher-dev"
     fulfill_batch_size: int = 100
+    # Dedicated fulfillment artifact bucket (separate from DROP intake staging).
+    fulfillment_gcs_bucket: str = ""
+

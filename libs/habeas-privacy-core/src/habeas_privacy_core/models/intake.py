@@ -34,6 +34,7 @@ class CreateRequestInput(BaseModel):
     intake_source: IntakeSource
     raw_record_id: int | None = None
     requestor_state: str = Field(min_length=1, max_length=64)
+    request_type: str = Field(default="delete", min_length=1, max_length=20)
 
 
 class DropListType(StrEnum):
@@ -67,3 +68,4 @@ class RequestRecord(BaseModel):
     intake_source: IntakeSource
     raw_record_id: int | None = None
     requestor_state: str
+    request_type: str = "delete"

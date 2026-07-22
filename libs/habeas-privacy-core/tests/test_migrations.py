@@ -73,6 +73,21 @@ def test_hash_index_refresh_migration_exists():
     assert "migrate:down" in content
 
 
+def test_data_fulfillment_attempts_migration_exists():
+    migration = (
+        migrations_dir() / "20260721120001_fulfillment_create_data_fulfillment_attempts.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+    assert "CREATE TABLE data_fulfillment_attempts" in content
+    assert "step IN ('suppression', 'reproduction')" in content
+    assert "ADD COLUMN IF NOT EXISTS request_type" in content
+    assert "core_forbid_terminal_attempt_mutation" in content
+    assert "ix_data_fulfillment_attempts_pending" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+
+
 @pytest.fixture
 async def migrated_pool():
     database_url = os.environ["DATABASE_URL"]
@@ -102,8 +117,10 @@ async def test_t4_1_requests_thin_spine_columns(migrated_pool):
             "intake_source",
             "raw_record_id",
             "requestor_state",
+            "request_type",
         }
         assert "requestor_state" in columns
+        assert "request_type" in columns
 
 
 @integration

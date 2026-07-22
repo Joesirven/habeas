@@ -212,6 +212,7 @@ async def requests_create(_body: ManualRequestBody):
                 intake_source=IntakeSource.MANUAL,
                 raw_record_id=None,
                 requestor_state=_body.state,
+                request_type=_body.request_type,
             ),
         )
         record = await get_request(conn, request_id)
