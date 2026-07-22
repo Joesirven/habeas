@@ -399,9 +399,11 @@ async def run_weekly_amend(
 
             connector_attempt_id = payload.get("connector_attempt_id")
             cppa_response = payload.get("response") or {}
-            response_file_name = connector_amend_body(
-                batch, file_suffix=file_suffix[:10]
-            )["files"][0]["filename"]
+            # Connector returns suffixed filenames after apply_file_suffix.
+            filenames = payload.get("filenames") or []
+            response_file_name = (
+                filenames[0] if filenames else batch.source_csv_filename
+            )
             await record_submission(
                 conn,
                 source_csv_filename=batch.source_csv_filename,

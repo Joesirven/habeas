@@ -6,8 +6,8 @@ No Tier-C suppression HTTP. CPPA codes: 2 Exempted, 3 Deleted, 4 Opted out, 5 No
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -26,6 +26,8 @@ from data_fulfillment_dispatcher.access_export import (
     export_access_pack,
 )
 from data_fulfillment_dispatcher.attempts import (
+    claim_fulfillment_attempt_by_id,
+    claim_next_fulfillment,
     enqueue_fulfillment_attempt,
     mark_attempt_error,
     mark_attempt_in_flight,
@@ -51,6 +53,7 @@ class DbConnection(Protocol):
 
 
 DwidResolver = Callable[[], Awaitable[list[str]]]
+DwidResolverFactory = Callable[[Any, str], DwidResolver]
 
 
 @dataclass
@@ -61,6 +64,8 @@ class FulfillDeps:
     gcs_transport: GcsTransport | None = None
     worker_id: str = "data-fulfillment-dispatcher"
     dwid_resolver: DwidResolver | None = None
+    # Build a per-request zero-arg resolver (used when dwid_resolver is unset).
+    dwid_resolver_factory: DwidResolverFactory | None = None
     bq_client: AccessBigQueryClient | None = None
 
 
@@ -274,6 +279,24 @@ async def _record_access_delivery_pending(
     )
 
 
+async def _begin_attempt(
+    conn: DbConnection,
+    *,
+    attempt_id: int,
+    worker_id: str,
+    claim_by_id: bool,
+) -> bool:
+    """Claim (by id when requested) then mark in_flight with submitted_at."""
+    if claim_by_id:
+        claimed = await claim_fulfillment_attempt_by_id(
+            conn, attempt_id, worker_id=worker_id
+        )
+        if claimed is None:
+            return False
+    await mark_attempt_in_flight(conn, attempt_id, worker_id=worker_id)
+    return True
+
+
 async def _fulfill_suppression(
     conn: DbConnection,
     request_id: str,
@@ -283,17 +306,37 @@ async def _fulfill_suppression(
     matching_result_id: int | None,
     consumer_id: str | None,
     deps: FulfillDeps,
+    attempt_id: int | None = None,
+    claim_by_id: bool = True,
 ) -> FulfillItemResult:
     response_status = response_status_for_match_count(match_count)
     process_id = await _resolve_bulk_process_id(conn)
-    attempt_id = await enqueue_fulfillment_attempt(
+
+    if attempt_id is None:
+        attempt_id = await enqueue_fulfillment_attempt(
+            conn,
+            request_id=request_id,
+            step=DATA_FULFILLMENT_STEP_SUPPRESSION,
+            matching_result_id=matching_result_id,
+            bulk_process_id=process_id,
+        )
+        claim_by_id = True
+
+    started = await _begin_attempt(
         conn,
-        request_id=request_id,
-        step=DATA_FULFILLMENT_STEP_SUPPRESSION,
-        matching_result_id=matching_result_id,
-        bulk_process_id=process_id,
+        attempt_id=attempt_id,
+        worker_id=deps.worker_id,
+        claim_by_id=claim_by_id,
     )
-    await mark_attempt_in_flight(conn, attempt_id, worker_id=deps.worker_id)
+    if not started:
+        return FulfillItemResult(
+            request_id=request_id,
+            outcome="skipped",
+            matched=matched,
+            match_count=match_count,
+            reason="claim_failed",
+            request_type="delete",
+        )
 
     gcs_uri: str | None = None
     audit: dict[str, Any] = {
@@ -303,47 +346,80 @@ async def _fulfill_suppression(
     }
 
     if match_count > 0:
+        if not deps.gcs_bucket:
+            await mark_attempt_error(
+                conn,
+                attempt_id,
+                error_code="gcs_bucket_unset",
+                error_message="fulfillment_gcs_bucket_required_for_match",
+                audit_payload=audit,
+            )
+            return FulfillItemResult(
+                request_id=request_id,
+                outcome="rejected",
+                matched=matched,
+                match_count=match_count,
+                response_status=None,
+                reason="gcs_bucket_unset",
+                request_type="delete",
+            )
+
         dwids = await _default_dwids(
             match_count=match_count,
             consumer_id=consumer_id,
             resolver=deps.dwid_resolver,
         )
         audit["dwid_count"] = len(dwids)
-        if deps.gcs_bucket:
-            try:
-                gcs_uri = await write_suppression_dwids(
-                    bucket=deps.gcs_bucket,
-                    process_id=process_id,
-                    dwids=dwids,
-                    transport=deps.gcs_transport,
-                )
-            except Exception as exc:
-                await mark_attempt_error(
-                    conn,
-                    attempt_id,
-                    error_code="gcs_write_failed",
-                    error_message=type(exc).__name__,
-                    audit_payload=audit,
-                )
-                logger.warning(
-                    "suppression_gcs_failed",
-                    extra={
-                        "event": "suppression_gcs_failed",
-                        "request_id": request_id,
-                        "error_type": type(exc).__name__,
-                    },
-                )
-                return FulfillItemResult(
-                    request_id=request_id,
-                    outcome="rejected",
-                    matched=matched,
-                    match_count=match_count,
-                    response_status=None,
-                    reason="gcs_write_failed",
-                    request_type="delete",
-                )
-        else:
-            audit["gcs_bucket_unset"] = True
+        if not dwids:
+            await mark_attempt_error(
+                conn,
+                attempt_id,
+                error_code="no_dwids",
+                error_message="empty_dwids_for_suppression",
+                audit_payload=audit,
+            )
+            return FulfillItemResult(
+                request_id=request_id,
+                outcome="rejected",
+                matched=matched,
+                match_count=match_count,
+                response_status=None,
+                reason="no_dwids",
+                request_type="delete",
+            )
+        try:
+            # Read-merge-write: merge current DWIDs into existing bulk pipe file.
+            gcs_uri = await write_suppression_dwids(
+                bucket=deps.gcs_bucket,
+                process_id=process_id,
+                dwids=dwids,
+                transport=deps.gcs_transport,
+            )
+        except Exception as exc:
+            await mark_attempt_error(
+                conn,
+                attempt_id,
+                error_code="gcs_write_failed",
+                error_message=type(exc).__name__,
+                audit_payload=audit,
+            )
+            logger.warning(
+                "suppression_gcs_failed",
+                extra={
+                    "event": "suppression_gcs_failed",
+                    "request_id": request_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return FulfillItemResult(
+                request_id=request_id,
+                outcome="rejected",
+                matched=matched,
+                match_count=match_count,
+                response_status=None,
+                reason="gcs_write_failed",
+                request_type="delete",
+            )
     else:
         audit["reason"] = "not_found"
 
@@ -397,19 +473,38 @@ async def _fulfill_access(
     consumer_id: str | None,
     state: str,
     deps: FulfillDeps,
+    attempt_id: int | None = None,
+    claim_by_id: bool = True,
 ) -> FulfillItemResult:
     process_id = await _resolve_bulk_process_id(conn)
     if process_id == "unknown":
         process_id = f"manual/{request_id}"
 
-    attempt_id = await enqueue_fulfillment_attempt(
+    if attempt_id is None:
+        attempt_id = await enqueue_fulfillment_attempt(
+            conn,
+            request_id=request_id,
+            step=DATA_FULFILLMENT_STEP_REPRODUCTION,
+            matching_result_id=matching_result_id,
+            bulk_process_id=process_id,
+        )
+        claim_by_id = True
+
+    started = await _begin_attempt(
         conn,
-        request_id=request_id,
-        step=DATA_FULFILLMENT_STEP_REPRODUCTION,
-        matching_result_id=matching_result_id,
-        bulk_process_id=process_id,
+        attempt_id=attempt_id,
+        worker_id=deps.worker_id,
+        claim_by_id=claim_by_id,
     )
-    await mark_attempt_in_flight(conn, attempt_id, worker_id=deps.worker_id)
+    if not started:
+        return FulfillItemResult(
+            request_id=request_id,
+            outcome="skipped",
+            matched=matched,
+            match_count=match_count,
+            reason="claim_failed",
+            request_type="access",
+        )
 
     dwids = await _default_dwids(
         match_count=match_count,
@@ -485,6 +580,26 @@ async def _fulfill_access(
             request_type="access",
         )
 
+    if not exported.included:
+        await mark_attempt_error(
+            conn,
+            attempt_id,
+            error_code="empty_access_pack",
+            error_message="no_included_tables_after_export",
+            audit_payload={
+                "dwid_count": len(dwids),
+                "excluded_table_count": len(exported.excluded),
+            },
+        )
+        return FulfillItemResult(
+            request_id=request_id,
+            outcome="rejected",
+            matched=matched,
+            match_count=match_count,
+            reason="empty_access_pack",
+            request_type="access",
+        )
+
     await mark_attempt_success(
         conn,
         attempt_id,
@@ -509,14 +624,21 @@ async def _fulfill_access(
     )
 
 
-async def fulfill_one(
+async def _route_fulfill(
     conn: DbConnection,
     request_id: str,
     *,
-    deps: FulfillDeps | None = None,
+    deps: FulfillDeps,
+    attempt_id: int | None = None,
+    claim_by_id: bool = True,
+    step: str | None = None,
 ) -> FulfillItemResult:
-    """Gate on matching.review, then route by request_type."""
-    deps = deps or FulfillDeps()
+    """Gate + load match/meta, then route by request_type / claimed step."""
+    if deps.dwid_resolver is None and deps.dwid_resolver_factory is not None:
+        deps = replace(
+            deps,
+            dwid_resolver=deps.dwid_resolver_factory(conn, request_id),
+        )
     approved = await is_matching_review_approved(conn, request_id)  # type: ignore[arg-type]
     if not approved:
         return FulfillItemResult(
@@ -545,7 +667,9 @@ async def fulfill_one(
     request_type = str(meta.get("request_type") or "delete")
     state = str(meta.get("requestor_state") or "CA")
 
-    if request_type in ACCESS_TYPES:
+    if step == DATA_FULFILLMENT_STEP_REPRODUCTION or (
+        step is None and request_type in ACCESS_TYPES
+    ):
         return await _fulfill_access(
             conn,
             request_id,
@@ -555,9 +679,10 @@ async def fulfill_one(
             consumer_id=consumer_id,
             state=state,
             deps=deps,
+            attempt_id=attempt_id,
+            claim_by_id=claim_by_id,
         )
 
-    # Default DROP delete/opt_out suppression path
     if request_type not in SUPPRESSION_TYPES and meta.get("intake_source") != "drop":
         return FulfillItemResult(
             request_id=request_id,
@@ -576,6 +701,84 @@ async def fulfill_one(
         matching_result_id=matching_result_id,
         consumer_id=consumer_id,
         deps=deps,
+        attempt_id=attempt_id,
+        claim_by_id=claim_by_id,
+    )
+
+
+async def fulfill_one(
+    conn: DbConnection,
+    request_id: str,
+    *,
+    deps: FulfillDeps | None = None,
+) -> FulfillItemResult:
+    """Gate on matching.review, enqueue+claim by id, then fulfill."""
+    deps = deps or FulfillDeps()
+    return await _route_fulfill(conn, request_id, deps=deps, claim_by_id=True)
+
+
+async def _enqueue_ready_attempt(
+    conn: DbConnection,
+    request_id: str,
+    *,
+    deps: FulfillDeps,
+) -> int | None:
+    """Enqueue a pending attempt for a ready request (batch path)."""
+    approved = await is_matching_review_approved(conn, request_id)  # type: ignore[arg-type]
+    if not approved:
+        return None
+
+    meta = await _load_request_meta(conn, request_id)
+    if meta is None:
+        return None
+    latest = await _latest_match(conn, request_id)
+    if latest is None:
+        return None
+
+    _matched, _match_count, matching_result_id, _consumer_id = latest
+    request_type = str(meta.get("request_type") or "delete")
+    process_id = await _resolve_bulk_process_id(conn)
+
+    if request_type in ACCESS_TYPES:
+        if process_id == "unknown":
+            process_id = f"manual/{request_id}"
+        return await enqueue_fulfillment_attempt(
+            conn,
+            request_id=request_id,
+            step=DATA_FULFILLMENT_STEP_REPRODUCTION,
+            matching_result_id=matching_result_id,
+            bulk_process_id=process_id,
+        )
+
+    if request_type not in SUPPRESSION_TYPES and meta.get("intake_source") != "drop":
+        return None
+
+    return await enqueue_fulfillment_attempt(
+        conn,
+        request_id=request_id,
+        step=DATA_FULFILLMENT_STEP_SUPPRESSION,
+        matching_result_id=matching_result_id,
+        bulk_process_id=process_id,
+    )
+
+
+async def _process_claimed_attempt(
+    conn: DbConnection,
+    claim: dict[str, Any],
+    *,
+    deps: FulfillDeps,
+) -> FulfillItemResult:
+    """Process an attempt already claimed via claim_next (batch path)."""
+    request_id = str(claim["request_id"])
+    attempt_id = int(claim["id"])
+    step = str(claim["step"])
+    return await _route_fulfill(
+        conn,
+        request_id,
+        deps=deps,
+        attempt_id=attempt_id,
+        claim_by_id=False,
+        step=step,
     )
 
 
@@ -586,13 +789,27 @@ async def run_fulfill(
     limit: int = 100,
     deps: FulfillDeps | None = None,
 ) -> FulfillResult:
-    """Fulfill one request_id or a batch of ready requests."""
+    """Fulfill one request_id (enqueue+claim by id) or batch via claim_next."""
+    deps = deps or FulfillDeps()
+
     if request_id is not None:
-        ids = [request_id]
-    else:
-        ids = await find_requests_ready_to_fulfill(conn, limit=limit)
+        return FulfillResult(items=[await fulfill_one(conn, request_id, deps=deps)])
+
+    ready_ids = await find_requests_ready_to_fulfill(conn, limit=limit)
+    for rid in ready_ids:
+        await _enqueue_ready_attempt(conn, rid, deps=deps)
 
     items: list[FulfillItemResult] = []
-    for rid in ids:
-        items.append(await fulfill_one(conn, rid, deps=deps))
+    for step in (
+        DATA_FULFILLMENT_STEP_SUPPRESSION,
+        DATA_FULFILLMENT_STEP_REPRODUCTION,
+    ):
+        while len(items) < limit:
+            claim = await claim_next_fulfillment(
+                conn, step, worker_id=deps.worker_id
+            )
+            if claim is None:
+                break
+            items.append(await _process_claimed_attempt(conn, claim, deps=deps))
+
     return FulfillResult(items=items)

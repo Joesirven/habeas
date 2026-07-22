@@ -6,6 +6,7 @@ import json
 from typing import Any, Protocol
 from uuid import UUID
 
+from habeas_privacy_core.queue.claim import claim_next
 from habeas_privacy_core.queue.constants import (
     DATA_FULFILLMENT_ATTEMPTS_TABLE,
     DATA_FULFILLMENT_STEP_REPRODUCTION,
@@ -64,20 +65,65 @@ async def enqueue_fulfillment_attempt(
     return int(attempt_id)
 
 
+async def claim_fulfillment_attempt_by_id(
+    conn: DbConnection,
+    attempt_id: int,
+    *,
+    worker_id: str,
+    lease_minutes: int = 10,
+) -> dict[str, Any] | None:
+    """Claim a specific pending attempt (single-request /fulfill path)."""
+    row = await conn.fetchrow(
+        f"""
+        UPDATE {DATA_FULFILLMENT_ATTEMPTS_TABLE}
+           SET status = 'claimed',
+               worker_id = $2,
+               claim_expires_at = NOW() + ($3 || ' minutes')::interval
+         WHERE id = $1
+           AND status = 'pending'
+           AND (retry_after IS NULL OR retry_after <= NOW())
+        RETURNING *
+        """,
+        attempt_id,
+        worker_id,
+        str(lease_minutes),
+    )
+    return dict(row) if row else None
+
+
+async def claim_next_fulfillment(
+    conn: DbConnection,
+    step: str,
+    *,
+    worker_id: str,
+    lease_minutes: int = 10,
+) -> dict[str, Any] | None:
+    """Claim the next pending fulfillment attempt for a step (batch path)."""
+    return await claim_next(
+        conn,  # type: ignore[arg-type]
+        DATA_FULFILLMENT_ATTEMPTS_TABLE,
+        step,
+        worker_id=worker_id,
+        lease_minutes=lease_minutes,
+    )
+
+
 async def mark_attempt_in_flight(
     conn: DbConnection,
     attempt_id: int,
     *,
     worker_id: str,
 ) -> None:
+    """Enter in_flight and stamp submitted_at for stuck-in-flight reaping."""
     await conn.execute(
         f"""
         UPDATE {DATA_FULFILLMENT_ATTEMPTS_TABLE}
            SET status = 'in_flight',
                worker_id = $2,
+               submitted_at = NOW(),
                claim_expires_at = NOW() + interval '10 minutes'
          WHERE id = $1
-           AND status IN ('pending', 'claimed')
+           AND status = 'claimed'
         """,
         attempt_id,
         worker_id,

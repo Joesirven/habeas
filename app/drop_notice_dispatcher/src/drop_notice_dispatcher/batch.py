@@ -199,18 +199,17 @@ def connector_upload_body(batch: UploadBatch) -> dict[str, Any]:
 
 
 def connector_amend_body(batch: UploadBatch, *, file_suffix: str) -> dict[str, Any]:
-    """JSON body for drop_connector POST /amend with a unique filename suffix."""
-    base = batch.source_csv_filename
-    if base.lower().endswith(".csv"):
-        filename = f"{base[:-4]}_{file_suffix}.csv"
-    else:
-        filename = f"{base}_{file_suffix}"
+    """JSON body for drop_connector POST /amend.
+
+    Filenames are the base ``source_csv_filename`` (no pre-suffix). The connector
+    applies ``file_suffix`` via ``apply_file_suffix``.
+    """
     return {
         "files": [
             {
-                "filename": filename,
+                "filename": batch.source_csv_filename,
                 "rows": batch.id_status_rows(),
-                "file_suffix": file_suffix,
             }
-        ]
+        ],
+        "file_suffix": file_suffix,
     }

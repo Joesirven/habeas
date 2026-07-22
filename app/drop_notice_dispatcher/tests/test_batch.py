@@ -11,6 +11,7 @@ from drop_notice_dispatcher.batch import (
     NOTICE_REVIEW_ACTION,
     ReadyRow,
     build_id_status_csv,
+    connector_amend_body,
     connector_upload_body,
     find_ready_rows,
     group_batches,
@@ -103,6 +104,19 @@ def test_t10_3_upload_filename_is_exact_source_csv_filename():
     csv_bytes = build_id_status_csv(body["files"][0]["rows"])
     assert csv_bytes.startswith(b"Id,Status")
     assert b"drop-1,3" in csv_bytes
+
+
+def test_amend_body_top_level_file_suffix_and_base_filename():
+    """Amend body: top-level file_suffix; filename equals source_csv (no pre-suffix)."""
+    batch = group_batches([_ready_row()])[0]
+    body = connector_amend_body(batch, file_suffix="amd0001")
+
+    assert body["file_suffix"] == "amd0001"
+    assert body["files"][0]["filename"] == FILENAME
+    assert body["files"][0]["filename"] == batch.source_csv_filename
+    assert "file_suffix" not in body["files"][0]
+    assert "_amd0001" not in body["files"][0]["filename"]
+    assert body["files"][0]["rows"] == [{"Id": "drop-1", "Status": 3}]
 
 
 @pytest.mark.asyncio

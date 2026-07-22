@@ -18,6 +18,13 @@ _ALLOWED_DELIVERY = frozenset({"pending", "delivered", "failed", "recalled"})
 
 
 class FulfillmentArtifactResponse(BaseModel):
+    """Role-gated fulfillment artifact fields (never on journey list DTOs).
+
+    ``fulfillment_artifact_uri`` is the internal ``gs://`` object/prefix.
+    ``shareable_url`` is a signed HTTPS URL for operator copy-paste — None until
+    signed-URL generation exists (do not set it to the GCS URI).
+    """
+
     request_id: str
     kind: Literal["access", "suppression"] | None = None
     fulfillment_artifact_uri: str | None = None
@@ -92,7 +99,7 @@ async def get_fulfillment_artifact(
         request_id=request_id,
         kind=kind,
         fulfillment_artifact_uri=gcs_uri,
-        shareable_url=gcs_uri,
+        shareable_url=None,
         access_delivery_status=str(delivery_status) if delivery_status else None,
         attempt_status=str(attempt["status"]) if attempt else None,
     )
@@ -171,7 +178,7 @@ async def patch_access_delivery_status(
         request_id=request_id,
         kind="access",
         fulfillment_artifact_uri=gcs_uri,
-        shareable_url=gcs_uri,
+        shareable_url=None,
         access_delivery_status=body.status,
         attempt_status=str(attempt["status"]) if attempt else None,
     )

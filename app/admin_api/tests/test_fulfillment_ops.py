@@ -37,5 +37,6 @@ async def test_get_artifact_returns_uri(monkeypatch: pytest.MonkeyPatch):
         RolePrincipal(email="ops@example.com", role=ROLE_SUPER_ADMIN),  # type: ignore[arg-type]
     )
     assert result.kind == "access"
-    assert result.shareable_url == "gs://b/bulk-run/p/request/r/"
+    assert result.fulfillment_artifact_uri == "gs://b/bulk-run/p/request/r/"
+    assert result.shareable_url is None
     assert result.access_delivery_status == "pending"

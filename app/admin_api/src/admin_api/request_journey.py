@@ -71,6 +71,9 @@ _FORBIDDEN_RESPONSE_KEYS = frozenset(
         "source_csv_filename",
         "response_file_name",
         "raw_payload",
+        "shareable_url",
+        "fulfillment_artifact_uri",
+        "signed_url",
     }
 )
 

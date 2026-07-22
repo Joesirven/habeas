@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -82,7 +82,15 @@ async def fulfill(body: FulfillRequest | None = None):
     async with pool.acquire() as conn:
         try:
             bq_client = None
+            gcs_transport = None
+            dwid_resolver_factory = None
             if settings.fulfillment_gcs_bucket:
+                from habeas_privacy_core.adapters.gcs import (
+                    make_google_cloud_transport,
+                )
+                from data_fulfillment_dispatcher.dwid_resolve import make_dwid_resolver
+
+                gcs_transport = make_google_cloud_transport()
                 try:
                     from google.cloud import bigquery
 
@@ -92,14 +100,20 @@ async def fulfill(body: FulfillRequest | None = None):
                         "fulfillment_bq_client_unavailable",
                         extra={"event": "fulfillment_bq_client_unavailable"},
                     )
+
+                def dwid_resolver_factory(db: Any, request_id: str):
+                    return make_dwid_resolver(db, request_id, bq_client=bq_client)
+
             result = await run_fulfill(
                 conn,
                 request_id=req.request_id,
                 limit=req.limit,
                 deps=FulfillDeps(
                     gcs_bucket=settings.fulfillment_gcs_bucket,
+                    gcs_transport=gcs_transport,
                     worker_id=settings.worker_id,
                     bq_client=bq_client,
+                    dwid_resolver_factory=dwid_resolver_factory,
                 ),
             )
         except Exception:
