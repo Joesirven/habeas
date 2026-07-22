@@ -81,6 +81,17 @@ async def fulfill(body: FulfillRequest | None = None):
     pool = get_pool()
     async with pool.acquire() as conn:
         try:
+            bq_client = None
+            if settings.fulfillment_gcs_bucket:
+                try:
+                    from google.cloud import bigquery
+
+                    bq_client = bigquery.Client()
+                except Exception:
+                    logger.warning(
+                        "fulfillment_bq_client_unavailable",
+                        extra={"event": "fulfillment_bq_client_unavailable"},
+                    )
             result = await run_fulfill(
                 conn,
                 request_id=req.request_id,
@@ -88,6 +99,7 @@ async def fulfill(body: FulfillRequest | None = None):
                 deps=FulfillDeps(
                     gcs_bucket=settings.fulfillment_gcs_bucket,
                     worker_id=settings.worker_id,
+                    bq_client=bq_client,
                 ),
             )
         except Exception:
