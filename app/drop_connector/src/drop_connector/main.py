@@ -7,7 +7,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
@@ -17,6 +17,10 @@ from habeas_privacy_core.observability.tracing import setup_tracing
 from drop_connector.client import DropApiClient, DropApiError
 from drop_connector.config import DropConnectorSettings
 from drop_connector.download import run_download
+from drop_connector.schedule_eligibility import (
+    fetch_last_download_success_at,
+    is_download_due,
+)
 from drop_connector.upload import IdStatusRow, build_id_status_csv, run_amend, run_upload
 
 logger = logging.getLogger(__name__)
@@ -40,6 +44,13 @@ class UploadRequest(BaseModel):
 class AmendRequest(BaseModel):
     files: list[UploadFileBody] = Field(min_length=1)
     file_suffix: str = Field(min_length=1, max_length=10)
+
+
+class ScheduledDownloadBody(BaseModel):
+    """Optional Cloud Scheduler payload — empty/manual downloads skip the gate."""
+
+    interval_days: int | None = Field(default=None, ge=1, le=90)
+    source: str | None = None
 
 
 def _require_api_key() -> None:
@@ -117,9 +128,49 @@ async def readyz():
 @app.post("/download")
 @app.post("/download/submit")
 @app.post("/poll")
-async def download():
-    """Scheduler-ready: GET CPPA /data/download → stage ZIP + land attempts."""
+async def download(request: Request):
+    """Scheduler-ready: GET CPPA /data/download → stage ZIP + land attempts.
+
+    When Cloud Scheduler sends ``{\"interval_days\": N}``, skip if the last
+    successful download is newer than the interval. Manual/ops calls without
+    ``interval_days`` always run.
+    """
     _require_api_key()
+
+    interval_days: int | None = None
+    raw_body = await request.body()
+    if raw_body:
+        try:
+            parsed = ScheduledDownloadBody.model_validate_json(raw_body)
+            interval_days = parsed.interval_days
+        except Exception:
+            # Non-schedule bodies (or empty JSON) — treat as unconditional download.
+            interval_days = None
+
+    if interval_days is not None and settings.database_url:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            last_success = await fetch_last_download_success_at(conn)
+            due, next_eligible = is_download_due(
+                interval_days=interval_days, last_success_at=last_success
+            )
+            if not due:
+                logger.info(
+                    "drop_download_skipped_not_due",
+                    extra={
+                        "event": "drop_download_skipped_not_due",
+                        "interval_days": interval_days,
+                    },
+                )
+                return {
+                    "status": "skipped",
+                    "reason": "not_due",
+                    "interval_days": interval_days,
+                    "next_eligible_at": (
+                        next_eligible.isoformat() if next_eligible else None
+                    ),
+                }
+
     client = _client()
     try:
         if settings.database_url:

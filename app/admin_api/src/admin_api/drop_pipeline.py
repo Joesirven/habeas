@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Any
 
 import httpx
@@ -19,6 +19,7 @@ from admin_api.approvals import (
     MATCH_TYPE_FILTERS,
     MatchTypeFilter,
     assign_requests,
+    assign_requests_by_match_type,
     bulk_approve_matching_review_by_match_type,
     bulk_decline_matching_review_by_match_type,
     create_matching_review_approval,
@@ -88,9 +89,44 @@ class DropPipelineSettings(CoreSettings):
     # When true, mutating /ops/drop/* requires X-Goog-Authenticated-User-Email.
     # Local default false; enable with IAP in front of admin-api (see infra/README).
     require_iap_identity: bool = False
+    # CA DROP retrieval schedule (UTC HH:MM). Prefer live Cloud Scheduler via worker_schedules.
+    drop_connector_schedule_utc: str = "14:00"
+    drop_connector_schedule_label: str = "CA DROP retrieval"
+    drop_connector_interval_days: int = 15
 
 
 settings = DropPipelineSettings()
+
+
+def _parse_schedule_hhmm(raw: str) -> time:
+    """Parse HH:MM (24h UTC). Falls back to 14:00 on invalid input."""
+    try:
+        hour_s, minute_s = raw.strip().split(":", 1)
+        hour = int(hour_s)
+        minute = int(minute_s)
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return time(hour=hour, minute=minute, tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        pass
+    return time(hour=14, minute=0, tzinfo=timezone.utc)
+
+
+def next_scheduled_retrieval_utc(
+    *,
+    now: datetime | None = None,
+    schedule_hhmm: str | None = None,
+) -> datetime:
+    """Next daily fire at DROP_CONNECTOR_SCHEDULE_UTC (HH:MM)."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    fire_time = _parse_schedule_hhmm(schedule_hhmm or settings.drop_connector_schedule_utc)
+    candidate = datetime.combine(current.date(), fire_time)
+    if candidate <= current:
+        candidate = datetime.combine(current.date() + timedelta(days=1), fire_time)
+    return candidate
 
 DEFAULT_PROXY_TIMEOUT = 60.0
 DOWNLOAD_PROXY_TIMEOUT = 120.0
@@ -169,6 +205,15 @@ class AssignBody(BaseModel):
     request_ids: list[str] = Field(min_length=1, max_length=200)
     target_role: str = "reviewer"
     assignee_identity: str = Field(min_length=3, max_length=200)
+    decided_by: str | None = None
+
+
+class AssignByMatchTypeBody(BaseModel):
+    """Assign every DROP request in a match-type batch to a reviewer."""
+
+    match_type: MatchTypeFilter
+    assignee_identity: str = Field(min_length=3, max_length=200)
+    target_role: str = "reviewer"
     decided_by: str | None = None
 
 
@@ -497,6 +542,22 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
         str(APPROACHING_SLA_THRESHOLD_HOURS["matching_review"]),
     )
 
+    last_connector_success = await conn.fetchval(
+        """
+        SELECT completed_at
+          FROM drop_connector_attempts
+         WHERE status = 'success'
+           AND completed_at IS NOT NULL
+         ORDER BY completed_at DESC
+         LIMIT 1
+        """
+    )
+    from admin_api.worker_schedules import ca_drop_schedule_payload
+
+    ca_drop_schedule = await ca_drop_schedule_payload(
+        last_success_at=last_connector_success
+    )
+
     return {
         "connector_attempts": [
             {"step": r["step"], "status": r["status"], "count": int(r["count"])}
@@ -559,6 +620,7 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
             "matching_review": int(approaching_matching_review or 0),
             "thresholds_hours": dict(APPROACHING_SLA_THRESHOLD_HOURS),
         },
+        "ca_drop_schedule": ca_drop_schedule,
         "matching_results_recent": [
             {
                 "request_id": r["request_id"],
@@ -602,6 +664,607 @@ def _public_worker_health(probe: dict[str, Any]) -> dict[str, Any]:
         "status_code": probe.get("status_code"),
         "ready": ready_summary,
         "error": probe.get("error"),
+    }
+
+
+def _status_bucket(status: str) -> str:
+    if status in _OPEN_ATTEMPT_STATUSES:
+        return "open"
+    if status == "success":
+        return "success"
+    if status in _TERMINAL_FAIL_STATUSES:
+        return "failed"
+    return "other"
+
+
+def _empty_stage_counts() -> dict[str, int]:
+    return {"total": 0, "open": 0, "success": 0, "failed": 0, "other": 0}
+
+
+def _accumulate_status(counts: dict[str, int], status: str, n: int) -> None:
+    bucket = _status_bucket(status)
+    counts[bucket] = int(counts.get(bucket, 0)) + n
+    counts["total"] = int(counts.get("total", 0)) + n
+
+
+def _process_label(*, intake_source: str, process_at: datetime) -> str:
+    stamp = process_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return f"{intake_source} · {stamp}"
+
+
+def _stage_completion_ratio(counts: dict[str, int]) -> float:
+    total = int(counts.get("total", 0))
+    if total <= 0:
+        return 0.0
+    return int(counts.get("success", 0)) / total
+
+
+def _derive_overall(stages: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Weighted progress across request-processing stages (counts only)."""
+    order = ("download", "land", "promote", "matching", "review", "fulfillment")
+    weights = {
+        "download": 0.10,
+        "land": 0.15,
+        "promote": 0.20,
+        "matching": 0.30,
+        "review": 0.15,
+        "fulfillment": 0.10,
+    }
+    weighted = 0.0
+    current_stage = "download"
+    for key in order:
+        stage = stages.get(key) or _empty_stage_counts()
+        ratio = _stage_completion_ratio(stage)
+        weighted += weights[key] * ratio
+        open_n = int(stage.get("open", 0))
+        failed_n = int(stage.get("failed", 0))
+        total = int(stage.get("total", 0))
+        success_n = int(stage.get("success", 0))
+        incomplete = open_n > 0 or failed_n > 0 or (total > 0 and success_n < total)
+        if incomplete:
+            current_stage = key
+            break
+        if total == 0 and key in ("land", "promote", "matching"):
+            current_stage = key
+            break
+    else:
+        current_stage = "fulfillment"
+    percent = int(round(min(100.0, max(0.0, weighted * 100.0))))
+    any_open = any(int((stages.get(k) or {}).get("open", 0)) > 0 for k in order)
+    any_failed = any(int((stages.get(k) or {}).get("failed", 0)) > 0 for k in order)
+    if percent >= 100 and not any_open and not any_failed:
+        status = "complete"
+        current_stage = "fulfillment"
+    elif any_failed and not any_open:
+        status = "needs_attention"
+    elif any_open or percent < 100:
+        status = "in_progress"
+    else:
+        status = "complete"
+    return {
+        "percent": percent,
+        "current_stage": current_stage,
+        "status": status,
+    }
+
+
+async def list_bulk_processes(
+    conn: Any,
+    *,
+    day: date | None = None,
+    days: int = 1,
+    intake_source: str | None = None,
+    download_status: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """DROP bulk processes keyed by download attempt (intake + datetime).
+
+    No gcs_uri / filenames in the response — process_id + timestamps only.
+    When ``day`` is set, that UTC calendar day is used; otherwise the last
+    ``days`` days (UTC) ending now.
+    """
+    now = datetime.now(timezone.utc)
+    if day is not None:
+        day_start = datetime.combine(day, time(0, 0, tzinfo=timezone.utc))
+        day_end = day_start + timedelta(days=1)
+    else:
+        bounded_days = max(1, min(days, 30))
+        day_end = now
+        day_start = now - timedelta(days=bounded_days)
+
+    clauses = [
+        "step = 'download'",
+        "attempted_at >= $1",
+        "attempted_at < $2",
+    ]
+    params: list[Any] = [day_start, day_end]
+    idx = 3
+    if download_status:
+        clauses.append(f"status = ${idx}")
+        params.append(download_status)
+        idx += 1
+    # intake_source reserved for multi-intake; DROP downloads are always 'drop'.
+    if intake_source and intake_source != "drop":
+        return []
+
+    params.append(max(1, min(limit, 100)))
+    rows = await conn.fetch(
+        f"""
+        SELECT id, status, attempted_at, completed_at,
+               (gcs_uri IS NOT NULL AND length(trim(gcs_uri)) > 0) AS has_uri
+          FROM drop_connector_attempts
+         WHERE {' AND '.join(clauses)}
+         ORDER BY attempted_at DESC
+         LIMIT ${idx}
+        """,
+        *params,
+    )
+    processes: list[dict[str, Any]] = []
+    for row in rows:
+        attempted_at = row["attempted_at"]
+        processes.append(
+            {
+                "process_id": int(row["id"]),
+                "intake_source": "drop",
+                "process_at": attempted_at.isoformat() if attempted_at else None,
+                "completed_at": (
+                    row["completed_at"].isoformat() if row["completed_at"] else None
+                ),
+                "download_status": str(row["status"]),
+                "label": _process_label(
+                    intake_source="drop",
+                    process_at=attempted_at,
+                ),
+                "linkable": bool(row["has_uri"]),
+            }
+        )
+    return processes
+
+
+def _run_row(
+    *,
+    job: str,
+    attempt_id: int,
+    step: str,
+    status: str,
+    started_at: datetime | None,
+    completed_at: datetime | None,
+    attempt_number: int,
+    request_id: Any = None,
+) -> dict[str, Any]:
+    return {
+        "run_id": f"{job}:{attempt_id}",
+        "job": job,
+        "attempt_id": attempt_id,
+        "step": step,
+        "status": status,
+        "started_at": started_at.isoformat() if started_at else None,
+        "completed_at": completed_at.isoformat() if completed_at else None,
+        "attempt_number": attempt_number,
+        "request_id": str(request_id) if request_id is not None else None,
+    }
+
+
+async def collect_process_run_groups(
+    conn: Any,
+    *,
+    stages: list[str],
+    day: date | None = None,
+    days: int = 1,
+    process_id: int | None = None,
+    status: str | None = None,
+    limit_per_group: int = 40,
+) -> list[dict[str, Any]]:
+    """Attempt history for pipeline stages, grouped by bulk process label."""
+    allowed = {"download", "land", "promote", "matching"}
+    stage_set = [s for s in stages if s in allowed]
+    if not stage_set:
+        return []
+
+    processes = await list_bulk_processes(
+        conn,
+        day=day,
+        days=days,
+        limit=50,
+    )
+    if process_id is not None:
+        processes = [p for p in processes if p["process_id"] == process_id]
+
+    groups: list[dict[str, Any]] = []
+    for proc in processes:
+        pid = int(proc["process_id"])
+        head = await conn.fetchrow(
+            """
+            SELECT id, status, attempted_at, completed_at, gcs_uri, attempt_number
+              FROM drop_connector_attempts
+             WHERE id = $1 AND step = 'download'
+            """,
+            pid,
+        )
+        if head is None:
+            continue
+        gcs_uri = head["gcs_uri"]
+        runs: list[dict[str, Any]] = []
+
+        if "download" in stage_set:
+            runs.append(
+                _run_row(
+                    job="drop_connector",
+                    attempt_id=int(head["id"]),
+                    step="download",
+                    status=str(head["status"]),
+                    started_at=head["attempted_at"],
+                    completed_at=head["completed_at"],
+                    attempt_number=int(head["attempt_number"] or 1),
+                )
+            )
+
+        if gcs_uri and ("land" in stage_set or "promote" in stage_set):
+            step_filter = [s for s in ("land", "promote") if s in stage_set]
+            ingest_rows = await conn.fetch(
+                """
+                SELECT id, step, status, attempted_at, completed_at, attempt_number
+                  FROM drop_ingest_attempts
+                 WHERE gcs_uri = $1
+                   AND step = ANY($2::text[])
+                 ORDER BY attempted_at DESC
+                 LIMIT $3
+                """,
+                gcs_uri,
+                step_filter,
+                limit_per_group,
+            )
+            for row in ingest_rows:
+                runs.append(
+                    _run_row(
+                        job="drop_ingestor",
+                        attempt_id=int(row["id"]),
+                        step=str(row["step"]),
+                        status=str(row["status"]),
+                        started_at=row["attempted_at"],
+                        completed_at=row["completed_at"],
+                        attempt_number=int(row["attempt_number"] or 1),
+                    )
+                )
+
+        if gcs_uri and "matching" in stage_set:
+            match_rows = await conn.fetch(
+                """
+                SELECT ma.id, ma.step, ma.status, ma.attempted_at, ma.completed_at,
+                       ma.attempt_number, ma.request_id
+                  FROM matching_attempts ma
+                  JOIN requests r ON r.id = ma.request_id AND r.intake_source = 'drop'
+                  JOIN drop_raw_requests drr ON drr.id = r.raw_record_id
+                  JOIN drop_ingest_attempts i
+                    ON i.source_csv_filename = drr.source_csv_filename
+                   AND i.step = 'land'
+                   AND i.gcs_uri = $1
+                 ORDER BY ma.attempted_at DESC
+                 LIMIT $2
+                """,
+                gcs_uri,
+                limit_per_group,
+            )
+            for row in match_rows:
+                runs.append(
+                    _run_row(
+                        job="matching",
+                        attempt_id=int(row["id"]),
+                        step=str(row["step"]),
+                        status=str(row["status"]),
+                        started_at=row["attempted_at"],
+                        completed_at=row["completed_at"],
+                        attempt_number=int(row["attempt_number"] or 1),
+                        request_id=row["request_id"],
+                    )
+                )
+
+        if status:
+            if status == "open":
+                runs = [r for r in runs if r["status"] in _OPEN_ATTEMPT_STATUSES]
+            elif status == "failed":
+                runs = [r for r in runs if r["status"] in _TERMINAL_FAIL_STATUSES]
+            elif status == "success":
+                runs = [r for r in runs if r["status"] == "success"]
+            else:
+                runs = [r for r in runs if r["status"] == status]
+
+        runs.sort(key=lambda r: r["started_at"] or "", reverse=True)
+        groups.append(
+            {
+                "process_id": pid,
+                "intake_source": proc["intake_source"],
+                "process_at": proc["process_at"],
+                "label": proc["label"],
+                "download_status": proc["download_status"],
+                "run_count": len(runs),
+                "runs": runs,
+            }
+        )
+    return groups
+
+
+_TREND_JOB_TABLES: tuple[tuple[str, str], ...] = (
+    ("drop_connector", "drop_connector_attempts"),
+    ("drop_ingestor", "drop_ingest_attempts"),
+    ("matching", "matching_attempts"),
+    ("hash_index_refresh", "hash_index_refresh_attempts"),
+)
+
+
+async def _window_attempt_stats(
+    conn: Any,
+    *,
+    table: str,
+    start: datetime,
+    end: datetime,
+) -> dict[str, float | int]:
+    has_attempt_number = table != "hash_index_refresh_attempts"
+    attempt_expr = "attempt_number" if has_attempt_number else "1"
+    row = await conn.fetchrow(
+        f"""
+        SELECT COUNT(*)::int AS total,
+               COUNT(*) FILTER (
+                 WHERE status = ANY($3::text[])
+               )::int AS failed,
+               COALESCE(AVG({attempt_expr}), 0)::float AS avg_attempts
+          FROM {table}
+         WHERE attempted_at >= $1
+           AND attempted_at < $2
+        """,
+        start,
+        end,
+        list(_TERMINAL_FAIL_STATUSES),
+    )
+    total = int(row["total"] or 0) if row else 0
+    failed = int(row["failed"] or 0) if row else 0
+    avg_attempts = float(row["avg_attempts"] or 0) if row else 0.0
+    error_rate = (failed / total) if total else 0.0
+    return {
+        "total": total,
+        "failed": failed,
+        "error_rate": round(error_rate, 4),
+        "avg_attempts": round(avg_attempts, 3),
+    }
+
+
+def _trend_anomaly(
+    current: dict[str, float | int],
+    previous: dict[str, float | int],
+) -> list[str]:
+    flags: list[str] = []
+    cur_err = float(current["error_rate"])
+    prev_err = float(previous["error_rate"])
+    cur_retry = float(current["avg_attempts"])
+    prev_retry = float(previous["avg_attempts"])
+    if int(current["total"]) >= 5:
+        if prev_err > 0 and cur_err >= prev_err * 2 and cur_err - prev_err >= 0.05:
+            flags.append("error_rate_spike")
+        elif prev_err == 0 and cur_err >= 0.15:
+            flags.append("error_rate_elevated")
+        if prev_retry > 0 and cur_retry >= prev_retry * 1.5 and cur_retry - prev_retry >= 0.25:
+            flags.append("retry_drift")
+        elif prev_retry == 0 and cur_retry >= 1.5:
+            flags.append("retry_elevated")
+    return flags
+
+
+async def collect_worker_trends(
+    conn: Any,
+    *,
+    window_hours: int = 168,
+) -> dict[str, Any]:
+    """Compare current vs prior window attempt stats for drift / anomaly signals."""
+    hours = max(8, min(window_hours, 2160))
+    now = datetime.now(timezone.utc)
+    current_start = now - timedelta(hours=hours)
+    previous_start = current_start - timedelta(hours=hours)
+    workers: list[dict[str, Any]] = []
+    for job, table in _TREND_JOB_TABLES:
+        current = await _window_attempt_stats(
+            conn, table=table, start=current_start, end=now
+        )
+        previous = await _window_attempt_stats(
+            conn, table=table, start=previous_start, end=current_start
+        )
+        flags = _trend_anomaly(current, previous)
+        workers.append(
+            {
+                "worker": job,
+                "current": current,
+                "previous": previous,
+                "delta": {
+                    "error_rate": round(
+                        float(current["error_rate"]) - float(previous["error_rate"]), 4
+                    ),
+                    "avg_attempts": round(
+                        float(current["avg_attempts"]) - float(previous["avg_attempts"]),
+                        3,
+                    ),
+                    "total": int(current["total"]) - int(previous["total"]),
+                },
+                "anomalies": flags,
+                "signal": "watch" if flags else "ok",
+            }
+        )
+    return {
+        "window_hours": hours,
+        "current_start": current_start.isoformat(),
+        "previous_start": previous_start.isoformat(),
+        "as_of": now.isoformat(),
+        "workers": workers,
+    }
+
+
+async def collect_bulk_process_progress(
+    conn: Any,
+    *,
+    process_id: int,
+) -> dict[str, Any] | None:
+    """Stage progress for one DROP download-keyed bulk process (counts only)."""
+    head = await conn.fetchrow(
+        """
+        SELECT id, status, attempted_at, completed_at, gcs_uri
+          FROM drop_connector_attempts
+         WHERE id = $1
+           AND step = 'download'
+        """,
+        process_id,
+    )
+    if head is None:
+        return None
+
+    download = _empty_stage_counts()
+    _accumulate_status(download, str(head["status"]), 1)
+
+    gcs_uri = head["gcs_uri"]
+    land = _empty_stage_counts()
+    promote = _empty_stage_counts()
+    land_by_list: list[dict[str, Any]] = []
+    promote_by_list: list[dict[str, Any]] = []
+
+    if gcs_uri:
+        ingest_rows = await conn.fetch(
+            """
+            SELECT step, status, list_type, COUNT(*)::int AS count
+              FROM drop_ingest_attempts
+             WHERE gcs_uri = $1
+             GROUP BY step, status, list_type
+            """,
+            gcs_uri,
+        )
+        for row in ingest_rows:
+            n = int(row["count"])
+            step = str(row["step"])
+            status = str(row["status"])
+            target = land if step == "land" else promote if step == "promote" else None
+            if target is None:
+                continue
+            _accumulate_status(target, status, n)
+            by_list = land_by_list if step == "land" else promote_by_list
+            by_list.append(
+                {
+                    "list_type": row["list_type"],
+                    "status": status,
+                    "count": n,
+                }
+            )
+
+        # Request set for this ZIP: raw rows whose land attempt shares gcs_uri.
+        request_stats = await conn.fetchrow(
+            """
+            WITH batch_raw AS (
+                SELECT DISTINCT drr.id AS raw_id
+                  FROM drop_raw_requests drr
+                  JOIN drop_ingest_attempts i
+                    ON i.source_csv_filename = drr.source_csv_filename
+                   AND i.step = 'land'
+                   AND i.gcs_uri = $1
+            ),
+            batch_requests AS (
+                SELECT r.id AS request_id, drr.response_status
+                  FROM batch_raw br
+                  JOIN drop_raw_requests drr ON drr.id = br.raw_id
+                  JOIN requests r
+                    ON r.raw_record_id = drr.id
+                   AND r.intake_source = 'drop'
+            ),
+            latest_match AS (
+                SELECT DISTINCT ON (ma.request_id)
+                       ma.request_id, ma.status
+                  FROM matching_attempts ma
+                  JOIN batch_requests br ON br.request_id = ma.request_id
+                 ORDER BY ma.request_id, ma.attempted_at DESC
+            )
+            SELECT
+                (SELECT COUNT(*)::int FROM batch_raw) AS raw_rows,
+                (SELECT COUNT(*)::int FROM batch_requests) AS request_rows,
+                (SELECT COUNT(*)::int FROM batch_requests br
+                  WHERE br.request_id NOT IN (SELECT request_id FROM latest_match)
+                ) AS matching_none,
+                (SELECT COUNT(*)::int FROM latest_match
+                  WHERE status = ANY($2::text[])) AS matching_open,
+                (SELECT COUNT(*)::int FROM latest_match
+                  WHERE status = 'success') AS matching_success,
+                (SELECT COUNT(*)::int FROM latest_match
+                  WHERE status = ANY($3::text[])) AS matching_failed,
+                (SELECT COUNT(*)::int
+                   FROM approval_requests ar
+                   JOIN batch_requests br ON br.request_id = ar.request_id
+                  WHERE ar.action_type = $4
+                    AND ar.status = 'pending') AS review_pending,
+                (SELECT COUNT(*)::int
+                   FROM approval_requests ar
+                   JOIN batch_requests br ON br.request_id = ar.request_id
+                  WHERE ar.action_type = $4
+                    AND ar.status = 'approved') AS review_approved,
+                (SELECT COUNT(*)::int FROM batch_requests
+                  WHERE response_status IS NULL) AS fulfill_unset,
+                (SELECT COUNT(*)::int FROM batch_requests
+                  WHERE response_status IS NOT NULL) AS fulfill_done
+            """,
+            gcs_uri,
+            list(_OPEN_ATTEMPT_STATUSES),
+            list(_TERMINAL_FAIL_STATUSES),
+            MATCHING_REVIEW_ACTION,
+        )
+    else:
+        request_stats = None
+
+    matching = _empty_stage_counts()
+    review = _empty_stage_counts()
+    fulfillment = _empty_stage_counts()
+    raw_rows = 0
+    request_rows = 0
+    if request_stats is not None:
+        raw_rows = int(request_stats["raw_rows"] or 0)
+        request_rows = int(request_stats["request_rows"] or 0)
+        matching_none = int(request_stats["matching_none"] or 0)
+        matching["open"] = int(request_stats["matching_open"] or 0) + matching_none
+        matching["success"] = int(request_stats["matching_success"] or 0)
+        matching["failed"] = int(request_stats["matching_failed"] or 0)
+        matching["total"] = (
+            matching["open"] + matching["success"] + matching["failed"]
+        )
+        review["open"] = int(request_stats["review_pending"] or 0)
+        review["success"] = int(request_stats["review_approved"] or 0)
+        review["total"] = review["open"] + review["success"]
+        fulfillment["open"] = int(request_stats["fulfill_unset"] or 0)
+        fulfillment["success"] = int(request_stats["fulfill_done"] or 0)
+        fulfillment["total"] = fulfillment["open"] + fulfillment["success"]
+
+    stages = {
+        "download": download,
+        "land": {**land, "by_list_type": land_by_list},
+        "promote": {**promote, "by_list_type": promote_by_list},
+        "matching": matching,
+        "review": review,
+        "fulfillment": fulfillment,
+    }
+    overall = _derive_overall(
+        {
+            "download": download,
+            "land": land,
+            "promote": promote,
+            "matching": matching,
+            "review": review,
+            "fulfillment": fulfillment,
+        }
+    )
+    attempted_at = head["attempted_at"]
+    return {
+        "process_id": int(head["id"]),
+        "intake_source": "drop",
+        "process_at": attempted_at.isoformat() if attempted_at else None,
+        "completed_at": (
+            head["completed_at"].isoformat() if head["completed_at"] else None
+        ),
+        "label": _process_label(intake_source="drop", process_at=attempted_at),
+        "download_status": str(head["status"]),
+        "raw_rows": raw_rows,
+        "request_rows": request_rows,
+        "stages": stages,
+        "overall": overall,
     }
 
 
@@ -668,6 +1331,119 @@ def _model_dump_nonzero(model: BaseModel) -> dict[str, Any]:
 @router.get("/pipeline")
 async def drop_pipeline_status(_principal: SuperAdminPrincipal):
     return await get_pipeline_status()
+
+
+@router.get("/processes")
+async def drop_bulk_processes(
+    _principal: SuperAdminPrincipal,
+    day: date | None = Query(
+        default=None,
+        description="UTC calendar day (YYYY-MM-DD). Defaults to today when days omitted.",
+    ),
+    days: int = Query(default=1, ge=1, le=30),
+    intake_source: str | None = Query(default=None),
+    download_status: str | None = Query(default=None),
+    overall_status: str | None = Query(
+        default=None,
+        description="Filter by derived overall.status when include_summary=true.",
+    ),
+    include_summary: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    """List DROP bulk processes keyed by intake type + datetime."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        processes = await list_bulk_processes(
+            conn,
+            day=day,
+            days=days,
+            intake_source=intake_source,
+            download_status=download_status,
+            limit=limit,
+        )
+        if include_summary:
+            enriched: list[dict[str, Any]] = []
+            for item in processes:
+                detail = await collect_bulk_process_progress(
+                    conn, process_id=int(item["process_id"])
+                )
+                if detail is not None:
+                    item = {
+                        **item,
+                        "overall": detail["overall"],
+                        "request_rows": detail["request_rows"],
+                        "raw_rows": detail["raw_rows"],
+                    }
+                if overall_status and item.get("overall", {}).get("status") != overall_status:
+                    continue
+                enriched.append(item)
+            processes = enriched
+    return {
+        "day": (day or datetime.now(timezone.utc).date()).isoformat(),
+        "days": days,
+        "processes": processes,
+    }
+
+
+@router.get("/processes/runs")
+async def drop_bulk_process_runs(
+    _principal: SuperAdminPrincipal,
+    stage: str = Query(
+        default="download",
+        description="Comma-separated stages: download,land,promote,matching",
+    ),
+    day: date | None = Query(default=None),
+    days: int = Query(default=1, ge=1, le=30),
+    process_id: int | None = Query(default=None, ge=1),
+    status: str | None = Query(default=None),
+):
+    """Attempt history for pipeline stages, grouped by bulk process."""
+    _require_database()
+    stages = [part.strip() for part in stage.split(",") if part.strip()]
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        groups = await collect_process_run_groups(
+            conn,
+            stages=stages,
+            day=day,
+            days=days,
+            process_id=process_id,
+            status=status,
+        )
+    return {"stages": stages, "groups": groups}
+
+
+@router.get("/processes/{process_id}")
+async def drop_bulk_process_detail(
+    process_id: int,
+    _principal: SuperAdminPrincipal,
+):
+    """Stage progress for one DROP bulk process (connector download id)."""
+    _require_database()
+    if process_id < 1:
+        raise HTTPException(status_code=400, detail="invalid process_id")
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        detail = await collect_bulk_process_progress(conn, process_id=process_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="process not found")
+    return detail
+
+
+@router.get("/workers/trends")
+async def drop_worker_trends(
+    _principal: SuperAdminPrincipal,
+    window: str = Query(default="1w", description="8h | 1w | 3m"),
+):
+    """Drift / anomaly signals from attempt stats vs the prior equal window."""
+    _require_database()
+    hours = {"8h": 8, "1w": 168, "3m": 2160}.get(window, 168)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        payload = await collect_worker_trends(conn, window_hours=hours)
+    payload["window"] = window if window in {"8h", "1w", "3m"} else "1w"
+    return payload
 
 
 @router.post("/download")
@@ -827,6 +1603,21 @@ async def hash_index_refresh_process(
     """Proxy process to hash_index_refresh worker (Cloud Run invoker token)."""
     url = f"{settings.hash_index_refresh_url.rstrip('/')}/process"
     return await proxy_post(url, timeout=HASH_INDEX_REFRESH_PROXY_TIMEOUT)
+
+
+def _coerce_audit_payload(value: Any) -> dict[str, Any]:
+    """Normalize JSONB audit_payload to a dict (legacy rows may be list/str/null)."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
 
 
 def _serialize_matching_result_row(row: Any) -> dict[str, Any]:
@@ -1088,7 +1879,7 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
             else None,
             "error_code": a["error_code"],
             # Allowlisted JSONB already — never add hash/dwid fields here.
-            "audit_payload": dict(a["audit_payload"] or {}),
+            "audit_payload": _coerce_audit_payload(a["audit_payload"]),
         }
         for a in attempt_rows
     ]
@@ -1295,6 +2086,36 @@ async def drop_workflow_assign(
                 target_role=body.target_role,
                 assignee_identity=assignee,
                 decided_by=decided_by,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": "ok", **result}
+
+
+@router.post("/workflow/assign-by-match-type")
+async def drop_workflow_assign_by_match_type(
+    body: AssignByMatchTypeBody,
+    actor: DropMutationActor,
+):
+    """Assign an entire match-type batch (all DROP latest results of that type)."""
+    _require_database()
+    if body.match_type not in MATCH_TYPE_FILTERS:
+        raise HTTPException(status_code=422, detail=f"invalid match_type: {body.match_type}")
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
+    assignee = body.assignee_identity.strip()
+    if is_authenticated_actor(actor) and (
+        not assignee or assignee == "web-admin@habeas.com"
+    ):
+        assignee = actor
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await assign_requests_by_match_type(
+                conn,
+                match_type=body.match_type,
+                assignee_identity=assignee,
+                decided_by=decided_by,
+                target_role=body.target_role,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

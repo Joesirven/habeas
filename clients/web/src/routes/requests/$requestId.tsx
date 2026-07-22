@@ -1,13 +1,18 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from '@tanstack/react-router'
 import { useState, type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
+import { MatchingReviewPanel } from '@/components/requests/RequestTriageDialog'
 import { RunTimeline } from '@/components/ops/RunTimeline'
 import { useMe } from '@/lib/auth'
 import {
+  getDropMatchingResultDetail,
   getRequestJourney,
+  postDropMatchingResultDecline,
+  postDropMatchingResultPromote,
   type JourneyStage,
+  type MatchingResultDetail,
   type RunTimelineStep,
 } from '@/lib/api'
 
@@ -72,7 +77,7 @@ function MetaStrip({
         <dt className="taste-micro">Stage</dt>
         <dd className="capitalize">
           <span className="taste-frost-chip text-[0.65rem]">
-            {currentStage.replaceAll('_', ' ')}
+            {(currentStage ?? 'unknown').replaceAll('_', ' ')}
           </span>
         </dd>
       </div>
@@ -149,7 +154,9 @@ function OverviewPanel({
         </div>
         <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
           <dt className="taste-micro">Current stage</dt>
-          <dd className="mt-1 text-xs capitalize">{currentStage.replaceAll('_', ' ')}</dd>
+          <dd className="mt-1 text-xs capitalize">
+            {(currentStage ?? 'unknown').replaceAll('_', ' ')}
+          </dd>
         </div>
         {runningStage ? (
           <div className="rounded-lg border border-habeas-mid/30 bg-panel/60 px-3 py-2 sm:col-span-2">
@@ -200,27 +207,80 @@ function JourneyPanel({ timelineSteps }: { timelineSteps: RunTimelineStep[] }) {
   )
 }
 
-function MatchingPanel({ requestId, currentStage }: { requestId: string; currentStage: string }) {
+async function fetchMatchingDetailOptional(
+  requestId: string,
+): Promise<MatchingResultDetail | null> {
+  try {
+    return await getDropMatchingResultDetail(requestId)
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('404') ||
+        error.message.includes('500') ||
+        error.message.includes('502') ||
+        error.message.includes('503'))
+    ) {
+      return null
+    }
+    throw error
+  }
+}
+
+function MatchingPanel({ requestId }: { requestId: string }) {
+  const queryClient = useQueryClient()
+  const { isAdmin } = useMe()
+  const [actionError, setActionError] = useState<string | null>(null)
+
+  const matchingQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'drop', 'matching-results', requestId],
+    queryFn: () => fetchMatchingDetailOptional(requestId),
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  })
+
+  const promoteMutation = useMutation({
+    mutationFn: () => postDropMatchingResultPromote(requestId),
+    onSuccess: async () => {
+      setActionError(null)
+      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+    },
+    onError: (error) => {
+      setActionError(error instanceof Error ? error.message : 'Promote failed')
+    },
+  })
+
+  const declineMutation = useMutation({
+    mutationFn: () => postDropMatchingResultDecline(requestId),
+    onSuccess: async () => {
+      setActionError(null)
+      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+    },
+    onError: (error) => {
+      setActionError(error instanceof Error ? error.message : 'Decline failed')
+    },
+  })
+
+  const matching = matchingQuery.data
+  const actionPending = promoteMutation.isPending || declineMutation.isPending
+  const canReviewActions =
+    isAdmin &&
+    matching != null &&
+    matching.review_status === 'pending' &&
+    Boolean(matching.approval_id)
+
   return (
-    <div className="space-y-4 p-4 text-xs">
-      <p className="max-w-xl text-ink-soft">
-        Matching review for request{' '}
-        <span className="font-mono text-ink">{requestId}</span> lives in the approvals
-        queues — no PII is shown here. Current stage:{' '}
-        <span className="capitalize text-ink">{currentStage.replaceAll('_', ' ')}</span>.
-      </p>
-      <div className="flex flex-wrap gap-2">
-        <Link to="/requests/needs-attention" className="taste-btn-primary text-xs">
-          Open needs-attention queue
-        </Link>
-        <Link to="/approvals/matching-review" className="taste-btn text-xs">
-          Open matching review approvals
-        </Link>
-      </div>
-      <p className="max-w-lg text-[0.65rem] text-mute">
-        Filter matching review by this request id once in the DROP console matching tab, or
-        locate the row in needs-attention if this request is blocked on human review.
-      </p>
+    <div className="p-4">
+      <MatchingReviewPanel
+        requestId={requestId}
+        matching={matching}
+        isPending={matchingQuery.isPending}
+        isError={matchingQuery.isError}
+        canReviewActions={canReviewActions}
+        actionPending={actionPending}
+        actionError={actionError}
+        onPromote={() => promoteMutation.mutate()}
+        onDecline={() => declineMutation.mutate()}
+      />
     </div>
   )
 }
@@ -307,12 +367,7 @@ export function RequestDetailPage() {
             />
           ) : null}
           {tab === 'journey' ? <JourneyPanel timelineSteps={timelineSteps} /> : null}
-          {tab === 'matching' ? (
-            <MatchingPanel
-              requestId={requestId}
-              currentStage={journeyQuery.data.current_stage}
-            />
-          ) : null}
+          {tab === 'matching' ? <MatchingPanel requestId={requestId} /> : null}
         </div>
       ) : null}
     </section>

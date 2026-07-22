@@ -422,6 +422,60 @@ async def assign_requests(
     }
 
 
+async def assign_requests_by_match_type(
+    conn: asyncpg.Connection,
+    *,
+    match_type: MatchTypeFilter,
+    assignee_identity: str,
+    decided_by: str,
+    target_role: str = "reviewer",
+) -> dict[str, Any]:
+    """Assign every DROP request whose latest match_count matches ``match_type``.
+
+    Ensures a pending matching.review gate first (same as bulk promote), then
+    creates workflow.assignment rows for the full batch.
+    """
+    if match_type not in MATCH_TYPE_FILTERS:
+        raise ValueError(f"invalid match_type: {match_type!r}")
+    if target_role != "reviewer":
+        raise ValueError("assign-by-match-type target_role must be reviewer")
+
+    ensured = await ensure_pending_matching_reviews_for_match_type(
+        conn, match_type=match_type
+    )
+    predicate = match_count_predicate_sql(match_type, "lr.match_count")
+    rows = await conn.fetch(
+        f"""
+        WITH latest AS (
+            SELECT DISTINCT ON (mr.request_id)
+                   mr.request_id::text AS request_id,
+                   mr.match_count
+              FROM matching_results mr
+              JOIN requests r ON r.id = mr.request_id
+             WHERE r.intake_source = 'drop'
+             ORDER BY mr.request_id, mr.recorded_at DESC
+        )
+        SELECT lr.request_id
+          FROM latest lr
+         WHERE {predicate}
+        """
+    )
+    request_ids = [str(row["request_id"]) for row in rows]
+    assigned = await assign_requests(
+        conn,
+        request_ids=request_ids,
+        target_role=target_role,
+        assignee_identity=assignee_identity,
+        decided_by=decided_by,
+    )
+    return {
+        **assigned,
+        "match_type": match_type,
+        "ensured_count": ensured["ensured_count"],
+        "batch_size": len(request_ids),
+    }
+
+
 async def escalate_requests(
     conn: asyncpg.Connection,
     *,
@@ -459,6 +513,7 @@ __all__ = [
     "WORKFLOW_ASSIGNMENT_ACTION",
     "MatchTypeFilter",
     "assign_requests",
+    "assign_requests_by_match_type",
     "bulk_approve_matching_review_by_match_type",
     "bulk_decline_matching_review_by_match_type",
     "create_matching_review_approval",

@@ -3,7 +3,12 @@ import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
-import { listRuns, type OpsTimeWindow, type RunSummary } from '@/lib/api'
+import {
+  listRuns,
+  resolveRunsTimeParams,
+  type OpsTimeWindow,
+  type RunSummary,
+} from '@/lib/api'
 import { RoleGate } from '@/lib/auth'
 import {
   DEFAULT_RUNS_WINDOW,
@@ -16,11 +21,11 @@ import {
 } from '@/router'
 
 const JOB_OPTIONS: { value: RunsJobFilter | ''; label: string }[] = [
-  { value: '', label: 'All jobs' },
-  { value: 'drop_connector', label: 'Download' },
-  { value: 'drop_ingestor', label: 'Ingest' },
-  { value: 'matching', label: 'Matching' },
-  { value: 'hash_index_refresh', label: 'Hash index refresh' },
+  { value: '', label: 'All workers' },
+  { value: 'drop_connector', label: 'drop_connector · Download' },
+  { value: 'drop_ingestor', label: 'drop_ingestor · Ingest' },
+  { value: 'matching', label: 'matching' },
+  { value: 'hash_index_refresh', label: 'hash_index_refresh' },
 ]
 
 const STATUS_TABS: {
@@ -190,7 +195,7 @@ function RunsToolbar({
           </button>
         ))}
         <label className="ml-auto flex items-center gap-2">
-          <span className="taste-micro">Job</span>
+          <span className="taste-micro">Worker</span>
           <select
             className="glass rounded-lg px-2 py-1.5 text-xs text-ink"
             value={search.job ?? ''}
@@ -305,14 +310,15 @@ function RunsContent() {
   const { job, status, request_id: requestId } = search
   const window = search.window ?? DEFAULT_RUNS_WINDOW
 
+  const timeParams = resolveRunsTimeParams(window as OpsTimeWindow)
   const runsQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'runs', { job, status, window, requestId }],
+    queryKey: ['admin-api', 'ops', 'runs', { job, status, window, requestId, timeParams }],
     queryFn: () =>
       listRuns({
         job,
         status,
         request_id: requestId,
-        window: window as OpsTimeWindow,
+        ...timeParams,
         limit: 100,
       }),
     refetchInterval: 10_000,

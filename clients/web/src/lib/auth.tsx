@@ -80,7 +80,7 @@ export function RouteShell({ eyebrow, title, description, note }: RouteShellProp
     <section className="space-y-8">
       <header>
         <p className="taste-micro">{eyebrow}</p>
-        <h2 className="mt-3 font-display text-[2.25rem] font-medium tracking-tight text-ink">
+        <h2 className="mt-3 font-display text-xl font-medium tracking-tight text-ink">
           {title}
         </h2>
         <p className="mt-4 max-w-xl text-sm leading-relaxed text-ink-soft">{description}</p>

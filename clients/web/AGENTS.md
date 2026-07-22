@@ -15,7 +15,7 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
 ## Navigation (Ops IA — Request / Job / Run)
 
 - **Requests** → list (row opens journey), Needs attention, SLAs (shell).
-- **Ops** (super_admin): Dashboard, Runs, Jobs (shell), Insights (`/ops/health`), Incidents (shell → failed Runs), Configuration.
+- **Ops** (super_admin): Dashboard (stages + Hash refresh + Configurations), Workers, Runs, Jobs (shell), Insights (`/ops/health`), Incidents (shell → failed Runs).
 - **Console** (super_admin): `/ops/drop-pipeline?tab=` mutation power surface.
 - Browser never calls worker URLs — only admin-api aggregates.
 

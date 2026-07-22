@@ -179,3 +179,24 @@ def test_mark_in_flight_sql_sets_submitted_at():
     source = inspect.getsource(helpers.mark_hash_index_refresh_in_flight)
     assert "submitted_at = NOW()" in source
     assert "status = 'in_flight'" in source
+
+
+def test_serving_swap_macro_retains_durable_per_state_builds():
+    """Worker dbt contract: per-state builds must survive serving patch (no drop/rename)."""
+    from pathlib import Path
+
+    macro = (
+        Path(__file__).resolve().parents[3]
+        / "transform"
+        / "drop_hash"
+        / "macros"
+        / "swap_serving_tables.sql"
+    )
+    text = macro.read_text()
+    assert "generate_alias_name" in text
+    lowered = text.lower()
+    assert "create table" in lowered and " copy " in lowered
+    assert "rename to" not in lowered
+    # Merge path must not drop the state build after INSERT.
+    assert "drop table if exists" not in lowered
+    assert "__build_" in text

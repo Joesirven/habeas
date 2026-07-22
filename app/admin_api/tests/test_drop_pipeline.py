@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,6 +14,16 @@ from admin_api import drop_pipeline
 from admin_api import roles
 from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
+
+
+def test_next_scheduled_retrieval_utc_rolls_forward():
+    now = datetime(2026, 7, 21, 15, 0, tzinfo=timezone.utc)
+    nxt = drop_pipeline.next_scheduled_retrieval_utc(now=now, schedule_hhmm="14:00")
+    assert nxt == datetime(2026, 7, 22, 14, 0, tzinfo=timezone.utc)
+
+    before = datetime(2026, 7, 21, 13, 0, tzinfo=timezone.utc)
+    same_day = drop_pipeline.next_scheduled_retrieval_utc(now=before, schedule_hhmm="14:00")
+    assert same_day == datetime(2026, 7, 21, 14, 0, tzinfo=timezone.utc)
 
 
 class _Row(dict):
@@ -89,6 +100,14 @@ PIPELINE_FIXTURE: dict[str, Any] = {
         "attempts_by_status": [],
         "last_run": None,
     },
+    "ca_drop_schedule": {
+        "label": "CA DROP retrieval",
+        "schedule_utc": "14:00",
+        "cadence": "every_15_days",
+        "next_run_at": "2026-07-22T14:00:00+00:00",
+        "last_success_at": None,
+        "interval_days": 15,
+    },
     "worker_health": {
         "drop_connector": {
             "name": "drop_connector",
@@ -133,6 +152,8 @@ def test_pipeline_status_shape(monkeypatch: pytest.MonkeyPatch):
     assert "consumer_id" not in body["matching_results_recent"][0]
     assert body["matching_review"]["action_type"] == "matching.review"
     assert "hash_index_refresh" in body
+    assert "ca_drop_schedule" in body
+    assert body["ca_drop_schedule"]["cadence"] == "every_15_days"
     assert "worker_health" in body
     assert body["worker_health"]["drop_connector"]["ok"] is True
     assert "url" not in body["worker_health"]["drop_connector"]
@@ -348,11 +369,13 @@ async def test_collect_pipeline_counts_shape():
             return []
         return []
 
-    async def fetchval(sql: str, *args: Any) -> int:
+    async def fetchval(sql: str, *args: Any) -> Any:
         if "approaching_sla:" in sql:
             return 0
         if "response_status IS NULL" in sql and "matching_results" in sql:
             return 2
+        if "status = 'success'" in sql and "drop_connector_attempts" in sql:
+            return None
         return 7
 
     async def fetchrow(sql: str, *args: Any) -> _Row | None:
@@ -386,6 +409,10 @@ async def test_collect_pipeline_counts_shape():
         "matching_review": 0,
         "thresholds_hours": dict(drop_pipeline.APPROACHING_SLA_THRESHOLD_HOURS),
     }
+    assert result["ca_drop_schedule"]["cadence"] == "every_15_days"
+    assert result["ca_drop_schedule"]["schedule_utc"]
+    assert result["ca_drop_schedule"]["next_run_at"]
+    assert result["ca_drop_schedule"]["last_success_at"] is None
 
 
 @pytest.mark.asyncio
@@ -414,7 +441,7 @@ async def test_collect_pipeline_counts_approaching_sla_math():
             return []
         return []
 
-    async def fetchval(sql: str, *args: Any) -> int:
+    async def fetchval(sql: str, *args: Any) -> Any:
         fetchval_calls.append((sql, args))
         if "-- approaching_sla:matching\n" in sql:
             # Seeded: one DROP matching attempt older than matching threshold.
@@ -427,6 +454,8 @@ async def test_collect_pipeline_counts_approaching_sla_math():
             return 0
         if "response_status IS NULL" in sql and "matching_results" in sql:
             return 0
+        if "status = 'success'" in sql and "drop_connector_attempts" in sql:
+            return None
         return 0
 
     async def fetchrow(sql: str, *args: Any) -> _Row | None:
@@ -465,8 +494,10 @@ async def test_collect_pipeline_counts_approaching_sla_empty_zeros():
     async def fetch(sql: str, *args: Any) -> list[_Row]:
         return []
 
-    async def fetchval(sql: str, *args: Any) -> int | None:
+    async def fetchval(sql: str, *args: Any) -> Any:
         if "approaching_sla:" in sql:
+            return None
+        if "status = 'success'" in sql and "drop_connector_attempts" in sql:
             return None
         return 0
 
@@ -940,6 +971,56 @@ async def test_get_matching_result_detail_shape(monkeypatch: pytest.MonkeyPatch)
     assert detail["assignment"]["target_role"] == "legal"
     assert "consumer_id" not in detail
     assert "email" not in detail["attempts"][0]["audit_payload"]
+
+
+@pytest.mark.asyncio
+async def test_get_matching_result_detail_tolerates_list_audit_payload(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Legacy matching_attempts.audit_payload may be a JSON array — must not 500."""
+    from datetime import datetime, timezone
+
+    recorded = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_Row(
+            request_id="00000000-0000-0000-0000-000000000002",
+            matched=True,
+            match_count=1,
+            matched_via="drop_hash",
+            recorded_at=recorded,
+            requestor_state="CA",
+            attempt_id=99,
+            approval_id=11,
+            review_status="pending",
+            decided_by=None,
+            decided_at=None,
+            decision_reason=None,
+        )
+    )
+    conn.fetch = AsyncMock(
+        return_value=[
+            _Row(
+                id=99,
+                attempt_number=1,
+                status="success",
+                attempted_at=recorded,
+                completed_at=recorded,
+                error_code=None,
+                audit_payload=["legacy", "list"],
+            )
+        ]
+    )
+
+    async def fake_assignment(_conn: Any, request_id: str) -> dict[str, Any] | None:
+        return None
+
+    monkeypatch.setattr(drop_pipeline, "get_current_assignment", fake_assignment)
+    detail = await drop_pipeline.get_matching_result_detail(
+        conn, "00000000-0000-0000-0000-000000000002"
+    )
+    assert detail is not None
+    assert detail["attempts"][0]["audit_payload"] == {}
 
 
 def test_matching_results_list_route(monkeypatch: pytest.MonkeyPatch):
@@ -1643,3 +1724,187 @@ def test_drop_spine_composes_super_admin_role_with_iap_actor(
     assert denied.status_code == 403
     assert allowed.status_code == 200
     assert allowed.json()["attempt_id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_list_bulk_processes_keyed_by_intake_datetime():
+    day = datetime(2026, 7, 21, tzinfo=timezone.utc).date()
+    attempted = datetime(2026, 7, 21, 14, 3, tzinfo=timezone.utc)
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        assert "drop_connector_attempts" in sql
+        return [
+            _Row(
+                id=12,
+                status="success",
+                attempted_at=attempted,
+                completed_at=attempted,
+                has_uri=True,
+            )
+        ]
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+    rows = await drop_pipeline.list_bulk_processes(conn, day=day)
+    assert len(rows) == 1
+    assert rows[0]["process_id"] == 12
+    assert rows[0]["intake_source"] == "drop"
+    assert rows[0]["label"].startswith("drop · ")
+    assert "gcs_uri" not in rows[0]
+
+
+@pytest.mark.asyncio
+async def test_collect_bulk_process_progress_shape():
+    attempted = datetime(2026, 7, 21, 14, 3, tzinfo=timezone.utc)
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        if "FROM drop_connector_attempts" in sql and "step = 'download'" in sql:
+            return _Row(
+                id=12,
+                status="success",
+                attempted_at=attempted,
+                completed_at=attempted,
+                gcs_uri="gs://bucket/drop.zip",
+            )
+        if "batch_raw" in sql or "WITH batch_raw" in sql:
+            return _Row(
+                raw_rows=10,
+                request_rows=8,
+                matching_none=1,
+                matching_open=2,
+                matching_success=4,
+                matching_failed=1,
+                review_pending=2,
+                review_approved=3,
+                fulfill_unset=5,
+                fulfill_done=3,
+            )
+        return None
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        if "drop_ingest_attempts" in sql:
+            return [
+                _Row(step="land", status="success", list_type="Email", count=1),
+                _Row(step="promote", status="pending", list_type="Email", count=1),
+            ]
+        return []
+
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    conn.fetch = AsyncMock(side_effect=fetch)
+
+    detail = await drop_pipeline.collect_bulk_process_progress(conn, process_id=12)
+    assert detail is not None
+    assert detail["process_id"] == 12
+    assert detail["stages"]["download"]["success"] == 1
+    assert detail["stages"]["land"]["success"] == 1
+    assert detail["stages"]["promote"]["open"] == 1
+    assert detail["stages"]["matching"]["total"] == 8
+    assert detail["request_rows"] == 8
+    assert "gcs_uri" not in detail
+    assert "percent" in detail["overall"]
+
+
+def test_bulk_processes_route(monkeypatch: pytest.MonkeyPatch):
+    from admin_api import main as admin_main
+
+    async def fake_list(
+        conn: Any,
+        *,
+        day: Any = None,
+        days: int = 1,
+        intake_source: str | None = None,
+        download_status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "process_id": 1,
+                "intake_source": "drop",
+                "process_at": "2026-07-21T14:00:00+00:00",
+                "completed_at": None,
+                "download_status": "success",
+                "label": "drop · 2026-07-21 14:00 UTC",
+                "linkable": True,
+            }
+        ]
+
+    # Avoid lifespan create_pool when DATABASE_URL points at an unreachable host.
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "list_bulk_processes", fake_list)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/drop/processes",
+            headers={IAP_EMAIL_HEADER: "accounts.google.com:ops@example.com"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["processes"][0]["label"].startswith("drop · ")
+
+
+@pytest.mark.asyncio
+async def test_collect_worker_trends_flags_error_spike():
+    calls: list[tuple[Any, ...]] = []
+
+    async def fetchrow(sql: str, *args: Any) -> _Row:
+        calls.append(args)
+        # First call per job = current window, second = previous.
+        # Make matching look spiked vs prior.
+        if len(calls) % 2 == 1:
+            return _Row(total=20, failed=8, avg_attempts=2.0)
+        return _Row(total=20, failed=1, avg_attempts=1.1)
+
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    payload = await drop_pipeline.collect_worker_trends(conn, window_hours=24)
+    assert payload["window_hours"] == 24
+    matching = next(w for w in payload["workers"] if w["worker"] == "matching")
+    assert matching["signal"] == "watch"
+    assert "error_rate_spike" in matching["anomalies"]
+
+
+@pytest.mark.asyncio
+async def test_collect_process_run_groups_download_stage():
+    attempted = datetime(2026, 7, 21, 14, 3, tzinfo=timezone.utc)
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        if "FROM drop_connector_attempts" in sql and "LIMIT" in sql:
+            return [
+                _Row(
+                    id=12,
+                    status="success",
+                    attempted_at=attempted,
+                    completed_at=attempted,
+                    has_uri=True,
+                )
+            ]
+        return []
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        if "step = 'download'" in sql:
+            return _Row(
+                id=12,
+                status="success",
+                attempted_at=attempted,
+                completed_at=attempted,
+                gcs_uri="gs://bucket/z.zip",
+                attempt_number=1,
+            )
+        return None
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    groups = await drop_pipeline.collect_process_run_groups(
+        conn, stages=["download"], days=1
+    )
+    assert len(groups) == 1
+    assert groups[0]["label"].startswith("drop · ")
+    assert groups[0]["runs"][0]["run_id"] == "drop_connector:12"

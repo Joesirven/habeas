@@ -29,6 +29,8 @@ models:
         +materialized: view
       stg_phones:
         +materialized: view
+      stg_emails_digital_only:
+        +materialized: view
     marts:
       +tags: [mart]
       +materialized: table

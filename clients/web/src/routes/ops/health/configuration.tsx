@@ -9,7 +9,7 @@ function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
 }
 
-export function HealthConfigurationPage() {
+export function RetryConfigPanel() {
   const queryClient = useQueryClient()
   const [drafts, setDrafts] = useState<Record<string, number>>({})
   const [message, setMessage] = useState<string | null>(null)
@@ -36,21 +36,7 @@ export function HealthConfigurationPage() {
   const floor = configQuery.data?.floor ?? 4
 
   return (
-    <section className="space-y-12">
-      <header className="grid gap-8 lg:grid-cols-[1.1fr_0.9fr] lg:items-end">
-        <div>
-          <Micro>Health</Micro>
-          <h2 className="mt-3 max-w-md font-display text-[2.75rem] font-medium leading-[1.05] tracking-tight text-ink sm:text-[3.25rem]">
-            Configuration
-          </h2>
-        </div>
-        <p className="max-w-sm border-l border-line pl-5 text-sm leading-relaxed text-ink-soft">
-          Per-worker retry attempts via admin-api. Floor is {floor}. Reaper applies overrides on
-          the next cycle.
-        </p>
-      </header>
-
-      <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
+    <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
         <div>
           <Micro>Retry attempts</Micro>
           <p className="mt-2 max-w-xl text-sm text-ink-soft">
@@ -131,7 +117,36 @@ export function HealthConfigurationPage() {
         ) : null}
 
         {message ? <p className="text-sm text-ink-soft">{message}</p> : null}
-      </div>
+    </div>
+  )
+}
+
+export function HealthConfigurationPage() {
+  const configQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'retry-config'],
+    queryFn: getRetryConfig,
+    refetchInterval: 30_000,
+    placeholderData: (previous) => previous,
+  })
+
+  const floor = configQuery.data?.floor ?? 4
+
+  return (
+    <section className="space-y-12">
+      <header className="grid gap-8 lg:grid-cols-[1.1fr_0.9fr] lg:items-end">
+        <div>
+          <Micro>Health</Micro>
+          <h2 className="mt-3 max-w-md font-display text-[2.75rem] font-medium leading-[1.05] tracking-tight text-ink sm:text-[3.25rem]">
+            Configuration
+          </h2>
+        </div>
+        <p className="max-w-sm border-l border-line pl-5 text-sm leading-relaxed text-ink-soft">
+          Per-worker retry attempts via admin-api. Floor is {floor}. Reaper applies overrides on
+          the next cycle.
+        </p>
+      </header>
+
+      <RetryConfigPanel />
 
       <p className="text-sm text-ink-soft">
         <Link to="/ops/health" className="underline decoration-ink/25 underline-offset-4">

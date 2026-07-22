@@ -4,14 +4,16 @@ import { useState, type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import { RunTimeline } from '@/components/ops/RunTimeline'
+import { Badge } from '@/components/ui/badge'
 import { getRunDetail, type RunDetail, type RunEvent } from '@/lib/api'
 import { ForbiddenState, useMe } from '@/lib/auth'
 import type { PipelineTab } from '@/router'
 
-type DetailTab = 'timeline' | 'events'
+type DetailTab = 'overview' | 'timeline' | 'output' | 'events'
 
 const JOB_LABELS: Record<string, string> = {
   drop_connector: 'Download',
+  drop_ingestor: 'Ingest',
   drop_ingest: 'Ingest',
   matching: 'Matching',
   hash_index_refresh: 'Hash index refresh',
@@ -19,9 +21,10 @@ const JOB_LABELS: Record<string, string> = {
 
 const CONSOLE_TAB_BY_JOB: Record<string, PipelineTab> = {
   drop_connector: 'download',
+  drop_ingestor: 'ingest',
   drop_ingest: 'ingest',
   matching: 'matching',
-  hash_index_refresh: 'configurations',
+  hash_index_refresh: 'hash_refresh',
 }
 
 function Micro({ children }: { children: ReactNode }) {
@@ -32,14 +35,16 @@ function jobLabel(job: string): string {
   return JOB_LABELS[job] ?? job.replaceAll('_', ' ')
 }
 
-function runStatusClass(status: string): string {
+function runStatusVariant(status: string): 'ok' | 'fail' | 'run' | 'wait' | 'default' {
   const normalized = status.toLowerCase()
   if (
     normalized.includes('fail') ||
     normalized.includes('error') ||
-    normalized === 'failed_terminal'
+    normalized === 'failed_terminal' ||
+    normalized === 'abandoned' ||
+    normalized === 'timeout'
   ) {
-    return 'text-red-700'
+    return 'fail'
   }
   if (
     normalized.includes('success') ||
@@ -47,19 +52,19 @@ function runStatusClass(status: string): string {
     normalized === 'ok' ||
     normalized === 'succeeded'
   ) {
-    return 'text-emerald-700'
+    return 'ok'
   }
   if (normalized.includes('pending') || normalized.includes('claimed') || normalized === 'running') {
-    return 'text-habeas-mid'
+    return 'run'
   }
-  return 'text-ink-soft'
+  return 'wait'
 }
 
 function formatDuration(seconds: number | null | undefined): string {
   if (seconds == null || Number.isNaN(seconds)) return '—'
-  if (seconds < 60) return `${seconds}s`
+  if (seconds < 60) return `${Math.round(seconds)}s`
   const minutes = Math.floor(seconds / 60)
-  const remainder = seconds % 60
+  const remainder = Math.round(seconds % 60)
   if (minutes < 60) return remainder > 0 ? `${minutes}m ${remainder}s` : `${minutes}m`
   const hours = Math.floor(minutes / 60)
   const mins = minutes % 60
@@ -71,6 +76,17 @@ function formatTimestamp(value: string | null | undefined): string {
   return new Date(value).toLocaleString()
 }
 
+function Metric({ label, value, mono = false }: { label: string; value: ReactNode; mono?: boolean }) {
+  return (
+    <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2.5">
+      <dt className="taste-micro">{label}</dt>
+      <dd className={`mt-1 text-sm ${mono ? 'font-mono text-xs break-all' : 'tabular-nums'}`}>
+        {value}
+      </dd>
+    </div>
+  )
+}
+
 function RunDetailHeader({ detail }: { detail: RunDetail }) {
   const consoleTab = CONSOLE_TAB_BY_JOB[detail.job]
 
@@ -80,12 +96,18 @@ function RunDetailHeader({ detail }: { detail: RunDetail }) {
         <Link to="/ops/runs" className="taste-link text-xs">
           ← Runs
         </Link>
-        <span className="taste-frost-chip">{jobLabel(detail.job)}</span>
-        <span className={`taste-frost-chip ${runStatusClass(detail.status)}`}>{detail.status}</span>
+        <Link
+          to="/ops/workers/$workerName"
+          params={{ workerName: detail.job }}
+          className="taste-frost-chip"
+        >
+          {jobLabel(detail.job)}
+        </Link>
+        <Badge variant={runStatusVariant(detail.status)}>{detail.status}</Badge>
       </div>
       <div>
         <Micro>Run detail</Micro>
-        <h2 className="mt-2 font-display text-3xl font-medium tracking-tight text-ink">
+        <h2 className="mt-1 font-display text-xl font-medium tracking-tight text-ink sm:text-2xl">
           Attempt #{detail.attempt_id}
         </h2>
         <p className="mt-2 text-sm text-ink-soft">
@@ -107,38 +129,160 @@ function RunDetailHeader({ detail }: { detail: RunDetail }) {
           )}
         </p>
       </div>
-      <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="taste-panel-soft px-4 py-3">
-          <dt className="taste-micro">Started</dt>
-          <dd className="mt-1 text-sm tabular-nums">{formatTimestamp(detail.started_at)}</dd>
-        </div>
-        <div className="taste-panel-soft px-4 py-3">
-          <dt className="taste-micro">Completed</dt>
-          <dd className="mt-1 text-sm tabular-nums">{formatTimestamp(detail.completed_at)}</dd>
-        </div>
-        <div className="taste-panel-soft px-4 py-3">
-          <dt className="taste-micro">Duration</dt>
-          <dd className="mt-1 text-sm tabular-nums">{formatDuration(detail.duration_seconds)}</dd>
-        </div>
-        <div className="taste-panel-soft px-4 py-3">
-          <dt className="taste-micro">Attempt</dt>
-          <dd className="mt-1 text-sm tabular-nums">
-            {detail.attempt_number != null ? `#${detail.attempt_number}` : detail.attempt_id}
-          </dd>
-        </div>
-      </dl>
-      {consoleTab ? (
-        <div>
+      <div className="flex flex-wrap gap-2">
+        {consoleTab ? (
           <Link
-            to="/ops/drop-pipeline"
+            to="/"
             search={{ tab: consoleTab }}
             className="taste-btn text-xs"
           >
-            Open DROP console · {jobLabel(detail.job)}
+            Dashboard · {jobLabel(detail.job)}
           </Link>
-        </div>
-      ) : null}
+        ) : null}
+        <Link
+          to="/ops/workers/$workerName"
+          params={{ workerName: detail.job }}
+          className="taste-btn text-xs"
+        >
+          Worker history →
+        </Link>
+      </div>
     </header>
+  )
+}
+
+function HashIndexRunPanel({ detail }: { detail: RunDetail }) {
+  const metrics = detail.hash_index_run
+  if (detail.job !== 'hash_index_refresh') return null
+
+  return (
+    <div className="rounded-md border border-line bg-paper p-4">
+      <Micro>dbt pipeline outcome</Micro>
+      <p className="mt-1 text-xs text-ink-soft">
+        Rows written to serving marts and rematch enqueue count from hash_index_refresh_runs.
+      </p>
+      {!metrics ? (
+        <p className="mt-3 text-xs text-mute">No dbt run row linked to this attempt yet.</p>
+      ) : (
+        <dl className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <Metric
+            label="Run status"
+            value={
+              metrics.run_status ? (
+                <Badge variant={runStatusVariant(metrics.run_status)}>{metrics.run_status}</Badge>
+              ) : (
+                '—'
+              )
+            }
+          />
+          <Metric label="Rows email" value={metrics.rows_email ?? '—'} />
+          <Metric label="Rows phone" value={metrics.rows_phone ?? '—'} />
+          <Metric label="Rows NDZ" value={metrics.rows_ndz ?? '—'} />
+          <Metric label="Rematch enqueued" value={metrics.rematch_enqueued_count ?? '—'} />
+          <Metric label="Run started" value={formatTimestamp(metrics.run_started_at)} />
+          <Metric label="Run finished" value={formatTimestamp(metrics.run_finished_at)} />
+          {metrics.run_error_message ? (
+            <Metric label="Run error" value={metrics.run_error_message} />
+          ) : null}
+        </dl>
+      )}
+    </div>
+  )
+}
+
+function OverviewPanel({ detail }: { detail: RunDetail }) {
+  return (
+    <div className="space-y-4">
+      <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <Metric label="Job" value={jobLabel(detail.job)} />
+        <Metric label="Step" value={detail.step ?? '—'} mono />
+        <Metric label="Status" value={<Badge variant={runStatusVariant(detail.status)}>{detail.status}</Badge>} />
+        <Metric label="Attempt #" value={detail.attempt_number ?? detail.attempt_id} />
+        <Metric label="Worker id" value={detail.worker_id ?? '—'} mono />
+        <Metric label="Duration" value={formatDuration(detail.duration_seconds)} />
+        <Metric label="Started" value={formatTimestamp(detail.started_at)} />
+        <Metric label="Submitted" value={formatTimestamp(detail.submitted_at)} />
+        <Metric label="Completed" value={formatTimestamp(detail.completed_at)} />
+        {detail.state ? <Metric label="State" value={detail.state} mono /> : null}
+        {detail.list_types && detail.list_types.length > 0 ? (
+          <Metric
+            label="List types"
+            value={detail.list_types.join(', ')}
+            mono
+          />
+        ) : null}
+        {detail.request_id ? (
+          <Metric
+            label="Request"
+            value={
+              <Link
+                to="/requests/$requestId"
+                params={{ requestId: detail.request_id }}
+                className="taste-link font-mono text-xs"
+              >
+                {detail.request_id}
+              </Link>
+            }
+          />
+        ) : null}
+        <Metric label="Run id" value={detail.run_id} mono />
+      </dl>
+      <HashIndexRunPanel detail={detail} />
+    </div>
+  )
+}
+
+function OutputPanel({ detail, isSuperAdmin }: { detail: RunDetail; isSuperAdmin: boolean }) {
+  const hasError = Boolean(detail.error_message || detail.error_code)
+  const rawJson = JSON.stringify(detail.raw ?? detail, null, 2)
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2.5">
+          <p className="taste-micro">Error code</p>
+          <p className="mt-1 font-mono text-sm">{detail.error_code ?? '—'}</p>
+        </div>
+        <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2.5">
+          <p className="taste-micro">Outcome</p>
+          <p className="mt-1 text-sm">
+            <Badge variant={runStatusVariant(detail.status)}>{detail.status}</Badge>
+          </p>
+        </div>
+      </div>
+
+      <div
+        className={`rounded-lg border p-4 ${
+          hasError ? 'border-red-200/80 bg-red-50/40' : 'border-line/80 bg-paper/60'
+        }`}
+      >
+        <p className="taste-micro">
+          {isSuperAdmin ? 'Error message (redacted)' : 'Error message'}
+        </p>
+        <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-xs text-ink-soft">
+          {hasError ? detail.error_message ?? '—' : 'No error message on record.'}
+        </pre>
+        <p className="mt-2 text-[0.65rem] text-mute">
+          Stdout/stderr are not persisted in v1 — attempt row fields and audit events only.
+        </p>
+      </div>
+
+      <div className="rounded-lg border border-line/80 bg-paper/60 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="taste-micro">Attempt payload (API)</p>
+          <button
+            type="button"
+            className="taste-btn text-[0.65rem]"
+            onClick={() => void navigator.clipboard.writeText(rawJson)}
+          >
+            Copy JSON
+          </button>
+        </div>
+        <pre className="mt-3 max-h-[28rem] overflow-auto whitespace-pre-wrap break-words font-mono text-[0.65rem] text-ink-soft">
+          {rawJson}
+        </pre>
+      </div>
+    </div>
   )
 }
 
@@ -173,77 +317,58 @@ function RunEventsTable({ events }: { events: RunEvent[] }) {
   )
 }
 
-function PrivilegedErrorPanel({ detail, visible }: { detail: RunDetail; visible: boolean }) {
-  if (!visible) return null
-
-  const hasError = Boolean(detail.error_message || detail.error_code)
-
-  return (
-    <section className="taste-panel border-red-200/80 p-5 sm:p-6" aria-label="Privileged error details">
-      <div>
-        <Micro>Privileged · super admin</Micro>
-        <h3 className="mt-1 font-display text-lg font-medium text-ink">Error panel</h3>
-        <p className="mt-1 text-xs text-ink-soft">
-          Redacted operator message only — stdout/stderr not persisted in v1.
-        </p>
-      </div>
-      <dl className="mt-4 grid gap-4 sm:grid-cols-2">
-        <div>
-          <dt className="taste-micro">Error code</dt>
-          <dd className="mt-1 font-mono text-sm">{detail.error_code ?? '—'}</dd>
-        </div>
-        <div className="sm:col-span-2">
-          <dt className="taste-micro">Error message (redacted)</dt>
-          <dd className="mt-2 rounded-lg border border-line bg-paper/80 p-3 font-mono text-xs text-ink-soft">
-            {hasError ? (
-              <pre className="whitespace-pre-wrap break-words">{detail.error_message ?? '—'}</pre>
-            ) : (
-              <span>No error message on record.</span>
-            )}
-          </dd>
-        </div>
-      </dl>
-    </section>
-  )
-}
-
 function RunDetailTabs({
   tab,
   onTabChange,
   detail,
+  isSuperAdmin,
 }: {
   tab: DetailTab
   onTabChange: (tab: DetailTab) => void
   detail: RunDetail
+  isSuperAdmin: boolean
 }) {
+  const tabs: { id: DetailTab; label: string; count?: number }[] = [
+    { id: 'overview', label: 'Overview' },
+    { id: 'timeline', label: 'Timeline', count: detail.timeline.length },
+    { id: 'output', label: 'Output' },
+    { id: 'events', label: 'Events', count: detail.events.length },
+  ]
+
   return (
-    <div className="taste-panel-soft flex flex-col gap-5 p-5 sm:p-6">
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          className={tab === 'timeline' ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'}
-          onClick={() => onTabChange('timeline')}
-        >
-          Timeline
-        </button>
-        <button
-          type="button"
-          className={tab === 'events' ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'}
-          onClick={() => onTabChange('events')}
-        >
-          Events
-          {detail.events.length > 0 ? (
-            <span className="ml-1.5 tabular-nums text-[0.65rem] opacity-70">
-              ({detail.events.length})
-            </span>
-          ) : null}
-        </button>
+    <div className="taste-panel overflow-hidden">
+      <div className="flex flex-wrap gap-0 border-b border-line px-2">
+        {tabs.map((item) => {
+          const selected = tab === item.id
+          return (
+            <button
+              key={item.id}
+              type="button"
+              className={
+                selected
+                  ? 'relative px-3.5 py-2.5 text-xs font-medium text-habeas-navy after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:rounded-full after:bg-habeas-navy'
+                  : 'px-3.5 py-2.5 text-xs font-medium text-mute transition-colors hover:text-ink'
+              }
+              onClick={() => onTabChange(item.id)}
+            >
+              {item.label}
+              {item.count != null && item.count > 0 ? (
+                <span className="ml-1.5 tabular-nums text-[0.65rem] opacity-70">
+                  ({item.count})
+                </span>
+              ) : null}
+            </button>
+          )
+        })}
       </div>
-      {tab === 'timeline' ? (
-        <RunTimeline steps={detail.timeline} />
-      ) : (
-        <RunEventsTable events={detail.events} />
-      )}
+      <div className="p-4 sm:p-5">
+        {tab === 'overview' ? <OverviewPanel detail={detail} /> : null}
+        {tab === 'timeline' ? (
+          <RunTimeline steps={detail.timeline} emptyMessage="No timeline events on this attempt." />
+        ) : null}
+        {tab === 'output' ? <OutputPanel detail={detail} isSuperAdmin={isSuperAdmin} /> : null}
+        {tab === 'events' ? <RunEventsTable events={detail.events} /> : null}
+      </div>
     </div>
   )
 }
@@ -262,7 +387,7 @@ export function RunDetailPage() {
     attemptId?: string
   }
   const parsedAttemptId = attemptId ? Number.parseInt(attemptId, 10) : Number.NaN
-  const [tab, setTab] = useState<DetailTab>('timeline')
+  const [tab, setTab] = useState<DetailTab>('overview')
   const { isSuperAdmin, isLoading: meLoading } = useMe()
 
   const detailQuery = useQuery({
@@ -324,10 +449,14 @@ export function RunDetailPage() {
   }
 
   return (
-    <div className="space-y-8">
+    <section className="taste-ops-page space-y-5">
       <RunDetailHeader detail={detail} />
-      <RunDetailTabs tab={tab} onTabChange={setTab} detail={detail} />
-      <PrivilegedErrorPanel detail={detail} visible={isSuperAdmin} />
-    </div>
+      <RunDetailTabs
+        tab={tab}
+        onTabChange={setTab}
+        detail={detail}
+        isSuperAdmin={isSuperAdmin}
+      />
+    </section>
   )
 }

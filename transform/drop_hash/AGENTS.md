@@ -10,7 +10,7 @@ Production dbt project for DROP hash-index serving tables in BigQuery.
 | `models/marts/` | Serving marts → `email_hash`, `phone_hash`, `ndz_hash` via build+state merge |
 | `udf/` | BigQuery JS `normalize_name` in `drop_hash_index` (bake-off winner) |
 | `drop_normalize/` | Python DROP v1.2.0 standardization + CPPA vector tests |
-| `macros/swap_serving_tables.sql` | `generate_alias_name` (state-suffixed physical tables) + serving merge |
+| `macros/swap_serving_tables.sql` | `generate_alias_name` (state-suffixed physical tables) + durable build retain + serving patch-by-state |
 
 ## Invariants
 
@@ -24,17 +24,20 @@ Production dbt project for DROP hash-index serving tables in BigQuery.
 - Worker invokes dbt from this directory with `--vars '{state: ...}'` per state.
   Shared serving marts hold **all US states + DC** (USPS 50+DC = 51 codes in
   `habeas_privacy_core.geo.state.USPS_STATES_PLUS_DC` — settled; not a separate
-  MDR jurisdiction config). Physical staging/int/build tables are
-  **state-suffixed** so parallel per-state jobs are safe; only
-  `email_hash` / `phone_hash` / `ndz_hash` are shared. Default `state: CA` in
-  `dbt_project.yml` is local convenience only — production passes the attempt’s
-  state. Full-wave enqueue/process is admin-api behind Identity-Aware Proxy
-  (`.../enqueue-all`, `.../process`) — never user→worker. Live BQ coverage +
-  blockers are in [RUNBOOK.md](RUNBOOK.md) (“Live multi-state builds”). No prod
-  dbt / enqueue-all without Jose.
-- **Email source:** `person_db.person.emailaddress` only — no dedicated email /
-  contact table in the MDR dataset. Sparse fill is MDR data (many states have
-  zero nonempty emails); dbt does not union alternate email columns.
+  MDR jurisdiction config).   Physical staging/int/build tables are
+  **state-suffixed and durable** (`int_*_<state>`, `*_hash__build_<state>`) so a
+  refresh rebuilds one state’s hashing work and patches serving by state; parallel
+  jobs are safe. Only `email_hash` / `phone_hash` / `ndz_hash` are shared
+  (national). Default `state: CA` in `dbt_project.yml` is local convenience only —
+  production passes the attempt’s state. Full-wave enqueue/process is admin-api
+  behind Identity-Aware Proxy (`.../enqueue-all`, `.../process`) — never
+  user→worker. Live BQ coverage + blockers are in [RUNBOOK.md](RUNBOOK.md)
+  (“Per-state refresh” / “Live multi-state builds”). No prod dbt / enqueue-all
+  without Jose.
+- **Email sources:** MDR `person_db.person.emailaddress` (sparse; no MDR
+  email/contact table) **plus** `production_datasets.emails_digital_only_24q2`
+  via `stg_emails_digital_only`. `int_email_hash` unions both, one standardize +
+  hash path, dedupe on `(dwid, state, email_std)`.
 - UDF body must stay the bake-off winner (`normalizeName` + LATIN_EXTENDED).
 
 ## Commands

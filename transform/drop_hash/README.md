@@ -45,13 +45,14 @@ DBT_PROFILES_DIR=. dbt build --vars '{state: CA}'
 DBT_PROFILES_DIR=. dbt build --vars '{state: NY}'
 ```
 
-`state` filters MDR staging (`stg_person`, `stg_phones`). Intermediate models keep
-`*_std` columns plus per-field hashes; serving marts expose `(hash_value, dwid, state, built_at)`.
+`state` filters staging (`stg_person`, `stg_phones`, `stg_emails_digital_only`).
+Intermediate models keep `*_std` columns plus per-field hashes; serving marts
+expose `(hash_value, dwid, state, built_at)`.
 
 | Layer | Examples | Notes |
 |-------|----------|-------|
-| Staging | `stg_person`, `stg_phones` | `state = var('state')` |
-| Intermediate | `int_email_hash`, `int_phone_hash`, `int_dob_hash`, `int_zip_hash`, `int_name_hash`, `int_ndz_hash` | `*_std` + hash columns |
+| Staging | `stg_person`, `stg_phones`, `stg_emails_digital_only` | `state = var('state')` |
+| Intermediate | `int_email_hash`, `int_phone_hash`, `int_dob_hash`, `int_zip_hash`, `int_name_hash`, `int_ndz_hash` | `*_std` + hash columns; email unions person + digital |
 | Serving | `email_hash`, `phone_hash`, `ndz_hash` | Built as `*_build` then swapped in |
 
 ### Serving schema
@@ -73,14 +74,21 @@ requester’s normalized source state (never out-of-state DWIDs).
 `stg_phones` emits **one row per available phone type**. When MDR has both cell and
 land numbers, `phone_hash` serving gets **two rows** for that `dwid` (distinct hashes).
 
-### Serving swap
+### Per-state artifacts + serving patch
 
-Mart models write to state-scoped builds (`email_hash__build_<state>`,
+Mart models write to durable state-scoped builds (`email_hash__build_<state>`,
 `phone_hash__build_<state>`, `ndz_hash__build_<state>`). Staging and intermediate
 tables are likewise suffixed (`stg_phones_fl`, `int_phone_hash_fl`, …) via
 `generate_alias_name` so parallel per-state workers cannot clobber each other.
-On successful `dbt build`, `perform_serving_swap()` merges that state’s build into
-the shared serving tables (`DELETE`/`INSERT` filtered by `state`).
+
+On successful `dbt build`, `perform_serving_swap()` patches shared serving
+(`email_hash` / `phone_hash` / `ndz_hash`) for that state only:
+
+- First create: `CREATE TABLE … COPY` from the state build (build retained).
+- Later refreshes: `DELETE`/`INSERT` filtered by `state` (build retained).
+
+A CA refresh therefore rebuilds only CA’s int/build and merges the CA slice —
+other states’ serving rows and durable artifacts are untouched.
 
 Disable swap (e.g. dry run): `--vars '{perform_serving_swap: false}'`.
 

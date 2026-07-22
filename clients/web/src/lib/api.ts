@@ -38,6 +38,8 @@ export type RequestRecord = {
   received_at: string
   intake_source: IntakeSource
   raw_record_id: number | null
+  /** 2-letter USPS acronym — not PII */
+  requestor_state?: string | null
 }
 
 export type ManualRequestInput = {
@@ -61,9 +63,12 @@ export function getHealth() {
   return fetchAdminApi<HealthPayload>('/readyz')
 }
 
-export function listRequests(intakeSource?: IntakeSource) {
-  const query = intakeSource ? `?intake_source=${intakeSource}` : ''
-  return fetchAdminApi<RequestRecord[]>(`/requests${query}`)
+export function listRequests(intakeSource?: IntakeSource, limit: number = 200) {
+  const search = new URLSearchParams()
+  if (intakeSource) search.set('intake_source', intakeSource)
+  search.set('limit', String(limit))
+  const query = search.toString()
+  return fetchAdminApi<RequestRecord[]>(`/requests?${query}`)
 }
 
 export function createManualRequest(body: ManualRequestInput) {
@@ -230,6 +235,55 @@ export type HashIndexRefreshStatus = {
   } | null
 }
 
+export type CaDropSchedule = {
+  label: string
+  schedule_utc: string
+  cadence: string
+  next_run_at: string
+  last_success_at: string | null
+  interval_days?: number
+}
+
+export type WorkerSchedule = {
+  job_key: string
+  job_name: string
+  label: string
+  enabled: boolean
+  schedule_kind: 'interval_days' | 'interval_minutes'
+  interval_days: number | null
+  interval_minutes: number | null
+  time_utc: string | null
+  cron: string
+  timezone: string
+  next_run_at: string | null
+  last_success_at: string | null
+  scheduler_state: string
+  scheduler_reachable: boolean
+}
+
+export type WorkerSchedulesPayload = {
+  schedules: WorkerSchedule[]
+}
+
+export type WorkerSchedulePatch = {
+  job_key: string
+  enabled?: boolean
+  interval_minutes?: number
+  interval_days?: number
+  time_utc?: string
+}
+
+export type HashIndexRunMetrics = {
+  run_status: string | null
+  run_started_at: string | null
+  run_finished_at: string | null
+  rows_email: number | null
+  rows_phone: number | null
+  rows_ndz: number | null
+  rematch_enqueued_count: number | null
+  run_error_message: string | null
+}
+
 export type WorkerHealthProbe = {
   name: string
   ok: boolean
@@ -255,6 +309,19 @@ export type DropPipelineStatus = {
   raw_requests_by_list_type: RawListTypeCount[]
   /** Absent on older admin-api revisions that predate fulfillment stage stats. */
   fulfillment?: DropFulfillmentStatus
+  /** Absent on older admin-api revisions. */
+  approaching_sla?: {
+    connector: number
+    ingest: number
+    matching: number
+    matching_review: number
+    thresholds_hours: {
+      connector: number
+      ingest: number
+      matching: number
+      matching_review: number
+    }
+  }
   drop_requests: {
     count: number
     recent: DropRequestThin[]
@@ -273,6 +340,8 @@ export type DropPipelineStatus = {
   }
   /** Absent on older admin-api revisions that predate hash-index ops. */
   hash_index_refresh?: HashIndexRefreshStatus
+  /** Absent on older admin-api revisions. */
+  ca_drop_schedule?: CaDropSchedule
   worker_health: Record<string, WorkerHealthProbe>
 }
 
@@ -335,6 +404,165 @@ export function getDropPipeline() {
   return fetchAdminApi<DropPipelineStatus>('/ops/drop/pipeline')
 }
 
+export type BulkProcessSummary = {
+  process_id: number
+  intake_source: string
+  process_at: string | null
+  completed_at: string | null
+  download_status: string
+  label: string
+  linkable: boolean
+  overall?: {
+    percent: number
+    current_stage: string
+    status: string
+  }
+  request_rows?: number
+  raw_rows?: number
+}
+
+export type BulkProcessStageCounts = {
+  total: number
+  open: number
+  success: number
+  failed: number
+  other?: number
+  by_list_type?: { list_type: string | null; status: string; count: number }[]
+}
+
+export type BulkProcessDetail = {
+  process_id: number
+  intake_source: string
+  process_at: string | null
+  completed_at: string | null
+  label: string
+  download_status: string
+  raw_rows: number
+  request_rows: number
+  stages: {
+    download: BulkProcessStageCounts
+    land: BulkProcessStageCounts
+    promote: BulkProcessStageCounts
+    matching: BulkProcessStageCounts
+    review: BulkProcessStageCounts
+    fulfillment: BulkProcessStageCounts
+  }
+  overall: {
+    percent: number
+    current_stage: string
+    status: string
+  }
+}
+
+export type BulkProcessesPayload = {
+  day: string
+  days?: number
+  processes: BulkProcessSummary[]
+}
+
+export type BulkProcessRun = {
+  run_id: string
+  job: string
+  attempt_id: number
+  step: string
+  status: string
+  started_at: string | null
+  completed_at: string | null
+  attempt_number: number
+  request_id: string | null
+}
+
+export type BulkProcessRunGroup = {
+  process_id: number
+  intake_source: string
+  process_at: string | null
+  label: string
+  download_status: string
+  run_count: number
+  runs: BulkProcessRun[]
+}
+
+export type BulkProcessRunsPayload = {
+  stages: string[]
+  groups: BulkProcessRunGroup[]
+}
+
+export type WorkerTrendWindowStats = {
+  total: number
+  failed: number
+  error_rate: number
+  avg_attempts: number
+}
+
+export type WorkerTrendRow = {
+  worker: string
+  current: WorkerTrendWindowStats
+  previous: WorkerTrendWindowStats
+  delta: { error_rate: number; avg_attempts: number; total: number }
+  anomalies: string[]
+  signal: 'ok' | 'watch' | string
+}
+
+export type WorkerTrendsPayload = {
+  window: string
+  window_hours: number
+  current_start: string
+  previous_start: string
+  as_of: string
+  workers: WorkerTrendRow[]
+}
+
+export function listDropBulkProcesses(params?: {
+  day?: string
+  days?: number
+  intake_source?: string
+  download_status?: string
+  overall_status?: string
+  include_summary?: boolean
+  limit?: number
+}) {
+  const search = new URLSearchParams()
+  if (params?.day) search.set('day', params.day)
+  if (params?.days != null) search.set('days', String(params.days))
+  if (params?.intake_source) search.set('intake_source', params.intake_source)
+  if (params?.download_status) search.set('download_status', params.download_status)
+  if (params?.overall_status) search.set('overall_status', params.overall_status)
+  if (params?.include_summary) search.set('include_summary', 'true')
+  if (params?.limit != null) search.set('limit', String(params.limit))
+  const query = search.toString()
+  return fetchAdminApi<BulkProcessesPayload>(
+    `/ops/drop/processes${query ? `?${query}` : ''}`,
+  )
+}
+
+export function getDropBulkProcess(processId: number) {
+  return fetchAdminApi<BulkProcessDetail>(`/ops/drop/processes/${processId}`)
+}
+
+export function listDropBulkProcessRuns(params: {
+  stage: string
+  day?: string
+  days?: number
+  process_id?: number
+  status?: string
+}) {
+  const search = new URLSearchParams()
+  search.set('stage', params.stage)
+  if (params.day) search.set('day', params.day)
+  if (params.days != null) search.set('days', String(params.days))
+  if (params.process_id != null) search.set('process_id', String(params.process_id))
+  if (params.status) search.set('status', params.status)
+  return fetchAdminApi<BulkProcessRunsPayload>(
+    `/ops/drop/processes/runs?${search.toString()}`,
+  )
+}
+
+export function getDropWorkerTrends(window: '8h' | '1w' | '3m' = '1w') {
+  return fetchAdminApi<WorkerTrendsPayload>(
+    `/ops/drop/workers/trends?window=${encodeURIComponent(window)}`,
+  )
+}
+
 export function getDropWorkers() {
   return fetchAdminApi<DropWorkersPayload>('/ops/drop/workers')
 }
@@ -369,6 +597,20 @@ export function getRetryConfig() {
 export function patchRetryConfig(body: { table_name: string; max_attempts: number }) {
   return fetchAdminApi<{ status: string; table_name: string; max_attempts: number }>(
     '/ops/health/retry-config',
+    {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+export function getWorkerSchedules() {
+  return fetchAdminApi<WorkerSchedulesPayload>('/ops/workers/schedules')
+}
+
+export function patchWorkerSchedule(body: WorkerSchedulePatch) {
+  return fetchAdminApi<{ status: string; schedule: WorkerSchedule; mode: string }>(
+    '/ops/workers/schedules',
     {
       method: 'PATCH',
       body: JSON.stringify(body),
@@ -534,6 +776,29 @@ export function postDropWorkflowAssign(body: {
   })
 }
 
+export function postDropWorkflowAssignByMatchType(body: {
+  match_type: MatchTypeFilter
+  assignee_identity: string
+  target_role?: WorkflowAssignmentTarget
+}) {
+  return fetchAdminApi<{
+    status: string
+    kind: string
+    count: number
+    batch_size: number
+    ensured_count: number
+    match_type: MatchTypeFilter
+    request_ids: string[]
+  }>('/ops/drop/workflow/assign-by-match-type', {
+    method: 'POST',
+    body: JSON.stringify({
+      target_role: 'reviewer',
+      decided_by: 'web-admin@habeas.com',
+      ...body,
+    }),
+  })
+}
+
 export function postDropWorkflowEscalate(body: {
   request_ids: string[]
   target_role: 'legal' | 'data_owner'
@@ -599,26 +864,86 @@ export type RunDetail = {
   run_id: string
   attempt_id: number
   job: string
+  step?: string
   status: string
   request_id: string | null
   attempt_number?: number | null
+  worker_id?: string | null
   started_at: string | null
+  submitted_at?: string | null
   completed_at: string | null
   duration_seconds: number | null
   error_code?: string | null
   error_message?: string | null
+  state?: string | null
+  list_types?: string[] | null
+  hash_index_run?: HashIndexRunMetrics | null
   timeline: RunTimelineStep[]
   events: RunEvent[]
+  /** Full normalized API payload for DE inspection (counts/ids only). */
+  raw?: Record<string, unknown>
 }
 
-export function getRunDetail(job: string, attemptId: number) {
-  const runId = `${job}:${attemptId}`
-  return fetchAdminApi<RunDetail>(`/ops/runs/${encodeURIComponent(runId)}`)
+/**
+ * Canonical job names for admin-api /ops/runs (list filter + run_id prefix).
+ * Accept short aliases from older UIs/APIs and normalize to attempt-table names.
+ */
+const RUN_JOB_CANONICAL: Record<string, string> = {
+  drop_connector: 'drop_connector',
+  connector: 'drop_connector',
+  drop_ingestor: 'drop_ingestor',
+  drop_ingest: 'drop_ingestor',
+  ingest: 'drop_ingestor',
+  matching: 'matching',
+  hash_index_refresh: 'hash_index_refresh',
+  hash_index: 'hash_index_refresh',
+}
+
+function toCanonicalRunJob(job: string | undefined): string | undefined {
+  if (!job) return undefined
+  return RUN_JOB_CANONICAL[job] ?? job
+}
+
+function fromApiRunJob(job: string): string {
+  return toCanonicalRunJob(job) ?? job
+}
+
+export async function getRunDetail(job: string, attemptId: number) {
+  // admin-api: GET /ops/runs/{run_id} where run_id is "{job}:{attempt_id}"
+  const canonicalJob = toCanonicalRunJob(job) ?? job
+  const runId = `${canonicalJob}:${attemptId}`
+  const raw = await fetchAdminApi<Record<string, unknown>>(
+    `/ops/runs/${encodeURIComponent(runId)}`,
+  )
+  return normalizeRunDetail(raw)
 }
 
 // --- Ops runs list (U4) ---
 
-export type OpsTimeWindow = '8h' | '24h' | '1w'
+/** Prefer these pills across Workers / Runs / Dashboard. */
+export type OpsTimeWindow = '8h' | '1w' | '3m' | 'custom' | '24h'
+
+/** Workers UI windows — `8h`/`1w`/`3m` map to API `window` when supported; custom uses `since`. */
+export type WorkersTimeWindow = '8h' | '1w' | '3m' | 'custom'
+
+export function resolveRunsTimeParams(
+  window: WorkersTimeWindow | OpsTimeWindow,
+  since?: string,
+): { window?: '8h' | '24h' | '1w' | '3m'; since?: string } {
+  if (window === '8h' || window === '1w' || window === '24h' || window === '3m') {
+    // Send both window and since for 3m so older admin-api (no 3m literal) still filters via since.
+    if (window === '3m') {
+      const anchor = new Date()
+      anchor.setMonth(anchor.getMonth() - 3)
+      return { window: '3m', since: since ?? anchor.toISOString() }
+    }
+    return { window }
+  }
+  if (window === 'custom' && since) {
+    return { since }
+  }
+  return { window: '1w' }
+}
 
 export type RunSummary = {
   run_id: string
@@ -632,23 +957,141 @@ export type RunSummary = {
   attempt_number: number
 }
 
-export function listRuns(params?: {
+/** Normalize deployed envelope/field names onto the UI RunSummary contract. */
+function normalizeRunSummary(raw: Record<string, unknown>): RunSummary {
+  const apiJob = String(raw.job ?? '')
+  const job = fromApiRunJob(apiJob)
+  const id = raw.id ?? raw.attempt_id ?? raw.attempt_number
+  const attemptNumber = typeof id === 'number' ? id : Number(id) || 0
+  const runId =
+    typeof raw.run_id === 'string' && raw.run_id
+      ? raw.run_id
+      : `${job}:${attemptNumber}`
+  const startedAt = String(raw.started_at ?? raw.attempted_at ?? '')
+  return {
+    run_id: runId,
+    job,
+    step: String(raw.step ?? job),
+    status: String(raw.status ?? ''),
+    request_id: (raw.request_id as string | null | undefined) ?? null,
+    started_at: startedAt,
+    completed_at: (raw.completed_at as string | null | undefined) ?? null,
+    duration_seconds:
+      typeof raw.duration_seconds === 'number' ? raw.duration_seconds : null,
+    attempt_number: attemptNumber,
+  }
+}
+
+function normalizeTimelineStatus(value: unknown): RunTimelineStepStatus {
+  const normalized = String(value ?? 'pending').toLowerCase()
+  if (normalized === 'completed' || normalized === 'complete' || normalized === 'ok') {
+    return 'completed'
+  }
+  if (normalized.includes('fail') || normalized.includes('error')) return 'failed'
+  if (normalized === 'running' || normalized === 'in_flight' || normalized === 'claimed') {
+    return 'running'
+  }
+  if (normalized === 'waiting' || normalized.includes('awaiting')) return 'waiting'
+  if (normalized === 'skipped') return 'skipped'
+  return 'pending'
+}
+
+function normalizeHashIndexRun(raw: unknown): HashIndexRunMetrics | null {
+  if (!raw || typeof raw !== 'object') return null
+  const row = raw as Record<string, unknown>
+  if (row.run_status == null && row.run_started_at == null) return null
+  return {
+    run_status: (row.run_status as string | null | undefined) ?? null,
+    run_started_at: (row.run_started_at as string | null | undefined) ?? null,
+    run_finished_at: (row.run_finished_at as string | null | undefined) ?? null,
+    rows_email: typeof row.rows_email === 'number' ? row.rows_email : null,
+    rows_phone: typeof row.rows_phone === 'number' ? row.rows_phone : null,
+    rows_ndz: typeof row.rows_ndz === 'number' ? row.rows_ndz : null,
+    rematch_enqueued_count:
+      typeof row.rematch_enqueued_count === 'number' ? row.rematch_enqueued_count : null,
+    run_error_message: (row.run_error_message as string | null | undefined) ?? null,
+  }
+}
+
+function normalizeRunDetail(raw: Record<string, unknown>): RunDetail {
+  const summary = normalizeRunSummary(raw)
+  const timelineRaw = Array.isArray(raw.timeline) ? raw.timeline : []
+  const eventsRaw = Array.isArray(raw.events) ? raw.events : []
+  const listTypes = Array.isArray(raw.list_types)
+    ? raw.list_types.map(String)
+    : null
+  return {
+    ...summary,
+    attempt_id: summary.attempt_number,
+    step: String(raw.step ?? summary.step ?? summary.job),
+    worker_id: (raw.worker_id as string | null | undefined) ?? null,
+    submitted_at: (raw.submitted_at as string | null | undefined) ?? null,
+    error_code: (raw.error_code as string | null | undefined) ?? null,
+    error_message:
+      (raw.error_message as string | null | undefined) ??
+      (raw.error_redacted as string | null | undefined) ??
+      null,
+    state: (raw.state as string | null | undefined) ?? null,
+    list_types: listTypes,
+    hash_index_run: normalizeHashIndexRun(raw.hash_index_run),
+    timeline: timelineRaw.map((step, index) => {
+      const row = step as Record<string, unknown>
+      const key = String(row.key ?? row.event ?? row.step ?? `step-${index}`)
+      return {
+        key,
+        label: String(row.label ?? row.event ?? row.step ?? key),
+        status: normalizeTimelineStatus(row.status ?? 'completed'),
+        timestamp:
+          (row.timestamp as string | null | undefined) ??
+          (row.at as string | null | undefined) ??
+          null,
+        detail: (row.detail as string | null | undefined) ?? null,
+      }
+    }),
+    events: eventsRaw.map((event, index) => {
+      const row = event as Record<string, unknown>
+      return {
+        id: String(row.id ?? `event-${index}`),
+        event_type: String(row.event_type ?? row.kind ?? row.event ?? 'event'),
+        occurred_at: String(row.occurred_at ?? row.at ?? ''),
+        summary:
+          (row.summary as string | null | undefined) ??
+          (row.detail as string | null | undefined) ??
+          null,
+      }
+    }),
+    raw,
+  }
+}
+
+export async function listRuns(params?: {
   job?: string
   status?: string
   request_id?: string
   window?: OpsTimeWindow
+  since?: string
   limit?: number
   offset?: number
 }) {
   const search = new URLSearchParams()
-  if (params?.job) search.set('job', params.job)
+  const apiJob = toCanonicalRunJob(params?.job)
+  if (apiJob) search.set('job', apiJob)
   if (params?.status) search.set('status', params.status)
   if (params?.request_id) search.set('request_id', params.request_id)
-  if (params?.window) search.set('window', params.window)
+  if (params?.window && params.window !== 'custom') {
+    search.set('window', params.window)
+  }
+  if (params?.since) search.set('since', params.since)
   if (params?.limit != null) search.set('limit', String(params.limit))
   if (params?.offset != null) search.set('offset', String(params.offset))
   const query = search.toString()
-  return fetchAdminApi<RunSummary[]>(`/ops/runs${query ? `?${query}` : ''}`)
+  const raw = await fetchAdminApi<unknown>(`/ops/runs${query ? `?${query}` : ''}`)
+  const rows = Array.isArray(raw)
+    ? raw
+    : Array.isArray((raw as { runs?: unknown }).runs)
+      ? ((raw as { runs: unknown[] }).runs)
+      : []
+  return rows.map((row) => normalizeRunSummary(row as Record<string, unknown>))
 }
 
 // --- Request journey + needs attention (U5) ---
@@ -679,6 +1122,12 @@ export type RequestJourneyResponse = {
   stages: JourneyStage[]
 }
 
+export type NeedsAttentionAssignment = {
+  target_role: string | null
+  kind: string | null
+  assignee_identity: string | null
+}
+
 export type NeedsAttentionItem = {
   request_id: string
   reason: string
@@ -686,10 +1135,27 @@ export type NeedsAttentionItem = {
   intake_source: string
   received_at: string | null
   requested_at: string | null
+  approval_id?: number | null
+  matched?: boolean | null
+  match_count?: number | null
+  match_type?: string | null
+  matched_via?: string | null
+  requestor_state?: string | null
+  review_status?: string | null
+  assignment?: NeedsAttentionAssignment | null
 }
 
 export type NeedsAttentionResponse = {
   items: NeedsAttentionItem[]
+}
+
+export type RequestComment = {
+  id: number
+  request_id: string
+  author_user_id: number
+  actor: string
+  body: string
+  occurred_at: string
 }
 
 export function getRequestJourney(requestId: string) {
@@ -704,5 +1170,24 @@ export function getNeedsAttention(limit?: number) {
   const query = search.toString()
   return fetchAdminApi<NeedsAttentionResponse>(
     `/ops/requests/needs-attention${query ? `?${query}` : ''}`,
+  )
+}
+
+export function getRequestComments(requestId: string, limit?: number) {
+  const search = new URLSearchParams()
+  if (limit != null) search.set('limit', String(limit))
+  const query = search.toString()
+  return fetchAdminApi<RequestComment[]>(
+    `/ops/requests/${encodeURIComponent(requestId)}/comments${query ? `?${query}` : ''}`,
+  )
+}
+
+export function postRequestComment(requestId: string, body: string) {
+  return fetchAdminApi<RequestComment>(
+    `/ops/requests/${encodeURIComponent(requestId)}/comments`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ body }),
+    },
   )
 }

@@ -5,18 +5,29 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
 
+from admin_api.approvals import match_type_for_count
 from admin_api.roles import RolePrincipal, require_roles
-from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_DATA_OWNER, ROLE_SUPER_ADMIN
+from habeas_privacy_core.audit.writer import write_audit
+from habeas_privacy_core.auth import (
+    ROLE_ADMIN,
+    ROLE_DATA_OWNER,
+    ROLE_SUPER_ADMIN,
+    actor_from_iap_header,
+    is_authenticated_actor,
+)
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
 from habeas_privacy_core.workflow.approval import (
     MATCHING_REVIEW_ACTION,
+    get_current_assignment,
     is_matching_review_approved,
 )
+
+OPS_COMMENT_COMMAND = "ops.comment"
 
 JOURNEY_STAGES: tuple[str, ...] = (
     "received",
@@ -96,6 +107,12 @@ class RequestJourneyResponse(BaseModel):
     stages: list[JourneyStage]
 
 
+class NeedsAttentionAssignment(BaseModel):
+    target_role: str | None = None
+    kind: str | None = None
+    assignee_identity: str | None = None
+
+
 class NeedsAttentionItem(BaseModel):
     request_id: str
     reason: str
@@ -103,10 +120,33 @@ class NeedsAttentionItem(BaseModel):
     intake_source: str
     received_at: str | None
     requested_at: str | None = None
+    approval_id: int | None = None
+    matched: bool | None = None
+    match_count: int | None = None
+    match_type: str | None = None
+    matched_via: str | None = None
+    requestor_state: str | None = None
+    review_status: str | None = None
+    assignment: NeedsAttentionAssignment | None = None
 
 
 class NeedsAttentionResponse(BaseModel):
     items: list[NeedsAttentionItem] = Field(default_factory=list)
+
+
+class RequestCommentBody(BaseModel):
+    """Ops note — no DROP PII; body is operator text only."""
+
+    body: str = Field(min_length=1, max_length=2000)
+
+
+class RequestComment(BaseModel):
+    id: int
+    request_id: str
+    author_user_id: int
+    actor: str
+    body: str
+    occurred_at: str
 
 
 def _require_database() -> None:
@@ -236,11 +276,18 @@ def _stage_from_attempt(
 
 
 def _compute_current_stage(stages: list[JourneyStage]) -> str:
+    """Prefer active work; never stall on earlier not_started after later progress."""
     for stage in stages:
+        if stage.status in ("waiting", "in_progress", "failed"):
+            return stage.stage
+    last_complete_idx = -1
+    for index, stage in enumerate(stages):
+        if stage.status == "complete":
+            last_complete_idx = index
+    for stage in stages[last_complete_idx + 1 :]:
         if stage.status == "skipped":
             continue
-        if stage.status in ("waiting", "in_progress", "failed", "not_started"):
-            return stage.stage
+        return stage.stage
     return stages[-1].stage
 
 
@@ -292,6 +339,14 @@ async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourney
     )
     match_attempt = await _latest_matching_attempt(conn, request_id=request_id)
     has_match_result = await _has_matching_result(conn, request_id=request_id)
+    # Hash rematch / thin spine can reach match without per-file download/land/promote.
+    pipeline_bypassed = bool(
+        has_match_result
+        and pipeline_applicable
+        and download_attempt is None
+        and land_attempt is None
+        and promote_attempt is None
+    )
     review_approved = await is_matching_review_approved(conn, request_id)
     pending_review = await conn.fetchrow(
         """
@@ -318,20 +373,33 @@ async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourney
         _stage_from_attempt(
             stage="download",
             attempt=download_attempt,
-            skipped=not pipeline_applicable,
+            skipped=not pipeline_applicable or pipeline_bypassed,
         ),
         _stage_from_attempt(
             stage="land",
             attempt=land_attempt,
-            skipped=not pipeline_applicable,
+            skipped=not pipeline_applicable or pipeline_bypassed,
         ),
         _stage_from_attempt(
             stage="promote",
             attempt=promote_attempt,
-            skipped=not pipeline_applicable,
+            skipped=not pipeline_applicable or pipeline_bypassed,
         ),
         _stage_from_attempt(stage="match", attempt=match_attempt),
     ]
+    if pipeline_bypassed:
+        stages = [
+            (
+                stage.model_copy(
+                    update={
+                        "blocker": "bypassed — matched without batch download/land/promote",
+                    }
+                )
+                if stage.stage in _PIPELINE_STAGES and stage.status == "skipped"
+                else stage
+            )
+            for stage in stages
+        ]
 
     review_status: StageStatus = "not_started"
     review_blocker: str | None = None
@@ -421,19 +489,48 @@ async def list_needs_attention(
     *,
     limit: int,
 ) -> NeedsAttentionResponse:
-    """Requests waiting on human gates (PII-safe)."""
+    """Pending matching.review gates with latest match summary (PII-safe)."""
     rows = await conn.fetch(
         """
-        SELECT ar.request_id::text AS request_id,
-               r.intake_source,
-               r.received_at,
-               ar.requested_at
-          FROM approval_requests ar
-          JOIN requests r ON r.id = ar.request_id
-         WHERE ar.action_type = $1
-           AND ar.status = 'pending'
-         ORDER BY ar.requested_at ASC
-         LIMIT $2
+        WITH pending AS (
+            SELECT ar.id AS approval_id,
+                   ar.request_id,
+                   ar.requested_at,
+                   ar.status AS review_status,
+                   r.intake_source,
+                   r.received_at,
+                   UPPER(TRIM(r.requestor_state)) AS requestor_state
+              FROM approval_requests ar
+              JOIN requests r ON r.id = ar.request_id
+             WHERE ar.action_type = $1
+               AND ar.status = 'pending'
+             ORDER BY ar.requested_at ASC
+             LIMIT $2
+        ),
+        latest_mr AS (
+            SELECT DISTINCT ON (mr.request_id)
+                   mr.request_id,
+                   mr.matched,
+                   mr.match_count,
+                   mr.matched_via,
+                   mr.recorded_at
+              FROM matching_results mr
+              JOIN pending p ON p.request_id = mr.request_id
+             ORDER BY mr.request_id, mr.recorded_at DESC
+        )
+        SELECT p.request_id::text AS request_id,
+               p.approval_id,
+               p.intake_source,
+               p.received_at,
+               p.requested_at,
+               p.review_status,
+               p.requestor_state,
+               lm.matched,
+               lm.match_count,
+               lm.matched_via
+          FROM pending p
+          LEFT JOIN latest_mr lm ON lm.request_id = p.request_id
+         ORDER BY p.requested_at ASC
         """,
         MATCHING_REVIEW_ACTION,
         limit,
@@ -441,18 +538,136 @@ async def list_needs_attention(
 
     items: list[NeedsAttentionItem] = []
     for row in rows:
-        journey = await build_request_journey(conn, request_id=row["request_id"])
+        match_count = (
+            int(row["match_count"]) if row["match_count"] is not None else None
+        )
+        assignment_raw = await get_current_assignment(conn, row["request_id"])
+        assignment = None
+        if assignment_raw is not None:
+            assignment = NeedsAttentionAssignment(
+                target_role=assignment_raw.get("target_role"),
+                kind=assignment_raw.get("kind"),
+                assignee_identity=assignment_raw.get("assignee_identity"),
+            )
+        state = row["requestor_state"]
+        state_acronym = str(state).strip().upper()[:2] if state else None
         items.append(
             NeedsAttentionItem(
                 request_id=row["request_id"],
                 reason=MATCHING_REVIEW_ACTION,
-                current_stage=journey.current_stage,
+                current_stage="review",
                 intake_source=row["intake_source"],
                 received_at=_iso(row["received_at"]),
                 requested_at=_iso(row["requested_at"]),
+                approval_id=int(row["approval_id"]) if row["approval_id"] is not None else None,
+                matched=bool(row["matched"]) if row["matched"] is not None else None,
+                match_count=match_count,
+                match_type=match_type_for_count(match_count) if match_count is not None else None,
+                matched_via=row["matched_via"],
+                requestor_state=state_acronym,
+                review_status=row["review_status"],
+                assignment=assignment,
             )
         )
     return NeedsAttentionResponse(items=items)
+
+
+async def ensure_user(conn: Any, *, email: str) -> tuple[int, str]:
+    """Upsert operator by IAP email; returns (user_id, normalized_email)."""
+    normalized = email.strip().lower()
+    if not normalized or normalized == "unknown":
+        raise ValueError("authenticated actor required for comments")
+    row = await conn.fetchrow(
+        """
+        INSERT INTO users (email)
+        VALUES ($1)
+        ON CONFLICT (email) DO UPDATE
+           SET last_seen_at = NOW()
+        RETURNING id, email
+        """,
+        normalized,
+    )
+    assert row is not None
+    return int(row["id"]), str(row["email"])
+
+
+async def list_request_comments(conn: Any, *, request_id: str, limit: int = 50) -> list[RequestComment]:
+    """Comments from request_comments ⋈ users (append-only)."""
+    rows = await conn.fetch(
+        """
+        SELECT c.id,
+               c.request_id::text AS request_id,
+               c.author_user_id,
+               u.email AS actor,
+               c.body,
+               c.created_at
+          FROM request_comments c
+          JOIN users u ON u.id = c.author_user_id
+         WHERE c.request_id = $1::uuid
+         ORDER BY c.created_at ASC
+         LIMIT $2
+        """,
+        request_id,
+        limit,
+    )
+    return [
+        RequestComment(
+            id=int(row["id"]),
+            request_id=row["request_id"],
+            author_user_id=int(row["author_user_id"]),
+            actor=str(row["actor"]),
+            body=str(row["body"]),
+            occurred_at=_iso(row["created_at"]) or "",
+        )
+        for row in rows
+    ]
+
+
+async def create_request_comment(
+    conn: Any,
+    *,
+    request_id: str,
+    body: str,
+    actor: str,
+) -> RequestComment:
+    text = body.strip()
+    if not text:
+        raise ValueError("comment body required")
+    exists = await conn.fetchval(
+        "SELECT 1 FROM requests WHERE id = $1::uuid",
+        request_id,
+    )
+    if exists is None:
+        raise LookupError("request not found")
+    user_id, email = await ensure_user(conn, email=actor)
+    row = await conn.fetchrow(
+        """
+        INSERT INTO request_comments (request_id, author_user_id, body)
+        VALUES ($1::uuid, $2, $3)
+        RETURNING id, request_id::text AS request_id, author_user_id, body, created_at
+        """,
+        request_id,
+        user_id,
+        text,
+    )
+    assert row is not None
+    await write_audit(
+        actor=email,
+        interface="admin-api",
+        command=OPS_COMMENT_COMMAND,
+        arguments={"request_id": request_id, "comment_id": int(row["id"])},
+        result_status=201,
+        result_summary="ops comment recorded",
+        conn=conn,
+    )
+    return RequestComment(
+        id=int(row["id"]),
+        request_id=row["request_id"],
+        author_user_id=int(row["author_user_id"]),
+        actor=email,
+        body=text,
+        occurred_at=_iso(row["created_at"]) or "",
+    )
 
 
 def assert_no_pii_keys(payload: Any) -> None:
@@ -478,6 +693,60 @@ async def needs_attention(
         response = await list_needs_attention(conn, limit=limit)
     assert_no_pii_keys(response.model_dump())
     return response
+
+
+@router.get("/{request_id}/comments", response_model=list[RequestComment])
+async def get_request_comments(
+    request_id: str,
+    _viewer: RequestOpsViewer,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[RequestComment]:
+    _require_database()
+    try:
+        UUID(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid request_id") from exc
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        comments = await list_request_comments(conn, request_id=request_id, limit=limit)
+    for comment in comments:
+        assert_no_pii_keys(comment.model_dump())
+    return comments
+
+
+@router.post("/{request_id}/comments", response_model=RequestComment, status_code=201)
+async def post_request_comment(
+    request_id: str,
+    body: RequestCommentBody,
+    request: Request,
+    _viewer: RequestOpsViewer,
+) -> RequestComment:
+    _require_database()
+    try:
+        UUID(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid request_id") from exc
+
+    actor = actor_from_iap_header(request)
+    if not is_authenticated_actor(actor):
+        actor = _viewer.email or actor
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            comment = await create_request_comment(
+                conn,
+                request_id=request_id,
+                body=body.body,
+                actor=actor,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="request not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    assert_no_pii_keys(comment.model_dump())
+    return comment
 
 
 @router.get("/{request_id}/journey", response_model=RequestJourneyResponse)

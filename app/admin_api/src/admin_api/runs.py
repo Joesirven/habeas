@@ -19,7 +19,7 @@ RUN_JOBS = frozenset(
     {"drop_connector", "drop_ingestor", "matching", "hash_index_refresh"}
 )
 _FAILED_STATUSES = ("submit_error", "outcome_error", "timeout", "abandoned")
-_TIME_WINDOWS: dict[str, int] = {"8h": 8, "24h": 24, "1w": 168}
+_TIME_WINDOWS: dict[str, int] = {"8h": 8, "24h": 24, "1w": 168, "3m": 2160}
 
 _UNION_BODY = """
 SELECT 'drop_connector'::text AS job,
@@ -94,11 +94,27 @@ _DETAIL_SQL: dict[str, str] = {
          WHERE id = $1
     """,
     "hash_index_refresh": """
-        SELECT id, step, status, attempted_at, completed_at, submitted_at,
-               1 AS attempt_number, worker_id, error_code, error_message,
-               NULL::uuid AS request_id, state, list_types
-          FROM hash_index_refresh_attempts
-         WHERE id = $1
+        SELECT a.id, a.step, a.status, a.attempted_at, a.completed_at, a.submitted_at,
+               1 AS attempt_number, a.worker_id, a.error_code, a.error_message,
+               NULL::uuid AS request_id, a.state, a.list_types,
+               r.status AS run_status,
+               r.started_at AS run_started_at,
+               r.finished_at AS run_finished_at,
+               r.rows_email,
+               r.rows_phone,
+               r.rows_ndz,
+               r.rematch_enqueued_count,
+               r.error_message AS run_error_message
+          FROM hash_index_refresh_attempts a
+          LEFT JOIN LATERAL (
+              SELECT status, started_at, finished_at, rows_email, rows_phone, rows_ndz,
+                     rematch_enqueued_count, error_message
+                FROM hash_index_refresh_runs
+               WHERE attempt_id = a.id
+               ORDER BY COALESCE(finished_at, started_at) DESC
+               LIMIT 1
+          ) r ON TRUE
+         WHERE a.id = $1
     """,
 }
 
@@ -124,6 +140,19 @@ class TimelineEvent(BaseModel):
     at: datetime
 
 
+class HashIndexRunMetrics(BaseModel):
+    """dbt / rematch outcome from hash_index_refresh_runs (batch job only)."""
+
+    run_status: str | None = None
+    run_started_at: datetime | None = None
+    run_finished_at: datetime | None = None
+    rows_email: int | None = None
+    rows_phone: int | None = None
+    rows_ndz: int | None = None
+    rematch_enqueued_count: int | None = None
+    run_error_message: str | None = None
+
+
 class RunDetail(RunSummary):
     worker_id: str | None = None
     error_code: str | None = None
@@ -132,6 +161,7 @@ class RunDetail(RunSummary):
     state: str | None = None
     list_types: list[str] | None = None
     timeline: list[TimelineEvent] = Field(default_factory=list)
+    hash_index_run: HashIndexRunMetrics | None = None
 
 
 def _require_database() -> None:
@@ -197,6 +227,23 @@ def _timeline_from_row(row: Any) -> list[TimelineEvent]:
     return events
 
 
+def _hash_index_run_from_row(row: Any) -> HashIndexRunMetrics | None:
+    if row.get("run_status") is None and row.get("run_started_at") is None:
+        return None
+    run_error = row.get("run_error_message")
+    rematch = row.get("rematch_enqueued_count")
+    return HashIndexRunMetrics(
+        run_status=row.get("run_status"),
+        run_started_at=row.get("run_started_at"),
+        run_finished_at=row.get("run_finished_at"),
+        rows_email=row.get("rows_email"),
+        rows_phone=row.get("rows_phone"),
+        rows_ndz=row.get("rows_ndz"),
+        rematch_enqueued_count=int(rematch) if rematch is not None else None,
+        run_error_message=redact_error_text(run_error) if run_error else None,
+    )
+
+
 def _detail_from_row(job: str, row: Any) -> RunDetail:
     attempt_id = int(row["id"])
     started_at = row["attempted_at"]
@@ -204,6 +251,7 @@ def _detail_from_row(job: str, row: Any) -> RunDetail:
     request_id = row.get("request_id")
     raw_error = row.get("error_message")
     list_types = row.get("list_types")
+    hash_metrics = _hash_index_run_from_row(row) if job == "hash_index_refresh" else None
     return RunDetail(
         run_id=_run_id(job, attempt_id),
         job=job,
@@ -221,6 +269,7 @@ def _detail_from_row(job: str, row: Any) -> RunDetail:
         state=row.get("state"),
         list_types=list(list_types) if list_types is not None else None,
         timeline=_timeline_from_row(row),
+        hash_index_run=hash_metrics,
     )
 
 
@@ -289,7 +338,7 @@ async def fetch_run_detail(conn: Any, *, job: str, attempt_id: int) -> RunDetail
 def _resolve_since(
     *,
     since: datetime | None,
-    window: Literal["8h", "24h", "1w"] | None,
+    window: Literal["8h", "24h", "1w", "3m"] | None,
 ) -> datetime | None:
     if since is not None:
         return since
@@ -306,7 +355,7 @@ async def list_runs(
     status: str | None = Query(default=None),
     request_id: str | None = Query(default=None),
     since: datetime | None = Query(default=None),
-    window: Literal["8h", "24h", "1w"] | None = Query(default=None),
+    window: Literal["8h", "24h", "1w", "3m"] | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[RunSummary]:

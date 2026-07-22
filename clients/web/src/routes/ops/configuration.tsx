@@ -1,21 +1,36 @@
-import { OpsPageChrome, RequireRole } from '@/lib/auth'
+import { Link } from '@tanstack/react-router'
+import { type ReactNode } from 'react'
+
+import { ScheduleConfigPanel } from '@/routes/ops/workers/ScheduleConfigPanel'
+import { RoleGate, isSuperAdmin } from '@/lib/auth'
+
+function Micro({ children }: { children: ReactNode }) {
+  return <p className="taste-micro">{children}</p>
+}
 
 export function OpsConfigurationPage() {
   return (
-    <RequireRole allow={['super_admin']}>
-      <OpsPageChrome
-        eyebrow="OPS · CONFIGURATION"
-        title="Configuration"
-        support="Infra-owned until an editable concurrency API exists. Retry knobs live under Health."
-      >
-        <div className="taste-panel p-5">
-          <p className="taste-micro">Shell</p>
-          <p className="mt-3 text-sm text-ink-soft">
-            Role allowlists and worker URLs are deployed via Cloud Build / Console env — not edited
-            here in v1.
+    <RoleGate allow={isSuperAdmin}>
+      <section className="taste-ops-page space-y-4">
+        <header>
+          <Micro>Workers · Configuration</Micro>
+          <h2 className="mt-1 font-display text-xl font-medium tracking-tight text-ink">
+            Configuration
+          </h2>
+          <p className="mt-1 max-w-xl text-xs text-ink-soft">
+            Live worker schedules from Cloud Scheduler. Retry knobs live under Workers → Settings.
+            Role allowlists and worker URLs stay deploy-time.
           </p>
-        </div>
-      </OpsPageChrome>
-    </RequireRole>
+        </header>
+
+        <ScheduleConfigPanel />
+
+        <p className="text-xs">
+          <Link to="/ops/workers/settings" className="taste-link">
+            Open Workers Settings (schedules + retry)
+          </Link>
+        </p>
+      </section>
+    </RoleGate>
   )
 }

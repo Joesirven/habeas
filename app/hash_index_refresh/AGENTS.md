@@ -4,9 +4,10 @@
 
 **Kind:** automation
 
-Runs dbt under `transform/drop_hash/` to rebuild DROP hash serving marts, then
-rematches open and reopened Opted-out DROP requests whose normalized source
-state equals the refreshed state (any served state — A10 USPS 50+DC).
+Runs dbt under `transform/drop_hash/` to rebuild **one state’s** durable
+int/build artifacts and patch national serving marts by state, then rematches
+open and reopened Opted-out DROP requests whose normalized source state equals
+the refreshed state (any served state — A10 USPS 50+DC).
 
 - `POST /process` — claim `hash_index_refresh_attempts`, run dbt, append run row
 - After **each** successful refresh: `enqueue_rematch_for_refresh` for that state
@@ -22,7 +23,7 @@ state equals the refreshed state (any served state — A10 USPS 50+DC).
 - Ops enqueue one state or all served states via admin-api
   `.../enqueue` / `.../enqueue-all` (web Configurations + CLI `--all-states`).
   Live multi-state build blockers → [`transform/drop_hash/RUNBOOK.md`](../../transform/drop_hash/RUNBOOK.md)
-  (“Live multi-state builds”).
+  (“Per-state refresh” / “Live multi-state builds”).
 - Redact hashes/dwids from run error messages (privacy invariants)
 
 Schema: [`db/migrations/`](../../db/migrations/) — `hash_index_refresh_*`.

@@ -4,35 +4,25 @@
   --color-habeas-navy: #1e4191;
   --color-habeas-mid: #2b7bb9;
   --color-habeas-light: #428bca;
-  --color-paper: #f7f9fc;
+  --color-paper: #f8fafc;
   --color-paper-raised: #ffffff;
-  --color-ink: #121820;
-  --color-ink-soft: #3d4a5c;
-  --color-mute: #8a95a5;
-  --color-line: #e4e8ee;
-  --color-line-strong: #d0d6e0;
-  --color-panel: #eef1f6;
-  --font-display: 'Fraunces', ui-serif, Georgia, 'Times New Roman', serif;
+  --color-ink: #0f172a;
+  --color-ink-soft: #334155;
+  --color-mute: #64748b;
+  --color-line: #e2e8f0;
+  --color-line-strong: #cbd5e1;
+  --color-panel: #f1f5f9;
+  --font-display: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
   --font-body: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
 }
 
 :root {
-  /* Habeas brand hex — ops canvas + inline references */
   --habeas-navy: #1e4191;
   --habeas-mid: #2b7bb9;
   --habeas-light: #428bca;
-  --habeas-canvas: #f7f9fc;
-
-  /* Amigo frosted glass — matte overlay recipe (blur / fill / border) */
-  --glass-blur: 30.15px;
-  --glass-gradient-start: hsla(20, 8%, 77%, 0.2);
-  --glass-gradient-end: hsla(15, 7%, 79%, 0.2);
-  --glass-gradient-start-hover: hsla(20, 8%, 77%, 0.3);
-  --glass-gradient-end-hover: hsla(15, 7%, 79%, 0.3);
-  --glass-gradient-start-dark: hsla(20, 8%, 77%, 0.3);
-  --glass-gradient-end-dark: hsla(15, 7%, 79%, 0.3);
-  --glass-border: #909090;
-  --radius-sm: 8px;
+  --habeas-canvas: #f8fafc;
+  --glass-border: #e2e8f0;
+  --radius-sm: 6px;
 }
 
 body {
@@ -40,71 +30,22 @@ body {
   background-color: var(--habeas-canvas);
 }
 
-/* Amigo glass — warm-gray translucent gradient + ~30px blur + #909090 border */
+/* Flat surface helpers (legacy class names retained for route migration) */
 @utility glass {
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  backdrop-filter: blur(var(--glass-blur));
-  background: linear-gradient(
-    to right,
-    var(--glass-gradient-start),
-    var(--glass-gradient-end)
-  );
+  background: #ffffff;
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-sm);
-
-  &:hover {
-    background: linear-gradient(
-      90deg,
-      var(--glass-gradient-start-hover),
-      var(--glass-gradient-end-hover)
-    );
-  }
 }
 
-/* Darker glass for text-on-dark (atmospheric panels) — 0.3 opacity fill */
 @utility glass-dark {
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  backdrop-filter: blur(var(--glass-blur));
-  background: linear-gradient(
-    to right,
-    var(--glass-gradient-start-dark),
-    var(--glass-gradient-end-dark)
-  );
-  border: 1px solid var(--glass-border);
+  background: #1e4191;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
-
-  &:hover {
-    background: linear-gradient(
-      90deg,
-      hsla(20, 8%, 77%, 0.38),
-      hsla(15, 7%, 79%, 0.38)
-    );
-  }
-}
-
-@keyframes taste-rise {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes taste-soft-pulse {
-  0%,
-  100% {
-    opacity: 0.55;
-  }
-  50% {
-    opacity: 0.9;
-  }
+  color: #fff;
 }
 
 .taste-micro {
-  @apply text-[0.65rem] font-medium uppercase tracking-[0.18em] text-mute;
+  @apply text-[0.65rem] font-medium uppercase tracking-[0.12em] text-mute;
 }
 
 .taste-rule {
@@ -112,65 +53,27 @@ body {
 }
 
 .taste-panel {
-  @apply rounded-[1.1rem] border border-line bg-paper-raised;
+  @apply rounded-md border border-line bg-paper-raised;
 }
 
 .taste-panel-soft {
-  @apply rounded-[1.1rem] border border-line bg-panel/70;
+  @apply rounded-md border border-line bg-panel/80;
 }
 
-/* Expand frost chips without @apply glass (Tailwind v4 custom utilities) */
 .taste-frost-chip {
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  backdrop-filter: blur(var(--glass-blur));
-  background: linear-gradient(
-    to right,
-    var(--glass-gradient-start),
-    var(--glass-gradient-end)
-  );
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-sm);
-  @apply px-2.5 py-1 text-[0.65rem] font-medium uppercase tracking-[0.12em] text-ink shadow-none;
-  animation: taste-rise 420ms ease-out both;
+  @apply inline-flex items-center rounded-md border border-line bg-panel px-2 py-0.5 text-[0.65rem] font-medium text-ink-soft;
 }
 
 .taste-frost-chip-dark {
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  backdrop-filter: blur(var(--glass-blur));
-  background: linear-gradient(
-    to right,
-    var(--glass-gradient-start-dark),
-    var(--glass-gradient-end-dark)
-  );
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-sm);
-  @apply px-2.5 py-1 text-[0.65rem] font-medium uppercase tracking-[0.12em] text-white shadow-none;
-  animation: taste-rise 420ms ease-out both;
+  @apply inline-flex items-center rounded-md border border-habeas-navy/20 bg-habeas-navy/90 px-2 py-0.5 text-[0.65rem] font-medium text-white;
 }
 
 .taste-btn {
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  backdrop-filter: blur(var(--glass-blur));
-  background: linear-gradient(
-    to right,
-    var(--glass-gradient-start),
-    var(--glass-gradient-end)
-  );
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-sm);
-  @apply inline-flex items-center justify-center px-3.5 py-2 text-sm text-ink transition disabled:opacity-45;
-}
-
-.taste-btn:hover {
-  background: linear-gradient(
-    90deg,
-    var(--glass-gradient-start-hover),
-    var(--glass-gradient-end-hover)
-  );
+  @apply inline-flex items-center justify-center rounded-md border border-line bg-white px-3 py-1.5 text-xs font-medium text-ink transition hover:bg-panel disabled:opacity-45;
 }
 
 .taste-btn-primary {
-  @apply inline-flex items-center justify-center rounded-lg bg-habeas-navy px-3.5 py-2 text-sm text-white transition hover:bg-habeas-mid disabled:opacity-45;
+  @apply inline-flex items-center justify-center rounded-md bg-habeas-navy px-3 py-1.5 text-xs font-medium text-white transition hover:bg-habeas-navy/90 disabled:opacity-45;
 }
 
 .taste-link {
@@ -182,11 +85,11 @@ body {
 }
 
 .taste-table thead {
-  @apply border-b border-line text-[0.62rem] font-medium uppercase tracking-[0.14em] text-mute;
+  @apply border-b border-line text-[0.62rem] font-medium uppercase tracking-[0.1em] text-mute;
 }
 
 .taste-table th {
-  @apply px-3 py-1.5 font-medium;
+  @apply px-3 py-2 font-medium;
 }
 
 .taste-table tbody tr {
@@ -194,67 +97,53 @@ body {
 }
 
 .taste-table td {
-  @apply px-3 py-1.5;
+  @apply px-3 py-2;
 }
 
-/* Ops route rhythm — compact section stacking (Prefect/Dagster density) */
 .taste-ops-page {
   @apply space-y-4;
-}
-
-.taste-ops-page > header {
-  @apply gap-2;
 }
 
 .taste-ops-page > header h2 {
   @apply mt-1;
 }
 
-/* Status pills — success / fail / in-flight / waiting */
 .taste-status-pill {
-  @apply inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[0.62rem] font-medium uppercase tracking-[0.08em];
+  @apply inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[0.62rem] font-medium capitalize;
 }
 
 .taste-status-ok {
-  @apply border-emerald-200/80 bg-emerald-50 text-emerald-800;
+  @apply border-emerald-200 bg-emerald-50 text-emerald-800;
 }
 
 .taste-status-fail {
-  @apply border-red-200/80 bg-red-50 text-red-800;
+  @apply border-red-200 bg-red-50 text-red-800;
 }
 
 .taste-status-run {
-  @apply border-habeas-light/40 bg-habeas-mid/10 text-habeas-navy;
+  @apply border-sky-200 bg-sky-50 text-habeas-navy;
 }
 
 .taste-status-wait {
-  @apply border-habeas-mid/45 bg-transparent text-habeas-mid;
+  @apply border-line bg-white text-ink-soft;
 }
 
 .taste-status-dot {
   @apply h-1.5 w-1.5 shrink-0 rounded-full;
 }
 
-.taste-status-ok .taste-status-dot,
-.taste-status-dot-ok {
+.taste-status-ok .taste-status-dot {
   @apply bg-emerald-600;
 }
 
-.taste-status-fail .taste-status-dot,
-.taste-status-dot-fail {
+.taste-status-fail .taste-status-dot {
   @apply bg-red-600;
 }
 
-.taste-status-run .taste-status-dot,
-.taste-status-dot-run {
-  @apply animate-pulse bg-habeas-light;
+.taste-status-run .taste-status-dot {
+  @apply animate-pulse bg-habeas-mid;
 }
 
-.taste-status-wait .taste-status-dot,
-.taste-status-dot-wait {
-  @apply border border-habeas-mid/60 bg-transparent;
-}
-
-.taste-atmosphere-orb {
-  animation: taste-soft-pulse 7s ease-in-out infinite;
+.taste-status-wait .taste-status-dot {
+  @apply border border-mute bg-transparent;
 }

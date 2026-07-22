@@ -36,22 +36,39 @@ bq query --use_legacy_sql=false < transform/drop_hash/udf/tests/test_udf_vectors
 
 Expect **0 rows** from the vector query.
 
-## 3. Full dbt build + serving swap (per state)
+## 3. Per-state refresh (durable int/build → patch serving)
 
-Shared marts hold all served states; each dbt run fills **one** state:
+Shared serving marts hold all served states; each dbt run rebuilds **one** state
+only — it does **not** re-hash the other 50.
+
+| Layer | Physical tables (example `state=CA`) | Lifetime |
+|-------|--------------------------------------|----------|
+| Staging / int | `stg_person_ca`, `int_email_hash_ca`, `int_phone_hash_ca`, `int_ndz_hash_ca`, … | Durable; overwritten only when that state refreshes |
+| Mart build | `email_hash__build_ca`, `phone_hash__build_ca`, `ndz_hash__build_ca` | Durable; retained after serving merge (parallel-safe) |
+| Serving (national) | `email_hash`, `phone_hash`, `ndz_hash` | Patched: `DELETE`/`INSERT` (or first-create `COPY`) for `WHERE state='CA'` only |
 
 ```bash
 cd transform/drop_hash
 cp profiles.yml.example profiles.yml   # if needed
 DBT_PROFILES_DIR=. dbt build --vars '{state: CA}'
 DBT_PROFILES_DIR=. dbt build --vars '{state: TX}'
-# Or enqueue the full wave via admin-api:
+# Or enqueue one state / full wave via admin-api:
+#   POST /ops/drop/hash-index-refresh/enqueue   (body: state)
 #   POST /ops/drop/hash-index-refresh/enqueue-all
 ```
 
-Writes intermediates, builds `*_hash__build` marts, then merges that state’s rows
-into `email_hash`, `phone_hash`, `ndz_hash`. Parallel per-state jobs are OK;
-watch BigQuery slots/cost. Served-state list is **USPS 50 + DC** (settled).
+Flow for a single-state refresh (e.g. CA):
+
+1. `generate_alias_name` suffixes every model alias with `_<state>` so parallel
+   workers cannot clobber each other (FL phone race lesson).
+2. Staging filters MDR with `state = var('state')`; int models hash that slice.
+3. Mart models write `*_hash__build_<state>`.
+4. `perform_serving_swap()` patches national serving for that state only and
+   **keeps** the build tables (first create uses `CREATE TABLE … COPY`, not rename).
+
+Parallel per-state jobs are OK; watch BigQuery slots/cost. Served-state list is
+**USPS 50 + DC** (settled). Dry-run without patching serving:
+`--vars '{state: CA, perform_serving_swap: false}'`.
 
 **Timeout (name UDF):** chunk by `FARM_FINGERPRINT(dwid) % N` — see `udf/README.md`.
 
@@ -79,20 +96,19 @@ source of truth for enqueue-all / hash refresh — not a separate MDR jurisdicti
 config. Every state must be hashed and ready to match; sparse marts (email) still
 run per state and simply yield zero serving rows when MDR has no values.
 
-### Email MDR source (investigation 2026-07-20)
+### Email sources (MDR + digital)
 
-| Finding | Detail |
-|---------|--------|
-| Dataset | `example-gcp-project.person_db` (dbt `source('person_db', …)`) |
-| Email tables | **None** named email/contact — only `person` holds an email field |
-| Email column | Sole column: `person.emailaddress` (join keys `dwid`, `state`) |
-| Other “mail*” columns | Postal/mail **address** fields on `person` / household / models — not emails |
-| Phones | Separate table `phones` (`dwid`, `state`, cell/land) — no email columns |
-| Fill rate | ~9.9M nonempty / ~377M person rows (~97% null or empty) |
-| States with any email | **9:** NY, IN, IL, WI, RI, SD, FL, AZ, MT — remaining 42 (incl. **CA**) have zero nonempty |
-| dbt recommendation | Keep `stg_person` → `int_email_hash` on `emailaddress`; **no union** needed |
+**MDR (investigation 2026-07-20):** Dataset `example-gcp-project.person_db` — no
+email/contact table; sole field `person.emailaddress` (~9.9M nonempty / ~377M
+rows; **9** states with any fill: NY/IN/IL/WI/RI/SD/FL/AZ/MT). Sparse fill is an
+MDR completeness property.
 
-Sparse `email_hash` is an MDR completeness property, not a wrong dbt source.
+**Digital supplement:** `example-gcp-project.production_datasets.emails_digital_only_24q2`
+→ `stg_emails_digital_only` (projects `email` → `emailaddress`, `var('state')`
+filter) → unioned in `int_email_hash` with `stg_person`, one standardize + hash
+path, dedupe on `(dwid, state, email_std)`. Mart/serving contract unchanged.
+
+Re-enqueue hash refresh only after Jose approves (fills more states than MDR alone).
 
 **Enqueue-all wave (code complete — do not fire against prod without Jose):**
 
@@ -121,8 +137,9 @@ curl -sS -H "Authorization: Bearer $IAP_ID_TOKEN" "$ADMIN_API_URL/auth/me"
 | Worker | Invoked only by admin-api runtime SA (`roles/run.invoker` on workers — never user/IAP) |
 
 Parallel per-state `dbt build --vars '{state: …}'` into shared serving marts is
-supported (staging/int/build relations are state-suffixed). Watch BigQuery
-slots/cost. Prefer the queue/worker path over ad-hoc prod dbt.
+supported (staging/int/build relations are state-suffixed and **retained** after
+the serving patch). Watch BigQuery slots/cost. Prefer the queue/worker path over
+ad-hoc prod dbt. See “Per-state refresh” above.
 
 **FL phone gap (2026-07-17):** After the first enqueue-all wave, `phone_hash`
 had every served state except `FL` while MDR `person_db.phones` had ~20.5M FL
@@ -141,13 +158,13 @@ Project `example-gcp-project` · `bq ls` / metadata + count queries OK (no PII s
 
 | Mart | Row count | Distinct `state` | Notes |
 |------|-----------|------------------|--------|
-| `email_hash` | ~9.91M | **9** | Exact match to MDR nonempty `person.emailaddress`; states NY/IN/IL/WI/RI/SD/FL/AZ/MT. CA and 41 others correctly absent (MDR zero fill). |
+| `email_hash` | ~9.91M | **9** | Pre-digital-union: matched MDR nonempty `person.emailaddress` only (NY/IN/IL/WI/RI/SD/FL/AZ/MT). Post-union counts rise after next approved refresh. |
 | `phone_hash` | ~411.7M | **51** | Full USPS 50+DC coverage |
 | `ndz_hash` | ~276.9M | **51** | Full USPS 50+DC coverage |
 
 Dataset `drop_hash_index` lists serving + intermediate tables; experiment dataset
-`drop_hash_experiment` still present (sandbox only). No re-enqueue needed for
-email after the 2026-07-20 investigation — serving already equals MDR fill.
+`drop_hash_experiment` still present (sandbox only). Email serving still reflects
+MDR-only fill until a Jose-approved refresh runs the digital union.
 
 ### Blockers / notes for prod enqueue-all
 
@@ -155,8 +172,8 @@ email after the 2026-07-20 investigation — serving already equals MDR fill.
    approval (see `.agent/modules/prod-write-gate.md`). Prior waves approved separately.
 2. **Served states** — **settled:** USPS 50+DC. Re-enqueue only when MDR updates or
    a mart gap appears (phone/ndz currently 51/51).
-3. **Email sparsity** — expected; not a rebuild blocker. Matching on email only
-   works in the 9 MDR-filled states until Habeas loads more `emailaddress` values.
+3. **Email sparsity** — MDR-only fill is sparse (9 states); digital source
+   (`emails_digital_only_24q2`) widens coverage after the next approved refresh.
 4. **Worker workload identity** — Cloud Build does not yet attach a dedicated
    `hash-index-refresh` runtime SA with BigQuery `jobUser` + dataset write on
    `drop_hash_index` + MDR read (see `infra/README.md` go-live checklist). Invoker
