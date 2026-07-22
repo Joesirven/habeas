@@ -135,6 +135,24 @@ def test_journey_denies_unknown_email(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.status_code == 403
 
 
+def test_compute_current_stage_prefers_waiting_over_earlier_not_started() -> None:
+    stages = [
+        request_journey.JourneyStage(stage="received", label="Received", status="complete"),
+        request_journey.JourneyStage(stage="download", label="Download", status="skipped"),
+        request_journey.JourneyStage(stage="land", label="Land", status="skipped"),
+        request_journey.JourneyStage(stage="promote", label="Promote", status="skipped"),
+        request_journey.JourneyStage(stage="match", label="Match", status="complete"),
+        request_journey.JourneyStage(
+            stage="review",
+            label="Review",
+            status="waiting",
+            blocker="matching.review required",
+        ),
+        request_journey.JourneyStage(stage="fulfill", label="Fulfill", status="complete"),
+    ]
+    assert request_journey._compute_current_stage(stages) == "review"
+
+
 def test_journey_allows_data_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     roles.settings.admin_api_data_owners = "owner@example.com"
     headers = {IAP_EMAIL_HEADER: "owner@example.com"}
@@ -249,6 +267,9 @@ async def test_needs_attention_includes_pending_review(pool) -> None:
     item = next(row for row in response.items if row.request_id == request_id)
     assert item.reason == MATCHING_REVIEW_ACTION
     assert item.current_stage == "review"
+    assert item.match_count == 1
+    assert item.match_type == "single_match"
+    assert item.matched is True
     assert_no_pii_keys(response.model_dump())
 
 

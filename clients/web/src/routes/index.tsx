@@ -1,12 +1,15 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 
-import { Skeleton, SkeletonLines } from '@/components/AppShell'
+import { SkeletonLines } from '@/components/AppShell'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { useMe } from '@/lib/auth'
-import { getDropGlobalStats, getHealth, getNeedsAttention } from '@/lib/api'
+import { getDropGlobalStats, getDropPipeline, getHealth, getNeedsAttention } from '@/lib/api'
+import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
 
-export function DashboardPage() {
-  const { isSuperAdmin, isAdmin } = useMe()
+function OperatorDashboardHome() {
+  const { isAdmin } = useMe()
 
   const attentionQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'home'],
@@ -33,159 +36,194 @@ export function DashboardPage() {
     placeholderData: (previous) => previous,
   })
 
-  const attentionCount = attentionQuery.data?.items.length
+  const pipelineQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'drop-pipeline', 'home-viz'],
+    queryFn: getDropPipeline,
+    refetchInterval: 15_000,
+    enabled: isAdmin,
+    retry: 2,
+    placeholderData: (previous) => previous,
+  })
+
+  const attentionCount = attentionQuery.data?.items.length ?? 0
   const dropStats = dropStatsQuery.data
-  const attentionLoading = attentionQuery.isPending && !attentionQuery.data
+  const approaching = pipelineQuery.data?.approaching_sla
+  const loading = attentionQuery.isPending && !attentionQuery.data
+
+  const matchCounts = { single_match: 0, multi_match: 0, not_found: 0 }
+  for (const row of pipelineQuery.data?.matching_results_recent ?? []) {
+    const matchType = row.match_type
+    if (matchType && matchType in matchCounts) {
+      matchCounts[matchType as keyof typeof matchCounts] += 1
+    }
+  }
+  const matchMax = Math.max(
+    1,
+    matchCounts.single_match,
+    matchCounts.multi_match,
+    matchCounts.not_found,
+  )
+
+  const slaBars = approaching
+    ? [
+        { key: 'Download', value: approaching.connector },
+        { key: 'Ingest', value: approaching.ingest },
+        { key: 'Matching', value: approaching.matching },
+        { key: 'Review', value: approaching.matching_review },
+      ]
+    : []
+  const slaMax = Math.max(1, ...slaBars.map((bar) => bar.value), 1)
 
   return (
-    <section className="taste-ops-page">
+    <section className="space-y-5">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="taste-micro">Home</p>
-          <h2 className="font-display text-xl font-medium leading-none tracking-tight text-ink">
-            Needs me
-          </h2>
+          <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">Home</p>
+          <h2 className="mt-1 text-xl font-semibold tracking-tight text-ink">Dashboard</h2>
         </div>
         <div className="flex items-center gap-2">
-          {(attentionQuery.isFetching || dropStatsQuery.isFetching) &&
-          !attentionLoading &&
-          attentionQuery.data ? (
-            <span className="taste-frost-chip">Refreshing</span>
-          ) : null}
           {healthQuery.data ? (
-            <span className="taste-frost-chip tabular-nums">
+            <Badge variant="ok" className="normal-case tracking-normal">
               API {healthQuery.data.status}
-            </span>
-          ) : healthQuery.isPending ? (
-            <span className="taste-frost-chip">Checking API</span>
+            </Badge>
           ) : null}
         </div>
       </header>
 
-      <div className="taste-panel-soft p-6 sm:p-7">
-        <p className="taste-micro">Needs attention</p>
-
-        {attentionLoading ? (
-          <div className="mt-5" role="status" aria-label="Loading needs-attention queue">
-            <Skeleton className="h-14 w-24" />
-            <div className="mt-4">
-              <SkeletonLines lines={2} />
-            </div>
-          </div>
-        ) : null}
-
-        {attentionQuery.isError && !attentionQuery.data ? (
-          <p className="mt-4 text-sm text-red-700">Could not load needs-attention queue.</p>
-        ) : null}
-
-        {attentionQuery.data ? (
-          <div className="mt-4 flex flex-wrap items-end justify-between gap-6">
-            <div>
-              <p className="font-display text-5xl font-medium tabular-nums text-habeas-navy sm:text-6xl">
-                {attentionCount}
-              </p>
-              <p className="mt-2 text-sm text-ink-soft">
-                {attentionCount === 0
-                  ? 'Nothing blocking right now.'
-                  : 'Requests waiting on human gates or blockers.'}
-              </p>
-            </div>
-            <Link to="/requests/needs-attention" className="taste-btn-primary">
-              Open queue →
-            </Link>
-          </div>
-        ) : null}
-
-        {attentionQuery.data && attentionQuery.data.items.length > 0 ? (
-          <ul className="mt-6 space-y-2 border-t border-line pt-5">
-            {attentionQuery.data.items.slice(0, 4).map((item) => (
-              <li key={item.request_id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
-                <Link
-                  to="/requests/$requestId"
-                  params={{ requestId: item.request_id }}
-                  className="taste-link font-mono text-xs"
-                >
-                  {item.request_id}
-                </Link>
-                <span className="text-ink-soft">{item.reason}</span>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </div>
-
-      <div className="flex flex-wrap gap-2">
-        <Link to="/requests" className="taste-btn text-xs">
-          All requests →
-        </Link>
-        {isAdmin ? (
-          <Link to="/requests/needs-attention" className="taste-btn text-xs">
-            Needs attention →
-          </Link>
-        ) : null}
-        {isAdmin ? (
-          <Link to="/ops/health" className="taste-btn text-xs">
-            Insights →
-          </Link>
-        ) : null}
-      </div>
-
-      {isAdmin && dropStats ? (
-        <div className="taste-panel-soft px-5 py-4">
-          <p className="taste-micro">Pipeline signals</p>
-          <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-sm">
-            <div className="flex items-baseline gap-2">
-              <dt className="text-ink-soft">Review pending</dt>
-              <dd className="font-medium tabular-nums">{dropStats.matching_review_pending}</dd>
-            </div>
-            <div className="flex items-baseline gap-2">
-              <dt className="text-ink-soft">Open DROP</dt>
-              <dd className="font-medium tabular-nums">{dropStats.open_drop_requests}</dd>
-            </div>
-            <div className="flex items-baseline gap-2">
-              <dt className="text-ink-soft">Workers down</dt>
-              <dd className="font-medium tabular-nums">
-                {dropStats.workers_down}/{dropStats.workers_total}
-              </dd>
-            </div>
-          </dl>
+      {loading ? (
+        <div className="rounded-lg border border-line bg-paper p-5">
+          <SkeletonLines lines={4} />
         </div>
       ) : null}
 
-      {isAdmin && dropStatsQuery.isPending && !dropStats ? (
-        <div className="taste-panel-soft p-5">
-          <SkeletonLines lines={2} />
-        </div>
-      ) : null}
-
-      {isSuperAdmin ? (
-        <div className="relative overflow-hidden rounded-[1.1rem] bg-habeas-navy p-5 sm:p-6">
-          <div
-            aria-hidden
-            className="taste-atmosphere-orb pointer-events-none absolute -right-6 top-0 h-36 w-36 rounded-full bg-habeas-light/30 blur-2xl"
-          />
-          <div className="relative">
-            <p className="taste-micro text-white/55">Shortcuts</p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Link to="/ops/workers" className="taste-frost-chip-dark">
-                Workers →
-              </Link>
-              <Link to="/ops/workers/failed" className="taste-frost-chip-dark">
-                Failed runs →
-              </Link>
-              <Link to="/requests/needs-attention" className="taste-frost-chip-dark">
-                Inbox →
-              </Link>
-              <Link
-                to="/ops/drop-pipeline"
-                search={{ tab: 'matching' }}
-                className="taste-frost-chip-dark"
-              >
-                Matching pipeline →
-              </Link>
+      {!loading ? (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-lg border border-line bg-paper p-4">
+              <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+                Inbox
+              </p>
+              <p className="mt-2 text-3xl font-semibold tabular-nums text-ink">{attentionCount}</p>
+              <Button asChild size="sm" className="mt-3">
+                <Link to="/requests/needs-attention">Open inbox</Link>
+              </Button>
+            </div>
+            <div className="rounded-lg border border-line bg-paper p-4">
+              <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+                Review pending
+              </p>
+              <p className="mt-2 text-3xl font-semibold tabular-nums text-ink">
+                {dropStats?.matching_review_pending ?? '—'}
+              </p>
+              <p className="mt-2 text-xs text-ink-soft">matching.review gates</p>
+            </div>
+            <div className="rounded-lg border border-line bg-paper p-4">
+              <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+                Spine requests
+              </p>
+              <p className="mt-2 text-3xl font-semibold tabular-nums text-ink">
+                {dropStats?.open_drop_requests ?? '—'}
+              </p>
+              <p className="mt-2 text-xs text-ink-soft">Thin DROP requests on the spine</p>
+            </div>
+            <div className="rounded-lg border border-line bg-paper p-4">
+              <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+                Approaching deadline
+              </p>
+              <p className="mt-2 text-3xl font-semibold tabular-nums text-ink">
+                {approaching
+                  ? approaching.connector +
+                    approaching.ingest +
+                    approaching.matching +
+                    approaching.matching_review
+                  : '—'}
+              </p>
+              <p className="mt-2 text-xs text-ink-soft">
+                Needs review · gate {approaching?.matching_review ?? '—'}
+              </p>
             </div>
           </div>
-        </div>
+
+          {isAdmin && pipelineQuery.data?.ca_drop_schedule ? (
+            <div className="rounded-lg border border-line bg-paper p-4">
+              <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+                Next CA DROP retrieval
+              </p>
+              <p className="mt-2 text-lg font-semibold tabular-nums text-ink">
+                {new Date(pipelineQuery.data.ca_drop_schedule.next_run_at).toLocaleString()}
+              </p>
+              <p className="mt-1 text-xs text-ink-soft">
+                {pipelineQuery.data.ca_drop_schedule.cadence} ·{' '}
+                {pipelineQuery.data.ca_drop_schedule.schedule_utc} UTC
+              </p>
+            </div>
+          ) : null}
+
+          {isAdmin ? (
+            <div className="grid gap-4 lg:grid-cols-2">
+              <div className="rounded-lg border border-line bg-paper p-4">
+                <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+                  Approaching age policy
+                </p>
+                <p className="mt-1 text-xs text-ink-soft">
+                  Open rows past stage attention thresholds.
+                </p>
+                {slaBars.length === 0 ? (
+                  <p className="mt-4 text-xs text-mute">No pipeline snapshot yet.</p>
+                ) : (
+                  <div className="mt-4 space-y-2.5">
+                    {slaBars.map((bar) => (
+                      <div
+                        key={bar.key}
+                        className="grid grid-cols-[5rem_1fr_2rem] items-center gap-2"
+                      >
+                        <span className="text-[0.7rem] text-ink-soft">{bar.key}</span>
+                        <div className="h-2 overflow-hidden rounded-full bg-panel">
+                          <div
+                            className="h-full rounded-full bg-habeas-mid"
+                            style={{ width: `${(bar.value / slaMax) * 100}%` }}
+                          />
+                        </div>
+                        <span className="text-right text-[0.7rem] tabular-nums text-ink">
+                          {bar.value}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-line bg-paper p-4">
+                <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+                  Recent match mix
+                </p>
+                <p className="mt-1 text-xs text-ink-soft">Latest matching_results sample.</p>
+                <div className="mt-4 flex items-end gap-3" style={{ height: '7rem' }}>
+                  {(
+                    [
+                      ['Single', matchCounts.single_match],
+                      ['Multi', matchCounts.multi_match],
+                      ['Not found', matchCounts.not_found],
+                    ] as const
+                  ).map(([label, count]) => (
+                    <div key={label} className="flex min-w-0 flex-1 flex-col items-center gap-1">
+                      <span className="text-[0.65rem] tabular-nums text-mute">{count}</span>
+                      <div className="flex w-full flex-1 items-end">
+                        <div
+                          className="w-full rounded-t-md bg-habeas-navy/80"
+                          style={{
+                            height: `${Math.max((count / matchMax) * 100, count > 0 ? 8 : 0)}%`,
+                          }}
+                        />
+                      </div>
+                      <span className="truncate text-[0.65rem] text-ink-soft">{label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </>
       ) : null}
 
       {healthQuery.isError && !healthQuery.data ? (
@@ -196,4 +234,22 @@ export function DashboardPage() {
       ) : null}
     </section>
   )
+}
+
+export function DashboardPage() {
+  const { isSuperAdmin, isLoading } = useMe()
+
+  if (isLoading) {
+    return (
+      <section className="space-y-4">
+        <SkeletonLines lines={5} />
+      </section>
+    )
+  }
+
+  if (isSuperAdmin) {
+    return <DropPipelinePage />
+  }
+
+  return <OperatorDashboardHome />
 }

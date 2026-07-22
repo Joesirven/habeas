@@ -77,7 +77,7 @@ function MetaStrip({
         <dt className="taste-micro">Stage</dt>
         <dd className="capitalize">
           <span className="taste-frost-chip text-[0.65rem]">
-            {currentStage.replaceAll('_', ' ')}
+            {(currentStage ?? 'unknown').replaceAll('_', ' ')}
           </span>
         </dd>
       </div>
@@ -154,7 +154,9 @@ function OverviewPanel({
         </div>
         <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
           <dt className="taste-micro">Current stage</dt>
-          <dd className="mt-1 text-xs capitalize">{currentStage.replaceAll('_', ' ')}</dd>
+          <dd className="mt-1 text-xs capitalize">
+            {(currentStage ?? 'unknown').replaceAll('_', ' ')}
+          </dd>
         </div>
         {runningStage ? (
           <div className="rounded-lg border border-habeas-mid/30 bg-panel/60 px-3 py-2 sm:col-span-2">
@@ -211,7 +213,13 @@ async function fetchMatchingDetailOptional(
   try {
     return await getDropMatchingResultDetail(requestId)
   } catch (error) {
-    if (error instanceof Error && error.message.includes('404')) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('404') ||
+        error.message.includes('500') ||
+        error.message.includes('502') ||
+        error.message.includes('503'))
+    ) {
       return null
     }
     throw error

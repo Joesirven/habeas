@@ -5,12 +5,12 @@ import { AppShell } from '@/components/AppShell'
 import { DashboardPage } from '@/routes/index'
 import { OpsDashboardPage } from '@/routes/ops/dashboard'
 import { DeMonitorPage } from '@/routes/ops/de-monitor'
-import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
 import { OpsIncidentsPage } from '@/routes/ops/incidents'
 import { OpsJobsPage } from '@/routes/ops/jobs'
 import { OpsRunsPage } from '@/routes/ops/runs'
 import { RunDetailPage } from '@/routes/ops/run-detail'
-import { WorkersPage } from '@/routes/ops/workers'
+import { WorkersPage, WorkersTrendsPage } from '@/routes/ops/workers'
+import { WorkerDetailPage } from '@/routes/ops/workers/$workerName'
 import { WorkersFailedPage } from '@/routes/ops/workers/failed'
 import { WorkersSettingsPage } from '@/routes/ops/workers/settings'
 import { HealthConfigurationPage } from '@/routes/ops/health/configuration'
@@ -28,6 +28,8 @@ export const PIPELINE_TABS = [
   'ingest',
   'matching',
   'fulfillment',
+  'hash_refresh',
+  'history',
   'configurations',
 ] as const
 
@@ -207,15 +209,74 @@ const rootRoute = createRootRoute({
   ),
 })
 
+function parseProcessId(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 1) {
+    return Math.floor(value)
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10)
+    if (Number.isFinite(parsed) && parsed >= 1) return parsed
+  }
+  return undefined
+}
+
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
+  validateSearch: (search: Record<string, unknown>) => {
+    const parsed: { tab: PipelineTab; process?: number } = {
+      tab: parsePipelineTab(search.tab),
+    }
+    const process = parseProcessId(search.process)
+    if (process != null) parsed.process = process
+    return parsed
+  },
   component: DashboardPage,
 })
+
+export type RequestsSearch = {
+  source?: 'webform' | 'drop' | 'csv' | 'manual'
+  state?: string
+  attention?: 'needs' | 'clear'
+  raw?: 'yes' | 'no'
+  q?: string
+  received_after?: string
+  received_before?: string
+}
+
+function parseRequestsSearch(search: Record<string, unknown>): RequestsSearch {
+  const parsed: RequestsSearch = {}
+  if (
+    typeof search.source === 'string' &&
+    ['webform', 'drop', 'csv', 'manual'].includes(search.source)
+  ) {
+    parsed.source = search.source as RequestsSearch['source']
+  }
+  if (typeof search.state === 'string' && search.state.trim()) {
+    parsed.state = search.state.trim().toUpperCase()
+  }
+  if (search.attention === 'needs' || search.attention === 'clear') {
+    parsed.attention = search.attention
+  }
+  if (search.raw === 'yes' || search.raw === 'no') {
+    parsed.raw = search.raw
+  }
+  if (typeof search.q === 'string' && search.q.trim()) {
+    parsed.q = search.q.trim()
+  }
+  if (typeof search.received_after === 'string' && search.received_after.trim()) {
+    parsed.received_after = search.received_after.trim()
+  }
+  if (typeof search.received_before === 'string' && search.received_before.trim()) {
+    parsed.received_before = search.received_before.trim()
+  }
+  return parsed
+}
 
 const requestsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests',
+  validateSearch: (search: Record<string, unknown>) => parseRequestsSearch(search),
   component: RequestsPage,
 })
 
@@ -278,6 +339,19 @@ const opsWorkersSettingsRoute = createRoute({
   component: WorkersSettingsPage,
 })
 
+const opsWorkersTrendsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/workers/trends',
+  component: WorkersTrendsPage,
+})
+
+const opsWorkerDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/workers/$workerName',
+  validateSearch: (search: Record<string, unknown>) => parseWorkersFailedSearch(search),
+  component: WorkerDetailPage,
+})
+
 const opsDeMonitorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/de-monitor',
@@ -313,10 +387,21 @@ const opsIncidentsRoute = createRoute({
 const dropPipelineRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/drop-pipeline',
-  validateSearch: (search: Record<string, unknown>) => ({
-    tab: parsePipelineTab(search.tab),
-  }),
-  component: DropPipelinePage,
+  validateSearch: (search: Record<string, unknown>) => {
+    const parsed: { tab: PipelineTab; process?: number } = {
+      tab: parsePipelineTab(search.tab),
+    }
+    const process = parseProcessId(search.process)
+    if (process != null) parsed.process = process
+    return parsed
+  },
+  beforeLoad: ({ search }) => {
+    throw redirect({
+      to: '/',
+      search: { tab: search.tab, process: search.process },
+    })
+  },
+  component: () => null,
 })
 
 const healthRoute = createRoute({
@@ -355,6 +440,8 @@ const routeTree = rootRoute.addChildren([
   opsWorkersRoute,
   opsWorkersFailedRoute,
   opsWorkersSettingsRoute,
+  opsWorkersTrendsRoute,
+  opsWorkerDetailRoute,
   opsDeMonitorRoute,
   opsRunsRoute,
   opsJobsRoute,

@@ -6,6 +6,7 @@ import { RunTimeline } from '@/components/ops/RunTimeline'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
+  ConfirmActionDialog,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -70,7 +71,14 @@ async function fetchMatchingDetailOptional(
   try {
     return await getDropMatchingResultDetail(requestId)
   } catch (error) {
-    if (error instanceof Error && error.message.includes('404')) {
+    // 404 = no result yet; 5xx / legacy payload bugs should not crash the drawer.
+    if (
+      error instanceof Error &&
+      (error.message.includes('404') ||
+        error.message.includes('500') ||
+        error.message.includes('502') ||
+        error.message.includes('503'))
+    ) {
       return null
     }
     throw error
@@ -105,14 +113,55 @@ export function MatchingReviewPanel({
   onPromote: () => void
   onDecline: () => void
 }) {
+  const [confirm, setConfirm] = useState<'promote' | 'decline' | null>(null)
+
   return (
     <div className="space-y-4 text-xs">
+      <ConfirmActionDialog
+        open={confirm === 'promote'}
+        onOpenChange={(open) => {
+          if (!open) setConfirm(null)
+        }}
+        title="Promote to fulfillment?"
+        description={`Promote request ${requestId.slice(0, 8)}… past matching review. This cannot be undone from the inbox.`}
+        confirmLabel="Promote"
+        confirming={actionPending}
+        onConfirm={() => {
+          setConfirm(null)
+          onPromote()
+        }}
+      />
+      <ConfirmActionDialog
+        open={confirm === 'decline'}
+        onOpenChange={(open) => {
+          if (!open) setConfirm(null)
+        }}
+        title="Decline matching review?"
+        description={`Decline request ${requestId.slice(0, 8)}… — it will leave the review queue without fulfillment.`}
+        confirmLabel="Decline"
+        tone="destructive"
+        confirming={actionPending}
+        onConfirm={() => {
+          setConfirm(null)
+          onDecline()
+        }}
+      />
       {isPending && matching == null ? (
         <p className="text-ink-soft">Loading matching result…</p>
       ) : null}
-      {isError ? <p className="text-red-700">Could not load matching result.</p> : null}
+      {isError ? (
+        <p className="text-red-700">
+          Could not load matching result. Retry or open Workers → matching.
+        </p>
+      ) : null}
       {matching == null && !isPending && !isError ? (
-        <p className="text-ink-soft">No matching result recorded for this request yet.</p>
+        <div className="space-y-2 text-ink-soft">
+          <p>No matching result payload for this request yet.</p>
+          <p className="text-[0.65rem] text-mute">
+            Skipped download/land/promote stages are fine. Detail appears once a matching_results
+            row exists; review can still wait on matching.review independently.
+          </p>
+        </div>
       ) : null}
       {matching ? (
         <>
@@ -127,7 +176,9 @@ export function MatchingReviewPanel({
             </div>
             <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
               <dt className="taste-micro">Match type</dt>
-              <dd className="mt-1">{matching.match_type.replaceAll('_', ' ')}</dd>
+              <dd className="mt-1">
+                {(matching.match_type ?? '—').replaceAll('_', ' ')}
+              </dd>
             </div>
             <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
               <dt className="taste-micro">Review status</dt>
@@ -139,7 +190,7 @@ export function MatchingReviewPanel({
             </div>
             <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
               <dt className="taste-micro">Matched via</dt>
-              <dd className="mt-1">{matching.matched_via}</dd>
+              <dd className="mt-1">{matching.matched_via ?? '—'}</dd>
             </div>
             {matching.requestor_state ? (
               <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
@@ -157,10 +208,19 @@ export function MatchingReviewPanel({
 
           {canReviewActions ? (
             <div className="flex flex-wrap items-center gap-2 border-t border-line pt-4">
-              <Button size="sm" disabled={actionPending} onClick={onPromote}>
+              <Button
+                size="sm"
+                disabled={actionPending}
+                onClick={() => setConfirm('promote')}
+              >
                 Promote to fulfillment
               </Button>
-              <Button size="sm" variant="outline" disabled={actionPending} onClick={onDecline}>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={actionPending}
+                onClick={() => setConfirm('decline')}
+              >
                 Decline
               </Button>
             </div>
@@ -285,7 +345,7 @@ export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDe
                   <dt className="taste-micro">Stage</dt>
                   <dd>
                     <span className="taste-frost-chip text-[0.65rem] capitalize">
-                      {journeyQuery.data.current_stage.replaceAll('_', ' ')}
+                      {(journeyQuery.data.current_stage ?? 'unknown').replaceAll('_', ' ')}
                     </span>
                   </dd>
                 </div>

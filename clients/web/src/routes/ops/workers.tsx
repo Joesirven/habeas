@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
-import { useMemo, type ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import {
   getDropGlobalStats,
+  getDropWorkerTrends,
   getDropWorkers,
   listRuns,
   resolveRunsTimeParams,
@@ -18,12 +19,22 @@ import type { WorkersSearch, WorkersStatusTab } from '@/router'
 const WINDOW_OPTIONS: WorkersTimeWindow[] = ['8h', '1w', '3m', 'custom']
 
 const JOB_OPTIONS = [
-  { value: '', label: 'All jobs' },
-  { value: 'matching', label: 'matching' },
-  { value: 'hash_index_refresh', label: 'hash_index_refresh' },
+  { value: '', label: 'All workers' },
   { value: 'drop_connector', label: 'drop_connector' },
   { value: 'drop_ingestor', label: 'drop_ingestor' },
+  { value: 'request_dispatcher', label: 'request_dispatcher' },
+  { value: 'matching', label: 'matching' },
+  { value: 'data_fulfillment', label: 'data_fulfillment' },
+  { value: 'hash_index_refresh', label: 'hash_index_refresh' },
 ] as const
+
+/** Workers that have unified /ops/runs history. */
+const RUN_HISTORY_JOBS = new Set([
+  'drop_connector',
+  'drop_ingestor',
+  'matching',
+  'hash_index_refresh',
+])
 
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
@@ -235,14 +246,18 @@ function WorkersBody() {
 
   const timeParams = resolveRunsTimeParams(window, since)
 
+  const runJob =
+    job && RUN_HISTORY_JOBS.has(job) ? job : job ? null : undefined
+
   const runsQuery = useQuery({
     queryKey: ['ops', 'workers', 'runs', window, since, job],
     queryFn: () =>
       listRuns({
         ...timeParams,
-        job: job || undefined,
+        job: runJob || undefined,
         limit: 200,
       }),
+    enabled: runJob !== null,
     refetchInterval: 15_000,
   })
 
@@ -260,7 +275,11 @@ function WorkersBody() {
 
   const runs = runsQuery.data ?? []
   const visible = useMemo(() => filterRuns(runs, tab), [runs, tab])
-  const workers = workersQuery.data?.workers ?? []
+  const workers = useMemo(() => {
+    const all = workersQuery.data?.workers ?? []
+    if (!job) return all
+    return all.filter((worker) => worker.name === job)
+  }, [workersQuery.data?.workers, job])
   const workerAgg = useMemo(() => aggregateWorkers(workers), [workers])
   const globalStats = statsQuery.data
   const workersDown = globalStats?.workers_down ?? workers.filter((w) => !w.ok).length
@@ -362,9 +381,9 @@ function WorkersBody() {
           onChange={(patch) => patchSearch(patch)}
         />
         <label className="ml-auto flex items-center gap-1.5 text-xs text-ink-soft">
-          Job
+          Worker
           <select
-            className="glass rounded-lg px-2 py-1.5 text-xs text-ink"
+            className="rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
             value={job ?? ''}
             onChange={(event) =>
               patchSearch({ job: event.target.value ? event.target.value : undefined })
@@ -417,8 +436,28 @@ function WorkersBody() {
                   </tr>
                 ) : (
                   workers.map((worker) => (
-                    <tr key={worker.name}>
-                      <td className="font-mono text-xs">{worker.name}</td>
+                    <tr
+                      key={worker.name}
+                      className="cursor-pointer transition-colors hover:bg-panel/50"
+                      onClick={() =>
+                        void navigate({
+                          to: '/ops/workers/$workerName',
+                          params: { workerName: worker.name },
+                          search: { window, since },
+                        })
+                      }
+                    >
+                      <td className="font-mono text-xs">
+                        <Link
+                          to="/ops/workers/$workerName"
+                          params={{ workerName: worker.name }}
+                          search={{ window, since }}
+                          className="text-habeas-mid underline decoration-habeas-mid/30 underline-offset-2"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          {worker.name}
+                        </Link>
+                      </td>
                       <td>
                         <StatusPill status={worker.ok ? 'ok' : 'failed'} />
                       </td>
@@ -464,7 +503,11 @@ function WorkersBody() {
           </div>
         </div>
 
-        {runsQuery.isError ? (
+        {runJob === null ? (
+          <p className="px-3 py-4 text-xs text-ink-soft">
+            {job} has queue probes on the fleet table but no unified Runs history yet.
+          </p>
+        ) : runsQuery.isError ? (
           <p className="px-3 py-4 text-xs text-red-700">
             Runs fetch failed.{' '}
             <button type="button" className="underline" onClick={() => void runsQuery.refetch()}>
@@ -554,6 +597,151 @@ export function WorkersPage() {
   return (
     <RoleGate allow={isSuperAdmin}>
       <WorkersBody />
+    </RoleGate>
+  )
+}
+
+function pct(rate: number): string {
+  return `${(rate * 100).toFixed(1)}%`
+}
+
+function WorkersTrendsBody() {
+  const [window, setWindow] = useState<'8h' | '1w' | '3m'>('1w')
+  const trendsQuery = useQuery({
+    queryKey: ['ops', 'workers', 'trends', window],
+    queryFn: () => getDropWorkerTrends(window),
+    refetchInterval: 30_000,
+  })
+  const rows = trendsQuery.data?.workers ?? []
+
+  return (
+    <section className="taste-ops-page space-y-4">
+      <header className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <Link to="/ops/workers" className="taste-link text-xs">
+            ← Workers
+          </Link>
+          <Micro>Workers</Micro>
+          <h2 className="mt-1 font-display text-xl font-medium tracking-tight text-ink">
+            Trends
+          </h2>
+          <p className="mt-1 max-w-2xl text-xs text-ink-soft">
+            Drift and anomaly signals from attempt stats — error rate and average retries versus
+            the previous equal window.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {(['8h', '1w', '3m'] as const).map((option) => (
+            <button
+              key={option}
+              type="button"
+              className={window === option ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'}
+              onClick={() => setWindow(option)}
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+      </header>
+
+      {trendsQuery.isError ? (
+        <p className="text-xs text-red-700">Could not load worker trends.</p>
+      ) : trendsQuery.isPending && !trendsQuery.data ? (
+        <div className="taste-panel p-4">
+          <SkeletonLines lines={5} />
+        </div>
+      ) : (
+        <div className="taste-panel overflow-hidden">
+          <div className="border-b border-line px-3 py-2">
+            <Micro>
+              Current {trendsQuery.data?.window_hours}h vs prior {trendsQuery.data?.window_hours}h
+            </Micro>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="taste-table">
+              <thead>
+                <tr>
+                  <th>Worker</th>
+                  <th>Signal</th>
+                  <th>Error rate</th>
+                  <th>Δ error</th>
+                  <th>Avg attempts</th>
+                  <th>Δ retries</th>
+                  <th>Volume</th>
+                  <th>Anomalies</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={row.worker}>
+                    <td className="font-mono text-xs">
+                      <Link
+                        to="/ops/workers/$workerName"
+                        params={{ workerName: row.worker }}
+                        className="text-habeas-mid underline decoration-habeas-mid/30 underline-offset-2"
+                      >
+                        {row.worker}
+                      </Link>
+                    </td>
+                    <td>
+                      <span
+                        className={
+                          row.signal === 'watch'
+                            ? 'taste-status-pill taste-status-fail'
+                            : 'taste-status-pill taste-status-ok'
+                        }
+                      >
+                        {row.signal}
+                      </span>
+                    </td>
+                    <td className="tabular-nums text-xs">
+                      {pct(row.current.error_rate)}
+                      <span className="text-mute"> / {pct(row.previous.error_rate)}</span>
+                    </td>
+                    <td
+                      className={`tabular-nums text-xs ${
+                        row.delta.error_rate > 0.05 ? 'text-red-700' : 'text-ink-soft'
+                      }`}
+                    >
+                      {row.delta.error_rate >= 0 ? '+' : ''}
+                      {pct(row.delta.error_rate)}
+                    </td>
+                    <td className="tabular-nums text-xs">
+                      {row.current.avg_attempts.toFixed(2)}
+                      <span className="text-mute"> / {row.previous.avg_attempts.toFixed(2)}</span>
+                    </td>
+                    <td
+                      className={`tabular-nums text-xs ${
+                        row.delta.avg_attempts > 0.25 ? 'text-red-700' : 'text-ink-soft'
+                      }`}
+                    >
+                      {row.delta.avg_attempts >= 0 ? '+' : ''}
+                      {row.delta.avg_attempts.toFixed(2)}
+                    </td>
+                    <td className="tabular-nums text-xs">
+                      {row.current.total}
+                      <span className="text-mute"> (Δ {row.delta.total})</span>
+                    </td>
+                    <td className="text-[0.65rem] text-ink-soft">
+                      {row.anomalies.length === 0
+                        ? '—'
+                        : row.anomalies.map((flag) => flag.replaceAll('_', ' ')).join(' · ')}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
+export function WorkersTrendsPage() {
+  return (
+    <RoleGate allow={isSuperAdmin}>
+      <WorkersTrendsBody />
     </RoleGate>
   )
 }

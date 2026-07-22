@@ -8,7 +8,7 @@ type AppShellProps = {
   children: ReactNode
 }
 
-/** Pulse placeholder for loading panels (dashboard, ops, approvals). */
+/** Pulse placeholder for loading panels. */
 export function Skeleton({ className = '' }: { className?: string }) {
   return (
     <div
@@ -40,7 +40,7 @@ function RoleStatusBanner() {
   if (isError) {
     return (
       <div
-        className="border-b border-amber-500/40 bg-amber-50 px-6 py-2 text-center text-xs text-amber-950"
+        className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-center text-xs text-amber-950"
         role="status"
       >
         Role API unavailable ({error?.message ?? 'GET /me failed'}). Ops nav is shown for
@@ -51,10 +51,10 @@ function RoleStatusBanner() {
   if (!me) return null
   return (
     <div
-      className="border-b border-[var(--glass-border)] bg-[var(--habeas-canvas)]/90 px-6 py-1 text-center text-[0.62rem] uppercase tracking-[0.14em] text-mute"
+      className="border-b border-line bg-panel/60 px-4 py-1 text-center text-[0.65rem] text-mute"
       role="status"
     >
-      Signed in as {me.email} · role {me.role.replace(/_/g, ' ')}
+      {me.email} · {me.role.replace(/_/g, ' ')}
     </div>
   )
 }
@@ -63,36 +63,26 @@ function AppShellFrame({ children }: AppShellProps) {
   useLiveEvents()
 
   return (
-    <div className="flex min-h-screen flex-col bg-[var(--habeas-canvas)]">
-      <header
-        className="sticky top-0 z-20 border-b border-[var(--glass-border)]"
-        style={{
-          WebkitBackdropFilter: 'blur(var(--glass-blur))',
-          backdropFilter: 'blur(var(--glass-blur))',
-          background:
-            'linear-gradient(to right, var(--glass-gradient-start), var(--glass-gradient-end))',
-        }}
-      >
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-3">
+    <div className="flex min-h-screen flex-col bg-paper">
+      <header className="sticky top-0 z-20 border-b border-line bg-white/95 backdrop-blur-sm">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-2.5 sm:px-6">
           <div className="min-w-0">
-            <p className="taste-micro">Habeas</p>
-            <h1 className="mt-0.5 font-display text-[1.2rem] font-medium leading-none tracking-tight text-ink">
-              Data Privacy
-            </h1>
+            <p className="text-[0.65rem] font-medium uppercase tracking-[0.12em] text-mute">
+              Habeas
+            </p>
+            <h1 className="text-base font-semibold tracking-tight text-ink">Data Privacy</h1>
           </div>
           <NavMenu />
         </div>
         <RoleStatusBanner />
       </header>
 
-      <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-6">{children}</main>
+      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-5 sm:px-6">{children}</main>
 
-      <footer className="mt-auto bg-ink">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
-          <p className="text-xs tracking-wide text-white/85">Habeas · Data Privacy</p>
-          <p className="text-[0.65rem] uppercase tracking-[0.16em] text-white/45">
-            Ops console
-          </p>
+      <footer className="mt-auto border-t border-line bg-white">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3 sm:px-6">
+          <p className="text-xs text-mute">Habeas · Data Privacy</p>
+          <p className="text-[0.65rem] text-mute">Ops</p>
         </div>
       </footer>
     </div>

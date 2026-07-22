@@ -90,3 +90,62 @@ export const DialogDescription = React.forwardRef<
   />
 ))
 DialogDescription.displayName = DialogPrimitive.Description.displayName
+
+export type ConfirmActionDialogProps = {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  title: string
+  description: string
+  confirmLabel?: string
+  cancelLabel?: string
+  confirming?: boolean
+  /** Destructive styling for decline / irreversible bulk actions. */
+  tone?: 'default' | 'destructive'
+  onConfirm: () => void
+}
+
+/** Modal confirm for promote / decline / bulk actions. */
+export function ConfirmActionDialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  confirmLabel = 'Confirm',
+  cancelLabel = 'Cancel',
+  confirming = false,
+  tone = 'default',
+  onConfirm,
+}: ConfirmActionDialogProps) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md" onOpenAutoFocus={(event) => event.preventDefault()}>
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <button
+            type="button"
+            className="inline-flex h-8 items-center justify-center rounded-md border border-line bg-paper px-3 text-xs font-medium text-ink hover:bg-panel disabled:opacity-50"
+            disabled={confirming}
+            onClick={() => onOpenChange(false)}
+          >
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            className={
+              tone === 'destructive'
+                ? 'inline-flex h-8 items-center justify-center rounded-md bg-red-700 px-3 text-xs font-medium text-white hover:bg-red-800 disabled:opacity-50'
+                : 'inline-flex h-8 items-center justify-center rounded-md bg-habeas-navy px-3 text-xs font-medium text-white hover:bg-habeas-navy/90 disabled:opacity-50'
+            }
+            disabled={confirming}
+            onClick={onConfirm}
+          >
+            {confirming ? 'Working…' : confirmLabel}
+          </button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}

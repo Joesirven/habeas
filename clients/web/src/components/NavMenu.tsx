@@ -22,22 +22,20 @@ type NavGroup = {
   children: NavChild[]
 }
 
-const REQUESTS_GROUP: NavGroup = {
-  label: 'Requests',
-  to: '/requests',
-  children: [
-    { label: 'All requests', to: '/requests' },
-    { label: 'Needs attention', to: '/requests/needs-attention' },
-    { label: 'DROP pipeline', to: '/ops/drop-pipeline' },
-  ],
-}
-
 const WORKERS_GROUP: NavGroup = {
   label: 'Workers',
   to: '/ops/workers',
   children: [
     { label: 'Overview', to: '/ops/workers' },
+    { label: 'Trends', to: '/ops/workers/trends' },
+    { label: 'Runs', to: '/ops/runs' },
     { label: 'Failed runs', to: '/ops/workers/failed' },
+    { label: 'drop_connector', to: '/ops/workers/drop_connector' },
+    { label: 'drop_ingestor', to: '/ops/workers/drop_ingestor' },
+    { label: 'matching', to: '/ops/workers/matching' },
+    { label: 'hash_index_refresh', to: '/ops/workers/hash_index_refresh' },
+    { label: 'request_dispatcher', to: '/ops/workers/request_dispatcher' },
+    { label: 'data_fulfillment', to: '/ops/workers/data_fulfillment' },
     { label: 'Settings', to: '/ops/workers/settings' },
   ],
 }
@@ -49,6 +47,24 @@ function pathMatches(pathname: string, to: string) {
 function groupIsActive(pathname: string, group: NavGroup) {
   if (pathMatches(pathname, group.to)) return true
   return group.children.some((child) => pathMatches(pathname, child.to))
+}
+
+function NavLink({
+  to,
+  label,
+  exact = false,
+}: {
+  to: string
+  label: string
+  exact?: boolean
+}) {
+  const pathname = useRouterState({ select: (state) => state.location.pathname })
+  const active = exact ? pathname === to : pathMatches(pathname, to)
+  return (
+    <Link to={to} className={`${navClass}${active ? ' active' : ''}`}>
+      {label}
+    </Link>
+  )
 }
 
 function NavDropdown({ group }: { group: NavGroup }) {
@@ -165,10 +181,9 @@ export function NavMenu() {
       className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2 text-[0.8125rem]"
       aria-busy={isLoading}
     >
-      <Link to="/" className={navClass}>
-        Dashboard
-      </Link>
-      <NavDropdown group={REQUESTS_GROUP} />
+      <NavLink to="/" label="Dashboard" exact />
+      <NavLink to="/requests" label="Requests" exact />
+      <NavLink to="/requests/needs-attention" label="Inbox" />
       {showWorkers ? <NavDropdown group={WORKERS_GROUP} /> : null}
     </nav>
   )

@@ -1,14 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useBlocker, useNavigate, useSearch } from '@tanstack/react-router'
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 import { SkeletonLines } from '@/components/AppShell'
+import { ConfirmActionDialog } from '@/components/ui/dialog'
 import { RoleGate, isSuperAdmin } from '@/lib/auth'
 import {
+  getDropBulkProcess,
   getDropMatchingResultDetail,
   getDropMatchingResults,
   getDropPipeline,
+  getDropWorkers,
+  listDropBulkProcesses,
+  listDropBulkProcessRuns,
+  listRuns,
   postDropDispatch,
   postDropDownload,
   postDropFulfill,
@@ -20,10 +26,14 @@ import {
   postDropMatchingResultsBulkDecline,
   postDropPromote,
   postDropWorkflowAssign,
-  postDropWorkflowEscalate,
+  postDropWorkflowAssignByMatchType,
   postHashIndexRefreshEnqueue,
   postHashIndexRefreshEnqueueAll,
   postHashIndexRefreshProcess,
+  type BulkProcessDetail,
+  type BulkProcessRunGroup,
+  type BulkProcessStageCounts,
+  type BulkProcessSummary,
   type DropPipelineStatus,
   type HashIndexRefreshStatus,
   type MatchTypeFilter,
@@ -33,6 +43,7 @@ import {
   type StepStatusCount,
   type WorkerHealthProbe,
 } from '@/lib/api'
+import { RetryConfigPanel } from '@/routes/ops/health/configuration'
 
 type PipelineTab =
   | 'home'
@@ -40,6 +51,8 @@ type PipelineTab =
   | 'ingest'
   | 'matching'
   | 'fulfillment'
+  | 'hash_refresh'
+  | 'history'
   | 'configurations'
 
 function approachingSlaFrom(data: DropPipelineStatus | undefined) {
@@ -67,8 +80,44 @@ const PIPELINE_TAB_BAR: { key: PipelineTab; label: string }[] = [
   { key: 'ingest', label: 'Ingest' },
   { key: 'matching', label: 'Matching' },
   { key: 'fulfillment', label: 'Fulfillment' },
+  { key: 'hash_refresh', label: 'Hash refresh' },
+  { key: 'history', label: 'History' },
   { key: 'configurations', label: 'Configurations' },
 ]
+
+const TAB_HISTORY_STAGES: Partial<Record<PipelineTab, string>> = {
+  download: 'download',
+  ingest: 'land,promote',
+  matching: 'matching',
+}
+
+const TAB_BULK_STAGES: Partial<
+  Record<PipelineTab, { key: keyof BulkProcessDetail['stages']; label: string }[]>
+> = {
+  home: [
+    { key: 'download', label: 'Download' },
+    { key: 'land', label: 'Land' },
+    { key: 'promote', label: 'Promote' },
+    { key: 'matching', label: 'Matching' },
+    { key: 'review', label: 'Review' },
+    { key: 'fulfillment', label: 'Fulfill' },
+  ],
+  download: [{ key: 'download', label: 'Download' }],
+  ingest: [
+    { key: 'land', label: 'Land' },
+    { key: 'promote', label: 'Promote' },
+  ],
+  matching: [
+    { key: 'matching', label: 'Matching' },
+    { key: 'review', label: 'Review' },
+  ],
+  fulfillment: [{ key: 'fulfillment', label: 'Fulfillment' }],
+}
+
+function stageCountsBlurb(stage: BulkProcessStageCounts | undefined): string {
+  if (!stage) return '—'
+  return `${stage.success}/${stage.total} ok · ${stage.open} open · ${stage.failed} failed`
+}
 
 const SERVED_STATE_ACRONYMS = [
   'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'DC', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA',
@@ -189,49 +238,49 @@ function ActionResultFrame({
 
       {expanded
         ? createPortal(
+          <div
+            className="fixed inset-0 z-[100] flex items-end justify-center bg-habeas-navy/45 p-4 backdrop-blur-sm sm:items-center"
+            role="presentation"
+            onClick={() => setExpanded(false)}
+          >
             <div
-              className="fixed inset-0 z-[100] flex items-end justify-center bg-habeas-navy/45 p-4 backdrop-blur-sm sm:items-center"
-              role="presentation"
-              onClick={() => setExpanded(false)}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby={titleId}
+              className="taste-panel flex max-h-[min(85vh,40rem)] w-full max-w-2xl flex-col overflow-hidden p-0"
+              onClick={(event) => event.stopPropagation()}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  setExpanded(false)
+                }
+              }}
             >
-              <div
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby={titleId}
-                className="taste-panel flex max-h-[min(85vh,40rem)] w-full max-w-2xl flex-col overflow-hidden p-0"
-                onClick={(event) => event.stopPropagation()}
-                onKeyDown={(event) => {
-                  if (event.key === 'Escape') {
-                    event.preventDefault()
-                    setExpanded(false)
-                  }
-                }}
-              >
-                <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
-                  <div className="min-w-0">
-                    <Micro>Payload</Micro>
-                    <h3
-                      id={titleId}
-                      className="mt-2 truncate font-display text-xl font-medium tracking-tight text-ink"
-                    >
-                      {lastAction ?? 'Action response'}
-                    </h3>
-                  </div>
-                  <button
-                    type="button"
-                    className="taste-btn shrink-0 px-2.5 py-1 text-[0.65rem]"
-                    onClick={() => setExpanded(false)}
+              <div className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
+                <div className="min-w-0">
+                  <Micro>Payload</Micro>
+                  <h3
+                    id={titleId}
+                    className="mt-2 truncate font-display text-xl font-medium tracking-tight text-ink"
                   >
-                    Close
-                  </button>
+                    {lastAction ?? 'Action response'}
+                  </h3>
                 </div>
-                <pre className="min-h-0 flex-1 overflow-auto overscroll-contain px-5 py-4 font-mono text-xs leading-relaxed text-ink-soft [overflow-wrap:anywhere] whitespace-pre-wrap break-all">
-                  {actionResult ?? ''}
-                </pre>
+                <button
+                  type="button"
+                  className="taste-btn shrink-0 px-2.5 py-1 text-[0.65rem]"
+                  onClick={() => setExpanded(false)}
+                >
+                  Close
+                </button>
               </div>
-            </div>,
-            document.body,
-          )
+              <pre className="min-h-0 flex-1 overflow-auto overscroll-contain px-5 py-4 font-mono text-xs leading-relaxed text-ink-soft [overflow-wrap:anywhere] whitespace-pre-wrap break-all">
+                {actionResult ?? ''}
+              </pre>
+            </div>
+          </div>,
+          document.body,
+        )
         : null}
     </>
   )
@@ -290,7 +339,7 @@ function ActionButtons({
 }) {
   const filtered = ACTIONS.filter((action) => keys.includes(action.key))
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-wrap gap-1.5">
       {filtered.map((action, index) => {
         const busy = actionMutation.isPending && actionMutation.variables === action.key
         return (
@@ -299,23 +348,708 @@ function ActionButtons({
             type="button"
             className={
               index === 0
-                ? 'taste-btn-primary w-full justify-between gap-3 text-left'
-                : 'taste-btn w-full justify-between gap-3 text-left'
+                ? 'taste-btn-primary px-3 py-1.5 text-xs'
+                : 'taste-btn px-3 py-1.5 text-xs'
             }
             disabled={actionMutation.isPending || showSkeleton || postMatchOpen}
             onClick={() => actionMutation.mutate(action.key)}
           >
-            <span>{action.label}</span>
-            {busy ? (
-              <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-            ) : (
-              <span className="font-mono text-[0.65rem] opacity-50">
-                {String(index + 1).padStart(2, '0')}
-              </span>
-            )}
+            <span className="inline-flex items-center gap-2">
+              {action.label}
+              {busy ? (
+                <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+              ) : (
+                <span className="font-mono text-[0.6rem] opacity-50">
+                  {String(index + 1).padStart(2, '0')}
+                </span>
+              )}
+            </span>
           </button>
         )
       })}
+    </div>
+  )
+}
+
+function runAgeLabel(startedAt: string): string {
+  const ms = Date.now() - new Date(startedAt).getTime()
+  if (Number.isNaN(ms) || ms < 0) return '—'
+  const minutes = Math.floor(ms / 60_000)
+  if (minutes < 60) return `${Math.max(minutes, 0)}m`
+  const hours = Math.floor(minutes / 60)
+  const rem = minutes % 60
+  return rem > 0 ? `${hours}h ${rem}m` : `${hours}h`
+}
+
+function ProcessRunsHistoryPanel({
+  stage,
+  processId,
+  days = 1,
+  emptyLabel,
+}: {
+  stage: string
+  processId?: number
+  days?: number
+  emptyLabel: string
+}) {
+  const [statusFilter, setStatusFilter] = useState<string>('')
+  const runsQuery = useQuery({
+    queryKey: [
+      'admin-api',
+      'ops',
+      'drop-process-runs',
+      stage,
+      processId ?? 'all',
+      days,
+      statusFilter,
+    ],
+    queryFn: () =>
+      listDropBulkProcessRuns({
+        stage,
+        days,
+        process_id: processId,
+        status: statusFilter || undefined,
+      }),
+    refetchInterval: 5_000,
+    placeholderData: (previous) => previous,
+  })
+
+  const groups = runsQuery.data?.groups ?? []
+  const totalRuns = groups.reduce((sum, group) => sum + group.run_count, 0)
+
+  return (
+    <div className="rounded-md border border-line bg-paper">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
+        <Micro>Runs by bulk process</Micro>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            className="rounded-md border border-line bg-paper px-2 py-1 text-[0.65rem] text-ink"
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+            aria-label="Filter run status"
+          >
+            <option value="">All statuses</option>
+            <option value="open">Open</option>
+            <option value="success">Success</option>
+            <option value="failed">Failed</option>
+          </select>
+          <span className="text-[0.65rem] tabular-nums text-mute">
+            {groups.length} processes · {totalRuns} runs
+          </span>
+        </div>
+      </div>
+      {runsQuery.isError ? (
+        <p className="px-3 py-3 text-xs text-red-700">Could not load process run history.</p>
+      ) : runsQuery.isPending && !runsQuery.data ? (
+        <div className="p-3">
+          <SkeletonLines lines={3} />
+        </div>
+      ) : groups.length === 0 ? (
+        <p className="px-3 py-3 text-xs text-ink-soft">{emptyLabel}</p>
+      ) : (
+        <div className="divide-y divide-line">
+          {groups.map((group: BulkProcessRunGroup) => (
+            <div key={group.process_id} className="px-3 py-2.5">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <p className="text-xs font-medium text-ink">{group.label}</p>
+                <p className="text-[0.65rem] text-mute">
+                  {group.download_status} · {group.run_count} runs
+                </p>
+              </div>
+              {group.runs.length === 0 ? (
+                <p className="mt-1 text-[0.65rem] text-ink-soft">No runs for this filter.</p>
+              ) : (
+                <div className="mt-2 overflow-x-auto">
+                  <table className="taste-table">
+                    <thead>
+                      <tr>
+                        <th>Run</th>
+                        <th>Step</th>
+                        <th>Status</th>
+                        <th>Age</th>
+                        <th>Attempt</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {group.runs.map((run) => (
+                        <tr key={run.run_id}>
+                          <td className="max-w-[9rem] truncate font-mono text-xs">
+                            <Link
+                              to="/ops/runs/$job/$attemptId"
+                              params={{
+                                job: run.job,
+                                attemptId: String(run.attempt_id),
+                              }}
+                              className="text-habeas-mid underline decoration-habeas-mid/30 underline-offset-2"
+                            >
+                              {run.run_id}
+                            </Link>
+                          </td>
+                          <td className="font-mono text-xs">{run.step}</td>
+                          <td className="text-xs">{run.status.replaceAll('_', ' ')}</td>
+                          <td className="tabular-nums text-xs text-ink-soft">
+                            {run.started_at ? runAgeLabel(run.started_at) : '—'}
+                          </td>
+                          <td className="tabular-nums text-xs">{run.attempt_number}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function BatchRequestRunsList({
+  onSelectProcess,
+  selectedProcessId,
+}: {
+  onSelectProcess: (id: number) => void
+  selectedProcessId?: number
+}) {
+  const [days, setDays] = useState(7)
+  const [intake, setIntake] = useState('drop')
+  const [downloadStatus, setDownloadStatus] = useState('')
+  const [overallStatus, setOverallStatus] = useState('')
+
+  const listQuery = useQuery({
+    queryKey: [
+      'admin-api',
+      'ops',
+      'drop-processes',
+      'home-list',
+      days,
+      intake,
+      downloadStatus,
+      overallStatus,
+    ],
+    queryFn: () =>
+      listDropBulkProcesses({
+        days,
+        intake_source: intake || undefined,
+        download_status: downloadStatus || undefined,
+        overall_status: overallStatus || undefined,
+        include_summary: true,
+        limit: 50,
+      }),
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  })
+
+  const rows = listQuery.data?.processes ?? []
+
+  return (
+    <div className="rounded-md border border-line bg-paper">
+      <div className="flex flex-wrap items-end justify-between gap-2 border-b border-line px-3 py-2.5">
+        <div>
+          <Micro>Batch request runs</Micro>
+          <p className="mt-0.5 text-[0.65rem] text-ink-soft">
+            Bulk processes keyed by intake payload + datetime
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          <select
+            className="rounded-md border border-line bg-paper px-2 py-1 text-[0.65rem]"
+            value={intake}
+            onChange={(event) => setIntake(event.target.value)}
+            aria-label="Filter intake"
+          >
+            <option value="drop">drop</option>
+          </select>
+          <select
+            className="rounded-md border border-line bg-paper px-2 py-1 text-[0.65rem]"
+            value={days}
+            onChange={(event) => setDays(Number(event.target.value))}
+            aria-label="Filter time window"
+          >
+            <option value={1}>1 day</option>
+            <option value={7}>7 days</option>
+            <option value={14}>14 days</option>
+            <option value={30}>30 days</option>
+          </select>
+          <select
+            className="rounded-md border border-line bg-paper px-2 py-1 text-[0.65rem]"
+            value={downloadStatus}
+            onChange={(event) => setDownloadStatus(event.target.value)}
+            aria-label="Filter download status"
+          >
+            <option value="">Download: any</option>
+            <option value="pending">pending</option>
+            <option value="in_flight">in_flight</option>
+            <option value="success">success</option>
+            <option value="submit_error">submit_error</option>
+            <option value="outcome_error">outcome_error</option>
+          </select>
+          <select
+            className="rounded-md border border-line bg-paper px-2 py-1 text-[0.65rem]"
+            value={overallStatus}
+            onChange={(event) => setOverallStatus(event.target.value)}
+            aria-label="Filter overall status"
+          >
+            <option value="">Overall: any</option>
+            <option value="in_progress">in_progress</option>
+            <option value="complete">complete</option>
+            <option value="needs_attention">needs_attention</option>
+          </select>
+        </div>
+      </div>
+      {listQuery.isError ? (
+        <p className="px-3 py-3 text-xs text-red-700">Could not load batch runs.</p>
+      ) : listQuery.isPending && !listQuery.data ? (
+        <div className="p-3">
+          <SkeletonLines lines={4} />
+        </div>
+      ) : rows.length === 0 ? (
+        <p className="px-3 py-3 text-xs text-ink-soft">No bulk processes in this window.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="taste-table">
+            <thead>
+              <tr>
+                <th>Process</th>
+                <th>Intake</th>
+                <th>Download</th>
+                <th>Overall</th>
+                <th>Progress</th>
+                <th>Requests</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row: BulkProcessSummary) => {
+                const selected = selectedProcessId === row.process_id
+                return (
+                  <tr
+                    key={row.process_id}
+                    className={selected ? 'bg-habeas-navy/5' : undefined}
+                  >
+                    <td className="text-xs">{row.label}</td>
+                    <td className="font-mono text-xs">{row.intake_source}</td>
+                    <td className="text-xs">{row.download_status.replaceAll('_', ' ')}</td>
+                    <td className="text-xs">
+                      {row.overall?.status?.replaceAll('_', ' ') ?? '—'}
+                    </td>
+                    <td className="tabular-nums text-xs">
+                      {row.overall?.percent != null ? `${row.overall.percent}%` : '—'}
+                    </td>
+                    <td className="tabular-nums text-xs">{row.request_rows ?? '—'}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="taste-btn px-2 py-0.5 text-[0.65rem]"
+                        onClick={() => onSelectProcess(row.process_id)}
+                      >
+                        {selected ? 'Selected' : 'Track'}
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CompactOpsMetrics({
+  approachingDeadlineTotal,
+  approachingReview,
+  spineCount,
+  nextCaDrop,
+  scheduleBlurb,
+  reviewPending,
+  matchingQueue,
+  workersUp,
+  workersTotal,
+}: {
+  approachingDeadlineTotal: number | null
+  approachingReview: number | null
+  spineCount: number | string
+  nextCaDrop: string
+  scheduleBlurb: string
+  reviewPending: number | string
+  matchingQueue: number | string
+  workersUp: number | null
+  workersTotal: number
+}) {
+  const cells = [
+    {
+      label: 'Approaching',
+      value: approachingDeadlineTotal ?? '—',
+      hint: `review ${approachingReview ?? '—'}`,
+      href: '/requests/needs-attention' as const,
+    },
+    {
+      label: 'Spine',
+      value: spineCount,
+      hint: 'thin DROP',
+    },
+    {
+      label: 'Next CA DROP',
+      value: nextCaDrop,
+      hint: scheduleBlurb,
+      wide: true,
+    },
+    {
+      label: 'Review',
+      value: reviewPending,
+      hint: 'gates',
+    },
+    {
+      label: 'Match Q',
+      value: matchingQueue,
+      hint: 'pending',
+    },
+    {
+      label: 'Workers',
+      value: workersUp != null ? `${workersUp}/${workersTotal}` : '—',
+      hint: 'up',
+      href: '/ops/workers' as const,
+    },
+  ]
+
+  return (
+    <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-6">
+      {cells.map((cell) => (
+        <div
+          key={cell.label}
+          className={`rounded border border-line bg-paper px-2 py-1.5 ${
+            cell.wide ? 'sm:col-span-1' : ''
+          }`}
+        >
+          <p className="text-[0.6rem] font-medium uppercase tracking-wide text-mute">
+            {cell.label}
+          </p>
+          <p
+            className={`mt-0.5 font-semibold tabular-nums leading-tight text-ink ${
+              cell.wide ? 'truncate text-xs' : 'text-base'
+            }`}
+            title={typeof cell.value === 'string' ? cell.value : undefined}
+          >
+            {cell.value}
+          </p>
+          <p className="truncate text-[0.6rem] text-ink-soft">
+            {cell.hint}
+            {cell.href ? (
+              <>
+                {' · '}
+                <Link
+                  to={cell.href}
+                  className="text-habeas-navy underline-offset-2 hover:underline"
+                >
+                  open
+                </Link>
+              </>
+            ) : null}
+          </p>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function BulkProcessTracker({
+  processId,
+  onSelectProcess,
+  detail,
+  processes,
+  loading,
+}: {
+  processId: number | undefined
+  onSelectProcess: (id: number | undefined) => void
+  detail: BulkProcessDetail | undefined
+  processes: { process_id: number; label: string; download_status: string }[]
+  loading: boolean
+}) {
+  const stages = TAB_BULK_STAGES.home ?? []
+  const percent = detail?.overall.percent ?? 0
+  const status = detail?.overall.status ?? '—'
+
+  return (
+    <div className="rounded-md border border-line bg-paper p-3">
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div className="min-w-0">
+          <Micro>Latest bulk process</Micro>
+          <p className="mt-0.5 text-sm font-medium text-ink">
+            {detail?.label ?? (loading ? 'Loading…' : 'No recent bulk process')}
+          </p>
+          <p className="mt-0.5 text-[0.65rem] text-ink-soft">
+            {detail
+              ? `${detail.request_rows} spine · ${detail.raw_rows} raw · ${status.replaceAll('_', ' ')}`
+              : processes.length === 0
+                ? 'No download attempts in the last 30 days'
+                : 'Select a process'}
+          </p>
+        </div>
+        <label className="flex items-center gap-1.5 text-xs text-ink-soft">
+          <span className="taste-micro">Recent</span>
+          <select
+            className="min-w-[14rem] rounded-md border border-line bg-paper px-2 py-1 text-xs text-ink"
+            value={processId ?? ''}
+            onChange={(event) => {
+              const value = event.target.value
+              onSelectProcess(value ? Number.parseInt(value, 10) : undefined)
+            }}
+            aria-label="Recent bulk process"
+          >
+            <option value="">Select process…</option>
+            {processes.map((process) => (
+              <option key={process.process_id} value={process.process_id}>
+                {process.label} · {process.download_status}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="mt-2">
+        <div className="mb-1 flex items-center justify-between text-[0.65rem] text-mute">
+          <span>Batch progress</span>
+          <span className="tabular-nums text-ink">{percent}%</span>
+        </div>
+        <div className="h-1.5 overflow-hidden rounded-full bg-panel">
+          <div
+            className="h-full rounded-full bg-habeas-navy transition-[width]"
+            style={{ width: `${percent}%` }}
+          />
+        </div>
+      </div>
+
+      <div className="mt-2 grid gap-1.5 sm:grid-cols-3 lg:grid-cols-6">
+        {stages.map((stage) => {
+          const counts = detail?.stages[stage.key]
+          const active = detail?.overall.current_stage === stage.key
+          return (
+            <div
+              key={stage.key}
+              className={`rounded border px-2 py-1 ${
+                active ? 'border-habeas-navy/40 bg-habeas-navy/5' : 'border-line/80'
+              }`}
+            >
+              <p className="text-[0.6rem] uppercase tracking-wide text-mute">{stage.label}</p>
+              <p className="text-[0.7rem] tabular-nums text-ink">
+                {counts ? `${counts.success}/${counts.total}` : '—'}
+                <span className="ml-1 text-[0.6rem] text-ink-soft">
+                  {counts ? `${counts.open} open` : ''}
+                </span>
+              </p>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function BulkStepSummary({
+  tab,
+  detail,
+}: {
+  tab: PipelineTab
+  detail: BulkProcessDetail | undefined
+}) {
+  const stageKeys = TAB_BULK_STAGES[tab]
+  if (
+    !stageKeys ||
+    tab === 'home' ||
+    tab === 'hash_refresh' ||
+    tab === 'history' ||
+    tab === 'configurations'
+  ) {
+    return null
+  }
+  if (!detail) {
+    return (
+      <div className="rounded-md border border-dashed border-line px-3 py-2 text-xs text-ink-soft">
+        Select a bulk process above to see this step’s run summary.
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded-md border border-line bg-paper px-3 py-2.5">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <Micro>Step run summary · {detail.label}</Micro>
+        <span className="text-[0.65rem] text-mute">
+          Current stage {detail.overall.current_stage.replaceAll('_', ' ')}
+        </span>
+      </div>
+      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+        {stageKeys.map((stage) => {
+          const counts = detail.stages[stage.key]
+          return (
+            <div key={stage.key} className="rounded-md border border-line/70 px-2.5 py-2">
+              <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+                {stage.label}
+              </p>
+              <p className="mt-1 text-xs tabular-nums text-ink">{stageCountsBlurb(counts)}</p>
+              {counts?.by_list_type && counts.by_list_type.length > 0 ? (
+                <p className="mt-1 text-[0.65rem] text-ink-soft">
+                  {counts.by_list_type
+                    .slice(0, 4)
+                    .map(
+                      (row) =>
+                        `${row.list_type ?? '—'} ${row.status}×${row.count}`,
+                    )
+                    .join(' · ')}
+                </p>
+              ) : null}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function ConfigurationsPanel({
+  data,
+  scheduleNext,
+  scheduleLast,
+  scheduleUtc,
+}: {
+  data: DropPipelineStatus | undefined
+  scheduleNext: string | null
+  scheduleLast: string | null
+  scheduleUtc: string | null
+}) {
+  const workersQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'drop-workers', 'config'],
+    queryFn: getDropWorkers,
+    refetchInterval: 15_000,
+    placeholderData: (previous) => previous,
+  })
+  const workers = workersQuery.data?.workers ?? []
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-line bg-paper p-4">
+        <Micro>Scheduled workers</Micro>
+        <p className="mt-1 max-w-2xl text-xs text-ink-soft">
+          CA DROP retrieval fires on the connector schedule. Other workers claim from attempt
+          queues — concurrency and retry floors below.
+        </p>
+        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+          <div className="rounded-md border border-line/80 px-3 py-2">
+            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Next CA DROP</p>
+            <p className="mt-1 text-sm tabular-nums text-ink">
+              {scheduleNext ? new Date(scheduleNext).toLocaleString() : '—'}
+            </p>
+            <p className="mt-0.5 text-[0.65rem] text-mute">
+              {scheduleUtc ? `Daily ${scheduleUtc} UTC` : 'Schedule unset'}
+            </p>
+          </div>
+          <div className="rounded-md border border-line/80 px-3 py-2">
+            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Last success</p>
+            <p className="mt-1 text-sm tabular-nums text-ink">
+              {scheduleLast ? new Date(scheduleLast).toLocaleString() : '—'}
+            </p>
+          </div>
+          <div className="rounded-md border border-line/80 px-3 py-2">
+            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Workers up</p>
+            <p className="mt-1 text-sm tabular-nums text-ink">
+              {data
+                ? `${WORKER_ORDER.filter((name) => data.worker_health[name]?.ok).length}/${WORKER_ORDER.length}`
+                : '—'}
+            </p>
+          </div>
+        </div>
+        <div className="mt-3 overflow-x-auto">
+          <table className="taste-table">
+            <thead>
+              <tr>
+                <th>Worker</th>
+                <th>Ready</th>
+                <th>Pending</th>
+                <th>In flight</th>
+                <th>Concurrency</th>
+                <th>Max attempts</th>
+              </tr>
+            </thead>
+            <tbody>
+              {workers.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="text-mute">
+                    {workersQuery.isPending ? 'Loading workers…' : 'No worker records.'}
+                  </td>
+                </tr>
+              ) : (
+                workers.map((worker) => (
+                  <tr key={worker.name}>
+                    <td className="font-mono text-xs">
+                      <Link
+                        to="/ops/workers/$workerName"
+                        params={{ workerName: worker.name }}
+                        className="text-habeas-mid underline decoration-habeas-mid/30 underline-offset-2"
+                      >
+                        {worker.name}
+                      </Link>
+                    </td>
+                    <td className={worker.ok ? 'text-emerald-700' : 'text-red-700'}>
+                      {worker.ok ? 'up' : 'down'}
+                    </td>
+                    <td className="tabular-nums">{worker.queue.pending}</td>
+                    <td className="tabular-nums">{worker.queue.in_flight}</td>
+                    <td className="tabular-nums">
+                      {worker.pool.configured_concurrency ?? '—'}
+                    </td>
+                    <td className="tabular-nums">{worker.pool.max_attempts ?? '—'}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <RetryConfigPanel />
+
+      <div className="rounded-md border border-line bg-paper p-4">
+        <Micro>Auto-process steps & rules</Micro>
+        <p className="mt-1 max-w-2xl text-xs text-ink-soft">
+          Stage actions stay operator-triggered from the Dashboard tabs. Hash refresh requires
+          enqueue then Process. Matching opens a required review gate after a successful run.
+          Fulfillment only processes DROP rows with an approved matching.review gate.
+        </p>
+        <ul className="mt-3 space-y-1.5 text-xs text-ink-soft">
+          <li>
+            <span className="font-medium text-ink">Download</span> — scheduled connector retrieval
+            (above) or manual Download ZIP.
+          </li>
+          <li>
+            <span className="font-medium text-ink">Ingest</span> — Land then Promote; open attempts
+            claim when the ingestor is up.
+          </li>
+          <li>
+            <span className="font-medium text-ink">Matching</span> — Dispatch then Run; post-match
+            dialog forces review or bulk approve.
+          </li>
+          <li>
+            <span className="font-medium text-ink">Hash refresh</span> — per-state or all-states
+            enqueue; Process drains the queue (see Hash refresh tab).
+          </li>
+        </ul>
+        <p className="mt-3 text-xs text-ink-soft">
+          <Link to="/ops/workers/settings" className="text-habeas-mid underline-offset-2 hover:underline">
+            Workers → Settings
+          </Link>
+          {' · '}
+          <Link
+            to="/"
+            search={{ tab: 'hash_refresh' }}
+            className="text-habeas-mid underline-offset-2 hover:underline"
+          >
+            Hash refresh tab
+          </Link>
+        </p>
+      </div>
     </div>
   )
 }
@@ -436,65 +1170,6 @@ function WorkerHealthRow({ probe }: { probe: WorkerHealthProbe }) {
       <td className="tabular-nums text-ink-soft">{probe.status_code ?? '—'}</td>
       <td className="font-mono text-xs text-mute">{probe.ready?.status ?? '—'}</td>
     </tr>
-  )
-}
-
-function AtmospherePanel({ data }: { data: DropPipelineStatus | undefined }) {
-  const workersUp = data
-    ? WORKER_ORDER.filter((name) => data.worker_health[name]?.ok).length
-    : 0
-
-  return (
-    <div className="relative min-h-[22rem] overflow-hidden rounded-[1.35rem] bg-habeas-navy">
-      <div
-        aria-hidden
-        className="taste-atmosphere-orb pointer-events-none absolute -left-16 top-8 h-56 w-56 rounded-full bg-habeas-light/35 blur-2xl"
-      />
-      <div
-        aria-hidden
-        className="taste-atmosphere-orb pointer-events-none absolute -right-10 bottom-0 h-64 w-64 rounded-full bg-habeas-mid/45 blur-3xl"
-        style={{ animationDelay: '1.6s' }}
-      />
-      <div
-        aria-hidden
-        className="taste-atmosphere-orb pointer-events-none absolute left-1/3 top-1/4 h-40 w-40 rounded-full bg-white/10 blur-xl"
-        style={{ animationDelay: '3.2s' }}
-      />
-
-      <div className="relative flex h-full flex-col justify-between gap-8 p-6 sm:p-7">
-        <div className="flex flex-wrap gap-2">
-          <span className="taste-frost-chip-dark">Spine live</span>
-          <span className="taste-frost-chip-dark">
-            Workers {data ? `${workersUp}/${WORKER_ORDER.length}` : '—'}
-          </span>
-          <span className="taste-frost-chip-dark">
-            Matching pending {data?.matching_review.pending ?? '—'}
-          </span>
-        </div>
-
-        <div>
-          <p className="text-[0.65rem] font-medium uppercase tracking-[0.18em] text-white/55">
-            DROP requests
-          </p>
-          <p className="mt-2 font-display text-6xl font-medium tracking-tight text-white sm:text-7xl">
-            {data?.drop_requests.count ?? '—'}
-          </p>
-          <p className="mt-3 max-w-xs text-sm leading-relaxed text-white/65">
-            Thin intake rows in flight. Counts and ids only — no personally identifiable
-            information.
-          </p>
-        </div>
-
-        <div className="flex flex-wrap gap-2">
-          <span className="taste-frost-chip-dark">
-            Match success {data?.matching_attempts.success ?? '—'}
-          </span>
-          <span className="taste-frost-chip-dark">
-            Review approved {data?.matching_review.approved ?? '—'}
-          </span>
-        </div>
-      </div>
-    </div>
   )
 }
 
@@ -672,7 +1347,7 @@ function MatchingResultsPanel({
   const [bulkType, setBulkType] = useState<MatchTypeFilter>('multi_match')
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set())
   const [assigneeEmail, setAssigneeEmail] = useState('')
-  const [escalateTarget, setEscalateTarget] = useState<'legal' | 'data_owner'>('legal')
+  const [confirmBatchAssign, setConfirmBatchAssign] = useState(false)
   const bulkSectionRef = useRef<HTMLDivElement>(null)
 
   function invalidateMatching() {
@@ -763,11 +1438,12 @@ function MatchingResultsPanel({
     },
   })
 
-  const escalateMutation = useMutation({
-    mutationFn: (requestIds: string[]) =>
-      postDropWorkflowEscalate({
-        request_ids: requestIds,
-        target_role: escalateTarget,
+  const bulkAssignMutation = useMutation({
+    mutationFn: (matchType: MatchTypeFilter) =>
+      postDropWorkflowAssignByMatchType({
+        match_type: matchType,
+        assignee_identity: assigneeEmail.trim() || 'web-admin@habeas.com',
+        target_role: 'reviewer',
       }),
     onSuccess: () => {
       setCheckedIds(new Set())
@@ -816,17 +1492,44 @@ function MatchingResultsPanel({
   const detailActionPending =
     promoteMutation.isPending ||
     declineMutation.isPending ||
-    assignMutation.isPending ||
-    escalateMutation.isPending
+    assignMutation.isPending
+
+  const allVisibleSelected =
+    rows.length > 0 && rows.every((row) => checkedIds.has(row.request_id))
+
+  function toggleSelectAllVisible() {
+    setCheckedIds((previous) => {
+      if (allVisibleSelected) {
+        const next = new Set(previous)
+        for (const row of rows) next.delete(row.request_id)
+        return next
+      }
+      const next = new Set(previous)
+      for (const row of rows) next.add(row.request_id)
+      return next
+    })
+  }
 
   return (
     <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
+      <ConfirmActionDialog
+        open={confirmBatchAssign}
+        onOpenChange={setConfirmBatchAssign}
+        title={`Assign all ${MATCH_TYPE_LABELS[bulkType]}?`}
+        description={`Assign every DROP request in the ${MATCH_TYPE_LABELS[bulkType]} batch to ${assigneeEmail.trim() || 'the reviewer'}. Missing matching.review gates will be opened first.`}
+        confirmLabel="Assign entire batch"
+        confirming={bulkAssignMutation.isPending}
+        onConfirm={() => {
+          setConfirmBatchAssign(false)
+          bulkAssignMutation.mutate(bulkType)
+        }}
+      />
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <Micro>Matching results</Micro>
           <p className="mt-2 max-w-xl text-sm text-ink-soft">
             Grouped by request. Promote clears matching.review for fulfillment; decline rejects
-            without fulfilling. Assign/escalate uses IAP identity for the actor.
+            without fulfilling. Assign routes the review to another operator (IAP actor).
           </p>
         </div>
         <div className="flex gap-2">
@@ -946,23 +1649,6 @@ function MatchingResultsPanel({
               >
                 {assignMutation.isPending ? 'Assigning…' : 'Assign to reviewer'}
               </button>
-              <select
-                className="glass rounded-lg px-3 py-2 text-sm text-ink"
-                value={escalateTarget}
-                onChange={(e) => setEscalateTarget(e.target.value as 'legal' | 'data_owner')}
-                aria-label="Escalate target"
-              >
-                <option value="legal">Legal</option>
-                <option value="data_owner">Data owner</option>
-              </select>
-              <button
-                type="button"
-                className="taste-btn text-xs"
-                disabled={escalateMutation.isPending}
-                onClick={() => escalateMutation.mutate(selectedIds)}
-              >
-                {escalateMutation.isPending ? 'Escalating…' : `Escalate to ${escalateTarget}`}
-              </button>
             </div>
           )}
 
@@ -975,7 +1661,14 @@ function MatchingResultsPanel({
               <table className="taste-table">
                 <thead>
                   <tr>
-                    <th className="w-8" aria-label="Select" />
+                    <th className="w-8">
+                      <input
+                        type="checkbox"
+                        checked={allVisibleSelected}
+                        onChange={toggleSelectAllVisible}
+                        aria-label="Select all visible"
+                      />
+                    </th>
                     <th>Recorded</th>
                     <th>Request ID</th>
                     <th>State</th>
@@ -1037,11 +1730,10 @@ function MatchingResultsPanel({
                       </td>
                       <td className="text-xs text-ink-soft">
                         {row.assignment
-                          ? `${row.assignment.target_role}${
-                              row.assignment.assignee_identity
-                                ? ` · ${row.assignment.assignee_identity}`
-                                : ''
-                            }`
+                          ? `${row.assignment.target_role}${row.assignment.assignee_identity
+                            ? ` · ${row.assignment.assignee_identity}`
+                            : ''
+                          }`
                           : '—'}
                       </td>
                     </tr>
@@ -1050,11 +1742,11 @@ function MatchingResultsPanel({
               </table>
             )}
           </div>
-          {(assignMutation.isError || escalateMutation.isError) && (
+          {assignMutation.isError && (
             <p className="text-sm text-red-700">
-              {(assignMutation.error ?? escalateMutation.error) instanceof Error
-                ? (assignMutation.error ?? escalateMutation.error)!.message
-                : String(assignMutation.error ?? escalateMutation.error)}
+              {assignMutation.error instanceof Error
+                ? assignMutation.error.message
+                : String(assignMutation.error)}
             </p>
           )}
         </>
@@ -1106,11 +1798,10 @@ function MatchingResultsPanel({
                   <dt className="taste-micro">Assignment</dt>
                   <dd className="mt-1 text-sm text-ink">
                     {detail.assignment
-                      ? `${detail.assignment.kind ?? '—'} → ${detail.assignment.target_role}${
-                          detail.assignment.assignee_identity
-                            ? ` (${detail.assignment.assignee_identity})`
-                            : ''
-                        }`
+                      ? `${detail.assignment.kind ?? '—'} → ${detail.assignment.target_role}${detail.assignment.assignee_identity
+                        ? ` (${detail.assignment.assignee_identity})`
+                        : ''
+                      }`
                       : '—'}
                   </dd>
                 </div>
@@ -1147,23 +1838,6 @@ function MatchingResultsPanel({
                 >
                   Assign to reviewer
                 </button>
-                <select
-                  className="glass rounded-lg px-3 py-2 text-sm text-ink"
-                  value={escalateTarget}
-                  onChange={(e) => setEscalateTarget(e.target.value as 'legal' | 'data_owner')}
-                  aria-label="Escalate target detail"
-                >
-                  <option value="legal">Legal</option>
-                  <option value="data_owner">Data owner</option>
-                </select>
-                <button
-                  type="button"
-                  className="taste-btn text-xs"
-                  disabled={detailActionPending}
-                  onClick={() => escalateMutation.mutate([detail.request_id])}
-                >
-                  Escalate
-                </button>
               </div>
               {(promoteMutation.isError || declineMutation.isError) && (
                 <p className="text-sm text-red-700">
@@ -1186,17 +1860,18 @@ function MatchingResultsPanel({
       )}
 
       <div ref={bulkSectionRef} className="border-t border-line pt-5">
-        <Micro>Bulk promote / decline</Micro>
+        <Micro>Bulk by match type</Micro>
         <p className="mt-2 max-w-xl text-sm text-ink-soft">
-          Promote ensures matching.review gates and approves them for the match type (including
-          multi-match). Decline rejects pending gates without fulfilling.
+          Acts on the entire DROP batch for the selected match type (not just checked rows).
+          Promote/decline clear review gates; assign opens missing gates then routes the whole
+          batch to a reviewer.
         </p>
-        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
           <select
             className="glass rounded-lg px-3 py-2 text-sm text-ink"
             value={bulkType}
             onChange={(event) => setBulkType(event.target.value as MatchTypeFilter)}
-            aria-label="Bulk promote match type"
+            aria-label="Bulk match type"
           >
             {MATCH_TYPE_OPTIONS.map((type) => (
               <option key={type} value={type}>
@@ -1204,6 +1879,16 @@ function MatchingResultsPanel({
               </option>
             ))}
           </select>
+          <label className="flex min-w-[14rem] flex-col gap-1 text-xs text-ink-soft">
+            Reviewer email
+            <input
+              className="glass rounded-lg px-3 py-2 text-sm text-ink"
+              value={assigneeEmail}
+              onChange={(e) => setAssigneeEmail(e.target.value)}
+              placeholder="reviewer@habeas.com"
+              aria-label="Assignee email for batch assign"
+            />
+          </label>
           <button
             type="button"
             className="taste-btn-primary"
@@ -1224,6 +1909,18 @@ function MatchingResultsPanel({
               ? 'Declining…'
               : `Decline ${MATCH_TYPE_LABELS[bulkType]}`}
           </button>
+          <button
+            type="button"
+            className="taste-btn"
+            disabled={
+              bulkAssignMutation.isPending || assigneeEmail.trim().length === 0
+            }
+            onClick={() => setConfirmBatchAssign(true)}
+          >
+            {bulkAssignMutation.isPending
+              ? 'Assigning…'
+              : `Assign all ${MATCH_TYPE_LABELS[bulkType]}`}
+          </button>
         </div>
         {bulkPromoteMutation.isSuccess && (
           <p className="mt-3 text-sm text-emerald-700">
@@ -1231,9 +1928,8 @@ function MatchingResultsPanel({
             {bulkPromoteMutation.data.approved_count === 1 ? '' : 's'} for{' '}
             {bulkPromoteMutation.data.match_type}
             {bulkPromoteMutation.data.ensured_count
-              ? ` (opened ${bulkPromoteMutation.data.ensured_count} missing gate${
-                  bulkPromoteMutation.data.ensured_count === 1 ? '' : 's'
-                })`
+              ? ` (opened ${bulkPromoteMutation.data.ensured_count} missing gate${bulkPromoteMutation.data.ensured_count === 1 ? '' : 's'
+              })`
               : ''}
             .
           </p>
@@ -1245,13 +1941,37 @@ function MatchingResultsPanel({
             {bulkDeclineMutation.data.match_type}.
           </p>
         )}
-        {(bulkPromoteMutation.isError || bulkDeclineMutation.isError) && (
-          <p className="mt-3 text-sm text-red-700">
-            {(bulkPromoteMutation.error ?? bulkDeclineMutation.error) instanceof Error
-              ? (bulkPromoteMutation.error ?? bulkDeclineMutation.error)!.message
-              : String(bulkPromoteMutation.error ?? bulkDeclineMutation.error)}
+        {bulkAssignMutation.isSuccess && (
+          <p className="mt-3 text-sm text-emerald-700">
+            Assigned {bulkAssignMutation.data.count} request
+            {bulkAssignMutation.data.count === 1 ? '' : 's'} (
+            {MATCH_TYPE_LABELS[bulkAssignMutation.data.match_type]})
+            {bulkAssignMutation.data.ensured_count
+              ? ` · opened ${bulkAssignMutation.data.ensured_count} missing review gate${bulkAssignMutation.data.ensured_count === 1 ? '' : 's'
+              }`
+              : ''}
+            .
           </p>
         )}
+        {(bulkPromoteMutation.isError ||
+          bulkDeclineMutation.isError ||
+          bulkAssignMutation.isError) && (
+            <p className="mt-3 text-sm text-red-700">
+              {(bulkPromoteMutation.error ??
+                bulkDeclineMutation.error ??
+                bulkAssignMutation.error) instanceof Error
+                ? (
+                  bulkPromoteMutation.error ??
+                  bulkDeclineMutation.error ??
+                  bulkAssignMutation.error
+                )!.message
+                : String(
+                  bulkPromoteMutation.error ??
+                  bulkDeclineMutation.error ??
+                  bulkAssignMutation.error,
+                )}
+            </p>
+          )}
       </div>
     </div>
   )
@@ -1286,54 +2006,95 @@ function HashIndexPanel({
   postMatchOpen: boolean
 }) {
   return (
-    <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
-      <div>
-        <Micro>Hash index refresh</Micro>
-        <p className="mt-2 max-w-xl text-sm text-ink-soft">
-          Rebuild serving marts per state via dbt, then rematch open not-found and prior multi-match
-          DROP requests for that state. Enqueue queues one attempt; enqueue all covers USPS 50+DC.
-        </p>
-      </div>
-      <div className="flex flex-wrap items-center gap-3">
-        <label className="flex items-center gap-2 text-sm text-ink-soft">
-          <span className="taste-micro">State</span>
-          <select
-            className="glass rounded-lg px-3 py-2 font-mono text-sm text-ink"
-            value={hashState}
-            onChange={(event) => setHashState(event.target.value)}
-            aria-label="Hash index refresh state"
-          >
-            {SERVED_STATE_ACRONYMS.map((state) => (
-              <option key={state} value={state}>
-                {state}
-              </option>
-            ))}
-          </select>
-        </label>
-        <span className="text-sm text-ink-soft">
-          {hashWorkerDown
-            ? 'Worker down'
-            : hashPending
-              ? 'Pending / in-flight'
-              : lastRun
-                ? `Last ${lastRun.status}`
-                : 'None'}
-        </span>
-        {lastRun?.status === 'success' && (
-          <span className="text-sm text-ink-soft">
-            rows e/p/n {lastRun.rows_email ?? '—'}/{lastRun.rows_phone ?? '—'}/
-            {lastRun.rows_ndz ?? '—'} · rematch {lastRun.rematch_enqueued_count}
+    <div className="space-y-3">
+      <div className="rounded-md border border-line bg-paper p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <Micro>Hash index refresh</Micro>
+            <p className="mt-1 max-w-xl text-xs text-ink-soft">
+              dbt rebuild per state, then rematch open not-found / multi-match DROP rows for that
+              state.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <label className="flex items-center gap-1.5 text-xs text-ink-soft">
+              <span className="taste-micro">State</span>
+              <select
+                className="rounded-md border border-line bg-paper px-2 py-1 font-mono text-xs text-ink"
+                value={hashState}
+                onChange={(event) => setHashState(event.target.value)}
+                aria-label="Hash index refresh state"
+              >
+                {SERVED_STATE_ACRONYMS.map((state) => (
+                  <option key={state} value={state}>
+                    {state}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="taste-btn-primary px-3 py-1.5 text-xs"
+              disabled={
+                showSkeleton ||
+                hashPending ||
+                hashIndexMutation.isPending ||
+                actionMutation.isPending ||
+                postMatchOpen
+              }
+              onClick={() => hashIndexMutation.mutate({ kind: 'enqueue', state: hashState })}
+            >
+              Enqueue state
+            </button>
+            <button
+              type="button"
+              className="taste-btn px-3 py-1.5 text-xs"
+              disabled={
+                showSkeleton ||
+                hashIndexMutation.isPending ||
+                actionMutation.isPending ||
+                postMatchOpen
+              }
+              onClick={() => hashIndexMutation.mutate({ kind: 'enqueue-all' })}
+            >
+              Enqueue all
+            </button>
+            <button
+              type="button"
+              className="taste-btn px-3 py-1.5 text-xs"
+              disabled={
+                showSkeleton ||
+                !hashPending ||
+                hashIndexMutation.isPending ||
+                actionMutation.isPending ||
+                postMatchOpen
+              }
+              onClick={() => hashIndexMutation.mutate({ kind: 'process' })}
+            >
+              Process
+            </button>
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-3 text-xs text-ink-soft">
+          <span>
+            {hashWorkerDown
+              ? 'Worker down'
+              : hashPending
+                ? 'Pending / in-flight'
+                : lastRun
+                  ? `Last ${lastRun.status}`
+                  : 'No runs yet'}
           </span>
-        )}
-        {lastRun?.status && lastRun.status !== 'success' && lastRun.error_message && (
-          <span className="text-sm text-red-700">{lastRun.error_message}</span>
-        )}
-      </div>
-      <div>
-        <Micro>Attempts by status</Micro>
-        <p className="mt-1 text-xs text-mute">
-          Immutable attempt history counts — pending through terminal statuses.
-        </p>
+          {lastRun?.status === 'success' ? (
+            <span>
+              rows e/p/n {lastRun.rows_email ?? '—'}/{lastRun.rows_phone ?? '—'}/
+              {lastRun.rows_ndz ?? '—'} · rematch {lastRun.rematch_enqueued_count}
+            </span>
+          ) : null}
+          {lastRun?.status && lastRun.status !== 'success' && lastRun.error_message ? (
+            <span className="text-red-700">{lastRun.error_message}</span>
+          ) : null}
+        </div>
         <div className="mt-3">
           <StatusCountTable
             rows={data?.hash_index_refresh?.attempts_by_status ?? []}
@@ -1341,49 +2102,64 @@ function HashIndexPanel({
           />
         </div>
       </div>
-      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:gap-3">
-        <button
-          type="button"
-          className="taste-btn"
-          disabled={
-            showSkeleton ||
-            hashPending ||
-            hashIndexMutation.isPending ||
-            actionMutation.isPending ||
-            postMatchOpen
-          }
-          onClick={() => hashIndexMutation.mutate({ kind: 'enqueue', state: hashState })}
-        >
-          Enqueue state
-        </button>
-        <button
-          type="button"
-          className="taste-btn"
-          disabled={
-            showSkeleton ||
-            hashIndexMutation.isPending ||
-            actionMutation.isPending ||
-            postMatchOpen
-          }
-          onClick={() => hashIndexMutation.mutate({ kind: 'enqueue-all' })}
-        >
-          Enqueue all states
-        </button>
-        <button
-          type="button"
-          className="taste-btn"
-          disabled={
-            showSkeleton ||
-            !hashPending ||
-            hashIndexMutation.isPending ||
-            actionMutation.isPending ||
-            postMatchOpen
-          }
-          onClick={() => hashIndexMutation.mutate({ kind: 'process' })}
-        >
-          Process refresh
-        </button>
+      <HashRefreshRunsPanel />
+    </div>
+  )
+}
+
+function HashRefreshRunsPanel() {
+  const runsQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'hash-refresh-runs'],
+    queryFn: () => listRuns({ job: 'hash_index_refresh', limit: 40 }),
+    refetchInterval: 5_000,
+    placeholderData: (previous) => previous,
+  })
+  const runs = runsQuery.data ?? []
+  return (
+    <div className="rounded-md border border-line bg-paper">
+      <div className="flex items-center justify-between border-b border-line px-3 py-2">
+        <Micro>Hash refresh run history</Micro>
+        <Link to="/ops/workers/$workerName" params={{ workerName: 'hash_index_refresh' }} className="text-[0.65rem] text-habeas-mid hover:underline">
+          Worker →
+        </Link>
       </div>
+      {runs.length === 0 ? (
+        <p className="px-3 py-3 text-xs text-ink-soft">No hash refresh attempts yet.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="taste-table">
+            <thead>
+              <tr>
+                <th>Run</th>
+                <th>Status</th>
+                <th>Age</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runs.map((run) => (
+                <tr key={run.run_id}>
+                  <td className="font-mono text-xs">
+                    <Link
+                      to="/ops/runs/$job/$attemptId"
+                      params={{
+                        job: run.job,
+                        attemptId: String(run.attempt_number),
+                      }}
+                      className="text-habeas-mid underline-offset-2 hover:underline"
+                    >
+                      {run.run_id}
+                    </Link>
+                  </td>
+                  <td className="text-xs">{run.status.replaceAll('_', ' ')}</td>
+                  <td className="tabular-nums text-xs text-ink-soft">
+                    {runAgeLabel(run.started_at)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }
@@ -1399,7 +2175,7 @@ export function DropPipelinePage() {
 function DropPipelinePageInner() {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
-  const { tab } = useSearch({ from: '/ops/drop-pipeline' })
+  const { tab, process: processId } = useSearch({ from: '/' })
   const [lastAction, setLastAction] = useState<string | null>(null)
   const [actionResult, setActionResult] = useState<string | null>(null)
   const [postMatchOpen, setPostMatchOpen] = useState(false)
@@ -1411,7 +2187,18 @@ function DropPipelinePageInner() {
   const resultsAnchorRef = useRef<HTMLDivElement>(null)
 
   function setTab(next: PipelineTab) {
-    void navigate({ to: '/ops/drop-pipeline', search: { tab: next } })
+    void navigate({
+      to: '/',
+      search: { tab: next, process: processId },
+    })
+  }
+
+  function setProcess(next: number | undefined) {
+    void navigate({
+      to: '/',
+      search: { tab, process: next },
+      replace: true,
+    })
   }
 
   // Hard-block AppShell / in-page Links while the required post-match dialog is open.
@@ -1428,6 +2215,40 @@ function DropPipelinePageInner() {
     placeholderData: (previous) => previous,
   })
 
+  const processesQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'drop-processes', 'recent-30d'],
+    // Prefer recent window (not calendar "today") so older downloads still surface.
+    queryFn: () => listDropBulkProcesses({ days: 30, limit: 100 }),
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  })
+
+  const processList = processesQuery.data?.processes ?? []
+
+  // Default to the newest process when none selected.
+  useEffect(() => {
+    if (processId != null) return
+    const newest = processList[0]?.process_id
+    if (newest != null) setProcess(newest)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only auto-select when list arrives
+  }, [processId, processList])
+
+  // If URL process is stale/missing from recent list, fall back to latest.
+  useEffect(() => {
+    if (processId == null || processList.length === 0) return
+    if (processList.some((item) => item.process_id === processId)) return
+    setProcess(processList[0]?.process_id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [processId, processList])
+
+  const processDetailQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'drop-processes', 'detail', processId],
+    queryFn: () => getDropBulkProcess(processId!),
+    enabled: processId != null,
+    refetchInterval: 5_000,
+    placeholderData: (previous) => previous,
+  })
+
   const actionMutation = useMutation({
     mutationFn: async (key: ActionKey) => {
       const action = ACTIONS.find((item) => item.key === key)
@@ -1438,6 +2259,7 @@ function DropPipelinePageInner() {
     onSuccess: ({ key, data }) => {
       setActionResult(JSON.stringify(data, null, 2))
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-processes'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-matching-results'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'approvals'] })
       if (key === 'match' && data && typeof data === 'object' && 'status' in data) {
@@ -1481,6 +2303,7 @@ function DropPipelinePageInner() {
     onSuccess: (payload) => {
       setActionResult(JSON.stringify(payload, null, 2))
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-processes'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-stats-global'] })
     },
     onError: (error) => {
@@ -1489,6 +2312,7 @@ function DropPipelinePageInner() {
   })
 
   const data: DropPipelineStatus | undefined = pipelineQuery.data
+  const bulkDetail = processDetailQuery.data
   const approachingSla = approachingSlaFrom(data)
   const showSkeleton = pipelineQuery.isPending && !data
   const hashPending = (data?.hash_index_refresh?.pending ?? 0) > 0
@@ -1508,10 +2332,50 @@ function DropPipelinePageInner() {
   }
 
   const showActionPanel =
-    tab === 'download' || tab === 'ingest' || tab === 'matching' || tab === 'fulfillment'
+    tab === 'download' ||
+    tab === 'ingest' ||
+    tab === 'matching' ||
+    tab === 'fulfillment' ||
+    tab === 'hash_refresh'
+
+  const workersUp = data
+    ? WORKER_ORDER.filter((name) => data.worker_health[name]?.ok).length
+    : null
+  const approachingDeadlineTotal = approachingSla
+    ? approachingSla.connector +
+    approachingSla.ingest +
+    approachingSla.matching +
+    approachingSla.matching_review
+    : null
+  const caSchedule = data?.ca_drop_schedule
+  const matchTypeCounts = useMemo(() => {
+    const counts = { single_match: 0, multi_match: 0, not_found: 0 }
+    for (const row of data?.matching_results_recent ?? []) {
+      const matchType = row.match_type
+      if (matchType && matchType in counts) {
+        counts[matchType as keyof typeof counts] += 1
+      }
+    }
+    return counts
+  }, [data?.matching_results_recent])
+  const matchTypeMax = Math.max(
+    1,
+    matchTypeCounts.single_match,
+    matchTypeCounts.multi_match,
+    matchTypeCounts.not_found,
+  )
+  const slaBars = approachingSla
+    ? [
+      { key: 'Download', value: approachingSla.connector },
+      { key: 'Ingest', value: approachingSla.ingest },
+      { key: 'Matching', value: approachingSla.matching },
+      { key: 'Review', value: approachingSla.matching_review },
+    ]
+    : []
+  const slaMax = Math.max(1, ...slaBars.map((bar) => bar.value))
 
   return (
-    <section className="taste-ops-page space-y-5">
+    <section className="space-y-5">
       <PostMatchDialog
         open={postMatchOpen}
         matchSummary={postMatchSummary}
@@ -1520,337 +2384,314 @@ function DropPipelinePageInner() {
 
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <Micro>Requests · Pipeline</Micro>
-          <h2 className="mt-1 font-display text-xl font-medium tracking-tight text-ink">
-            DROP pipeline
-          </h2>
+          <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">Ops</p>
+          <h2 className="mt-1 text-xl font-semibold tracking-tight text-ink">Dashboard</h2>
         </div>
         {pipelineQuery.isFetching && !pipelineQuery.isPending ? (
-          <span className="taste-frost-chip text-[0.65rem]">Refreshing</span>
+          <span className="rounded-md border border-line px-2 py-0.5 text-[0.65rem] text-mute">
+            Refreshing
+          </span>
         ) : null}
       </header>
 
+      <CompactOpsMetrics
+        approachingDeadlineTotal={approachingDeadlineTotal}
+        approachingReview={approachingSla?.matching_review ?? null}
+        spineCount={data?.drop_requests.count ?? '—'}
+        nextCaDrop={
+          caSchedule?.next_run_at
+            ? new Date(caSchedule.next_run_at).toLocaleString()
+            : '—'
+        }
+        scheduleBlurb={
+          caSchedule
+            ? `${caSchedule.cadence} · ${caSchedule.schedule_utc} UTC`
+            : 'Schedule unavailable'
+        }
+        reviewPending={data?.matching_review.pending ?? '—'}
+        matchingQueue={data?.matching_attempts.pending ?? '—'}
+        workersUp={workersUp}
+        workersTotal={WORKER_ORDER.length}
+      />
+
+      <BulkProcessTracker
+        processId={processId}
+        onSelectProcess={setProcess}
+        detail={bulkDetail}
+        processes={processList}
+        loading={processesQuery.isPending || processDetailQuery.isPending}
+      />
+
       <PipelineTabBar active={tab} onSelect={setTab} />
 
+      <BulkStepSummary tab={tab} detail={bulkDetail} />
+
       {showSkeleton && (
-        <div className="taste-panel p-6" role="status" aria-label="Loading pipeline status">
+        <div
+          className="rounded-lg border border-line bg-paper p-6"
+          role="status"
+          aria-label="Loading pipeline status"
+        >
           <SkeletonLines lines={5} />
         </div>
       )}
 
       {pipelineQuery.isError && !data && (
         <p className="text-sm text-red-700">
-          Could not load DROP pipeline status. Is admin-api running with DATABASE_URL?
+          Could not load DROP pipeline status from admin-api.
         </p>
       )}
 
-      {tab === 'home' && (
-        <>
-          <div className="grid items-start gap-6 lg:grid-cols-[0.95fr_1.05fr]">
-            <div className="taste-panel-soft flex min-w-0 flex-col gap-6 p-6 sm:p-7">
-              <div>
-                <Micro>Overview</Micro>
-                <p className="mt-2 max-w-sm text-sm text-ink-soft">
-                  Spine snapshot across review, matching, and intake. Use stage tabs to run actions.
-                </p>
-              </div>
-              {data ? (
-                <div className="overflow-x-auto">
-                  <table className="taste-table">
-                    <tbody>
-                      <tr>
-                        <td className="!px-0 text-ink-soft">Matching review pending</td>
-                        <td className="!px-0 tabular-nums">{data.matching_review.pending}</td>
-                      </tr>
-                      <tr>
-                        <td className="!px-0 text-ink-soft">Matching attempts pending</td>
-                        <td className="!px-0 tabular-nums">{data.matching_attempts.pending}</td>
-                      </tr>
-                      {approachingSla ? (
-                        <>
-                          <tr>
-                            <td className="!px-0 text-ink-soft">
-                              Download approaching (age policy)
-                            </td>
-                            <td className="!px-0 tabular-nums">
-                              {approachingSla.connector}
-                            </td>
-                          </tr>
-                          <tr>
-                            <td className="!px-0 text-ink-soft">
-                              Ingest approaching (age policy)
-                            </td>
-                            <td className="!px-0 tabular-nums">{approachingSla.ingest}</td>
-                          </tr>
-                          <tr>
-                            <td className="!px-0 text-ink-soft">
-                              Matching approaching (age policy)
-                            </td>
-                            <td className="!px-0 tabular-nums">
-                              {approachingSla.matching}
-                            </td>
-                          </tr>
-                          <tr>
-                            <td className="!px-0 text-ink-soft">
-                              Review approaching (age policy)
-                            </td>
-                            <td className="!px-0 tabular-nums">
-                              {approachingSla.matching_review}
-                            </td>
-                          </tr>
-                        </>
-                      ) : null}
-                      <tr>
-                        <td className="!px-0 text-ink-soft">DROP requests</td>
-                        <td className="!px-0 tabular-nums">{data.drop_requests.count}</td>
-                      </tr>
-                      <tr>
-                        <td className="!px-0 text-ink-soft">Hash refresh pending</td>
-                        <td className="!px-0 tabular-nums">{data.hash_index_refresh?.pending ?? 0}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              ) : null}
-              <Link to="/requests/needs-attention" className="taste-btn w-fit text-xs">
-                Needs attention →
-              </Link>
-            </div>
-            <AtmospherePanel data={data} />
-          </div>
-
-          {data ? (
-            <>
-              <div className="space-y-3">
-                <Micro>Worker health</Micro>
-                <div className="taste-panel overflow-x-auto px-2 py-1">
-                  <table className="taste-table">
-                    <thead>
-                      <tr>
-                        <th>Worker</th>
-                        <th>Health</th>
-                        <th>Code</th>
-                        <th>Ready</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {WORKER_ORDER.map((name) => {
-                        const probe = data.worker_health[name]
-                        if (!probe) {
-                          return (
-                            <tr key={name}>
-                              <td className="font-mono text-xs">{name}</td>
-                              <td colSpan={3} className="text-mute">
-                                —
-                              </td>
-                            </tr>
-                          )
-                        }
-                        return <WorkerHealthRow key={name} probe={probe} />
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <Micro>Recent DROP requests</Micro>
-                <div className="taste-panel overflow-x-auto px-2 py-1">
-                  {data.drop_requests.recent.length === 0 ? (
-                    <p className="p-4 text-sm text-ink-soft">No DROP thin requests yet.</p>
-                  ) : (
-                    <table className="taste-table">
-                      <thead>
-                        <tr>
-                          <th>Received</th>
-                          <th>Request ID</th>
-                          <th>Raw record</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {data.drop_requests.recent.map((row) => (
-                          <tr key={row.id}>
-                            <td>
-                              {row.received_at ? new Date(row.received_at).toLocaleString() : '—'}
-                            </td>
-                            <td className="font-mono text-xs">{row.id}</td>
-                            <td className="tabular-nums">{row.raw_record_id ?? '—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              </div>
-            </>
-          ) : null}
-        </>
-      )}
-
-      {tab === 'download' && (
-        <div className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
-          <div className="taste-panel-soft flex flex-col gap-6 p-6 sm:p-7">
-            <div>
-              <Micro>Download</Micro>
-              <p className="mt-2 text-sm text-ink-soft">
-                Fetch the latest DROP ZIP from the connector worker.
+      {tab === 'home' && data ? (
+        <div className="space-y-4">
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div className="rounded-lg border border-line bg-paper p-4">
+              <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+                Approaching age policy
               </p>
-            </div>
-            <ActionButtons
-              keys={['download']}
-              showSkeleton={showSkeleton}
-              postMatchOpen={postMatchOpen}
-              actionMutation={actionMutation}
-            />
-          </div>
-          {data ? (
-            <div className="space-y-3">
-              <Micro>Connector attempts</Micro>
-              <div className="taste-panel-soft p-4">
-                <CountTable rows={data.connector_attempts} empty="No connector attempts." />
-              </div>
-              {approachingSla ? (
-                <div className="taste-panel-soft p-4">
-                  <Micro>Approaching (age policy)</Micro>
-                  <p className="mt-1 text-xs text-ink-soft">
-                    Open connector attempts older than{' '}
-                    {approachingSla.thresholds_hours.connector}h — not legal DROP deadline
-                    clocks.
-                  </p>
-                  <table className="taste-table mt-3">
-                    <tbody>
-                      <tr>
-                        <td className="!px-0 text-ink-soft">Connector</td>
-                        <td className="!px-0 tabular-nums">{approachingSla.connector}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-      )}
-
-      {tab === 'ingest' && (
-        <div className="space-y-6">
-          {approachingSla ? (
-            <div className="taste-panel-soft p-4">
-              <Micro>Approaching (age policy)</Micro>
               <p className="mt-1 text-xs text-ink-soft">
-                Open ingest attempts older than {approachingSla.thresholds_hours.ingest}h —
-                age policy, not legal DROP deadline clocks.
+                Open rows past stage attention thresholds (not legal SLA clocks).
               </p>
-              <table className="taste-table mt-3">
-                <tbody>
+              <div className="mt-4 space-y-2.5">
+                {slaBars.map((bar) => (
+                  <div key={bar.key} className="grid grid-cols-[5rem_1fr_2rem] items-center gap-2">
+                    <span className="text-[0.7rem] text-ink-soft">{bar.key}</span>
+                    <div className="h-2 overflow-hidden rounded-full bg-panel">
+                      <div
+                        className="h-full rounded-full bg-habeas-mid"
+                        style={{ width: `${(bar.value / slaMax) * 100}%` }}
+                      />
+                    </div>
+                    <span className="text-right text-[0.7rem] tabular-nums text-ink">
+                      {bar.value}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-line bg-paper p-4">
+              <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+                Recent match mix
+              </p>
+              <p className="mt-1 text-xs text-ink-soft">
+                From latest matching_results sample on the pipeline snapshot.
+              </p>
+              <div className="mt-4 flex items-end gap-3" style={{ height: '7rem' }}>
+                {(
+                  [
+                    ['Single', matchTypeCounts.single_match],
+                    ['Multi', matchTypeCounts.multi_match],
+                    ['Not found', matchTypeCounts.not_found],
+                  ] as const
+                ).map(([label, count]) => (
+                  <div key={label} className="flex min-w-0 flex-1 flex-col items-center gap-1">
+                    <span className="text-[0.65rem] tabular-nums text-mute">{count}</span>
+                    <div className="flex w-full flex-1 items-end">
+                      <div
+                        className="w-full rounded-t-md bg-habeas-navy/80"
+                        style={{
+                          height: `${Math.max((count / matchTypeMax) * 100, count > 0 ? 8 : 0)}%`,
+                        }}
+                      />
+                    </div>
+                    <span className="truncate text-[0.65rem] text-ink-soft">{label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-line bg-paper">
+            <div className="border-b border-line px-4 py-3">
+              <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+                Worker health
+              </p>
+            </div>
+            <div className="overflow-x-auto px-2 py-1">
+              <table className="taste-table">
+                <thead>
                   <tr>
-                    <td className="!px-0 text-ink-soft">Ingest (land + promote)</td>
-                    <td className="!px-0 tabular-nums">{approachingSla.ingest}</td>
+                    <th>Worker</th>
+                    <th>Health</th>
+                    <th>Code</th>
+                    <th>Ready</th>
                   </tr>
+                </thead>
+                <tbody>
+                  {WORKER_ORDER.map((name) => {
+                    const probe = data.worker_health[name]
+                    if (!probe) {
+                      return (
+                        <tr key={name}>
+                          <td className="font-mono text-xs">{name}</td>
+                          <td colSpan={3} className="text-mute">
+                            —
+                          </td>
+                        </tr>
+                      )
+                    }
+                    return <WorkerHealthRow key={name} probe={probe} />
+                  })}
                 </tbody>
               </table>
             </div>
-          ) : null}
-          <div className="grid gap-6 lg:grid-cols-2">
-            <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
+          </div>
+        </div>
+      ) : null}
+
+      {tab === 'history' && (
+        <div className="space-y-3">
+          <p className="text-xs text-ink-soft">
+            Past bulk pipeline runs (intake + datetime). Select Track to drive the progress strip
+            above.
+          </p>
+          <BatchRequestRunsList
+            selectedProcessId={processId}
+            onSelectProcess={(id) => setProcess(id)}
+          />
+        </div>
+      )}
+
+      {tab === 'download' && (
+        <div className="space-y-3">
+          <div className="rounded-md border border-line bg-paper p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <Micro>Unzip</Micro>
-                <p className="mt-2 text-sm text-ink-soft">
-                  Land step — unpack the DROP ZIP into staged CSVs.
+                <Micro>Download</Micro>
+                <p className="mt-1 text-xs text-ink-soft">
+                  Fetch the latest DROP ZIP from the connector worker.
+                  {caSchedule?.next_run_at ? (
+                    <>
+                      {' '}
+                      Next scheduled:{' '}
+                      <span className="tabular-nums text-ink">
+                        {new Date(caSchedule.next_run_at).toLocaleString()}
+                      </span>
+                    </>
+                  ) : null}
                 </p>
               </div>
-              {data ? (
-                <div className="flex flex-wrap gap-2">
-                  <span className="glass px-2.5 py-1 text-xs text-ink-soft">
-                    Open / pending{' '}
-                    <span className="tabular-nums text-ink">{landQueue.open}</span>
-                  </span>
-                  <span className="glass px-2.5 py-1 text-xs text-ink-soft">
-                    Failed / needs attention{' '}
-                    <span
-                      className={
-                        landQueue.failed > 0
-                          ? 'tabular-nums text-red-700'
-                          : 'tabular-nums text-ink'
-                      }
-                    >
-                      {landQueue.failed}
-                    </span>
-                  </span>
-                  <span className="glass px-2.5 py-1 text-xs text-ink-soft">
-                    Success <span className="tabular-nums text-ink">{landQueue.success}</span>
-                  </span>
-                </div>
-              ) : null}
               <ActionButtons
-                keys={['land']}
+                keys={['download']}
                 showSkeleton={showSkeleton}
                 postMatchOpen={postMatchOpen}
                 actionMutation={actionMutation}
               />
-              {data ? (
+            </div>
+            {approachingSla ? (
+              <p className="mt-3 text-xs text-ink-soft">
+                Approaching age policy:{' '}
+                <span className="tabular-nums text-ink">{approachingSla.connector}</span> open
+                past {approachingSla.thresholds_hours.connector}h
+              </p>
+            ) : null}
+          </div>
+          {data ? (
+            <div className="rounded-md border border-line bg-paper p-3">
+              <Micro>Connector attempts</Micro>
+              <div className="mt-2">
+                <CountTable rows={data.connector_attempts} empty="No connector attempts." />
+              </div>
+            </div>
+          ) : null}
+          <ProcessRunsHistoryPanel
+            stage={TAB_HISTORY_STAGES.download!}
+            days={7}
+            emptyLabel="No download runs for bulk processes in this window."
+          />
+        </div>
+      )}
+
+      {tab === 'ingest' && (
+        <div className="space-y-3">
+          {approachingSla ? (
+            <p className="text-xs text-ink-soft">
+              Approaching age policy:{' '}
+              <span className="tabular-nums text-ink">{approachingSla.ingest}</span> open past{' '}
+              {approachingSla.thresholds_hours.ingest}h (land + promote)
+            </p>
+          ) : null}
+          <div className="grid gap-3 lg:grid-cols-2">
+            <div className="rounded-md border border-line bg-paper p-4">
+              <div className="flex flex-wrap items-start justify-between gap-2">
                 <div>
-                  <Micro>Attempts by status</Micro>
-                  <div className="mt-3">
-                    <StatusCountTable rows={landQueue.rows} empty="No land attempts." />
-                  </div>
+                  <Micro>Unzip</Micro>
+                  <p className="mt-1 text-xs text-ink-soft">Land — unpack ZIP to staged CSVs.</p>
+                </div>
+                <ActionButtons
+                  keys={['land']}
+                  showSkeleton={showSkeleton}
+                  postMatchOpen={postMatchOpen}
+                  actionMutation={actionMutation}
+                />
+              </div>
+              {data ? (
+                <div className="mt-3 flex flex-wrap gap-2 text-xs text-ink-soft">
+                  <span>
+                    Open <span className="tabular-nums text-ink">{landQueue.open}</span>
+                  </span>
+                  <span>
+                    Failed{' '}
+                    <span className={landQueue.failed > 0 ? 'tabular-nums text-red-700' : 'tabular-nums text-ink'}>
+                      {landQueue.failed}
+                    </span>
+                  </span>
+                  <span>
+                    Success <span className="tabular-nums text-ink">{landQueue.success}</span>
+                  </span>
                 </div>
               ) : null}
             </div>
 
-            <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
-              <div>
-                <Micro>Promote to raw</Micro>
-                <p className="mt-2 text-sm text-ink-soft">
-                  Promote step — write staged rows into drop_raw_requests.
-                </p>
+            <div className="rounded-md border border-line bg-paper p-4">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <Micro>Promote to raw</Micro>
+                  <p className="mt-1 text-xs text-ink-soft">Write staged rows into drop_raw_requests.</p>
+                </div>
+                <ActionButtons
+                  keys={['promote']}
+                  showSkeleton={showSkeleton}
+                  postMatchOpen={postMatchOpen}
+                  actionMutation={actionMutation}
+                />
               </div>
               {data ? (
-                <div className="flex flex-wrap gap-2">
-                  <span className="glass px-2.5 py-1 text-xs text-ink-soft">
-                    Open / pending{' '}
-                    <span className="tabular-nums text-ink">{promoteQueue.open}</span>
+                <div className="mt-3 flex flex-wrap gap-2 text-xs text-ink-soft">
+                  <span>
+                    Open <span className="tabular-nums text-ink">{promoteQueue.open}</span>
                   </span>
-                  <span className="glass px-2.5 py-1 text-xs text-ink-soft">
-                    Failed / needs attention{' '}
+                  <span>
+                    Failed{' '}
                     <span
                       className={
-                        promoteQueue.failed > 0
-                          ? 'tabular-nums text-red-700'
-                          : 'tabular-nums text-ink'
+                        promoteQueue.failed > 0 ? 'tabular-nums text-red-700' : 'tabular-nums text-ink'
                       }
                     >
                       {promoteQueue.failed}
                     </span>
                   </span>
-                  <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                  <span>
                     Success <span className="tabular-nums text-ink">{promoteQueue.success}</span>
                   </span>
-                </div>
-              ) : null}
-              <ActionButtons
-                keys={['promote']}
-                showSkeleton={showSkeleton}
-                postMatchOpen={postMatchOpen}
-                actionMutation={actionMutation}
-              />
-              {data ? (
-                <div>
-                  <Micro>Attempts by status</Micro>
-                  <div className="mt-3">
-                    <StatusCountTable rows={promoteQueue.rows} empty="No promote attempts." />
-                  </div>
                 </div>
               ) : null}
             </div>
           </div>
 
+          <ProcessRunsHistoryPanel
+            stage={TAB_HISTORY_STAGES.ingest!}
+            days={7}
+            emptyLabel="No land/promote runs for bulk processes in this window."
+          />
+
           {data ? (
-            <div className="space-y-3">
+            <div className="rounded-md border border-line bg-paper p-3">
               <Micro>Raw by list type</Micro>
-              <div className="taste-panel overflow-x-auto px-2 py-1">
+              <div className="mt-2 overflow-x-auto">
                 {data.raw_requests_by_list_type.length === 0 ? (
-                  <p className="p-4 text-sm text-ink-soft">No drop_raw_requests rows.</p>
+                  <p className="text-xs text-ink-soft">No drop_raw_requests rows.</p>
                 ) : (
                   <table className="taste-table">
                     <thead>
@@ -1881,56 +2722,38 @@ function DropPipelinePageInner() {
 
       {tab === 'matching' && (
         <>
-          <div className="grid items-start gap-6 lg:grid-cols-[0.9fr_1.1fr]">
-            <div className="taste-panel-soft flex max-w-xl flex-col gap-6 p-6 sm:p-7">
-              <div>
-                <Micro>Matching</Micro>
-                <p className="mt-2 text-sm text-ink-soft">
-                  Dispatch thin requests to the matcher, then run matching. After success, the
-                  required dialog forces review or bulk approve.
-                </p>
-              </div>
-              <ActionButtons
-                keys={['dispatch', 'match']}
-                showSkeleton={showSkeleton}
-                postMatchOpen={postMatchOpen}
-                actionMutation={actionMutation}
-              />
-            </div>
-            {approachingSla ? (
-              <div className="taste-panel-soft flex flex-col gap-4 p-6 sm:p-7">
+          <div className="space-y-3">
+            <div className="rounded-md border border-line bg-paper p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <Micro>Approaching (age policy)</Micro>
-                  <p className="mt-2 max-w-md text-sm text-ink-soft">
-                    Open work older than stage age thresholds — not legal DROP deadline breach
-                    clocks. Thresholds: matching {approachingSla.thresholds_hours.matching}h ·
-                    review {approachingSla.thresholds_hours.matching_review}h.
+                  <Micro>Matching</Micro>
+                  <p className="mt-1 max-w-xl text-xs text-ink-soft">
+                    Dispatch thin requests, then run matching. Success opens a required review /
+                    bulk-approve dialog.
                   </p>
                 </div>
-                <div className="overflow-x-auto">
-                  <table className="taste-table">
-                    <thead>
-                      <tr>
-                        <th className="!px-0">Stage</th>
-                        <th className="!px-0">Count</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr>
-                        <td className="!px-0 text-ink-soft">Matching attempts</td>
-                        <td className="!px-0 tabular-nums">{approachingSla.matching}</td>
-                      </tr>
-                      <tr>
-                        <td className="!px-0 text-ink-soft">Matching review</td>
-                        <td className="!px-0 tabular-nums">
-                          {approachingSla.matching_review}
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
+                <ActionButtons
+                  keys={['dispatch', 'match']}
+                  showSkeleton={showSkeleton}
+                  postMatchOpen={postMatchOpen}
+                  actionMutation={actionMutation}
+                />
               </div>
-            ) : null}
+              {approachingSla ? (
+                <p className="mt-3 text-xs text-ink-soft">
+                  Approaching: matching{' '}
+                  <span className="tabular-nums text-ink">{approachingSla.matching}</span> (
+                  {approachingSla.thresholds_hours.matching}h) · review{' '}
+                  <span className="tabular-nums text-ink">{approachingSla.matching_review}</span>{' '}
+                  ({approachingSla.thresholds_hours.matching_review}h)
+                </p>
+              ) : null}
+            </div>
+            <ProcessRunsHistoryPanel
+              stage={TAB_HISTORY_STAGES.matching!}
+              days={7}
+              emptyLabel="No matching runs for bulk processes in this window."
+            />
           </div>
           <div ref={resultsAnchorRef}>
             <MatchingResultsPanel
@@ -1943,35 +2766,37 @@ function DropPipelinePageInner() {
       )}
 
       {tab === 'fulfillment' && (
-        <div className="grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
-          <div className="taste-panel-soft flex flex-col gap-6 p-6 sm:p-7">
-            <div>
-              <Micro>Fulfillment</Micro>
-              <p className="mt-2 text-sm text-ink-soft">
-                Dispatch sets response_status (3/4/5) for DROP rows with approved matching.review.
-                Counts only — no request-id queue table on this worker.
-              </p>
+        <div className="space-y-3">
+          <div className="rounded-md border border-line bg-paper p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <Micro>Fulfillment</Micro>
+                <p className="mt-1 max-w-xl text-xs text-ink-soft">
+                  Sets response_status (3/4/5) for DROP rows with approved matching.review. No
+                  attempt-table runs — queue depth from the fulfillment worker.
+                </p>
+              </div>
+              <ActionButtons
+                keys={['fulfill']}
+                showSkeleton={showSkeleton}
+                postMatchOpen={postMatchOpen}
+                actionMutation={actionMutation}
+              />
             </div>
             {data ? (
-              <div className="flex flex-wrap gap-2">
-                <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+              <div className="mt-3 flex flex-wrap gap-3 text-xs text-ink-soft">
+                <span>
                   Ready{' '}
-                  <span className="tabular-nums text-ink">
-                    {data.fulfillment?.ready ?? '—'}
-                  </span>
+                  <span className="tabular-nums text-ink">{data.fulfillment?.ready ?? '—'}</span>
                 </span>
-                <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                <span>
                   Unset <span className="tabular-nums text-ink">{fulfillmentUnset}</span>
                 </span>
-                <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                <span>
                   Review pending{' '}
                   <span className="tabular-nums text-ink">{data.matching_review.pending}</span>
                 </span>
-                <span className="glass px-2.5 py-1 text-xs text-ink-soft">
-                  Review approved{' '}
-                  <span className="tabular-nums text-ink">{data.matching_review.approved}</span>
-                </span>
-                <span className="glass px-2.5 py-1 text-xs text-ink-soft">
+                <span>
                   Worker{' '}
                   <span
                     className={
@@ -1989,22 +2814,33 @@ function DropPipelinePageInner() {
                 </span>
               </div>
             ) : null}
-            <ActionButtons
-              keys={['fulfill']}
-              showSkeleton={showSkeleton}
-              postMatchOpen={postMatchOpen}
-              actionMutation={actionMutation}
-            />
+          </div>
+
+          <div className="rounded-md border border-line bg-paper">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
+              <Micro>Worker queue</Micro>
+              <Link
+                to="/ops/workers/$workerName"
+                params={{ workerName: 'data_fulfillment' }}
+                className="text-[0.65rem] text-habeas-mid underline-offset-2 hover:underline"
+              >
+                data_fulfillment →
+              </Link>
+            </div>
+            <p className="px-3 py-3 text-xs text-ink-soft">
+              Fulfillment has no unified Runs rows yet — use Workers for live queue depth and
+              probe status.
+            </p>
           </div>
 
           {data ? (
-            <div className="space-y-6">
-              <div className="space-y-3">
+            <div className="grid gap-3 lg:grid-cols-2">
+              <div className="rounded-md border border-line bg-paper p-3">
                 <Micro>response_status distribution</Micro>
-                <p className="text-xs text-mute">
-                  CPPA codes on drop_raw_requests — 3 Deleted · 4 Opted out · 5 Not found.
+                <p className="mt-1 text-[0.65rem] text-mute">
+                  3 Deleted · 4 Opted out · 5 Not found
                 </p>
-                <div className="taste-panel overflow-x-auto px-2 py-1">
+                <div className="mt-2 overflow-x-auto">
                   <table className="taste-table">
                     <thead>
                       <tr>
@@ -2047,10 +2883,9 @@ function DropPipelinePageInner() {
                   </table>
                 </div>
               </div>
-
-              <div className="space-y-3">
+              <div className="rounded-md border border-line bg-paper p-3">
                 <Micro>Matching gate (fulfill blockers)</Micro>
-                <div className="taste-panel-soft p-4">
+                <div className="mt-2">
                   <StatusCountTable
                     rows={data.matching_review.by_status}
                     empty="No matching.review gates."
@@ -2062,7 +2897,7 @@ function DropPipelinePageInner() {
         </div>
       )}
 
-      {tab === 'configurations' && (
+      {tab === 'hash_refresh' && (
         <HashIndexPanel
           data={data}
           showSkeleton={showSkeleton}
@@ -2077,7 +2912,16 @@ function DropPipelinePageInner() {
         />
       )}
 
-      {showActionPanel || tab === 'configurations' ? (
+      {tab === 'configurations' && (
+        <ConfigurationsPanel
+          data={data}
+          scheduleNext={caSchedule?.next_run_at ?? null}
+          scheduleLast={caSchedule?.last_success_at ?? null}
+          scheduleUtc={caSchedule?.schedule_utc ?? null}
+        />
+      )}
+
+      {showActionPanel ? (
         <ActionResultFrame
           lastAction={lastAction}
           actionResult={actionResult}

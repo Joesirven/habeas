@@ -21,11 +21,11 @@ import {
 } from '@/router'
 
 const JOB_OPTIONS: { value: RunsJobFilter | ''; label: string }[] = [
-  { value: '', label: 'All jobs' },
-  { value: 'drop_connector', label: 'Download' },
-  { value: 'drop_ingestor', label: 'Ingest' },
-  { value: 'matching', label: 'Matching' },
-  { value: 'hash_index_refresh', label: 'Hash index refresh' },
+  { value: '', label: 'All workers' },
+  { value: 'drop_connector', label: 'drop_connector · Download' },
+  { value: 'drop_ingestor', label: 'drop_ingestor · Ingest' },
+  { value: 'matching', label: 'matching' },
+  { value: 'hash_index_refresh', label: 'hash_index_refresh' },
 ]
 
 const STATUS_TABS: {
@@ -195,7 +195,7 @@ function RunsToolbar({
           </button>
         ))}
         <label className="ml-auto flex items-center gap-2">
-          <span className="taste-micro">Job</span>
+          <span className="taste-micro">Worker</span>
           <select
             className="glass rounded-lg px-2 py-1.5 text-xs text-ink"
             value={search.job ?? ''}

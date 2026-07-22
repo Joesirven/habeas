@@ -257,6 +257,45 @@ def test_get_run_detail_not_found(mock_pool: MagicMock) -> None:
     assert response.status_code == 404
 
 
+def test_get_run_detail_hash_index_includes_dbt_metrics(mock_pool: MagicMock) -> None:
+    mock_pool.fetchrow = AsyncMock(
+        return_value=_Row(
+            id=9,
+            step="hash_index_refresh",
+            status="success",
+            attempted_at=_STARTED,
+            completed_at=_COMPLETED,
+            submitted_at=_STARTED,
+            attempt_number=1,
+            worker_id="hash-index-refresh-1",
+            error_code=None,
+            error_message=None,
+            request_id=None,
+            state="CA",
+            list_types=["Email", "Phone", "NDZ"],
+            run_status="success",
+            run_started_at=_STARTED,
+            run_finished_at=_COMPLETED,
+            rows_email=100,
+            rows_phone=50,
+            rows_ndz=25,
+            rematch_enqueued_count=3,
+            run_error_message=None,
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/ops/runs/hash_index_refresh:9", headers=_SUPER_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["state"] == "CA"
+    assert body["hash_index_run"]["rows_email"] == 100
+    assert body["hash_index_run"]["rows_phone"] == 50
+    assert body["hash_index_run"]["rows_ndz"] == 25
+    assert body["hash_index_run"]["rematch_enqueued_count"] == 3
+
+
 def test_get_run_detail_forbidden_for_data_owner(mock_pool: MagicMock) -> None:
     roles.settings.admin_api_data_owners = "owner@example.com"
     roles.settings.admin_api_super_admins = ""
