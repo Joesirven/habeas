@@ -15,10 +15,12 @@ from habeas_privacy_core.workflow.approval import (
     NOTICE_REVIEW_ACTION,
     WORKFLOW_ASSIGNMENT_ACTION,
     create_pending_matching_review,
+    create_pending_notice_review,
     create_workflow_assignment,
     ensure_pending_matching_review,
     get_current_assignment,
     is_matching_review_approved,
+    is_notice_review_approved,
     list_workflow_assignments,
 )
 
@@ -59,6 +61,22 @@ async def create_matching_review_approval(
 ) -> dict[str, Any]:
     """Insert a pending matching.review approval_requests row for a request."""
     return await create_pending_matching_review(
+        conn,
+        request_id=request_id,
+        context=context,
+        expires_in=expires_in,
+    )
+
+
+async def create_notice_review_approval(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    context: dict[str, Any] | None = None,
+    expires_in: timedelta = DEFAULT_APPROVAL_TTL,
+) -> dict[str, Any]:
+    """Insert a pending notice.review approval_requests row for a request."""
+    return await create_pending_notice_review(
         conn,
         request_id=request_id,
         context=context,
@@ -526,6 +544,7 @@ __all__ = [
     "ASSIGNMENT_TARGETS",
     "MATCHING_REVIEW_ACTION",
     "MATCH_TYPE_FILTERS",
+    "NOTICE_REVIEW_ACTION",
     "WORKFLOW_ASSIGNMENT_ACTION",
     "MatchTypeFilter",
     "assign_requests",
@@ -533,6 +552,7 @@ __all__ = [
     "bulk_approve_matching_review_by_match_type",
     "bulk_decline_matching_review_by_match_type",
     "create_matching_review_approval",
+    "create_notice_review_approval",
     "create_workflow_assignment",
     "decide_approval",
     "decline_matching_review_for_request",
@@ -540,6 +560,7 @@ __all__ = [
     "escalate_requests",
     "get_current_assignment",
     "is_matching_review_approved",
+    "is_notice_review_approved",
     "list_approvals",
     "list_workflow_assignments",
     "match_count_predicate_sql",
