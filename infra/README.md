@@ -271,6 +271,37 @@ Before first deploy, point Cloud Run at the reaper SA and Cloud SQL instance (ed
 --add-cloudsql-instances=example-gcp-project:us-east4:dev-dpra
 ```
 
+## Cloud Scheduler (worker ticks)
+
+Workers are HTTP + queue-claim. Cloud Scheduler OIDC-invokes worker endpoints on a cadence. Schedules are **live in GCP** (no Postgres mirror). Super_admins edit them via admin-api `GET|PATCH /ops/workers/schedules` (Workers Settings / Ops Configuration UI).
+
+| Job id pattern | Target | Default |
+|----------------|--------|---------|
+| `dpra-{env}-drop-connector-download` | `POST /download` | Daily `0 14 * * *` UTC + body `interval_days=15` (eligibility gate) |
+| `dpra-{env}-reaper` | `POST /reap` | every 1 min |
+| `dpra-{env}-drop-ingestor-land` | `POST /ingest/land` | every 5 min |
+| `dpra-{env}-drop-ingestor-promote` | `POST /ingest/promote` | every 5 min |
+| `dpra-{env}-request-dispatcher` | `POST /dispatch` | every 5 min |
+| `dpra-{env}-matching` | `POST /process` | every 5 min |
+| `dpra-{env}-data-fulfillment` | `POST /fulfill` | every 5 min |
+
+**Scheduler SA:** `dpra-scheduler@example-gcp-project.iam.gserviceaccount.com` — grant `roles/run.invoker` on workers (infra exception; still never grant users worker invoker).
+
+**Admin-api:** set `CLOUD_SCHEDULER_ENABLED=true`, `GCP_PROJECT`, `CLOUD_SCHEDULER_LOCATION=us-east4`, `CLOUD_SCHEDULER_JOB_PREFIX=dpra-prod` (or `dpra-dev`). Runtime SA needs Cloud Scheduler admin/updater on these jobs.
+
+### Upsert script (dry-run by default)
+
+```bash
+# Prints gcloud commands only
+ENV=dev ./infra/scripts/upsert_worker_scheduler_jobs.sh
+
+# Apply (dev). Prod requires Jose approval (prod-write-gate).
+CONFIRM=yes ENV=dev ./infra/scripts/upsert_worker_scheduler_jobs.sh
+# CONFIRM=yes ENV=prod ./infra/scripts/upsert_worker_scheduler_jobs.sh  # Jose only
+```
+
+Hash-index refresh is **not** auto-scheduled (manual/ops enqueue).
+
 ## Manual deploy (dev)
 
 ```bash

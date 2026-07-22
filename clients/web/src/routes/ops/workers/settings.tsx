@@ -2,6 +2,7 @@ import { Link } from '@tanstack/react-router'
 import { type ReactNode } from 'react'
 
 import { RetryConfigPanel } from '@/routes/ops/health/configuration'
+import { ScheduleConfigPanel } from '@/routes/ops/workers/ScheduleConfigPanel'
 import { RoleGate, isSuperAdmin } from '@/lib/auth'
 
 function Micro({ children }: { children: ReactNode }) {
@@ -18,7 +19,7 @@ function WorkersSettingsBody() {
             Settings
           </h2>
           <p className="mt-1 max-w-xl text-xs text-ink-soft">
-            Per-worker retry attempt limits. Reaper applies overrides on the next cycle.
+            Super admin only. Edit Cloud Scheduler run cadences and per-worker retry limits.
           </p>
         </div>
         <Link to="/ops/workers" className="taste-btn text-xs">
@@ -26,6 +27,7 @@ function WorkersSettingsBody() {
         </Link>
       </header>
 
+      <ScheduleConfigPanel />
       <RetryConfigPanel />
     </section>
   )

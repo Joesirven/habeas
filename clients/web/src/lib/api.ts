@@ -241,6 +241,36 @@ export type CaDropSchedule = {
   cadence: string
   next_run_at: string
   last_success_at: string | null
+  interval_days?: number
+}
+
+export type WorkerSchedule = {
+  job_key: string
+  job_name: string
+  label: string
+  enabled: boolean
+  schedule_kind: 'interval_days' | 'interval_minutes'
+  interval_days: number | null
+  interval_minutes: number | null
+  time_utc: string | null
+  cron: string
+  timezone: string
+  next_run_at: string | null
+  last_success_at: string | null
+  scheduler_state: string
+  scheduler_reachable: boolean
+}
+
+export type WorkerSchedulesPayload = {
+  schedules: WorkerSchedule[]
+}
+
+export type WorkerSchedulePatch = {
+  job_key: string
+  enabled?: boolean
+  interval_minutes?: number
+  interval_days?: number
+  time_utc?: string
 }
 
 export type HashIndexRunMetrics = {
@@ -567,6 +597,20 @@ export function getRetryConfig() {
 export function patchRetryConfig(body: { table_name: string; max_attempts: number }) {
   return fetchAdminApi<{ status: string; table_name: string; max_attempts: number }>(
     '/ops/health/retry-config',
+    {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+export function getWorkerSchedules() {
+  return fetchAdminApi<WorkerSchedulesPayload>('/ops/workers/schedules')
+}
+
+export function patchWorkerSchedule(body: WorkerSchedulePatch) {
+  return fetchAdminApi<{ status: string; schedule: WorkerSchedule; mode: string }>(
+    '/ops/workers/schedules',
     {
       method: 'PATCH',
       body: JSON.stringify(body),

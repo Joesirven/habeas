@@ -914,11 +914,13 @@ function ConfigurationsPanel({
   scheduleNext,
   scheduleLast,
   scheduleUtc,
+  scheduleCadence,
 }: {
   data: DropPipelineStatus | undefined
   scheduleNext: string | null
   scheduleLast: string | null
   scheduleUtc: string | null
+  scheduleCadence: string | null
 }) {
   const workersQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-workers', 'config'],
@@ -927,14 +929,23 @@ function ConfigurationsPanel({
     placeholderData: (previous) => previous,
   })
   const workers = workersQuery.data?.workers ?? []
+  const cadenceLabel = scheduleCadence
+    ? scheduleCadence.replaceAll('_', ' ')
+    : null
 
   return (
     <div className="space-y-4">
       <div className="rounded-md border border-line bg-paper p-4">
         <Micro>Scheduled workers</Micro>
         <p className="mt-1 max-w-2xl text-xs text-ink-soft">
-          CA DROP retrieval fires on the connector schedule. Other workers claim from attempt
-          queues — concurrency and retry floors below.
+          CA DROP retrieval fires on the connector schedule (interval gate). Other workers claim
+          from attempt queues — concurrency and retry floors below. Edit schedules under Workers
+          → Settings.
+        </p>
+        <p className="mt-2 text-xs">
+          <Link to="/ops/workers/settings" className="taste-link">
+            Edit schedules
+          </Link>
         </p>
         <div className="mt-3 grid gap-3 sm:grid-cols-3">
           <div className="rounded-md border border-line/80 px-3 py-2">
@@ -943,7 +954,9 @@ function ConfigurationsPanel({
               {scheduleNext ? new Date(scheduleNext).toLocaleString() : '—'}
             </p>
             <p className="mt-0.5 text-[0.65rem] text-mute">
-              {scheduleUtc ? `Daily ${scheduleUtc} UTC` : 'Schedule unset'}
+              {scheduleUtc
+                ? `${cadenceLabel ?? 'schedule'} · tick ${scheduleUtc} UTC`
+                : 'Schedule unset'}
             </p>
           </div>
           <div className="rounded-md border border-line/80 px-3 py-2">
@@ -2918,6 +2931,7 @@ function DropPipelinePageInner() {
           scheduleNext={caSchedule?.next_run_at ?? null}
           scheduleLast={caSchedule?.last_success_at ?? null}
           scheduleUtc={caSchedule?.schedule_utc ?? null}
+          scheduleCadence={caSchedule?.cadence ?? null}
         />
       )}
 

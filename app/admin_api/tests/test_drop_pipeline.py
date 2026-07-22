@@ -101,11 +101,12 @@ PIPELINE_FIXTURE: dict[str, Any] = {
         "last_run": None,
     },
     "ca_drop_schedule": {
-        "label": "Daily CA DROP retrieval",
+        "label": "CA DROP retrieval",
         "schedule_utc": "14:00",
-        "cadence": "daily",
+        "cadence": "every_15_days",
         "next_run_at": "2026-07-22T14:00:00+00:00",
         "last_success_at": None,
+        "interval_days": 15,
     },
     "worker_health": {
         "drop_connector": {
@@ -152,7 +153,7 @@ def test_pipeline_status_shape(monkeypatch: pytest.MonkeyPatch):
     assert body["matching_review"]["action_type"] == "matching.review"
     assert "hash_index_refresh" in body
     assert "ca_drop_schedule" in body
-    assert body["ca_drop_schedule"]["cadence"] == "daily"
+    assert body["ca_drop_schedule"]["cadence"] == "every_15_days"
     assert "worker_health" in body
     assert body["worker_health"]["drop_connector"]["ok"] is True
     assert "url" not in body["worker_health"]["drop_connector"]
@@ -408,7 +409,7 @@ async def test_collect_pipeline_counts_shape():
         "matching_review": 0,
         "thresholds_hours": dict(drop_pipeline.APPROACHING_SLA_THRESHOLD_HOURS),
     }
-    assert result["ca_drop_schedule"]["cadence"] == "daily"
+    assert result["ca_drop_schedule"]["cadence"] == "every_15_days"
     assert result["ca_drop_schedule"]["schedule_utc"]
     assert result["ca_drop_schedule"]["next_run_at"]
     assert result["ca_drop_schedule"]["last_success_at"] is None

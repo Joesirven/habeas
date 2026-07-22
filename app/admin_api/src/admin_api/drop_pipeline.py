@@ -89,9 +89,10 @@ class DropPipelineSettings(CoreSettings):
     # When true, mutating /ops/drop/* requires X-Goog-Authenticated-User-Email.
     # Local default false; enable with IAP in front of admin-api (see infra/README).
     require_iap_identity: bool = False
-    # Daily CA DROP retrieval schedule (UTC HH:MM). Infra Cloud Scheduler should match.
+    # CA DROP retrieval schedule (UTC HH:MM). Prefer live Cloud Scheduler via worker_schedules.
     drop_connector_schedule_utc: str = "14:00"
-    drop_connector_schedule_label: str = "Daily CA DROP retrieval"
+    drop_connector_schedule_label: str = "CA DROP retrieval"
+    drop_connector_interval_days: int = 15
 
 
 settings = DropPipelineSettings()
@@ -551,18 +552,11 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
          LIMIT 1
         """
     )
-    next_retrieval = next_scheduled_retrieval_utc()
-    ca_drop_schedule = {
-        "label": settings.drop_connector_schedule_label,
-        "schedule_utc": settings.drop_connector_schedule_utc,
-        "cadence": "daily",
-        "next_run_at": next_retrieval.isoformat(),
-        "last_success_at": (
-            last_connector_success.isoformat()
-            if last_connector_success is not None
-            else None
-        ),
-    }
+    from admin_api.worker_schedules import ca_drop_schedule_payload
+
+    ca_drop_schedule = await ca_drop_schedule_payload(
+        last_success_at=last_connector_success
+    )
 
     return {
         "connector_attempts": [
