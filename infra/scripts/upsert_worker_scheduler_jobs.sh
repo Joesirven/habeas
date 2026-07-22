@@ -51,10 +51,13 @@ upsert_http_job() {
   local uri="$2"
   local cron="$3"
   local body="${4:-}"
+  # Cloud Run expects OIDC audience = service root URL (no path).
+  local audience
+  audience="$(printf '%s\n' "${uri}" | sed -E 's#(https://[^/]+).*#\1#')"
 
   local oidc_flags=(
     --oidc-service-account-email="${SCHEDULER_SA}"
-    --oidc-token-audience="${uri}"
+    --oidc-token-audience="${audience}"
   )
 
   local common=(
@@ -136,6 +139,17 @@ do
     --role="roles/run.invoker"
 done
 
+PROJECT_NUMBER="$(gcloud projects describe "${PROJECT}" --format='value(projectNumber)' 2>/dev/null || true)"
+if [[ -n "${PROJECT_NUMBER}" ]]; then
+  echo
+  echo "Allow Cloud Scheduler agent to mint OIDC as ${SCHEDULER_SA}:"
+  run gcloud iam service-accounts add-iam-policy-binding "${SCHEDULER_SA}" \
+    --project="${PROJECT}" \
+    --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-cloudscheduler.iam.gserviceaccount.com" \
+    --role="roles/iam.serviceAccountUser"
+fi
+
 echo
 echo "Admin-api needs roles/cloudscheduler.admin (or custom) to edit jobs from UI."
+echo "OIDC audience must be the Cloud Run service root URL (script derives it from URI)."
 echo "Done."

@@ -285,7 +285,7 @@ Workers are HTTP + queue-claim. Cloud Scheduler OIDC-invokes worker endpoints on
 | `dpra-{env}-matching` | `POST /process` | every 5 min |
 | `dpra-{env}-data-fulfillment` | `POST /fulfill` | every 5 min |
 
-**Scheduler SA:** `dpra-scheduler@example-gcp-project.iam.gserviceaccount.com` — grant `roles/run.invoker` on workers (infra exception; still never grant users worker invoker).
+**Scheduler SA:** `dpra-scheduler@example-gcp-project.iam.gserviceaccount.com` — grant `roles/run.invoker` on workers (infra exception; still never grant users worker invoker). OIDC audience must be the Cloud Run **service root** URL (no path). Grant Cloud Scheduler’s agent `roles/iam.serviceAccountUser` on the scheduler SA so it can mint tokens.
 
 **Admin-api:** set `CLOUD_SCHEDULER_ENABLED=true`, `GCP_PROJECT`, `CLOUD_SCHEDULER_LOCATION=us-east4`, `CLOUD_SCHEDULER_JOB_PREFIX=dpra-prod` (or `dpra-dev`). Runtime SA needs Cloud Scheduler admin/updater on these jobs.
 
