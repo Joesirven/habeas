@@ -177,6 +177,7 @@ Prerequisites Jose must keep granted:
 | `roles/run.invoker` | **only** `service-…@gcp-sa-iap.iam.gserviceaccount.com` | `admin-api-dev` |
 | `DROP_OPS_SUPER_ADMIN_EMAILS` (etc.) env | include ops SA / operator emails | Cloud Run env on admin-api |
 | Worker `roles/run.invoker` | **only** admin-api runtime SA | `hash-index-refresh-dev`, `matching-dev`, … |
+| `roles/cloudscheduler.admin` | admin-api runtime SA (`95660886550-compute@…`) | project (live schedule GET/PATCH) |
 
 Do **not** use `DATABASE_URL` for ops mutations — SELECT-only analysis only.
 Do **not** curl workers or grant yourself worker `run.invoker`.
@@ -287,7 +288,7 @@ Workers are HTTP + queue-claim. Cloud Scheduler OIDC-invokes worker endpoints on
 
 **Scheduler SA:** `dpra-scheduler@example-gcp-project.iam.gserviceaccount.com` — grant `roles/run.invoker` on workers (infra exception; still never grant users worker invoker). OIDC audience must be the Cloud Run **service root** URL (no path). Grant Cloud Scheduler’s agent `roles/iam.serviceAccountUser` on the scheduler SA so it can mint tokens.
 
-**Admin-api:** set `CLOUD_SCHEDULER_ENABLED=true`, `GCP_PROJECT`, `CLOUD_SCHEDULER_LOCATION=us-east4`, `CLOUD_SCHEDULER_JOB_PREFIX=dpra-prod` (or `dpra-dev`). Runtime SA needs Cloud Scheduler admin/updater on these jobs.
+**Admin-api (dev):** `admin-api-dev.yaml` sets `CLOUD_SCHEDULER_ENABLED=true`, `CLOUD_SCHEDULER_LOCATION=us-east4`, `CLOUD_SCHEDULER_JOB_PREFIX=dpra-dev` (plus existing `GCP_PROJECT`). Runtime SA (`95660886550-compute@…`) needs `roles/cloudscheduler.admin` on the project (or a custom role that can get/patch/pause/resume jobs) so Workers Settings can edit live schedules.
 
 ### Upsert script (dry-run by default)
 
