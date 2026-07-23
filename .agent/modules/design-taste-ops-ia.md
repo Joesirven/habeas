@@ -32,12 +32,11 @@
 
 ### Dashboard request processing pipeline
 
-- Top console tabs: **Pipeline** · Hash refresh · History · Configurations (not Download/Ingest/Matching/Fulfillment at top).
+- Top console tabs: **Pipeline** · Hash refresh · History · Configurations.
 - Header: **Run Pipeline** (shadcn dropdown → CA DROP + confirm dialog with staged queue). Compact metric cards with ring/spark viz + hover detail popovers.
 - Pipeline list: shadcn Tabs (Bulk / Individual); compact Popover filters.
-- Bulk cards: human title from `process_at`; collapsed ~1–2 lines with Dur/Prog inline + tiny stage chips (no Matching results in header); expanded title row shares Dur + Est/err; stage tabs Download · Ingest · Matching · Fulfillment stay local (no URL write per click — apply `?stage=` once on expand).
+- Bulk cards: ~1–2 line collapsed row — human `process_at` title, inline Dur/Prog, tiny stage chips; expanded keeps title + Dur + Est./error% on one row. Stage tabs (**Download · Ingest · Matching · Fulfillment**) stay local (no URL write per click — apply `?stage=` once on expand); only the **selected** tab is large when expanded; current-but-not-selected stays compact with an in-progress cue. **Matching results** only when the Matching stage is selected.
 - Matching completion % / Finished·Queued·Failed chips use `matching_attempts` only — never blend review (review shares the request spine but doubles the denominator).
-- Stage strip: only **selected** tab is large (Finished/Queued/Failed/Abandoned); current-not-selected stays compact with an in-progress cue; **Matching results** only when Matching tab is selected.
 - Individual view: status toggles on the same filter row as Intake/Window (shared `RUN_STATUS_FILTERS` semantics with bulk-card toggles).
 - Expanded runs: toggle filters, pagination, bulk Re-run / Assign / Details dialog → full Runs page.
 

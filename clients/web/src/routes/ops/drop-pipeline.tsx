@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 import { Skeleton, SkeletonLines } from '@/components/AppShell'
 import { Button } from '@/components/ui/button'
 import {
+  ConfirmActionDialog,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -29,7 +30,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { RoleGate, isSuperAdmin } from '@/lib/auth'
+import { RoleGate, isSuperAdmin, useMe } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 import {
   getDropBulkProcess,
@@ -42,17 +43,21 @@ import {
   postDropDownload,
   postDropFulfill,
   postDropLand,
+  postDropMatch,
   postDropPromote,
+  postDropWorkflowAssign,
   postHashIndexRefreshEnqueue,
   postHashIndexRefreshEnqueueAll,
   postHashIndexRefreshProcess,
   type BulkProcessDetail,
+  type BulkProcessRun,
   type BulkProcessRunGroup,
   type BulkProcessStageCounts,
   type BulkProcessSummary,
   type BulkProcessesPayload,
   type DropPipelineStatus,
   type HashIndexRefreshStatus,
+  type StepStatusCount,
   type WorkerHealthProbe,
 } from '@/lib/api'
 import { RetryConfigPanel } from '@/routes/ops/health/configuration'
@@ -63,6 +68,8 @@ import {
   type PipelineStageTab,
   type PipelineTab,
 } from '@/router'
+
+const RUNS_PAGE_SIZE = 10
 
 function PlayPipelineIcon({ className }: { className?: string }) {
   return (
@@ -95,15 +102,6 @@ const PIPELINE_TAB_BAR: { key: PipelineTab; label: string }[] = [
 ]
 
 type BulkPipelineStageKey = keyof BulkProcessDetail['stages']
-
-const STAGE_KEY_LABELS: Record<BulkPipelineStageKey, string> = {
-  download: 'Download',
-  land: 'Land',
-  promote: 'Promote',
-  matching: 'Matching',
-  review: 'Review',
-  fulfillment: 'Fulfill',
-}
 
 const BULK_CARD_STAGE_TABS: {
   key: PipelineStageTab
@@ -173,15 +171,10 @@ function countsForStageTab(
   tab: (typeof BULK_CARD_STAGE_TABS)[number],
 ): BulkProcessStageCounts | undefined {
   if (!detail) return undefined
-  // Matching tab still owns the review gate for "current stage" highlighting, but
-  // completion % / Finished·Queued·Failed chips must use matching_attempts only.
-  // Blending review (same request spine, different unit) doubles the denominator and
-  // drops Matching from ~100% to ~50% the moment review gates open.
+  // Matching completion / status cards use matching_attempts only — do not blend review.
   if (tab.key === 'matching') {
     return detail.stages.matching
   }
-  // Ingest: land + promote are sequential CSV steps — merged success/total is a fair
-  // average across both sub-stages (unlike matching + review).
   return mergeStageCounts(tab.stages.map((stage) => detail.stages[stage.key]))
 }
 
@@ -224,48 +217,18 @@ function stageVisualState(
   return isCurrent ? 'active' : 'idle'
 }
 
-function stageStripTone(visual: StageVisual): {
-  text: string
-  light: 'emerald' | 'sky' | 'amber' | 'red' | 'mute' | 'navy'
-  bar: string
-  wash: string
-} {
+function stageCardClassName(visual: StageVisual): string {
   switch (visual) {
     case 'complete':
-      return {
-        text: 'text-emerald-900',
-        light: 'emerald',
-        bar: 'bg-emerald-600',
-        wash: 'bg-emerald-50/80',
-      }
+      return 'border-emerald-600/45 bg-emerald-50 text-emerald-950'
     case 'active':
-      return {
-        text: 'text-habeas-navy',
-        light: 'emerald',
-        bar: 'bg-emerald-600',
-        wash: 'bg-emerald-50/50',
-      }
+      return 'border-habeas-navy/45 bg-habeas-navy/8'
     case 'failed':
-      return {
-        text: 'text-red-800',
-        light: 'red',
-        bar: 'bg-red-600',
-        wash: 'bg-red-50/70',
-      }
+      return 'border-red-400/50 bg-red-50'
     case 'pending':
-      return {
-        text: 'text-amber-950',
-        light: 'amber',
-        bar: 'bg-amber-500',
-        wash: 'bg-amber-50/60',
-      }
+      return 'border-amber-400/45 bg-amber-50/70'
     default:
-      return {
-        text: 'text-ink-soft',
-        light: 'mute',
-        bar: 'bg-habeas-navy/40',
-        wash: 'bg-transparent',
-      }
+      return 'border-line/80 bg-paper'
   }
 }
 
@@ -497,7 +460,7 @@ function runAgeLabel(startedAt: string): string {
   return rem > 0 ? `${hours}h ${rem}m` : `${hours}h`
 }
 
-const OPEN_RUN_STATUSES = new Set(['pending', 'claimed', 'in_flight', 'leased'])
+const OPEN_RUN_STATUSES = new Set(['pending', 'claimed', 'in_flight'])
 const FAILED_RUN_STATUSES = new Set([
   'submit_error',
   'outcome_error',
@@ -505,48 +468,24 @@ const FAILED_RUN_STATUSES = new Set([
   'abandoned',
 ])
 
-/** Shared by bulk-card toggles and Individual view (RUN_STATUS_FILTERS values). */
-function runMatchesStatusFilter(
-  run: { status: string },
-  statusFilter: string,
-): boolean {
-  const s = run.status.toLowerCase()
-  if (!statusFilter) return true
-  if (statusFilter === 'attention') {
-    return (
-      s.includes('fail') ||
-      s.includes('error') ||
-      OPEN_RUN_STATUSES.has(s) ||
-      s === 'abandoned'
-    )
-  }
-  if (statusFilter === 'abandoned') return s === 'abandoned'
-  if (statusFilter === 'pending') return OPEN_RUN_STATUSES.has(s)
-  if (statusFilter === 'fail') {
-    return (
-      (s.includes('fail') || s.includes('error') || s === 'timeout') &&
-      s !== 'abandoned'
-    )
-  }
-  if (statusFilter === 'success') return s === 'success'
-  // Legacy CompactFilterSelect aliases used by standalone ProcessRunsHistoryPanel
-  if (statusFilter === 'open') return OPEN_RUN_STATUSES.has(s)
-  if (statusFilter === 'failed') return FAILED_RUN_STATUSES.has(s)
-  return s.includes(statusFilter.toLowerCase())
-}
-
 function filterRunGroupsForStatus(
   groups: BulkProcessRunGroup[],
   statusFilter: string,
 ): BulkProcessRunGroup[] {
-  return groups
-    .map((group) => {
-      const runs = group.runs.filter((run) =>
-        runMatchesStatusFilter(run, statusFilter),
-      )
-      return { ...group, runs, run_count: runs.length }
-    })
-    .filter((group) => group.run_count > 0)
+  if (!statusFilter || statusFilter === 'attention') {
+    const allowed =
+      statusFilter === 'attention'
+        ? new Set([...OPEN_RUN_STATUSES, ...FAILED_RUN_STATUSES])
+        : null
+    if (!allowed) return groups
+    return groups
+      .map((group) => {
+        const runs = group.runs.filter((run) => allowed.has(run.status))
+        return { ...group, runs, run_count: runs.length }
+      })
+      .filter((group) => group.run_count > 0)
+  }
+  return groups.filter((group) => group.run_count > 0)
 }
 
 function CompactFilterSelect({
@@ -644,25 +583,32 @@ function ProcessRunsHistoryPanel({
       stage,
       processId ?? 'all',
       days,
+      statusFilter,
     ],
-    queryFn: () =>
-      // Fetch unfiltered; apply RUN_STATUS_FILTERS (and legacy aliases) client-side
-      // so fail/pending/attention match the bulk-card toggle semantics.
-      listDropBulkProcessRuns({
+    queryFn: async () => {
+      // Fetch unfiltered for "attention" so older admin-api builds still work;
+      // filter open+failed client-side. Named filters still hit the API.
+      const apiStatus =
+        !statusFilter || statusFilter === 'attention' ? undefined : statusFilter
+      const payload = await listDropBulkProcessRuns({
         stage,
         days,
         process_id: processId,
-      }),
+        status: apiStatus,
+      })
+      if (statusFilter !== 'attention') return payload
+      return {
+        ...payload,
+        groups: filterRunGroupsForStatus(payload.groups, 'attention'),
+      }
+    },
     refetchInterval: 5_000,
     placeholderData: (previous) => previous,
   })
 
   const allowed =
     processIds != null ? new Set(processIds) : null
-  const groups = filterRunGroupsForStatus(
-    runsQuery.data?.groups ?? [],
-    statusFilter,
-  ).filter((group) => {
+  const groups = (runsQuery.data?.groups ?? []).filter((group) => {
     if (group.run_count <= 0) return false
     if (allowed != null && !allowed.has(group.process_id)) return false
     return true
@@ -844,26 +790,17 @@ function bulkDurationLabel(
   return dayRem > 0 ? `${days}d ${dayRem}h` : `${days}d`
 }
 
-/** Human title for bulk cards from process_at (e.g. Jul 22, 2026, 2:00 PM). */
 function formatBulkProcessName(processAt: string | null | undefined): string {
   if (!processAt) return '—'
-  const start = new Date(processAt)
-  if (Number.isNaN(start.getTime())) return '—'
-  return start.toLocaleString(undefined, {
+  const date = new Date(processAt)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleString(undefined, {
     month: 'short',
     day: 'numeric',
     year: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
   })
-}
-
-function bulkStageLabel(stageKey: string | undefined): string {
-  if (!stageKey) return '—'
-  if (stageKey in STAGE_KEY_LABELS) {
-    return STAGE_KEY_LABELS[stageKey as BulkPipelineStageKey]
-  }
-  return stageKey.replaceAll('_', ' ')
 }
 
 function stageRunIndicators(counts: BulkProcessStageCounts | undefined): {
@@ -895,7 +832,7 @@ function stageRunIndicators(counts: BulkProcessStageCounts | undefined): {
   const failed = Math.max(0, counts.failed - abandoned)
   const hasStatusBreakdown = (counts.by_list_type?.length ?? 0) > 0
   const queued = hasStatusBreakdown
-    ? byStatus.get('pending') ?? 0
+    ? (byStatus.get('pending') ?? 0)
     : counts.open
   const inFlight = hasStatusBreakdown
     ? (byStatus.get('claimed') ?? 0) +
@@ -958,39 +895,26 @@ function bulkDerivedStats(detail: BulkProcessDetail | undefined): {
   }
 }
 
-function StatusLight({
-  tone = 'mute',
-  pulse = false,
-  title,
-}: {
-  tone?: 'emerald' | 'sky' | 'amber' | 'red' | 'mute' | 'navy'
-  pulse?: boolean
-  title?: string
-}) {
-  const fill =
-    tone === 'emerald'
-      ? 'bg-emerald-500'
-      : tone === 'sky'
-        ? 'bg-sky-500'
-        : tone === 'amber'
-          ? 'bg-amber-500'
-          : tone === 'red'
-            ? 'bg-red-500'
-            : tone === 'navy'
-              ? 'bg-habeas-navy'
-              : 'bg-mute/70'
+function RunningPulse({ label = 'Running' }: { label?: string }) {
   return (
-    <span
-      className="relative inline-flex h-1.5 w-1.5 shrink-0"
-      title={title}
-      aria-hidden={title ? undefined : true}
-    >
-      {pulse ? (
-        <span
-          className={`absolute inline-flex h-full w-full animate-ping rounded-full ${fill} opacity-60`}
-        />
-      ) : null}
-      <span className={`relative inline-flex h-1.5 w-1.5 rounded-full ${fill}`} />
+    <span className="inline-flex items-center gap-1.5 rounded border border-emerald-300/70 bg-emerald-50/90 px-1.5 py-0.5 text-[0.6rem] font-medium uppercase tracking-wide text-emerald-900">
+      <span className="relative flex h-1.5 w-1.5">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-60" />
+        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-600" />
+      </span>
+      {label}
+    </span>
+  )
+}
+
+function PendingPulse({ label = 'Pending' }: { label?: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded border border-sky-300/70 bg-sky-50/90 px-1.5 py-0.5 text-[0.6rem] font-medium uppercase tracking-wide text-sky-950">
+      <span className="relative flex h-1.5 w-1.5">
+        <span className="absolute inline-flex h-full w-full animate-pulse rounded-full bg-sky-400 opacity-70" />
+        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-sky-600" />
+      </span>
+      {label}
     </span>
   )
 }
@@ -1014,179 +938,44 @@ function isPendingBulkSummary(row: BulkProcessSummary): boolean {
   return row.overall?.status === 'in_progress' && (row.overall.percent ?? 0) < 5
 }
 
-function MiniRing({
-  percent,
-  tone = 'navy',
-}: {
-  percent: number
-  tone?: 'navy' | 'emerald' | 'red' | 'amber'
-}) {
-  const clamped = Math.max(0, Math.min(100, percent))
-  const color =
-    tone === 'emerald'
-      ? 'stroke-emerald-600'
-      : tone === 'red'
-        ? 'stroke-red-600'
-        : tone === 'amber'
-          ? 'stroke-amber-600'
-          : 'stroke-habeas-navy'
-  const r = 14
-  const c = 2 * Math.PI * r
-  const offset = c - (clamped / 100) * c
-  return (
-    <svg viewBox="0 0 36 36" className="h-9 w-9 shrink-0" aria-hidden="true">
-      <circle
-        cx="18"
-        cy="18"
-        r={r}
-        fill="none"
-        className="stroke-line"
-        strokeWidth="3"
-      />
-      <circle
-        cx="18"
-        cy="18"
-        r={r}
-        fill="none"
-        className={color}
-        strokeWidth="3"
-        strokeLinecap="round"
-        strokeDasharray={c}
-        strokeDashoffset={offset}
-        transform="rotate(-90 18 18)"
-      />
-    </svg>
-  )
+function retryCountFromRuns(runs: { attempt_number: number }[]): number {
+  return runs.reduce((sum, run) => sum + Math.max(0, run.attempt_number - 1), 0)
 }
 
-function BulkStageStrip({
-  detail,
-  loading,
-  duration,
-  running,
-  activeTab,
-  onSelectTab,
-  expanded,
+function StageRunStatChips({
+  finished,
+  queued,
+  failed,
+  abandoned,
+  dense = false,
 }: {
-  detail: BulkProcessDetail | undefined
-  loading?: boolean
-  duration?: string | null
-  running?: boolean
-  activeTab: PipelineStageTab
-  onSelectTab: (tab: PipelineStageTab) => void
-  expanded: boolean
+  finished: number
+  queued: number
+  failed: number
+  abandoned: number
+  dense?: boolean
 }) {
+  const chip = dense
+    ? 'inline-flex items-center gap-1 rounded px-1 py-px text-[0.55rem] tabular-nums'
+    : 'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[0.6rem] tabular-nums'
   return (
-    <div
-      className="flex min-w-0 items-stretch overflow-x-auto"
-      role="tablist"
-      aria-label="Bulk process stages"
-    >
-      {BULK_CARD_STAGE_TABS.map((tab) => {
-        if (loading || !detail) {
-          return (
-            <div
-              key={tab.key}
-              className={
-                expanded
-                  ? 'min-w-[4.5rem] flex-1 px-1.5 py-0.5'
-                  : 'min-w-[3.5rem] shrink-0 px-1 py-0.5'
-              }
-            >
-              <Skeleton className={expanded ? 'h-5 w-full' : 'h-3 w-full'} />
-            </div>
-          )
-        }
-        const counts = countsForStageTab(detail, tab)
-        const isCurrent = isStageTabCurrent(detail, tab)
-        const selected = activeTab === tab.key
-        const visual = stageVisualState(counts, isCurrent)
-        const indicators = stageRunIndicators(counts)
-        const tone = stageStripTone(visual)
-        const currentRunning =
-          isCurrent && Boolean(running) && visual !== 'complete'
-        const showProgress = currentRunning || (expanded && selected)
-
-        return (
-          <button
-            key={tab.key}
-            type="button"
-            role="tab"
-            aria-selected={selected}
-            onClick={(event) => {
-              event.stopPropagation()
-              onSelectTab(tab.key)
-            }}
-            className={cn(
-              'flex min-w-0 flex-1 flex-col justify-center px-1.5 py-0.5 text-left transition-colors',
-              tone.wash,
-              expanded && selected
-                ? 'bg-habeas-navy/8 ring-1 ring-inset ring-habeas-navy/25'
-                : 'hover:bg-panel/50',
-            )}
-            title={
-              counts
-                ? `${tab.label}: ${stageCountsBlurb(counts)}${
-                    duration && selected ? ` · ${duration}` : ''
-                  }`
-                : tab.label
-            }
-          >
-            <div className="flex min-w-0 items-center gap-1">
-              <StatusLight
-                tone={
-                  visual === 'complete'
-                    ? 'emerald'
-                    : visual === 'failed'
-                      ? 'red'
-                      : currentRunning
-                        ? 'emerald'
-                        : tone.light
-                }
-                pulse={currentRunning}
-                title={
-                  visual === 'complete'
-                    ? 'Done'
-                    : currentRunning
-                      ? 'Running'
-                      : visual === 'failed'
-                        ? 'Failed'
-                        : undefined
-                }
-              />
-              <span
-                className={cn(
-                  'truncate text-[0.6rem] font-medium leading-none tracking-wide',
-                  visual === 'complete' ||
-                    currentRunning ||
-                    visual === 'failed'
-                    ? tone.text
-                    : 'text-mute',
-                )}
-              >
-                {tab.label}
-              </span>
-              <span className="ml-auto shrink-0 text-[0.55rem] tabular-nums leading-none text-ink">
-                {counts && counts.total > 0 ? `${indicators.percent}%` : '—'}
-              </span>
-            </div>
-            {showProgress ? (
-              <div className="relative mt-0.5 h-1 overflow-hidden rounded-full bg-line/60">
-                <div
-                  className={cn(
-                    'h-full rounded-full transition-[width]',
-                    visual === 'failed' ? 'bg-red-600' : tone.bar,
-                  )}
-                  style={{ width: `${indicators.percent}%` }}
-                />
-                {currentRunning ? (
-                  <div className="pointer-events-none absolute inset-0 animate-pulse bg-gradient-to-r from-transparent via-white/50 to-transparent" />
-                ) : null}
-              </div>
-            ) : null}
-          </button>
-        )
-      })}
+    <div className="flex flex-wrap items-center gap-1">
+      <span className={`${chip} bg-emerald-50 text-emerald-900`}>
+        <span className="text-mute">Finished</span> {finished}
+      </span>
+      <span className={`${chip} bg-sky-50 text-sky-950`}>
+        <span className="text-mute">Queued</span> {queued}
+      </span>
+      <span
+        className={`${chip} ${failed > 0 ? 'bg-red-50 text-red-800' : 'bg-panel text-ink-soft'}`}
+      >
+        <span className="text-mute">Failed</span> {failed}
+      </span>
+      <span
+        className={`${chip} ${abandoned > 0 ? 'bg-amber-50 text-amber-950' : 'bg-panel text-ink-soft'}`}
+      >
+        <span className="text-mute">Abandoned</span> {abandoned}
+      </span>
     </div>
   )
 }
@@ -1265,6 +1054,211 @@ function BulkStageStateCards({
   )
 }
 
+function MiniRing({
+  percent,
+  tone = 'navy',
+}: {
+  percent: number
+  tone?: 'navy' | 'emerald' | 'red' | 'amber'
+}) {
+  const clamped = Math.max(0, Math.min(100, percent))
+  const color =
+    tone === 'emerald'
+      ? 'stroke-emerald-600'
+      : tone === 'red'
+        ? 'stroke-red-600'
+        : tone === 'amber'
+          ? 'stroke-amber-600'
+          : 'stroke-habeas-navy'
+  const r = 14
+  const c = 2 * Math.PI * r
+  const offset = c - (clamped / 100) * c
+  return (
+    <svg viewBox="0 0 36 36" className="h-9 w-9 shrink-0" aria-hidden="true">
+      <circle
+        cx="18"
+        cy="18"
+        r={r}
+        fill="none"
+        className="stroke-line"
+        strokeWidth="3"
+      />
+      <circle
+        cx="18"
+        cy="18"
+        r={r}
+        fill="none"
+        className={color}
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeDasharray={c}
+        strokeDashoffset={offset}
+        transform="rotate(-90 18 18)"
+      />
+    </svg>
+  )
+}
+
+function BulkStageStrip({
+  detail,
+  loading,
+  duration,
+  running,
+  activeTab,
+  onSelectTab,
+  expanded,
+}: {
+  detail: BulkProcessDetail | undefined
+  loading?: boolean
+  duration?: string | null
+  running?: boolean
+  activeTab: PipelineStageTab
+  onSelectTab: (tab: PipelineStageTab) => void
+  expanded: boolean
+}) {
+  return (
+    <div
+      className="flex min-w-0 items-stretch gap-1 overflow-x-auto"
+      role="tablist"
+      aria-label="Bulk process stages"
+    >
+      {BULK_CARD_STAGE_TABS.map((tab) => {
+        if (loading || !detail) {
+          return (
+            <div
+              key={tab.key}
+              className={
+                expanded
+                  ? 'min-w-[4.5rem] flex-1 rounded border border-line/70 bg-paper/80 px-1.5 py-1'
+                  : 'min-w-[3.25rem] shrink-0 rounded border border-line/70 bg-paper/80 px-1 py-0.5'
+              }
+            >
+              <Skeleton className={expanded ? 'h-8 w-full' : 'h-3 w-full'} />
+            </div>
+          )
+        }
+        const counts = countsForStageTab(detail, tab)
+        const isCurrent = isStageTabCurrent(detail, tab)
+        const selected = activeTab === tab.key
+        const visual = stageVisualState(counts, isCurrent)
+        const indicators = stageRunIndicators(counts)
+        const emphasize = expanded && selected
+        const currentCompact = expanded && isCurrent && !selected
+
+        if (!emphasize) {
+          return (
+            <button
+              key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              onClick={(event) => {
+                event.stopPropagation()
+                onSelectTab(tab.key)
+              }}
+              className={`flex shrink-0 items-center gap-1 rounded border text-left transition-colors hover:border-habeas-navy/35 ${
+                expanded
+                  ? 'px-1.5 py-1'
+                  : 'px-1 py-0.5'
+              } ${
+                currentCompact
+                  ? `border-l-2 border-l-emerald-500 ${stageCardClassName(visual)}`
+                  : stageCardClassName(visual)
+              }`}
+              title={
+                counts
+                  ? `${tab.label}: ${stageCountsBlurb(counts)}${
+                      isCurrent ? ' · current' : ''
+                    }`
+                  : tab.label
+              }
+            >
+              {currentCompact ? (
+                <span
+                  className="relative flex h-1.5 w-1.5 shrink-0"
+                  aria-hidden="true"
+                >
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-60" />
+                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-600" />
+                </span>
+              ) : null}
+              <span
+                className={`text-[0.55rem] font-medium uppercase leading-none tracking-wide ${
+                  visual === 'complete' ? 'text-emerald-800' : 'text-mute'
+                }`}
+              >
+                {tab.label}
+              </span>
+              <span className="text-[0.55rem] tabular-nums leading-none text-ink">
+                {counts && counts.total > 0 ? `${indicators.percent}%` : '—'}
+              </span>
+            </button>
+          )
+        }
+
+        return (
+          <button
+            key={tab.key}
+            type="button"
+            role="tab"
+            aria-selected={selected}
+            onClick={(event) => {
+              event.stopPropagation()
+              onSelectTab(tab.key)
+            }}
+            className={`min-w-[13rem] flex-1 rounded-md border px-2.5 py-2 text-left transition-shadow ring-1 ring-habeas-navy/30 ${stageCardClassName(visual)}`}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-ink">
+                  {tab.label}
+                  {isCurrent ? (
+                    <span className="ml-1.5 font-normal normal-case text-mute">
+                      · current
+                    </span>
+                  ) : null}
+                </p>
+                <p className="mt-0.5 text-[0.65rem] tabular-nums text-ink-soft">
+                  {duration
+                    ? `${duration}${running ? ' so far' : ''}`
+                    : 'Duration —'}
+                </p>
+              </div>
+              <span className="tabular-nums text-sm font-medium text-ink">
+                {indicators.percent}%
+              </span>
+            </div>
+            <div className="relative mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/70">
+              <div
+                className={
+                  visual === 'failed'
+                    ? 'h-full rounded-full bg-red-600 transition-[width]'
+                    : running && isCurrent
+                      ? 'h-full rounded-full bg-emerald-600 transition-[width]'
+                      : 'h-full rounded-full bg-habeas-navy transition-[width]'
+                }
+                style={{ width: `${indicators.percent}%` }}
+              />
+              {running && isCurrent ? (
+                <div className="pointer-events-none absolute inset-0 animate-pulse bg-gradient-to-r from-transparent via-white/40 to-transparent" />
+              ) : null}
+            </div>
+            <div className="mt-1.5">
+              <StageRunStatChips
+                finished={indicators.finished}
+                queued={indicators.queued}
+                failed={indicators.failed}
+                abandoned={indicators.abandoned}
+                dense
+              />
+            </div>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 function stageTabFromOverall(
   current: string | undefined | null,
 ): PipelineStageTab {
@@ -1274,6 +1268,28 @@ function stageTabFromOverall(
   if (stage === 'matching' || stage === 'review') return 'matching'
   if (stage === 'fulfillment' || stage === 'fulfill') return 'fulfillment'
   return 'download'
+}
+
+async function rerunBulkProcessRun(run: BulkProcessRun) {
+  const step = run.step.toLowerCase()
+  const job = run.job.toLowerCase()
+  if (job === 'drop_connector' || step === 'download') {
+    return postDropDownload()
+  }
+  if (step === 'land') {
+    return postDropLand({ land_attempt_id: run.attempt_id })
+  }
+  if (step === 'promote') {
+    return postDropPromote({ promote_attempt_id: run.attempt_id })
+  }
+  if (job === 'matching' || step === 'matching') {
+    return postDropMatch()
+  }
+  if (job === 'data_fulfillment' || step === 'fulfill' || step === 'fulfillment') {
+    if (!run.request_id) throw new Error('Fulfill re-run needs a request id')
+    return postDropFulfill({ request_id: run.request_id })
+  }
+  throw new Error(`No re-run action for ${run.job}/${run.step}`)
 }
 
 function BatchProcessExpandRow({
@@ -1286,9 +1302,9 @@ function BatchProcessExpandRow({
   expanded: boolean
   onToggle: () => void
   focusedStage?: PipelineStageTab
-  /** Kept for callers; stage tabs stay local — do not write URL on every click. */
-  onStageChange?: (stage: PipelineStageTab) => void
 }) {
+  const { data: me } = useMe()
+  const queryClient = useQueryClient()
   const statusKey = row.overall?.status ?? row.download_status
   const likelyNeedsReview = statusKey === 'needs_attention'
   const detailQuery = useQuery({
@@ -1299,12 +1315,38 @@ function BatchProcessExpandRow({
       expanded || likelyNeedsReview || isActiveBulkSummary(row) ? 5_000 : 30_000,
     placeholderData: (previous) => previous,
   })
-  const appliedFocusedOnExpand = useRef(false)
   const [stageTab, setStageTab] = useState<PipelineStageTab>(
     focusedStage ?? stageTabFromOverall(row.overall?.current_stage) ?? 'download',
   )
+  const appliedFocusKeyRef = useRef<string | null>(null)
   const activeStage =
     BULK_CARD_STAGE_TABS.find((tab) => tab.key === stageTab) ?? BULK_CARD_STAGE_TABS[0]
+  const runsQuery = useQuery({
+    queryKey: [
+      'admin-api',
+      'ops',
+      'drop-process-runs',
+      'bulk-card',
+      row.process_id,
+      activeStage.runStage,
+    ],
+    queryFn: () =>
+      listDropBulkProcessRuns({
+        stage: activeStage.runStage,
+        days: 30,
+        process_id: row.process_id,
+      }),
+    enabled: expanded,
+    refetchInterval: expanded ? 5_000 : false,
+    placeholderData: (previous) => previous,
+  })
+  const [runStatusFilter, setRunStatusFilter] = useState('attention')
+  const [runPage, setRunPage] = useState(0)
+  const [selectedRunIds, setSelectedRunIds] = useState<Set<string>>(new Set())
+  const [detailRun, setDetailRun] = useState<BulkProcessRun | null>(null)
+  const [assignOpen, setAssignOpen] = useState(false)
+  const [assignEmail, setAssignEmail] = useState('')
+  const [rerunConfirmOpen, setRerunConfirmOpen] = useState(false)
 
   const detail = detailQuery.data
   const running = isActiveBulkSummary(row) || isActiveBulkDetail(detail)
@@ -1313,7 +1355,6 @@ function BatchProcessExpandRow({
   const resolvedStatusKey =
     detail?.overall.status ?? row.overall?.status ?? row.download_status
   const status = resolvedStatusKey.replaceAll('_', ' ')
-  const requestRows = detail?.request_rows ?? row.request_rows
   const completedAt = detail?.completed_at ?? row.completed_at
   const duration = bulkDurationLabel(row.process_at, running ? null : completedAt)
   const derived = bulkDerivedStats(detail)
@@ -1331,14 +1372,71 @@ function BatchProcessExpandRow({
             100,
         )
       : 0
+  const processName = formatBulkProcessName(row.process_at)
+
+  const allRuns = runsQuery.data?.groups.flatMap((group) => group.runs) ?? []
+  const filteredRuns = useMemo(() => {
+    if (runStatusFilter === 'attention') {
+      return allRuns.filter((run) => {
+        const s = run.status.toLowerCase()
+        return (
+          s.includes('fail') ||
+          s.includes('error') ||
+          s === 'pending' ||
+          s === 'claimed' ||
+          s === 'in_flight' ||
+          s === 'leased' ||
+          s === 'abandoned'
+        )
+      })
+    }
+    if (runStatusFilter === 'abandoned') {
+      return allRuns.filter((run) => run.status.toLowerCase() === 'abandoned')
+    }
+    if (runStatusFilter === 'pending') {
+      return allRuns.filter((run) => {
+        const s = run.status.toLowerCase()
+        return (
+          s === 'pending' || s === 'claimed' || s === 'in_flight' || s === 'leased'
+        )
+      })
+    }
+    if (runStatusFilter === 'fail') {
+      return allRuns.filter((run) => {
+        const s = run.status.toLowerCase()
+        return (
+          (s.includes('fail') || s.includes('error') || s === 'timeout') &&
+          s !== 'abandoned'
+        )
+      })
+    }
+    if (runStatusFilter === '') return allRuns
+    return allRuns.filter((run) =>
+      run.status.toLowerCase().includes(runStatusFilter.toLowerCase()),
+    )
+  }, [allRuns, runStatusFilter])
+
+  const pageCount = Math.max(1, Math.ceil(filteredRuns.length / RUNS_PAGE_SIZE))
+  const safePage = Math.min(runPage, pageCount - 1)
+  const pagedRuns = filteredRuns.slice(
+    safePage * RUNS_PAGE_SIZE,
+    safePage * RUNS_PAGE_SIZE + RUNS_PAGE_SIZE,
+  )
+  const selectedRuns = allRuns.filter((run) => selectedRunIds.has(run.run_id))
+
+  useEffect(() => {
+    setRunPage(0)
+    setSelectedRunIds(new Set())
+  }, [runStatusFilter, stageTab, row.process_id])
 
   useEffect(() => {
     if (!expanded) {
-      appliedFocusedOnExpand.current = false
+      appliedFocusKeyRef.current = null
       return
     }
-    if (appliedFocusedOnExpand.current) return
-    appliedFocusedOnExpand.current = true
+    const focusKey = focusedStage ?? '__default__'
+    if (appliedFocusKeyRef.current === focusKey) return
+    appliedFocusKeyRef.current = focusKey
     if (focusedStage) {
       setStageTab(focusedStage)
       return
@@ -1348,6 +1446,7 @@ function BatchProcessExpandRow({
         detail?.overall.current_stage ?? row.overall?.current_stage,
       ),
     )
+    // Apply URL/deep-link stage once per expand; tab clicks stay local.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expanded, focusedStage])
 
@@ -1355,7 +1454,48 @@ function BatchProcessExpandRow({
     setStageTab(next)
   }
 
-  const processName = formatBulkProcessName(row.process_at)
+  const rerunMutation = useMutation({
+    mutationFn: async (runs: BulkProcessRun[]) => {
+      const results = []
+      for (const run of runs) {
+        results.push(await rerunBulkProcessRun(run))
+      }
+      return results
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-process-runs'] })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-processes'] })
+      setSelectedRunIds(new Set())
+      setRerunConfirmOpen(false)
+    },
+  })
+
+  const assignMutation = useMutation({
+    mutationFn: async () => {
+      const requestIds = [
+        ...new Set(
+          selectedRuns
+            .map((run) => run.request_id)
+            .filter((id): id is string => Boolean(id)),
+        ),
+      ]
+      if (requestIds.length === 0) {
+        throw new Error('Selected runs have no request ids to assign')
+      }
+      const email = assignEmail.trim() || me?.email
+      if (!email) throw new Error('Assignee email is required')
+      return postDropWorkflowAssign({
+        request_ids: requestIds,
+        assignee_identity: email,
+      })
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops'] })
+      setAssignOpen(false)
+      setSelectedRunIds(new Set())
+    },
+  })
+
   const rowTone = running
     ? 'border-b border-emerald-200/70 bg-emerald-50/30 last:border-b-0'
     : pending
@@ -1364,9 +1504,29 @@ function BatchProcessExpandRow({
         ? 'border-b border-amber-200/70 bg-amber-50/25 last:border-b-0'
         : 'border-b border-line bg-paper last:border-b-0'
 
+  function toggleRun(runId: string) {
+    setSelectedRunIds((current) => {
+      const next = new Set(current)
+      if (next.has(runId)) next.delete(runId)
+      else next.add(runId)
+      return next
+    })
+  }
+
+  function togglePageSelection() {
+    const ids = pagedRuns.map((run) => run.run_id)
+    const allSelected = ids.every((id) => selectedRunIds.has(id))
+    setSelectedRunIds((current) => {
+      const next = new Set(current)
+      if (allSelected) ids.forEach((id) => next.delete(id))
+      else ids.forEach((id) => next.add(id))
+      return next
+    })
+  }
+
   return (
     <div className={rowTone}>
-      <div className="flex flex-col gap-0.5 px-3 py-1">
+      <div className="flex flex-col gap-1 px-3 py-2">
         <div className="flex w-full items-center gap-2">
           <button
             type="button"
@@ -1390,39 +1550,40 @@ function BatchProcessExpandRow({
             </span>
             <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
               <p className="truncate text-xs font-medium text-ink">{processName}</p>
-              {running ? (
-                <StatusLight tone="emerald" pulse title="Running" />
-              ) : null}
-              {pending ? (
-                <StatusLight tone="sky" pulse title="Pending" />
-              ) : null}
+              {running ? <RunningPulse /> : null}
+              {pending ? <PendingPulse /> : null}
               {needsReview ? <NeedsReviewChip count={reviewCount} /> : null}
               {derived.failed > 0 ? (
-                <span className="text-[0.6rem] text-red-700">
+                <span className="text-[0.6rem] font-medium text-red-700">
                   {derived.failed} failed
                 </span>
               ) : null}
               {!running && !pending && !needsReview ? (
-                <span className="text-[0.6rem] capitalize text-mute">{status}</span>
+                <span className="text-[0.6rem] text-mute">{status}</span>
               ) : null}
-              <span className="ml-auto flex shrink-0 items-center gap-2 text-[0.6rem] tabular-nums text-mute">
-                <span>
-                  Dur {duration ?? '—'}
-                  {duration && running ? '…' : ''}
-                </span>
-                {expanded ? (
-                  <span>
-                    Est {estCompletion}% · err {errorRate}%
-                  </span>
-                ) : (
-                  <span>
-                    Prog {percent != null ? `${percent}%` : '—'}
-                    {requestRows != null ? ` · ${requestRows} req` : ''}
-                  </span>
-                )}
-              </span>
             </div>
           </button>
+          <div className="flex shrink-0 items-center gap-2 text-[0.6rem] tabular-nums text-ink">
+            <span>
+              <span className="text-mute">Dur </span>
+              {duration ?? '—'}
+              {duration && running ? (
+                <span className="text-mute">…</span>
+              ) : null}
+            </span>
+            {expanded ? (
+              <span>
+                <span className="text-mute">Est </span>
+                {estCompletion}%
+                <span className="text-mute"> · err {errorRate}%</span>
+              </span>
+            ) : (
+              <span>
+                <span className="text-mute">Prog </span>
+                {percent != null ? `${percent}%` : '—'}
+              </span>
+            )}
+          </div>
         </div>
 
         <div className="w-full pl-7">
@@ -1442,23 +1603,20 @@ function BatchProcessExpandRow({
         <div
           className={
             running
-              ? 'space-y-1.5 border-t border-emerald-100/80 bg-emerald-50/15 px-3 py-1.5 pl-10'
+              ? 'space-y-2 border-t border-emerald-100/80 bg-emerald-50/15 px-3 py-2.5 pl-10'
               : pending
-                ? 'space-y-1.5 border-t border-sky-100/80 bg-sky-50/15 px-3 py-1.5 pl-10'
+                ? 'space-y-2 border-t border-sky-100/80 bg-sky-50/15 px-3 py-2.5 pl-10'
                 : needsReview
-                  ? 'space-y-1.5 border-t border-amber-100/80 bg-amber-50/15 px-3 py-1.5 pl-10'
-                  : 'space-y-1.5 border-t border-line/60 px-3 py-1.5 pl-10'
+                  ? 'space-y-2 border-t border-amber-100/80 bg-amber-50/15 px-3 py-2.5 pl-10'
+                  : 'space-y-2 border-t border-line/60 px-3 py-2.5 pl-10'
           }
         >
           {detailQuery.isError ? (
             <p className="text-[0.65rem] text-red-700">Could not load stage detail</p>
           ) : null}
 
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-[0.6rem] font-medium uppercase tracking-wide text-mute">
-              {activeStage.label} run states
-            </p>
-            {stageTab === 'matching' ? (
+          {stageTab === 'matching' ? (
+            <div className="flex justify-start">
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Link
@@ -1474,8 +1632,8 @@ function BatchProcessExpandRow({
                   Review fulfill / decline for this bulk in Inbox
                 </TooltipContent>
               </Tooltip>
-            ) : null}
-          </div>
+            </div>
+          ) : null}
 
           <BulkStageStateCards
             stageTab={stageTab}
@@ -1489,8 +1647,312 @@ function BatchProcessExpandRow({
               matching-job runs as the closest Runs filter.
             </p>
           ) : null}
+
+          <div className="rounded-md border border-line/80 bg-paper">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-2.5 py-1.5">
+              <Micro>{activeStage.label} runs</Micro>
+              <div className="flex flex-wrap items-center gap-1">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className="taste-btn px-2 py-0.5 text-[0.6rem] disabled:opacity-40"
+                      disabled={selectedRuns.length === 0 || rerunMutation.isPending}
+                      onClick={() => setRerunConfirmOpen(true)}
+                    >
+                      Re-run
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>Queue selected runs again via admin-api</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className="taste-btn px-2 py-0.5 text-[0.6rem] disabled:opacity-40"
+                      disabled={
+                        selectedRuns.every((run) => !run.request_id) ||
+                        assignMutation.isPending
+                      }
+                      onClick={() => {
+                        setAssignEmail(me?.email ?? '')
+                        setAssignOpen(true)
+                      }}
+                    >
+                      Assign
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    Assign selected request ids to a reviewer
+                  </TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className="taste-btn px-2 py-0.5 text-[0.6rem] disabled:opacity-40"
+                      disabled={selectedRuns.length !== 1}
+                      onClick={() => setDetailRun(selectedRuns[0] ?? null)}
+                    >
+                      Details
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>Open a detailed popup for one selected run</TooltipContent>
+                </Tooltip>
+                <span className="text-[0.65rem] tabular-nums text-mute">
+                  {filteredRuns.length}/{allRuns.length}
+                </span>
+              </div>
+            </div>
+            <div
+              className="flex flex-wrap gap-1 border-b border-line px-2.5 py-1.5"
+              role="group"
+              aria-label="Filter individual runs"
+            >
+              {RUN_STATUS_FILTERS.map((filter) => {
+                const selected = runStatusFilter === filter.value
+                return (
+                  <Tooltip key={filter.value || 'all'}>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        className={
+                          selected
+                            ? 'rounded-md bg-habeas-navy px-2 py-0.5 text-[0.6rem] font-medium text-white'
+                            : 'rounded-md border border-line bg-paper px-2 py-0.5 text-[0.6rem] text-ink-soft transition-colors hover:border-habeas-navy/40 hover:text-ink'
+                        }
+                        aria-pressed={selected}
+                        onClick={() => setRunStatusFilter(filter.value)}
+                      >
+                        {filter.label}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Show {filter.label.toLowerCase()} runs</TooltipContent>
+                  </Tooltip>
+                )
+              })}
+            </div>
+            {runsQuery.isError ? (
+              <p className="px-2.5 py-2 text-[0.7rem] text-red-700">
+                Could not load individual runs.
+              </p>
+            ) : runsQuery.isPending && !runsQuery.data ? (
+              <div className="p-2.5">
+                <SkeletonLines lines={3} />
+              </div>
+            ) : filteredRuns.length === 0 ? (
+              <p className="px-2.5 py-2 text-[0.7rem] text-ink-soft">
+                {stageTab === 'fulfillment'
+                  ? 'No matching-stage runs yet — fulfillment is tracked per request response_status.'
+                  : 'No individual runs match this filter.'}
+              </p>
+            ) : (
+              <>
+                <div className="max-h-64 overflow-auto">
+                  <table className="taste-table">
+                    <thead>
+                      <tr>
+                        <th className="w-8">
+                          <input
+                            type="checkbox"
+                            aria-label="Select page"
+                            checked={
+                              pagedRuns.length > 0 &&
+                              pagedRuns.every((run) => selectedRunIds.has(run.run_id))
+                            }
+                            onChange={togglePageSelection}
+                          />
+                        </th>
+                        <th>Run</th>
+                        <th>Step</th>
+                        <th>Status</th>
+                        <th>Age</th>
+                        <th>Attempt</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pagedRuns.map((run) => (
+                        <tr
+                          key={run.run_id}
+                          className="cursor-pointer hover:bg-panel/60"
+                          onClick={() => setDetailRun(run)}
+                        >
+                          <td onClick={(event) => event.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              aria-label={`Select ${run.run_id}`}
+                              checked={selectedRunIds.has(run.run_id)}
+                              onChange={() => toggleRun(run.run_id)}
+                            />
+                          </td>
+                          <td className="max-w-[9rem] truncate font-mono text-xs">
+                            {run.run_id}
+                          </td>
+                          <td className="font-mono text-xs">{run.step}</td>
+                          <td className="text-xs">{run.status.replaceAll('_', ' ')}</td>
+                          <td className="tabular-nums text-xs text-ink-soft">
+                            {run.started_at ? runAgeLabel(run.started_at) : '—'}
+                          </td>
+                          <td className="tabular-nums text-xs">{run.attempt_number}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-2.5 py-1.5">
+                  <p className="text-[0.65rem] text-mute">
+                    Page {safePage + 1} of {pageCount}
+                  </p>
+                  <div className="flex gap-1">
+                    <button
+                      type="button"
+                      className="taste-btn px-2 py-0.5 text-[0.6rem] disabled:opacity-40"
+                      disabled={safePage <= 0}
+                      onClick={() => setRunPage((page) => Math.max(0, page - 1))}
+                    >
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      className="taste-btn px-2 py-0.5 text-[0.6rem] disabled:opacity-40"
+                      disabled={safePage >= pageCount - 1}
+                      onClick={() =>
+                        setRunPage((page) => Math.min(pageCount - 1, page + 1))
+                      }
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       ) : null}
+
+      <ConfirmActionDialog
+        open={rerunConfirmOpen}
+        onOpenChange={setRerunConfirmOpen}
+        title={`Re-run ${selectedRuns.length} run${selectedRuns.length === 1 ? '' : 's'}?`}
+        description="Queues the selected attempts again through admin-api. Download re-queues the connector; land/promote target attempt ids when available."
+        confirmLabel="Re-run selected"
+        confirming={rerunMutation.isPending}
+        onConfirm={() => rerunMutation.mutate(selectedRuns)}
+      />
+
+      <Dialog open={assignOpen} onOpenChange={setAssignOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Assign requests</DialogTitle>
+            <DialogDescription>
+              Assign request ids from the selected runs to a reviewer identity.
+            </DialogDescription>
+          </DialogHeader>
+          <label className="block space-y-1 text-xs text-ink-soft">
+            <span>Assignee email</span>
+            <input
+              className="w-full rounded-md border border-line bg-paper px-2 py-1.5 font-mono text-xs text-ink"
+              value={assignEmail}
+              onChange={(event) => setAssignEmail(event.target.value)}
+              placeholder="name@example.com"
+            />
+          </label>
+          {assignMutation.isError ? (
+            <p className="text-xs text-red-700">
+              {assignMutation.error instanceof Error
+                ? assignMutation.error.message
+                : 'Assign failed'}
+            </p>
+          ) : null}
+          <DialogFooter>
+            <button
+              type="button"
+              className="taste-btn px-3 py-1.5 text-xs"
+              onClick={() => setAssignOpen(false)}
+              disabled={assignMutation.isPending}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="taste-btn-primary px-3 py-1.5 text-xs"
+              disabled={assignMutation.isPending}
+              onClick={() => assignMutation.mutate()}
+            >
+              {assignMutation.isPending ? 'Assigning…' : 'Assign'}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={detailRun != null}
+        onOpenChange={(open) => {
+          if (!open) setDetailRun(null)
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Run detail</DialogTitle>
+            <DialogDescription>
+              Compact view for this attempt. Open the full Runs page for timeline and output.
+            </DialogDescription>
+          </DialogHeader>
+          {detailRun ? (
+            <dl className="grid grid-cols-2 gap-2 text-xs">
+              <div>
+                <dt className="text-mute">Run</dt>
+                <dd className="font-mono text-ink">{detailRun.run_id}</dd>
+              </div>
+              <div>
+                <dt className="text-mute">Status</dt>
+                <dd className="capitalize text-ink">
+                  {detailRun.status.replaceAll('_', ' ')}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-mute">Step</dt>
+                <dd className="font-mono text-ink">{detailRun.step}</dd>
+              </div>
+              <div>
+                <dt className="text-mute">Attempt</dt>
+                <dd className="tabular-nums text-ink">{detailRun.attempt_number}</dd>
+              </div>
+              <div>
+                <dt className="text-mute">Age</dt>
+                <dd className="tabular-nums text-ink">
+                  {detailRun.started_at ? runAgeLabel(detailRun.started_at) : '—'}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-mute">Request</dt>
+                <dd className="font-mono text-ink">{detailRun.request_id ?? '—'}</dd>
+              </div>
+            </dl>
+          ) : null}
+          <DialogFooter>
+            {detailRun ? (
+              <Link
+                to="/ops/runs/$job/$attemptId"
+                params={{
+                  job: detailRun.job,
+                  attemptId: String(detailRun.attempt_id),
+                }}
+                className="taste-btn-primary px-3 py-1.5 text-xs"
+              >
+                Full runs page
+              </Link>
+            ) : null}
+            <button
+              type="button"
+              className="taste-btn px-3 py-1.5 text-xs"
+              onClick={() => setDetailRun(null)}
+            >
+              Close
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -1500,19 +1962,16 @@ function BatchRequestRunsList({
   onSelectProcess,
   selectedProcessId,
   focusedStage,
-  onStageChange,
 }: {
   onSelectProcess: (id: number) => void
   selectedProcessId?: number
   focusedStage?: PipelineStageTab
-  onStageChange?: (stage: PipelineStageTab) => void
 }) {
   const [viewMode, setViewMode] = useState<'bulk' | 'individual'>('bulk')
   const [days, setDays] = useState(7)
   const [intake, setIntake] = useState('drop')
   const [downloadStatus, setDownloadStatus] = useState('')
   const [overallStatus, setOverallStatus] = useState('')
-  const [runStatusFilter, setRunStatusFilter] = useState('attention')
   const [expandedId, setExpandedId] = useState<number | null>(null)
   const didAutoExpand = useRef(false)
 
@@ -1570,23 +2029,22 @@ function BatchRequestRunsList({
     })
   }
 
+  const individualRunStatus =
+    overallStatus === 'complete'
+      ? 'success'
+      : overallStatus === 'in_progress'
+        ? 'open'
+        : overallStatus === 'needs_attention'
+          ? 'attention'
+          : 'attention'
+
   return (
     <div className="rounded-md border border-line bg-paper">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <Micro>Request Processing Pipeline</Micro>
-          {activeCount > 0 ? (
-            <span className="inline-flex items-center gap-1 text-[0.6rem] text-emerald-900">
-              <StatusLight tone="emerald" pulse title="Running" />
-              {activeCount} running
-            </span>
-          ) : null}
-          {pendingCount > 0 ? (
-            <span className="inline-flex items-center gap-1 text-[0.6rem] text-sky-950">
-              <StatusLight tone="sky" pulse title="Pending" />
-              {pendingCount} pending
-            </span>
-          ) : null}
+          {activeCount > 0 ? <RunningPulse label={`${activeCount} running`} /> : null}
+          {pendingCount > 0 ? <PendingPulse label={`${pendingCount} pending`} /> : null}
         </div>
         <Tabs
           value={viewMode}
@@ -1645,38 +2103,6 @@ function BatchRequestRunsList({
             { value: 'needs_attention', label: 'needs_attention' },
           ]}
         />
-        {viewMode === 'individual' ? (
-          <div
-            className="flex flex-wrap items-center gap-1"
-            role="group"
-            aria-label="Filter individual runs"
-          >
-            {RUN_STATUS_FILTERS.map((filter) => {
-              const selected = runStatusFilter === filter.value
-              return (
-                <Tooltip key={filter.value || 'all'}>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      className={
-                        selected
-                          ? 'rounded-md bg-habeas-navy px-2 py-0.5 text-[0.6rem] font-medium text-white'
-                          : 'rounded-md border border-line bg-paper px-2 py-0.5 text-[0.6rem] text-ink-soft transition-colors hover:border-habeas-navy/40 hover:text-ink'
-                      }
-                      aria-pressed={selected}
-                      onClick={() => setRunStatusFilter(filter.value)}
-                    >
-                      {filter.label}
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    Show {filter.label.toLowerCase()} runs
-                  </TooltipContent>
-                </Tooltip>
-              )
-            })}
-          </div>
-        ) : null}
       </div>
 
       <div className="min-h-[16rem]">
@@ -1703,9 +2129,8 @@ function BatchRequestRunsList({
                   : rows.map((row) => row.process_id)
               }
               days={days}
-              defaultStatus={runStatusFilter}
+              defaultStatus={individualRunStatus}
               embedded
-              hideStatusFilter
               emptyLabel="No individual runs match the current filters."
             />
           )
@@ -1741,9 +2166,6 @@ function BatchRequestRunsList({
                 onToggle={() => toggle(row.process_id)}
                 focusedStage={
                   expandedId === row.process_id ? focusedStage : undefined
-                }
-                onStageChange={
-                  expandedId === row.process_id ? onStageChange : undefined
                 }
               />
             ))}
@@ -1827,7 +2249,6 @@ function CompactOpsMetrics({
   errorRateMonth,
   matchRate,
   matchPending,
-  matchDrainActive,
   totalSuppressed,
   workerHealth,
   loading,
@@ -1839,7 +2260,6 @@ function CompactOpsMetrics({
   errorRateMonth: number | null
   matchRate: number | null
   matchPending: number | null
-  matchDrainActive: boolean | null
   totalSuppressed: number | null
   workerHealth: Record<string, WorkerHealthProbe> | undefined
   loading?: boolean
@@ -1864,7 +2284,7 @@ function CompactOpsMetrics({
       viz: (
         <MiniRing
           percent={Math.min(100, ((openRequests ?? 0) / Math.max(openRequests ?? 1, 20)) * 100)}
-          tone="navy"
+          tone="sky"
         />
       ),
       detail: (
@@ -1924,12 +2344,6 @@ function CompactOpsMetrics({
         <p className="text-xs text-ink-soft">
           Success vs pending matching attempts · queue{' '}
           <span className="tabular-nums text-ink">{matchPending ?? '—'}</span>
-          {matchDrainActive ? (
-            <>
-              {' '}
-              · <span className="text-habeas-mid">drain active</span>
-            </>
-          ) : null}
         </p>
       ),
     },
@@ -2187,13 +2601,11 @@ function ConfigurationsPanel({
   scheduleNext,
   scheduleLast,
   scheduleUtc,
-  scheduleCadence,
 }: {
   data: DropPipelineStatus | undefined
   scheduleNext: string | null
   scheduleLast: string | null
   scheduleUtc: string | null
-  scheduleCadence: string | null
 }) {
   const workersQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-workers', 'config'],
@@ -2202,23 +2614,14 @@ function ConfigurationsPanel({
     placeholderData: (previous) => previous,
   })
   const workers = workersQuery.data?.workers ?? []
-  const cadenceLabel = scheduleCadence
-    ? scheduleCadence.replaceAll('_', ' ')
-    : null
 
   return (
     <div className="space-y-4">
       <div className="rounded-md border border-line bg-paper p-4">
         <Micro>Scheduled workers</Micro>
         <p className="mt-1 max-w-2xl text-xs text-ink-soft">
-          CA DROP retrieval fires on the connector schedule (interval gate). Other workers claim
-          from attempt queues — concurrency and retry floors below. Edit schedules under Workers
-          → Settings.
-        </p>
-        <p className="mt-2 text-xs">
-          <Link to="/ops/workers/settings" className="taste-link">
-            Edit schedules
-          </Link>
+          CA DROP retrieval fires on the connector schedule. Other workers claim from attempt
+          queues — concurrency and retry floors below.
         </p>
         <div className="mt-3 grid gap-3 sm:grid-cols-3">
           <div className="rounded-md border border-line/80 px-3 py-2">
@@ -2227,9 +2630,7 @@ function ConfigurationsPanel({
               {scheduleNext ? new Date(scheduleNext).toLocaleString() : '—'}
             </p>
             <p className="mt-0.5 text-[0.65rem] text-mute">
-              {scheduleUtc
-                ? `${cadenceLabel ?? 'schedule'} · tick ${scheduleUtc} UTC`
-                : 'Schedule unset'}
+              {scheduleUtc ? `Daily ${scheduleUtc} UTC` : 'Schedule unset'}
             </p>
           </div>
           <div className="rounded-md border border-line/80 px-3 py-2">
@@ -2586,14 +2987,6 @@ function DropPipelinePageInner() {
     })
   }
 
-  function setStage(next: PipelineStageTab) {
-    void navigate({
-      to: '/',
-      search: { tab, process: processId, stage: next },
-      replace: true,
-    })
-  }
-
   const pipelineQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-pipeline'],
     queryFn: getDropPipeline,
@@ -2712,7 +3105,6 @@ function DropPipelinePageInner() {
 
   const matchPending = data?.matching_attempts.pending ?? null
   const matchSuccess = data?.matching_attempts.success ?? null
-  const matchDrainActive = data?.matching_attempts.drain?.active ?? null
   const matchRate =
     matchPending != null && matchSuccess != null && matchPending + matchSuccess > 0
       ? matchSuccess / (matchSuccess + matchPending)
@@ -2760,7 +3152,6 @@ function DropPipelinePageInner() {
         errorRateMonth={monthErrorRate}
         matchRate={matchRate}
         matchPending={matchPending}
-        matchDrainActive={matchDrainActive}
         totalSuppressed={totalSuppressed}
         workerHealth={data?.worker_health}
       />
@@ -2791,7 +3182,6 @@ function DropPipelinePageInner() {
           selectedProcessId={processId}
           focusedStage={focusedStage}
           onSelectProcess={(id) => setProcess(id)}
-          onStageChange={setStage}
         />
       ) : null}
 
@@ -2826,7 +3216,6 @@ function DropPipelinePageInner() {
           scheduleNext={caSchedule?.next_run_at ?? null}
           scheduleLast={caSchedule?.last_success_at ?? null}
           scheduleUtc={caSchedule?.schedule_utc ?? null}
-          scheduleCadence={caSchedule?.cadence ?? null}
         />
       )}
 
