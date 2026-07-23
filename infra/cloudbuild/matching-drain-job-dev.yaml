@@ -1,0 +1,26 @@
+# Matching drain Job (Method E shell) — 5 parallel tasks calling /drain-chunk.
+# Until Cloud Run Jobs are wired in example-gcp-project, Scheduler should hit
+# admin-api POST /ops/drop/ensure-drain (inline budgeted drain on matching service).
+# This file documents the target Job shape for U5.
+substitutions:
+  _REGION: us-east4
+  _PROJECT: example-gcp-project
+  _JOB: matching-drain-dev
+  _SERVICE_IMAGE: matching-dev
+  _TAG: latest
+  _TASK_COUNT: "5"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: note
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        echo "Deploy matching service image first (matching-dev.yaml)."
+        echo "Then create Job ${_JOB} with --tasks=${_TASK_COUNT} entrypoint"
+        echo "that POSTs /drain-chunk (or runs matching.chunk_drain CLI)."
+        echo "Invoker: admin-api runtime SA + Cloud Scheduler SA only."

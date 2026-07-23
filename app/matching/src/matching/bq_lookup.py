@@ -118,6 +118,83 @@ def lookup_dwids_by_hash(
     return hits
 
 
+def lookup_dwids_by_hashes(
+    *,
+    list_type: DropListType,
+    hash_values: list[str],
+    state: str | None = None,
+    client: BigQueryClient | None = None,
+    project: str | None = None,
+    dataset: str | None = None,
+) -> dict[str, list[LookupHit]]:
+    """Set-based mart lookup: one query for many hashes. Always filters by state.
+
+    Returns a map of hash_value → hits (missing hashes map to empty lists).
+    Empty ``hash_values`` returns {}. Production callers must pass ``state``.
+    """
+    if state is None or not str(state).strip():
+        raise ValueError("lookup state is required")
+    resolved_state = str(state).strip().upper()
+    if not resolved_state:
+        raise ValueError("lookup state is required")
+
+    unique_hashes = list(dict.fromkeys(h for h in hash_values if h))
+    if not unique_hashes:
+        return {}
+
+    table = serving_table(list_type)
+    project_id = project or os.environ.get("DROP_HASH_BQ_PROJECT", DEFAULT_BQ_PROJECT)
+    dataset_id = dataset or os.environ.get("DROP_HASH_BQ_DATASET", DEFAULT_BQ_DATASET)
+    fq_table = f"`{project_id}.{dataset_id}.{table}`"
+
+    sql = f"""
+        SELECT h AS hash_value,
+               CAST(m.dwid AS STRING) AS dwid
+          FROM UNNEST(@hash_values) AS h
+          LEFT JOIN {fq_table} AS m
+            ON m.hash_value = h
+           AND m.state = @lookup_state
+    """
+
+    bq_client = client or _default_client()
+    try:
+        from google.cloud import bigquery
+    except ImportError as exc:  # pragma: no cover
+        raise BigQueryLookupError("google-cloud-bigquery is not installed") from exc
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter("hash_values", "STRING", unique_hashes),
+            bigquery.ScalarQueryParameter("lookup_state", "STRING", resolved_state),
+        ]
+    )
+    try:
+        result = bq_client.query(sql, job_config=job_config)
+        rows = list(result)
+    except Exception as exc:
+        message = redact_error_text(str(exc))
+        lower = message.lower()
+        if "timeout" in lower or "deadline" in lower:
+            raise BigQueryLookupError(message, retry_seconds=120) from exc
+        raise BigQueryLookupError(message, retry_seconds=60) from exc
+
+    out: dict[str, list[LookupHit]] = {h: [] for h in unique_hashes}
+    for row in rows:
+        if hasattr(row, "keys"):
+            hv = row["hash_value"]
+            dwid = row["dwid"]
+        else:
+            hv, dwid = row[0], row[1]
+        if hv is None:
+            continue
+        key = str(hv)
+        if key not in out:
+            out[key] = []
+        if dwid is not None:
+            out[key].append(LookupHit(dwid=str(dwid)))
+    return out
+
+
 def _default_client() -> Any:
     from google.cloud import bigquery
 

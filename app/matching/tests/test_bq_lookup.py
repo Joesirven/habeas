@@ -10,7 +10,11 @@ import pytest
 from habeas_privacy_core.models.intake import DropListType
 from matching import IntakeSource, MatchRequest
 from matching.adapters.drop_hash import DropHashPipeline
-from matching.bq_lookup import BigQueryLookupError, lookup_dwids_by_hash
+from matching.bq_lookup import (
+    BigQueryLookupError,
+    lookup_dwids_by_hash,
+    lookup_dwids_by_hashes,
+)
 from matching.main import process_next
 
 
@@ -292,3 +296,51 @@ async def test_missing_hash_field():
     assert result.matched is False
     assert result.match_count == 0
     assert result.matched_via.endswith("_missing")
+
+
+def test_lookup_dwids_by_hashes_set_based():
+    client = MagicMock()
+    client.query.return_value = _FakeJob(
+        [
+            _FakeRow(hash_value="h1", dwid="10"),
+            _FakeRow(hash_value="h1", dwid="11"),
+            _FakeRow(hash_value="h2", dwid=None),
+        ]
+    )
+    out = lookup_dwids_by_hashes(
+        list_type=DropListType.EMAIL,
+        hash_values=["h1", "h2", "h3"],
+        state="CA",
+        client=client,
+    )
+    assert [h.dwid for h in out["h1"]] == ["10", "11"]
+    assert out["h2"] == []
+    assert out["h3"] == []
+    assert "UNNEST(@hash_values)" in client.query.call_args.args[0]
+    params = {}
+    for p in client.query.call_args.kwargs["job_config"].query_parameters:
+        params[p.name] = getattr(p, "values", None) or getattr(p, "value", None)
+    assert params["lookup_state"] == "CA"
+    assert params["hash_values"] == ["h1", "h2", "h3"]
+
+
+def test_lookup_dwids_by_hashes_requires_state():
+    with pytest.raises(ValueError, match="lookup state is required"):
+        lookup_dwids_by_hashes(
+            list_type=DropListType.EMAIL,
+            hash_values=["h1"],
+            state=None,
+            client=MagicMock(),
+        )
+
+
+def test_lookup_dwids_by_hashes_empty():
+    assert (
+        lookup_dwids_by_hashes(
+            list_type=DropListType.EMAIL,
+            hash_values=[],
+            state="CA",
+            client=MagicMock(),
+        )
+        == {}
+    )

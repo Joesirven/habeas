@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
@@ -135,7 +136,12 @@ async def process_next():
         attempt_number = int(claim.get("attempt_number") or 1)
         started_at = datetime.now(timezone.utc)
         await conn.execute(
-            f"UPDATE {MATCHING_ATTEMPTS_TABLE} SET status = 'in_flight' WHERE id = $1",
+            f"""
+            UPDATE {MATCHING_ATTEMPTS_TABLE}
+               SET status = 'in_flight',
+                   submitted_at = COALESCE(submitted_at, NOW())
+             WHERE id = $1
+            """,
             attempt_id,
         )
 
@@ -266,6 +272,37 @@ async def process_next():
         "match_count": result.match_count,
         "result_id": result_id,
     }
+
+
+@app.post("/drain-chunk")
+async def drain_chunk():
+    """Claim and process one set-based matching chunk (Job task unit)."""
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="database not configured")
+
+    from matching.chunk_drain import process_matching_chunk
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        return await process_matching_chunk(conn, worker_id=settings.worker_id)
+
+
+@app.post("/ensure-drain")
+async def ensure_drain_endpoint():
+    """Run budgeted chunk drain if pending attempts exist (inline Job shell)."""
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="database not configured")
+
+    from matching.chunk_drain import run_drain_budget
+
+    max_chunks = int(os.environ.get("MATCHING_DRAIN_MAX_CHUNKS", "50"))
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        return await run_drain_budget(
+            conn,
+            worker_id=settings.worker_id,
+            max_chunks=max_chunks,
+        )
 
 
 def run() -> None:
