@@ -1280,7 +1280,7 @@ function BatchProcessExpandRow({
   /** Kept for callers; stage tabs stay local — do not write URL on every click. */
   onStageChange?: (stage: PipelineStageTab) => void
 }) {
-  const { data: me } = useMe()
+  const { me } = useMe()
   const queryClient = useQueryClient()
   const statusKey = row.overall?.status ?? row.download_status
   const likelyNeedsReview = statusKey === 'needs_attention'
