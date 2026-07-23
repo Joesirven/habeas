@@ -61,9 +61,9 @@ Optional: copy `.env.example` to `.env` and set `VITE_ADMIN_API_URL` when not us
 
 ### Drop ops navigation
 
-- **Pipeline** (`/?tab=pipeline`) — fleet actions + bulk cards; Download / Ingest / Matching / Fulfillment tabs live inside each bulk card (`stage=`). Hash refresh / Configurations remain top tabs.
+- **Pipeline** (`/?tab=pipeline`, also `/ops/drop-pipeline?tab=`) — **Run Pipeline** (CA DROP → download→land→promote) + bulk/individual list. Top tabs: Pipeline · Hash refresh · History · Configurations. Stage tabs Download / Ingest / Matching / Fulfillment live inside each bulk card (`stage=`).
 - **Health** (`/ops/health`) — workers + queues from admin_api; Escalations/retries and Configuration (retry `max_attempts`) under the Health hover menu.
-- Browser never calls worker URLs — only admin-api aggregates.
+- Browser never calls worker URLs — only admin-api aggregates. Local Vite → deployed admin-api-dev uses Application Default Credentials (ADC) Bearer ID token (super_admin); see [`AGENTS.md`](AGENTS.md).
 
 ### Local DROP pipeline stack (ports)
 
