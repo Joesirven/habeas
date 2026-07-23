@@ -289,15 +289,25 @@ async def drain_chunk():
 
 @app.post("/ensure-drain")
 async def ensure_drain_endpoint():
-    """Run budgeted chunk drain if pending attempts exist (inline Job shell)."""
+    """Start drain Job when configured; else inline budgeted chunk loop."""
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
 
-    from matching.chunk_drain import run_drain_budget
+    from matching.chunk_drain import (
+        ensure_drain,
+        run_drain_budget,
+        start_drain_job_execution,
+    )
 
     max_chunks = int(os.environ.get("MATCHING_DRAIN_MAX_CHUNKS", "50"))
+    job_name = os.environ.get("MATCHING_DRAIN_JOB_NAME", "").strip()
     pool = get_pool()
     async with pool.acquire() as conn:
+        if job_name:
+            async def _start() -> None:
+                await start_drain_job_execution()
+
+            return await ensure_drain(conn, start_job=_start)
         return await run_drain_budget(
             conn,
             worker_id=settings.worker_id,

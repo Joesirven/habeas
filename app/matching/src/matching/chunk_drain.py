@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from habeas_privacy_core.audit.redaction import redact_error_text
@@ -34,6 +36,20 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CHUNK_LIMIT = 10_000
 COMPLETE_BATCH_SIZE = 250
+DEFAULT_DRAIN_LEASE_HOLDER = "matching-drain-job"
+
+
+def drain_lease_holder() -> str:
+    return os.environ.get("MATCHING_DRAIN_LEASE_HOLDER", DEFAULT_DRAIN_LEASE_HOLDER)
+
+
+def job_task_worker_id(base: str | None = None) -> str:
+    """Worker id unique per Cloud Run Job task (SKIP LOCKED safe)."""
+    root = base or os.environ.get("WORKER_ID", "matching-drain")
+    task_index = os.environ.get("CLOUD_RUN_TASK_INDEX")
+    if task_index is None or task_index == "":
+        return root
+    return f"{root}-task{task_index}"
 
 
 async def process_matching_chunk(
@@ -287,15 +303,16 @@ async def _pending_matching_count(conn: Any) -> int:
 async def ensure_drain(
     conn: Any,
     *,
-    holder: str,
-    start_job: Any | None = None,
+    holder: str | None = None,
+    start_job: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Acquire drain lease if pending work exists; optionally start Job callback."""
+    lease_holder = holder or drain_lease_holder()
     pending_n = await _pending_matching_count(conn)
     if pending_n <= 0:
         return {"status": "idle", "pending": 0, "lease_acquired": False}
 
-    acquired = await acquire_drain_lease(conn, holder=holder)
+    acquired = await acquire_drain_lease(conn, holder=lease_holder)
     if not acquired:
         return {"status": "drain_active", "pending": pending_n, "lease_acquired": False}
 
@@ -305,7 +322,7 @@ async def ensure_drain(
             await start_job()
             job_started = True
         except Exception as exc:
-            await release_drain_lease(conn, holder=holder)
+            await release_drain_lease(conn, holder=lease_holder)
             safe = redact_error_text(str(exc))
             logger.error(
                 "matching_ensure_drain_job_start_failed",
@@ -318,7 +335,7 @@ async def ensure_drain(
                 "lease_acquired": False,
             }
 
-    await renew_drain_lease(conn, holder=holder)
+    await renew_drain_lease(conn, holder=lease_holder)
     return {
         "status": "started",
         "pending": pending_n,
@@ -326,6 +343,7 @@ async def ensure_drain(
         "job_started": job_started,
         "task_count": int(os.environ.get("MATCHING_DRAIN_TASK_COUNT", "5")),
         "chunk_limit": DEFAULT_CHUNK_LIMIT,
+        "holder": lease_holder,
     }
 
 
@@ -335,13 +353,15 @@ async def run_drain_budget(
     worker_id: str,
     max_chunks: int = 50,
     bq_client: Any | None = None,
+    holder: str | None = None,
 ) -> dict[str, Any]:
     """Acquire lease and process chunks until idle or ``max_chunks`` (inline Job shell)."""
+    lease_holder = holder or drain_lease_holder()
     pending_before = await _pending_matching_count(conn)
     if pending_before <= 0:
         return {"status": "idle", "pending": 0, "chunks": 0, "completed": 0}
 
-    acquired = await acquire_drain_lease(conn, holder=worker_id)
+    acquired = await acquire_drain_lease(conn, holder=lease_holder)
     if not acquired:
         return {
             "status": "drain_active",
@@ -354,7 +374,7 @@ async def run_drain_budget(
     completed = 0
     try:
         while chunks < max_chunks:
-            await renew_drain_lease(conn, holder=worker_id)
+            await renew_drain_lease(conn, holder=lease_holder)
             result = await process_matching_chunk(
                 conn,
                 worker_id=worker_id,
@@ -365,7 +385,7 @@ async def run_drain_budget(
             chunks += 1
             completed += int(result.get("completed") or 0)
     finally:
-        await release_drain_lease(conn, holder=worker_id)
+        await release_drain_lease(conn, holder=lease_holder)
 
     pending_after = await _pending_matching_count(conn)
     return {
@@ -375,3 +395,139 @@ async def run_drain_budget(
         "chunks": chunks,
         "completed": completed,
     }
+
+
+async def run_job_task(
+    conn: Any,
+    *,
+    worker_id: str | None = None,
+    max_chunks: int | None = None,
+    bq_client: Any | None = None,
+    holder: str | None = None,
+) -> dict[str, Any]:
+    """Cloud Run Job task body: drain chunks via SKIP LOCKED (no lease acquire)."""
+    lease_holder = holder or drain_lease_holder()
+    task_worker = worker_id or job_task_worker_id()
+    budget = max_chunks
+    if budget is None:
+        budget = int(os.environ.get("MATCHING_DRAIN_MAX_CHUNKS", "50"))
+
+    chunks = 0
+    completed = 0
+    last_status = "idle"
+    while chunks < budget:
+        await renew_drain_lease(conn, holder=lease_holder)
+        result = await process_matching_chunk(
+            conn,
+            worker_id=task_worker,
+            bq_client=bq_client,
+        )
+        last_status = str(result.get("status") or "idle")
+        claimed = int(result.get("claimed") or 0)
+        if last_status == "idle" or claimed == 0:
+            break
+        chunks += 1
+        completed += int(result.get("completed") or 0)
+
+    pending_after = await _pending_matching_count(conn)
+    if pending_after <= 0:
+        await release_drain_lease(conn, holder=lease_holder)
+
+    logger.info(
+        "matching_drain_job_task_done",
+        extra={
+            "event": "matching_drain_job_task_done",
+            "worker_id": task_worker,
+            "chunks": chunks,
+            "completed": completed,
+            "pending_after": pending_after,
+            "last_status": last_status,
+        },
+    )
+    return {
+        "status": "ok",
+        "worker_id": task_worker,
+        "chunks": chunks,
+        "completed": completed,
+        "pending_after": pending_after,
+        "last_status": last_status,
+    }
+
+
+async def start_drain_job_execution() -> dict[str, Any]:
+    """Start Cloud Run Job execution via Run Admin API v2."""
+    import google.auth
+    import google.auth.transport.requests
+    import httpx
+
+    job_name = os.environ.get("MATCHING_DRAIN_JOB_NAME", "").strip()
+    if not job_name:
+        raise RuntimeError("MATCHING_DRAIN_JOB_NAME is not set")
+
+    region = os.environ.get("MATCHING_DRAIN_JOB_REGION", "us-east4").strip()
+    project = os.environ.get("GCP_PROJECT", "").strip()
+    credentials, detected_project = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    if not project:
+        project = detected_project or ""
+    if not project:
+        raise RuntimeError("GCP_PROJECT is not set")
+
+    credentials.refresh(google.auth.transport.requests.Request())
+    url = (
+        f"https://run.googleapis.com/v2/projects/{project}"
+        f"/locations/{region}/jobs/{job_name}:run"
+    )
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {credentials.token}",
+                "Content-Type": "application/json",
+            },
+            json={},
+        )
+    if response.status_code >= 400:
+        safe = redact_error_text(response.text[:500])
+        raise RuntimeError(f"job run failed status={response.status_code} body={safe}")
+
+    payload = response.json() if response.content else {}
+    execution = ""
+    if isinstance(payload, dict):
+        execution = str(payload.get("metadata", {}).get("name") or payload.get("name") or "")
+    logger.info(
+        "matching_drain_job_started",
+        extra={
+            "event": "matching_drain_job_started",
+            "job_name": job_name,
+            "execution": execution or None,
+        },
+    )
+    return {"job_name": job_name, "execution": execution or None, "region": region}
+
+
+def main() -> None:
+    """Cloud Run Job entrypoint: ``python -m matching.chunk_drain``."""
+    import asyncpg
+
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if not database_url:
+        raise SystemExit("DATABASE_URL is required for matching drain Job tasks")
+
+    async def _run() -> dict[str, Any]:
+        conn = await asyncpg.connect(database_url)
+        try:
+            return await run_job_task(conn)
+        finally:
+            await conn.close()
+
+    result = asyncio.run(_run())
+    logger.info(
+        "matching_drain_job_task_result",
+        extra={"event": "matching_drain_job_task_result", **result},
+    )
+
+
+if __name__ == "__main__":
+    main()
