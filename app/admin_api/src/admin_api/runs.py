@@ -273,12 +273,56 @@ def _detail_from_row(job: str, row: Any) -> RunDetail:
     )
 
 
+def _process_id_clause(param_idx: int) -> str:
+    """Scope unified runs to one bulk process (download attempt id).
+
+    Connector: the download row itself. Ingest / matching: same ``gcs_uri``
+    join path as ``collect_process_run_groups`` in drop_pipeline.
+    """
+    return f"""(
+        (job = 'drop_connector' AND attempt_id = ${param_idx})
+        OR (
+            job = 'drop_ingestor'
+            AND attempt_id IN (
+                SELECT i.id
+                  FROM drop_ingest_attempts i
+                  JOIN drop_connector_attempts c
+                    ON c.gcs_uri IS NOT NULL
+                   AND c.gcs_uri = i.gcs_uri
+                   AND c.step = 'download'
+                 WHERE c.id = ${param_idx}
+            )
+        )
+        OR (
+            job = 'matching'
+            AND attempt_id IN (
+                SELECT ma.id
+                  FROM matching_attempts ma
+                  JOIN requests r
+                    ON r.id = ma.request_id
+                   AND r.intake_source = 'drop'
+                  JOIN drop_raw_requests drr
+                    ON drr.id = r.raw_record_id
+                  JOIN drop_ingest_attempts i
+                    ON i.source_csv_filename = drr.source_csv_filename
+                   AND i.step = 'land'
+                  JOIN drop_connector_attempts c
+                    ON c.gcs_uri IS NOT NULL
+                   AND c.gcs_uri = i.gcs_uri
+                   AND c.step = 'download'
+                 WHERE c.id = ${param_idx}
+            )
+        )
+    )"""
+
+
 async def fetch_run_summaries(
     conn: Any,
     *,
     job: str | None,
     status: str | None,
     request_id: str | None,
+    process_id: int | None,
     since: datetime | None,
     limit: int,
     offset: int,
@@ -306,6 +350,11 @@ async def fetch_run_summaries(
     if request_id is not None:
         clauses.append(f"request_id = ${idx}::uuid")
         params.append(request_id)
+        idx += 1
+
+    if process_id is not None:
+        clauses.append(_process_id_clause(idx))
+        params.append(process_id)
         idx += 1
 
     if since is not None:
@@ -354,6 +403,7 @@ async def list_runs(
     job: str | None = Query(default=None),
     status: str | None = Query(default=None),
     request_id: str | None = Query(default=None),
+    process_id: int | None = Query(default=None, ge=1),
     since: datetime | None = Query(default=None),
     window: Literal["8h", "24h", "1w", "3m"] | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
@@ -371,6 +421,7 @@ async def list_runs(
             job=job,
             status=status,
             request_id=request_id,
+            process_id=process_id,
             since=effective_since,
             limit=limit,
             offset=offset,

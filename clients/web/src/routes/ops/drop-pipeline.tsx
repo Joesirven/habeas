@@ -1,12 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 import { Skeleton, SkeletonLines } from '@/components/AppShell'
 import { Button } from '@/components/ui/button'
 import {
-  ConfirmActionDialog,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -30,7 +29,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { RoleGate, isSuperAdmin, useMe } from '@/lib/auth'
+import { RoleGate, isSuperAdmin } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 import {
   getDropBulkProcess,
@@ -43,14 +42,11 @@ import {
   postDropDownload,
   postDropFulfill,
   postDropLand,
-  postDropMatch,
   postDropPromote,
-  postDropWorkflowAssign,
   postHashIndexRefreshEnqueue,
   postHashIndexRefreshEnqueueAll,
   postHashIndexRefreshProcess,
   type BulkProcessDetail,
-  type BulkProcessRun,
   type BulkProcessRunGroup,
   type BulkProcessStageCounts,
   type BulkProcessSummary,
@@ -61,12 +57,12 @@ import {
 } from '@/lib/api'
 import { RetryConfigPanel } from '@/routes/ops/health/configuration'
 import {
+  runsSearchForBulkStage,
   runsSearchForWorker,
+  type BulkStageRunState,
   type PipelineStageTab,
   type PipelineTab,
 } from '@/router'
-
-const RUNS_PAGE_SIZE = 10
 
 function PlayPipelineIcon({ className }: { className?: string }) {
   return (
@@ -228,18 +224,48 @@ function stageVisualState(
   return isCurrent ? 'active' : 'idle'
 }
 
-function stageCardClassName(visual: StageVisual): string {
+function stageStripTone(visual: StageVisual): {
+  text: string
+  light: 'emerald' | 'sky' | 'amber' | 'red' | 'mute' | 'navy'
+  bar: string
+  wash: string
+} {
   switch (visual) {
     case 'complete':
-      return 'border-emerald-600/45 bg-emerald-50 text-emerald-950'
+      return {
+        text: 'text-emerald-900',
+        light: 'emerald',
+        bar: 'bg-emerald-600',
+        wash: 'bg-emerald-50/80',
+      }
     case 'active':
-      return 'border-habeas-navy/45 bg-habeas-navy/8'
+      return {
+        text: 'text-habeas-navy',
+        light: 'emerald',
+        bar: 'bg-emerald-600',
+        wash: 'bg-emerald-50/50',
+      }
     case 'failed':
-      return 'border-red-400/50 bg-red-50'
+      return {
+        text: 'text-red-800',
+        light: 'red',
+        bar: 'bg-red-600',
+        wash: 'bg-red-50/70',
+      }
     case 'pending':
-      return 'border-amber-400/45 bg-amber-50/70'
+      return {
+        text: 'text-amber-950',
+        light: 'amber',
+        bar: 'bg-amber-500',
+        wash: 'bg-amber-50/60',
+      }
     default:
-      return 'border-line/80 bg-paper'
+      return {
+        text: 'text-ink-soft',
+        light: 'mute',
+        bar: 'bg-habeas-navy/40',
+        wash: 'bg-transparent',
+      }
   }
 }
 
@@ -843,22 +869,43 @@ function bulkStageLabel(stageKey: string | undefined): string {
 function stageRunIndicators(counts: BulkProcessStageCounts | undefined): {
   finished: number
   queued: number
+  inFlight: number
   failed: number
   abandoned: number
   percent: number
 } {
   if (!counts || counts.total <= 0) {
-    return { finished: 0, queued: 0, failed: 0, abandoned: 0, percent: 0 }
+    return {
+      finished: 0,
+      queued: 0,
+      inFlight: 0,
+      failed: 0,
+      abandoned: 0,
+      percent: 0,
+    }
+  }
+  const byStatus = new Map<string, number>()
+  for (const row of counts.by_list_type ?? []) {
+    const key = row.status.toLowerCase()
+    byStatus.set(key, (byStatus.get(key) ?? 0) + row.count)
   }
   const abandoned =
-    counts.by_list_type
-      ?.filter((row) => row.status.toLowerCase() === 'abandoned')
-      .reduce((sum, row) => sum + row.count, 0) ??
-    (counts.other ?? 0)
+    byStatus.get('abandoned') ??
+    (counts.by_list_type?.length ? 0 : (counts.other ?? 0))
   const failed = Math.max(0, counts.failed - abandoned)
+  const hasStatusBreakdown = (counts.by_list_type?.length ?? 0) > 0
+  const queued = hasStatusBreakdown
+    ? byStatus.get('pending') ?? 0
+    : counts.open
+  const inFlight = hasStatusBreakdown
+    ? (byStatus.get('claimed') ?? 0) +
+      (byStatus.get('in_flight') ?? 0) +
+      (byStatus.get('leased') ?? 0)
+    : 0
   return {
     finished: counts.success,
-    queued: counts.open,
+    queued,
+    inFlight,
     failed,
     abandoned,
     percent: Math.round((counts.success / counts.total) * 100),
@@ -911,26 +958,39 @@ function bulkDerivedStats(detail: BulkProcessDetail | undefined): {
   }
 }
 
-function RunningPulse({ label = 'Running' }: { label?: string }) {
+function StatusLight({
+  tone = 'mute',
+  pulse = false,
+  title,
+}: {
+  tone?: 'emerald' | 'sky' | 'amber' | 'red' | 'mute' | 'navy'
+  pulse?: boolean
+  title?: string
+}) {
+  const fill =
+    tone === 'emerald'
+      ? 'bg-emerald-500'
+      : tone === 'sky'
+        ? 'bg-sky-500'
+        : tone === 'amber'
+          ? 'bg-amber-500'
+          : tone === 'red'
+            ? 'bg-red-500'
+            : tone === 'navy'
+              ? 'bg-habeas-navy'
+              : 'bg-mute/70'
   return (
-    <span className="inline-flex items-center gap-1.5 rounded border border-emerald-300/70 bg-emerald-50/90 px-1.5 py-0.5 text-[0.6rem] font-medium uppercase tracking-wide text-emerald-900">
-      <span className="relative flex h-1.5 w-1.5">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-60" />
-        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-600" />
-      </span>
-      {label}
-    </span>
-  )
-}
-
-function PendingPulse({ label = 'Pending' }: { label?: string }) {
-  return (
-    <span className="inline-flex items-center gap-1.5 rounded border border-sky-300/70 bg-sky-50/90 px-1.5 py-0.5 text-[0.6rem] font-medium uppercase tracking-wide text-sky-950">
-      <span className="relative flex h-1.5 w-1.5">
-        <span className="absolute inline-flex h-full w-full animate-pulse rounded-full bg-sky-400 opacity-70" />
-        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-sky-600" />
-      </span>
-      {label}
+    <span
+      className="relative inline-flex h-1.5 w-1.5 shrink-0"
+      title={title}
+      aria-hidden={title ? undefined : true}
+    >
+      {pulse ? (
+        <span
+          className={`absolute inline-flex h-full w-full animate-ping rounded-full ${fill} opacity-60`}
+        />
+      ) : null}
+      <span className={`relative inline-flex h-1.5 w-1.5 rounded-full ${fill}`} />
     </span>
   )
 }
@@ -952,44 +1012,6 @@ function isPendingBulkSummary(row: BulkProcessSummary): boolean {
   const download = row.download_status
   if (download === 'pending' || download === 'in_flight') return true
   return row.overall?.status === 'in_progress' && (row.overall.percent ?? 0) < 5
-}
-
-function StageRunStatChips({
-  finished,
-  queued,
-  failed,
-  abandoned,
-  dense = false,
-}: {
-  finished: number
-  queued: number
-  failed: number
-  abandoned: number
-  dense?: boolean
-}) {
-  const chip = dense
-    ? 'inline-flex items-center gap-1 rounded px-1 py-px text-[0.55rem] tabular-nums'
-    : 'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[0.6rem] tabular-nums'
-  return (
-    <div className="flex flex-wrap items-center gap-1">
-      <span className={`${chip} bg-emerald-50 text-emerald-900`}>
-        <span className="text-mute">Finished</span> {finished}
-      </span>
-      <span className={`${chip} bg-sky-50 text-sky-950`}>
-        <span className="text-mute">Queued</span> {queued}
-      </span>
-      <span
-        className={`${chip} ${failed > 0 ? 'bg-red-50 text-red-800' : 'bg-panel text-ink-soft'}`}
-      >
-        <span className="text-mute">Failed</span> {failed}
-      </span>
-      <span
-        className={`${chip} ${abandoned > 0 ? 'bg-amber-50 text-amber-950' : 'bg-panel text-ink-soft'}`}
-      >
-        <span className="text-mute">Abandoned</span> {abandoned}
-      </span>
-    </div>
-  )
 }
 
 function MiniRing({
@@ -1056,11 +1078,7 @@ function BulkStageStrip({
 }) {
   return (
     <div
-      className={
-        expanded
-          ? 'flex min-w-0 items-stretch gap-1 overflow-x-auto'
-          : 'flex min-w-0 items-center gap-1 overflow-x-auto'
-      }
+      className="flex min-w-0 items-stretch overflow-x-auto"
       role="tablist"
       aria-label="Bulk process stages"
     >
@@ -1071,11 +1089,11 @@ function BulkStageStrip({
               key={tab.key}
               className={
                 expanded
-                  ? 'min-w-[4.5rem] flex-1 rounded border border-line/70 bg-paper/80 px-1.5 py-1'
-                  : 'min-w-[3.25rem] shrink-0 rounded border border-line/70 bg-paper/80 px-1 py-0.5'
+                  ? 'min-w-[4.5rem] flex-1 px-1.5 py-0.5'
+                  : 'min-w-[3.5rem] shrink-0 px-1 py-0.5'
               }
             >
-              <Skeleton className={expanded ? 'h-6 w-full' : 'h-3 w-full'} />
+              <Skeleton className={expanded ? 'h-5 w-full' : 'h-3 w-full'} />
             </div>
           )
         }
@@ -1084,87 +1102,10 @@ function BulkStageStrip({
         const selected = activeTab === tab.key
         const visual = stageVisualState(counts, isCurrent)
         const indicators = stageRunIndicators(counts)
-        const emphasize = expanded && selected
-
-        if (!emphasize) {
-          const currentCue = isCurrent && (running || visual === 'running')
-          if (!expanded) {
-            return (
-              <button
-                key={tab.key}
-                type="button"
-                role="tab"
-                aria-selected={selected}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  onSelectTab(tab.key)
-                }}
-                className={`inline-flex shrink-0 items-center gap-0.5 rounded border px-1 py-0.5 text-left transition-colors hover:border-habeas-navy/35 ${stageCardClassName(visual)} ${
-                  currentCue ? 'border-l-2 border-l-emerald-500' : ''
-                }`}
-                title={
-                  counts
-                    ? `${tab.label}: ${stageCountsBlurb(counts)}`
-                    : tab.label
-                }
-              >
-                <span
-                  className={`text-[0.5rem] font-medium uppercase leading-none tracking-wide ${
-                    visual === 'complete' ? 'text-emerald-800' : 'text-mute'
-                  }`}
-                >
-                  {tab.label}
-                </span>
-                {counts && counts.total > 0 ? (
-                  <span className="text-[0.5rem] tabular-nums leading-none text-ink">
-                    {indicators.percent}%
-                  </span>
-                ) : null}
-              </button>
-            )
-          }
-
-          return (
-            <button
-              key={tab.key}
-              type="button"
-              role="tab"
-              aria-selected={selected}
-              onClick={(event) => {
-                event.stopPropagation()
-                onSelectTab(tab.key)
-              }}
-              className={`flex min-w-[4.75rem] shrink-0 flex-col items-start justify-center rounded border px-1.5 py-1 text-left transition-colors hover:border-habeas-navy/35 ${stageCardClassName(visual)} ${
-                currentCue ? 'border-l-2 border-l-emerald-500' : ''
-              }`}
-              title={
-                counts
-                  ? `${tab.label}: ${stageCountsBlurb(counts)}`
-                  : tab.label
-              }
-            >
-              <div className="flex items-center gap-1">
-                {currentCue ? (
-                  <span
-                    className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500"
-                    aria-hidden="true"
-                    title="Current stage"
-                  />
-                ) : null}
-                <p
-                  className={`text-[0.55rem] font-medium uppercase leading-tight tracking-wide ${
-                    visual === 'complete' ? 'text-emerald-800' : 'text-mute'
-                  }`}
-                >
-                  {tab.label}
-                </p>
-              </div>
-              <p className="mt-0.5 text-[0.6rem] tabular-nums leading-none text-ink">
-                {counts && counts.total > 0 ? `${indicators.percent}%` : '—'}
-              </p>
-            </button>
-          )
-        }
+        const tone = stageStripTone(visual)
+        const currentRunning =
+          isCurrent && Boolean(running) && visual !== 'complete'
+        const showProgress = currentRunning || (expanded && selected)
 
         return (
           <button
@@ -1176,55 +1117,150 @@ function BulkStageStrip({
               event.stopPropagation()
               onSelectTab(tab.key)
             }}
-            className={`min-w-[13rem] flex-1 rounded-md border px-2.5 py-2 text-left transition-shadow ${stageCardClassName(visual)} ring-1 ring-habeas-navy/30`}
+            className={cn(
+              'flex min-w-0 flex-1 flex-col justify-center px-1.5 py-0.5 text-left transition-colors',
+              tone.wash,
+              expanded && selected
+                ? 'bg-habeas-navy/8 ring-1 ring-inset ring-habeas-navy/25'
+                : 'hover:bg-panel/50',
+            )}
+            title={
+              counts
+                ? `${tab.label}: ${stageCountsBlurb(counts)}${
+                    duration && selected ? ` · ${duration}` : ''
+                  }`
+                : tab.label
+            }
           >
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div>
-                <p className="text-[0.65rem] font-semibold uppercase tracking-wide text-ink">
-                  {tab.label}
-                  {isCurrent ? (
-                    <span className="ml-1.5 font-normal normal-case text-mute">
-                      · current
-                    </span>
-                  ) : null}
-                </p>
-                <p className="mt-0.5 text-[0.65rem] tabular-nums text-ink-soft">
-                  {duration
-                    ? `${duration}${running ? ' so far' : ''}`
-                    : 'Duration —'}
-                </p>
-              </div>
-              <span className="tabular-nums text-sm font-medium text-ink">
-                {indicators.percent}%
+            <div className="flex min-w-0 items-center gap-1">
+              <StatusLight
+                tone={
+                  visual === 'complete'
+                    ? 'emerald'
+                    : visual === 'failed'
+                      ? 'red'
+                      : currentRunning
+                        ? 'emerald'
+                        : tone.light
+                }
+                pulse={currentRunning}
+                title={
+                  visual === 'complete'
+                    ? 'Done'
+                    : currentRunning
+                      ? 'Running'
+                      : visual === 'failed'
+                        ? 'Failed'
+                        : undefined
+                }
+              />
+              <span
+                className={cn(
+                  'truncate text-[0.6rem] font-medium leading-none tracking-wide',
+                  visual === 'complete' ||
+                    currentRunning ||
+                    visual === 'failed'
+                    ? tone.text
+                    : 'text-mute',
+                )}
+              >
+                {tab.label}
+              </span>
+              <span className="ml-auto shrink-0 text-[0.55rem] tabular-nums leading-none text-ink">
+                {counts && counts.total > 0 ? `${indicators.percent}%` : '—'}
               </span>
             </div>
-            <div className="relative mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/70">
-              <div
-                className={
-                  visual === 'failed'
-                    ? 'h-full rounded-full bg-red-600 transition-[width]'
-                    : running && isCurrent
-                      ? 'h-full rounded-full bg-emerald-600 transition-[width]'
-                      : 'h-full rounded-full bg-habeas-navy transition-[width]'
-                }
-                style={{ width: `${indicators.percent}%` }}
-              />
-              {running && isCurrent ? (
-                <div className="pointer-events-none absolute inset-0 animate-pulse bg-gradient-to-r from-transparent via-white/40 to-transparent" />
-              ) : null}
-            </div>
-            <div className="mt-1.5">
-              <StageRunStatChips
-                finished={indicators.finished}
-                queued={indicators.queued}
-                failed={indicators.failed}
-                abandoned={indicators.abandoned}
-                dense
-              />
-            </div>
+            {showProgress ? (
+              <div className="relative mt-0.5 h-1 overflow-hidden rounded-full bg-line/60">
+                <div
+                  className={cn(
+                    'h-full rounded-full transition-[width]',
+                    visual === 'failed' ? 'bg-red-600' : tone.bar,
+                  )}
+                  style={{ width: `${indicators.percent}%` }}
+                />
+                {currentRunning ? (
+                  <div className="pointer-events-none absolute inset-0 animate-pulse bg-gradient-to-r from-transparent via-white/50 to-transparent" />
+                ) : null}
+              </div>
+            ) : null}
           </button>
         )
       })}
+    </div>
+  )
+}
+
+const STAGE_STATE_CARDS: {
+  key: BulkStageRunState
+  label: string
+  tone: string
+}[] = [
+  { key: 'queued', label: 'Queued', tone: 'text-sky-950' },
+  { key: 'in_flight', label: 'In flight', tone: 'text-habeas-navy' },
+  { key: 'failed', label: 'Failed', tone: 'text-red-800' },
+  { key: 'abandoned', label: 'Abandoned', tone: 'text-amber-950' },
+  { key: 'finished', label: 'Finished', tone: 'text-emerald-900' },
+]
+
+function BulkStageStateCards({
+  stageTab,
+  processId,
+  indicators,
+  loading,
+}: {
+  stageTab: PipelineStageTab
+  processId: number
+  indicators: ReturnType<typeof stageRunIndicators>
+  loading?: boolean
+}) {
+  const counts: Record<BulkStageRunState, number> = {
+    queued: indicators.queued,
+    in_flight: indicators.inFlight,
+    failed: indicators.failed,
+    abandoned: indicators.abandoned,
+    finished: indicators.finished,
+  }
+
+  if (loading) {
+    return (
+      <div className="grid grid-cols-2 gap-1 sm:grid-cols-5">
+        {STAGE_STATE_CARDS.map((card) => (
+          <div
+            key={card.key}
+            className="rounded-md border border-line/70 bg-paper px-2 py-1.5"
+          >
+            <Skeleton className="h-8 w-full" />
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  return (
+    <div className="grid grid-cols-2 gap-1 sm:grid-cols-5">
+      {STAGE_STATE_CARDS.map((card) => (
+        <Link
+          key={card.key}
+          to="/ops/runs"
+          search={runsSearchForBulkStage(stageTab, card.key, {
+            process: processId,
+          })}
+          className="rounded-md border border-line bg-paper px-2 py-1.5 text-left transition-colors hover:border-habeas-navy/35 hover:bg-panel/40"
+        >
+          <p className="text-[0.55rem] font-medium uppercase tracking-wide text-mute">
+            {card.label}
+          </p>
+          <p
+            className={cn(
+              'mt-0.5 text-base font-semibold tabular-nums',
+              card.tone,
+            )}
+          >
+            {counts[card.key]}
+          </p>
+        </Link>
+      ))}
     </div>
   )
 }
@@ -1240,28 +1276,6 @@ function stageTabFromOverall(
   return 'download'
 }
 
-async function rerunBulkProcessRun(run: BulkProcessRun) {
-  const step = run.step.toLowerCase()
-  const job = run.job.toLowerCase()
-  if (job === 'drop_connector' || step === 'download') {
-    return postDropDownload()
-  }
-  if (step === 'land') {
-    return postDropLand({ land_attempt_id: run.attempt_id })
-  }
-  if (step === 'promote') {
-    return postDropPromote({ promote_attempt_id: run.attempt_id })
-  }
-  if (job === 'matching' || step === 'matching') {
-    return postDropMatch()
-  }
-  if (job === 'data_fulfillment' || step === 'fulfill' || step === 'fulfillment') {
-    if (!run.request_id) throw new Error('Fulfill re-run needs a request id')
-    return postDropFulfill({ request_id: run.request_id })
-  }
-  throw new Error(`No re-run action for ${run.job}/${run.step}`)
-}
-
 function BatchProcessExpandRow({
   row,
   expanded,
@@ -1275,8 +1289,6 @@ function BatchProcessExpandRow({
   /** Kept for callers; stage tabs stay local — do not write URL on every click. */
   onStageChange?: (stage: PipelineStageTab) => void
 }) {
-  const { me } = useMe()
-  const queryClient = useQueryClient()
   const statusKey = row.overall?.status ?? row.download_status
   const likelyNeedsReview = statusKey === 'needs_attention'
   const detailQuery = useQuery({
@@ -1293,32 +1305,6 @@ function BatchProcessExpandRow({
   )
   const activeStage =
     BULK_CARD_STAGE_TABS.find((tab) => tab.key === stageTab) ?? BULK_CARD_STAGE_TABS[0]
-  const runsQuery = useQuery({
-    queryKey: [
-      'admin-api',
-      'ops',
-      'drop-process-runs',
-      'bulk-card',
-      row.process_id,
-      activeStage.runStage,
-    ],
-    queryFn: () =>
-      listDropBulkProcessRuns({
-        stage: activeStage.runStage,
-        days: 30,
-        process_id: row.process_id,
-      }),
-    enabled: expanded,
-    refetchInterval: expanded ? 5_000 : false,
-    placeholderData: (previous) => previous,
-  })
-  const [runStatusFilter, setRunStatusFilter] = useState('attention')
-  const [runPage, setRunPage] = useState(0)
-  const [selectedRunIds, setSelectedRunIds] = useState<Set<string>>(new Set())
-  const [detailRun, setDetailRun] = useState<BulkProcessRun | null>(null)
-  const [assignOpen, setAssignOpen] = useState(false)
-  const [assignEmail, setAssignEmail] = useState('')
-  const [rerunConfirmOpen, setRerunConfirmOpen] = useState(false)
 
   const detail = detailQuery.data
   const running = isActiveBulkSummary(row) || isActiveBulkDetail(detail)
@@ -1346,25 +1332,6 @@ function BatchProcessExpandRow({
         )
       : 0
 
-  const allRuns = runsQuery.data?.groups.flatMap((group) => group.runs) ?? []
-  const filteredRuns = useMemo(
-    () => allRuns.filter((run) => runMatchesStatusFilter(run, runStatusFilter)),
-    [allRuns, runStatusFilter],
-  )
-
-  const pageCount = Math.max(1, Math.ceil(filteredRuns.length / RUNS_PAGE_SIZE))
-  const safePage = Math.min(runPage, pageCount - 1)
-  const pagedRuns = filteredRuns.slice(
-    safePage * RUNS_PAGE_SIZE,
-    safePage * RUNS_PAGE_SIZE + RUNS_PAGE_SIZE,
-  )
-  const selectedRuns = allRuns.filter((run) => selectedRunIds.has(run.run_id))
-
-  useEffect(() => {
-    setRunPage(0)
-    setSelectedRunIds(new Set())
-  }, [runStatusFilter, stageTab, row.process_id])
-
   useEffect(() => {
     if (!expanded) {
       appliedFocusedOnExpand.current = false
@@ -1388,48 +1355,6 @@ function BatchProcessExpandRow({
     setStageTab(next)
   }
 
-  const rerunMutation = useMutation({
-    mutationFn: async (runs: BulkProcessRun[]) => {
-      const results = []
-      for (const run of runs) {
-        results.push(await rerunBulkProcessRun(run))
-      }
-      return results
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-process-runs'] })
-      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-processes'] })
-      setSelectedRunIds(new Set())
-      setRerunConfirmOpen(false)
-    },
-  })
-
-  const assignMutation = useMutation({
-    mutationFn: async () => {
-      const requestIds = [
-        ...new Set(
-          selectedRuns
-            .map((run) => run.request_id)
-            .filter((id): id is string => Boolean(id)),
-        ),
-      ]
-      if (requestIds.length === 0) {
-        throw new Error('Selected runs have no request ids to assign')
-      }
-      const email = assignEmail.trim() || me?.email
-      if (!email) throw new Error('Assignee email is required')
-      return postDropWorkflowAssign({
-        request_ids: requestIds,
-        assignee_identity: email,
-      })
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops'] })
-      setAssignOpen(false)
-      setSelectedRunIds(new Set())
-    },
-  })
-
   const processName = formatBulkProcessName(row.process_at)
   const rowTone = running
     ? 'border-b border-emerald-200/70 bg-emerald-50/30 last:border-b-0'
@@ -1439,29 +1364,9 @@ function BatchProcessExpandRow({
         ? 'border-b border-amber-200/70 bg-amber-50/25 last:border-b-0'
         : 'border-b border-line bg-paper last:border-b-0'
 
-  function toggleRun(runId: string) {
-    setSelectedRunIds((current) => {
-      const next = new Set(current)
-      if (next.has(runId)) next.delete(runId)
-      else next.add(runId)
-      return next
-    })
-  }
-
-  function togglePageSelection() {
-    const ids = pagedRuns.map((run) => run.run_id)
-    const allSelected = ids.every((id) => selectedRunIds.has(id))
-    setSelectedRunIds((current) => {
-      const next = new Set(current)
-      if (allSelected) ids.forEach((id) => next.delete(id))
-      else ids.forEach((id) => next.add(id))
-      return next
-    })
-  }
-
   return (
     <div className={rowTone}>
-      <div className="flex flex-col gap-1 px-3 py-1.5">
+      <div className="flex flex-col gap-0.5 px-3 py-1">
         <div className="flex w-full items-center gap-2">
           <button
             type="button"
@@ -1485,8 +1390,12 @@ function BatchProcessExpandRow({
             </span>
             <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
               <p className="truncate text-xs font-medium text-ink">{processName}</p>
-              {running ? <RunningPulse /> : null}
-              {pending ? <PendingPulse /> : null}
+              {running ? (
+                <StatusLight tone="emerald" pulse title="Running" />
+              ) : null}
+              {pending ? (
+                <StatusLight tone="sky" pulse title="Pending" />
+              ) : null}
               {needsReview ? <NeedsReviewChip count={reviewCount} /> : null}
               {derived.failed > 0 ? (
                 <span className="text-[0.6rem] text-red-700">
@@ -1533,20 +1442,23 @@ function BatchProcessExpandRow({
         <div
           className={
             running
-              ? 'space-y-2 border-t border-emerald-100/80 bg-emerald-50/15 px-3 py-2.5 pl-10'
+              ? 'space-y-1.5 border-t border-emerald-100/80 bg-emerald-50/15 px-3 py-1.5 pl-10'
               : pending
-                ? 'space-y-2 border-t border-sky-100/80 bg-sky-50/15 px-3 py-2.5 pl-10'
+                ? 'space-y-1.5 border-t border-sky-100/80 bg-sky-50/15 px-3 py-1.5 pl-10'
                 : needsReview
-                  ? 'space-y-2 border-t border-amber-100/80 bg-amber-50/15 px-3 py-2.5 pl-10'
-                  : 'space-y-2 border-t border-line/60 px-3 py-2.5 pl-10'
+                  ? 'space-y-1.5 border-t border-amber-100/80 bg-amber-50/15 px-3 py-1.5 pl-10'
+                  : 'space-y-1.5 border-t border-line/60 px-3 py-1.5 pl-10'
           }
         >
           {detailQuery.isError ? (
             <p className="text-[0.65rem] text-red-700">Could not load stage detail</p>
           ) : null}
 
-          {stageTab === 'matching' ? (
-            <div className="flex justify-start">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-[0.6rem] font-medium uppercase tracking-wide text-mute">
+              {activeStage.label} run states
+            </p>
+            {stageTab === 'matching' ? (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Link
@@ -1562,314 +1474,23 @@ function BatchProcessExpandRow({
                   Review fulfill / decline for this bulk in Inbox
                 </TooltipContent>
               </Tooltip>
-            </div>
-          ) : null}
-
-          <div className="rounded-md border border-line/80 bg-paper">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-2.5 py-1.5">
-              <Micro>{activeStage.label} runs</Micro>
-              <div className="flex flex-wrap items-center gap-1">
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      className="taste-btn px-2 py-0.5 text-[0.6rem] disabled:opacity-40"
-                      disabled={selectedRuns.length === 0 || rerunMutation.isPending}
-                      onClick={() => setRerunConfirmOpen(true)}
-                    >
-                      Re-run
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Queue selected runs again via admin-api</TooltipContent>
-                </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      className="taste-btn px-2 py-0.5 text-[0.6rem] disabled:opacity-40"
-                      disabled={
-                        selectedRuns.every((run) => !run.request_id) ||
-                        assignMutation.isPending
-                      }
-                      onClick={() => {
-                        setAssignEmail(me?.email ?? '')
-                        setAssignOpen(true)
-                      }}
-                    >
-                      Assign
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    Assign selected request ids to a reviewer
-                  </TooltipContent>
-                </Tooltip>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      className="taste-btn px-2 py-0.5 text-[0.6rem] disabled:opacity-40"
-                      disabled={selectedRuns.length !== 1}
-                      onClick={() => setDetailRun(selectedRuns[0] ?? null)}
-                    >
-                      Details
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Open a detailed popup for one selected run</TooltipContent>
-                </Tooltip>
-                <span className="text-[0.65rem] tabular-nums text-mute">
-                  {filteredRuns.length}/{allRuns.length}
-                </span>
-              </div>
-            </div>
-            <div
-              className="flex flex-wrap gap-1 border-b border-line px-2.5 py-1.5"
-              role="group"
-              aria-label="Filter individual runs"
-            >
-              {RUN_STATUS_FILTERS.map((filter) => {
-                const selected = runStatusFilter === filter.value
-                return (
-                  <Tooltip key={filter.value || 'all'}>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        className={
-                          selected
-                            ? 'rounded-md bg-habeas-navy px-2 py-0.5 text-[0.6rem] font-medium text-white'
-                            : 'rounded-md border border-line bg-paper px-2 py-0.5 text-[0.6rem] text-ink-soft transition-colors hover:border-habeas-navy/40 hover:text-ink'
-                        }
-                        aria-pressed={selected}
-                        onClick={() => setRunStatusFilter(filter.value)}
-                      >
-                        {filter.label}
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>Show {filter.label.toLowerCase()} runs</TooltipContent>
-                  </Tooltip>
-                )
-              })}
-            </div>
-            {runsQuery.isError ? (
-              <p className="px-2.5 py-2 text-[0.7rem] text-red-700">
-                Could not load individual runs.
-              </p>
-            ) : runsQuery.isPending && !runsQuery.data ? (
-              <div className="p-2.5">
-                <SkeletonLines lines={3} />
-              </div>
-            ) : filteredRuns.length === 0 ? (
-              <p className="px-2.5 py-2 text-[0.7rem] text-ink-soft">
-                {stageTab === 'fulfillment'
-                  ? 'No matching-stage runs yet — fulfillment is tracked per request response_status.'
-                  : 'No individual runs match this filter.'}
-              </p>
-            ) : (
-              <>
-                <div className="max-h-64 overflow-auto">
-                  <table className="taste-table">
-                    <thead>
-                      <tr>
-                        <th className="w-8">
-                          <input
-                            type="checkbox"
-                            aria-label="Select page"
-                            checked={
-                              pagedRuns.length > 0 &&
-                              pagedRuns.every((run) => selectedRunIds.has(run.run_id))
-                            }
-                            onChange={togglePageSelection}
-                          />
-                        </th>
-                        <th>Run</th>
-                        <th>Step</th>
-                        <th>Status</th>
-                        <th>Age</th>
-                        <th>Attempt</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pagedRuns.map((run) => (
-                        <tr
-                          key={run.run_id}
-                          className="cursor-pointer hover:bg-panel/60"
-                          onClick={() => setDetailRun(run)}
-                        >
-                          <td onClick={(event) => event.stopPropagation()}>
-                            <input
-                              type="checkbox"
-                              aria-label={`Select ${run.run_id}`}
-                              checked={selectedRunIds.has(run.run_id)}
-                              onChange={() => toggleRun(run.run_id)}
-                            />
-                          </td>
-                          <td className="max-w-[9rem] truncate font-mono text-xs">
-                            {run.run_id}
-                          </td>
-                          <td className="font-mono text-xs">{run.step}</td>
-                          <td className="text-xs">{run.status.replaceAll('_', ' ')}</td>
-                          <td className="tabular-nums text-xs text-ink-soft">
-                            {run.started_at ? runAgeLabel(run.started_at) : '—'}
-                          </td>
-                          <td className="tabular-nums text-xs">{run.attempt_number}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-2.5 py-1.5">
-                  <p className="text-[0.65rem] text-mute">
-                    Page {safePage + 1} of {pageCount}
-                  </p>
-                  <div className="flex gap-1">
-                    <button
-                      type="button"
-                      className="taste-btn px-2 py-0.5 text-[0.6rem] disabled:opacity-40"
-                      disabled={safePage <= 0}
-                      onClick={() => setRunPage((page) => Math.max(0, page - 1))}
-                    >
-                      Previous
-                    </button>
-                    <button
-                      type="button"
-                      className="taste-btn px-2 py-0.5 text-[0.6rem] disabled:opacity-40"
-                      disabled={safePage >= pageCount - 1}
-                      onClick={() =>
-                        setRunPage((page) => Math.min(pageCount - 1, page + 1))
-                      }
-                    >
-                      Next
-                    </button>
-                  </div>
-                </div>
-              </>
-            )}
+            ) : null}
           </div>
-        </div>
-      ) : null}
 
-      <ConfirmActionDialog
-        open={rerunConfirmOpen}
-        onOpenChange={setRerunConfirmOpen}
-        title={`Re-run ${selectedRuns.length} run${selectedRuns.length === 1 ? '' : 's'}?`}
-        description="Queues the selected attempts again through admin-api. Download re-queues the connector; land/promote target attempt ids when available."
-        confirmLabel="Re-run selected"
-        confirming={rerunMutation.isPending}
-        onConfirm={() => rerunMutation.mutate(selectedRuns)}
-      />
-
-      <Dialog open={assignOpen} onOpenChange={setAssignOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Assign requests</DialogTitle>
-            <DialogDescription>
-              Assign request ids from the selected runs to a reviewer identity.
-            </DialogDescription>
-          </DialogHeader>
-          <label className="block space-y-1 text-xs text-ink-soft">
-            <span>Assignee email</span>
-            <input
-              className="w-full rounded-md border border-line bg-paper px-2 py-1.5 font-mono text-xs text-ink"
-              value={assignEmail}
-              onChange={(event) => setAssignEmail(event.target.value)}
-              placeholder="name@example.com"
-            />
-          </label>
-          {assignMutation.isError ? (
-            <p className="text-xs text-red-700">
-              {assignMutation.error instanceof Error
-                ? assignMutation.error.message
-                : 'Assign failed'}
+          <BulkStageStateCards
+            stageTab={stageTab}
+            processId={row.process_id}
+            indicators={activeIndicators}
+            loading={detailQuery.isPending && !detail}
+          />
+          {stageTab === 'fulfillment' ? (
+            <p className="text-[0.6rem] text-mute">
+              Fulfillment is tracked per request response status; cards link to
+              matching-job runs as the closest Runs filter.
             </p>
           ) : null}
-          <DialogFooter>
-            <button
-              type="button"
-              className="taste-btn px-3 py-1.5 text-xs"
-              onClick={() => setAssignOpen(false)}
-              disabled={assignMutation.isPending}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="taste-btn-primary px-3 py-1.5 text-xs"
-              disabled={assignMutation.isPending}
-              onClick={() => assignMutation.mutate()}
-            >
-              {assignMutation.isPending ? 'Assigning…' : 'Assign'}
-            </button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={detailRun != null}
-        onOpenChange={(open) => {
-          if (!open) setDetailRun(null)
-        }}
-      >
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Run detail</DialogTitle>
-            <DialogDescription>
-              Compact view for this attempt. Open the full Runs page for timeline and output.
-            </DialogDescription>
-          </DialogHeader>
-          {detailRun ? (
-            <dl className="grid grid-cols-2 gap-2 text-xs">
-              <div>
-                <dt className="text-mute">Run</dt>
-                <dd className="font-mono text-ink">{detailRun.run_id}</dd>
-              </div>
-              <div>
-                <dt className="text-mute">Status</dt>
-                <dd className="capitalize text-ink">
-                  {detailRun.status.replaceAll('_', ' ')}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-mute">Step</dt>
-                <dd className="font-mono text-ink">{detailRun.step}</dd>
-              </div>
-              <div>
-                <dt className="text-mute">Attempt</dt>
-                <dd className="tabular-nums text-ink">{detailRun.attempt_number}</dd>
-              </div>
-              <div>
-                <dt className="text-mute">Age</dt>
-                <dd className="tabular-nums text-ink">
-                  {detailRun.started_at ? runAgeLabel(detailRun.started_at) : '—'}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-mute">Request</dt>
-                <dd className="font-mono text-ink">{detailRun.request_id ?? '—'}</dd>
-              </div>
-            </dl>
-          ) : null}
-          <DialogFooter>
-            {detailRun ? (
-              <Link
-                to="/ops/runs/$job/$attemptId"
-                params={{
-                  job: detailRun.job,
-                  attemptId: String(detailRun.attempt_id),
-                }}
-                className="taste-btn-primary px-3 py-1.5 text-xs"
-              >
-                Full runs page
-              </Link>
-            ) : null}
-            <button
-              type="button"
-              className="taste-btn px-3 py-1.5 text-xs"
-              onClick={() => setDetailRun(null)}
-            >
-              Close
-            </button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -1954,8 +1575,18 @@ function BatchRequestRunsList({
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <Micro>Request Processing Pipeline</Micro>
-          {activeCount > 0 ? <RunningPulse label={`${activeCount} running`} /> : null}
-          {pendingCount > 0 ? <PendingPulse label={`${pendingCount} pending`} /> : null}
+          {activeCount > 0 ? (
+            <span className="inline-flex items-center gap-1 text-[0.6rem] text-emerald-900">
+              <StatusLight tone="emerald" pulse title="Running" />
+              {activeCount} running
+            </span>
+          ) : null}
+          {pendingCount > 0 ? (
+            <span className="inline-flex items-center gap-1 text-[0.6rem] text-sky-950">
+              <StatusLight tone="sky" pulse title="Pending" />
+              {pendingCount} pending
+            </span>
+          ) : null}
         </div>
         <Tabs
           value={viewMode}

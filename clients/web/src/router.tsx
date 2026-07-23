@@ -104,7 +104,14 @@ function parsePipelineSearch(search: Record<string, unknown>): PipelineSearch {
 export const RUNS_WINDOWS = ['8h', '24h', '1w', '3m', 'custom'] as const
 export type RunsWindow = (typeof RUNS_WINDOWS)[number]
 
-export const RUNS_STATUS_FILTERS = ['failed', 'success', 'claimed', 'in_flight'] as const
+export const RUNS_STATUS_FILTERS = [
+  'failed',
+  'success',
+  'claimed',
+  'in_flight',
+  'pending',
+  'abandoned',
+] as const
 export type RunsStatusFilter = (typeof RUNS_STATUS_FILTERS)[number]
 
 export const RUNS_JOB_FILTERS = [
@@ -120,11 +127,20 @@ export type RunsSearch = {
   status?: RunsStatusFilter
   job?: RunsJobFilter
   request_id?: string
+  /** Bulk process id (`drop_connector_attempts.id` download) — URL param `process`. */
+  process?: number
   /** ISO timestamp — used when `window` is `custom`. */
   since?: string
 }
 
 export const DEFAULT_RUNS_WINDOW: RunsWindow = '1w'
+
+export type BulkStageRunState =
+  | 'queued'
+  | 'in_flight'
+  | 'failed'
+  | 'abandoned'
+  | 'finished'
 
 /** Map a fleet worker name onto `/ops/runs` search (unified jobs only). */
 export function runsSearchForWorker(
@@ -139,6 +155,39 @@ export function runsSearchForWorker(
     next.job = workerName as RunsJobFilter
   }
   return next
+}
+
+const BULK_STAGE_TO_RUNS_JOB: Record<PipelineStageTab, RunsJobFilter> = {
+  download: 'drop_connector',
+  ingest: 'drop_ingestor',
+  matching: 'matching',
+  // Fulfillment is response_status on requests; closest unified job is matching.
+  fulfillment: 'matching',
+}
+
+const BULK_STATE_TO_RUNS_STATUS: Record<BulkStageRunState, RunsStatusFilter> = {
+  queued: 'pending',
+  in_flight: 'in_flight',
+  failed: 'failed',
+  abandoned: 'abandoned',
+  finished: 'success',
+}
+
+/**
+ * `/ops/runs` search for a bulk-card stage state tile.
+ * Pass `process` (bulk download attempt id) so Runs scopes to that process.
+ */
+export function runsSearchForBulkStage(
+  stageTab: PipelineStageTab,
+  state: BulkStageRunState,
+  extras?: Partial<RunsSearch>,
+): RunsSearch {
+  return {
+    window: DEFAULT_RUNS_WINDOW,
+    job: BULK_STAGE_TO_RUNS_JOB[stageTab],
+    status: BULK_STATE_TO_RUNS_STATUS[state],
+    ...extras,
+  }
 }
 
 function parseRunsWindow(value: unknown): RunsWindow | undefined {
@@ -189,6 +238,8 @@ function parseRunsSearch(search: Record<string, unknown>): RunsSearch {
   if (job) parsed.job = job
   const requestId = parseRunsRequestId(search.request_id)
   if (requestId) parsed.request_id = requestId
+  const process = parseProcessId(search.process)
+  if (process != null) parsed.process = process
   const since = parseRunsSince(search.since)
   if (since) parsed.since = since
   return parsed
