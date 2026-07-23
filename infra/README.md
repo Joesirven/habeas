@@ -123,7 +123,7 @@ Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admi
 | Caller | Auth |
 |--------|------|
 | super_admin (CLI / local Vite) | ADC Cloud Run ID token (`habeas-cli auth login --adc` or Vite ADC proxy); email must be on `ADMIN_API_SUPER_ADMINS` |
-| admin / data_owner (CLI) | `habeas-cli auth login` (IAP audience token + email bound to gcloud account) |
+| admin / data_owner (CLI) | `habeas-cli auth login` (Cloud Run audience token via ADC + email header bound to gcloud account) |
 | Browser SSO | ops-ia / admin-web IAP front door (unchanged) |
 
 Do **not** re-run [`admin-api-dev-iam.yaml`](cloudbuild/admin-api-dev-iam.yaml) for the ADC workflow — it re-enables Cloud Run IAP and strips user invoker.

@@ -18,20 +18,20 @@
 
 | Who | How |
 |-----|-----|
-| **super_admin** | `habeas-cli auth login --adc` (or `ADMIN_API_AUTH=adc`) — ADC Cloud Run ID token; email from JWT; must be on `ADMIN_API_SUPER_ADMINS` |
-| **admin / data_owner** | `habeas-cli auth login` — IAP audience token via SA impersonation; email bound to active `gcloud` account (`@habeas.us`) |
+| **super_admin** | `habeas-cli auth login --adc` (or `ADMIN_API_AUTH=adc`) — ADC Cloud Run ID token only; email from JWT; must be on `ADMIN_API_SUPER_ADMINS` |
+| **admin / data_owner** | `habeas-cli auth login` — same Cloud Run audience token via ADC **plus** `X-Goog-Authenticated-User-Email` bound to active `gcloud` account (`@habeas.us`); full allowlists |
+
+Both paths mint audience = `ADMIN_API_URL` origin (Cloud Run IAP is off on admin-api-dev).
 
 ```bash
 export ADMIN_API_URL=https://admin-api-dev-hsa55rg7ja-uk.a.run.app
-
-# Super_admin (ADC) — principal must be on ADMIN_API_SUPER_ADMINS / allowlists
 gcloud auth application-default login
+
+# Super_admin (Bearer only)
 uv run --package habeas-cli habeas-cli auth login --adc
 uv run --package habeas-cli habeas-cli auth status
 
-# Admin / data_owner (IAP login) — email = gcloud account, not free-form spoof
-export IAP_OAUTH_CLIENT_ID=95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com
-export IAP_IMPERSONATE_SERVICE_ACCOUNT=95660886550-compute@developer.gserviceaccount.com
+# Admin / data_owner (Bearer + email header bound to gcloud account)
 uv run --package habeas-cli habeas-cli auth login
 uv run --package habeas-cli habeas-cli drop hash-index-refresh process --execute
 ```

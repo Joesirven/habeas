@@ -357,27 +357,30 @@ def _mint_iap_token() -> str:
 
 
 def _refresh_stored_iap(creds: dict[str, Any]) -> dict[str, Any]:
+    """Refresh stored login token (Cloud Run service-URL audience via ADC)."""
     token = str(creds.get("iap_id_token") or "").strip()
     if token and not token_needs_refresh(token, creds.get("expires_at")):
         return creds
-    client_id = os.environ.get("IAP_OAUTH_CLIENT_ID", "").strip()
-    if not client_id:
-        raise AdminApiError(
-            "Stored IAP token expired or missing; set IAP_OAUTH_CLIENT_ID and run "
-            "`habeas-cli auth login` again."
-        )
+    base_url = str(creds.get("admin_api_url") or admin_api_base_url()).rstrip("/")
     try:
-        fresh = fetch_iap_id_token(client_id)
+        audience = cloud_run_audience(base_url)
+    except ValueError as exc:
+        raise AdminApiError(
+            f"Stored IAP credentials have invalid admin_api_url: {exc}"
+        ) from exc
+    try:
+        fresh = fetch_adc_id_token(audience)
     except AdminApiError as exc:
         raise AdminApiError(
-            f"Stored IAP credentials need refresh but mint failed: {exc}"
+            f"Stored IAP credentials need refresh but ADC mint failed: {exc}. "
+            "Run `gcloud auth application-default login` and `habeas-cli auth login`."
         ) from exc
     creds = {
         **creds,
         "auth": "iap",
         "iap_id_token": fresh,
         "expires_at": expires_at_iso_from_token(fresh),
-        "admin_api_url": creds.get("admin_api_url") or admin_api_base_url(),
+        "admin_api_url": base_url,
     }
     save_credentials(creds)
     return creds

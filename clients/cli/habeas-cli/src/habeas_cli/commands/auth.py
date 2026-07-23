@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 import typer
 
 from habeas_cli.admin_api_client import (
@@ -12,7 +10,6 @@ from habeas_cli.admin_api_client import (
     cloud_run_audience,
     expires_at_iso_from_token,
     fetch_adc_id_token,
-    fetch_iap_id_token,
     gcloud_active_account,
 )
 from habeas_cli.credentials import (
@@ -27,17 +24,6 @@ from habeas_cli.output import emit
 app = typer.Typer(help="Authenticate the CLI against admin-api (IAP or ADC)")
 
 
-def _require_iap_client_id() -> str:
-    client_id = os.environ.get("IAP_OAUTH_CLIENT_ID", "").strip()
-    if not client_id:
-        raise typer.BadParameter(
-            "IAP_OAUTH_CLIENT_ID is required for `auth login` (IAP path). "
-            "Set it to the IAP OAuth client id for admin-api, or use "
-            "`habeas-cli auth login --adc` for the super_admin ADC path."
-        )
-    return client_id
-
-
 @app.command("login")
 def login(
     adc: bool = typer.Option(
@@ -49,8 +35,12 @@ def login(
 ) -> None:
     """Mint and store credentials for admin-api mutations.
 
-    Default: IAP audience token + email bound to the active gcloud account.
-    ``--adc``: verify ADC can mint a Cloud Run ID token and store ADC mode.
+    Default (allowlisted roles): Cloud Run ID token (ADC, audience = service URL)
+    plus ``X-Goog-Authenticated-User-Email`` bound to the active gcloud account.
+    ``--adc``: same token mint, no email header (super_admin Bearer-only path).
+
+    admin-api-dev runs with Cloud Run IAP off; service-URL audience is required
+    for IAM invoker. Legacy IAP OAuth-client audiences are not used here.
     """
     base_url = admin_api_base_url()
     try:
@@ -59,13 +49,14 @@ def login(
         emit({"status": "error", "detail": str(exc)}, human=human)
         raise typer.Exit(code=1) from exc
 
+    try:
+        audience = cloud_run_audience(base_url)
+        token = fetch_adc_id_token(audience)
+    except (AdminApiError, ValueError) as exc:
+        emit({"status": "error", "detail": str(exc)}, human=human)
+        raise typer.Exit(code=1) from exc
+
     if adc:
-        try:
-            audience = cloud_run_audience(base_url)
-            token = fetch_adc_id_token(audience)
-        except (AdminApiError, ValueError) as exc:
-            emit({"status": "error", "detail": str(exc)}, human=human)
-            raise typer.Exit(code=1) from exc
         path = save_credentials(
             {
                 "auth": "adc",
@@ -87,28 +78,6 @@ def login(
             human=human,
         )
         return
-
-    try:
-        client_id = _require_iap_client_id()
-    except typer.BadParameter as exc:
-        emit({"status": "error", "detail": str(exc)}, human=human)
-        raise typer.Exit(code=1) from exc
-
-    try:
-        token = fetch_iap_id_token(client_id)
-    except AdminApiError as exc:
-        emit(
-            {
-                "status": "error",
-                "detail": (
-                    f"IAP mint failed: {exc}. Check IAP_OAUTH_CLIENT_ID, "
-                    "TokenCreator on IAP_IMPERSONATE_SERVICE_ACCOUNT, and "
-                    "IAP accessor grants."
-                ),
-            },
-            human=human,
-        )
-        raise typer.Exit(code=1) from exc
 
     path = save_credentials(
         {

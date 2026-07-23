@@ -112,7 +112,7 @@ def test_bearer_jwt_on_super_admins_is_super_admin(monkeypatch: pytest.MonkeyPat
     roles.settings.require_iap_identity = True
 
     def _fake_verify(token, request, audience):
-        return {"email": "ops@example.com"}
+        return {"email": "ops@example.com", "email_verified": True}
 
     monkeypatch.setattr(
         "google.oauth2.id_token.verify_oauth2_token",
@@ -134,7 +134,7 @@ def test_bearer_jwt_not_on_super_admins_denied_even_if_admin(
     roles.settings.require_iap_identity = True
 
     def _fake_verify(token, request, audience):
-        return {"email": "admin@example.com"}
+        return {"email": "admin@example.com", "email_verified": True}
 
     monkeypatch.setattr(
         "google.oauth2.id_token.verify_oauth2_token",
@@ -146,6 +146,59 @@ def test_bearer_jwt_not_on_super_admins_denied_even_if_admin(
 
     assert response.status_code == 403
     assert "ADC access requires super_admin" in response.json()["detail"]
+
+
+def test_forged_iap_header_cannot_override_bearer_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disagreeing header must not elevate via iap_header allowlists."""
+    roles.settings.admin_api_super_admins = "ops@example.com"
+    roles.settings.admin_api_admins = "victim@example.com"
+    roles.settings.require_iap_identity = True
+
+    def _fake_verify(token, request, audience):
+        return {"email": "attacker@example.com", "email_verified": True}
+
+    monkeypatch.setattr(
+        "google.oauth2.id_token.verify_oauth2_token",
+        _fake_verify,
+    )
+    headers = {
+        "Authorization": "Bearer fake-token",
+        IAP_EMAIL_HEADER: "accounts.google.com:victim@example.com",
+    }
+
+    with TestClient(app) as client:
+        response = client.get("/me", headers=headers)
+
+    assert response.status_code == 403
+    assert "ADC access requires super_admin" in response.json()["detail"]
+
+
+def test_matching_bearer_and_header_uses_allowlists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI auth login: Cloud Run token + matching gcloud email → full allowlists."""
+    roles.settings.admin_api_admins = "admin@example.com"
+    roles.settings.require_iap_identity = True
+
+    def _fake_verify(token, request, audience):
+        return {"email": "admin@example.com", "email_verified": True}
+
+    monkeypatch.setattr(
+        "google.oauth2.id_token.verify_oauth2_token",
+        _fake_verify,
+    )
+    headers = {
+        "Authorization": "Bearer fake-token",
+        IAP_EMAIL_HEADER: "accounts.google.com:admin@example.com",
+    }
+
+    with TestClient(app) as client:
+        response = client.get("/me", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == _me_payload("admin@example.com", ROLE_ADMIN)
 
 
 def test_iap_header_admin_still_works() -> None:

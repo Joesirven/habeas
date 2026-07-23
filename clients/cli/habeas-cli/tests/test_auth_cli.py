@@ -47,7 +47,6 @@ def creds_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_auth_login_binds_gcloud_email(
     creds_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("IAP_OAUTH_CLIENT_ID", "123.apps.googleusercontent.com")
     monkeypatch.setenv("ADMIN_API_URL", REMOTE)
     monkeypatch.delenv("IAP_ID_TOKEN", raising=False)
     token = _jwt_with_exp(time.time() + 3600)
@@ -58,14 +57,16 @@ def test_auth_login_binds_gcloud_email(
             return_value="ops@example.com",
         ),
         patch(
-            "habeas_cli.commands.auth.fetch_iap_id_token",
+            "habeas_cli.commands.auth.fetch_adc_id_token",
             return_value=token,
         ) as mint,
     ):
         result = runner.invoke(app, ["auth", "login"])
 
     assert result.exit_code == 0, result.stdout
-    mint.assert_called_once_with("123.apps.googleusercontent.com")
+    mint.assert_called_once()
+    audience = mint.call_args[0][0]
+    assert audience == REMOTE
     payload = json.loads(result.stdout)
     assert payload["auth"] == "iap"
     assert payload["email"] == "ops@example.com"
