@@ -134,6 +134,8 @@ DEFAULT_PROXY_TIMEOUT = 60.0
 DOWNLOAD_PROXY_TIMEOUT = 120.0
 # dbt per-state builds can run nearly an hour; keep under worker Cloud Run timeout.
 HASH_INDEX_REFRESH_PROXY_TIMEOUT = 3300.0
+# Matching chunk drain can process many 10K BQ chunks per ensure-drain call.
+MATCHING_DRAIN_PROXY_TIMEOUT = 3300.0
 
 WORKER_KEYS = (
     ("drop_connector", "drop_connector_url"),
@@ -413,6 +415,31 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
         elif row["status"] == "success":
             matching_success = item["count"]
 
+    drain_lease_row = await conn.fetchrow(
+        """
+        SELECT holder,
+               acquired_at,
+               expires_at,
+               (holder IS NOT NULL AND expires_at IS NOT NULL AND expires_at >= NOW())
+                 AS active
+          FROM matching_drain_lease
+         WHERE id = 1
+        """
+    )
+    matching_drain = {
+        "active": bool(drain_lease_row["active"]) if drain_lease_row else False,
+        "holder": (
+            str(drain_lease_row["holder"])
+            if drain_lease_row and drain_lease_row["holder"] is not None
+            else None
+        ),
+        "expires_at": (
+            drain_lease_row["expires_at"].isoformat()
+            if drain_lease_row and drain_lease_row["expires_at"] is not None
+            else None
+        ),
+    }
+
     matching_result_rows = await conn.fetch(
         """
         SELECT mr.request_id::text AS request_id,
@@ -614,6 +641,7 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
             "pending": matching_pending,
             "success": matching_success,
             "by_status": matching_by_status,
+            "drain": matching_drain,
         },
         "approaching_sla": {
             "connector": int(approaching_connector or 0),
@@ -1563,7 +1591,34 @@ async def drop_dispatch(
 ):
     url = f"{settings.request_dispatcher_url.rstrip('/')}/dispatch"
     payload = _model_dump_nonzero(body) if body is not None else {}
-    return await proxy_post(url, json_body=payload)
+    status_code, result = await proxy_post_payload(url, json_body=payload)
+    if status_code == 200:
+        try:
+            drain_url = f"{settings.matching_url.rstrip('/')}/ensure-drain"
+            _, drain_payload = await proxy_post_payload(
+                drain_url, timeout=MATCHING_DRAIN_PROXY_TIMEOUT
+            )
+            if isinstance(result, dict):
+                result = {**result, "ensure_drain": drain_payload}
+        except Exception as exc:
+            logger.warning(
+                "drop_dispatch_ensure_drain_failed",
+                extra={
+                    "event": "drop_dispatch_ensure_drain_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
+    return JSONResponse(content=result, status_code=status_code)
+
+
+@router.post("/ensure-drain")
+async def drop_ensure_drain(
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
+):
+    """Catch-all / wave kick: budgeted matching chunk drain on the matching worker."""
+    url = f"{settings.matching_url.rstrip('/')}/ensure-drain"
+    return await proxy_post(url, timeout=MATCHING_DRAIN_PROXY_TIMEOUT)
 
 
 @router.post("/match")
@@ -1688,7 +1743,31 @@ async def hash_index_refresh_process(
 ):
     """Proxy process to hash_index_refresh worker (Cloud Run invoker token)."""
     url = f"{settings.hash_index_refresh_url.rstrip('/')}/process"
-    return await proxy_post(url, timeout=HASH_INDEX_REFRESH_PROXY_TIMEOUT)
+    status_code, payload = await proxy_post_payload(
+        url, timeout=HASH_INDEX_REFRESH_PROXY_TIMEOUT
+    )
+    rematch_n = 0
+    if isinstance(payload, dict):
+        rematch_n = int(payload.get("rematch_enqueued_count") or 0)
+        if rematch_n == 0 and isinstance(payload.get("run"), dict):
+            rematch_n = int(payload["run"].get("rematch_enqueued_count") or 0)
+    if status_code == 200 and rematch_n > 0:
+        try:
+            drain_url = f"{settings.matching_url.rstrip('/')}/ensure-drain"
+            _, drain_payload = await proxy_post_payload(
+                drain_url, timeout=MATCHING_DRAIN_PROXY_TIMEOUT
+            )
+            if isinstance(payload, dict):
+                payload = {**payload, "ensure_drain": drain_payload}
+        except Exception as exc:
+            logger.warning(
+                "hash_index_refresh_ensure_drain_failed",
+                extra={
+                    "event": "hash_index_refresh_ensure_drain_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
+    return JSONResponse(content=payload, status_code=status_code)
 
 
 def _coerce_audit_payload(value: Any) -> dict[str, Any]:

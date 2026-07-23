@@ -16,6 +16,34 @@ state-specific matching requirement is a new adapter class, not a new app.
 - Reaper default `max_attempts` is **5** (≥3 retries after the initial attempt); Health
   Configuration may override via admin_api (floor 4).
 
+## Chunk drain (Method E)
+
+- Queue remains **one `matching_attempts` row per request**.
+- Hot path: `POST /ensure-drain` acquires a single-flight `matching_drain_lease`, then
+  starts Cloud Run Job **`matching-drain-dev`** (5 parallel tasks). Each task runs
+  `python -m matching.chunk_drain` and drains **≤10K** homogeneous chunks via set-based
+  BigQuery (`lookup_dwids_by_hashes`). Tasks compete with `SKIP LOCKED`.
+- Job task HTTP unit (optional/ops): `POST /drain-chunk` (one chunk).
+- Fallback: if `MATCHING_DRAIN_JOB_NAME` is unset, `/ensure-drain` runs the inline
+  budgeted loop (`run_drain_budget`).
+- Small path unchanged: `POST /process` (one claim). Sets `submitted_at` on `in_flight`
+  so the reaper can recover hung rows.
+- Wave kick: admin-api chains `/ensure-drain` after `/ops/drop/dispatch` and after
+  hash-index refresh process when rematch enqueued. Catch-all: Scheduler →
+  matching `POST /ensure-drain`.
+
+### Compat-first cutover
+
+1. Deploy matching + migration `matching_create_matching_drain_lease`.
+2. Deploy Job via `matching-dev.yaml` (embeds Job deploy) or `matching-drain-job-dev.yaml`.
+3. Confirm pending declines faster than ~12/hour (Job executions visible in Cloud Run).
+4. Flip matching Scheduler to ensure-drain only.
+5. Mid-flight rows: complete or reaper timeout → new pending → chunk drain.
+6. **Prod:** Jose-approved (2026-07-22). Use `infra/cloudbuild/matching-prod.yaml` once
+   prod Cloud SQL exists; create/flip `dpra-prod-matching` → `/ensure-drain` after smoke.
+   Today `example-gcp-project` has no prod SQL / matching-prod runtime — operational cutover is
+   on `matching-dev` + `matching-drain-dev`.
+
 ## Local
 
 ```bash
@@ -28,3 +56,4 @@ Depends on [`habeas-privacy-core`](../../libs/habeas-privacy-core/).
 
 **Agent rules:** [`AGENTS.md`](AGENTS.md) · **Parent:** [`app/AGENTS.md`](../AGENTS.md)
 **Design:** `Projects/Data Privacy/01-ARCHITECTURE/Decisions/ADR-21-DROP-Hash-Matching.md` (Addendum, 2026-07-13) + `05-DELIVERABLES/Matching-Design-Brief.md` in the KB.
+**Plan:** [`docs/plans/2026-07-22-001-feat-matching-chunk-drain-plan.md`](../../docs/plans/2026-07-22-001-feat-matching-chunk-drain-plan.md)

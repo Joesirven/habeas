@@ -1662,7 +1662,9 @@ source = { editable = "app/matching" }
 dependencies = [
     { name = "habeas-privacy-core" },
     { name = "fastapi" },
+    { name = "google-auth" },
     { name = "google-cloud-bigquery" },
+    { name = "httpx" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1670,7 +1672,9 @@ dependencies = [
 requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "google-auth", specifier = ">=2.36" },
     { name = "google-cloud-bigquery", specifier = ">=3.25" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 

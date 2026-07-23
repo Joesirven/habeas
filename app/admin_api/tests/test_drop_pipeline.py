@@ -381,6 +381,8 @@ async def test_collect_pipeline_counts_shape():
     async def fetchrow(sql: str, *args: Any) -> _Row | None:
         if "hash_index_refresh_runs" in sql:
             return None
+        if "matching_drain_lease" in sql:
+            return _Row(holder=None, acquired_at=None, expires_at=None, active=False)
         return None
 
     conn = MagicMock()
@@ -398,6 +400,11 @@ async def test_collect_pipeline_counts_shape():
     assert result["drop_requests"]["count"] == 7
     assert result["matching_attempts"]["pending"] == 2
     assert result["matching_attempts"]["success"] == 5
+    assert result["matching_attempts"]["drain"] == {
+        "active": False,
+        "holder": None,
+        "expires_at": None,
+    }
     assert result["matching_review"]["pending"] == 1
     assert result["matching_review"]["approved"] == 3
     assert result["hash_index_refresh"]["pending"] == 1

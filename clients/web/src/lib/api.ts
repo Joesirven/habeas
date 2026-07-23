@@ -368,6 +368,12 @@ export type DropPipelineStatus = {
     pending: number
     success: number
     by_status: { status: string; count: number }[]
+    /** Absent on older admin-api revisions that predate chunk drain. */
+    drain?: {
+      active: boolean
+      holder: string | null
+      expires_at: string | null
+    }
   }
   matching_results_recent: MatchingResultSummary[]
   matching_review: {
