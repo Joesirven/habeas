@@ -20,6 +20,9 @@ _logger = logging.getLogger(__name__)
 MATCHING_REVIEW_ACTION = "matching.review"
 DEFAULT_MATCHING_REVIEW_TTL = timedelta(days=7)
 
+# Legal Inbox · Notice — after DROP fulfill, before weekly response upload.
+NOTICE_REVIEW_ACTION = "notice.review"
+
 # Legal Inbox · Triage — route (never silent-reject) before first matching enqueue.
 INTAKE_ROUTE_TRIAGE_ACTION = "intake.route_triage"
 
@@ -374,6 +377,38 @@ async def is_matching_review_approved(
         MATCHING_REVIEW_ACTION,
     )
     return row is not None
+
+
+async def is_notice_review_approved(
+    conn: asyncpg.Connection,
+    request_id: str,
+) -> bool:
+    """True when notice.review is approved or drop_raw notice_review_status is approved."""
+    approved = await conn.fetchval(
+        """
+        SELECT 1
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status = 'approved'
+         LIMIT 1
+        """,
+        UUID(request_id),
+        NOTICE_REVIEW_ACTION,
+    )
+    if approved is not None:
+        return True
+    status = await conn.fetchval(
+        """
+        SELECT drr.notice_review_status
+          FROM requests r
+          JOIN drop_raw_requests drr ON drr.id = r.raw_record_id
+         WHERE r.id = $1
+           AND r.intake_source = 'drop'
+        """,
+        UUID(request_id),
+    )
+    return str(status or "") == "approved"
 
 
 async def create_pending_matching_review(

@@ -19,6 +19,7 @@ from admin_api.approvals import (
     ASSIGNMENT_TARGETS,
     MATCH_TYPE_FILTERS,
     MatchTypeFilter,
+    approve_legal_notice_review,
     assign_requests,
     assign_requests_by_match_type,
     bulk_approve_matching_review_by_match_type,
@@ -269,6 +270,14 @@ class RouteTriageConditionBody(BaseModel):
 
     condition_jsonb: dict[str, Any]
     rationale: str = Field(min_length=1, max_length=2000)
+    decided_by: str | None = None
+
+
+class NoticeApproveBody(BaseModel):
+    """Legal Notice: approve notice.review for fulfilled DROP rows."""
+
+    request_ids: list[str] = Field(min_length=1, max_length=200)
+    decision_reason: str | None = None
     decided_by: str | None = None
 
 
@@ -2703,6 +2712,29 @@ async def drop_workflow_triage_send_to_matching(
     async with pool.acquire() as conn:
         try:
             result = await send_legal_triage_to_matching(
+                conn,
+                request_ids=body.request_ids,
+                decided_by=decided_by,
+                decision_reason=body.decision_reason,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": "ok", **result}
+
+
+@router.post("/workflow/notice/approve")
+async def drop_workflow_notice_approve(
+    body: NoticeApproveBody,
+    _principal: LegalPrincipal,
+    actor: DropMutationActor,
+):
+    """Legal Notice: approve notice.review and clear Inbox · Notice."""
+    _require_database()
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await approve_legal_notice_review(
                 conn,
                 request_ids=body.request_ids,
                 decided_by=decided_by,

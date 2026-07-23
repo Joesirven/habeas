@@ -42,6 +42,7 @@ import {
   postDropWorkflowAssign,
   postDropWorkflowEscalate,
   postRequestComment,
+  postNoticeApprove,
   postTriageBulkReject,
   postTriageSendToMatching,
   suggestedDropResponseStatus,
@@ -600,7 +601,13 @@ function InboxReviewPane({
   const [commentError, setCommentError] = useState<string | null>(null)
   const [copyNote, setCopyNote] = useState<string | null>(null)
   const [confirmAction, setConfirmAction] = useState<
-    'fulfill' | 'decline' | 'escalate' | 'triage_reject' | 'triage_match' | null
+    | 'fulfill'
+    | 'decline'
+    | 'escalate'
+    | 'triage_reject'
+    | 'triage_match'
+    | 'notice_approve'
+    | null
   >(null)
   const [draftOpen, setDraftOpen] = useState(false)
 
@@ -722,6 +729,20 @@ function InboxReviewPane({
     },
   })
 
+  const noticeApproveMutation = useMutation({
+    mutationFn: () => postNoticeApprove({ request_ids: [item.request_id] }),
+    onSuccess: async () => {
+      setActionError(null)
+      setConfirmAction(null)
+      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+    },
+    onError: (error) => {
+      setActionError(
+        error instanceof Error ? error.message : 'Notice approve failed',
+      )
+    },
+  })
+
   const assignMutation = useMutation({
     mutationFn: (email: string) =>
       postDropWorkflowAssign({
@@ -767,7 +788,8 @@ function InboxReviewPane({
     declineMutation.isPending ||
     escalateMutation.isPending ||
     triageRejectMutation.isPending ||
-    triageMatchMutation.isPending
+    triageMatchMutation.isPending ||
+    noticeApproveMutation.isPending
   const comments = commentsQuery.data ?? []
   const bucket = dueBucket(item)
   const assignee = item.assignment?.assignee_identity
@@ -870,6 +892,17 @@ function InboxReviewPane({
           confirmLabel="Send to matching"
           confirming={actionPending && confirmAction === 'triage_match'}
           onConfirm={() => triageMatchMutation.mutate()}
+        />
+        <ConfirmActionDialog
+          open={confirmAction === 'notice_approve'}
+          onOpenChange={(open) => {
+            if (!open && !actionPending) setConfirmAction(null)
+          }}
+          title="Approve notice.review?"
+          description={`Clear notice review for ${item.request_id.slice(0, 8)}… so it can enter the Wednesday DROP upload batch.`}
+          confirmLabel="Approve notice"
+          confirming={actionPending && confirmAction === 'notice_approve'}
+          onConfirm={() => noticeApproveMutation.mutate()}
         />
 
         <div className="shrink-0 space-y-2.5 border-b border-line px-4 py-3">
@@ -979,6 +1012,26 @@ function InboxReviewPane({
                   <TooltipContent>Send to matching — release Triage hold</TooltipContent>
                 </Tooltip>
               </>
+            ) : null}
+            {showNotice && canReviewActions ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-[0.65rem]"
+                    disabled={actionPending}
+                    onClick={() => setConfirmAction('notice_approve')}
+                    aria-label="Approve notice review"
+                  >
+                    Approve notice
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  Legal Notice — clear notice.review for Wed DROP upload
+                </TooltipContent>
+              </Tooltip>
             ) : null}
             {(showMatching || showLegalEscalation) && canReviewActions ? (
               <>
@@ -1204,6 +1257,17 @@ function InboxReviewPane({
                   consumer URL.
                 </p>
                 <p className="text-mute">Next upload window: Wed 00:00 America/Los_Angeles</p>
+                {canReviewActions ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="mt-2"
+                    disabled={actionPending}
+                    onClick={() => setConfirmAction('notice_approve')}
+                  >
+                    Approve notice
+                  </Button>
+                ) : null}
               </TabsContent>
             ) : null}
 
@@ -1640,7 +1704,13 @@ export function NeedsAttentionPage() {
   const [bulkAssignee, setBulkAssignee] = useState('')
   const [threadActionError, setThreadActionError] = useState<string | null>(null)
   const [bulkConfirm, setBulkConfirm] = useState<
-    'fulfill' | 'decline' | 'assign' | 'triage_reject' | 'triage_match' | null
+    | 'fulfill'
+    | 'decline'
+    | 'assign'
+    | 'triage_reject'
+    | 'triage_match'
+    | 'notice_approve'
+    | null
   >(null)
   /** Narrow viewports: queue or detail — never stack the pane under the list. */
   const [mobilePane, setMobilePane] = useState<'queue' | 'detail'>('queue')
@@ -1939,9 +2009,29 @@ export function NeedsAttentionPage() {
     },
   })
 
+  const bulkNoticeApproveMutation = useMutation({
+    mutationFn: (requestIds: string[]) =>
+      postNoticeApprove({ request_ids: requestIds }),
+    onSuccess: async (result) => {
+      setBulkError(
+        result.count === 0 ? 'No notice rows approved' : null,
+      )
+      setSelectedIds(new Set())
+      setBulkConfirm(null)
+      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+    },
+    onError: (error) => {
+      setBulkError(
+        error instanceof Error ? error.message : 'Notice approve failed',
+      )
+      setBulkConfirm(null)
+    },
+  })
+
   const loading = attentionQuery.isPending && !attentionQuery.data
   const triageBulkPending =
     bulkTriageRejectMutation.isPending || bulkTriageMatchMutation.isPending
+  const noticeBulkPending = bulkNoticeApproveMutation.isPending
 
   function toggleId(requestId: string) {
     setSelectedIds((previous) => {
@@ -2091,6 +2181,20 @@ export function NeedsAttentionPage() {
           if (requestIds.length > 0) bulkTriageMatchMutation.mutate(requestIds)
         }}
       />
+      <ConfirmActionDialog
+        open={bulkConfirm === 'notice_approve'}
+        onOpenChange={(open) => {
+          if (!open && !bulkNoticeApproveMutation.isPending) setBulkConfirm(null)
+        }}
+        title={`Approve notice for ${allFilteredSelected ? filteredIds.length : selectedCount}?`}
+        description="Clears notice.review so selected DROP rows can enter the Wednesday upload batch."
+        confirmLabel="Approve notice"
+        confirming={bulkNoticeApproveMutation.isPending}
+        onConfirm={() => {
+          const requestIds = allFilteredSelected ? [...filteredIds] : [...selectedIds]
+          if (requestIds.length > 0) bulkNoticeApproveMutation.mutate(requestIds)
+        }}
+      />
       <header className="flex shrink-0 flex-wrap items-end justify-between gap-3">
         <div>
           <Micro>
@@ -2105,17 +2209,20 @@ export function NeedsAttentionPage() {
             ) : null}
             {bulkMutation.isPending ||
             bulkAssignMutation.isPending ||
-            triageBulkPending ? (
+            triageBulkPending ||
+            noticeBulkPending ? (
               <span className="taste-frost-chip text-[0.65rem]" role="status" aria-live="polite">
-                {bulkTriageRejectMutation.isPending
-                  ? 'Rejecting…'
-                  : bulkTriageMatchMutation.isPending
-                    ? 'Sending…'
-                    : bulkMutation.isPending
-                      ? bulkConfirm === 'decline'
-                        ? 'Declining…'
-                        : 'Fulfilling…'
-                      : 'Assigning…'}
+                {bulkNoticeApproveMutation.isPending
+                  ? 'Approving notice…'
+                  : bulkTriageRejectMutation.isPending
+                    ? 'Rejecting…'
+                    : bulkTriageMatchMutation.isPending
+                      ? 'Sending…'
+                      : bulkMutation.isPending
+                        ? bulkConfirm === 'decline'
+                          ? 'Declining…'
+                          : 'Fulfilling…'
+                        : 'Assigning…'}
               </span>
             ) : null}
             {attentionQuery.data && attentionQuery.data.items.length > 0 ? (
@@ -2303,6 +2410,18 @@ export function NeedsAttentionPage() {
               </>
             ) : null}
 
+            {legalPersona && inboxKind === 'notice' ? (
+              <Button
+                size="sm"
+                disabled={selectedCount === 0 || noticeBulkPending}
+                onClick={() => setBulkConfirm('notice_approve')}
+              >
+                {bulkNoticeApproveMutation.isPending
+                  ? 'Approving…'
+                  : 'Approve notice'}
+              </Button>
+            ) : null}
+
             <div className="ml-auto flex items-center gap-2">
               {selectedCount > 0 ? (
                 <span className="taste-frost-chip tabular-nums text-[0.65rem]">
@@ -2372,37 +2491,33 @@ export function NeedsAttentionPage() {
             ) : null}
             {!loading && !attentionQuery.isError && filteredItems.length === 0 ? (
               <p className="p-6 text-xs text-ink-soft">
-                {items.length === 0 && legalPersona
-                  ? inboxKind === 'notice'
-                    ? 'Notice review is reserved — items appear here after data-vertical fulfill once that feed is wired.'
-                    : inboxKind === 'delivery'
-                      ? 'Delivery handoff is reserved — access packs appear here after fulfill once that feed is wired.'
-                      : inboxKind === 'triage'
-                        ? 'No Legal Triage holds — condition hits land here before matching.'
-                        : inboxKind === 'escalations'
-                          ? 'No escalations from data owners right now.'
-                          : inboxKind === 'pending_tasks'
-                            ? 'No pending tasks assigned to you.'
-                            : 'Nothing in the Legal case queue right now.'
-                  : items.length === 0
-                    ? 'Nothing needs attention right now.'
-                    : inboxKind === 'triage'
-                      ? 'No Legal Triage holds — condition hits land here before matching.'
-                      : inboxKind === 'escalations'
-                        ? 'No escalations to Legal right now.'
-                        : inboxKind === 'delivery'
-                          ? legalPersona
-                            ? 'Delivery handoff feed is not wired yet — access packs will appear here after fulfill.'
-                            : 'No access delivery tasks yet — packs appear here after fulfillment.'
-                          : inboxKind === 'notice'
-                            ? legalPersona
-                              ? 'Notice review feed is not wired yet — items will appear here after data-vertical fulfill.'
-                              : 'No DROP notice.review items waiting.'
-                            : inboxKind === 'communications'
-                              ? 'No requester comms yet — drafts and replies will land here.'
-                              : inboxKind === 'pending_tasks'
-                                ? 'No pending tasks assigned to you.'
-                                : 'No items match the current view.'}
+                {items.length === 0
+                  ? legalPersona
+                    ? inboxKind === 'notice'
+                      ? 'No DROP notice.review items — fulfilled rows with pending notice land here.'
+                      : inboxKind === 'delivery'
+                        ? 'No access delivery handoffs yet — rows appear after access packs get a delivery status.'
+                        : inboxKind === 'triage'
+                          ? 'No Legal Triage holds — condition hits land here before matching.'
+                          : inboxKind === 'escalations'
+                            ? 'No escalations from data owners right now.'
+                            : inboxKind === 'pending_tasks'
+                              ? 'No pending tasks assigned to you.'
+                              : 'Nothing in the Legal case queue right now.'
+                    : 'Nothing needs attention right now.'
+                  : inboxKind === 'triage'
+                    ? 'No Legal Triage holds — condition hits land here before matching.'
+                    : inboxKind === 'escalations'
+                      ? 'No escalations to Legal right now.'
+                      : inboxKind === 'delivery'
+                        ? 'No access delivery tasks in this filter.'
+                        : inboxKind === 'notice'
+                          ? 'No DROP notice.review items waiting.'
+                          : inboxKind === 'communications'
+                            ? 'No requester comms yet — drafts and replies will land here.'
+                            : inboxKind === 'pending_tasks'
+                              ? 'No pending tasks assigned to you.'
+                              : 'No items match the current view.'}
               </p>
             ) : null}
 

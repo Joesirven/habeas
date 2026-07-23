@@ -1433,6 +1433,28 @@ export function postTriageSendToMatching(body: {
   })
 }
 
+export function postNoticeApprove(body: {
+  request_ids: string[]
+  decision_reason?: string | null
+}) {
+  return fetchAdminApi<{
+    status: string
+    count: number
+    request_ids: string[]
+    results: Array<{
+      request_id: string
+      notice_review_status_set: boolean
+      assignment_closed: boolean
+    }>
+  }>('/ops/drop/workflow/notice/approve', {
+    method: 'POST',
+    body: JSON.stringify({
+      decided_by: 'web-admin@habeas.com',
+      ...body,
+    }),
+  })
+}
+
 export type RouteTriageCondition = {
   requestor_state_not_in?: string[]
   state_in?: string[]

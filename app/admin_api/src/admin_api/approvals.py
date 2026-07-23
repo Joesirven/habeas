@@ -13,6 +13,7 @@ from habeas_privacy_core.workflow.approval import (
     ASSIGNMENT_TARGETS,
     DEFAULT_MATCHING_REVIEW_TTL,
     MATCHING_REVIEW_ACTION,
+    NOTICE_REVIEW_ACTION,
     WORKFLOW_ASSIGNMENT_ACTION,
     close_pending_legal_triage,
     create_pending_matching_review,
@@ -668,12 +669,80 @@ async def send_legal_triage_to_matching(
     }
 
 
+async def approve_legal_notice_review(
+    conn: asyncpg.Connection,
+    *,
+    request_ids: list[str],
+    decided_by: str,
+    decision_reason: str | None = None,
+) -> dict[str, Any]:
+    """Legal Notice: mark notice_review_status approved (and close pending gate)."""
+    reason = decision_reason or "legal notice.review approved"
+    results: list[dict[str, Any]] = []
+    for request_id in request_ids:
+        updated = await conn.execute(
+            """
+            UPDATE drop_raw_requests AS drr
+               SET notice_review_status = 'approved'
+              FROM requests AS r
+             WHERE r.id = $1
+               AND r.intake_source = 'drop'
+               AND r.raw_record_id = drr.id
+               AND drr.response_status IS NOT NULL
+               AND drr.notice_review_status = 'pending'
+            """,
+            UUID(request_id),
+        )
+        status_set = (
+            updated.endswith("UPDATE 1")
+            if isinstance(updated, str)
+            else bool(updated)
+        )
+        pending_id = await conn.fetchval(
+            """
+            SELECT id
+              FROM approval_requests
+             WHERE request_id = $1
+               AND action_type = $2
+               AND status = 'pending'
+             ORDER BY requested_at DESC
+             LIMIT 1
+            """,
+            UUID(request_id),
+            NOTICE_REVIEW_ACTION,
+        )
+        assignment_closed = False
+        if pending_id is not None:
+            decided = await decide_approval(
+                conn,
+                approval_id=int(pending_id),
+                status="approved",
+                decided_by=decided_by,
+                decision_reason=reason,
+            )
+            assignment_closed = decided is not None
+        results.append(
+            {
+                "request_id": request_id,
+                "notice_review_status_set": status_set,
+                "assignment_closed": assignment_closed,
+            }
+        )
+    return {
+        "count": sum(1 for r in results if r["notice_review_status_set"]),
+        "request_ids": [r["request_id"] for r in results if r["notice_review_status_set"]],
+        "results": results,
+    }
+
+
 __all__ = [
     "ASSIGNMENT_TARGETS",
     "MATCHING_REVIEW_ACTION",
     "MATCH_TYPE_FILTERS",
+    "NOTICE_REVIEW_ACTION",
     "WORKFLOW_ASSIGNMENT_ACTION",
     "MatchTypeFilter",
+    "approve_legal_notice_review",
     "assign_requests",
     "assign_requests_by_match_type",
     "bulk_approve_matching_review_by_match_type",

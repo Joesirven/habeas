@@ -28,6 +28,7 @@ from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
 from habeas_privacy_core.workflow.approval import (
     MATCHING_REVIEW_ACTION,
+    NOTICE_REVIEW_ACTION,
     WORKFLOW_ASSIGNMENT_ACTION,
     get_current_assignment,
     is_matching_review_approved,
@@ -831,6 +832,133 @@ async def list_assignment_needs_attention(
     return items
 
 
+async def list_notice_needs_attention(
+    conn: Any,
+    *,
+    limit: int,
+) -> list[NeedsAttentionItem]:
+    """Fulfilled DROP rows awaiting Legal notice.review before Wed upload."""
+    rows = await conn.fetch(
+        """
+        SELECT r.id::text AS request_id,
+               r.intake_source,
+               r.received_at,
+               r.raw_record_id,
+               UPPER(TRIM(r.requestor_state)) AS requestor_state,
+               drr.source_csv_filename,
+               drr.response_status,
+               ar.id AS approval_id,
+               COALESCE(ar.requested_at, r.received_at) AS requested_at,
+               COALESCE(ar.status, drr.notice_review_status) AS review_status
+          FROM requests r
+          JOIN drop_raw_requests drr
+            ON drr.id = r.raw_record_id
+           AND r.intake_source = 'drop'
+          LEFT JOIN LATERAL (
+                SELECT ar2.id, ar2.requested_at, ar2.status
+                  FROM approval_requests ar2
+                 WHERE ar2.request_id = r.id
+                   AND ar2.action_type = $1
+                   AND ar2.status = 'pending'
+                 ORDER BY ar2.requested_at DESC
+                 LIMIT 1
+               ) ar ON TRUE
+         WHERE drr.response_status IS NOT NULL
+           AND drr.notice_review_status = 'pending'
+         ORDER BY COALESCE(ar.requested_at, r.received_at) ASC NULLS LAST
+         LIMIT $2
+        """,
+        NOTICE_REVIEW_ACTION,
+        limit,
+    )
+    items: list[NeedsAttentionItem] = []
+    bulk_by_csv: dict[str, int | None] = {}
+    for row in rows:
+        state = row["requestor_state"]
+        state_acronym = str(state).strip().upper()[:2] if state else None
+        bulk_process_id = None
+        if row["raw_record_id"] is not None:
+            bulk_process_id = await _bulk_process_id_for_raw(
+                conn,
+                raw_record_id=int(row["raw_record_id"]),
+                cache=bulk_by_csv,
+            )
+        items.append(
+            NeedsAttentionItem(
+                request_id=row["request_id"],
+                reason=NOTICE_REVIEW_ACTION,
+                kind="notice",
+                current_stage="notice",
+                intake_source=row["intake_source"],
+                received_at=_iso(row["received_at"]),
+                requested_at=_iso(row["requested_at"]),
+                approval_id=(
+                    int(row["approval_id"]) if row["approval_id"] is not None else None
+                ),
+                requestor_state=state_acronym,
+                review_status=str(row["review_status"] or "pending"),
+                bulk_process_id=bulk_process_id,
+                source_csv_filename=(
+                    str(row["source_csv_filename"])
+                    if row["source_csv_filename"] is not None
+                    else None
+                ),
+            )
+        )
+    return items
+
+
+async def list_delivery_needs_attention(
+    conn: Any,
+    *,
+    limit: int,
+) -> list[NeedsAttentionItem]:
+    """Access handoff rows awaiting delivery status (shareable URL path)."""
+    rows = await conn.fetch(
+        """
+        WITH latest AS (
+            SELECT DISTINCT ON (ca.request_id)
+                   ca.request_id,
+                   ca.status AS delivery_status,
+                   ca.contacted_at
+              FROM communication_attempts ca
+             WHERE ca.purpose = 'access_delivery'
+             ORDER BY ca.request_id, ca.contacted_at DESC
+        )
+        SELECT r.id::text AS request_id,
+               r.intake_source,
+               r.received_at,
+               UPPER(TRIM(r.requestor_state)) AS requestor_state,
+               l.contacted_at AS requested_at,
+               l.delivery_status AS review_status
+          FROM latest l
+          JOIN requests r ON r.id = l.request_id
+         WHERE l.delivery_status IN ('pending', 'recorded', 'failed', 'sent')
+         ORDER BY l.contacted_at ASC NULLS LAST
+         LIMIT $1
+        """,
+        limit,
+    )
+    items: list[NeedsAttentionItem] = []
+    for row in rows:
+        state = row["requestor_state"]
+        state_acronym = str(state).strip().upper()[:2] if state else None
+        items.append(
+            NeedsAttentionItem(
+                request_id=row["request_id"],
+                reason="access.delivery",
+                kind="delivery",
+                current_stage="delivery",
+                intake_source=row["intake_source"],
+                received_at=_iso(row["received_at"]),
+                requested_at=_iso(row["requested_at"]),
+                requestor_state=state_acronym,
+                review_status=str(row["review_status"] or "pending"),
+            )
+        )
+    return items
+
+
 async def list_needs_attention(
     conn: Any,
     *,
@@ -854,7 +982,10 @@ async def list_needs_attention(
                 conn, kind="escalations", limit=limit
             )
         )
-    # notice / delivery: reserved — empty until those gates land in this feed.
+    if kind in {"notice", "all"}:
+        items.extend(await list_notice_needs_attention(conn, limit=limit))
+    if kind in {"delivery", "all"}:
+        items.extend(await list_delivery_needs_attention(conn, limit=limit))
 
     # Stable sort + hard limit when unioning kinds.
     items.sort(key=lambda item: item.requested_at or item.received_at or "")

@@ -284,13 +284,14 @@ function LegalHome() {
       label: 'Notice',
       kind: 'notice',
       count: notice,
-      hint: notice === 0 ? 'Feed reserved' : 'DROP notice.review',
+      hint: 'DROP notice.review',
     },
     {
       label: 'Delivery',
       kind: 'delivery',
       count: delivery,
-      hint: delivery === 0 ? 'Feed reserved' : 'Access handoff',
+      hint:
+        delivery === 0 ? 'Access handoff (empty until packs land)' : 'Access handoff',
     },
   ]
 

@@ -1756,6 +1756,59 @@ def test_legal_triage_bulk_reject_and_send_to_matching(
     assert forbidden.status_code == 403
 
 
+def test_notice_approve_legal_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_approve(
+        conn: Any,
+        *,
+        request_ids: list[str],
+        decided_by: str,
+        decision_reason: str | None = None,
+    ) -> dict[str, Any]:
+        captured["approve"] = {
+            "request_ids": request_ids,
+            "decided_by": decided_by,
+        }
+        return {
+            "count": len(request_ids),
+            "request_ids": request_ids,
+            "results": [
+                {
+                    "request_id": rid,
+                    "notice_review_status_set": True,
+                    "assignment_closed": False,
+                }
+                for rid in request_ids
+            ],
+        }
+
+    _fake_pool(monkeypatch)
+    roles.settings.admin_api_legals = "legal@example.com"
+    roles.settings.admin_api_data_owners = "owner@example.com"
+    roles.settings.admin_api_super_admins = ""
+    roles.settings.admin_api_admins = ""
+    monkeypatch.setattr(drop_pipeline, "approve_legal_notice_review", fake_approve)
+
+    rid = "00000000-0000-0000-0000-000000000088"
+    with TestClient(app) as client:
+        ok = client.post(
+            "/ops/drop/workflow/notice/approve",
+            headers={IAP_EMAIL_HEADER: "legal@example.com"},
+            json={"request_ids": [rid]},
+        )
+        forbidden = client.post(
+            "/ops/drop/workflow/notice/approve",
+            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            json={"request_ids": [rid]},
+        )
+
+    assert ok.status_code == 200
+    assert ok.json()["count"] == 1
+    assert captured["approve"]["request_ids"] == [rid]
+    assert forbidden.status_code == 403
+
+
 def test_route_triage_conditions_get_put_legal_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

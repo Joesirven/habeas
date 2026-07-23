@@ -173,6 +173,50 @@ async def test_list_needs_attention_kind_triage_and_escalations() -> None:
     assert [item.request_id for item in escalations.items] == [escalate_id]
 
 
+@pytest.mark.asyncio
+async def test_list_needs_attention_kind_notice() -> None:
+    notice_id = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+    conn = AsyncMock()
+    from admin_api.request_journey import NeedsAttentionItem
+
+    notice_item = NeedsAttentionItem(
+        request_id=notice_id,
+        reason="notice.review",
+        kind="notice",
+        current_stage="notice",
+        intake_source="drop",
+        received_at=None,
+    )
+    with (
+        patch(
+            "admin_api.request_journey.list_matching_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "admin_api.request_journey.list_assignment_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "admin_api.request_journey.list_notice_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[notice_item],
+        ),
+        patch(
+            "admin_api.request_journey.list_delivery_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        notice = await request_journey.list_needs_attention(
+            conn, limit=50, kind="notice"
+        )
+
+    assert notice.kind == "notice"
+    assert [item.request_id for item in notice.items] == [notice_id]
+
+
 def test_legal_can_read_needs_attention(monkeypatch: pytest.MonkeyPatch) -> None:
     roles.settings.require_iap_identity = True
     roles.settings.admin_api_legals = "legal@example.com"
