@@ -57,7 +57,6 @@ import {
   type BulkProcessesPayload,
   type DropPipelineStatus,
   type HashIndexRefreshStatus,
-  type StepStatusCount,
   type WorkerHealthProbe,
 } from '@/lib/api'
 import { RetryConfigPanel } from '@/routes/ops/health/configuration'
@@ -915,10 +914,6 @@ function isPendingBulkSummary(row: BulkProcessSummary): boolean {
   return row.overall?.status === 'in_progress' && (row.overall.percent ?? 0) < 5
 }
 
-function retryCountFromRuns(runs: { attempt_number: number }[]): number {
-  return runs.reduce((sum, run) => sum + Math.max(0, run.attempt_number - 1), 0)
-}
-
 function StageRunStatChips({
   finished,
   queued,
@@ -1184,7 +1179,7 @@ function BatchProcessExpandRow({
   focusedStage?: PipelineStageTab
   onStageChange?: (stage: PipelineStageTab) => void
 }) {
-  const { data: me } = useMe()
+  const { me } = useMe()
   const queryClient = useQueryClient()
   const statusKey = row.overall?.status ?? row.download_status
   const likelyNeedsReview = statusKey === 'needs_attention'
@@ -2213,7 +2208,7 @@ function CompactOpsMetrics({
       viz: (
         <MiniRing
           percent={Math.min(100, ((openRequests ?? 0) / Math.max(openRequests ?? 1, 20)) * 100)}
-          tone="sky"
+          tone="navy"
         />
       ),
       detail: (
