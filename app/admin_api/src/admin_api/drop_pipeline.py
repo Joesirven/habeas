@@ -22,7 +22,6 @@ from admin_api.approvals import (
     assign_requests_by_match_type,
     bulk_approve_matching_review_by_match_type,
     bulk_decline_matching_review_by_match_type,
-    create_matching_review_approval,
     decline_matching_review_for_request,
     escalate_requests,
     get_current_assignment,
@@ -42,7 +41,10 @@ from habeas_privacy_core.auth import (
 )
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
-from habeas_privacy_core.workflow.approval import MATCHING_REVIEW_ACTION
+from habeas_privacy_core.workflow.approval import (
+    MATCHING_REVIEW_ACTION,
+    ensure_pending_matching_review,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -706,7 +708,11 @@ def _stage_completion_ratio(counts: dict[str, int]) -> float:
 
 
 def _derive_overall(stages: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """Weighted progress across request-processing stages (counts only)."""
+    """Weighted progress across request-processing stages (counts only).
+
+    Later stages do not contribute until earlier stages are complete — avoids
+    REVIEW/FULFILL looking done while LAND/MATCHING are still open.
+    """
     order = ("download", "land", "promote", "matching", "review", "fulfillment")
     weights = {
         "download": 0.10,
@@ -718,22 +724,23 @@ def _derive_overall(stages: dict[str, dict[str, Any]]) -> dict[str, Any]:
     }
     weighted = 0.0
     current_stage = "download"
+    blocked = False
     for key in order:
         stage = stages.get(key) or _empty_stage_counts()
-        ratio = _stage_completion_ratio(stage)
-        weighted += weights[key] * ratio
         open_n = int(stage.get("open", 0))
         failed_n = int(stage.get("failed", 0))
         total = int(stage.get("total", 0))
         success_n = int(stage.get("success", 0))
         incomplete = open_n > 0 or failed_n > 0 or (total > 0 and success_n < total)
-        if incomplete:
+        awaiting = total == 0 and key in ("land", "promote", "matching")
+        if blocked:
+            continue
+        ratio = _stage_completion_ratio(stage)
+        weighted += weights[key] * ratio
+        if incomplete or awaiting:
             current_stage = key
-            break
-        if total == 0 and key in ("land", "promote", "matching"):
-            current_stage = key
-            break
-    else:
+            blocked = True
+    if not blocked:
         current_stage = "fulfillment"
     percent = int(round(min(100.0, max(0.0, weighted * 100.0))))
     any_open = any(int((stages.get(k) or {}).get("open", 0)) > 0 for k in order)
@@ -970,6 +977,9 @@ async def collect_process_run_groups(
                 runs = [r for r in runs if r["status"] in _OPEN_ATTEMPT_STATUSES]
             elif status == "failed":
                 runs = [r for r in runs if r["status"] in _TERMINAL_FAIL_STATUSES]
+            elif status in ("attention", "open_or_failed"):
+                attention = set(_OPEN_ATTEMPT_STATUSES) | set(_TERMINAL_FAIL_STATUSES)
+                runs = [r for r in runs if r["status"] in attention]
             elif status == "success":
                 runs = [r for r in runs if r["status"] == "success"]
             else:
@@ -1185,6 +1195,12 @@ async def collect_bulk_process_progress(
             SELECT
                 (SELECT COUNT(*)::int FROM batch_raw) AS raw_rows,
                 (SELECT COUNT(*)::int FROM batch_requests) AS request_rows,
+                (SELECT COUNT(DISTINCT drr.source_csv_filename)::int
+                   FROM batch_raw br
+                   JOIN drop_raw_requests drr ON drr.id = br.raw_id
+                  WHERE drr.source_csv_filename IS NOT NULL
+                    AND length(trim(drr.source_csv_filename)) > 0
+                ) AS land_csv_count,
                 (SELECT COUNT(*)::int FROM batch_requests br
                   WHERE br.request_id NOT IN (SELECT request_id FROM latest_match)
                 ) AS matching_none,
@@ -1194,6 +1210,10 @@ async def collect_bulk_process_progress(
                   WHERE status = 'success') AS matching_success,
                 (SELECT COUNT(*)::int FROM latest_match
                   WHERE status = ANY($3::text[])) AS matching_failed,
+                (SELECT COUNT(DISTINCT mr.request_id)::int
+                   FROM matching_results mr
+                   JOIN batch_requests br ON br.request_id = mr.request_id
+                ) AS matching_results_count,
                 (SELECT COUNT(*)::int
                    FROM approval_requests ar
                    JOIN batch_requests br ON br.request_id = ar.request_id
@@ -1222,22 +1242,70 @@ async def collect_bulk_process_progress(
     fulfillment = _empty_stage_counts()
     raw_rows = 0
     request_rows = 0
+    land_csv_count = 0
     if request_stats is not None:
         raw_rows = int(request_stats["raw_rows"] or 0)
         request_rows = int(request_stats["request_rows"] or 0)
+        land_csv_count = int(request_stats["land_csv_count"] or 0)
         matching_none = int(request_stats["matching_none"] or 0)
+        matching_results_count = int(request_stats["matching_results_count"] or 0)
         matching["open"] = int(request_stats["matching_open"] or 0) + matching_none
         matching["success"] = int(request_stats["matching_success"] or 0)
         matching["failed"] = int(request_stats["matching_failed"] or 0)
+        # Prefer outcome rows when attempt ledger under-counts success.
+        if matching_results_count > matching["success"]:
+            gained = matching_results_count - matching["success"]
+            matching["success"] = matching_results_count
+            matching["open"] = max(0, matching["open"] - gained)
         matching["total"] = (
             matching["open"] + matching["success"] + matching["failed"]
         )
-        review["open"] = int(request_stats["review_pending"] or 0)
-        review["success"] = int(request_stats["review_approved"] or 0)
-        review["total"] = review["open"] + review["success"]
+        # Review/fulfill denominators are spine size — never 1/1 "done" while
+        # matching still has 200 open.
+        review_pending = int(request_stats["review_pending"] or 0)
+        review_approved = int(request_stats["review_approved"] or 0)
+        if request_rows > 0:
+            review["success"] = min(review_approved, request_rows)
+            review["open"] = max(0, request_rows - review["success"])
+            # pending gates already counted in open via remainder; keep pending
+            # visible when approvals exist without full spine coverage.
+            if review_pending > 0:
+                review["open"] = max(review["open"], review_pending)
+            review["total"] = request_rows
+        else:
+            review["open"] = review_pending
+            review["success"] = review_approved
+            review["total"] = review["open"] + review["success"]
         fulfillment["open"] = int(request_stats["fulfill_unset"] or 0)
         fulfillment["success"] = int(request_stats["fulfill_done"] or 0)
         fulfillment["total"] = fulfillment["open"] + fulfillment["success"]
+
+    # Reconcile stale land/promote attempt ledgers with spine outcomes.
+    # Land may stay pending while raws already exist; promote may be missing
+    # entirely when an unscoped promote created requests.
+    if raw_rows > 0:
+        units = max(land_csv_count, land["total"], 1)
+        if land["success"] < units:
+            gained = units - land["success"]
+            land["success"] = units
+            land["open"] = max(0, land["open"] - gained)
+            land["total"] = max(
+                land["total"], land["success"] + land["failed"] + land["open"]
+            )
+    # Only invent promote success when the ledger is missing entirely.
+    if request_rows > 0 and promote["total"] == 0:
+        promote_units = max(land_csv_count, land["success"], 1)
+        promote["success"] = promote_units
+        promote["total"] = promote_units
+        promote["open"] = 0
+
+    # Do not surface review/fulfill as ahead of matching.
+    matching_incomplete = matching["total"] == 0 or matching["open"] > 0 or (
+        matching["success"] < matching["total"]
+    )
+    if matching_incomplete:
+        review = _empty_stage_counts()
+        fulfillment = _empty_stage_counts()
 
     stages = {
         "download": download,
@@ -1371,9 +1439,19 @@ async def drop_bulk_processes(
         if include_summary:
             enriched: list[dict[str, Any]] = []
             for item in processes:
-                detail = await collect_bulk_process_progress(
-                    conn, process_id=int(item["process_id"])
-                )
+                try:
+                    detail = await collect_bulk_process_progress(
+                        conn, process_id=int(item["process_id"])
+                    )
+                except Exception:
+                    logger.exception(
+                        "bulk_process_summary_failed",
+                        extra={
+                            "event": "bulk_process_summary_failed",
+                            "process_id": int(item["process_id"]),
+                        },
+                    )
+                    detail = None
                 if detail is not None:
                     item = {
                         **item,
@@ -1512,17 +1590,25 @@ async def drop_match(
             _require_database()
             pool = get_pool()
             async with pool.acquire() as conn:
-                approval = await create_matching_review_approval(
+                # Worker opens the gate in the match-success transaction; this
+                # ensure is idempotent belt-and-suspenders for proxy races.
+                approval = await ensure_pending_matching_review(
                     conn,
                     request_id=payload["request_id"],
                 )
-            payload = {
-                **payload,
-                "matching_review_approval_id": int(approval["id"]),
-                "matching_review_status": "pending",
-            }
+            if approval is not None:
+                payload = {
+                    **payload,
+                    "matching_review_approval_id": int(approval["id"]),
+                    "matching_review_status": "pending",
+                }
+            else:
+                payload = {
+                    **payload,
+                    "matching_review_status": "pending_or_covered",
+                }
         except Exception as exc:
-            # Do not block match success; bulk-approve can ensure gates later.
+            # Match already succeeded in the worker; reaper reconciler backfills.
             logger.warning(
                 "drop_match_review_gate_failed",
                 extra={

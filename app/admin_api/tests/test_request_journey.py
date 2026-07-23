@@ -135,6 +135,32 @@ def test_journey_denies_unknown_email(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.status_code == 403
 
 
+@pytest.mark.asyncio
+async def test_latest_download_for_csv_joins_via_land_gcs_uri() -> None:
+    """Download attribution uses land.gcs_uri — not connector.source_csv_filename."""
+
+    class FakeConn:
+        async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+            if "drop_connector_attempts" in query and "gcs_uri = $1" in query:
+                assert args[0] == "gs://bucket/drop.zip"
+                return {
+                    "id": 42,
+                    "status": "success",
+                    "attempted_at": None,
+                    "completed_at": None,
+                    "gcs_uri": "gs://bucket/drop.zip",
+                }
+            return None
+
+    row = await request_journey._latest_download_for_csv(
+        FakeConn(),
+        source_csv_filename="20260717_1_EMAIL.csv",
+        land_gcs_uri="gs://bucket/drop.zip",
+    )
+    assert row is not None
+    assert row["id"] == 42
+
+
 def test_compute_current_stage_prefers_waiting_over_earlier_not_started() -> None:
     stages = [
         request_journey.JourneyStage(stage="received", label="Received", status="complete"),
@@ -214,7 +240,8 @@ async def test_journey_manual_request_received_stage(pool) -> None:
         journey = await build_request_journey(conn, request_id=request_id)
 
     assert journey.request_id == request_id
-    assert journey.current_stage == "received"
+    # After received, next non-skipped work is match (not yet started).
+    assert journey.current_stage == "match"
     assert journey.intake_source == "manual"
     assert len(journey.stages) == len(JOURNEY_STAGES)
     assert journey.stages[0].status == "complete"
@@ -261,7 +288,7 @@ async def test_needs_attention_includes_pending_review(pool) -> None:
         )
         await _insert_matching_result(conn, request_id=request_id, match_count=1)
         await ensure_pending_matching_review(conn, request_id=request_id)
-        response = await request_journey.list_needs_attention(conn, limit=50)
+        response = await request_journey.list_needs_attention(conn, limit=1000)
 
     assert any(item.request_id == request_id for item in response.items)
     item = next(row for row in response.items if row.request_id == request_id)
@@ -270,6 +297,33 @@ async def test_needs_attention_includes_pending_review(pool) -> None:
     assert item.match_count == 1
     assert item.match_type == "single_match"
     assert item.matched is True
+    assert item.bulk_process_id is None  # manual intake — no DROP batch
+    assert_no_pii_keys(response.model_dump())
+
+
+@pytest.mark.asyncio
+@pytestmark_integration
+async def test_needs_attention_includes_ungated_matching_results(pool) -> None:
+    """Matches without an approval gate still need review (runs review-open)."""
+    async with pool.acquire() as conn:
+        request_id = str(
+            await conn.fetchval(
+                """
+                INSERT INTO requests (intake_source, raw_record_id)
+                VALUES ('manual', NULL)
+                RETURNING id
+                """
+            )
+        )
+        await _insert_matching_result(conn, request_id=request_id, match_count=1)
+        # Intentionally no ensure_pending_matching_review — gate missing.
+        response = await request_journey.list_needs_attention(conn, limit=1000)
+
+    assert any(item.request_id == request_id for item in response.items)
+    item = next(row for row in response.items if row.request_id == request_id)
+    assert item.review_status == "none"
+    assert item.approval_id is None
+    assert item.match_type == "single_match"
     assert_no_pii_keys(response.model_dump())
 
 
@@ -314,8 +368,8 @@ async def test_journey_api_integration_no_pii(pool, monkeypatch: pytest.MonkeyPa
         "first_name",
         "last_name",
         "gcs_uri",
-        "source_csv_filename",
     ):
         assert forbidden not in serialized
+    # source_csv_filename is an intentional ops field on journey (ZIP member name).
 
     await db_pool.close_pool()

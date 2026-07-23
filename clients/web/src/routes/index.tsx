@@ -13,7 +13,7 @@ function OperatorDashboardHome() {
 
   const attentionQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'home'],
-    queryFn: () => getNeedsAttention(100),
+    queryFn: () => getNeedsAttention(200),
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })

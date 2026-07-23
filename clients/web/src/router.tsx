@@ -10,8 +10,6 @@ import { OpsJobsPage } from '@/routes/ops/jobs'
 import { OpsRunsPage } from '@/routes/ops/runs'
 import { RunDetailPage } from '@/routes/ops/run-detail'
 import { WorkersPage, WorkersTrendsPage } from '@/routes/ops/workers'
-import { WorkerDetailPage } from '@/routes/ops/workers/$workerName'
-import { WorkersFailedPage } from '@/routes/ops/workers/failed'
 import { WorkersSettingsPage } from '@/routes/ops/workers/settings'
 import { HealthConfigurationPage } from '@/routes/ops/health/configuration'
 import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
@@ -23,11 +21,7 @@ import { RequestsPage } from '@/routes/requests/index'
 import { RequestsSlasPage } from '@/routes/requests/slas'
 
 export const PIPELINE_TABS = [
-  'home',
-  'download',
-  'ingest',
-  'matching',
-  'fulfillment',
+  'pipeline',
   'hash_refresh',
   'history',
   'configurations',
@@ -35,16 +29,80 @@ export const PIPELINE_TABS = [
 
 export type PipelineTab = (typeof PIPELINE_TABS)[number]
 
+/** Stage tabs live inside each bulk-run card (not the top console bar). */
+export const PIPELINE_STAGE_TABS = [
+  'download',
+  'ingest',
+  'matching',
+  'fulfillment',
+] as const
+
+export type PipelineStageTab = (typeof PIPELINE_STAGE_TABS)[number]
+
+export type PipelineSearch = {
+  tab: PipelineTab
+  process?: number
+  stage?: PipelineStageTab
+}
+
 function parsePipelineTab(value: unknown): PipelineTab {
   if (typeof value === 'string' && PIPELINE_TABS.includes(value as PipelineTab)) {
     return value as PipelineTab
   }
-  return 'home'
+  // Legacy deep links: Home and stage tabs → Pipeline
+  if (
+    value === 'home' ||
+    (typeof value === 'string' &&
+      PIPELINE_STAGE_TABS.includes(value as PipelineStageTab))
+  ) {
+    return 'pipeline'
+  }
+  return 'pipeline'
 }
 
-/** Primary filter pills (legacy `24h` still parseable from URLs). */
-export const RUNS_WINDOWS = ['8h', '1w', '3m', 'custom'] as const
-export type RunsWindow = (typeof RUNS_WINDOWS)[number] | '24h'
+function parsePipelineStage(
+  value: unknown,
+  tabRaw: unknown,
+): PipelineStageTab | undefined {
+  if (
+    typeof value === 'string' &&
+    PIPELINE_STAGE_TABS.includes(value as PipelineStageTab)
+  ) {
+    return value as PipelineStageTab
+  }
+  if (
+    typeof tabRaw === 'string' &&
+    PIPELINE_STAGE_TABS.includes(tabRaw as PipelineStageTab)
+  ) {
+    return tabRaw as PipelineStageTab
+  }
+  return undefined
+}
+
+function parseProcessId(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 1) {
+    return Math.floor(value)
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10)
+    if (Number.isFinite(parsed) && parsed >= 1) return parsed
+  }
+  return undefined
+}
+
+function parsePipelineSearch(search: Record<string, unknown>): PipelineSearch {
+  const parsed: PipelineSearch = {
+    tab: parsePipelineTab(search.tab),
+  }
+  const process = parseProcessId(search.process)
+  if (process != null) parsed.process = process
+  const stage = parsePipelineStage(search.stage, search.tab)
+  if (stage != null) parsed.stage = stage
+  return parsed
+}
+
+export const RUNS_WINDOWS = ['8h', '24h', '1w', '3m', 'custom'] as const
+export type RunsWindow = (typeof RUNS_WINDOWS)[number]
 
 export const RUNS_STATUS_FILTERS = ['failed', 'success', 'claimed', 'in_flight'] as const
 export type RunsStatusFilter = (typeof RUNS_STATUS_FILTERS)[number]
@@ -62,16 +120,41 @@ export type RunsSearch = {
   status?: RunsStatusFilter
   job?: RunsJobFilter
   request_id?: string
+  /** ISO timestamp — used when `window` is `custom`. */
+  since?: string
 }
 
 export const DEFAULT_RUNS_WINDOW: RunsWindow = '1w'
 
+/** Map a fleet worker name onto `/ops/runs` search (unified jobs only). */
+export function runsSearchForWorker(
+  workerName: string,
+  extras?: Partial<RunsSearch>,
+): RunsSearch {
+  const next: RunsSearch = {
+    window: DEFAULT_RUNS_WINDOW,
+    ...extras,
+  }
+  if (RUNS_JOB_FILTERS.includes(workerName as RunsJobFilter)) {
+    next.job = workerName as RunsJobFilter
+  }
+  return next
+}
+
 function parseRunsWindow(value: unknown): RunsWindow | undefined {
-  if (typeof value !== 'string') return undefined
-  if ((RUNS_WINDOWS as readonly string[]).includes(value) || value === '24h') {
+  if (typeof value === 'string' && (RUNS_WINDOWS as readonly string[]).includes(value)) {
     return value as RunsWindow
   }
   return undefined
+}
+
+function parseRunsSince(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const parsed = Date.parse(trimmed)
+  if (Number.isNaN(parsed)) return undefined
+  return new Date(parsed).toISOString()
 }
 
 function parseRunsStatus(value: unknown): RunsStatusFilter | undefined {
@@ -106,6 +189,8 @@ function parseRunsSearch(search: Record<string, unknown>): RunsSearch {
   if (job) parsed.job = job
   const requestId = parseRunsRequestId(search.request_id)
   if (requestId) parsed.request_id = requestId
+  const since = parseRunsSince(search.since)
+  if (since) parsed.since = since
   return parsed
 }
 
@@ -148,16 +233,6 @@ function parseWorkersSearch(search: Record<string, unknown>): WorkersSearch {
   if (typeof search.job === 'string' && search.job.trim()) {
     parsed.job = search.job.trim()
   }
-  if (typeof search.since === 'string' && search.since.trim()) {
-    parsed.since = search.since.trim()
-  }
-  return parsed
-}
-
-function parseWorkersFailedSearch(search: Record<string, unknown>): WorkersFailedSearch {
-  const parsed: WorkersFailedSearch = {}
-  const window = parseWorkersWindow(search.window)
-  if (window) parsed.window = window
   if (typeof search.since === 'string' && search.since.trim()) {
     parsed.since = search.since.trim()
   }
@@ -209,28 +284,10 @@ const rootRoute = createRootRoute({
   ),
 })
 
-function parseProcessId(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value) && value >= 1) {
-    return Math.floor(value)
-  }
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number.parseInt(value.trim(), 10)
-    if (Number.isFinite(parsed) && parsed >= 1) return parsed
-  }
-  return undefined
-}
-
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
-  validateSearch: (search: Record<string, unknown>) => {
-    const parsed: { tab: PipelineTab; process?: number } = {
-      tab: parsePipelineTab(search.tab),
-    }
-    const process = parseProcessId(search.process)
-    if (process != null) parsed.process = process
-    return parsed
-  },
+  validateSearch: (search: Record<string, unknown>) => parsePipelineSearch(search),
   component: DashboardPage,
 })
 
@@ -280,9 +337,26 @@ const requestsRoute = createRoute({
   component: RequestsPage,
 })
 
+function parseNeedsAttentionSearch(search: Record<string, unknown>): {
+  bulk?: number
+} {
+  const parsed: { bulk?: number } = {}
+  const raw = search.bulk
+  const n =
+    typeof raw === 'number'
+      ? raw
+      : typeof raw === 'string' && raw.trim()
+        ? Number(raw)
+        : NaN
+  if (Number.isInteger(n) && n >= 1) parsed.bulk = n
+  return parsed
+}
+
 const needsAttentionRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests/needs-attention',
+  validateSearch: (search: Record<string, unknown>) =>
+    parseNeedsAttentionSearch(search),
   component: NeedsAttentionPage,
 })
 
@@ -329,8 +403,13 @@ const opsWorkersRoute = createRoute({
 const opsWorkersFailedRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/workers/failed',
-  validateSearch: (search: Record<string, unknown>) => parseWorkersFailedSearch(search),
-  component: WorkersFailedPage,
+  beforeLoad: () => {
+    throw redirect({
+      to: '/ops/runs',
+      search: { status: 'failed', window: DEFAULT_RUNS_WINDOW },
+    })
+  },
+  component: () => null,
 })
 
 const opsWorkersSettingsRoute = createRoute({
@@ -348,8 +427,13 @@ const opsWorkersTrendsRoute = createRoute({
 const opsWorkerDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/workers/$workerName',
-  validateSearch: (search: Record<string, unknown>) => parseWorkersFailedSearch(search),
-  component: WorkerDetailPage,
+  beforeLoad: ({ params }) => {
+    throw redirect({
+      to: '/ops/runs',
+      search: runsSearchForWorker(params.workerName),
+    })
+  },
+  component: () => null,
 })
 
 const opsDeMonitorRoute = createRoute({
@@ -387,18 +471,15 @@ const opsIncidentsRoute = createRoute({
 const dropPipelineRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/drop-pipeline',
-  validateSearch: (search: Record<string, unknown>) => {
-    const parsed: { tab: PipelineTab; process?: number } = {
-      tab: parsePipelineTab(search.tab),
-    }
-    const process = parseProcessId(search.process)
-    if (process != null) parsed.process = process
-    return parsed
-  },
+  validateSearch: (search: Record<string, unknown>) => parsePipelineSearch(search),
   beforeLoad: ({ search }) => {
     throw redirect({
       to: '/',
-      search: { tab: search.tab, process: search.process },
+      search: {
+        tab: search.tab,
+        process: search.process,
+        stage: search.stage,
+      },
     })
   },
   component: () => null,

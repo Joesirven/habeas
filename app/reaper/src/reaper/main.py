@@ -15,6 +15,7 @@ from habeas_privacy_core.health import health_payload, ready_payload
 from habeas_privacy_core.observability.logging import configure_logging
 from habeas_privacy_core.observability.tracing import setup_tracing
 from habeas_privacy_core.queue.reap import ReapedTableConfig, run_reap
+from habeas_privacy_core.workflow.approval import reconcile_ungated_matching_reviews
 from reaper.config import DEFAULT_REAPED_TABLES
 
 logger = logging.getLogger(__name__)
@@ -114,15 +115,44 @@ async def _reaped_tables_with_overrides(pool) -> list[ReapedTableConfig]:
 
 @app.post("/reap")
 async def reap():
-    """Run queue sweeps — invoked by Cloud Scheduler every minute."""
+    """Run queue sweeps — invoked by Cloud Scheduler every minute.
+
+    Also backfills missing matching.review gates (same recovery lane as lease
+    reaping — match success opens the gate in-transaction; this catches hangers).
+    """
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
 
     pool = get_pool()
     tables = await _reaped_tables_with_overrides(pool)
     results = await run_reap(pool, tables)
+
+    matching_review_reconcile: dict = {}
+    try:
+        async with pool.acquire() as conn:
+            matching_review_reconcile = await reconcile_ungated_matching_reviews(
+                conn, limit=200
+            )
+        logger.info(
+            "matching_review_reconcile_complete",
+            extra={
+                "event": "matching_review_reconcile_complete",
+                **matching_review_reconcile,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "matching_review_reconcile_failed",
+            extra={"event": "matching_review_reconcile_failed"},
+        )
+        matching_review_reconcile = {"status": "error"}
+
     logger.info("reap_complete", extra={"event": "reap_complete", "results": results})
-    return {"status": "ok", "results": results}
+    return {
+        "status": "ok",
+        "results": results,
+        "matching_review_reconcile": matching_review_reconcile,
+    }
 
 
 def run() -> None:

@@ -18,6 +18,7 @@ from habeas_privacy_core.workflow.approval import (
     eval_condition,
     fetch_active_rule,
     is_matching_review_approved,
+    reconcile_ungated_matching_reviews,
     release_approved,
 )
 from habeas_privacy_core.workflow.error_policy import (
@@ -155,6 +156,46 @@ async def test_ensure_pending_matching_review_noop_when_freshly_approved():
     assert result is None
     conn.fetchval.assert_not_awaited()
     conn.fetchrow.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_ungated_matching_reviews_ensures_hangers():
+    request_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(
+        return_value=[
+            {
+                "request_id": request_id,
+                "matching_result_id": 9,
+                "match_count": 2,
+                "matched": True,
+            }
+        ]
+    )
+
+    with patch(
+        "habeas_privacy_core.workflow.approval.ensure_pending_matching_review",
+        new_callable=AsyncMock,
+        return_value={"id": 3, "status": "pending"},
+    ) as ensure:
+        summary = await reconcile_ungated_matching_reviews(conn, limit=50)
+
+    assert summary == {
+        "scanned": 1,
+        "ensured_count": 1,
+        "skipped_count": 0,
+        "error_count": 0,
+        "limit": 50,
+    }
+    ensure.assert_awaited_once()
+    assert ensure.await_args.kwargs["request_id"] == request_id
+    assert ensure.await_args.kwargs["context"]["source"] == (
+        "reconcile_ungated_matching_reviews"
+    )
+    sql = conn.fetch.await_args.args[0]
+    assert "NOT EXISTS" in sql
+    assert "approved" in sql
+    assert "drop_raw_requests" in sql
 
 
 @pytest.fixture

@@ -1,7 +1,8 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 
-const LIVE_EVENTS_PATH = `${import.meta.env.VITE_ADMIN_API_URL ?? '/api'}/live/events`
+// Empty string must fall back to /api (same as api.ts) — ?? keeps "".
+const LIVE_EVENTS_PATH = `${import.meta.env.VITE_ADMIN_API_URL || '/api'}/live/events`
 
 export function useLiveEvents() {
   const queryClient = useQueryClient()

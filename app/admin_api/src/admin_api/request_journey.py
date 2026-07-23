@@ -68,11 +68,12 @@ _FORBIDDEN_RESPONSE_KEYS = frozenset(
         "first_name",
         "last_name",
         "gcs_uri",
-        "source_csv_filename",
         "response_file_name",
         "raw_payload",
     }
 )
+# Ops may return source_csv_filename (ZIP member name) and bulk_process_id.
+# Intake gcs_uri stays forbidden (KTD-8) — never put it on journey DTOs.
 
 
 class RequestJourneySettings(CoreSettings):
@@ -105,6 +106,9 @@ class RequestJourneyResponse(BaseModel):
     current_stage: str
     blocker: str | None = None
     stages: list[JourneyStage]
+    # CSV member name for ops; batch key is download attempt id (not intake gcs_uri).
+    source_csv_filename: str | None = None
+    bulk_process_id: int | None = None
 
 
 class NeedsAttentionAssignment(BaseModel):
@@ -128,6 +132,10 @@ class NeedsAttentionItem(BaseModel):
     requestor_state: str | None = None
     review_status: str | None = None
     assignment: NeedsAttentionAssignment | None = None
+    # drop_connector download attempt id (batch key) — for inbox thread grouping
+    bulk_process_id: int | None = None
+    # ZIP member name — fallback batch key when download ledger is missing (seed/broker)
+    source_csv_filename: str | None = None
 
 
 class NeedsAttentionResponse(BaseModel):
@@ -174,18 +182,19 @@ def _attempt_stage_status(raw_status: str | None) -> StageStatus:
     return "not_started"
 
 
-async def _latest_connector_attempt(
+async def _latest_ingest_attempt(
     conn: Any,
     *,
     step: str,
     source_csv_filename: str | None,
 ) -> dict[str, Any] | None:
+    """Land/promote are per-CSV; join key is drop_raw_requests.source_csv_filename."""
     if not source_csv_filename:
         return None
     row = await conn.fetchrow(
         """
-        SELECT status, attempted_at, completed_at
-          FROM drop_connector_attempts
+        SELECT id, status, attempted_at, completed_at, gcs_uri
+          FROM drop_ingest_attempts
          WHERE step = $1
            AND source_csv_filename = $2
            AND status != 'abandoned'
@@ -198,25 +207,50 @@ async def _latest_connector_attempt(
     return dict(row) if row is not None else None
 
 
-async def _latest_ingest_attempt(
+async def _latest_download_for_csv(
     conn: Any,
     *,
-    step: str,
     source_csv_filename: str | None,
+    land_gcs_uri: str | None = None,
 ) -> dict[str, Any] | None:
+    """Download is ZIP-level; attribute via land.gcs_uri → connector download.
+
+    ``record_download_success`` does not stamp source_csv_filename — one download
+    produces many land rows that share gcs_uri. That is the intentional join.
+    """
+    if land_gcs_uri:
+        row = await conn.fetchrow(
+            """
+            SELECT id, status, attempted_at, completed_at, gcs_uri
+              FROM drop_connector_attempts
+             WHERE step = 'download'
+               AND gcs_uri = $1
+               AND status != 'abandoned'
+             ORDER BY attempted_at DESC
+             LIMIT 1
+            """,
+            land_gcs_uri,
+        )
+        if row is not None:
+            return dict(row)
+
     if not source_csv_filename:
         return None
     row = await conn.fetchrow(
         """
-        SELECT status, attempted_at, completed_at
-          FROM drop_ingest_attempts
-         WHERE step = $1
-           AND source_csv_filename = $2
-           AND status != 'abandoned'
-         ORDER BY attempted_at DESC
+        SELECT c.id, c.status, c.attempted_at, c.completed_at, c.gcs_uri
+          FROM drop_ingest_attempts i
+          JOIN drop_connector_attempts c
+            ON c.gcs_uri = i.gcs_uri
+           AND c.step = 'download'
+           AND c.status != 'abandoned'
+         WHERE i.step = 'land'
+           AND i.source_csv_filename = $1
+           AND i.status != 'abandoned'
+           AND i.gcs_uri IS NOT NULL
+         ORDER BY c.attempted_at DESC
          LIMIT 1
         """,
-        step,
         source_csv_filename,
     )
     return dict(row) if row is not None else None
@@ -322,11 +356,6 @@ async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourney
     source_csv_filename = row["source_csv_filename"]
     pipeline_applicable = intake_source == "drop" and source_csv_filename is not None
 
-    download_attempt = await _latest_connector_attempt(
-        conn,
-        step="download",
-        source_csv_filename=source_csv_filename,
-    )
     land_attempt = await _latest_ingest_attempt(
         conn,
         step="land",
@@ -337,15 +366,31 @@ async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourney
         step="promote",
         source_csv_filename=source_csv_filename,
     )
+    # Prefer land.gcs_uri; promote also stamps the ZIP uri at land-complete.
+    land_gcs_uri = None
+    if land_attempt and land_attempt.get("gcs_uri"):
+        land_gcs_uri = str(land_attempt["gcs_uri"])
+    elif promote_attempt and promote_attempt.get("gcs_uri"):
+        land_gcs_uri = str(promote_attempt["gcs_uri"])
+    download_attempt = await _latest_download_for_csv(
+        conn,
+        source_csv_filename=source_csv_filename,
+        land_gcs_uri=land_gcs_uri,
+    )
     match_attempt = await _latest_matching_attempt(conn, request_id=request_id)
     has_match_result = await _has_matching_result(conn, request_id=request_id)
-    # Hash rematch / thin spine can reach match without per-file download/land/promote.
+    # True only when match exists with no attributable batch ledger (e.g. helper seed).
     pipeline_bypassed = bool(
         has_match_result
         and pipeline_applicable
         and download_attempt is None
         and land_attempt is None
         and promote_attempt is None
+    )
+    bulk_process_id = (
+        int(download_attempt["id"])
+        if download_attempt and download_attempt.get("id") is not None
+        else None
     )
     review_approved = await is_matching_review_approved(conn, request_id)
     pending_review = await conn.fetchrow(
@@ -481,6 +526,8 @@ async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourney
         current_stage=current_stage,
         blocker=_current_blocker(stages, current_stage),
         stages=stages,
+        source_csv_filename=source_csv_filename,
+        bulk_process_id=bulk_process_id,
     )
 
 
@@ -489,25 +536,19 @@ async def list_needs_attention(
     *,
     limit: int,
 ) -> NeedsAttentionResponse:
-    """Pending matching.review gates with latest match summary (PII-safe)."""
+    """Inbox queue for matching review (PII-safe).
+
+    Includes:
+    - pending ``matching.review`` approval gates, and
+    - latest matching_results that still need review but never got a gate
+      (``review_status=none`` / journey blocker ``matching.review required``).
+
+    Runs review-open counts use spine − approved; the inbox previously only
+    listed existing pending gates, so ungated matches were invisible here.
+    """
     rows = await conn.fetch(
         """
-        WITH pending AS (
-            SELECT ar.id AS approval_id,
-                   ar.request_id,
-                   ar.requested_at,
-                   ar.status AS review_status,
-                   r.intake_source,
-                   r.received_at,
-                   UPPER(TRIM(r.requestor_state)) AS requestor_state
-              FROM approval_requests ar
-              JOIN requests r ON r.id = ar.request_id
-             WHERE ar.action_type = $1
-               AND ar.status = 'pending'
-             ORDER BY ar.requested_at ASC
-             LIMIT $2
-        ),
-        latest_mr AS (
+        WITH latest_mr AS (
             SELECT DISTINCT ON (mr.request_id)
                    mr.request_id,
                    mr.matched,
@@ -515,28 +556,111 @@ async def list_needs_attention(
                    mr.matched_via,
                    mr.recorded_at
               FROM matching_results mr
-              JOIN pending p ON p.request_id = mr.request_id
              ORDER BY mr.request_id, mr.recorded_at DESC
+        ),
+        latest_review AS (
+            SELECT DISTINCT ON (ar.request_id)
+                   ar.id AS approval_id,
+                   ar.request_id,
+                   ar.status AS review_status,
+                   ar.requested_at
+              FROM approval_requests ar
+             WHERE ar.action_type = $1
+             ORDER BY ar.request_id, ar.requested_at DESC
+        ),
+        candidates AS (
+            -- Matched (or not-found) results awaiting review: pending gate OR no gate yet.
+            SELECT r.id AS request_id,
+                   r.intake_source,
+                   r.received_at,
+                   r.raw_record_id,
+                   UPPER(TRIM(r.requestor_state)) AS requestor_state,
+                   lm.matched,
+                   lm.match_count,
+                   lm.matched_via,
+                   lr.approval_id,
+                   COALESCE(lr.review_status, 'none') AS review_status,
+                   COALESCE(lr.requested_at, lm.recorded_at, r.received_at) AS sort_at
+              FROM latest_mr lm
+              JOIN requests r ON r.id = lm.request_id
+              LEFT JOIN latest_review lr ON lr.request_id = lm.request_id
+              LEFT JOIN drop_raw_requests drr
+                ON drr.id = r.raw_record_id
+               AND r.intake_source = 'drop'
+             WHERE COALESCE(lr.review_status, 'none') IN ('pending', 'none')
+               AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
+
+            UNION
+
+            -- Pending gates without a matching_results row yet (edge / race).
+            SELECT r.id AS request_id,
+                   r.intake_source,
+                   r.received_at,
+                   r.raw_record_id,
+                   UPPER(TRIM(r.requestor_state)) AS requestor_state,
+                   NULL::boolean AS matched,
+                   NULL::int AS match_count,
+                   NULL::text AS matched_via,
+                   ar.id AS approval_id,
+                   ar.status AS review_status,
+                   ar.requested_at AS sort_at
+              FROM approval_requests ar
+              JOIN requests r ON r.id = ar.request_id
+             WHERE ar.action_type = $1
+               AND ar.status = 'pending'
+               AND NOT EXISTS (
+                     SELECT 1 FROM matching_results mr WHERE mr.request_id = ar.request_id
+                   )
+        ),
+        batch AS (
+            -- Attribute via land *or* promote ledger: promote rows always stamp
+            -- source_csv_filename + gcs_uri at land-complete; land enqueue rows
+            -- sometimes have a null filename when the ZIP member list was empty.
+            SELECT DISTINCT ON (c.request_id)
+                   c.request_id,
+                   conn.id AS bulk_process_id
+              FROM candidates c
+              JOIN drop_raw_requests drr
+                ON drr.id = c.raw_record_id
+               AND c.intake_source = 'drop'
+              JOIN drop_ingest_attempts i
+                ON i.source_csv_filename = drr.source_csv_filename
+               AND i.step IN ('land', 'promote')
+               AND i.status != 'abandoned'
+               AND i.gcs_uri IS NOT NULL
+              JOIN drop_connector_attempts conn
+                ON conn.gcs_uri = i.gcs_uri
+               AND conn.step = 'download'
+               AND conn.status != 'abandoned'
+             ORDER BY c.request_id, conn.attempted_at DESC
         )
-        SELECT p.request_id::text AS request_id,
-               p.approval_id,
-               p.intake_source,
-               p.received_at,
-               p.requested_at,
-               p.review_status,
-               p.requestor_state,
-               lm.matched,
-               lm.match_count,
-               lm.matched_via
-          FROM pending p
-          LEFT JOIN latest_mr lm ON lm.request_id = p.request_id
-         ORDER BY p.requested_at ASC
+        SELECT c.request_id::text AS request_id,
+               c.approval_id,
+               c.intake_source,
+               c.received_at,
+               c.raw_record_id,
+               c.sort_at AS requested_at,
+               c.review_status,
+               c.requestor_state,
+               c.matched,
+               c.match_count,
+               c.matched_via,
+               b.bulk_process_id,
+               drr_csv.source_csv_filename
+          FROM candidates c
+          LEFT JOIN batch b ON b.request_id = c.request_id
+          LEFT JOIN drop_raw_requests drr_csv
+            ON drr_csv.id = c.raw_record_id
+           AND c.intake_source = 'drop'
+         ORDER BY c.sort_at ASC NULLS LAST
+         LIMIT $2
         """,
         MATCHING_REVIEW_ACTION,
         limit,
     )
 
     items: list[NeedsAttentionItem] = []
+    bulk_by_csv: dict[str, int | None] = {}
     for row in rows:
         match_count = (
             int(row["match_count"]) if row["match_count"] is not None else None
@@ -551,6 +675,22 @@ async def list_needs_attention(
             )
         state = row["requestor_state"]
         state_acronym = str(state).strip().upper()[:2] if state else None
+        bulk_process_id = (
+            int(row["bulk_process_id"])
+            if row["bulk_process_id"] is not None
+            else None
+        )
+        if (
+            bulk_process_id is None
+            and row["intake_source"] == "drop"
+            and row["raw_record_id"] is not None
+        ):
+            bulk_process_id = await _bulk_process_id_for_raw(
+                conn,
+                raw_record_id=int(row["raw_record_id"]),
+                cache=bulk_by_csv,
+            )
+        review_status = str(row["review_status"] or "none")
         items.append(
             NeedsAttentionItem(
                 request_id=row["request_id"],
@@ -565,11 +705,63 @@ async def list_needs_attention(
                 match_type=match_type_for_count(match_count) if match_count is not None else None,
                 matched_via=row["matched_via"],
                 requestor_state=state_acronym,
-                review_status=row["review_status"],
+                review_status=review_status,
                 assignment=assignment,
+                bulk_process_id=bulk_process_id,
+                source_csv_filename=(
+                    str(row["source_csv_filename"])
+                    if row["source_csv_filename"] is not None
+                    else None
+                ),
             )
         )
     return NeedsAttentionResponse(items=items)
+
+
+async def _bulk_process_id_for_raw(
+    conn: Any,
+    *,
+    raw_record_id: int,
+    cache: dict[str, int | None] | None = None,
+) -> int | None:
+    """Resolve download attempt id for a DROP raw row (inbox batch key)."""
+    source_csv_filename = await conn.fetchval(
+        """
+        SELECT source_csv_filename
+          FROM drop_raw_requests
+         WHERE id = $1
+        """,
+        raw_record_id,
+    )
+    if not source_csv_filename:
+        return None
+    csv_key = str(source_csv_filename)
+    if cache is not None and csv_key in cache:
+        return cache[csv_key]
+    land_attempt = await _latest_ingest_attempt(
+        conn, step="land", source_csv_filename=csv_key
+    )
+    promote_attempt = await _latest_ingest_attempt(
+        conn, step="promote", source_csv_filename=csv_key
+    )
+    land_gcs_uri = None
+    if land_attempt and land_attempt.get("gcs_uri"):
+        land_gcs_uri = str(land_attempt["gcs_uri"])
+    elif promote_attempt and promote_attempt.get("gcs_uri"):
+        land_gcs_uri = str(promote_attempt["gcs_uri"])
+    download_attempt = await _latest_download_for_csv(
+        conn,
+        source_csv_filename=csv_key,
+        land_gcs_uri=land_gcs_uri,
+    )
+    resolved = (
+        int(download_attempt["id"])
+        if download_attempt is not None and download_attempt.get("id") is not None
+        else None
+    )
+    if cache is not None:
+        cache[csv_key] = resolved
+    return resolved
 
 
 async def ensure_user(conn: Any, *, email: str) -> tuple[int, str]:
@@ -685,7 +877,7 @@ def assert_no_pii_keys(payload: Any) -> None:
 @router.get("/needs-attention", response_model=NeedsAttentionResponse)
 async def needs_attention(
     _viewer: RequestOpsViewer,
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=200, ge=1, le=1000),
 ) -> NeedsAttentionResponse:
     _require_database()
     pool = get_pool()

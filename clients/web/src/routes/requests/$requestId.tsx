@@ -245,7 +245,7 @@ function MatchingPanel({ requestId }: { requestId: string }) {
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
     onError: (error) => {
-      setActionError(error instanceof Error ? error.message : 'Promote failed')
+      setActionError(error instanceof Error ? error.message : 'Fulfill failed')
     },
   })
 

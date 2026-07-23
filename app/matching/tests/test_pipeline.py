@@ -1,5 +1,5 @@
 import base64
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -54,11 +54,21 @@ async def test_plaintext_pipeline_stub_raises_until_data_source_decided():
         await PlaintextMatchPipeline().match(request)
 
 
-@pytest.mark.asyncio
-async def test_complete_attempt_success_ensures_pending_matching_review():
+def _transactional_conn(*, fetchval_return: int = 42) -> AsyncMock:
+    """Mock connection with asyncpg-style ``async with conn.transaction()``."""
     conn = AsyncMock()
     conn.execute = AsyncMock(return_value="UPDATE 1")
-    conn.fetchval = AsyncMock(return_value=42)
+    conn.fetchval = AsyncMock(return_value=fetchval_return)
+    txn = AsyncMock()
+    txn.__aenter__ = AsyncMock(return_value=None)
+    txn.__aexit__ = AsyncMock(return_value=None)
+    conn.transaction = MagicMock(return_value=txn)
+    return conn
+
+
+@pytest.mark.asyncio
+async def test_complete_attempt_success_ensures_pending_matching_review():
+    conn = _transactional_conn(fetchval_return=42)
     request_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
     with patch(
@@ -76,6 +86,7 @@ async def test_complete_attempt_success_ensures_pending_matching_review():
         )
 
     assert result_id == 42
+    conn.transaction.assert_called_once()
     ensure.assert_awaited_once()
     assert ensure.await_args.kwargs["request_id"] == request_id
     assert ensure.await_args.kwargs["context"] == {
@@ -86,23 +97,22 @@ async def test_complete_attempt_success_ensures_pending_matching_review():
 
 
 @pytest.mark.asyncio
-async def test_complete_attempt_success_survives_review_ensure_failure():
-    conn = AsyncMock()
-    conn.execute = AsyncMock(return_value="UPDATE 1")
-    conn.fetchval = AsyncMock(return_value=11)
+async def test_complete_attempt_success_rolls_back_when_review_ensure_fails():
+    conn = _transactional_conn(fetchval_return=11)
 
     with patch(
         "matching.results.ensure_pending_matching_review",
         new_callable=AsyncMock,
         side_effect=RuntimeError("db blip"),
     ):
-        result_id = await complete_attempt_success(
-            conn,
-            attempt_id=1,
-            request_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            matched=True,
-            matched_via="drop_hash",
-            match_count=1,
-        )
+        with pytest.raises(RuntimeError, match="db blip"):
+            await complete_attempt_success(
+                conn,
+                attempt_id=1,
+                request_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                matched=True,
+                matched_via="drop_hash",
+                match_count=1,
+            )
 
-    assert result_id == 11
+    conn.transaction.assert_called_once()

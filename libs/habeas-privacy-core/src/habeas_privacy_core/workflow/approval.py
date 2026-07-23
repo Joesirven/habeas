@@ -252,6 +252,105 @@ async def ensure_pending_matching_review(
         return None
 
 
+async def reconcile_ungated_matching_reviews(
+    conn: asyncpg.Connection,
+    *,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Backfill pending matching.review gates for results that never got one.
+
+    Same recovery idea as the reaper queue sweep: find latest matching_results
+    without a pending gate (and not already covered by a fresh approval), then
+    ``ensure_pending_matching_review``. Ids/counts only — no PII.
+    """
+    bounded = max(1, min(int(limit), 1000))
+    rows = await conn.fetch(
+        """
+        WITH latest AS (
+            SELECT DISTINCT ON (mr.request_id)
+                   mr.request_id,
+                   mr.id AS matching_result_id,
+                   mr.match_count,
+                   mr.matched
+              FROM matching_results mr
+             ORDER BY mr.request_id, mr.recorded_at DESC
+        )
+        SELECT l.request_id::text AS request_id,
+               l.matching_result_id,
+               l.match_count,
+               l.matched
+          FROM latest l
+          JOIN requests r ON r.id = l.request_id
+          LEFT JOIN drop_raw_requests drr
+            ON drr.id = r.raw_record_id
+           AND r.intake_source = 'drop'
+         WHERE NOT EXISTS (
+                 SELECT 1
+                   FROM approval_requests ar
+                  WHERE ar.request_id = l.request_id
+                    AND ar.action_type = $1
+                    AND ar.status = 'pending'
+               )
+           AND NOT EXISTS (
+                 SELECT 1
+                   FROM approval_requests ar
+                  WHERE ar.request_id = l.request_id
+                    AND ar.action_type = $1
+                    AND ar.status = 'approved'
+                    AND ar.decided_at IS NOT NULL
+                    AND ar.decided_at >= (
+                          SELECT MAX(mr.recorded_at)
+                            FROM matching_results mr
+                           WHERE mr.request_id = l.request_id
+                        )
+               )
+           AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
+         ORDER BY l.matching_result_id ASC
+         LIMIT $2
+        """,
+        MATCHING_REVIEW_ACTION,
+        bounded,
+    )
+
+    ensured = 0
+    skipped = 0
+    errors = 0
+    for row in rows:
+        request_id = str(row["request_id"])
+        try:
+            created = await ensure_pending_matching_review(
+                conn,
+                request_id=request_id,
+                context={
+                    "matching_result_id": int(row["matching_result_id"]),
+                    "match_count": int(row["match_count"] or 0),
+                    "matched": bool(row["matched"]),
+                    "source": "reconcile_ungated_matching_reviews",
+                },
+            )
+            if created is not None:
+                ensured += 1
+            else:
+                skipped += 1
+        except Exception:
+            errors += 1
+            _logger.exception(
+                "matching_review_reconcile_failed",
+                extra={
+                    "event": "matching_review_reconcile_failed",
+                    "request_id": request_id,
+                },
+            )
+
+    return {
+        "scanned": len(rows),
+        "ensured_count": ensured,
+        "skipped_count": skipped,
+        "error_count": errors,
+        "limit": bounded,
+    }
+
+
 def _serialize_assignment_row(row: Any) -> dict[str, Any]:
     context = row.get("context_jsonb") if hasattr(row, "get") else row["context_jsonb"]
     if isinstance(context, str):

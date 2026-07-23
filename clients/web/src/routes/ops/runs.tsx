@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
-import { type ReactNode } from 'react'
+import { type FormEvent, type ReactNode, useState } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import {
@@ -36,6 +36,7 @@ const STATUS_TABS: {
   { key: 'all', label: 'All' },
   { key: 'failed', label: 'Failed', apiStatus: 'failed' },
   { key: 'in_flight', label: 'In progress', apiStatus: 'in_flight' },
+  { key: 'claimed', label: 'Claimed', apiStatus: 'claimed' },
   { key: 'success', label: 'Success', apiStatus: 'success' },
 ]
 
@@ -134,6 +135,22 @@ function activeStatusTab(status: RunsStatusFilter | undefined): (typeof STATUS_T
   return status
 }
 
+function toDatetimeLocalValue(iso: string | undefined): string {
+  if (!iso) return ''
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function fromDatetimeLocalValue(value: string): string | undefined {
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const parsed = Date.parse(trimmed)
+  if (Number.isNaN(parsed)) return undefined
+  return new Date(parsed).toISOString()
+}
+
 function buildRunsSearch(
   current: RunsSearch,
   patch: Partial<{
@@ -141,6 +158,7 @@ function buildRunsSearch(
     job: RunsJobFilter | undefined
     window: RunsWindow
     request_id: string | undefined
+    since: string | undefined
   }>,
 ): RunsSearch {
   const next: RunsSearch = {
@@ -149,9 +167,11 @@ function buildRunsSearch(
   const job = patch.job !== undefined ? patch.job : current.job
   const status = patch.status !== undefined ? patch.status : current.status
   const requestId = patch.request_id !== undefined ? patch.request_id : current.request_id
+  const since = patch.since !== undefined ? patch.since : current.since
   if (job) next.job = job
   if (status) next.status = status
   if (requestId) next.request_id = requestId
+  if (next.window === 'custom' && since) next.since = since
   return next
 }
 
@@ -163,6 +183,16 @@ function RunsToolbar({
   onSearchChange: (next: RunsSearch) => void
 }) {
   const activeTab = activeStatusTab(search.status)
+  const [requestDraft, setRequestDraft] = useState(search.request_id ?? '')
+  const window = search.window ?? DEFAULT_RUNS_WINDOW
+
+  function applyRequestFilter(event: FormEvent) {
+    event.preventDefault()
+    const trimmed = requestDraft.trim()
+    onSearchChange(
+      buildRunsSearch(search, { request_id: trimmed ? trimmed : undefined }),
+    )
+  }
 
   return (
     <div className="flex flex-col gap-3 border-b border-line pb-3">
@@ -185,19 +215,30 @@ function RunsToolbar({
             key={windowOption}
             type="button"
             className={
-              (search.window ?? DEFAULT_RUNS_WINDOW) === windowOption
-                ? 'taste-btn-primary text-xs'
-                : 'taste-btn text-xs'
+              window === windowOption ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'
             }
-            onClick={() => onSearchChange(buildRunsSearch(search, { window: windowOption }))}
+            onClick={() =>
+              onSearchChange(
+                buildRunsSearch(search, {
+                  window: windowOption,
+                  since:
+                    windowOption === 'custom'
+                      ? search.since ?? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+                      : undefined,
+                }),
+              )
+            }
           >
             {windowOption}
           </button>
         ))}
-        <label className="ml-auto flex items-center gap-2">
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1">
           <span className="taste-micro">Worker</span>
           <select
-            className="glass rounded-lg px-2 py-1.5 text-xs text-ink"
+            className="glass min-w-[12rem] rounded-lg px-2 py-1.5 text-xs text-ink"
             value={search.job ?? ''}
             onChange={(event) => {
               const value = event.target.value
@@ -217,22 +258,54 @@ function RunsToolbar({
             ))}
           </select>
         </label>
-      </div>
-      {search.request_id ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="taste-micro">Request filter</span>
-          <span className="taste-frost-chip font-mono normal-case tracking-normal">
-            {search.request_id}
-          </span>
-          <button
-            type="button"
-            className="taste-btn text-xs"
-            onClick={() => onSearchChange(buildRunsSearch(search, { request_id: undefined }))}
-          >
-            Clear
+
+        <form className="flex flex-wrap items-end gap-2" onSubmit={applyRequestFilter}>
+          <label className="flex flex-col gap-1">
+            <span className="taste-micro">Request id</span>
+            <input
+              className="glass min-w-[14rem] rounded-lg px-2 py-1.5 font-mono text-xs text-ink"
+              value={requestDraft}
+              onChange={(event) => setRequestDraft(event.target.value)}
+              placeholder="uuid…"
+              aria-label="Filter by request id"
+            />
+          </label>
+          <button type="submit" className="taste-btn text-xs">
+            Apply
           </button>
-        </div>
-      ) : null}
+          {search.request_id ? (
+            <button
+              type="button"
+              className="taste-btn text-xs"
+              onClick={() => {
+                setRequestDraft('')
+                onSearchChange(buildRunsSearch(search, { request_id: undefined }))
+              }}
+            >
+              Clear
+            </button>
+          ) : null}
+        </form>
+
+        {window === 'custom' ? (
+          <label className="flex flex-col gap-1">
+            <span className="taste-micro">Since</span>
+            <input
+              type="datetime-local"
+              className="glass rounded-lg px-2 py-1.5 text-xs text-ink"
+              value={toDatetimeLocalValue(search.since)}
+              onChange={(event) =>
+                onSearchChange(
+                  buildRunsSearch(search, {
+                    window: 'custom',
+                    since: fromDatetimeLocalValue(event.target.value),
+                  }),
+                )
+              }
+            />
+          </label>
+        ) : null}
+      </div>
     </div>
   )
 }
@@ -307,12 +380,12 @@ function RunsTable({ runs }: { runs: RunSummary[] }) {
 function RunsContent() {
   const navigate = useNavigate()
   const search = useSearch({ from: '/ops/runs' })
-  const { job, status, request_id: requestId } = search
+  const { job, status, request_id: requestId, since } = search
   const window = search.window ?? DEFAULT_RUNS_WINDOW
 
-  const timeParams = resolveRunsTimeParams(window as OpsTimeWindow)
+  const timeParams = resolveRunsTimeParams(window as OpsTimeWindow, since)
   const runsQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'runs', { job, status, window, requestId, timeParams }],
+    queryKey: ['admin-api', 'ops', 'runs', { job, status, window, requestId, since, timeParams }],
     queryFn: () =>
       listRuns({
         job,
@@ -343,7 +416,7 @@ function RunsContent() {
             ) : null}
           </div>
           <p className="mt-1 text-xs text-ink-soft">
-            Job attempts across DROP workers — filter by status, job, and time window.
+            Job attempts across DROP workers — filter by status, worker, request, and time.
           </p>
         </div>
       </header>
