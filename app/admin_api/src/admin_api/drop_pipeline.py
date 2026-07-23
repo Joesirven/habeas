@@ -36,8 +36,8 @@ from habeas_privacy_core.auth import (
     ROLE_DATA_OWNER,
     ROLE_SUPER_ADMIN,
     UNKNOWN_ACTOR,
-    actor_from_iap_header,
     is_authenticated_actor,
+    resolve_actor,
 )
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
@@ -234,8 +234,8 @@ def _require_database() -> None:
 
 
 async def require_drop_mutation_actor(request: Request) -> str:
-    """Require IAP principal on mutating /ops/drop routes when configured."""
-    actor = actor_from_iap_header(request)
+    """Require authenticated principal on mutating /ops/drop routes when configured."""
+    actor = resolve_actor(request).email
     if settings.require_iap_identity and not is_authenticated_actor(actor):
         raise HTTPException(
             status_code=401,

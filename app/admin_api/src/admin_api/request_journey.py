@@ -16,8 +16,8 @@ from habeas_privacy_core.auth import (
     ROLE_ADMIN,
     ROLE_DATA_OWNER,
     ROLE_SUPER_ADMIN,
-    actor_from_iap_header,
     is_authenticated_actor,
+    resolve_actor,
 )
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
@@ -920,7 +920,7 @@ async def post_request_comment(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="invalid request_id") from exc
 
-    actor = actor_from_iap_header(request)
+    actor = resolve_actor(request).email
     if not is_authenticated_actor(actor):
         actor = _viewer.email or actor
 

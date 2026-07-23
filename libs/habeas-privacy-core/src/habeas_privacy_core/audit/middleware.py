@@ -14,7 +14,7 @@ from starlette.responses import Response
 from starlette.types import ASGIApp
 
 from habeas_privacy_core.audit.writer import write_audit
-from habeas_privacy_core.auth import actor_from_iap_header
+from habeas_privacy_core.auth import actor_from_iap_header, resolve_actor
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +117,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
         ):
             return await call_next(request)
 
-        actor = actor_from_iap_header(request)
+        actor = resolve_actor(request).email
         interface = interface_from_request(request)
         command = command_from_request(request)
         trace_id = trace_id_from_request(request)

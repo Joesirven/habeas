@@ -4,22 +4,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Annotated
+from urllib.parse import urlparse
 
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel
 from pydantic_settings import SettingsConfigDict
 
 from habeas_privacy_core.auth import (
-    UNKNOWN_ACTOR,
-    actor_from_iap_header,
+    ALL_ROLES,
     is_authenticated_actor,
+    resolve_actor,
 )
 from habeas_privacy_core.auth.roles import (
+    ROLE_SUPER_ADMIN,
     Role,
     parse_email_allowlist,
     resolve_role_from_allowlists,
 )
 from habeas_privacy_core.config import CoreSettings
+
+DEV_SIMULATE_ROLE_HEADER = "X-Dev-Simulate-Role"
 
 
 class RoleSettings(CoreSettings):
@@ -30,6 +34,7 @@ class RoleSettings(CoreSettings):
     admin_api_super_admins: str = ""
     admin_api_admins: str = ""
     admin_api_data_owners: str = ""
+    admin_api_id_token_audience: str = ""
     require_iap_identity: bool = False
 
 
@@ -39,12 +44,14 @@ settings = RoleSettings()
 class MeResponse(BaseModel):
     email: str
     role: Role
+    real_role: Role
 
 
 @dataclass(frozen=True, slots=True)
 class RolePrincipal:
     email: str
     role: Role
+    real_role: Role
 
 
 def _super_admin_allowlist() -> frozenset[str]:
@@ -59,16 +66,30 @@ def _data_owner_allowlist() -> frozenset[str]:
     return parse_email_allowlist(settings.admin_api_data_owners)
 
 
-def _resolve_principal_email(request: Request) -> tuple[str, bool]:
-    actor = actor_from_iap_header(request)
-    if is_authenticated_actor(actor):
-        return actor, True
-    return UNKNOWN_ACTOR, False
+def _id_token_audience(request: Request) -> str | None:
+    configured = settings.admin_api_id_token_audience.strip()
+    if configured:
+        return configured.rstrip("/")
+    parsed = urlparse(str(request.base_url))
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return None
+
+
+def _effective_role(real_role: Role, request: Request) -> Role:
+    if real_role != ROLE_SUPER_ADMIN:
+        return real_role
+    simulate = request.headers.get(DEV_SIMULATE_ROLE_HEADER, "").strip()
+    if simulate in ALL_ROLES:
+        return simulate  # type: ignore[return-value]
+    return real_role
 
 
 async def get_role_principal(request: Request) -> RolePrincipal:
-    """Resolve the caller email and role from IAP headers and allowlists."""
-    email, authenticated = _resolve_principal_email(request)
+    """Resolve caller email and role from IAP headers or verified Bearer JWT."""
+    resolved = resolve_actor(request, audience=_id_token_audience(request))
+    email = resolved.email
+    authenticated = is_authenticated_actor(email)
 
     if settings.require_iap_identity and not authenticated:
         raise HTTPException(
@@ -76,18 +97,29 @@ async def get_role_principal(request: Request) -> RolePrincipal:
             detail="Identity-Aware Proxy identity required",
         )
 
-    role = resolve_role_from_allowlists(
-        email if authenticated else None,
-        super_admins=_super_admin_allowlist(),
-        admins=_admin_allowlist(),
-        data_owners=_data_owner_allowlist(),
-        require_identity=settings.require_iap_identity,
-        is_authenticated=authenticated,
-    )
-    if role is None:
-        raise HTTPException(status_code=403, detail="role not permitted")
+    if resolved.source == "bearer_jwt":
+        normalized = email.strip().lower()
+        if normalized not in _super_admin_allowlist():
+            raise HTTPException(
+                status_code=403,
+                detail="ADC access requires super_admin",
+            )
+        real_role: Role = ROLE_SUPER_ADMIN
+    else:
+        role = resolve_role_from_allowlists(
+            email if authenticated else None,
+            super_admins=_super_admin_allowlist(),
+            admins=_admin_allowlist(),
+            data_owners=_data_owner_allowlist(),
+            require_identity=settings.require_iap_identity,
+            is_authenticated=authenticated,
+        )
+        if role is None:
+            raise HTTPException(status_code=403, detail="role not permitted")
+        real_role = role
 
-    return RolePrincipal(email=email, role=role)
+    effective = _effective_role(real_role, request)
+    return RolePrincipal(email=email, role=effective, real_role=real_role)
 
 
 CurrentRolePrincipal = Annotated[RolePrincipal, Depends(get_role_principal)]
