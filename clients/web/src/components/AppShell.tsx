@@ -1,6 +1,13 @@
-import type { ReactNode } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { useState, type ReactNode } from 'react'
 
 import { NavMenu } from '@/components/NavMenu'
+import {
+  getStoredSimulateRole,
+  setStoredSimulateRole,
+  SIMULATE_ROLE_VALUES,
+  type UserRole,
+} from '@/lib/api'
 import { AuthProvider, useAuth } from '@/lib/auth'
 import { useLiveEvents } from '@/lib/live-events'
 
@@ -34,8 +41,14 @@ export function SkeletonLines({
   )
 }
 
+function roleLabel(role: UserRole) {
+  return role.replace(/_/g, ' ')
+}
+
 function RoleStatusBanner() {
-  const { me, isError, error, isLoading } = useAuth()
+  const { me, isError, error, isLoading, realRole } = useAuth()
+  const queryClient = useQueryClient()
+  const [simulateRole, setSimulateRole] = useState<UserRole | null>(() => getStoredSimulateRole())
   if (isLoading) return null
   if (isError) {
     return (
@@ -49,12 +62,46 @@ function RoleStatusBanner() {
     )
   }
   if (!me) return null
+
+  const showSimulator = realRole === 'super_admin'
+  const selectValue = simulateRole ?? me.role
+
   return (
     <div
-      className="border-b border-line bg-panel/60 px-4 py-1 text-center text-[0.65rem] text-mute"
+      className="border-b border-line bg-panel/60 px-4 py-1 text-[0.65rem] text-mute"
       role="status"
     >
-      {me.email} · {me.role.replace(/_/g, ' ')}
+      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-center gap-x-3 gap-y-1">
+        <span>
+          {me.email} · {roleLabel(me.role)}
+          {showSimulator && me.role !== me.real_role ? (
+            <span className="text-mute/80"> (real {roleLabel(me.real_role)})</span>
+          ) : null}
+        </span>
+        {showSimulator ? (
+          <label className="inline-flex items-center gap-1.5 text-mute">
+            <span className="text-[0.65rem] text-mute">View as</span>
+            <select
+              className="rounded border border-line bg-white px-1.5 py-0.5 text-[0.65rem] text-ink-soft outline-none focus:border-habeas-navy/40"
+              aria-label="Simulate effective role"
+              value={selectValue}
+              onChange={(event) => {
+                const next = event.target.value as UserRole
+                const stored = next === me.real_role ? null : next
+                setStoredSimulateRole(stored)
+                setSimulateRole(stored)
+                void queryClient.invalidateQueries({ queryKey: ['admin-api', 'me'] })
+              }}
+            >
+              {SIMULATE_ROLE_VALUES.map((role) => (
+                <option key={role} value={role}>
+                  {roleLabel(role)}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+      </div>
     </div>
   )
 }

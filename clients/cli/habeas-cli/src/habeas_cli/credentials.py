@@ -9,9 +9,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Literal
-
-AuthMode = Literal["iap", "adc"]
+from typing import Any
 
 _CREDENTIALS_ENV = "HABEAS_CREDENTIALS"
 _DEFAULT_RELATIVE = Path(".config") / "habeas-cli" / "credentials.json"

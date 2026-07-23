@@ -88,8 +88,12 @@ export type ManualRequestInput = {
   external_id?: string
 }
 
-export function getMe() {
-  return fetchAdminApi<MePayload>('/me')
+export async function getMe() {
+  const me = await fetchAdminApi<MePayload>('/me')
+  return {
+    ...me,
+    real_role: me.real_role ?? me.role,
+  }
 }
 
 export function getHealth() {

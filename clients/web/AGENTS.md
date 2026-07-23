@@ -39,6 +39,13 @@ General Amigo frost: [`.agent/modules/design-taste.md`](../../.agent/modules/des
 - Hash-index: **Refresh state** / **Refresh all** enqueue then process in one action (USPS 50+DC); rematch-on-refresh for every successful state.
 - Matching review / fulfill-decline live in Inbox (`?bulk=`). Bulk card runs support pagination, re-run, assign, detail dialog.
 
+## Local admin-api proxy
+
+- Default: `VITE_PROXY_TARGET=http://127.0.0.1:8000` (no Identity-Aware Proxy).
+- Deployed admin-api-dev (`*.run.app`): Vite mints a cached ADC ID token (audience = service origin) and injects `Authorization: Bearer`. Super_admin allowlist only; actor email from verified JWT. Optional `IAP_ID_TOKEN` / `CLOUD_RUN_ID_TOKEN` override; `IAP_USER_EMAIL` legacy header still forwarded if set.
+- Non-super_admin: use ops-ia IAP front door, not the ADC proxy.
+- Super_admin can simulate effective role via banner `View as` → `X-Dev-Simulate-Role` (sessionStorage).
+
 ## Rules
 
 - Thin client — no business rules in browser; all authorization on admin-api.
