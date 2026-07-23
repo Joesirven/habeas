@@ -2176,6 +2176,7 @@ function CompactOpsMetrics({
   errorRateMonth,
   matchRate,
   matchPending,
+  matchDrainActive,
   totalSuppressed,
   workerHealth,
   loading,
@@ -2187,6 +2188,7 @@ function CompactOpsMetrics({
   errorRateMonth: number | null
   matchRate: number | null
   matchPending: number | null
+  matchDrainActive: boolean | null
   totalSuppressed: number | null
   workerHealth: Record<string, WorkerHealthProbe> | undefined
   loading?: boolean
@@ -2271,6 +2273,12 @@ function CompactOpsMetrics({
         <p className="text-xs text-ink-soft">
           Success vs pending matching attempts · queue{' '}
           <span className="tabular-nums text-ink">{matchPending ?? '—'}</span>
+          {matchDrainActive ? (
+            <>
+              {' '}
+              · <span className="text-habeas-mid">drain active</span>
+            </>
+          ) : null}
         </p>
       ),
     },
@@ -3053,6 +3061,7 @@ function DropPipelinePageInner() {
 
   const matchPending = data?.matching_attempts.pending ?? null
   const matchSuccess = data?.matching_attempts.success ?? null
+  const matchDrainActive = data?.matching_attempts.drain?.active ?? null
   const matchRate =
     matchPending != null && matchSuccess != null && matchPending + matchSuccess > 0
       ? matchSuccess / (matchSuccess + matchPending)
@@ -3100,6 +3109,7 @@ function DropPipelinePageInner() {
         errorRateMonth={monthErrorRate}
         matchRate={matchRate}
         matchPending={matchPending}
+        matchDrainActive={matchDrainActive}
         totalSuppressed={totalSuppressed}
         workerHealth={data?.worker_health}
       />

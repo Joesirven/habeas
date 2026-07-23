@@ -415,6 +415,31 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
         elif row["status"] == "success":
             matching_success = item["count"]
 
+    drain_lease_row = await conn.fetchrow(
+        """
+        SELECT holder,
+               acquired_at,
+               expires_at,
+               (holder IS NOT NULL AND expires_at IS NOT NULL AND expires_at >= NOW())
+                 AS active
+          FROM matching_drain_lease
+         WHERE id = 1
+        """
+    )
+    matching_drain = {
+        "active": bool(drain_lease_row["active"]) if drain_lease_row else False,
+        "holder": (
+            str(drain_lease_row["holder"])
+            if drain_lease_row and drain_lease_row["holder"] is not None
+            else None
+        ),
+        "expires_at": (
+            drain_lease_row["expires_at"].isoformat()
+            if drain_lease_row and drain_lease_row["expires_at"] is not None
+            else None
+        ),
+    }
+
     matching_result_rows = await conn.fetch(
         """
         SELECT mr.request_id::text AS request_id,
@@ -616,6 +641,7 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
             "pending": matching_pending,
             "success": matching_success,
             "by_status": matching_by_status,
+            "drain": matching_drain,
         },
         "approaching_sla": {
             "connector": int(approaching_connector or 0),
