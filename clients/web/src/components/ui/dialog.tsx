@@ -101,6 +101,10 @@ export type ConfirmActionDialogProps = {
   confirming?: boolean
   /** Destructive styling for decline / irreversible bulk actions. */
   tone?: 'default' | 'destructive'
+  /** Extra body content (e.g. DROP response_status picker). */
+  children?: React.ReactNode
+  /** When false, confirm stays disabled (e.g. required selection missing). */
+  confirmDisabled?: boolean
   onConfirm: () => void
 }
 
@@ -114,6 +118,8 @@ export function ConfirmActionDialog({
   cancelLabel = 'Cancel',
   confirming = false,
   tone = 'default',
+  children,
+  confirmDisabled = false,
   onConfirm,
 }: ConfirmActionDialogProps) {
   return (
@@ -130,6 +136,7 @@ export function ConfirmActionDialog({
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
+        {children}
         {confirming ? (
           <p className="text-xs text-ink-soft" role="status" aria-live="polite">
             Working — do not close this tab…
@@ -151,7 +158,7 @@ export function ConfirmActionDialog({
                 ? 'inline-flex h-8 items-center justify-center rounded-md bg-red-700 px-3 text-xs font-medium text-white hover:bg-red-800 disabled:opacity-50'
                 : 'inline-flex h-8 items-center justify-center rounded-md bg-habeas-navy px-3 text-xs font-medium text-white hover:bg-habeas-navy/90 disabled:opacity-50'
             }
-            disabled={confirming}
+            disabled={confirming || confirmDisabled}
             onClick={onConfirm}
           >
             {confirming ? 'Working…' : confirmLabel}

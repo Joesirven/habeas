@@ -20,6 +20,7 @@ def _reset_scheduler(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(roles.settings, "require_iap_identity", True)
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
     monkeypatch.setattr(roles.settings, "admin_api_admins", "admin@example.com")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
     monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
     worker_schedules.reset_scheduler_client_factory()
     yield

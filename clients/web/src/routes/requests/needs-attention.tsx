@@ -5,18 +5,34 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { SkeletonLines } from '@/components/AppShell'
 import {
   AccessHandoffPanel,
+  buildAccessDeliveryDraft,
+  DropResponseStatusPicker,
   MatchingReviewPanel,
 } from '@/components/requests/RequestTriageDialog'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { ConfirmActionDialog } from '@/components/ui/dialog'
+import {
+  ConfirmActionDialog,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { useMe } from '@/lib/auth'
 import {
   getDropMatchingResultDetail,
   getFulfillmentArtifact,
+  getLegalNeedsAttention,
   getNeedsAttention,
   getRequestComments,
   getRequestJourney,
@@ -24,12 +40,30 @@ import {
   postDropMatchingResultDecline,
   postDropMatchingResultPromote,
   postDropWorkflowAssign,
+  postDropWorkflowEscalate,
   postRequestComment,
+  postTriageBulkReject,
+  postTriageSendToMatching,
+  suggestedDropResponseStatus,
+  type DropResponseStatusCode,
   type JourneyStage,
   type MatchingResultDetail,
   type NeedsAttentionItem,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
+
+function recommendedStatusFromItem(
+  item: NeedsAttentionItem,
+  matching?: MatchingResultDetail | null,
+): DropResponseStatusCode {
+  const fromApi =
+    matching?.recommended_response_status ?? item.recommended_response_status
+  if (fromApi === 3 || fromApi === 4 || fromApi === 5) return fromApi
+  return suggestedDropResponseStatus(
+    matching?.match_type ?? item.match_type,
+    matching?.match_count ?? item.match_count,
+  )
+}
 
 const SOURCE_LABELS: Record<string, string> = {
   webform: 'Gravity Forms',
@@ -47,6 +81,8 @@ const DUE_SOON_HOURS = 12
 type InboxKind =
   | 'all'
   | 'matching'
+  | 'triage'
+  | 'escalations'
   | 'delivery'
   | 'notice'
   | 'communications'
@@ -54,17 +90,51 @@ type InboxKind =
 type MatchFilter = 'all' | 'single_match' | 'multi_match' | 'not_found' | 'unknown'
 type DueFilter = 'all' | 'overdue' | 'due_soon' | 'on_track'
 
-const INBOX_KIND_TABS: { value: InboxKind; label: string }[] = [
+const OPS_INBOX_KIND_TABS: { value: InboxKind; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'matching', label: 'Matching' },
+  { value: 'triage', label: 'Triage' },
+  { value: 'escalations', label: 'Escalations' },
   { value: 'delivery', label: 'Delivery' },
   { value: 'notice', label: 'Notice' },
   { value: 'communications', label: 'Comms' },
   { value: 'pending_tasks', label: 'Tasks' },
 ]
 
-function isMatchingItem(item: NeedsAttentionItem): boolean {
+/** Legal case queue — no Matching / Comms / All (matching stays on data-owner My work). */
+const LEGAL_INBOX_KIND_TABS: { value: InboxKind; label: string }[] = [
+  { value: 'triage', label: 'Triage' },
+  { value: 'escalations', label: 'Escalations' },
+  { value: 'notice', label: 'Notice' },
+  { value: 'delivery', label: 'Delivery' },
+  { value: 'pending_tasks', label: 'Tasks' },
+]
+
+/** Data-owner / employee queue — matching review + assigned Tasks. */
+const DATA_OWNER_INBOX_KIND_TABS: { value: InboxKind; label: string }[] = [
+  { value: 'matching', label: 'Matching' },
+  { value: 'pending_tasks', label: 'Tasks' },
+]
+
+function isTriageItem(item: NeedsAttentionItem): boolean {
   return (
+    item.kind === 'triage' ||
+    item.assignment?.kind === 'triage' ||
+    item.current_stage === 'triage'
+  )
+}
+
+function isEscalationItem(item: NeedsAttentionItem): boolean {
+  return (
+    item.kind === 'escalations' ||
+    item.assignment?.kind === 'escalate'
+  )
+}
+
+function isMatchingItem(item: NeedsAttentionItem): boolean {
+  if (isTriageItem(item) || isEscalationItem(item)) return false
+  return (
+    item.kind === 'matching' ||
     item.reason === 'matching.review' ||
     item.match_type != null ||
     item.current_stage === 'review'
@@ -73,6 +143,7 @@ function isMatchingItem(item: NeedsAttentionItem): boolean {
 
 function isDeliveryItem(item: NeedsAttentionItem): boolean {
   return (
+    item.kind === 'delivery' ||
     item.reason === 'access.delivery' ||
     item.reason === 'delivery.confirm' ||
     item.current_stage === 'delivery'
@@ -80,7 +151,11 @@ function isDeliveryItem(item: NeedsAttentionItem): boolean {
 }
 
 function isNoticeItem(item: NeedsAttentionItem): boolean {
-  return item.reason === 'notice.review' || item.current_stage === 'notice'
+  return (
+    item.kind === 'notice' ||
+    item.reason === 'notice.review' ||
+    item.current_stage === 'notice'
+  )
 }
 
 function isCommsItem(item: NeedsAttentionItem): boolean {
@@ -132,6 +207,11 @@ function matchTypeLabel(matchType: string | null | undefined): string {
 }
 
 function inboxItemTitle(item: NeedsAttentionItem): string {
+  if (isTriageItem(item)) {
+    const state = item.requestor_state?.trim()
+    return state ? `Triage hold · ${state}` : 'Triage hold · condition route'
+  }
+  if (isEscalationItem(item)) return 'Escalated to Legal'
   if (isDeliveryItem(item)) return 'Access pack ready · copy URL'
   if (isNoticeItem(item)) return 'Notice review before Wed upload'
   if (isCommsItem(item)) return 'Requester communications'
@@ -141,11 +221,145 @@ function inboxItemTitle(item: NeedsAttentionItem): string {
   return reasonLabel(item.reason)
 }
 
-function journeyDot(status: JourneyStage['status']): string {
-  if (status === 'complete') return 'bg-emerald-600/70'
-  if (status === 'waiting' || status === 'in_progress') return 'bg-amber-500/80'
-  if (status === 'failed') return 'bg-red-600/70'
+function journeySegmentClass(status: JourneyStage['status']): string {
+  if (status === 'complete') return 'bg-emerald-600'
+  if (status === 'failed') return 'bg-red-600'
+  if (status === 'waiting' || status === 'in_progress') return 'bg-amber-500'
+  if (status === 'skipped') return 'bg-mute/50'
   return 'bg-line'
+}
+
+function matchTypeBadgeVariant(
+  matchType: string | null | undefined,
+): 'default' | 'ok' | 'fail' | 'wait' | 'run' {
+  if (matchType === 'single_match') return 'wait'
+  if (matchType === 'multi_match') return 'fail'
+  if (matchType === 'not_found') return 'default'
+  return 'default'
+}
+
+function JourneyProgressBar({ stages }: { stages: JourneyStage[] }) {
+  if (stages.length === 0) return null
+  const activeIdx = stages.findIndex(
+    (stage) =>
+      stage.status === 'in_progress' ||
+      stage.status === 'waiting' ||
+      stage.status === 'failed',
+  )
+
+  return (
+    <div className="space-y-1.5" role="group" aria-label="Request journey">
+      <div className="flex h-2 w-full overflow-hidden rounded-full bg-canvas ring-1 ring-line">
+        {stages.map((stage) => (
+          <div
+            key={stage.stage}
+            className={cn(
+              'h-full min-w-[3px] flex-1',
+              journeySegmentClass(stage.status),
+            )}
+            title={`${stage.label}: ${stage.status.replaceAll('_', ' ')}${
+              stage.blocker ? ` — ${stage.blocker}` : ''
+            }`}
+          />
+        ))}
+      </div>
+      <div className="flex gap-0.5">
+        {stages.map((stage, index) => (
+          <span
+            key={stage.stage}
+            className={cn(
+              'min-w-0 flex-1 truncate text-center text-[0.55rem] leading-tight',
+              index === activeIdx ||
+                stage.status === 'in_progress' ||
+                stage.status === 'waiting'
+                ? 'font-medium text-ink'
+                : 'text-mute',
+            )}
+            title={stage.blocker ?? undefined}
+          >
+            {stage.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function IconCheck({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      aria-hidden
+    >
+      <path d="M3 8.5 6 11.5 13 4.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function IconX({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      aria-hidden
+    >
+      <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function IconCopy({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      aria-hidden
+    >
+      <rect x="5.5" y="5.5" width="8" height="8" rx="1" />
+      <path d="M10.5 5.5V4a1.5 1.5 0 00-1.5-1.5H4A1.5 1.5 0 002.5 4v5A1.5 1.5 0 004 10.5h1.5" />
+    </svg>
+  )
+}
+
+function IconMail({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      aria-hidden
+    >
+      <rect x="2" y="4" width="12" height="9" rx="1" />
+      <path d="M2 5.5l6 4 6-4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function IconExternal({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      aria-hidden
+    >
+      <path d="M10 2h4v4M14 2L7 9M6 3H3a1 1 0 00-1 1v9a1 1 0 001 1h9a1 1 0 001-1v-3" />
+    </svg>
+  )
 }
 
 function emailInitials(email: string | null | undefined): string {
@@ -369,11 +583,14 @@ function InboxReviewPane({
   item,
   canReviewActions,
   assigneeCandidates,
+  legalPersona = false,
   onBackToQueue,
 }: {
   item: NeedsAttentionItem
   canReviewActions: boolean
   assigneeCandidates: string[]
+  /** Legal case-queue mode — hide DO escalate; resolve escalations via fulfill path. */
+  legalPersona?: boolean
   onBackToQueue?: () => void
 }) {
   const queryClient = useQueryClient()
@@ -382,18 +599,30 @@ function InboxReviewPane({
   const [assignError, setAssignError] = useState<string | null>(null)
   const [commentError, setCommentError] = useState<string | null>(null)
   const [copyNote, setCopyNote] = useState<string | null>(null)
+  const [confirmAction, setConfirmAction] = useState<
+    'fulfill' | 'decline' | 'escalate' | 'triage_reject' | 'triage_match' | null
+  >(null)
+  const [draftOpen, setDraftOpen] = useState(false)
 
-  const showMatching = isMatchingItem(item) && !isDeliveryItem(item) && !isNoticeItem(item)
+  const showTriage = isTriageItem(item)
+  const showEscalation = isEscalationItem(item)
+  const showMatching =
+    (isMatchingItem(item) || showEscalation) &&
+    !isDeliveryItem(item) &&
+    !isNoticeItem(item) &&
+    !showTriage &&
+    !legalPersona
+  const showLegalEscalation = legalPersona && showEscalation
   const showDelivery = isDeliveryItem(item) || item.current_stage === 'fulfill'
   const showNotice = isNoticeItem(item)
-  const showComms = isCommsItem(item)
+  const showComms = isCommsItem(item) && !legalPersona
 
   const matchingQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop', 'matching-results', item.request_id],
     queryFn: () => fetchMatchingDetailOptional(item.request_id),
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
-    enabled: showMatching || showDelivery,
+    enabled: showMatching || showLegalEscalation || showDelivery,
   })
 
   const journeyQuery = useQuery({
@@ -417,10 +646,19 @@ function InboxReviewPane({
     refetchInterval: 15_000,
   })
 
+  const [fulfillStatus, setFulfillStatus] = useState<DropResponseStatusCode | null>(() =>
+    recommendedStatusFromItem(item),
+  )
+  const suggestedStatus = recommendedStatusFromItem(item, matchingQuery.data)
+
   const promoteMutation = useMutation({
-    mutationFn: () => postDropMatchingResultPromote(item.request_id),
+    mutationFn: (responseStatus: DropResponseStatusCode) =>
+      postDropMatchingResultPromote(item.request_id, {
+        response_status: responseStatus,
+      }),
     onSuccess: async () => {
       setActionError(null)
+      setConfirmAction(null)
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
     onError: (error) => {
@@ -436,6 +674,51 @@ function InboxReviewPane({
     },
     onError: (error) => {
       setActionError(error instanceof Error ? error.message : 'Decline failed')
+    },
+  })
+
+  const escalateMutation = useMutation({
+    mutationFn: () =>
+      postDropWorkflowEscalate({
+        request_ids: [item.request_id],
+        target_role: 'legal',
+      }),
+    onSuccess: async () => {
+      setActionError(null)
+      setConfirmAction(null)
+      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+    },
+    onError: (error) => {
+      setActionError(error instanceof Error ? error.message : 'Escalate failed')
+    },
+  })
+
+  const triageRejectMutation = useMutation({
+    mutationFn: () =>
+      postTriageBulkReject({
+        request_ids: [item.request_id],
+        response_status: 2,
+      }),
+    onSuccess: async () => {
+      setActionError(null)
+      setConfirmAction(null)
+      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+    },
+    onError: (error) => {
+      setActionError(error instanceof Error ? error.message : 'Triage reject failed')
+    },
+  })
+
+  const triageMatchMutation = useMutation({
+    mutationFn: () =>
+      postTriageSendToMatching({ request_ids: [item.request_id] }),
+    onSuccess: async () => {
+      setActionError(null)
+      setConfirmAction(null)
+      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+    },
+    onError: (error) => {
+      setActionError(error instanceof Error ? error.message : 'Send to matching failed')
     },
   })
 
@@ -479,221 +762,563 @@ function InboxReviewPane({
     },
   })
 
-  const actionPending = promoteMutation.isPending || declineMutation.isPending
+  const actionPending =
+    promoteMutation.isPending ||
+    declineMutation.isPending ||
+    escalateMutation.isPending ||
+    triageRejectMutation.isPending ||
+    triageMatchMutation.isPending
   const comments = commentsQuery.data ?? []
   const bucket = dueBucket(item)
   const assignee = item.assignment?.assignee_identity
   const stages = journeyQuery.data?.stages ?? []
+  const shareableUrl =
+    artifactQuery.data?.shareable_url ?? artifactQuery.data?.fulfillment_artifact_uri ?? ''
+  const outboundDraft = buildAccessDeliveryDraft({
+    requestId: item.request_id,
+    shareableUrl: shareableUrl || '[shareable URL will appear here after fulfillment]',
+  })
+  const showHandoffTab = showDelivery || showComms
+  const showResolveMatching = showMatching || showLegalEscalation
+  const primaryTab = showTriage
+    ? 'triage'
+    : showLegalEscalation
+      ? 'comments'
+      : showMatching
+        ? 'matching'
+        : showHandoffTab
+          ? 'delivery'
+          : showNotice
+            ? 'notice'
+            : 'comments'
+
+  function copyShareableUrl() {
+    if (!shareableUrl) return
+    void navigator.clipboard.writeText(shareableUrl).then(() => {
+      setCopyNote('Copied URL')
+      window.setTimeout(() => setCopyNote(null), 2000)
+    })
+  }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="shrink-0 space-y-2 border-b border-line px-4 py-3">
-        {onBackToQueue ? (
-          <button
-            type="button"
-            onClick={onBackToQueue}
-            className="mb-1 text-[0.7rem] font-medium text-habeas-navy underline-offset-2 hover:underline md:hidden"
-          >
-            ← Queue
-          </button>
+    <TooltipProvider delayDuration={250}>
+      <div className="flex h-full min-h-0 flex-col">
+        <ConfirmActionDialog
+          open={confirmAction === 'fulfill'}
+          onOpenChange={(open) => {
+            if (!open && !actionPending) setConfirmAction(null)
+            if (open) setFulfillStatus(suggestedStatus)
+          }}
+          title="Fulfill this match?"
+          description={`Approve matching review for ${item.request_id.slice(0, 8)}… and set the CA DROP status result.`}
+          confirmLabel="Fulfill"
+          confirming={actionPending && confirmAction === 'fulfill'}
+          confirmDisabled={fulfillStatus == null}
+          onConfirm={() => {
+            if (fulfillStatus != null) promoteMutation.mutate(fulfillStatus)
+          }}
+        >
+          <DropResponseStatusPicker
+            value={fulfillStatus}
+            onChange={setFulfillStatus}
+            disabled={actionPending}
+            suggested={suggestedStatus}
+          />
+        </ConfirmActionDialog>
+        <ConfirmActionDialog
+          open={confirmAction === 'decline'}
+          onOpenChange={(open) => {
+            if (!open && !actionPending) setConfirmAction(null)
+          }}
+          title="Decline matching review?"
+          description={`Decline request ${item.request_id.slice(0, 8)}… — it will leave the review queue without fulfillment.`}
+          confirmLabel="Decline"
+          tone="destructive"
+          confirming={actionPending && confirmAction === 'decline'}
+          onConfirm={() => declineMutation.mutate()}
+        />
+        <ConfirmActionDialog
+          open={confirmAction === 'escalate'}
+          onOpenChange={(open) => {
+            if (!open && !actionPending) setConfirmAction(null)
+          }}
+          title="Escalate to Legal?"
+          description={`Send request ${item.request_id.slice(0, 8)}… to Legal Inbox · Escalations. Add a comment first if context is needed.`}
+          confirmLabel="Escalate"
+          confirming={actionPending && confirmAction === 'escalate'}
+          onConfirm={() => escalateMutation.mutate()}
+        />
+        <ConfirmActionDialog
+          open={confirmAction === 'triage_reject'}
+          onOpenChange={(open) => {
+            if (!open && !actionPending) setConfirmAction(null)
+          }}
+          title="Bulk reject (Exempted)?"
+          description={`Set CA DROP response_status = 2 (Exempted) for ${item.request_id.slice(0, 8)}… and leave Triage.`}
+          confirmLabel="Reject as Exempted"
+          tone="destructive"
+          confirming={actionPending && confirmAction === 'triage_reject'}
+          onConfirm={() => triageRejectMutation.mutate()}
+        />
+        <ConfirmActionDialog
+          open={confirmAction === 'triage_match'}
+          onOpenChange={(open) => {
+            if (!open && !actionPending) setConfirmAction(null)
+          }}
+          title="Send to matching?"
+          description={`Release ${item.request_id.slice(0, 8)}… from Triage and enqueue auto-match for the data owner.`}
+          confirmLabel="Send to matching"
+          confirming={actionPending && confirmAction === 'triage_match'}
+          onConfirm={() => triageMatchMutation.mutate()}
+        />
+
+        <div className="shrink-0 space-y-2.5 border-b border-line px-4 py-3">
+          {onBackToQueue ? (
+            <button
+              type="button"
+              onClick={onBackToQueue}
+              className="text-[0.7rem] font-medium text-habeas-navy underline-offset-2 hover:underline md:hidden"
+            >
+              ← Queue
+            </button>
+          ) : null}
+
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                {showTriage ? (
+                  <Badge variant="wait" className="normal-case tracking-normal">
+                    Triage
+                  </Badge>
+                ) : showEscalation ? (
+                  <Badge variant="fail" className="normal-case tracking-normal">
+                    Escalation
+                  </Badge>
+                ) : item.match_type ? (
+                  <Badge
+                    variant={matchTypeBadgeVariant(item.match_type)}
+                    className="normal-case tracking-normal text-[0.7rem]"
+                  >
+                    {matchTypeLabel(item.match_type)}
+                  </Badge>
+                ) : showDelivery ? (
+                  <Badge variant="run" className="normal-case tracking-normal">
+                    Delivery
+                  </Badge>
+                ) : showNotice ? (
+                  <Badge variant="wait" className="normal-case tracking-normal">
+                    Notice review
+                  </Badge>
+                ) : showComms ? (
+                  <Badge variant="default" className="normal-case tracking-normal">
+                    Communications
+                  </Badge>
+                ) : (
+                  <span className="text-sm font-medium text-ink">{inboxItemTitle(item)}</span>
+                )}
+                {(showTriage || showEscalation) && item.requestor_state ? (
+                  <Badge variant="default" className="normal-case tracking-normal">
+                    {item.requestor_state}
+                  </Badge>
+                ) : null}
+                <Badge
+                  variant={
+                    bucket === 'overdue' ? 'fail' : bucket === 'due_soon' ? 'wait' : 'default'
+                  }
+                  className="normal-case tracking-normal"
+                >
+                  {formatDueLabel(item)}
+                </Badge>
+              </div>
+              <p className="truncate text-[0.65rem] text-mute">{compactMetaLine(item)}</p>
+              <p className="font-mono text-[0.6rem] text-mute/80">{item.request_id}</p>
+            </div>
+            <AssigneeAvatarPicker
+              currentEmail={assignee}
+              candidates={assigneeCandidates}
+              disabled={!canReviewActions}
+              pending={assignMutation.isPending}
+              error={assignError}
+              onAssign={(email) => assignMutation.mutate(email)}
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-0.5">
+            {showTriage && canReviewActions ? (
+              <>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-[0.65rem]"
+                      disabled={actionPending}
+                      onClick={() => setConfirmAction('triage_reject')}
+                      aria-label="Reject as Exempted"
+                    >
+                      Reject 2
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Legal Triage — set DROP status 2 Exempted</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-[0.65rem]"
+                      disabled={actionPending}
+                      onClick={() => setConfirmAction('triage_match')}
+                      aria-label="Send to matching"
+                    >
+                      Match
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Send to matching — release Triage hold</TooltipContent>
+                </Tooltip>
+              </>
+            ) : null}
+            {(showMatching || showLegalEscalation) && canReviewActions ? (
+              <>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 w-7 px-0"
+                      disabled={actionPending}
+                      onClick={() => setConfirmAction('fulfill')}
+                      aria-label="Fulfill"
+                    >
+                      <IconCheck className="h-3.5 w-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {showLegalEscalation
+                      ? 'Resolve escalation — set DROP status and release'
+                      : 'Fulfill — approve and release to fulfillment'}
+                  </TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 w-7 px-0"
+                      disabled={actionPending}
+                      onClick={() => setConfirmAction('decline')}
+                      aria-label="Decline"
+                    >
+                      <IconX className="h-3.5 w-3.5" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Decline — leave queue without fulfillment</TooltipContent>
+                </Tooltip>
+                {showMatching && !legalPersona ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-[0.65rem]"
+                        disabled={actionPending}
+                        onClick={() => setConfirmAction('escalate')}
+                        aria-label="Escalate to Legal"
+                      >
+                        Legal
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Escalate to Legal Inbox · Escalations</TooltipContent>
+                  </Tooltip>
+                ) : null}
+              </>
+            ) : null}
+            {(showDelivery || showComms) && shareableUrl ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 w-7 px-0"
+                    onClick={copyShareableUrl}
+                    aria-label="Copy URL"
+                  >
+                    <IconCopy className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Copy shareable delivery URL</TooltipContent>
+              </Tooltip>
+            ) : null}
+            {showDelivery || showComms ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 w-7 px-0"
+                    onClick={() => setDraftOpen(true)}
+                    aria-label="Draft outbound"
+                  >
+                    <IconMail className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Draft outbound access email</TooltipContent>
+              </Tooltip>
+            ) : null}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Link
+                  to="/requests/$requestId"
+                  params={{ requestId: item.request_id }}
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-md text-ink hover:bg-canvas"
+                  aria-label="Open full request page"
+                >
+                  <IconExternal className="h-3.5 w-3.5" />
+                </Link>
+              </TooltipTrigger>
+              <TooltipContent>Open full request history</TooltipContent>
+            </Tooltip>
+            {copyNote ? (
+              <span className="ml-1 text-[0.65rem] text-mute">{copyNote}</span>
+            ) : null}
+            {actionError ? (
+              <span className="ml-1 text-[0.65rem] text-red-700">{actionError}</span>
+            ) : null}
+          </div>
+        </div>
+
+        {stages.length > 0 ? (
+          <div className="shrink-0 border-b border-line px-4 py-2.5">
+            <JourneyProgressBar stages={stages} />
+          </div>
         ) : null}
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <div className="min-w-0">
-            <Micro>Request detail</Micro>
-            <h2 className="mt-0.5 text-sm font-medium text-ink">{inboxItemTitle(item)}</h2>
-            <h3 className="font-mono text-[0.75rem] text-mute">{item.request_id}</h3>
-            <dl className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-[0.7rem] text-ink-soft">
-              <div>
-                Source{' '}
-                <span className="text-ink">
-                  {SOURCE_LABELS[item.intake_source] ?? item.intake_source}
-                </span>
+
+        <Tabs defaultValue={primaryTab} className="flex min-h-0 flex-1 flex-col">
+          <div className="shrink-0 border-b border-line px-4 pt-2">
+            <TabsList className="h-7 w-full justify-start bg-transparent p-0">
+              {showTriage ? (
+                <TabsTrigger value="triage" className="h-6 px-2 text-[0.65rem]">
+                  Triage
+                </TabsTrigger>
+              ) : null}
+              {showResolveMatching ? (
+                <TabsTrigger value="matching" className="h-6 px-2 text-[0.65rem]">
+                  Matching
+                </TabsTrigger>
+              ) : null}
+              {showHandoffTab ? (
+                <TabsTrigger value="delivery" className="h-6 px-2 text-[0.65rem]">
+                  {showDelivery ? 'Delivery' : 'Handoff'}
+                </TabsTrigger>
+              ) : null}
+              {showNotice ? (
+                <TabsTrigger value="notice" className="h-6 px-2 text-[0.65rem]">
+                  Notice
+                </TabsTrigger>
+              ) : null}
+              {showComms && showDelivery ? (
+                <TabsTrigger value="comms" className="h-6 px-2 text-[0.65rem]">
+                  Comms
+                </TabsTrigger>
+              ) : null}
+              <TabsTrigger value="comments" className="h-6 gap-1 px-2 text-[0.65rem]">
+                {showLegalEscalation ? 'Escalation' : 'Comments'}
+                {comments.length > 0 ? (
+                  <span className="tabular-nums opacity-70">({comments.length})</span>
+                ) : null}
+              </TabsTrigger>
+            </TabsList>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+            {showTriage ? (
+              <TabsContent value="triage" className="mt-0 space-y-2 text-xs">
+                <p className="text-ink-soft">
+                  Condition routed this request here before matching. Reject as DROP{' '}
+                  <span className="font-mono">2</span> Exempted, or send to matching for the
+                  data owner.
+                </p>
+                {item.requestor_state ? (
+                  <p className="text-mute">
+                    Requestor state:{' '}
+                    <span className="font-medium text-ink">{item.requestor_state}</span>
+                  </p>
+                ) : null}
+              </TabsContent>
+            ) : null}
+
+            {showResolveMatching ? (
+              <TabsContent value="matching" className="mt-0">
+                <MatchingReviewPanel
+                  requestId={item.request_id}
+                  matching={matchingQuery.data}
+                  isPending={matchingQuery.isPending}
+                  isError={matchingQuery.isError}
+                  canReviewActions={canReviewActions}
+                  actionPending={actionPending}
+                  actionError={actionError}
+                  onPromote={(responseStatus) =>
+                    promoteMutation.mutate(responseStatus)
+                  }
+                  onDecline={() => declineMutation.mutate()}
+                  compact
+                  layout="tabs"
+                  hideActions
+                />
+              </TabsContent>
+            ) : null}
+
+            {showHandoffTab ? (
+              <TabsContent value="delivery" className="mt-0 space-y-3">
+                <AccessHandoffPanel
+                  requestId={item.request_id}
+                  artifact={artifactQuery.data}
+                  isPending={artifactQuery.isFetching && !artifactQuery.data}
+                  isError={artifactQuery.isError}
+                  canMutate={canReviewActions}
+                  busy={deliveryMutation.isPending}
+                  onCopyUrl={copyShareableUrl}
+                  onSetStatus={(status) => deliveryMutation.mutate(status)}
+                />
+                {showComms && !showDelivery ? (
+                  <p className="text-xs text-ink-soft">
+                    Requester communications will thread here as outbound and inbound messages
+                    are recorded.
+                  </p>
+                ) : null}
+              </TabsContent>
+            ) : null}
+
+            {showNotice ? (
+              <TabsContent value="notice" className="mt-0 space-y-2 text-xs">
+                <p className="text-ink-soft">
+                  DROP path after fulfill: approve{' '}
+                  <span className="font-mono">notice.review</span>, then Wed upload — not a
+                  consumer URL.
+                </p>
+                <p className="text-mute">Next upload window: Wed 00:00 America/Los_Angeles</p>
+              </TabsContent>
+            ) : null}
+
+            {showComms && showDelivery ? (
+              <TabsContent value="comms" className="mt-0 text-xs text-ink-soft">
+                <p className="font-medium text-ink">Requester communications</p>
+                <p className="mt-1">
+                  Outbound drafts, sent attempts, and inbound replies will thread here. Use
+                  Draft outbound on Delivery items for access URL emails today.
+                </p>
+              </TabsContent>
+            ) : null}
+
+            <TabsContent value="comments" className="mt-0 space-y-2">
+              <div className="max-h-64 space-y-1 overflow-y-auto">
+                {commentsQuery.isError ? (
+                  <p className="text-[0.7rem] text-red-700">Could not load comments.</p>
+                ) : null}
+                {!commentsQuery.isPending && !commentsQuery.isError && comments.length === 0 ? (
+                  <p className="text-[0.7rem] text-mute">No comments yet.</p>
+                ) : null}
+                {comments.map((comment) => (
+                  <div key={comment.id} className="border-b border-line/70 py-1.5 last:border-0">
+                    <div className="flex flex-wrap items-baseline justify-between gap-1">
+                      <span className="text-[0.65rem] font-medium text-ink">{comment.actor}</span>
+                      <span className="tabular-nums text-[0.6rem] text-mute">
+                        {formatRelativeTime(comment.occurred_at)}
+                      </span>
+                    </div>
+                    <p className="whitespace-pre-wrap text-[0.7rem] text-ink-soft">
+                      {comment.body}
+                    </p>
+                  </div>
+                ))}
               </div>
-              <div>
-                Stage{' '}
-                <span className="capitalize text-ink">
-                  {item.current_stage.replaceAll('_', ' ')}
-                </span>
-              </div>
-              <div>
-                Blocker <span className="text-ink">{reasonLabel(item.reason)}</span>
-              </div>
-              {item.bulk_process_id != null || item.source_csv_filename ? (
-                <div>
-                  Batch{' '}
-                  <span className="font-mono text-ink">
-                    {inboxBatchLabel(item)}
-                  </span>
+              {canReviewActions ? (
+                <div className="flex items-end gap-2 border-t border-line pt-2">
+                  <textarea
+                    className="min-h-[2.5rem] max-h-20 flex-1 resize-y rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
+                    value={commentDraft}
+                    onChange={(event) => setCommentDraft(event.target.value)}
+                    placeholder="Add a review note…"
+                    aria-label="Comment body"
+                    maxLength={2000}
+                  />
+                  <Button
+                    size="sm"
+                    disabled={commentMutation.isPending || commentDraft.trim().length === 0}
+                    onClick={() => commentMutation.mutate(commentDraft.trim())}
+                  >
+                    {commentMutation.isPending ? '…' : 'Post'}
+                  </Button>
                 </div>
               ) : null}
-            </dl>
+              {commentError ? (
+                <p className="text-[0.65rem] text-red-700">{commentError}</p>
+              ) : null}
+            </TabsContent>
           </div>
-          <AssigneeAvatarPicker
-            currentEmail={assignee}
-            candidates={assigneeCandidates}
-            disabled={!canReviewActions}
-            pending={assignMutation.isPending}
-            error={assignError}
-            onAssign={(email) => assignMutation.mutate(email)}
-          />
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Badge
-            variant={
-              bucket === 'overdue' ? 'fail' : bucket === 'due_soon' ? 'wait' : 'default'
-            }
-            className="normal-case tracking-normal"
-          >
-            {formatDueLabel(item)}
-          </Badge>
-        </div>
-      </div>
+        </Tabs>
 
-      {stages.length > 0 ? (
-        <div className="shrink-0 border-b border-line px-4 py-3">
-          <Micro>Journey</Micro>
-          <ol className="mt-2 flex flex-wrap gap-2">
-            {stages.map((stage) => (
-              <li
-                key={stage.stage}
-                className="flex items-center gap-1.5 rounded-md border border-line px-2 py-1 text-[0.65rem]"
-              >
-                <span className={cn('h-1.5 w-1.5 rounded-full', journeyDot(stage.status))} />
-                <span className="text-ink">{stage.label}</span>
-                {stage.blocker ? (
-                  <span className="max-w-[10rem] truncate text-mute">{stage.blocker}</span>
-                ) : null}
-              </li>
-            ))}
-          </ol>
-        </div>
-      ) : null}
-
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
-        {showMatching ? (
-          <MatchingReviewPanel
-            requestId={item.request_id}
-            matching={matchingQuery.data}
-            isPending={matchingQuery.isPending}
-            isError={matchingQuery.isError}
-            canReviewActions={canReviewActions}
-            actionPending={actionPending}
-            actionError={actionError}
-            onPromote={() => promoteMutation.mutate()}
-            onDecline={() => declineMutation.mutate()}
-            compact
-          />
-        ) : null}
-
-        {showDelivery || showComms ? (
-          <AccessHandoffPanel
-            requestId={item.request_id}
-            artifact={artifactQuery.data}
-            isPending={artifactQuery.isFetching && !artifactQuery.data}
-            isError={artifactQuery.isError}
-            canMutate={canReviewActions}
-            busy={deliveryMutation.isPending}
-            onCopyUrl={() => {
-              const url =
-                artifactQuery.data?.shareable_url ??
-                artifactQuery.data?.fulfillment_artifact_uri
-              if (!url) return
-              void navigator.clipboard.writeText(url).then(() => {
-                setCopyNote('Copied URL')
-                window.setTimeout(() => setCopyNote(null), 2000)
-              })
-            }}
-            onSetStatus={(status) => deliveryMutation.mutate(status)}
-          />
-        ) : null}
-        {copyNote ? <p className="text-[0.7rem] text-mute">{copyNote}</p> : null}
-
-        {showNotice ? (
-          <div className="space-y-3 text-xs">
-            <p className="text-ink-soft">
-              DROP path after fulfill: approve{' '}
-              <span className="font-mono">notice.review</span>, then Wed upload — not a
-              consumer URL.
-            </p>
-            <p className="text-mute">Next upload window: Wed 00:00 America/Los_Angeles</p>
-          </div>
-        ) : null}
-
-        {showComms ? (
-          <div className="space-y-2 rounded-lg border border-dashed border-line px-3 py-4 text-xs text-ink-soft">
-            <p className="font-medium text-ink">Requester communications</p>
-            <p>
-              Outbound drafts, sent attempts, and inbound replies will thread here. Use{' '}
-              <span className="font-medium text-ink">Draft outbound</span> on Delivery items
-              for access URL emails today.
-            </p>
-          </div>
-        ) : null}
-
-        <p className="text-[0.65rem] text-mute">
-          <Link
-            to="/requests/$requestId"
-            params={{ requestId: item.request_id }}
-            className="text-habeas-navy underline-offset-2 hover:underline"
-          >
-            Full request history →
-          </Link>
-        </p>
-      </div>
-
-      <section className="shrink-0 space-y-2 border-t border-line bg-paper/80 px-4 py-3">
-        <Micro>
-          Comments ·{' '}
-          {commentsQuery.isPending && comments.length === 0
-            ? '…'
-            : `${comments.length} note${comments.length === 1 ? '' : 's'}`}
-        </Micro>
-        <div className="max-h-28 space-y-1 overflow-y-auto">
-          {commentsQuery.isError ? (
-            <p className="text-[0.7rem] text-red-700">Could not load comments.</p>
-          ) : null}
-          {!commentsQuery.isPending && !commentsQuery.isError && comments.length === 0 ? (
-            <p className="text-[0.7rem] text-mute">No comments yet.</p>
-          ) : null}
-          {comments.map((comment) => (
-            <div
-              key={comment.id}
-              className="rounded-md border border-line/80 bg-canvas/60 px-2 py-1"
-            >
-              <div className="flex flex-wrap items-baseline justify-between gap-1">
-                <span className="text-[0.65rem] font-medium text-ink">{comment.actor}</span>
-                <span className="tabular-nums text-[0.6rem] text-mute">
-                  {formatRelativeTime(comment.occurred_at)}
-                </span>
+        <Dialog open={draftOpen} onOpenChange={setDraftOpen}>
+          <DialogContent className="max-w-lg">
+            <DialogHeader>
+              <DialogTitle>Draft access delivery</DialogTitle>
+              <DialogDescription>
+                Template for external email — copy subject and body, then send outside the
+                platform.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3 text-xs">
+              <div>
+                <p className="taste-micro">Subject</p>
+                <p className="mt-1 rounded-md border border-line bg-paper px-2 py-1.5 text-ink">
+                  {outboundDraft.subject}
+                </p>
               </div>
-              <p className="whitespace-pre-wrap text-[0.7rem] text-ink-soft">{comment.body}</p>
+              <div>
+                <p className="taste-micro">Body</p>
+                <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap rounded-md border border-line bg-paper px-2 py-1.5 font-sans text-[0.75rem] text-ink">
+                  {outboundDraft.body}
+                </pre>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(outboundDraft.body).then(() => {
+                      setCopyNote('Copied draft body')
+                      window.setTimeout(() => setCopyNote(null), 2000)
+                    })
+                  }}
+                >
+                  Copy body
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(outboundDraft.subject).then(() => {
+                      setCopyNote('Copied subject')
+                      window.setTimeout(() => setCopyNote(null), 2000)
+                    })
+                  }}
+                >
+                  Copy subject
+                </Button>
+              </div>
             </div>
-          ))}
-        </div>
-        {canReviewActions ? (
-          <div className="flex items-end gap-2">
-            <textarea
-              className="min-h-[2.5rem] max-h-20 flex-1 resize-y rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
-              value={commentDraft}
-              onChange={(event) => setCommentDraft(event.target.value)}
-              placeholder="Add a review note…"
-              aria-label="Comment body"
-              maxLength={2000}
-            />
-            <Button
-              size="sm"
-              disabled={commentMutation.isPending || commentDraft.trim().length === 0}
-              onClick={() => commentMutation.mutate(commentDraft.trim())}
-            >
-              {commentMutation.isPending ? '…' : 'Post'}
-            </Button>
-          </div>
-        ) : null}
-        {commentError ? (
-          <p className="text-[0.65rem] text-red-700">{commentError}</p>
-        ) : null}
-      </section>
-    </div>
+          </DialogContent>
+        </Dialog>
+      </div>
+    </TooltipProvider>
   )
 }
 
@@ -725,6 +1350,18 @@ function inboxBatchLabel(item: NeedsAttentionItem): string {
   const name = item.source_csv_filename?.split('/').pop() ?? item.source_csv_filename
   if (!name) return 'batch'
   return name.replace(/\.csv$/i, '')
+}
+
+function compactMetaLine(item: NeedsAttentionItem): string {
+  const parts = [
+    SOURCE_LABELS[item.intake_source] ?? item.intake_source,
+    item.current_stage.replaceAll('_', ' '),
+    reasonLabel(item.reason),
+  ]
+  if (item.bulk_process_id != null || item.source_csv_filename) {
+    parts.push(inboxBatchLabel(item))
+  }
+  return parts.join(' · ')
 }
 
 /** Threads only when browsing Matching (or All) with no result-type/due filter. */
@@ -814,13 +1451,15 @@ function ThreadReviewPane({
   batchLabel: string
   items: NeedsAttentionItem[]
   canReviewActions: boolean
-  onPromoteAll: () => void
+  onPromoteAll: (responseStatus: DropResponseStatusCode) => void
   onDeclineAll: () => void
   actionPending: boolean
   actionError: string | null
   onBackToQueue?: () => void
 }) {
   const [confirm, setConfirm] = useState<'fulfill' | 'decline' | null>(null)
+  // Exact 1:1 thread → Deleted (3) by default.
+  const [fulfillStatus, setFulfillStatus] = useState<DropResponseStatusCode | null>(3)
   const wasActionPending = useRef(false)
   useEffect(() => {
     if (wasActionPending.current && !actionPending) setConfirm(null)
@@ -838,13 +1477,24 @@ function ThreadReviewPane({
         open={confirm === 'fulfill'}
         onOpenChange={(open) => {
           if (!open && !actionPending) setConfirm(null)
+          if (open) setFulfillStatus(3)
         }}
         title={`Bulk fulfill ${items.length} exact matches?`}
-        description={`Approve matching review for all single-match requests from batch ${batchLabel} and release them to fulfillment.`}
+        description={`Approve matching review for all single-match requests from batch ${batchLabel} and set the CA DROP status result.`}
         confirmLabel={`Fulfill ${items.length}`}
         confirming={actionPending && confirm === 'fulfill'}
-        onConfirm={() => onPromoteAll()}
-      />
+        confirmDisabled={fulfillStatus == null}
+        onConfirm={() => {
+          if (fulfillStatus != null) onPromoteAll(fulfillStatus)
+        }}
+      >
+        <DropResponseStatusPicker
+          value={fulfillStatus}
+          onChange={setFulfillStatus}
+          disabled={actionPending}
+          suggested={3}
+        />
+      </ConfirmActionDialog>
       <ConfirmActionDialog
         open={confirm === 'decline'}
         onOpenChange={(open) => {
@@ -949,36 +1599,83 @@ export function NeedsAttentionPage() {
   const navigate = useNavigate()
   const search = useSearch({ from: '/requests/needs-attention' })
   const bulkFilter = search.bulk
-  const { isAdmin, me } = useMe()
+  const { isAdmin, isLegal, role, me, isLoading: meLoading } = useMe()
+  const legalPersona = Boolean(isLegal) || role === 'legal'
+  const dataOwnerPersona = role === 'data_owner'
+  const canReviewActions =
+    Boolean(isAdmin) || legalPersona || dataOwnerPersona
+  const inboxTabs = legalPersona
+    ? LEGAL_INBOX_KIND_TABS
+    : dataOwnerPersona
+      ? DATA_OWNER_INBOX_KIND_TABS
+      : OPS_INBOX_KIND_TABS
+  const defaultKind: InboxKind = legalPersona
+    ? 'triage'
+    : dataOwnerPersona || bulkFilter != null
+      ? 'matching'
+      : 'all'
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [activeTarget, setActiveTarget] = useState<ActiveTarget | null>(null)
   const [expandedThreads, setExpandedThreads] = useState<Set<string>>(new Set())
   const [inboxKind, setInboxKind] = useState<InboxKind>(
-    bulkFilter != null ? 'matching' : 'all',
+    () => (search.kind as InboxKind | undefined) ?? defaultKind,
   )
   const [matchFilter, setMatchFilter] = useState<MatchFilter>('all')
   const [dueFilter, setDueFilter] = useState<DueFilter>('all')
 
   useEffect(() => {
-    if (bulkFilter != null) setInboxKind('matching')
-  }, [bulkFilter])
+    if (search.kind) {
+      setInboxKind(search.kind as InboxKind)
+      return
+    }
+    if (bulkFilter != null && !legalPersona) {
+      setInboxKind('matching')
+      return
+    }
+    if (legalPersona) setInboxKind('triage')
+    else if (dataOwnerPersona) setInboxKind('matching')
+  }, [bulkFilter, dataOwnerPersona, legalPersona, search.kind])
+
   const [bulkError, setBulkError] = useState<string | null>(null)
   const [bulkAssignee, setBulkAssignee] = useState('')
   const [threadActionError, setThreadActionError] = useState<string | null>(null)
-  const [bulkConfirm, setBulkConfirm] = useState<'fulfill' | 'decline' | 'assign' | null>(
-    null,
-  )
+  const [bulkConfirm, setBulkConfirm] = useState<
+    'fulfill' | 'decline' | 'assign' | 'triage_reject' | 'triage_match' | null
+  >(null)
   /** Narrow viewports: queue or detail — never stack the pane under the list. */
   const [mobilePane, setMobilePane] = useState<'queue' | 'detail'>('queue')
 
   const attentionQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention'],
+    queryKey: [
+      'admin-api',
+      'ops',
+      'requests',
+      'needs-attention',
+      legalPersona ? 'legal' : 'ops',
+    ],
     // Max allowed by admin-api — Select all must cover every filter match loaded,
     // not just the rows currently scrolled into the queue pane.
-    queryFn: () => getNeedsAttention(1000),
+    queryFn: () =>
+      legalPersona ? getLegalNeedsAttention(1000) : getNeedsAttention(1000),
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })
+
+  function setInboxKindAndUrl(next: InboxKind) {
+    setInboxKind(next)
+    setMobilePane('queue')
+    if (next !== 'matching' && next !== 'all') {
+      setMatchFilter('all')
+    }
+    void navigate({
+      to: '/requests/needs-attention',
+      search: {
+        bulk: bulkFilter,
+        kind: next === defaultKind && !legalPersona ? undefined : next,
+      },
+      replace: true,
+    })
+  }
 
   const items = attentionQuery.data?.items ?? []
 
@@ -995,12 +1692,16 @@ export function NeedsAttentionPage() {
   const kindCounts = useMemo(() => {
     const myEmail = me?.email
     let matching = 0
+    let triage = 0
+    let escalations = 0
     let delivery = 0
     let notice = 0
     let communications = 0
     let pendingTasks = 0
     for (const item of items) {
       if (isMatchingItem(item)) matching += 1
+      if (isTriageItem(item)) triage += 1
+      if (isEscalationItem(item)) escalations += 1
       if (isDeliveryItem(item)) delivery += 1
       if (isNoticeItem(item)) notice += 1
       if (isCommsItem(item)) communications += 1
@@ -1009,6 +1710,8 @@ export function NeedsAttentionPage() {
     return {
       all: items.length,
       matching,
+      triage,
+      escalations,
       delivery,
       notice,
       communications,
@@ -1047,6 +1750,8 @@ export function NeedsAttentionPage() {
     return items.filter((item) => {
       if (bulkFilter != null && item.bulk_process_id !== bulkFilter) return false
       if (inboxKind === 'matching' && !isMatchingItem(item)) return false
+      if (inboxKind === 'triage' && !isTriageItem(item)) return false
+      if (inboxKind === 'escalations' && !isEscalationItem(item)) return false
       if (inboxKind === 'delivery' && !isDeliveryItem(item)) return false
       if (inboxKind === 'notice' && !isNoticeItem(item)) return false
       if (inboxKind === 'communications' && !isCommsItem(item)) return false
@@ -1117,18 +1822,25 @@ export function NeedsAttentionPage() {
     filteredIds.length > 0 && filteredIds.every((id) => selectedIds.has(id))
   const someFilteredSelected = filteredIds.some((id) => selectedIds.has(id))
 
+  const [bulkFulfillStatus, setBulkFulfillStatus] =
+    useState<DropResponseStatusCode | null>(3)
+
   const bulkMutation = useMutation({
     mutationFn: async ({
       action,
       requestIds,
+      responseStatus,
     }: {
       action: 'fulfill' | 'decline'
       requestIds: string[]
+      responseStatus?: DropResponseStatusCode
     }) => {
       const results = await Promise.allSettled(
         requestIds.map((requestId) =>
           action === 'fulfill'
-            ? postDropMatchingResultPromote(requestId)
+            ? postDropMatchingResultPromote(requestId, {
+                response_status: responseStatus,
+              })
             : postDropMatchingResultDecline(requestId),
         ),
       )
@@ -1193,7 +1905,43 @@ export function NeedsAttentionPage() {
     },
   })
 
+  const bulkTriageRejectMutation = useMutation({
+    mutationFn: (requestIds: string[]) =>
+      postTriageBulkReject({ request_ids: requestIds, response_status: 2 }),
+    onSuccess: async (result) => {
+      setBulkError(
+        result.count === 0 ? 'No triage rows rejected' : null,
+      )
+      setSelectedIds(new Set())
+      setBulkConfirm(null)
+      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+    },
+    onError: (error) => {
+      setBulkError(error instanceof Error ? error.message : 'Bulk reject failed')
+      setBulkConfirm(null)
+    },
+  })
+
+  const bulkTriageMatchMutation = useMutation({
+    mutationFn: (requestIds: string[]) =>
+      postTriageSendToMatching({ request_ids: requestIds }),
+    onSuccess: async () => {
+      setBulkError(null)
+      setSelectedIds(new Set())
+      setBulkConfirm(null)
+      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+    },
+    onError: (error) => {
+      setBulkError(
+        error instanceof Error ? error.message : 'Send to matching failed',
+      )
+      setBulkConfirm(null)
+    },
+  })
+
   const loading = attentionQuery.isPending && !attentionQuery.data
+  const triageBulkPending =
+    bulkTriageRejectMutation.isPending || bulkTriageMatchMutation.isPending
 
   function toggleId(requestId: string) {
     setSelectedIds((previous) => {
@@ -1239,16 +1987,24 @@ export function NeedsAttentionPage() {
     })
   }
 
-  function runBulk(action: 'fulfill' | 'decline') {
+  function runBulk(action: 'fulfill' | 'decline', responseStatus?: DropResponseStatusCode) {
     // Always act on the full filtered set when select-all is checked — not only
     // what happens to be scrolled into the left pane viewport.
     const requestIds = allFilteredSelected ? [...filteredIds] : [...selectedIds]
     if (requestIds.length === 0) return
-    bulkMutation.mutate({ action, requestIds })
+    bulkMutation.mutate({ action, requestIds, responseStatus })
   }
 
   const selectedCount = selectedIds.size
   const selectedInFilterCount = filteredIds.filter((id) => selectedIds.has(id)).length
+
+  if (meLoading) {
+    return (
+      <section className="space-y-4 py-6">
+        <SkeletonLines lines={6} />
+      </section>
+    )
+  }
 
   return (
     <section className="flex h-[calc(100vh-6.5rem)] flex-col gap-3">
@@ -1256,15 +2012,26 @@ export function NeedsAttentionPage() {
         open={bulkConfirm === 'fulfill'}
         onOpenChange={(open) => {
           if (!open && !bulkMutation.isPending) setBulkConfirm(null)
+          if (open) setBulkFulfillStatus(3)
         }}
         title={`Fulfill ${allFilteredSelected ? filteredIds.length : selectedCount} request${
           (allFilteredSelected ? filteredIds.length : selectedCount) === 1 ? '' : 's'
         }?`}
-        description="Selected items will leave matching review and move into fulfillment."
+        description="Selected items leave matching review with the CA DROP status result you confirm below."
         confirmLabel="Fulfill selected"
         confirming={bulkMutation.isPending && bulkConfirm === 'fulfill'}
-        onConfirm={() => runBulk('fulfill')}
-      />
+        confirmDisabled={bulkFulfillStatus == null}
+        onConfirm={() => {
+          if (bulkFulfillStatus != null) runBulk('fulfill', bulkFulfillStatus)
+        }}
+      >
+        <DropResponseStatusPicker
+          value={bulkFulfillStatus}
+          onChange={setBulkFulfillStatus}
+          disabled={bulkMutation.isPending}
+          suggested={3}
+        />
+      </ConfirmActionDialog>
       <ConfirmActionDialog
         open={bulkConfirm === 'decline'}
         onOpenChange={(open) => {
@@ -1295,9 +2062,40 @@ export function NeedsAttentionPage() {
           })
         }}
       />
+      <ConfirmActionDialog
+        open={bulkConfirm === 'triage_reject'}
+        onOpenChange={(open) => {
+          if (!open && !bulkTriageRejectMutation.isPending) setBulkConfirm(null)
+        }}
+        title={`Reject ${allFilteredSelected ? filteredIds.length : selectedCount} as Exempted?`}
+        description="Sets CA DROP response_status = 2 (Exempted) and closes Legal Triage for the selected requests."
+        confirmLabel="Reject as Exempted"
+        tone="destructive"
+        confirming={bulkTriageRejectMutation.isPending}
+        onConfirm={() => {
+          const requestIds = allFilteredSelected ? [...filteredIds] : [...selectedIds]
+          if (requestIds.length > 0) bulkTriageRejectMutation.mutate(requestIds)
+        }}
+      />
+      <ConfirmActionDialog
+        open={bulkConfirm === 'triage_match'}
+        onOpenChange={(open) => {
+          if (!open && !bulkTriageMatchMutation.isPending) setBulkConfirm(null)
+        }}
+        title={`Send ${allFilteredSelected ? filteredIds.length : selectedCount} to matching?`}
+        description="Releases Triage holds and enqueues auto-match for the data-owner queue."
+        confirmLabel="Send to matching"
+        confirming={bulkTriageMatchMutation.isPending}
+        onConfirm={() => {
+          const requestIds = allFilteredSelected ? [...filteredIds] : [...selectedIds]
+          if (requestIds.length > 0) bulkTriageMatchMutation.mutate(requestIds)
+        }}
+      />
       <header className="flex shrink-0 flex-wrap items-end justify-between gap-3">
         <div>
-          <Micro>Requests</Micro>
+          <Micro>
+            {legalPersona ? 'Legal' : dataOwnerPersona ? 'Data owner' : 'Requests'}
+          </Micro>
           <div className="mt-1 flex flex-wrap items-baseline gap-2">
             <h2 className="font-display text-xl font-medium tracking-tight text-ink">
               Inbox
@@ -1305,13 +2103,19 @@ export function NeedsAttentionPage() {
             {attentionQuery.isFetching && !attentionQuery.isPending ? (
               <span className="taste-frost-chip text-[0.65rem]">Refreshing</span>
             ) : null}
-            {bulkMutation.isPending || bulkAssignMutation.isPending ? (
+            {bulkMutation.isPending ||
+            bulkAssignMutation.isPending ||
+            triageBulkPending ? (
               <span className="taste-frost-chip text-[0.65rem]" role="status" aria-live="polite">
-                {bulkMutation.isPending
-                  ? bulkConfirm === 'decline'
-                    ? 'Declining…'
-                    : 'Fulfilling…'
-                  : 'Assigning…'}
+                {bulkTriageRejectMutation.isPending
+                  ? 'Rejecting…'
+                  : bulkTriageMatchMutation.isPending
+                    ? 'Sending…'
+                    : bulkMutation.isPending
+                      ? bulkConfirm === 'decline'
+                        ? 'Declining…'
+                        : 'Fulfilling…'
+                      : 'Assigning…'}
               </span>
             ) : null}
             {attentionQuery.data && attentionQuery.data.items.length > 0 ? (
@@ -1323,9 +2127,11 @@ export function NeedsAttentionPage() {
             ) : null}
           </div>
           <p className="mt-1 max-w-lg text-xs text-ink-soft">
-            Pending work stays in Inbox lanes — matching, delivery (shareable URL), DROP
-            notice, and requester comms. Exact 1:1 matches in one DROP batch group as a
-            thread for bulk fulfill.
+            {legalPersona
+              ? 'Case queue — Triage condition holds, Escalations from data owners, then Notice and Delivery after fulfill. Matching review stays on data-owner My work.'
+              : dataOwnerPersona
+                ? 'Approve recommended CA DROP status on Matching, or open Tasks assigned to you. Escalate to Legal when you need a hold.'
+                : 'Pending work stays in Inbox lanes — matching, delivery (shareable URL), DROP notice, and requester comms. Exact 1:1 matches in one DROP batch group as a thread for bulk fulfill.'}
           </p>
           {bulkFilter != null ? (
             <p className="mt-1.5 flex flex-wrap items-center gap-2 text-[0.7rem]">
@@ -1362,17 +2168,10 @@ export function NeedsAttentionPage() {
           <div className="space-y-1.5 border-b border-line px-2.5 py-2">
             <Tabs
               value={inboxKind}
-              onValueChange={(value) => {
-                const next = value as InboxKind
-                setInboxKind(next)
-                setMobilePane('queue')
-                if (next !== 'matching' && next !== 'all') {
-                  setMatchFilter('all')
-                }
-              }}
+              onValueChange={(value) => setInboxKindAndUrl(value as InboxKind)}
             >
               <TabsList className="h-7 w-full justify-start gap-0.5 overflow-x-auto bg-canvas p-0.5">
-                {INBOX_KIND_TABS.map((tab) => (
+                {inboxTabs.map((tab) => (
                   <TabsTrigger
                     key={tab.value}
                     value={tab.value}
@@ -1385,7 +2184,8 @@ export function NeedsAttentionPage() {
               </TabsList>
             </Tabs>
 
-            {(inboxKind === 'matching' || inboxKind === 'all') &&
+            {!legalPersona &&
+            (inboxKind === 'matching' || inboxKind === 'all') &&
               (matchOptions.length > 0 || dueOptions.length > 0) ? (
               <div className="flex flex-wrap items-center gap-1">
                 {inboxKind === 'matching' ? (
@@ -1459,7 +2259,7 @@ export function NeedsAttentionPage() {
               Select all
             </label>
 
-            {isAdmin ? (
+            {isAdmin && !legalPersona ? (
               <>
                 <Button
                   size="sm"
@@ -1479,6 +2279,26 @@ export function NeedsAttentionPage() {
                   {bulkMutation.isPending && bulkConfirm === 'decline'
                     ? 'Declining…'
                     : 'Decline'}
+                </Button>
+              </>
+            ) : null}
+
+            {legalPersona && inboxKind === 'triage' ? (
+              <>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={selectedCount === 0 || triageBulkPending}
+                  onClick={() => setBulkConfirm('triage_reject')}
+                >
+                  {bulkTriageRejectMutation.isPending ? 'Rejecting…' : 'Reject 2'}
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={selectedCount === 0 || triageBulkPending}
+                  onClick={() => setBulkConfirm('triage_match')}
+                >
+                  {bulkTriageMatchMutation.isPending ? 'Sending…' : 'Send to matching'}
                 </Button>
               </>
             ) : null}
@@ -1510,7 +2330,7 @@ export function NeedsAttentionPage() {
             </div>
           </div>
 
-          {isAdmin && selectedCount > 0 ? (
+          {isAdmin && !legalPersona && selectedCount > 0 ? (
             <div className="flex flex-wrap items-end gap-2 border-b border-line px-3 py-2">
               <label className="flex min-w-[10rem] flex-1 flex-col gap-1 text-[0.65rem] text-ink-soft">
                 Assign selected
@@ -1552,17 +2372,37 @@ export function NeedsAttentionPage() {
             ) : null}
             {!loading && !attentionQuery.isError && filteredItems.length === 0 ? (
               <p className="p-6 text-xs text-ink-soft">
-                {items.length === 0
-                  ? 'Nothing needs attention right now.'
-                  : inboxKind === 'delivery'
-                    ? 'No access delivery tasks yet — packs appear here after fulfillment.'
-                    : inboxKind === 'notice'
-                      ? 'No DROP notice.review items waiting.'
-                      : inboxKind === 'communications'
-                        ? 'No requester comms yet — drafts and replies will land here.'
-                        : inboxKind === 'pending_tasks'
-                          ? 'No pending tasks assigned to you.'
-                          : 'No items match the current view.'}
+                {items.length === 0 && legalPersona
+                  ? inboxKind === 'notice'
+                    ? 'Notice review is reserved — items appear here after data-vertical fulfill once that feed is wired.'
+                    : inboxKind === 'delivery'
+                      ? 'Delivery handoff is reserved — access packs appear here after fulfill once that feed is wired.'
+                      : inboxKind === 'triage'
+                        ? 'No Legal Triage holds — condition hits land here before matching.'
+                        : inboxKind === 'escalations'
+                          ? 'No escalations from data owners right now.'
+                          : inboxKind === 'pending_tasks'
+                            ? 'No pending tasks assigned to you.'
+                            : 'Nothing in the Legal case queue right now.'
+                  : items.length === 0
+                    ? 'Nothing needs attention right now.'
+                    : inboxKind === 'triage'
+                      ? 'No Legal Triage holds — condition hits land here before matching.'
+                      : inboxKind === 'escalations'
+                        ? 'No escalations to Legal right now.'
+                        : inboxKind === 'delivery'
+                          ? legalPersona
+                            ? 'Delivery handoff feed is not wired yet — access packs will appear here after fulfill.'
+                            : 'No access delivery tasks yet — packs appear here after fulfillment.'
+                          : inboxKind === 'notice'
+                            ? legalPersona
+                              ? 'Notice review feed is not wired yet — items will appear here after data-vertical fulfill.'
+                              : 'No DROP notice.review items waiting.'
+                            : inboxKind === 'communications'
+                              ? 'No requester comms yet — drafts and replies will land here.'
+                              : inboxKind === 'pending_tasks'
+                                ? 'No pending tasks assigned to you.'
+                                : 'No items match the current view.'}
               </p>
             ) : null}
 
@@ -1864,15 +2704,16 @@ export function NeedsAttentionPage() {
             <ThreadReviewPane
               batchLabel={activeThread.batchLabel}
               items={activeThread.items}
-              canReviewActions={Boolean(isAdmin)}
+              canReviewActions={canReviewActions}
               actionPending={bulkMutation.isPending}
               actionError={threadActionError}
               onBackToQueue={() => setMobilePane('queue')}
-              onPromoteAll={() => {
+              onPromoteAll={(responseStatus) => {
                 setThreadActionError(null)
                 bulkMutation.mutate({
                   action: 'fulfill',
                   requestIds: activeThread.items.map((item) => item.request_id),
+                  responseStatus,
                 })
               }}
               onDeclineAll={() => {
@@ -1886,8 +2727,9 @@ export function NeedsAttentionPage() {
           ) : activeItem ? (
             <InboxReviewPane
               item={activeItem}
-              canReviewActions={Boolean(isAdmin)}
+              canReviewActions={canReviewActions}
               assigneeCandidates={assigneeCandidates}
+              legalPersona={legalPersona}
               onBackToQueue={() => setMobilePane('queue')}
             />
           ) : (

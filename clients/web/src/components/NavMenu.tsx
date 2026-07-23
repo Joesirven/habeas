@@ -1,9 +1,10 @@
 import { Badge } from '@/components/ui/badge'
 import {
+  canAccessLegalSurfaces,
   canAccessOpsSurfaces,
   useAuth,
 } from '@/lib/auth'
-import { getNeedsAttention } from '@/lib/api'
+import { getLegalNeedsAttention, getNeedsAttention } from '@/lib/api'
 
 import { useQuery } from '@tanstack/react-query'
 import { Link, useRouterState } from '@tanstack/react-router'
@@ -50,17 +51,20 @@ function NavLink({
   label,
   exact = false,
   count,
+  search,
 }: {
   to: string
   label: string
   exact?: boolean
   count?: number | null
+  search?: Record<string, string | number | undefined>
 }) {
   const pathname = useRouterState({ select: (state) => state.location.pathname })
   const active = exact ? pathname === to : pathMatches(pathname, to)
   return (
     <Link
       to={to}
+      search={search}
       className={`inline-flex items-center gap-1.5 ${navClass}${active ? ' active' : ''}`}
     >
       {label}
@@ -181,9 +185,28 @@ function NavDropdown({ group }: { group: NavGroup }) {
 export function NavMenu() {
   const { role, isLoading, isError } = useAuth()
   const showWorkers = canAccessOpsSurfaces(role) || isError
+  const showLegalExtras = canAccessLegalSurfaces(role)
+  const homeLabel =
+    canAccessOpsSurfaces(role)
+      ? 'Dashboard'
+      : role === 'legal'
+        ? 'Home'
+        : 'My work'
+
+  const isLegalNav = role === 'legal'
   const inboxQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention'],
-    queryFn: () => getNeedsAttention(200),
+    queryKey: [
+      'admin-api',
+      'ops',
+      'requests',
+      'needs-attention',
+      isLegalNav ? 'legal' : 'ops',
+      'nav',
+    ],
+    queryFn: () =>
+      isLegalNav
+        ? getLegalNeedsAttention(200)
+        : getNeedsAttention({ limit: 200, kind: 'all' }),
     refetchInterval: 30_000,
     staleTime: 15_000,
   })
@@ -194,13 +217,21 @@ export function NavMenu() {
       className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2 text-[0.8125rem]"
       aria-busy={isLoading}
     >
-      <NavLink to="/" label="Dashboard" exact />
+      <NavLink to="/" label={homeLabel} exact />
       <NavLink to="/requests" label="Requests" exact />
       <NavLink
         to="/requests/needs-attention"
         label="Inbox"
         count={inboxCount}
+        search={isLegalNav ? { kind: 'triage' } : undefined}
       />
+      {showLegalExtras ? (
+        <>
+          <NavLink to="/requests/slas" label="SLAs" />
+          <NavLink to="/requests/conditions" label="Conditions" />
+          <NavLink to="/requests/new" label="Upload" />
+        </>
+      ) : null}
       {showWorkers ? <NavDropdown group={WORKERS_GROUP} /> : null}
     </nav>
   )

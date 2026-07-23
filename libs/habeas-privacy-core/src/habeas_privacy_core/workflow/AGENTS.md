@@ -11,6 +11,8 @@ Approval helpers, service level agreement computation, terminal error classifica
   pending gate when rematch invalidates a prior approval.
 - Match success opens the gate in the same DB transaction; reaper
   `/reap` calls `reconcile_ungated_matching_reviews` to backfill hangers.
-- Assign/escalate (U17) stores pending `workflow.assignment` rows on
+- Assign/escalate/triage stores pending `workflow.assignment` rows on
   `approval_requests` (append-history; supersede prior pending). Targets:
-  `reviewer` | `legal` | `data_owner`. No separate assignment table.
+  `reviewer` | `legal` | `data_owner`. Kinds: `assign` | `escalate` | `triage`.
+  `intake.route_triage` holds matching enqueue until Legal acts. No separate
+  assignment table.

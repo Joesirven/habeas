@@ -16,6 +16,7 @@ import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
 import { HealthLandingPage } from '@/routes/ops/health/index'
 import { RequestDetailPage } from '@/routes/requests/$requestId'
 import { NeedsAttentionPage } from '@/routes/requests/needs-attention'
+import { ConditionsPage } from '@/routes/requests/conditions'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
 import { RequestsSlasPage } from '@/routes/requests/slas'
@@ -34,6 +35,7 @@ export const PIPELINE_STAGE_TABS = [
   'download',
   'ingest',
   'matching',
+  'review',
   'fulfillment',
 ] as const
 
@@ -161,6 +163,8 @@ const BULK_STAGE_TO_RUNS_JOB: Record<PipelineStageTab, RunsJobFilter> = {
   download: 'drop_connector',
   ingest: 'drop_ingestor',
   matching: 'matching',
+  // Review gates live on requests; closest unified job is matching.
+  review: 'matching',
   // Fulfillment is response_status on requests; closest unified job is matching.
   fulfillment: 'matching',
 }
@@ -388,10 +392,27 @@ const requestsRoute = createRoute({
   component: RequestsPage,
 })
 
-function parseNeedsAttentionSearch(search: Record<string, unknown>): {
+export const NEEDS_ATTENTION_KINDS = [
+  'all',
+  'matching',
+  'triage',
+  'escalations',
+  'delivery',
+  'notice',
+  'communications',
+  'pending_tasks',
+] as const
+
+export type NeedsAttentionSearchKind = (typeof NEEDS_ATTENTION_KINDS)[number]
+
+export type NeedsAttentionSearch = {
   bulk?: number
-} {
-  const parsed: { bulk?: number } = {}
+  /** Inbox lane tab — Legal defaults to triage when omitted. */
+  kind?: NeedsAttentionSearchKind
+}
+
+function parseNeedsAttentionSearch(search: Record<string, unknown>): NeedsAttentionSearch {
+  const parsed: NeedsAttentionSearch = {}
   const raw = search.bulk
   const n =
     typeof raw === 'number'
@@ -400,6 +421,12 @@ function parseNeedsAttentionSearch(search: Record<string, unknown>): {
         ? Number(raw)
         : NaN
   if (Number.isInteger(n) && n >= 1) parsed.bulk = n
+  if (
+    typeof search.kind === 'string' &&
+    (NEEDS_ATTENTION_KINDS as readonly string[]).includes(search.kind)
+  ) {
+    parsed.kind = search.kind as NeedsAttentionSearchKind
+  }
   return parsed
 }
 
@@ -421,6 +448,12 @@ const manualRequestRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests/new',
   component: ManualRequestPage,
+})
+
+const conditionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/requests/conditions',
+  component: ConditionsPage,
 })
 
 const requestDetailRoute = createRoute({
@@ -566,6 +599,7 @@ const routeTree = rootRoute.addChildren([
   needsAttentionRoute,
   requestsSlasRoute,
   manualRequestRoute,
+  conditionsRoute,
   requestDetailRoute,
   matchingReviewRoute,
   opsDashboardRoute,

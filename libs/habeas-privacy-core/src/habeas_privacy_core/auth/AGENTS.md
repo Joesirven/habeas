@@ -7,6 +7,6 @@ plus role allowlist helpers.
 
 - Imported by apps and CLI — never import app code from here.
 - No vendor-specific adapter logic in this module (Google token verify is OK).
-- Roles: `super_admin` / `admin` / `data_owner` via `ADMIN_API_*` env allowlists.
+- Roles: `super_admin` / `admin` / `legal` / `data_owner` via `ADMIN_API_*` env allowlists.
 - Prefer Starlette types here (core has no FastAPI dependency); apps wire `Depends(...)`.
 - Prefer `resolve_actor` over `actor_from_iap_header` for new call sites.

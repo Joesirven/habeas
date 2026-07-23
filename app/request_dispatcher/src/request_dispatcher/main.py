@@ -83,9 +83,12 @@ async def dispatch(body: DispatchRequest | None = None):
             logger.exception("dispatch_failed", extra={"event": "dispatch_failed"})
             raise HTTPException(status_code=500, detail="dispatch failed") from None
 
+    busy = result.enqueued or result.held_for_triage
     return {
-        "status": "ok" if result.enqueued else "idle",
+        "status": "ok" if busy else "idle",
         "enqueued": result.enqueued,
+        "held_for_triage": result.held_for_triage,
+        "skipped_open_triage": result.skipped_open_triage,
         "request_ids": result.request_ids,
     }
 

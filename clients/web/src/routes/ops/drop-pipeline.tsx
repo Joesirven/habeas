@@ -96,15 +96,6 @@ const PIPELINE_TAB_BAR: { key: PipelineTab; label: string }[] = [
 
 type BulkPipelineStageKey = keyof BulkProcessDetail['stages']
 
-const STAGE_KEY_LABELS: Record<BulkPipelineStageKey, string> = {
-  download: 'Download',
-  land: 'Land',
-  promote: 'Promote',
-  matching: 'Matching',
-  review: 'Review',
-  fulfillment: 'Fulfill',
-}
-
 const BULK_CARD_STAGE_TABS: {
   key: PipelineStageTab
   label: string
@@ -130,10 +121,13 @@ const BULK_CARD_STAGE_TABS: {
     key: 'matching',
     label: 'Matching',
     runStage: 'matching',
-    stages: [
-      { key: 'matching', label: 'Matching' },
-      { key: 'review', label: 'Review' },
-    ],
+    stages: [{ key: 'matching', label: 'Matching' }],
+  },
+  {
+    key: 'review',
+    label: 'Review',
+    runStage: 'matching',
+    stages: [{ key: 'review', label: 'Review' }],
   },
   {
     key: 'fulfillment',
@@ -173,15 +167,16 @@ function countsForStageTab(
   tab: (typeof BULK_CARD_STAGE_TABS)[number],
 ): BulkProcessStageCounts | undefined {
   if (!detail) return undefined
-  // Matching tab still owns the review gate for "current stage" highlighting, but
-  // completion % / Finished·Queued·Failed chips must use matching_attempts only.
-  // Blending review (same request spine, different unit) doubles the denominator and
-  // drops Matching from ~100% to ~50% the moment review gates open.
+  // Matching % / Finished·Queued·Failed chips use matching_attempts only.
+  // Review is its own tab with request-spine counts from detail.stages.review.
   if (tab.key === 'matching') {
     return detail.stages.matching
   }
+  if (tab.key === 'review') {
+    return detail.stages.review
+  }
   // Ingest: land + promote are sequential CSV steps — merged success/total is a fair
-  // average across both sub-stages (unlike matching + review).
+  // average across both sub-stages.
   return mergeStageCounts(tab.stages.map((stage) => detail.stages[stage.key]))
 }
 
@@ -825,16 +820,9 @@ function isActiveBulkSummary(row: BulkProcessSummary): boolean {
   return ageMs >= 0 && ageMs <= ACTIVE_BULK_MAX_AGE_MS
 }
 
-function bulkDurationLabel(
-  processAt: string | null | undefined,
-  completedAt?: string | null,
-): string | null {
-  if (!processAt) return null
-  const start = new Date(processAt).getTime()
-  if (Number.isNaN(start)) return null
-  const end = completedAt ? new Date(completedAt).getTime() : Date.now()
-  if (Number.isNaN(end) || end < start) return null
-  const minutes = Math.floor((end - start) / 60_000)
+function formatDurationMs(ms: number | null | undefined): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null
+  const minutes = Math.floor(ms / 60_000)
   if (minutes < 60) return `${Math.max(minutes, 0)}m`
   const hours = Math.floor(minutes / 60)
   const rem = minutes % 60
@@ -842,6 +830,109 @@ function bulkDurationLabel(
   const days = Math.floor(hours / 24)
   const dayRem = hours % 24
   return dayRem > 0 ? `${days}d ${dayRem}h` : `${days}d`
+}
+
+function durationMsBetween(
+  startAt: string | null | undefined,
+  endAt?: string | null,
+): number | null {
+  if (!startAt) return null
+  const start = new Date(startAt).getTime()
+  if (Number.isNaN(start)) return null
+  const end = endAt ? new Date(endAt).getTime() : Date.now()
+  if (Number.isNaN(end) || end < start) return null
+  return end - start
+}
+
+/** Wall-clock span for a process stage group. Open runs end at now unless requireComplete. */
+function stageDurationMsFromGroup(
+  group: BulkProcessRunGroup | undefined,
+  opts?: { requireComplete?: boolean },
+): number | null {
+  if (!group?.runs.length) return null
+  let earliest: number | null = null
+  let latest: number | null = null
+  let anyOpen = false
+  for (const run of group.runs) {
+    if (!run.started_at) continue
+    const start = new Date(run.started_at).getTime()
+    if (Number.isNaN(start)) continue
+    if (earliest == null || start < earliest) earliest = start
+    if (run.completed_at) {
+      const end = new Date(run.completed_at).getTime()
+      if (!Number.isNaN(end) && (latest == null || end > latest)) latest = end
+    } else {
+      anyOpen = true
+    }
+  }
+  if (earliest == null) return null
+  if (opts?.requireComplete) {
+    if (anyOpen || latest == null) return null
+    return latest - earliest
+  }
+  const end = anyOpen || latest == null ? Date.now() : latest
+  if (end < earliest) return null
+  return end - earliest
+}
+
+/** Mean completed bulk duration in the peer window (same intake when set). */
+function averageBulkDurationMs(
+  peers: BulkProcessSummary[],
+  opts: { intakeSource?: string | null; excludeProcessId: number },
+): number | null {
+  const samples: number[] = []
+  for (const peer of peers) {
+    if (peer.process_id === opts.excludeProcessId) continue
+    if (opts.intakeSource && peer.intake_source !== opts.intakeSource) continue
+    if (!peer.process_at || !peer.completed_at) continue
+    const ms = durationMsBetween(peer.process_at, peer.completed_at)
+    if (ms != null && ms > 0) samples.push(ms)
+  }
+  if (samples.length === 0) return null
+  return samples.reduce((sum, value) => sum + value, 0) / samples.length
+}
+
+/** Mean completed stage wall-clock across peer process groups. */
+function averageStageDurationMs(
+  groups: BulkProcessRunGroup[] | undefined,
+  opts: { intakeSource?: string | null; excludeProcessId: number },
+): number | null {
+  if (!groups?.length) return null
+  const samples: number[] = []
+  for (const group of groups) {
+    if (group.process_id === opts.excludeProcessId) continue
+    if (opts.intakeSource && group.intake_source !== opts.intakeSource) continue
+    const ms = stageDurationMsFromGroup(group, { requireComplete: true })
+    if (ms != null && ms > 0) samples.push(ms)
+  }
+  if (samples.length === 0) return null
+  return samples.reduce((sum, value) => sum + value, 0) / samples.length
+}
+
+function durationVsAvgHint(
+  currentMs: number | null,
+  avgMs: number | null,
+): { avgLabel: string; deltaLabel: string | null; ofAvgPercent: number | null } | null {
+  const avgLabel = formatDurationMs(avgMs)
+  if (avgMs == null || avgLabel == null) return null
+  if (currentMs == null || avgMs <= 0) {
+    return { avgLabel, deltaLabel: null, ofAvgPercent: null }
+  }
+  const deltaMs = currentMs - avgMs
+  const absLabel = formatDurationMs(Math.abs(deltaMs))
+  const deltaLabel =
+    absLabel == null
+      ? null
+      : deltaMs === 0
+        ? 'at avg'
+        : deltaMs < 0
+          ? `−${absLabel} vs avg`
+          : `+${absLabel} vs avg`
+  return {
+    avgLabel,
+    deltaLabel,
+    ofAvgPercent: Math.round((currentMs / avgMs) * 100),
+  }
 }
 
 /** Human title for bulk cards from process_at (e.g. Jul 22, 2026, 2:00 PM). */
@@ -856,14 +947,6 @@ function formatBulkProcessName(processAt: string | null | undefined): string {
     hour: 'numeric',
     minute: '2-digit',
   })
-}
-
-function bulkStageLabel(stageKey: string | undefined): string {
-  if (!stageKey) return '—'
-  if (stageKey in STAGE_KEY_LABELS) {
-    return STAGE_KEY_LABELS[stageKey as BulkPipelineStageKey]
-  }
-  return stageKey.replaceAll('_', ' ')
 }
 
 function stageRunIndicators(counts: BulkProcessStageCounts | undefined): {
@@ -1078,7 +1161,7 @@ function BulkStageStrip({
 }) {
   return (
     <div
-      className="flex min-w-0 items-stretch overflow-x-auto"
+      className="flex min-w-0 items-stretch gap-1 overflow-x-auto"
       role="tablist"
       aria-label="Bulk process stages"
     >
@@ -1089,8 +1172,8 @@ function BulkStageStrip({
               key={tab.key}
               className={
                 expanded
-                  ? 'min-w-[4.5rem] flex-1 px-1.5 py-0.5'
-                  : 'min-w-[3.5rem] shrink-0 px-1 py-0.5'
+                  ? 'min-w-[4.5rem] flex-1 rounded px-1.5 py-1'
+                  : 'min-w-[3.25rem] shrink-0 rounded px-1 py-0.5'
               }
             >
               <Skeleton className={expanded ? 'h-5 w-full' : 'h-3 w-full'} />
@@ -1100,12 +1183,76 @@ function BulkStageStrip({
         const counts = countsForStageTab(detail, tab)
         const isCurrent = isStageTabCurrent(detail, tab)
         const selected = activeTab === tab.key
+        const emphasize = expanded && selected
         const visual = stageVisualState(counts, isCurrent)
         const indicators = stageRunIndicators(counts)
         const tone = stageStripTone(visual)
         const currentRunning =
           isCurrent && Boolean(running) && visual !== 'complete'
-        const showProgress = currentRunning || (expanded && selected)
+        const currentCompact = expanded && isCurrent && !selected
+
+        if (!emphasize) {
+          return (
+            <button
+              key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              onClick={(event) => {
+                event.stopPropagation()
+                onSelectTab(tab.key)
+              }}
+              className={cn(
+                'flex shrink-0 items-center gap-1 rounded text-left transition-colors hover:bg-panel/50',
+                expanded ? 'px-1.5 py-1' : 'px-1 py-0.5',
+                tone.wash,
+                currentCompact && 'border-l-2 border-l-emerald-500',
+              )}
+              title={
+                counts
+                  ? `${tab.label}: ${stageCountsBlurb(counts)}${
+                      isCurrent ? ' · current' : ''
+                    }`
+                  : tab.label
+              }
+            >
+              <StatusLight
+                tone={
+                  visual === 'complete'
+                    ? 'emerald'
+                    : visual === 'failed'
+                      ? 'red'
+                      : currentRunning || currentCompact
+                        ? 'emerald'
+                        : tone.light
+                }
+                pulse={currentRunning || currentCompact}
+                title={
+                  visual === 'complete'
+                    ? 'Done'
+                    : currentRunning || currentCompact
+                      ? 'Running'
+                      : visual === 'failed'
+                        ? 'Failed'
+                        : undefined
+                }
+              />
+              <span
+                className={cn(
+                  'truncate text-[0.55rem] font-medium leading-none tracking-wide',
+                  visual === 'complete' ||
+                    currentRunning ||
+                    currentCompact ||
+                    visual === 'failed'
+                    ? tone.text
+                    : 'text-mute',
+                )}
+              >
+                {tab.label}
+              </span>
+            </button>
+          )
+        }
 
         return (
           <button
@@ -1118,21 +1265,19 @@ function BulkStageStrip({
               onSelectTab(tab.key)
             }}
             className={cn(
-              'flex min-w-0 flex-1 flex-col justify-center px-1.5 py-0.5 text-left transition-colors',
+              'flex min-h-[3.25rem] min-w-[10rem] flex-1 flex-col justify-center rounded-md px-2.5 py-2.5 text-left transition-colors',
               tone.wash,
-              expanded && selected
-                ? 'bg-habeas-navy/8 ring-1 ring-inset ring-habeas-navy/25'
-                : 'hover:bg-panel/50',
+              'bg-habeas-navy/8 ring-1 ring-inset ring-habeas-navy/25',
             )}
             title={
               counts
                 ? `${tab.label}: ${stageCountsBlurb(counts)}${
-                    duration && selected ? ` · ${duration}` : ''
+                    duration ? ` · ${duration}` : ''
                   }`
                 : tab.label
             }
           >
-            <div className="flex min-w-0 items-center gap-1">
+            <div className="flex min-w-0 items-center gap-1.5">
               <StatusLight
                 tone={
                   visual === 'complete'
@@ -1156,34 +1301,31 @@ function BulkStageStrip({
               />
               <span
                 className={cn(
-                  'truncate text-[0.6rem] font-medium leading-none tracking-wide',
-                  visual === 'complete' ||
-                    currentRunning ||
-                    visual === 'failed'
-                    ? tone.text
-                    : 'text-mute',
+                  'truncate text-[0.65rem] font-semibold leading-none tracking-wide',
+                  tone.text,
                 )}
               >
                 {tab.label}
+                {isCurrent ? (
+                  <span className="ml-1 font-normal text-mute">· current</span>
+                ) : null}
               </span>
-              <span className="ml-auto shrink-0 text-[0.55rem] tabular-nums leading-none text-ink">
+              <span className="ml-auto shrink-0 text-sm font-medium tabular-nums leading-none text-ink">
                 {counts && counts.total > 0 ? `${indicators.percent}%` : '—'}
               </span>
             </div>
-            {showProgress ? (
-              <div className="relative mt-0.5 h-1 overflow-hidden rounded-full bg-line/60">
-                <div
-                  className={cn(
-                    'h-full rounded-full transition-[width]',
-                    visual === 'failed' ? 'bg-red-600' : tone.bar,
-                  )}
-                  style={{ width: `${indicators.percent}%` }}
-                />
-                {currentRunning ? (
-                  <div className="pointer-events-none absolute inset-0 animate-pulse bg-gradient-to-r from-transparent via-white/50 to-transparent" />
-                ) : null}
-              </div>
-            ) : null}
+            <div className="relative mt-1.5 h-1.5 overflow-hidden rounded-full bg-line/60">
+              <div
+                className={cn(
+                  'h-full rounded-full transition-[width]',
+                  visual === 'failed' ? 'bg-red-600' : tone.bar,
+                )}
+                style={{ width: `${indicators.percent}%` }}
+              />
+              {currentRunning ? (
+                <div className="pointer-events-none absolute inset-0 animate-pulse bg-gradient-to-r from-transparent via-white/50 to-transparent" />
+              ) : null}
+            </div>
           </button>
         )
       })}
@@ -1203,16 +1345,105 @@ const STAGE_STATE_CARDS: {
   { key: 'finished', label: 'Finished', tone: 'text-emerald-900' },
 ]
 
+function DurationMetricChip({
+  label,
+  value,
+  running,
+  avgHint,
+  avgTitle,
+  ofAvgPercent,
+}: {
+  label: string
+  value: string | null | undefined
+  running?: boolean
+  /** Compact historical average, e.g. "avg 18m". */
+  avgHint?: string | null
+  /** Richer tooltip (avg + delta). */
+  avgTitle?: string | null
+  /** Current duration as % of average — drives the ring when known. */
+  ofAvgPercent?: number | null
+}) {
+  const display = value && value.length > 0 ? value : '—'
+  const known = display !== '—'
+  const ringPercent =
+    ofAvgPercent != null && Number.isFinite(ofAvgPercent)
+      ? Math.max(4, Math.min(100, ofAvgPercent))
+      : running
+        ? 55
+        : known
+          ? 100
+          : 0
+  const compare = avgTitle ?? avgHint
+  const title =
+    compare && known
+      ? `${label}: ${display}${running ? '…' : ''} (${compare})`
+      : compare
+        ? `${label}: ${compare}`
+        : undefined
+  return (
+    <div
+      className="flex min-w-[8.5rem] flex-1 basis-[8.5rem] items-center gap-2 rounded-md border border-line bg-paper px-2.5 py-1.5"
+      title={title}
+    >
+      {known || avgHint ? (
+        <MiniRing
+          percent={known ? ringPercent : 0}
+          tone={running ? 'emerald' : 'navy'}
+        />
+      ) : (
+        <div
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-dashed border-line text-[0.55rem] text-mute"
+          aria-hidden="true"
+        >
+          —
+        </div>
+      )}
+      <div className="min-w-0">
+        <p className="text-[0.5rem] font-medium uppercase tracking-wide text-mute">
+          {label}
+        </p>
+        <p className="text-xs font-semibold tabular-nums leading-tight text-ink">
+          {display}
+          {known && running ? '…' : ''}
+        </p>
+        {avgHint ? (
+          <p className="mt-0.5 text-[0.55rem] tabular-nums leading-none text-mute">
+            {avgHint}
+          </p>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 function BulkStageStateCards({
   stageTab,
   processId,
   indicators,
   loading,
+  stageDuration,
+  bulkDuration,
+  stageAvgHint,
+  bulkAvgHint,
+  stageAvgTitle,
+  bulkAvgTitle,
+  stageOfAvgPercent,
+  bulkOfAvgPercent,
+  running,
 }: {
   stageTab: PipelineStageTab
   processId: number
   indicators: ReturnType<typeof stageRunIndicators>
   loading?: boolean
+  stageDuration?: string | null
+  bulkDuration?: string | null
+  stageAvgHint?: string | null
+  bulkAvgHint?: string | null
+  stageAvgTitle?: string | null
+  bulkAvgTitle?: string | null
+  stageOfAvgPercent?: number | null
+  bulkOfAvgPercent?: number | null
+  running?: boolean
 }) {
   const counts: Record<BulkStageRunState, number> = {
     queued: indicators.queued,
@@ -1221,24 +1452,31 @@ function BulkStageStateCards({
     abandoned: indicators.abandoned,
     finished: indicators.finished,
   }
+  // Fulfillment cards stay compact — duration chips share the row.
+  const compact = stageTab === 'fulfillment' || stageTab === 'review'
 
   if (loading) {
     return (
-      <div className="grid grid-cols-2 gap-1 sm:grid-cols-5">
+      <div className="flex flex-wrap items-stretch gap-1.5">
         {STAGE_STATE_CARDS.map((card) => (
           <div
             key={card.key}
-            className="rounded-md border border-line/70 bg-paper px-2 py-1.5"
+            className={cn(
+              'min-h-[3rem] rounded-md border border-line/70 bg-paper px-2 py-1.5',
+              compact ? 'w-[4.5rem]' : 'min-w-[5.5rem] flex-1',
+            )}
           >
             <Skeleton className="h-8 w-full" />
           </div>
         ))}
+        <Skeleton className="h-[3.25rem] min-w-[8.5rem] flex-1 basis-[8.5rem]" />
+        <Skeleton className="h-[3.25rem] min-w-[8.5rem] flex-1 basis-[8.5rem]" />
       </div>
     )
   }
 
   return (
-    <div className="grid grid-cols-2 gap-1 sm:grid-cols-5">
+    <div className="flex flex-wrap items-stretch gap-1.5">
       {STAGE_STATE_CARDS.map((card) => (
         <Link
           key={card.key}
@@ -1246,14 +1484,17 @@ function BulkStageStateCards({
           search={runsSearchForBulkStage(stageTab, card.key, {
             process: processId,
           })}
-          className="rounded-md border border-line bg-paper px-2 py-1.5 text-left transition-colors hover:border-habeas-navy/35 hover:bg-panel/40"
+          className={cn(
+            'min-h-[3rem] rounded-md border border-line bg-paper px-2 py-1.5 text-left transition-colors hover:border-habeas-navy/35 hover:bg-panel/40',
+            compact ? 'w-[4.5rem] shrink-0' : 'min-w-[5.5rem] flex-1',
+          )}
         >
-          <p className="text-[0.55rem] font-medium uppercase tracking-wide text-mute">
+          <p className="text-[0.5rem] font-medium uppercase tracking-wide text-mute">
             {card.label}
           </p>
           <p
             className={cn(
-              'mt-0.5 text-base font-semibold tabular-nums',
+              'mt-0.5 text-sm font-semibold tabular-nums',
               card.tone,
             )}
           >
@@ -1261,6 +1502,22 @@ function BulkStageStateCards({
           </p>
         </Link>
       ))}
+      <DurationMetricChip
+        label="Stage dur"
+        value={stageDuration}
+        running={running && indicators.percent < 100}
+        avgHint={stageAvgHint}
+        avgTitle={stageAvgTitle}
+        ofAvgPercent={stageOfAvgPercent}
+      />
+      <DurationMetricChip
+        label="Bulk dur"
+        value={bulkDuration}
+        running={running}
+        avgHint={bulkAvgHint}
+        avgTitle={bulkAvgTitle}
+        ofAvgPercent={bulkOfAvgPercent}
+      />
     </div>
   )
 }
@@ -1271,7 +1528,8 @@ function stageTabFromOverall(
   const stage = (current ?? '').toLowerCase()
   if (stage === 'download') return 'download'
   if (stage === 'land' || stage === 'promote') return 'ingest'
-  if (stage === 'matching' || stage === 'review') return 'matching'
+  if (stage === 'matching') return 'matching'
+  if (stage === 'review') return 'review'
   if (stage === 'fulfillment' || stage === 'fulfill') return 'fulfillment'
   return 'download'
 }
@@ -1281,6 +1539,8 @@ function BatchProcessExpandRow({
   expanded,
   onToggle,
   focusedStage,
+  peerProcesses,
+  historyDays,
 }: {
   row: BulkProcessSummary
   expanded: boolean
@@ -1288,6 +1548,10 @@ function BatchProcessExpandRow({
   focusedStage?: PipelineStageTab
   /** Kept for callers; stage tabs stay local — do not write URL on every click. */
   onStageChange?: (stage: PipelineStageTab) => void
+  /** Sibling bulks in the list window — used for bulk-duration average. */
+  peerProcesses: BulkProcessSummary[]
+  /** Window (days) for stage-run history averages. */
+  historyDays: number
 }) {
   const statusKey = row.overall?.status ?? row.download_status
   const likelyNeedsReview = statusKey === 'needs_attention'
@@ -1315,7 +1579,53 @@ function BatchProcessExpandRow({
   const status = resolvedStatusKey.replaceAll('_', ' ')
   const requestRows = detail?.request_rows ?? row.request_rows
   const completedAt = detail?.completed_at ?? row.completed_at
-  const duration = bulkDurationLabel(row.process_at, running ? null : completedAt)
+  const bulkDurationMs = durationMsBetween(
+    row.process_at,
+    running ? null : completedAt,
+  )
+  const duration = formatDurationMs(bulkDurationMs)
+  // Shared across expanded cards (no process_id) so stage averages reuse one cache entry.
+  const stageRunsQuery = useQuery({
+    queryKey: [
+      'admin-api',
+      'ops',
+      'drop-process-runs',
+      'stage-duration-history',
+      historyDays,
+      activeStage.runStage,
+    ],
+    queryFn: () =>
+      listDropBulkProcessRuns({
+        stage: activeStage.runStage,
+        days: historyDays,
+      }),
+    enabled: expanded,
+    staleTime: 15_000,
+    placeholderData: (previous) => previous,
+  })
+  const stageGroups = stageRunsQuery.data?.groups
+  const stageDurationMs = stageDurationMsFromGroup(
+    stageGroups?.find((group) => group.process_id === row.process_id),
+  )
+  const stageDuration = formatDurationMs(stageDurationMs)
+  const bulkAvgMs = averageBulkDurationMs(peerProcesses, {
+    intakeSource: row.intake_source,
+    excludeProcessId: row.process_id,
+  })
+  const stageAvgMs = averageStageDurationMs(stageGroups, {
+    intakeSource: row.intake_source,
+    excludeProcessId: row.process_id,
+  })
+  const bulkVsAvg = durationVsAvgHint(bulkDurationMs, bulkAvgMs)
+  const stageVsAvg = durationVsAvgHint(stageDurationMs, stageAvgMs)
+  const bulkAvgHint = bulkVsAvg ? `avg ${bulkVsAvg.avgLabel}` : null
+  const stageAvgHint = stageVsAvg ? `avg ${stageVsAvg.avgLabel}` : null
+  const bulkAvgTitle = bulkVsAvg?.deltaLabel
+    ? `${bulkAvgHint} · ${bulkVsAvg.deltaLabel}`
+    : bulkAvgHint
+  const stageAvgTitle = stageVsAvg?.deltaLabel
+    ? `${stageAvgHint} · ${stageVsAvg.deltaLabel}`
+    : stageAvgHint
   const derived = bulkDerivedStats(detail)
   const needsReview =
     resolvedStatusKey === 'needs_attention' || derived.reviewOpen > 0
@@ -1458,7 +1768,7 @@ function BatchProcessExpandRow({
             <p className="text-[0.6rem] font-medium uppercase tracking-wide text-mute">
               {activeStage.label} run states
             </p>
-            {stageTab === 'matching' ? (
+            {stageTab === 'review' ? (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Link
@@ -1482,6 +1792,15 @@ function BatchProcessExpandRow({
             processId={row.process_id}
             indicators={activeIndicators}
             loading={detailQuery.isPending && !detail}
+            stageDuration={stageDuration}
+            bulkDuration={duration}
+            stageAvgHint={stageAvgHint}
+            bulkAvgHint={bulkAvgHint}
+            stageAvgTitle={stageAvgTitle}
+            bulkAvgTitle={bulkAvgTitle}
+            stageOfAvgPercent={stageVsAvg?.ofAvgPercent}
+            bulkOfAvgPercent={bulkVsAvg?.ofAvgPercent}
+            running={running || pending}
           />
           {stageTab === 'fulfillment' ? (
             <p className="text-[0.6rem] text-mute">
@@ -1745,6 +2064,8 @@ function BatchRequestRunsList({
                 onStageChange={
                   expandedId === row.process_id ? onStageChange : undefined
                 }
+                peerProcesses={rows}
+                historyDays={Math.min(Math.max(days, 1), 30)}
               />
             ))}
           </div>

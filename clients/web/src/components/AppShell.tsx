@@ -3,6 +3,14 @@ import { useState, type ReactNode } from 'react'
 
 import { NavMenu } from '@/components/NavMenu'
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import {
   getStoredSimulateRole,
   setStoredSimulateRole,
   SIMULATE_ROLE_VALUES,
@@ -66,40 +74,53 @@ function RoleStatusBanner() {
   const showSimulator = realRole === 'super_admin'
   const selectValue = simulateRole ?? me.role
 
+  function applySimulateRole(next: UserRole) {
+    const stored = next === me.real_role ? null : next
+    setStoredSimulateRole(stored)
+    setSimulateRole(stored)
+    void queryClient.invalidateQueries({ queryKey: ['admin-api', 'me'] })
+  }
+
   return (
-    <div
-      className="border-b border-line bg-panel/60 px-4 py-1 text-[0.65rem] text-mute"
-      role="status"
-    >
+    <div className="border-b border-line bg-panel/60 px-4 py-1 text-[0.65rem] text-mute">
       <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-center gap-x-3 gap-y-1">
-        <span>
+        <span role="status">
           {me.email} · {roleLabel(me.role)}
           {showSimulator && me.role !== me.real_role ? (
             <span className="text-mute/80"> (real {roleLabel(me.real_role)})</span>
           ) : null}
         </span>
         {showSimulator ? (
-          <label className="inline-flex items-center gap-1.5 text-mute">
+          <div className="inline-flex items-center gap-1.5 text-mute">
             <span className="text-[0.65rem] text-mute">View as</span>
-            <select
-              className="rounded border border-line bg-white px-1.5 py-0.5 text-[0.65rem] text-ink-soft outline-none focus:border-habeas-navy/40"
-              aria-label="Simulate effective role"
-              value={selectValue}
-              onChange={(event) => {
-                const next = event.target.value as UserRole
-                const stored = next === me.real_role ? null : next
-                setStoredSimulateRole(stored)
-                setSimulateRole(stored)
-                void queryClient.invalidateQueries({ queryKey: ['admin-api', 'me'] })
-              }}
-            >
-              {SIMULATE_ROLE_VALUES.map((role) => (
-                <option key={role} value={role}>
-                  {roleLabel(role)}
-                </option>
-              ))}
-            </select>
-          </label>
+            {/* Portaled menu — native <select> closes immediately under sticky + backdrop-blur. */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="rounded border border-line bg-white px-1.5 py-0.5 text-[0.65rem] text-ink-soft outline-none hover:border-habeas-navy/35 focus-visible:border-habeas-navy/40"
+                  aria-label="Simulate effective role"
+                >
+                  {roleLabel(selectValue)} ▾
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="center" className="min-w-[9rem]">
+                <DropdownMenuLabel>Effective role</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {SIMULATE_ROLE_VALUES.map((role) => (
+                  <DropdownMenuItem
+                    key={role}
+                    onSelect={() => applySimulateRole(role)}
+                    className={
+                      role === selectValue ? 'bg-panel font-medium text-habeas-navy' : undefined
+                    }
+                  >
+                    {roleLabel(role)}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         ) : null}
       </div>
     </div>

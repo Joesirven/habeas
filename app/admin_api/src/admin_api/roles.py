@@ -33,6 +33,7 @@ class RoleSettings(CoreSettings):
 
     admin_api_super_admins: str = ""
     admin_api_admins: str = ""
+    admin_api_legals: str = ""
     admin_api_data_owners: str = ""
     admin_api_id_token_audience: str = ""
     require_iap_identity: bool = False
@@ -60,6 +61,10 @@ def _super_admin_allowlist() -> frozenset[str]:
 
 def _admin_allowlist() -> frozenset[str]:
     return parse_email_allowlist(settings.admin_api_admins)
+
+
+def _legal_allowlist() -> frozenset[str]:
+    return parse_email_allowlist(settings.admin_api_legals)
 
 
 def _data_owner_allowlist() -> frozenset[str]:
@@ -110,6 +115,7 @@ async def get_role_principal(request: Request) -> RolePrincipal:
             email if authenticated else None,
             super_admins=_super_admin_allowlist(),
             admins=_admin_allowlist(),
+            legals=_legal_allowlist(),
             data_owners=_data_owner_allowlist(),
             require_identity=settings.require_iap_identity,
             is_authenticated=authenticated,

@@ -1,12 +1,17 @@
 // Empty string (Cloud Run same-origin front door) must fall back to /api — not ??.
 const API_BASE = import.meta.env.VITE_ADMIN_API_URL || '/api'
 
-export type UserRole = 'super_admin' | 'admin' | 'data_owner'
+export type UserRole = 'super_admin' | 'admin' | 'legal' | 'data_owner'
 
 /** sessionStorage key for X-Dev-Simulate-Role (super_admin local/dev only). */
 export const SIMULATE_ROLE_STORAGE_KEY = 'habeas-cli.simulate-role'
 
-export const SIMULATE_ROLE_VALUES: UserRole[] = ['super_admin', 'admin', 'data_owner']
+export const SIMULATE_ROLE_VALUES: UserRole[] = [
+  'super_admin',
+  'admin',
+  'legal',
+  'data_owner',
+]
 
 export type MePayload = {
   email: string
@@ -19,7 +24,12 @@ export type MePayload = {
 export function getStoredSimulateRole(): UserRole | null {
   if (typeof sessionStorage === 'undefined') return null
   const value = sessionStorage.getItem(SIMULATE_ROLE_STORAGE_KEY)
-  if (value === 'super_admin' || value === 'admin' || value === 'data_owner') {
+  if (
+    value === 'super_admin' ||
+    value === 'admin' ||
+    value === 'legal' ||
+    value === 'data_owner'
+  ) {
     return value
   }
   return null
@@ -116,6 +126,37 @@ export function createManualRequest(body: ManualRequestInput) {
   })
 }
 
+export type AgentBatchUploadResult = {
+  batch_id: string
+  source_filename: string | null
+  input_row_count: number
+  cleaned_row_count: number
+  inserted_count: number
+  skipped_row_count: number
+  email_split_count: number
+  request_ids: string[]
+}
+
+export async function postAgentBatchUpload(file: File) {
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  const simulateRole = getStoredSimulateRole()
+  if (simulateRole) {
+    headers['X-Dev-Simulate-Role'] = simulateRole
+  }
+  const form = new FormData()
+  form.append('file', file)
+  const response = await fetch(`${API_BASE}/requests/agent-batch`, {
+    method: 'POST',
+    headers,
+    body: form,
+  })
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
+  }
+  return (await response.json()) as AgentBatchUploadResult
+}
+
 export type ApprovalRecord = {
   id: number
   request_id: string
@@ -200,6 +241,8 @@ export type MatchingAttemptRow = {
 
 export type MatchingResultRow = MatchingResultSummary & {
   match_type: MatchTypeFilter
+  /** Computed at read time from match_count (0→5, 1→3, N→4). */
+  recommended_response_status?: number | null
   review_status: string
   approval_id: number | null
   assignment?: WorkflowAssignmentSummary | null
@@ -234,6 +277,21 @@ export type MatchingResultsPayload = {
   filters?: MatchingResultsFilters
 }
 
+export type MatchedPersonPhone = {
+  type: 'cell' | 'land' | string
+  number: string
+}
+
+export type MatchedPersonContact = {
+  dwid: string
+  state: string
+  first_initial: string | null
+  last_initial: string | null
+  dob: string | null
+  email: string | null
+  phones: MatchedPersonPhone[]
+}
+
 export type MatchingResultDetail = MatchingResultRow & {
   attempt_id: number | null
   decided_by: string | null
@@ -241,6 +299,8 @@ export type MatchingResultDetail = MatchingResultRow & {
   decision_reason: string | null
   attempts?: MatchingAttemptRow[]
   assignment?: WorkflowAssignmentSummary | null
+  matched_contacts?: MatchedPersonContact[]
+  matched_contacts_status?: 'ok' | 'none' | 'unavailable' | string
 }
 
 export type BulkApproveMatchingResultsInput = {
@@ -797,20 +857,53 @@ export function postDropMatchingResultsBulkDecline(body: BulkApproveMatchingResu
   })
 }
 
+/** CA DROP response_status codes operators confirm on Inbox fulfill. */
+export type DropResponseStatusCode = 3 | 4 | 5
+
+export const DROP_RESPONSE_STATUS_OPTIONS: {
+  code: DropResponseStatusCode
+  label: string
+}[] = [
+  { code: 3, label: 'Deleted' },
+  { code: 4, label: 'Opted out' },
+  { code: 5, label: 'Not found' },
+]
+
+/** Default DROP status from match type / count (same mapping as fulfillment stub). */
+export function suggestedDropResponseStatus(
+  matchType: string | null | undefined,
+  matchCount?: number | null,
+): DropResponseStatusCode {
+  if (matchType === 'not_found' || matchCount === 0) return 5
+  if (matchType === 'multi_match' || (matchCount != null && matchCount > 1)) return 4
+  return 3
+}
+
+export function dropResponseStatusLabel(code: number | null | undefined): string {
+  const found = DROP_RESPONSE_STATUS_OPTIONS.find((row) => row.code === code)
+  return found ? `${found.code} ${found.label}` : code != null ? String(code) : '—'
+}
+
 export function postDropMatchingResultPromote(
   requestId: string,
-  body?: { decision_reason?: string },
+  body?: { decision_reason?: string; response_status?: DropResponseStatusCode },
 ) {
-  return fetchAdminApi<{ status: string; request_id: string; approval_id: number | null }>(
-    `/ops/drop/matching-results/${requestId}/promote`,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        decided_by: 'web-admin@habeas.com',
-        decision_reason: body?.decision_reason ?? 'fulfill — matching review approved',
-      }),
-    },
-  )
+  return fetchAdminApi<{
+    status: string
+    request_id: string
+    approval_id: number | null
+    response_status?: number
+    response_status_set?: boolean
+  }>(`/ops/drop/matching-results/${requestId}/promote`, {
+    method: 'POST',
+    body: JSON.stringify({
+      decided_by: 'web-admin@habeas.com',
+      decision_reason: body?.decision_reason ?? 'fulfill — matching review approved',
+      ...(body?.response_status != null
+        ? { response_status: body.response_status }
+        : {}),
+    }),
+  })
 }
 
 export function postDropMatchingResultDecline(
@@ -1207,9 +1300,19 @@ export type NeedsAttentionAssignment = {
   assignee_identity: string | null
 }
 
+export type NeedsAttentionItemKind =
+  | 'matching'
+  | 'triage'
+  | 'escalations'
+  | 'notice'
+  | 'delivery'
+
+export type NeedsAttentionKind = NeedsAttentionItemKind | 'all'
+
 export type NeedsAttentionItem = {
   request_id: string
   reason: string
+  kind?: NeedsAttentionItemKind
   current_stage: string
   intake_source: string
   received_at: string | null
@@ -1218,6 +1321,8 @@ export type NeedsAttentionItem = {
   matched?: boolean | null
   match_count?: number | null
   match_type?: string | null
+  /** Computed at read time from match_count (0→5, 1→3, N→4). */
+  recommended_response_status?: number | null
   matched_via?: string | null
   requestor_state?: string | null
   review_status?: string | null
@@ -1230,6 +1335,7 @@ export type NeedsAttentionItem = {
 
 export type NeedsAttentionResponse = {
   items: NeedsAttentionItem[]
+  kind?: NeedsAttentionKind
 }
 
 export type RequestComment = {
@@ -1247,12 +1353,121 @@ export function getRequestJourney(requestId: string) {
   )
 }
 
-export function getNeedsAttention(limit?: number) {
+export function getNeedsAttention(
+  limitOrParams?: number | { limit?: number; kind?: NeedsAttentionKind },
+) {
+  const params =
+    typeof limitOrParams === 'number'
+      ? { limit: limitOrParams }
+      : (limitOrParams ?? {})
   const search = new URLSearchParams()
-  if (limit != null) search.set('limit', String(limit))
+  if (params.limit != null) search.set('limit', String(params.limit))
+  if (params.kind) search.set('kind', params.kind)
   const query = search.toString()
   return fetchAdminApi<NeedsAttentionResponse>(
     `/ops/requests/needs-attention${query ? `?${query}` : ''}`,
+  )
+}
+
+/** Legal case lanes only — excludes matching.review so ops volume cannot crowd Triage out. */
+export const LEGAL_INBOX_KINDS: NeedsAttentionItemKind[] = [
+  'triage',
+  'escalations',
+  'notice',
+  'delivery',
+]
+
+export async function getLegalNeedsAttention(limit = 1000): Promise<NeedsAttentionResponse> {
+  const results = await Promise.all(
+    LEGAL_INBOX_KINDS.map((kind) => getNeedsAttention({ limit, kind })),
+  )
+  const items = results.flatMap((result) => result.items)
+  items.sort((a, b) =>
+    (a.requested_at || a.received_at || '').localeCompare(
+      b.requested_at || b.received_at || '',
+    ),
+  )
+  return { items, kind: 'all' }
+}
+
+export function postTriageBulkReject(body: {
+  request_ids: string[]
+  response_status?: number
+  decision_reason?: string | null
+}) {
+  return fetchAdminApi<{
+    status: string
+    count: number
+    request_ids: string[]
+    results: Array<{
+      request_id: string
+      response_status: number
+      response_status_set: boolean
+      assignment_closed: boolean
+    }>
+  }>('/ops/drop/workflow/triage/bulk-reject', {
+    method: 'POST',
+    body: JSON.stringify({
+      decided_by: 'web-admin@habeas.com',
+      response_status: 2,
+      ...body,
+    }),
+  })
+}
+
+export function postTriageSendToMatching(body: {
+  request_ids: string[]
+  decision_reason?: string | null
+}) {
+  return fetchAdminApi<{
+    status: string
+    count: number
+    request_ids: string[]
+    enqueued: string[]
+  }>('/ops/drop/workflow/triage/send-to-matching', {
+    method: 'POST',
+    body: JSON.stringify({
+      decided_by: 'web-admin@habeas.com',
+      ...body,
+    }),
+  })
+}
+
+export type RouteTriageCondition = {
+  requestor_state_not_in?: string[]
+  state_in?: string[]
+}
+
+export type RouteTriageRule = {
+  id: number
+  action_type: string
+  requires_approval: boolean
+  approver_role: string | null
+  condition_jsonb: RouteTriageCondition
+  rationale: string
+  effective_from: string | null
+  effective_to: string | null
+  created_by: string
+  created_at: string | null
+}
+
+export function getRouteTriageCondition() {
+  return fetchAdminApi<RouteTriageRule>('/ops/drop/workflow/conditions/route-triage')
+}
+
+export function putRouteTriageCondition(body: {
+  condition_jsonb: RouteTriageCondition
+  rationale: string
+}) {
+  return fetchAdminApi<{ status: string; rule: RouteTriageRule }>(
+    '/ops/drop/workflow/conditions/route-triage',
+    {
+      method: 'PUT',
+      body: JSON.stringify({
+        decided_by: 'web-admin@habeas.com',
+        ...body,
+      }),
+    },
   )
 }
 

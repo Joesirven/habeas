@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Any
 
@@ -22,28 +23,39 @@ from admin_api.approvals import (
     assign_requests_by_match_type,
     bulk_approve_matching_review_by_match_type,
     bulk_decline_matching_review_by_match_type,
+    bulk_reject_legal_triage,
     decline_matching_review_for_request,
     escalate_requests,
     get_current_assignment,
     list_workflow_assignments,
     match_type_for_count,
     promote_matching_review_for_request,
+    recommended_response_status_for_match_count,
+    send_legal_triage_to_matching,
 )
 from admin_api.cloud_run_auth import auth_headers_for
 from admin_api.roles import RolePrincipal, require_roles
 from habeas_privacy_core.auth import (
     ROLE_ADMIN,
     ROLE_DATA_OWNER,
+    ROLE_LEGAL,
     ROLE_SUPER_ADMIN,
     UNKNOWN_ACTOR,
     is_authenticated_actor,
     resolve_actor,
 )
+from habeas_privacy_core.audit.redaction import redact_error_text
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
+from habeas_privacy_core.db.request_resolver import request_resolver
+from habeas_privacy_core.geo.state import InvalidStateAcronymError, normalize_state_acronym
+from habeas_privacy_core.models.intake import DropListType
+from habeas_privacy_core.models.request import IntakeSource
 from habeas_privacy_core.workflow.approval import (
     MATCHING_REVIEW_ACTION,
     ensure_pending_matching_review,
+    fetch_intake_route_triage_rule,
+    version_intake_route_triage_rule,
 )
 
 logger = logging.getLogger(__name__)
@@ -197,10 +209,15 @@ class BulkApproveMatchingResultsBody(BaseModel):
 
 
 class MatchingReviewDecisionBody(BaseModel):
-    """Promote (approve) or decline (reject) a single matching.review gate."""
+    """Promote (approve) or decline (reject) a single matching.review gate.
+
+    Optional ``response_status`` (CPPA DROP codes 3/4/5) sets the DROP result
+    when promoting — Inbox fulfill confirms the status result.
+    """
 
     decided_by: str | None = None
     decision_reason: str | None = None
+    response_status: int | None = Field(default=None, ge=3, le=5)
 
 
 class AssignBody(BaseModel):
@@ -230,6 +247,31 @@ class EscalateBody(BaseModel):
     decided_by: str | None = None
 
 
+class TriageBulkRejectBody(BaseModel):
+    """Legal Triage: set DROP response_status (default 2 Exempted) and close hold."""
+
+    request_ids: list[str] = Field(min_length=1, max_length=200)
+    response_status: int = Field(default=2, ge=2, le=5)
+    decision_reason: str | None = None
+    decided_by: str | None = None
+
+
+class TriageSendToMatchingBody(BaseModel):
+    """Legal Triage: release hold and enqueue matching."""
+
+    request_ids: list[str] = Field(min_length=1, max_length=200)
+    decision_reason: str | None = None
+    decided_by: str | None = None
+
+
+class RouteTriageConditionBody(BaseModel):
+    """Version active ``intake.route_triage`` condition (Legal Conditions)."""
+
+    condition_jsonb: dict[str, Any]
+    rationale: str = Field(min_length=1, max_length=2000)
+    decided_by: str | None = None
+
+
 def _require_database() -> None:
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
@@ -255,6 +297,11 @@ SuperAdminPrincipal = Annotated[
 MatchingReviewPrincipal = Annotated[
     RolePrincipal,
     Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_DATA_OWNER)),
+]
+
+LegalPrincipal = Annotated[
+    RolePrincipal,
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL)),
 ]
 
 
@@ -1785,6 +1832,269 @@ def _coerce_audit_payload(value: Any) -> dict[str, Any]:
     return {}
 
 
+_DEFAULT_BQ_PROJECT = "example-gcp-project"
+_DEFAULT_BQ_DATASET = "drop_hash_index"
+_MDR_PERSON_TABLE = "`example-gcp-project.person_db.person`"
+_MDR_PHONES_TABLE = "`example-gcp-project.person_db.phones`"
+_HASH_TABLE_BY_LIST_TYPE = {
+    DropListType.EMAIL: "email_hash",
+    DropListType.PHONE: "phone_hash",
+    DropListType.NDZ: "ndz_hash",
+}
+
+
+def _initial_from_name(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[0].upper()
+
+
+def _primary_hash_for_list_type(
+    list_type: DropListType,
+    hash_fields: dict[str, Any],
+) -> tuple[str | None, str]:
+    """Mirror matching DropHashPipeline hash field selection (ADR-21)."""
+    if list_type == DropListType.EMAIL:
+        value = (
+            hash_fields.get("hashed_email")
+            or hash_fields.get("email_hash")
+            or hash_fields.get("pii_hash")
+            or hash_fields.get("hash")
+        )
+        return (str(value) if value is not None else None), "drop_hash_email"
+
+    if list_type == DropListType.PHONE:
+        value = (
+            hash_fields.get("hashed_phone")
+            or hash_fields.get("phone_hash")
+            or hash_fields.get("pii_hash")
+            or hash_fields.get("hash")
+        )
+        return (str(value) if value is not None else None), "drop_hash_phone"
+
+    if list_type == DropListType.NDZ:
+        value = (
+            hash_fields.get("concatenated_hash")
+            or hash_fields.get("pii_hash")
+            or hash_fields.get("hash")
+        )
+        return (str(value) if value is not None else None), "drop_hash_ndz_composite"
+
+    return None, f"drop_hash_unsupported_{list_type.value}"
+
+
+def _lookup_dwids_by_hash(
+    *,
+    list_type: DropListType,
+    hash_value: str,
+    lookup_state: str,
+    client: Any | None = None,
+) -> list[str]:
+    """Hash-index mart lookup — same contract as matching worker (state-scoped)."""
+    table = _HASH_TABLE_BY_LIST_TYPE.get(list_type)
+    if table is None:
+        raise ValueError(f"unsupported list_type for BQ lookup: {list_type!r}")
+
+    project_id = os.environ.get("DROP_HASH_BQ_PROJECT", _DEFAULT_BQ_PROJECT)
+    dataset_id = os.environ.get("DROP_HASH_BQ_DATASET", _DEFAULT_BQ_DATASET)
+    fq_table = f"`{project_id}.{dataset_id}.{table}`"
+
+    sql = f"""
+        SELECT CAST(dwid AS STRING) AS dwid
+          FROM {fq_table}
+         WHERE hash_value = @hash_value
+           AND state = @lookup_state
+    """
+    try:
+        from google.cloud import bigquery
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("google-cloud-bigquery is not installed") from exc
+
+    bq_client = client or bigquery.Client()
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("hash_value", "STRING", hash_value),
+            bigquery.ScalarQueryParameter("lookup_state", "STRING", lookup_state),
+        ]
+    )
+    try:
+        rows = list(bq_client.query(sql, job_config=job_config))
+    except Exception as exc:
+        raise RuntimeError(redact_error_text(str(exc))) from exc
+
+    dwids: list[str] = []
+    for row in rows:
+        dwid = row["dwid"] if hasattr(row, "keys") else row[0]
+        if dwid is not None:
+            dwids.append(str(dwid))
+    return dwids
+
+
+def _fetch_person_contacts_from_bq(
+    *,
+    dwids: list[str],
+    lookup_state: str,
+    client: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Join MDR person (+ phones) for review UI — role-gated endpoint only."""
+    if not dwids:
+        return []
+
+    try:
+        from google.cloud import bigquery
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("google-cloud-bigquery is not installed") from exc
+
+    sql = f"""
+        WITH targets AS (
+            SELECT dwid FROM UNNEST(@dwids) AS dwid
+        )
+        SELECT CAST(p.dwid AS STRING) AS dwid,
+               p.state,
+               p.firstname,
+               p.lastname,
+               CAST(p.birthdate AS STRING) AS birthdate,
+               p.emailaddress,
+               ph.likely_cell_phone,
+               ph.likely_land_phone
+          FROM targets t
+          JOIN {_MDR_PERSON_TABLE} p
+            ON CAST(p.dwid AS STRING) = t.dwid
+           AND p.state = @lookup_state
+          LEFT JOIN {_MDR_PHONES_TABLE} ph
+            ON CAST(ph.dwid AS STRING) = t.dwid
+           AND ph.state = @lookup_state
+         ORDER BY p.dwid
+    """
+    bq_client = client or bigquery.Client()
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter("dwids", "STRING", dwids),
+            bigquery.ScalarQueryParameter("lookup_state", "STRING", lookup_state),
+        ]
+    )
+    try:
+        rows = list(bq_client.query(sql, job_config=job_config))
+    except Exception as exc:
+        raise RuntimeError(redact_error_text(str(exc))) from exc
+
+    contacts: list[dict[str, Any]] = []
+    for row in rows:
+        phones: list[dict[str, str]] = []
+        cell = row.get("likely_cell_phone")
+        land = row.get("likely_land_phone")
+        if cell and str(cell).strip():
+            phones.append({"type": "cell", "number": str(cell).strip()})
+        if land and str(land).strip():
+            phones.append({"type": "land", "number": str(land).strip()})
+        birthdate = row.get("birthdate")
+        dob = str(birthdate).strip() if birthdate is not None and str(birthdate).strip() else None
+        email_raw = row.get("emailaddress")
+        email = str(email_raw).strip() if email_raw is not None and str(email_raw).strip() else None
+        contacts.append(
+            {
+                "dwid": str(row["dwid"]),
+                "state": str(row["state"]).strip().upper(),
+                "first_initial": _initial_from_name(row.get("firstname")),
+                "last_initial": _initial_from_name(row.get("lastname")),
+                "dob": dob,
+                "email": email,
+                "phones": phones,
+            }
+        )
+    return contacts
+
+
+async def _resolve_matched_dwids(
+    conn: Any,
+    *,
+    request_id: str,
+    match_count: int,
+    requestor_state: str | None,
+) -> tuple[list[str], str | None]:
+    """Resolve DWIDs for review enrichment (single: DB consumer_id; multi: BQ re-lookup)."""
+    if match_count <= 0:
+        return [], requestor_state
+
+    row = await conn.fetchrow(
+        """
+        SELECT mr.consumer_id,
+               r.raw_record_id,
+               r.intake_source,
+               UPPER(TRIM(r.requestor_state)) AS requestor_state
+          FROM matching_results mr
+          JOIN requests r ON r.id = mr.request_id
+         WHERE mr.request_id = $1::uuid
+         ORDER BY mr.recorded_at DESC
+         LIMIT 1
+        """,
+        request_id,
+    )
+    if row is None:
+        return [], requestor_state
+
+    lookup_state = requestor_state or (
+        str(row["requestor_state"]).strip().upper() if row["requestor_state"] else None
+    )
+    if match_count == 1 and row["consumer_id"]:
+        return [str(row["consumer_id"])], lookup_state
+
+    if row["intake_source"] != IntakeSource.DROP.value or row["raw_record_id"] is None:
+        return [], lookup_state
+    if not lookup_state:
+        return [], lookup_state
+
+    try:
+        normalized_state = normalize_state_acronym(lookup_state)
+    except InvalidStateAcronymError:
+        return [], lookup_state
+
+    payload = await request_resolver(conn, IntakeSource.DROP, int(row["raw_record_id"]))
+    hash_value, _via = _primary_hash_for_list_type(payload.list_type, payload.hash_fields)
+    if not hash_value:
+        return [], normalized_state
+
+    dwids = _lookup_dwids_by_hash(
+        list_type=payload.list_type,
+        hash_value=hash_value,
+        lookup_state=normalized_state,
+    )
+    return dwids, normalized_state
+
+
+async def enrich_matching_result_contacts(
+    conn: Any,
+    *,
+    request_id: str,
+    detail: dict[str, Any],
+    bq_client: Any | None = None,
+) -> dict[str, Any]:
+    """Attach matched_contacts for matching review (PII — never logged or audited)."""
+    match_count = int(detail.get("match_count") or 0)
+    if match_count <= 0:
+        return {"matched_contacts": [], "matched_contacts_status": "none"}
+
+    dwids, lookup_state = await _resolve_matched_dwids(
+        conn,
+        request_id=request_id,
+        match_count=match_count,
+        requestor_state=detail.get("requestor_state"),
+    )
+    if not dwids or not lookup_state:
+        return {"matched_contacts": [], "matched_contacts_status": "unavailable"}
+
+    contacts = await asyncio.to_thread(
+        _fetch_person_contacts_from_bq,
+        dwids=dwids,
+        lookup_state=lookup_state,
+        client=bq_client,
+    )
+    return {"matched_contacts": contacts, "matched_contacts_status": "ok"}
+
+
 def _serialize_matching_result_row(row: Any) -> dict[str, Any]:
     """Ids/counts/status/state acronym only — never consumer_id or PII."""
     match_count = int(row["match_count"] or 0)
@@ -1795,6 +2105,9 @@ def _serialize_matching_result_row(row: Any) -> dict[str, Any]:
         "matched": bool(row["matched"]),
         "match_count": match_count,
         "match_type": match_type_for_count(match_count),
+        "recommended_response_status": recommended_response_status_for_match_count(
+            match_count
+        ),
         "matched_via": row["matched_via"],
         "recorded_at": row["recorded_at"].isoformat()
         if row["recorded_at"] is not None
@@ -2049,6 +2362,29 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
         for a in attempt_rows
     ]
     detail["assignment"] = await get_current_assignment(conn, request_id)
+    if int(detail.get("match_count") or 0) > 0:
+        try:
+            detail.update(
+                await enrich_matching_result_contacts(
+                    conn,
+                    request_id=request_id,
+                    detail=detail,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "matching_contacts_enrichment_failed",
+                extra={
+                    "event": "matching_contacts_enrichment_failed",
+                    "request_id": request_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            detail["matched_contacts"] = []
+            detail["matched_contacts_status"] = "unavailable"
+    else:
+        detail["matched_contacts"] = []
+        detail["matched_contacts_status"] = "none"
     return detail
 
 
@@ -2174,8 +2510,17 @@ async def drop_matching_result_promote(
     body: MatchingReviewDecisionBody,
     actor: DropMutationActor,
 ):
-    """Promote one request to fulfillment (approve matching.review)."""
+    """Promote one request to fulfillment (approve matching.review).
+
+    When ``response_status`` is set (3 Deleted / 4 Opted out / 5 Not found),
+    also write the DROP status result on ``drop_raw_requests``.
+    """
     _require_database()
+    if body.response_status is not None and body.response_status not in (3, 4, 5):
+        raise HTTPException(
+            status_code=422,
+            detail="response_status must be 3 (Deleted), 4 (Opted out), or 5 (Not found)",
+        )
     decided_by = decided_by_for_mutation(actor, body.decided_by)
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -2185,9 +2530,12 @@ async def drop_matching_result_promote(
                 request_id=request_id,
                 decided_by=decided_by,
                 decision_reason=body.decision_reason,
+                response_status=body.response_status,
             )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": "ok", **result}
 
 
@@ -2215,8 +2563,11 @@ async def drop_matching_result_decline(
 
 
 @router.get("/matching-results/{request_id}")
-async def drop_matching_result_detail(request_id: str):
-    """Detail pane payload for one DROP matching result."""
+async def drop_matching_result_detail(
+    request_id: str,
+    _principal: MatchingReviewPrincipal,
+):
+    """Detail pane payload for one DROP matching result (includes matched person PII)."""
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -2313,6 +2664,88 @@ async def drop_workflow_escalate(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": "ok", **result}
+
+
+@router.post("/workflow/triage/bulk-reject")
+async def drop_workflow_triage_bulk_reject(
+    body: TriageBulkRejectBody,
+    _principal: LegalPrincipal,
+    actor: DropMutationActor,
+):
+    """Legal Triage: bulk-set DROP response_status and close triage holds."""
+    _require_database()
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await bulk_reject_legal_triage(
+                conn,
+                request_ids=body.request_ids,
+                decided_by=decided_by,
+                response_status=body.response_status,
+                decision_reason=body.decision_reason,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": "ok", **result}
+
+
+@router.post("/workflow/triage/send-to-matching")
+async def drop_workflow_triage_send_to_matching(
+    body: TriageSendToMatchingBody,
+    _principal: LegalPrincipal,
+    actor: DropMutationActor,
+):
+    """Legal Triage: release hold and enqueue matching for selected requests."""
+    _require_database()
+    decided_by = decided_by_for_mutation(actor, body.decided_by)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await send_legal_triage_to_matching(
+                conn,
+                request_ids=body.request_ids,
+                decided_by=decided_by,
+                decision_reason=body.decision_reason,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": "ok", **result}
+
+
+@router.get("/workflow/conditions/route-triage")
+async def get_route_triage_condition(_principal: LegalPrincipal):
+    """Active ``intake.route_triage`` rule for Legal Conditions editor."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rule = await fetch_intake_route_triage_rule(conn)
+    if rule is None:
+        raise HTTPException(status_code=404, detail="no active intake.route_triage rule")
+    return rule
+
+
+@router.put("/workflow/conditions/route-triage")
+async def put_route_triage_condition(
+    body: RouteTriageConditionBody,
+    _principal: LegalPrincipal,
+    actor: DropMutationActor,
+):
+    """Version ``intake.route_triage`` — close active row, insert replacement."""
+    _require_database()
+    created_by = decided_by_for_mutation(actor, body.decided_by)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            rule = await version_intake_route_triage_rule(
+                conn,
+                condition_jsonb=body.condition_jsonb,
+                rationale=body.rationale,
+                created_by=created_by,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": "ok", "rule": rule}
 
 
 @router.get("/workflow/assignments")

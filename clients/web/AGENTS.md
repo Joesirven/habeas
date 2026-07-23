@@ -14,7 +14,7 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
 
 ## Navigation (Ops IA — Request / Job / Run)
 
-- **Requests** → list (row opens journey), Needs attention, SLAs (shell).
+- **Requests** → list (row opens journey), Needs attention, SLAs (shell), Conditions (Legal), Upload.
 - **Ops** (super_admin): Dashboard (Pipeline · Hash refresh · History · Configurations), Workers, Runs, Jobs (shell), Insights (`/ops/health`), Incidents (shell → failed Runs).
 - **Console** (super_admin): `/ops/drop-pipeline?tab=` mutation power surface (same tab set as Dashboard).
 - Browser never calls worker URLs — only admin-api aggregates.
@@ -36,8 +36,8 @@ General Amigo frost: [`.agent/modules/design-taste.md`](../../.agent/modules/des
 ## DROP pipeline
 
 - Top tabs: Pipeline · Hash refresh · History · Configurations (`tab=`). **Run Pipeline** (CA DROP) queues download → land → promote.
-- Stage tabs Download / Ingest / Matching / Fulfillment live inside each bulk card (`stage=`); Land+Promote combined as Ingest — not top console tabs.
-- Bulk cards: compact collapsed row (Dur/Prog + tiny stage chips); Matching completion % from `matching_attempts` only (do not blend review); **Matching results** only when Matching stage is selected.
+- Stage tabs Download / Ingest / Matching / Review / Fulfillment live inside each bulk card (`stage=`); Land+Promote combined as Ingest — not top console tabs.
+- Bulk cards: compact collapsed row (Dur/Prog + tiny stage chips); Matching completion % from `matching_attempts` only (do not blend review); Review tab uses `stages.review`; **Matching results** when Review stage is selected.
 - Bulk-card state tiles → `/ops/runs?process=<id>&job=…&status=…&window=…` (`process` = download attempt id; API query `process_id`).
 - Individual view: status toggles (Open & failed / Queued / Failed / Abandoned / Finished / All) on the same filter row as Intake/Window.
 - Hash-index: **Refresh state** / **Refresh all** enqueue then process in one action (USPS 50+DC); rematch-on-refresh for every successful state.

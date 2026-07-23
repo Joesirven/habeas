@@ -7,19 +7,24 @@ import pytest
 from habeas_privacy_core.adapters.gcs import clear_gcs_store, read_object, write_object
 from habeas_privacy_core.adapters.secret_manager import clear_secret_cache, get_secret
 from habeas_privacy_core.db.migrations import migrations_dir, run_migrations
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from habeas_privacy_core.workflow.approval import (
+    INTAKE_ROUTE_TRIAGE_ACTION,
     MATCHING_REVIEW_ACTION,
     abandon_rejected,
     check_approval_required,
     clear_rule_cache,
+    create_workflow_assignment,
     ensure_pending_matching_review,
     eval_condition,
     fetch_active_rule,
     is_matching_review_approved,
+    normalize_route_triage_condition,
     reconcile_ungated_matching_reviews,
     release_approved,
+    should_route_to_legal_triage,
+    version_intake_route_triage_rule,
 )
 from habeas_privacy_core.workflow.error_policy import (
     ErrorDisposition,
@@ -124,6 +129,117 @@ def test_approval_migration_exists():
     assert "CREATE TABLE approval_rules" in content
     assert "INSERT INTO approval_rules" in content
     assert "suppress.paylocity" in content
+
+
+def test_intake_route_triage_seed_migration_exists():
+    migration = migrations_dir() / "20260723000001_core_seed_intake_route_triage_rule.sql"
+    assert migration.exists()
+    content = migration.read_text()
+    assert INTAKE_ROUTE_TRIAGE_ACTION in content
+    assert "requestor_state_not_in" in content
+
+
+def test_normalize_route_triage_condition_accepts_not_in():
+    assert normalize_route_triage_condition(
+        {"requestor_state_not_in": ["ca", "CO", "ca"]}
+    ) == {"requestor_state_not_in": ["CA", "CO"]}
+
+
+def test_normalize_route_triage_condition_rejects_mixed_predicates():
+    with pytest.raises(ValueError, match="exactly one"):
+        normalize_route_triage_condition(
+            {"requestor_state_not_in": ["CA"], "state_in": ["NY"]}
+        )
+
+
+@pytest.mark.asyncio
+async def test_version_intake_route_triage_rule_closes_and_inserts():
+    conn = AsyncMock()
+    tx = AsyncMock()
+    tx.__aenter__ = AsyncMock(return_value=None)
+    tx.__aexit__ = AsyncMock(return_value=None)
+    conn.transaction = MagicMock(return_value=tx)
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"id": 10},
+            {
+                "id": 11,
+                "action_type": INTAKE_ROUTE_TRIAGE_ACTION,
+                "requires_approval": True,
+                "approver_role": "legal",
+                "condition_jsonb": {"state_in": ["NY", "TX"]},
+                "rationale": "Route NY/TX to Triage",
+                "effective_from": None,
+                "effective_to": None,
+                "created_by": "legal@example.com",
+                "created_at": None,
+            },
+        ]
+    )
+    clear_rule_cache()
+    result = await version_intake_route_triage_rule(
+        conn,
+        condition_jsonb={"state_in": ["ny", "tx"]},
+        rationale="Route NY/TX to Triage",
+        created_by="legal@example.com",
+    )
+    assert result["id"] == 11
+    assert result["condition_jsonb"] == {"state_in": ["NY", "TX"]}
+    assert conn.fetchrow.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_create_workflow_assignment_accepts_triage_kind():
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "id": 1,
+            "request_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "action_type": "workflow.assignment",
+            "status": "pending",
+            "approver_role": "legal",
+            "context_jsonb": {"kind": "triage"},
+            "requested_at": None,
+            "expires_at": None,
+            "decided_by": "system:request_dispatcher",
+            "decided_at": None,
+            "decision_reason": None,
+        }
+    )
+    row = await create_workflow_assignment(
+        conn,
+        request_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        kind="triage",
+        target_role="legal",
+        decided_by="system:request_dispatcher",
+    )
+    assert row["target_role"] == "legal"
+    assert row["kind"] == "triage"
+
+
+@pytest.mark.asyncio
+async def test_create_workflow_assignment_rejects_triage_non_legal():
+    with pytest.raises(ValueError, match="triage target_role"):
+        await create_workflow_assignment(
+            AsyncMock(),
+            request_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            kind="triage",
+            target_role="data_owner",
+            decided_by="ops@example.com",
+        )
+
+
+@pytest.mark.asyncio
+async def test_should_route_to_legal_triage_delegates_to_check():
+    conn = AsyncMock()
+    with patch(
+        "habeas_privacy_core.workflow.approval.check_approval_required",
+        new_callable=AsyncMock,
+        return_value=None,
+    ) as check:
+        assert await should_route_to_legal_triage(conn, {"requestor_state": "TX"}) is None
+    check.assert_awaited_once_with(conn, INTAKE_ROUTE_TRIAGE_ACTION, {"requestor_state": "TX"})
 
 
 @pytest.mark.asyncio

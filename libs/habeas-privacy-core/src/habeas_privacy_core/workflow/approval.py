@@ -20,10 +20,14 @@ _logger = logging.getLogger(__name__)
 MATCHING_REVIEW_ACTION = "matching.review"
 DEFAULT_MATCHING_REVIEW_TTL = timedelta(days=7)
 
-# Assign/escalate workflow (U17) — reuses approval_requests; no new table.
+# Legal Inbox · Triage — route (never silent-reject) before first matching enqueue.
+INTAKE_ROUTE_TRIAGE_ACTION = "intake.route_triage"
+
+# Assign/escalate/triage workflow — reuses approval_requests; no new table.
 # Pending rows are the current pointer; re-assign supersedes prior pending.
 WORKFLOW_ASSIGNMENT_ACTION = "workflow.assignment"
 ASSIGNMENT_TARGETS = frozenset({"reviewer", "legal", "data_owner"})
+ASSIGNMENT_KINDS = frozenset({"assign", "escalate", "triage"})
 DEFAULT_ASSIGNMENT_TTL = timedelta(days=30)
 
 
@@ -134,6 +138,210 @@ async def check_approval_required(
         approver_role=rule["approver_role"],
         rationale=rule["rationale"],
     )
+
+
+async def should_route_to_legal_triage(
+    conn: asyncpg.Connection,
+    context: dict[str, Any],
+) -> ApprovalRequirement | None:
+    """Return requirement when active ``intake.route_triage`` condition matches.
+
+    A hit means hold matching enqueue and open a Legal triage assignment — never
+    terminal-reject without an explicit Legal Inbox action.
+    """
+    return await check_approval_required(conn, INTAKE_ROUTE_TRIAGE_ACTION, context)
+
+
+_USPS_STATE = re.compile(r"^[A-Z]{2}$")
+_ROUTE_TRIAGE_PREDICATES = frozenset({"requestor_state_not_in", "state_in"})
+
+
+def normalize_route_triage_condition(condition: dict[str, Any]) -> dict[str, Any]:
+    """Validate MVP state predicates for ``intake.route_triage``."""
+    if not isinstance(condition, dict) or not condition:
+        raise ValueError("condition_jsonb must be a non-empty object")
+    keys = set(condition) & _ROUTE_TRIAGE_PREDICATES
+    if len(keys) != 1:
+        raise ValueError(
+            "condition_jsonb must set exactly one of "
+            "requestor_state_not_in or state_in"
+        )
+    extra = set(condition) - _ROUTE_TRIAGE_PREDICATES
+    if extra:
+        raise ValueError(f"unsupported condition keys: {sorted(extra)}")
+    key = next(iter(keys))
+    raw_states = condition[key]
+    if not isinstance(raw_states, list) or not raw_states:
+        raise ValueError(f"{key} must be a non-empty list of USPS state codes")
+    states: list[str] = []
+    seen: set[str] = set()
+    for item in raw_states:
+        state = str(item).strip().upper()
+        if not _USPS_STATE.match(state):
+            raise ValueError(f"invalid USPS state code: {item!r}")
+        if state in seen:
+            continue
+        seen.add(state)
+        states.append(state)
+    return {key: states}
+
+
+def serialize_approval_rule(row: dict[str, Any]) -> dict[str, Any]:
+    """PII-safe approval_rules row for Legal Conditions UI."""
+    condition = row.get("condition_jsonb")
+    if isinstance(condition, str):
+        condition = json.loads(condition)
+    effective_from = row.get("effective_from")
+    effective_to = row.get("effective_to")
+    created_at = row.get("created_at")
+    return {
+        "id": int(row["id"]),
+        "action_type": str(row["action_type"]),
+        "requires_approval": bool(row["requires_approval"]),
+        "approver_role": row.get("approver_role"),
+        "condition_jsonb": condition,
+        "rationale": str(row["rationale"]),
+        "effective_from": effective_from.isoformat() if effective_from else None,
+        "effective_to": effective_to.isoformat() if effective_to else None,
+        "created_by": str(row["created_by"]),
+        "created_at": created_at.isoformat() if created_at else None,
+    }
+
+
+async def fetch_intake_route_triage_rule(
+    conn: asyncpg.Connection,
+) -> dict[str, Any] | None:
+    """Active ``intake.route_triage`` rule (bypasses short cache for admin reads)."""
+    row = await conn.fetchrow(
+        """
+        SELECT id, action_type, requires_approval, approver_role,
+               condition_jsonb, rationale, effective_from, effective_to,
+               created_by, created_at
+          FROM approval_rules
+         WHERE action_type = $1
+           AND effective_to IS NULL
+        """,
+        INTAKE_ROUTE_TRIAGE_ACTION,
+    )
+    return serialize_approval_rule(dict(row)) if row else None
+
+
+async def version_intake_route_triage_rule(
+    conn: asyncpg.Connection,
+    *,
+    condition_jsonb: dict[str, Any],
+    rationale: str,
+    created_by: str,
+) -> dict[str, Any]:
+    """Close the active route-triage rule and insert a new version.
+
+    Preserves the unique active-``action_type`` index: set ``effective_to`` on
+    the current row, then insert the replacement.
+    """
+    normalized = normalize_route_triage_condition(condition_jsonb)
+    clean_rationale = rationale.strip()
+    if not clean_rationale:
+        raise ValueError("rationale is required")
+    if len(clean_rationale) > 2000:
+        raise ValueError("rationale too long")
+    actor = created_by.strip()
+    if not actor:
+        raise ValueError("created_by is required")
+
+    async with conn.transaction():
+        closed = await conn.fetchrow(
+            """
+            UPDATE approval_rules
+               SET effective_to = NOW()
+             WHERE action_type = $1
+               AND effective_to IS NULL
+         RETURNING id
+            """,
+            INTAKE_ROUTE_TRIAGE_ACTION,
+        )
+        if closed is None:
+            raise ValueError("no active intake.route_triage rule to version")
+        row = await conn.fetchrow(
+            """
+            INSERT INTO approval_rules (
+                action_type, requires_approval, approver_role,
+                condition_jsonb, rationale, created_by
+            ) VALUES ($1, true, 'legal', $2::jsonb, $3, $4)
+            RETURNING id, action_type, requires_approval, approver_role,
+                      condition_jsonb, rationale, effective_from, effective_to,
+                      created_by, created_at
+            """,
+            INTAKE_ROUTE_TRIAGE_ACTION,
+            json.dumps(normalized),
+            clean_rationale,
+            actor,
+        )
+    clear_rule_cache()
+    return serialize_approval_rule(dict(row))
+
+
+async def has_pending_legal_triage(
+    conn: asyncpg.Connection,
+    request_id: str,
+) -> bool:
+    """True when a pending ``workflow.assignment`` triage for legal is open."""
+    row = await conn.fetchval(
+        """
+        SELECT 1
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status = 'pending'
+           AND approver_role = 'legal'
+           AND context_jsonb->>'kind' = 'triage'
+         LIMIT 1
+        """,
+        UUID(request_id),
+        WORKFLOW_ASSIGNMENT_ACTION,
+    )
+    return row is not None
+
+
+async def close_pending_legal_triage(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    decided_by: str,
+    decision_reason: str,
+    status: str = "approved",
+) -> dict[str, Any] | None:
+    """Close the pending Legal triage assignment for a request, if any."""
+    if status not in {"approved", "rejected"}:
+        raise ValueError(f"invalid triage decision status: {status!r}")
+    row = await conn.fetchrow(
+        """
+        UPDATE approval_requests
+           SET status = $3,
+               decided_by = $4,
+               decided_at = NOW(),
+               decision_reason = $5
+         WHERE id = (
+               SELECT id
+                 FROM approval_requests
+                WHERE request_id = $1
+                  AND action_type = $2
+                  AND status = 'pending'
+                  AND approver_role = 'legal'
+                  AND context_jsonb->>'kind' = 'triage'
+                ORDER BY requested_at DESC
+                LIMIT 1
+             )
+        RETURNING id, request_id, action_type, status, approver_role,
+                  context_jsonb, requested_at, expires_at, decided_by,
+                  decided_at, decision_reason
+        """,
+        UUID(request_id),
+        WORKFLOW_ASSIGNMENT_ACTION,
+        status,
+        decided_by,
+        decision_reason,
+    )
+    return _serialize_assignment_row(dict(row)) if row else None
 
 
 async def is_matching_review_approved(
@@ -410,12 +618,13 @@ async def create_workflow_assignment(
     assignee_identity: str | None = None,
     expires_in: timedelta = DEFAULT_ASSIGNMENT_TTL,
 ) -> dict[str, Any]:
-    """Append a pending assign/escalate row; supersede any prior pending assignment.
+    """Append a pending assign/escalate/triage row; supersede any prior pending.
 
-    ``kind`` is ``assign`` (typically ``reviewer`` + assignee email) or ``escalate``
-    (``legal`` / ``data_owner``). Identity is IAP email when present (A4).
+    ``kind`` is ``assign`` (``reviewer`` + assignee email), ``escalate``
+    (``legal`` / ``data_owner``), or ``triage`` (``legal`` only — route hold).
+    Identity is IAP email when present (A4).
     """
-    if kind not in {"assign", "escalate"}:
+    if kind not in ASSIGNMENT_KINDS:
         raise ValueError(f"invalid assignment kind: {kind!r}")
     if target_role not in ASSIGNMENT_TARGETS:
         raise ValueError(f"invalid assignment target: {target_role!r}")
@@ -426,6 +635,8 @@ async def create_workflow_assignment(
             raise ValueError("assign target_role must be reviewer")
     if kind == "escalate" and target_role not in {"legal", "data_owner"}:
         raise ValueError("escalate target_role must be legal or data_owner")
+    if kind == "triage" and target_role != "legal":
+        raise ValueError("triage target_role must be legal")
 
     assignee = assignee_identity.strip() if assignee_identity else None
     await _supersede_pending_assignments(

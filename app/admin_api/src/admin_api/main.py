@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
-from uuid import UUID
+from typing import Annotated, Any, AsyncIterator
+from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
@@ -24,19 +24,34 @@ from admin_api.drop_pipeline import health_router as ops_health_router
 from admin_api.drop_pipeline import router as drop_pipeline_router
 from admin_api.runs import router as runs_router
 from admin_api.request_journey import router as request_journey_router
-from admin_api.roles import CurrentRolePrincipal, MeResponse
+from admin_api.roles import CurrentRolePrincipal, MeResponse, RolePrincipal, require_roles
 from admin_api.worker_schedules import router as worker_schedules_router
 from habeas_privacy_core.audit import AuditMiddleware
+from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_LEGAL, ROLE_SUPER_ADMIN
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
-from habeas_privacy_core.db.requests import get_request, insert_request, list_requests
+from habeas_privacy_core.db.requests import (
+    get_request,
+    insert_request,
+    list_requests,
+    promote_manual_request,
+)
 from habeas_privacy_core.health import health_payload, ready_payload
-from habeas_privacy_core.models.intake import CreateRequestInput, RequestRecord
+from habeas_privacy_core.models.intake import (
+    CreateRequestInput,
+    RequestRecord,
+    clean_agent_batch_csv,
+)
 from habeas_privacy_core.models.request import IntakeSource
 from habeas_privacy_core.observability.logging import configure_logging
 from habeas_privacy_core.observability.tracing import setup_tracing
 
 logger = logging.getLogger(__name__)
+
+LegalIntakePrincipal = Annotated[
+    RolePrincipal,
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL)),
+]
 
 
 class AdminSettings(CoreSettings):
@@ -226,6 +241,92 @@ async def requests_create(_body: ManualRequestBody):
     if record is None:
         raise HTTPException(status_code=500, detail="request insert failed")
     return record
+
+
+class AgentBatchUploadResponse(BaseModel):
+    """Agent CSV upload result — counts and ids only (no PII)."""
+
+    batch_id: str
+    source_filename: str | None = None
+    input_row_count: int
+    cleaned_row_count: int
+    inserted_count: int
+    skipped_row_count: int
+    email_split_count: int
+    request_ids: list[str] = Field(default_factory=list)
+
+
+@app.post("/requests/agent-batch", response_model=AgentBatchUploadResponse, status_code=201)
+async def requests_agent_batch(
+    _principal: LegalIntakePrincipal,
+    file: UploadFile = File(...),
+):
+    """Legal agent-batch upload — platform cleans; dispatcher routes triage/match."""
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="database not configured")
+
+    content_type = (file.content_type or "").lower()
+    filename = file.filename or "upload.csv"
+    if content_type and content_type not in {
+        "text/csv",
+        "application/csv",
+        "application/vnd.ms-excel",
+        "application/octet-stream",
+        "text/plain",
+    }:
+        raise HTTPException(status_code=400, detail="content-type must be CSV")
+    if not filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="file must be a .csv upload")
+
+    raw = await file.read()
+    if not raw or not raw.strip():
+        raise HTTPException(status_code=400, detail="empty file")
+
+    batch_id = str(uuid4())
+    cleaned = clean_agent_batch_csv(
+        raw,
+        batch_id=batch_id,
+        source_filename=filename,
+    )
+    if cleaned.cleaned_row_count == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="no usable rows after platform cleaning",
+        )
+
+    request_ids: list[str] = []
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        for row in cleaned.rows:
+            _raw_id, request_id = await promote_manual_request(
+                conn,
+                requestor_state=row.requestor_state,
+                cleaned_payload=row.cleaned_payload,
+            )
+            request_ids.append(request_id)
+
+    logger.info(
+        "agent_batch_uploaded",
+        extra={
+            "event": "agent_batch_uploaded",
+            "batch_id": batch_id,
+            "input_row_count": cleaned.input_row_count,
+            "cleaned_row_count": cleaned.cleaned_row_count,
+            "inserted_count": len(request_ids),
+            "skipped_row_count": cleaned.skipped_row_count,
+            "email_split_count": cleaned.email_split_count,
+        },
+    )
+    return AgentBatchUploadResponse(
+        batch_id=batch_id,
+        source_filename=filename,
+        input_row_count=cleaned.input_row_count,
+        cleaned_row_count=cleaned.cleaned_row_count,
+        inserted_count=len(request_ids),
+        skipped_row_count=cleaned.skipped_row_count,
+        email_split_count=cleaned.email_split_count,
+        request_ids=request_ids,
+    )
 
 
 @app.get("/approvals", response_model=list[ApprovalRecord])

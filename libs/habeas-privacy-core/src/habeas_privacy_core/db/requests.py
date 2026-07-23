@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 from uuid import UUID
 
 import asyncpg
@@ -65,6 +66,33 @@ async def promote_drop_request(
             conn,
             CreateRequestInput(
                 intake_source=IntakeSource.DROP,
+                raw_record_id=raw_record_id,
+                requestor_state=requestor_state,
+            ),
+        )
+        return raw_record_id, request_id
+
+
+async def promote_manual_request(
+    conn: asyncpg.Connection,
+    *,
+    requestor_state: str,
+    cleaned_payload: dict[str, Any],
+) -> tuple[int, str]:
+    """Atomically insert manual_raw_requests and a linked thin requests row."""
+    async with conn.transaction():
+        raw_record_id = await conn.fetchval(
+            """
+            INSERT INTO manual_raw_requests (cleaned_payload)
+            VALUES ($1::jsonb)
+            RETURNING id
+            """,
+            json.dumps(cleaned_payload),
+        )
+        request_id = await insert_request(
+            conn,
+            CreateRequestInput(
+                intake_source=IntakeSource.MANUAL,
                 raw_record_id=raw_record_id,
                 requestor_state=requestor_state,
             ),

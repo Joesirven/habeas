@@ -4,8 +4,10 @@ import { type FormEvent, type ReactNode, useState } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import {
+  listDropBulkProcesses,
   listRuns,
   resolveRunsTimeParams,
+  type BulkProcessSummary,
   type OpsTimeWindow,
   type RunSummary,
 } from '@/lib/api'
@@ -127,6 +129,14 @@ function formatTimestamp(value: string | null | undefined): string {
   })
 }
 
+/** Select option label: intake · timestamp · #id (deep-link friendly). */
+function formatBulkRunOption(process: BulkProcessSummary): string {
+  const source = (process.intake_source || process.label || 'drop')
+    .replaceAll('_', ' ')
+    .trim()
+  return `${source} · ${formatTimestamp(process.process_at)} · #${process.process_id}`
+}
+
 function parseAttemptId(run: RunSummary): string {
   const parts = run.run_id.split(':')
   return parts.length > 1 ? parts[parts.length - 1]! : String(run.attempt_number)
@@ -190,6 +200,16 @@ function RunsToolbar({
   const activeTab = activeStatusTab(search.status)
   const [requestDraft, setRequestDraft] = useState(search.request_id ?? '')
   const window = search.window ?? DEFAULT_RUNS_WINDOW
+
+  const bulkProcessesQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'drop-processes', 'runs-filter', { days: 30, limit: 50 }],
+    queryFn: () => listDropBulkProcesses({ days: 30, limit: 50 }),
+    staleTime: 60_000,
+  })
+  const bulkProcesses = bulkProcessesQuery.data?.processes ?? []
+  const processInList =
+    search.process != null &&
+    bulkProcesses.some((row) => row.process_id === search.process)
 
   function applyRequestFilter(event: FormEvent) {
     event.preventDefault()
@@ -264,6 +284,40 @@ function RunsToolbar({
           </select>
         </label>
 
+        <label className="flex flex-col gap-1">
+          <span className="taste-micro">Bulk run</span>
+          <select
+            className="glass min-w-[16rem] max-w-[22rem] rounded-lg px-2 py-1.5 text-xs text-ink"
+            value={search.process != null ? String(search.process) : ''}
+            onChange={(event) => {
+              const value = event.target.value
+              if (!value) {
+                onSearchChange(buildRunsSearch(search, { process: undefined }))
+                return
+              }
+              const parsed = Number.parseInt(value, 10)
+              onSearchChange(
+                buildRunsSearch(search, {
+                  process: Number.isFinite(parsed) && parsed >= 1 ? parsed : undefined,
+                }),
+              )
+            }}
+            aria-label="Filter by bulk run"
+          >
+            <option value="">Any</option>
+            {search.process != null && !processInList ? (
+              <option value={String(search.process)}>
+                process #{search.process}
+              </option>
+            ) : null}
+            {bulkProcesses.map((row) => (
+              <option key={row.process_id} value={String(row.process_id)}>
+                {formatBulkRunOption(row)}
+              </option>
+            ))}
+          </select>
+        </label>
+
         <form className="flex flex-wrap items-end gap-2" onSubmit={applyRequestFilter}>
           <label className="flex flex-col gap-1">
             <span className="taste-micro">Request id</span>
@@ -291,23 +345,6 @@ function RunsToolbar({
             </button>
           ) : null}
         </form>
-
-        {search.process != null ? (
-          <div className="flex flex-wrap items-end gap-2">
-            <span className="taste-frost-chip font-mono text-xs">
-              process #{search.process}
-            </span>
-            <button
-              type="button"
-              className="taste-btn text-xs"
-              onClick={() =>
-                onSearchChange(buildRunsSearch(search, { process: undefined }))
-              }
-            >
-              Clear process
-            </button>
-          </div>
-        ) : null}
 
         {window === 'custom' ? (
           <label className="flex flex-col gap-1">

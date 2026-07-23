@@ -826,6 +826,15 @@ def test_match_type_for_count_mapping():
     assert match_type_for_count(5) == "multi_match"
 
 
+def test_recommended_response_status_for_match_count():
+    from admin_api.approvals import recommended_response_status_for_match_count
+
+    assert recommended_response_status_for_match_count(0) == 5
+    assert recommended_response_status_for_match_count(1) == 3
+    assert recommended_response_status_for_match_count(2) == 4
+    assert recommended_response_status_for_match_count(9) == 4
+
+
 @pytest.mark.asyncio
 async def test_collect_matching_results_stats_and_filter():
     from datetime import datetime, timezone
@@ -881,6 +890,7 @@ async def test_collect_matching_results_stats_and_filter():
     assert all_results["stats"]["not_found"] == 1
     assert all_results["stats"]["review_pending"] == 2
     assert all_results["results"][0]["match_type"] == "single_match"
+    assert all_results["results"][0]["recommended_response_status"] == 3
     assert all_results["results"][0]["requestor_state"] == "CA"
     assert all_results["results"][0]["assignment"]["assignee_identity"] == "rev@habeas.com"
     assert all_results["results"][1]["assignment"] is None
@@ -966,6 +976,13 @@ async def test_get_matching_result_detail_shape(monkeypatch: pytest.MonkeyPatch)
         }
 
     monkeypatch.setattr(drop_pipeline, "get_current_assignment", fake_assignment)
+    monkeypatch.setattr(
+        drop_pipeline,
+        "enrich_matching_result_contacts",
+        AsyncMock(
+            return_value={"matched_contacts": [], "matched_contacts_status": "unavailable"}
+        ),
+    )
     detail = await drop_pipeline.get_matching_result_detail(
         conn, "00000000-0000-0000-0000-000000000002"
     )
@@ -1023,11 +1040,114 @@ async def test_get_matching_result_detail_tolerates_list_audit_payload(
         return None
 
     monkeypatch.setattr(drop_pipeline, "get_current_assignment", fake_assignment)
+    monkeypatch.setattr(
+        drop_pipeline,
+        "enrich_matching_result_contacts",
+        AsyncMock(
+            return_value={"matched_contacts": [], "matched_contacts_status": "unavailable"}
+        ),
+    )
     detail = await drop_pipeline.get_matching_result_detail(
         conn, "00000000-0000-0000-0000-000000000002"
     )
     assert detail is not None
     assert detail["attempts"][0]["audit_payload"] == {}
+
+
+@pytest.mark.asyncio
+async def test_enrich_matching_result_contacts_single_uses_consumer_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_Row(
+            consumer_id="1001",
+            raw_record_id=42,
+            intake_source="drop",
+            requestor_state="CA",
+        )
+    )
+
+    def fake_fetch_person(*, dwids: list[str], lookup_state: str, client: Any | None = None):
+        assert dwids == ["1001"]
+        assert lookup_state == "CA"
+        return [
+            {
+                "dwid": "1001",
+                "state": "CA",
+                "first_initial": "J",
+                "last_initial": "D",
+                "dob": "1990-01-15",
+                "email": "jane@example.com",
+                "phones": [{"type": "cell", "number": "5551234567"}],
+            }
+        ]
+
+    monkeypatch.setattr(drop_pipeline, "_fetch_person_contacts_from_bq", fake_fetch_person)
+    payload = await drop_pipeline.enrich_matching_result_contacts(
+        conn,
+        request_id="00000000-0000-0000-0000-000000000099",
+        detail={"match_count": 1, "requestor_state": "CA"},
+    )
+    assert payload["matched_contacts_status"] == "ok"
+    assert payload["matched_contacts"][0]["first_initial"] == "J"
+    assert payload["matched_contacts"][0]["email"] == "jane@example.com"
+
+
+@pytest.mark.asyncio
+async def test_enrich_matching_result_contacts_multi_relooks_up_hash(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from habeas_privacy_core.models.intake import DropListType, DropMatchingPayload
+
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_Row(
+            consumer_id=None,
+            raw_record_id=7,
+            intake_source="drop",
+            requestor_state="TX",
+        )
+    )
+
+    async def fake_resolver(_conn: Any, _source: Any, _raw_id: int) -> DropMatchingPayload:
+        return DropMatchingPayload(
+            drop_record_id="drop-1",
+            list_type=DropListType.EMAIL,
+            hash_fields={"hashed_email": "abc"},
+        )
+
+    monkeypatch.setattr(drop_pipeline, "request_resolver", fake_resolver)
+    monkeypatch.setattr(
+        drop_pipeline,
+        "_lookup_dwids_by_hash",
+        lambda **kwargs: (["2001", "2002"] if kwargs["hash_value"] == "abc" else []),
+    )
+    monkeypatch.setattr(
+        drop_pipeline,
+        "_fetch_person_contacts_from_bq",
+        lambda **kwargs: [
+            {
+                "dwid": dwid,
+                "state": kwargs["lookup_state"],
+                "first_initial": "A",
+                "last_initial": "B",
+                "dob": None,
+                "email": None,
+                "phones": [],
+            }
+            for dwid in kwargs["dwids"]
+        ],
+    )
+
+    payload = await drop_pipeline.enrich_matching_result_contacts(
+        conn,
+        request_id="00000000-0000-0000-0000-000000000088",
+        detail={"match_count": 2, "requestor_state": "TX"},
+    )
+    assert payload["matched_contacts_status"] == "ok"
+    assert len(payload["matched_contacts"]) == 2
+    assert {c["dwid"] for c in payload["matched_contacts"]} == {"2001", "2002"}
 
 
 def test_matching_results_list_route(monkeypatch: pytest.MonkeyPatch):
@@ -1552,6 +1672,171 @@ def test_workflow_assign_escalate_and_list(monkeypatch: pytest.MonkeyPatch):
     assert bad.status_code == 422
 
 
+def test_legal_triage_bulk_reject_and_send_to_matching(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, Any] = {}
+
+    async def fake_reject(
+        conn: Any,
+        *,
+        request_ids: list[str],
+        decided_by: str,
+        response_status: int = 2,
+        decision_reason: str | None = None,
+    ) -> dict[str, Any]:
+        captured["reject"] = {
+            "request_ids": request_ids,
+            "response_status": response_status,
+            "decided_by": decided_by,
+        }
+        return {
+            "count": len(request_ids),
+            "request_ids": request_ids,
+            "results": [
+                {
+                    "request_id": rid,
+                    "response_status": response_status,
+                    "response_status_set": True,
+                    "assignment_closed": True,
+                }
+                for rid in request_ids
+            ],
+        }
+
+    async def fake_send(
+        conn: Any,
+        *,
+        request_ids: list[str],
+        decided_by: str,
+        decision_reason: str | None = None,
+    ) -> dict[str, Any]:
+        captured["send"] = {"request_ids": request_ids, "decided_by": decided_by}
+        return {
+            "count": len(request_ids),
+            "request_ids": request_ids,
+            "enqueued": request_ids,
+            "results": [],
+        }
+
+    _fake_pool(monkeypatch)
+    roles.settings.admin_api_legals = "legal@example.com"
+    roles.settings.admin_api_data_owners = "owner@example.com"
+    roles.settings.admin_api_super_admins = ""
+    roles.settings.admin_api_admins = ""
+    monkeypatch.setattr(drop_pipeline, "bulk_reject_legal_triage", fake_reject)
+    monkeypatch.setattr(drop_pipeline, "send_legal_triage_to_matching", fake_send)
+
+    legal_headers = {IAP_EMAIL_HEADER: "legal@example.com"}
+    owner_headers = {IAP_EMAIL_HEADER: "owner@example.com"}
+    rid = "00000000-0000-0000-0000-000000000099"
+
+    with TestClient(app) as client:
+        reject = client.post(
+            "/ops/drop/workflow/triage/bulk-reject",
+            headers=legal_headers,
+            json={"request_ids": [rid], "response_status": 2},
+        )
+        send = client.post(
+            "/ops/drop/workflow/triage/send-to-matching",
+            headers=legal_headers,
+            json={"request_ids": [rid]},
+        )
+        forbidden = client.post(
+            "/ops/drop/workflow/triage/bulk-reject",
+            headers=owner_headers,
+            json={"request_ids": [rid], "response_status": 2},
+        )
+
+    assert reject.status_code == 200
+    assert reject.json()["results"][0]["response_status"] == 2
+    assert captured["reject"]["response_status"] == 2
+    assert send.status_code == 200
+    assert send.json()["enqueued"] == [rid]
+    assert forbidden.status_code == 403
+
+
+def test_route_triage_conditions_get_put_legal_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_fetch(conn: Any) -> dict[str, Any]:
+        return {
+            "id": 1,
+            "action_type": "intake.route_triage",
+            "requires_approval": True,
+            "approver_role": "legal",
+            "condition_jsonb": {"requestor_state_not_in": ["CA", "CO"]},
+            "rationale": "Seed",
+            "effective_from": "2026-07-23T00:00:00+00:00",
+            "effective_to": None,
+            "created_by": "seed",
+            "created_at": "2026-07-23T00:00:00+00:00",
+        }
+
+    async def fake_version(
+        conn: Any,
+        *,
+        condition_jsonb: dict[str, Any],
+        rationale: str,
+        created_by: str,
+    ) -> dict[str, Any]:
+        captured["version"] = {
+            "condition_jsonb": condition_jsonb,
+            "rationale": rationale,
+            "created_by": created_by,
+        }
+        return {
+            "id": 2,
+            "action_type": "intake.route_triage",
+            "requires_approval": True,
+            "approver_role": "legal",
+            "condition_jsonb": condition_jsonb,
+            "rationale": rationale,
+            "effective_from": "2026-07-23T01:00:00+00:00",
+            "effective_to": None,
+            "created_by": created_by,
+            "created_at": "2026-07-23T01:00:00+00:00",
+        }
+
+    _fake_pool(monkeypatch)
+    roles.settings.admin_api_legals = "legal@example.com"
+    roles.settings.admin_api_data_owners = "owner@example.com"
+    roles.settings.admin_api_super_admins = ""
+    roles.settings.admin_api_admins = ""
+    monkeypatch.setattr(drop_pipeline, "fetch_intake_route_triage_rule", fake_fetch)
+    monkeypatch.setattr(drop_pipeline, "version_intake_route_triage_rule", fake_version)
+
+    legal_headers = {IAP_EMAIL_HEADER: "legal@example.com"}
+    owner_headers = {IAP_EMAIL_HEADER: "owner@example.com"}
+
+    with TestClient(app) as client:
+        get_ok = client.get(
+            "/ops/drop/workflow/conditions/route-triage",
+            headers=legal_headers,
+        )
+        put_ok = client.put(
+            "/ops/drop/workflow/conditions/route-triage",
+            headers=legal_headers,
+            json={
+                "condition_jsonb": {"state_in": ["NY", "TX"]},
+                "rationale": "Route NY/TX to Triage",
+            },
+        )
+        get_forbidden = client.get(
+            "/ops/drop/workflow/conditions/route-triage",
+            headers=owner_headers,
+        )
+
+    assert get_ok.status_code == 200
+    assert get_ok.json()["condition_jsonb"]["requestor_state_not_in"] == ["CA", "CO"]
+    assert put_ok.status_code == 200
+    assert put_ok.json()["rule"]["id"] == 2
+    assert captured["version"]["condition_jsonb"] == {"state_in": ["NY", "TX"]}
+    assert get_forbidden.status_code == 403
+
+
 @pytest.mark.asyncio
 async def test_create_workflow_assignment_validation():
     from habeas_privacy_core.workflow.approval import create_workflow_assignment
@@ -1903,6 +2188,7 @@ def test_bulk_processes_route(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(roles.settings, "require_iap_identity", True)
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
     monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
     monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
     _fake_pool(monkeypatch)
     monkeypatch.setattr(drop_pipeline, "list_bulk_processes", fake_list)

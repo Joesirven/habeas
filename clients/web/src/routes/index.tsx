@@ -5,7 +5,14 @@ import { SkeletonLines } from '@/components/AppShell'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useMe } from '@/lib/auth'
-import { getDropGlobalStats, getDropPipeline, getHealth, getNeedsAttention } from '@/lib/api'
+import {
+  getDropGlobalStats,
+  getDropPipeline,
+  getHealth,
+  getLegalNeedsAttention,
+  getNeedsAttention,
+  type NeedsAttentionItemKind,
+} from '@/lib/api'
 import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
 
 function OperatorDashboardHome() {
@@ -236,8 +243,157 @@ function OperatorDashboardHome() {
   )
 }
 
+function LegalHome() {
+  const attentionQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'legal'],
+    queryFn: () => getLegalNeedsAttention(1000),
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  })
+  const items = attentionQuery.data?.items ?? []
+  const triage = items.filter(
+    (item) => item.kind === 'triage' || item.assignment?.kind === 'triage',
+  ).length
+  const escalations = items.filter(
+    (item) => item.kind === 'escalations' || item.assignment?.kind === 'escalate',
+  ).length
+  const notice = items.filter(
+    (item) => item.kind === 'notice' || item.reason === 'notice.review',
+  ).length
+  const delivery = items.filter(
+    (item) =>
+      item.kind === 'delivery' ||
+      item.reason === 'access.delivery' ||
+      item.reason === 'delivery.confirm',
+  ).length
+
+  const cards: {
+    label: string
+    kind: NeedsAttentionItemKind
+    count: number
+    hint: string
+  }[] = [
+    { label: 'Triage', kind: 'triage', count: triage, hint: 'Condition holds' },
+    {
+      label: 'Escalations',
+      kind: 'escalations',
+      count: escalations,
+      hint: 'From data owners',
+    },
+    {
+      label: 'Notice',
+      kind: 'notice',
+      count: notice,
+      hint: notice === 0 ? 'Feed reserved' : 'DROP notice.review',
+    },
+    {
+      label: 'Delivery',
+      kind: 'delivery',
+      count: delivery,
+      hint: delivery === 0 ? 'Feed reserved' : 'Access handoff',
+    },
+  ]
+
+  return (
+    <section className="space-y-6">
+      <header>
+        <p className="taste-micro">Legal</p>
+        <h2 className="mt-2 font-display text-2xl font-medium tracking-tight text-ink">
+          Command Center
+        </h2>
+        <p className="mt-2 max-w-xl text-sm text-ink-soft">
+          Clear Triage and Escalations first. Notice and Delivery light up after
+          data-vertical fulfill. Upload agent batches when ready.
+        </p>
+      </header>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {cards.map((card) => (
+          <Link
+            key={card.label}
+            to="/requests/needs-attention"
+            search={{ kind: card.kind }}
+            className="taste-panel-soft block space-y-1 p-4 transition-colors hover:border-habeas-navy/30"
+          >
+            <p className="text-[0.65rem] uppercase tracking-wide text-mute">{card.label}</p>
+            <p className="font-display text-3xl tabular-nums text-ink">
+              {attentionQuery.isPending && !attentionQuery.data ? '—' : card.count}
+            </p>
+            <p className="text-[0.7rem] text-ink-soft">{card.hint}</p>
+          </Link>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button asChild size="sm">
+          <Link to="/requests/needs-attention" search={{ kind: 'triage' }}>
+            Open Inbox
+          </Link>
+        </Button>
+        <Button asChild size="sm" variant="outline">
+          <Link to="/requests/conditions">Conditions</Link>
+        </Button>
+        <Button asChild size="sm" variant="outline">
+          <Link to="/requests/new">Upload / New</Link>
+        </Button>
+      </div>
+    </section>
+  )
+}
+
+function DataOwnerHome() {
+  const { me } = useMe()
+  const attentionQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'do-home'],
+    queryFn: () => getNeedsAttention({ limit: 1000, kind: 'matching' }),
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  })
+  const items = attentionQuery.data?.items ?? []
+  const mine = items.filter((item) => {
+    const assignee = item.assignment?.assignee_identity?.trim().toLowerCase()
+    return Boolean(me?.email && assignee === me.email.trim().toLowerCase())
+  }).length
+
+  return (
+    <section className="space-y-6">
+      <header>
+        <p className="taste-micro">Data owner</p>
+        <h2 className="mt-2 font-display text-2xl font-medium tracking-tight text-ink">
+          My work
+        </h2>
+        <p className="mt-2 max-w-xl text-sm text-ink-soft">
+          Approve recommended CA DROP statuses, comment, escalate to Legal, or assign an
+          employee.
+        </p>
+      </header>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Link
+          to="/requests/needs-attention"
+          className="taste-panel-soft block space-y-1 p-4"
+        >
+          <p className="text-[0.65rem] uppercase tracking-wide text-mute">Matching review</p>
+          <p className="font-display text-3xl tabular-nums text-ink">
+            {attentionQuery.isPending && !attentionQuery.data ? '—' : items.length}
+          </p>
+        </Link>
+        <Link
+          to="/requests/needs-attention"
+          className="taste-panel-soft block space-y-1 p-4"
+        >
+          <p className="text-[0.65rem] uppercase tracking-wide text-mute">Assigned to me</p>
+          <p className="font-display text-3xl tabular-nums text-ink">
+            {attentionQuery.isPending && !attentionQuery.data ? '—' : mine}
+          </p>
+        </Link>
+      </div>
+      <Button asChild size="sm">
+        <Link to="/requests/needs-attention">Open Inbox</Link>
+      </Button>
+    </section>
+  )
+}
+
 export function DashboardPage() {
-  const { isSuperAdmin, isLoading } = useMe()
+  const { isSuperAdmin, isLegal, isLoading, role } = useMe()
 
   if (isLoading) {
     return (
@@ -249,6 +405,14 @@ export function DashboardPage() {
 
   if (isSuperAdmin) {
     return <DropPipelinePage />
+  }
+
+  if (isLegal || role === 'legal') {
+    return <LegalHome />
+  }
+
+  if (role === 'data_owner') {
+    return <DataOwnerHome />
   }
 
   return <OperatorDashboardHome />

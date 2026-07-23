@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import asyncpg
@@ -23,6 +23,7 @@ from habeas_privacy_core.auth import IAP_EMAIL_HEADER
 from habeas_privacy_core.db.migrations import run_migrations
 from habeas_privacy_core.workflow.approval import (
     MATCHING_REVIEW_ACTION,
+    WORKFLOW_ASSIGNMENT_ACTION,
     clear_rule_cache,
     ensure_pending_matching_review,
 )
@@ -37,6 +38,7 @@ pytestmark_integration = pytest.mark.skipif(
 def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
     monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
     monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
     monkeypatch.setattr(roles.settings, "require_iap_identity", False)
 
@@ -109,6 +111,99 @@ def test_journey_routes_registered() -> None:
     openapi_paths = app.openapi()["paths"]
     assert "/ops/requests/needs-attention" in openapi_paths
     assert "/ops/requests/{request_id}/journey" in openapi_paths
+    needs_params = openapi_paths["/ops/requests/needs-attention"]["get"]["parameters"]
+    assert any(param.get("name") == "kind" for param in needs_params)
+
+
+@pytest.mark.asyncio
+async def test_list_needs_attention_kind_triage_and_escalations() -> None:
+    triage_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    escalate_id = "ffffffff-1111-2222-3333-444444444444"
+    conn = AsyncMock()
+
+    async def fake_assignment(conn: Any, *, kind: str, limit: int):
+        del conn, limit
+        if kind == "triage":
+            from admin_api.request_journey import NeedsAttentionItem
+
+            return [
+                NeedsAttentionItem(
+                    request_id=triage_id,
+                    reason=WORKFLOW_ASSIGNMENT_ACTION,
+                    kind="triage",
+                    current_stage="triage",
+                    intake_source="drop",
+                    received_at=None,
+                )
+            ]
+        from admin_api.request_journey import NeedsAttentionItem
+
+        return [
+            NeedsAttentionItem(
+                request_id=escalate_id,
+                reason=WORKFLOW_ASSIGNMENT_ACTION,
+                kind="escalations",
+                current_stage="review",
+                intake_source="drop",
+                received_at=None,
+            )
+        ]
+
+    with (
+        patch(
+            "admin_api.request_journey.list_matching_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "admin_api.request_journey.list_assignment_needs_attention",
+            side_effect=fake_assignment,
+        ),
+    ):
+        triage = await request_journey.list_needs_attention(
+            conn, limit=50, kind="triage"
+        )
+        escalations = await request_journey.list_needs_attention(
+            conn, limit=50, kind="escalations"
+        )
+
+    assert triage.kind == "triage"
+    assert [item.request_id for item in triage.items] == [triage_id]
+    assert escalations.kind == "escalations"
+    assert [item.request_id for item in escalations.items] == [escalate_id]
+
+
+def test_legal_can_read_needs_attention(monkeypatch: pytest.MonkeyPatch) -> None:
+    roles.settings.require_iap_identity = True
+    roles.settings.admin_api_legals = "legal@example.com"
+    monkeypatch.setattr(request_journey.settings, "database_url", "postgres://local")
+
+    async def fake_list(conn: Any, *, limit: int, kind: str = "all"):
+        del conn, limit
+        return request_journey.NeedsAttentionResponse(items=[], kind=kind)  # type: ignore[arg-type]
+
+    class _Acquire:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            return None
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(request_journey, "get_pool", lambda: _Pool())
+    monkeypatch.setattr(request_journey, "list_needs_attention", fake_list)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/requests/needs-attention?kind=triage",
+            headers={IAP_EMAIL_HEADER: "legal@example.com"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["kind"] == "triage"
 
 
 def test_journey_requires_role_when_iap_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -293,6 +388,7 @@ async def test_needs_attention_includes_pending_review(pool) -> None:
     assert any(item.request_id == request_id for item in response.items)
     item = next(row for row in response.items if row.request_id == request_id)
     assert item.reason == MATCHING_REVIEW_ACTION
+    assert item.kind == "matching"
     assert item.current_stage == "review"
     assert item.match_count == 1
     assert item.match_type == "single_match"

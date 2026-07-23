@@ -12,6 +12,7 @@ from habeas_privacy_core.auth import (
     IAP_EMAIL_HEADER,
     ROLE_ADMIN,
     ROLE_DATA_OWNER,
+    ROLE_LEGAL,
     ROLE_SUPER_ADMIN,
 )
 
@@ -20,6 +21,7 @@ from habeas_privacy_core.auth import (
 def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
     monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
     monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
     monkeypatch.setattr(roles.settings, "admin_api_id_token_audience", "")
     monkeypatch.setattr(roles.settings, "require_iap_identity", False)
@@ -72,6 +74,29 @@ def test_me_data_owner_from_allowlist() -> None:
 
     assert response.status_code == 200
     assert response.json() == _me_payload("owner@example.com", ROLE_DATA_OWNER)
+
+
+def test_me_legal_from_allowlist() -> None:
+    roles.settings.admin_api_legals = "legal@example.com"
+    headers = {IAP_EMAIL_HEADER: "legal@example.com"}
+
+    with TestClient(app) as client:
+        response = client.get("/me", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == _me_payload("legal@example.com", ROLE_LEGAL)
+
+
+def test_me_admin_wins_over_legal_when_in_both_lists() -> None:
+    roles.settings.admin_api_admins = "user@example.com"
+    roles.settings.admin_api_legals = "user@example.com"
+    headers = {IAP_EMAIL_HEADER: "user@example.com"}
+
+    with TestClient(app) as client:
+        response = client.get("/me", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == _me_payload("user@example.com", ROLE_ADMIN)
 
 
 def test_me_super_admin_wins_when_in_multiple_lists() -> None:
@@ -228,6 +253,40 @@ def test_simulate_role_as_super_admin_changes_effective_role() -> None:
         ROLE_ADMIN,
         real_role=ROLE_SUPER_ADMIN,
     )
+
+
+def test_simulate_role_legal_as_super_admin() -> None:
+    roles.settings.admin_api_super_admins = "ops@example.com"
+    headers = {
+        IAP_EMAIL_HEADER: "ops@example.com",
+        roles.DEV_SIMULATE_ROLE_HEADER: ROLE_LEGAL,
+    }
+
+    with TestClient(app) as client:
+        response = client.get("/me", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == _me_payload(
+        "ops@example.com",
+        ROLE_LEGAL,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+
+
+def test_legal_forbidden_on_super_admin_runs_probe() -> None:
+    probe_app = FastAPI()
+
+    @probe_app.get("/probe")
+    async def probe_route(_principal=Depends(roles.require_roles(ROLE_SUPER_ADMIN))):
+        return {"ok": True}
+
+    roles.settings.admin_api_legals = "legal@example.com"
+    headers = {IAP_EMAIL_HEADER: "legal@example.com"}
+
+    with TestClient(probe_app) as client:
+        response = client.get("/probe", headers=headers)
+
+    assert response.status_code == 403
 
 
 def test_simulate_role_as_admin_ignored() -> None:

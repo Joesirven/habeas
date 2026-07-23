@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from typing import Literal
 
-Role = Literal["super_admin", "admin", "data_owner"]
+Role = Literal["super_admin", "admin", "legal", "data_owner"]
 
 ROLE_SUPER_ADMIN: Role = "super_admin"
 ROLE_ADMIN: Role = "admin"
+ROLE_LEGAL: Role = "legal"
 ROLE_DATA_OWNER: Role = "data_owner"
 
-ALL_ROLES: frozenset[Role] = frozenset({ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_DATA_OWNER})
+ALL_ROLES: frozenset[Role] = frozenset(
+    {ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL, ROLE_DATA_OWNER}
+)
 
 
 def parse_email_allowlist(raw: str | None) -> frozenset[str]:
@@ -29,10 +32,11 @@ def allowlists_configured(
     *,
     super_admins: frozenset[str],
     admins: frozenset[str],
+    legals: frozenset[str],
     data_owners: frozenset[str],
 ) -> bool:
     """True when at least one role allowlist is non-empty."""
-    return bool(super_admins or admins or data_owners)
+    return bool(super_admins or admins or legals or data_owners)
 
 
 def resolve_role_from_allowlists(
@@ -40,11 +44,14 @@ def resolve_role_from_allowlists(
     *,
     super_admins: frozenset[str],
     admins: frozenset[str],
+    legals: frozenset[str],
     data_owners: frozenset[str],
     require_identity: bool,
     is_authenticated: bool,
 ) -> Role | None:
     """Map an email to a role, or None when access should be denied.
+
+    Precedence: super_admin → admin → legal → data_owner.
 
     When no allowlists are configured and identity is not required, returns
     ``super_admin`` for local development convenience.
@@ -58,12 +65,15 @@ def resolve_role_from_allowlists(
             return ROLE_SUPER_ADMIN
         if normalized in admins:
             return ROLE_ADMIN
+        if normalized in legals:
+            return ROLE_LEGAL
         if normalized in data_owners:
             return ROLE_DATA_OWNER
 
     if not allowlists_configured(
         super_admins=super_admins,
         admins=admins,
+        legals=legals,
         data_owners=data_owners,
     ):
         if not require_identity:

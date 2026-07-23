@@ -29,24 +29,25 @@ Prefer `resolve_actor` / `ResolvedActor.email` in new code; keep
 
 ## Role allowlists (v1)
 
-Admin-api maps authenticated email → `super_admin` \| `admin` \| `data_owner` via
-environment allowlists. Lists accept comma- or pipe-separated emails
-(case-insensitive).
+Admin-api maps authenticated email → `super_admin` \| `admin` \| `legal` \|
+`data_owner` via environment allowlists. Lists accept comma- or pipe-separated
+emails (case-insensitive).
 
 | Variable | Role |
 |----------|------|
 | `ADMIN_API_SUPER_ADMINS` | `super_admin` |
 | `ADMIN_API_ADMINS` | `admin` |
+| `ADMIN_API_LEGALS` | `legal` |
 | `ADMIN_API_DATA_OWNERS` | `data_owner` |
 
 Precedence when an email appears in multiple lists: `super_admin` → `admin` →
-`data_owner`.
+`legal` → `data_owner`.
 
 ### Identity sources in admin-api
 
 | Source | Role resolution |
 |--------|-----------------|
-| `iap_header` | Full allowlists (`super_admin` / `admin` / `data_owner`) |
+| `iap_header` | Full allowlists (`super_admin` / `admin` / `legal` / `data_owner`) |
 | `bearer_jwt` | Must be on `ADMIN_API_SUPER_ADMINS` only; otherwise `403` |
 
 ### Local development default

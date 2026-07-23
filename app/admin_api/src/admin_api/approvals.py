@@ -8,11 +8,13 @@ from uuid import UUID
 
 import asyncpg
 
+from habeas_privacy_core.db.requests import enqueue_matching
 from habeas_privacy_core.workflow.approval import (
     ASSIGNMENT_TARGETS,
     DEFAULT_MATCHING_REVIEW_TTL,
     MATCHING_REVIEW_ACTION,
     WORKFLOW_ASSIGNMENT_ACTION,
+    close_pending_legal_triage,
     create_pending_matching_review,
     create_workflow_assignment,
     ensure_pending_matching_review,
@@ -38,6 +40,15 @@ def match_type_for_count(match_count: int) -> MatchTypeFilter:
     if match_count == 1:
         return "single_match"
     return "multi_match"
+
+
+def recommended_response_status_for_match_count(match_count: int) -> int:
+    """Map match_count → recommended CA DROP response_status (0→5, 1→3, N→4)."""
+    if match_count <= 0:
+        return 5
+    if match_count == 1:
+        return 3
+    return 4
 
 
 def match_count_predicate_sql(match_type: MatchTypeFilter, column: str = "match_count") -> str:
@@ -249,14 +260,56 @@ async def bulk_approve_matching_review_by_match_type(
     }
 
 
+# CA DROP response_status codes: 2 Exempted · 3 Deleted · 4 Opted out · 5 Not found.
+# Matching promote UI uses 3–5; Legal Triage may set 2–5.
+_DROP_RESPONSE_STATUS_CODES = frozenset({2, 3, 4, 5})
+_MATCHING_PROMOTE_STATUS_CODES = frozenset({3, 4, 5})
+
+
+async def _set_drop_response_status(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    response_status: int,
+    allow_codes: frozenset[int] | None = None,
+) -> bool:
+    """Set drop_raw_requests.response_status once for a DROP thin request."""
+    allowed = allow_codes if allow_codes is not None else _DROP_RESPONSE_STATUS_CODES
+    if response_status not in allowed:
+        raise ValueError(
+            "response_status must be 2 (Exempted), 3 (Deleted), "
+            "4 (Opted out), or 5 (Not found)"
+        )
+    result = await conn.execute(
+        """
+        UPDATE drop_raw_requests AS drr
+           SET response_status = $2
+          FROM requests AS r
+         WHERE r.id = $1
+           AND r.intake_source = 'drop'
+           AND r.raw_record_id = drr.id
+           AND drr.response_status IS NULL
+        """,
+        UUID(request_id),
+        response_status,
+    )
+    return result.endswith("1") if isinstance(result, str) else bool(result)
+
+
 async def promote_matching_review_for_request(
     conn: asyncpg.Connection,
     *,
     request_id: str,
     decided_by: str,
     decision_reason: str | None = None,
+    response_status: int | None = None,
 ) -> dict[str, Any]:
-    """Ensure a pending matching.review gate, then approve (promote to fulfillment)."""
+    """Ensure a pending matching.review gate, then approve (promote to fulfillment).
+
+    Optional ``response_status`` (3/4/5) writes the CA DROP status result after
+    approval — used by Inbox fulfill; omit to leave status unset for the
+    fulfillment dispatcher path.
+    """
     await ensure_pending_matching_review(conn, request_id=request_id)
     pending_id = await conn.fetchval(
         """
@@ -273,14 +326,32 @@ async def promote_matching_review_for_request(
     )
     if pending_id is None:
         if await is_matching_review_approved(conn, request_id):
-            return {
+            payload: dict[str, Any] = {
                 "request_id": request_id,
                 "review_status": "already_approved",
                 "approval_id": None,
             }
+            if response_status is not None:
+                set_ok = await _set_drop_response_status(
+                    conn,
+                    request_id=request_id,
+                    response_status=response_status,
+                    allow_codes=_MATCHING_PROMOTE_STATUS_CODES,
+                )
+                payload["response_status"] = response_status
+                payload["response_status_set"] = set_ok
+            return payload
         raise LookupError("no matching.review gate available to promote")
 
+    if response_status is not None and response_status not in _MATCHING_PROMOTE_STATUS_CODES:
+        raise ValueError(
+            "matching promote response_status must be 3 (Deleted), "
+            "4 (Opted out), or 5 (Not found)"
+        )
+
     reason = decision_reason or "fulfill — matching review approved"
+    if response_status is not None:
+        reason = f"{reason} · DROP status {response_status}"
     decided = await decide_approval(
         conn,
         approval_id=int(pending_id),
@@ -290,11 +361,21 @@ async def promote_matching_review_for_request(
     )
     if decided is None:
         raise LookupError("matching.review gate was not pending")
-    return {
+    payload = {
         "request_id": request_id,
         "review_status": "approved",
         "approval_id": int(decided["id"]),
     }
+    if response_status is not None:
+        set_ok = await _set_drop_response_status(
+            conn,
+            request_id=request_id,
+            response_status=response_status,
+            allow_codes=_MATCHING_PROMOTE_STATUS_CODES,
+        )
+        payload["response_status"] = response_status
+        payload["response_status_set"] = set_ok
+    return payload
 
 
 async def decline_matching_review_for_request(
@@ -506,6 +587,87 @@ async def escalate_requests(
     }
 
 
+async def bulk_reject_legal_triage(
+    conn: asyncpg.Connection,
+    *,
+    request_ids: list[str],
+    decided_by: str,
+    response_status: int = 2,
+    decision_reason: str | None = None,
+) -> dict[str, Any]:
+    """Legal Triage: set DROP response_status and close triage (no matching enqueue)."""
+    if response_status not in _DROP_RESPONSE_STATUS_CODES:
+        raise ValueError(
+            "response_status must be 2 (Exempted), 3 (Deleted), "
+            "4 (Opted out), or 5 (Not found)"
+        )
+    reason = decision_reason or f"legal triage reject · DROP status {response_status}"
+    results: list[dict[str, Any]] = []
+    for request_id in request_ids:
+        set_ok = await _set_drop_response_status(
+            conn,
+            request_id=request_id,
+            response_status=response_status,
+            allow_codes=_DROP_RESPONSE_STATUS_CODES,
+        )
+        closed = await close_pending_legal_triage(
+            conn,
+            request_id=request_id,
+            decided_by=decided_by,
+            decision_reason=reason,
+            status="approved",
+        )
+        results.append(
+            {
+                "request_id": request_id,
+                "response_status": response_status,
+                "response_status_set": set_ok,
+                "assignment_closed": closed is not None,
+            }
+        )
+    return {
+        "count": len(results),
+        "request_ids": [r["request_id"] for r in results],
+        "results": results,
+    }
+
+
+async def send_legal_triage_to_matching(
+    conn: asyncpg.Connection,
+    *,
+    request_ids: list[str],
+    decided_by: str,
+    decision_reason: str | None = None,
+) -> dict[str, Any]:
+    """Legal Triage: close triage hold and enqueue first matching attempt."""
+    reason = decision_reason or "legal triage · send to matching"
+    enqueued: list[str] = []
+    results: list[dict[str, Any]] = []
+    for request_id in request_ids:
+        closed = await close_pending_legal_triage(
+            conn,
+            request_id=request_id,
+            decided_by=decided_by,
+            decision_reason=reason,
+            status="approved",
+        )
+        await enqueue_matching(conn, request_id)
+        enqueued.append(request_id)
+        results.append(
+            {
+                "request_id": request_id,
+                "assignment_closed": closed is not None,
+                "enqueued": True,
+            }
+        )
+    return {
+        "count": len(results),
+        "request_ids": [r["request_id"] for r in results],
+        "enqueued": enqueued,
+        "results": results,
+    }
+
+
 __all__ = [
     "ASSIGNMENT_TARGETS",
     "MATCHING_REVIEW_ACTION",
@@ -516,6 +678,7 @@ __all__ = [
     "assign_requests_by_match_type",
     "bulk_approve_matching_review_by_match_type",
     "bulk_decline_matching_review_by_match_type",
+    "bulk_reject_legal_triage",
     "create_matching_review_approval",
     "create_workflow_assignment",
     "decide_approval",
@@ -529,4 +692,6 @@ __all__ = [
     "match_count_predicate_sql",
     "match_type_for_count",
     "promote_matching_review_for_request",
+    "recommended_response_status_for_match_count",
+    "send_legal_triage_to_matching",
 ]

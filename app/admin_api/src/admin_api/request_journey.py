@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -9,12 +10,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
 
-from admin_api.approvals import match_type_for_count
+from admin_api.approvals import (
+    match_type_for_count,
+    recommended_response_status_for_match_count,
+)
 from admin_api.roles import RolePrincipal, require_roles
 from habeas_privacy_core.audit.writer import write_audit
 from habeas_privacy_core.auth import (
     ROLE_ADMIN,
     ROLE_DATA_OWNER,
+    ROLE_LEGAL,
     ROLE_SUPER_ADMIN,
     is_authenticated_actor,
     resolve_actor,
@@ -23,8 +28,33 @@ from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
 from habeas_privacy_core.workflow.approval import (
     MATCHING_REVIEW_ACTION,
+    WORKFLOW_ASSIGNMENT_ACTION,
     get_current_assignment,
     is_matching_review_approved,
+)
+
+NeedsAttentionItemKind = Literal[
+    "matching",
+    "triage",
+    "escalations",
+    "notice",
+    "delivery",
+]
+NeedsAttentionKind = Literal[
+    "matching",
+    "triage",
+    "escalations",
+    "notice",
+    "delivery",
+    "all",
+]
+NEEDS_ATTENTION_KINDS: tuple[NeedsAttentionKind, ...] = (
+    "matching",
+    "triage",
+    "escalations",
+    "notice",
+    "delivery",
+    "all",
 )
 
 OPS_COMMENT_COMMAND = "ops.comment"
@@ -86,7 +116,9 @@ router = APIRouter(prefix="/ops/requests", tags=["request-journey"])
 
 RequestOpsViewer = Annotated[
     RolePrincipal,
-    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_DATA_OWNER)),
+    Depends(
+        require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL, ROLE_DATA_OWNER)
+    ),
 ]
 
 
@@ -120,6 +152,7 @@ class NeedsAttentionAssignment(BaseModel):
 class NeedsAttentionItem(BaseModel):
     request_id: str
     reason: str
+    kind: NeedsAttentionItemKind = "matching"
     current_stage: str
     intake_source: str
     received_at: str | None
@@ -128,6 +161,7 @@ class NeedsAttentionItem(BaseModel):
     matched: bool | None = None
     match_count: int | None = None
     match_type: str | None = None
+    recommended_response_status: int | None = None
     matched_via: str | None = None
     requestor_state: str | None = None
     review_status: str | None = None
@@ -140,6 +174,7 @@ class NeedsAttentionItem(BaseModel):
 
 class NeedsAttentionResponse(BaseModel):
     items: list[NeedsAttentionItem] = Field(default_factory=list)
+    kind: NeedsAttentionKind = "all"
 
 
 class RequestCommentBody(BaseModel):
@@ -531,21 +566,12 @@ async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourney
     )
 
 
-async def list_needs_attention(
+async def list_matching_needs_attention(
     conn: Any,
     *,
     limit: int,
-) -> NeedsAttentionResponse:
-    """Inbox queue for matching review (PII-safe).
-
-    Includes:
-    - pending ``matching.review`` approval gates, and
-    - latest matching_results that still need review but never got a gate
-      (``review_status=none`` / journey blocker ``matching.review required``).
-
-    Runs review-open counts use spine − approved; the inbox previously only
-    listed existing pending gates, so ungated matches were invisible here.
-    """
+) -> list[NeedsAttentionItem]:
+    """Matching.review inbox rows (PII-safe)."""
     rows = await conn.fetch(
         """
         WITH latest_mr AS (
@@ -695,6 +721,7 @@ async def list_needs_attention(
             NeedsAttentionItem(
                 request_id=row["request_id"],
                 reason=MATCHING_REVIEW_ACTION,
+                kind="matching",
                 current_stage="review",
                 intake_source=row["intake_source"],
                 received_at=_iso(row["received_at"]),
@@ -703,6 +730,11 @@ async def list_needs_attention(
                 matched=bool(row["matched"]) if row["matched"] is not None else None,
                 match_count=match_count,
                 match_type=match_type_for_count(match_count) if match_count is not None else None,
+                recommended_response_status=(
+                    recommended_response_status_for_match_count(match_count)
+                    if match_count is not None
+                    else None
+                ),
                 matched_via=row["matched_via"],
                 requestor_state=state_acronym,
                 review_status=review_status,
@@ -715,7 +747,120 @@ async def list_needs_attention(
                 ),
             )
         )
-    return NeedsAttentionResponse(items=items)
+    return items
+
+
+async def list_assignment_needs_attention(
+    conn: Any,
+    *,
+    kind: Literal["triage", "escalations"],
+    limit: int,
+) -> list[NeedsAttentionItem]:
+    """Pending Legal triage or escalate assignments (PII-safe)."""
+    assignment_kind = "triage" if kind == "triage" else "escalate"
+    rows = await conn.fetch(
+        """
+        SELECT ar.id AS approval_id,
+               r.id::text AS request_id,
+               r.intake_source,
+               r.received_at,
+               r.raw_record_id,
+               UPPER(TRIM(r.requestor_state)) AS requestor_state,
+               ar.requested_at,
+               ar.status AS review_status,
+               ar.approver_role,
+               ar.context_jsonb,
+               drr.source_csv_filename
+          FROM approval_requests ar
+          JOIN requests r ON r.id = ar.request_id
+          LEFT JOIN drop_raw_requests drr
+            ON drr.id = r.raw_record_id
+           AND r.intake_source = 'drop'
+         WHERE ar.action_type = $1
+           AND ar.status = 'pending'
+           AND ar.approver_role = 'legal'
+           AND ar.context_jsonb->>'kind' = $2
+           AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
+         ORDER BY ar.requested_at ASC
+         LIMIT $3
+        """,
+        WORKFLOW_ASSIGNMENT_ACTION,
+        assignment_kind,
+        limit,
+    )
+    items: list[NeedsAttentionItem] = []
+    bulk_by_csv: dict[str, int | None] = {}
+    for row in rows:
+        context = row["context_jsonb"] or {}
+        if isinstance(context, str):
+            context = json.loads(context)
+        state = row["requestor_state"]
+        state_acronym = str(state).strip().upper()[:2] if state else None
+        bulk_process_id = None
+        if row["intake_source"] == "drop" and row["raw_record_id"] is not None:
+            bulk_process_id = await _bulk_process_id_for_raw(
+                conn,
+                raw_record_id=int(row["raw_record_id"]),
+                cache=bulk_by_csv,
+            )
+        items.append(
+            NeedsAttentionItem(
+                request_id=row["request_id"],
+                reason=WORKFLOW_ASSIGNMENT_ACTION,
+                kind=kind,
+                current_stage="triage" if kind == "triage" else "review",
+                intake_source=row["intake_source"],
+                received_at=_iso(row["received_at"]),
+                requested_at=_iso(row["requested_at"]),
+                approval_id=int(row["approval_id"]),
+                requestor_state=state_acronym,
+                review_status=str(row["review_status"] or "pending"),
+                assignment=NeedsAttentionAssignment(
+                    target_role=row["approver_role"],
+                    kind=str(context.get("kind") or assignment_kind),
+                    assignee_identity=context.get("assignee_identity"),
+                ),
+                bulk_process_id=bulk_process_id,
+                source_csv_filename=(
+                    str(row["source_csv_filename"])
+                    if row["source_csv_filename"] is not None
+                    else None
+                ),
+            )
+        )
+    return items
+
+
+async def list_needs_attention(
+    conn: Any,
+    *,
+    limit: int,
+    kind: NeedsAttentionKind = "all",
+) -> NeedsAttentionResponse:
+    """Inbox queue by kind (matching · triage · escalations · notice · delivery · all)."""
+    if kind not in NEEDS_ATTENTION_KINDS:
+        raise ValueError(f"invalid needs-attention kind: {kind!r}")
+
+    items: list[NeedsAttentionItem] = []
+    if kind in {"matching", "all"}:
+        items.extend(await list_matching_needs_attention(conn, limit=limit))
+    if kind in {"triage", "all"}:
+        items.extend(
+            await list_assignment_needs_attention(conn, kind="triage", limit=limit)
+        )
+    if kind in {"escalations", "all"}:
+        items.extend(
+            await list_assignment_needs_attention(
+                conn, kind="escalations", limit=limit
+            )
+        )
+    # notice / delivery: reserved — empty until those gates land in this feed.
+
+    # Stable sort + hard limit when unioning kinds.
+    items.sort(key=lambda item: item.requested_at or item.received_at or "")
+    if len(items) > limit:
+        items = items[:limit]
+    return NeedsAttentionResponse(items=items, kind=kind)
 
 
 async def _bulk_process_id_for_raw(
@@ -877,12 +1022,16 @@ def assert_no_pii_keys(payload: Any) -> None:
 @router.get("/needs-attention", response_model=NeedsAttentionResponse)
 async def needs_attention(
     _viewer: RequestOpsViewer,
+    kind: NeedsAttentionKind = Query(default="all"),
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> NeedsAttentionResponse:
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
-        response = await list_needs_attention(conn, limit=limit)
+        try:
+            response = await list_needs_attention(conn, limit=limit, kind=kind)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     assert_no_pii_keys(response.model_dump())
     return response
 

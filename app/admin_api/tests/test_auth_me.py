@@ -12,6 +12,7 @@ from habeas_privacy_core.auth import IAP_EMAIL_HEADER, ROLE_SUPER_ADMIN
 def test_auth_me_without_iap_header(monkeypatch) -> None:
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
     monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
     monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
     monkeypatch.setattr(roles.settings, "require_iap_identity", False)
 

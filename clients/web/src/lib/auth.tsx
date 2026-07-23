@@ -1,7 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { createContext, useContext, type ReactNode } from 'react'
 
-import { SkeletonLines } from '@/components/AppShell'
 import { getMe, type MePayload, type UserRole } from '@/lib/api'
 
 export type { MePayload, UserRole }
@@ -59,11 +58,20 @@ export function useMe() {
     realRole,
     isSuperAdmin: role === 'super_admin',
     isAdmin: role === 'admin' || role === 'super_admin',
+    isLegal: role === 'legal',
   }
 }
 
 export function isSuperAdmin(role: UserRole | undefined): boolean {
   return role === 'super_admin'
+}
+
+export function isLegal(role: UserRole | undefined): boolean {
+  return role === 'legal'
+}
+
+export function canAccessLegalSurfaces(role: UserRole | undefined): boolean {
+  return role === 'legal' || role === 'super_admin' || role === 'admin'
 }
 
 export function canAccessInsights(role: UserRole | undefined): boolean {
@@ -122,8 +130,16 @@ export function RoleGate({ allow, children }: RoleGateProps) {
 
   if (isLoading) {
     return (
-      <div role="status" aria-label="Loading access">
-        <SkeletonLines lines={4} />
+      <div className="space-y-3" role="status" aria-label="Loading access">
+        {Array.from({ length: 4 }, (_, index) => (
+          <div
+            key={index}
+            className={`h-4 animate-pulse rounded-md bg-line/80 ${
+              index === 3 ? 'w-2/3' : 'w-full'
+            }`}
+            aria-hidden="true"
+          />
+        ))}
       </div>
     )
   }

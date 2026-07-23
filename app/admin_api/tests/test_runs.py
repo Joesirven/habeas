@@ -31,6 +31,7 @@ def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(admin_main.settings, "database_url", "")
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
     monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
     monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
     monkeypatch.setattr(roles.settings, "require_iap_identity", False)
 

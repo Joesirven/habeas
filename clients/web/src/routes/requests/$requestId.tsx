@@ -11,6 +11,7 @@ import {
   getRequestJourney,
   postDropMatchingResultDecline,
   postDropMatchingResultPromote,
+  type DropResponseStatusCode,
   type JourneyStage,
   type MatchingResultDetail,
   type RunTimelineStep,
@@ -239,7 +240,8 @@ function MatchingPanel({ requestId }: { requestId: string }) {
   })
 
   const promoteMutation = useMutation({
-    mutationFn: () => postDropMatchingResultPromote(requestId),
+    mutationFn: (responseStatus: DropResponseStatusCode) =>
+      postDropMatchingResultPromote(requestId, { response_status: responseStatus }),
     onSuccess: async () => {
       setActionError(null)
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
@@ -278,7 +280,7 @@ function MatchingPanel({ requestId }: { requestId: string }) {
         canReviewActions={canReviewActions}
         actionPending={actionPending}
         actionError={actionError}
-        onPromote={() => promoteMutation.mutate()}
+        onPromote={(responseStatus) => promoteMutation.mutate(responseStatus)}
         onDecline={() => declineMutation.mutate()}
       />
     </div>

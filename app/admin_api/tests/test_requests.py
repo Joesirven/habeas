@@ -1,18 +1,35 @@
 """Admin API request route tests."""
 
+from __future__ import annotations
+
 import os
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
+from admin_api import roles
 from admin_api.main import app
+from habeas_privacy_core.auth import IAP_EMAIL_HEADER, ROLE_LEGAL
+from habeas_privacy_core.models.intake import clean_agent_batch_csv
 
-pytestmark = pytest.mark.skipif(
+pytestmark_integration = pytest.mark.skipif(
     not os.getenv("DATABASE_URL"),
     reason="DATABASE_URL required for admin API integration tests",
 )
 
 
+@pytest.fixture(autouse=True)
+def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
+    monkeypatch.setattr(roles.settings, "require_iap_identity", False)
+
+
+@pytestmark_integration
 def test_create_manual_request():
     with TestClient(app) as client:
         response = client.post(
@@ -30,3 +47,89 @@ def test_create_manual_request():
     assert body["intake_source"] == "manual"
     assert body["id"]
     assert body["raw_record_id"] is None
+
+
+def test_clean_agent_batch_csv_normalizes_and_splits():
+    csv_text = (
+        "first_name,last_name,email,state\n"
+        "Ada,Lovelace,ada@example.com;ada2@example.com,California\n"
+        "Bad,Row,bad@example.com,\n"
+        "Grace,Hopper,grace@example.com,NY\n"
+    )
+    result = clean_agent_batch_csv(
+        csv_text,
+        batch_id="batch-1",
+        source_filename="agents.csv",
+    )
+    assert result.input_row_count == 3
+    assert result.skipped_row_count == 1
+    assert result.email_split_count == 1
+    assert result.cleaned_row_count == 3  # 2 from split + 1 NY
+    states = {row.requestor_state for row in result.rows}
+    assert states == {"CA", "NY"}
+    assert all(row.cleaned_payload["batch_id"] == "batch-1" for row in result.rows)
+
+
+def test_agent_batch_upload_route(monkeypatch: pytest.MonkeyPatch):
+    from admin_api import main as admin_main
+
+    roles.settings.admin_api_legals = "legal@example.com"
+    roles.settings.admin_api_data_owners = "owner@example.com"
+    roles.settings.require_iap_identity = True
+    monkeypatch.setattr(admin_main.settings, "database_url", "postgres://local")
+    monkeypatch.setattr(admin_main, "create_pool", AsyncMock())
+    monkeypatch.setattr(admin_main, "close_pool", AsyncMock())
+
+    inserted: list[str] = []
+
+    async def fake_promote(conn: Any, *, requestor_state: str, cleaned_payload: dict):
+        del conn, cleaned_payload
+        rid = f"00000000-0000-0000-0000-00000000000{len(inserted) + 1}"
+        inserted.append(rid)
+        return 1, rid
+
+    class _Acquire:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            return None
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(admin_main, "get_pool", lambda: _Pool())
+    monkeypatch.setattr(admin_main, "promote_manual_request", fake_promote)
+
+    csv_bytes = (
+        b"email,state\n"
+        b"one@example.com,CA\n"
+        b"two@example.com,TX\n"
+    )
+    with TestClient(app) as client:
+        ok = client.post(
+            "/requests/agent-batch",
+            headers={IAP_EMAIL_HEADER: "legal@example.com"},
+            files={"file": ("agents.csv", csv_bytes, "text/csv")},
+        )
+        empty = client.post(
+            "/requests/agent-batch",
+            headers={IAP_EMAIL_HEADER: "legal@example.com"},
+            files={"file": ("agents.csv", b"", "text/csv")},
+        )
+        forbidden = client.post(
+            "/requests/agent-batch",
+            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            files={"file": ("agents.csv", csv_bytes, "text/csv")},
+        )
+
+    assert ok.status_code == 201
+    body = ok.json()
+    assert body["inserted_count"] == 2
+    assert body["cleaned_row_count"] == 2
+    assert len(body["request_ids"]) == 2
+    assert "email" not in body
+    assert empty.status_code == 400
+    assert forbidden.status_code == 403
+    assert ROLE_LEGAL == "legal"

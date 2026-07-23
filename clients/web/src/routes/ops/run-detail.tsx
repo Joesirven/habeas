@@ -76,6 +76,100 @@ function formatTimestamp(value: string | null | undefined): string {
   return new Date(value).toLocaleString()
 }
 
+function durationLabelFromRange(
+  startAt: string | null | undefined,
+  endAt?: string | null,
+): string | null {
+  if (!startAt) return null
+  const start = new Date(startAt).getTime()
+  if (Number.isNaN(start)) return null
+  const end = endAt ? new Date(endAt).getTime() : Date.now()
+  if (Number.isNaN(end) || end < start) return null
+  return formatDuration((end - start) / 1000)
+}
+
+/** Best-effort bulk process timestamps from run detail raw payload (no invented fields). */
+function bulkDurationFromRaw(raw: Record<string, unknown> | undefined): string | null {
+  if (!raw) return null
+  const process =
+    (raw.process as Record<string, unknown> | undefined) ??
+    (raw.bulk_process as Record<string, unknown> | undefined) ??
+    null
+  const processAt =
+    (typeof raw.process_at === 'string' ? raw.process_at : null) ??
+    (typeof process?.process_at === 'string' ? process.process_at : null) ??
+    (typeof raw.bulk_process_at === 'string' ? raw.bulk_process_at : null)
+  const completedAt =
+    (typeof raw.process_completed_at === 'string' ? raw.process_completed_at : null) ??
+    (typeof process?.completed_at === 'string' ? process.completed_at : null) ??
+    (typeof raw.bulk_completed_at === 'string' ? raw.bulk_completed_at : null)
+  return durationLabelFromRange(processAt, completedAt)
+}
+
+function MiniDurationRing({
+  percent,
+  tone = 'navy',
+}: {
+  percent: number
+  tone?: 'navy' | 'emerald'
+}) {
+  const clamped = Math.max(0, Math.min(100, percent))
+  const color = tone === 'emerald' ? 'stroke-emerald-600' : 'stroke-habeas-navy'
+  const r = 14
+  const c = 2 * Math.PI * r
+  const offset = c - (clamped / 100) * c
+  return (
+    <svg viewBox="0 0 36 36" className="h-9 w-9 shrink-0" aria-hidden="true">
+      <circle cx="18" cy="18" r={r} fill="none" className="stroke-line" strokeWidth="3" />
+      <circle
+        cx="18"
+        cy="18"
+        r={r}
+        fill="none"
+        className={color}
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeDasharray={c}
+        strokeDashoffset={offset}
+        transform="rotate(-90 18 18)"
+      />
+    </svg>
+  )
+}
+
+function DurationVizCard({
+  label,
+  value,
+  running,
+}: {
+  label: string
+  value: string
+  running?: boolean
+}) {
+  const known = value !== '—'
+  return (
+    <div className="flex min-w-[7rem] items-center gap-2 rounded-lg border border-line/80 bg-paper/60 px-3 py-2.5">
+      {known ? (
+        <MiniDurationRing percent={running ? 55 : 100} tone={running ? 'emerald' : 'navy'} />
+      ) : (
+        <div
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-dashed border-line text-[0.55rem] text-mute"
+          aria-hidden="true"
+        >
+          —
+        </div>
+      )}
+      <div className="min-w-0">
+        <p className="taste-micro">{label}</p>
+        <p className="mt-0.5 text-sm font-semibold tabular-nums text-ink">
+          {value}
+          {known && running ? '…' : ''}
+        </p>
+      </div>
+    </div>
+  )
+}
+
 function Metric({ label, value, mono = false }: { label: string; value: ReactNode; mono?: boolean }) {
   return (
     <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2.5">
@@ -187,8 +281,23 @@ function HashIndexRunPanel({ detail }: { detail: RunDetail }) {
 }
 
 function OverviewPanel({ detail }: { detail: RunDetail }) {
+  const stageRunning = !detail.completed_at && Boolean(detail.started_at)
+  const stageDuration =
+    formatDuration(detail.duration_seconds) !== '—'
+      ? formatDuration(detail.duration_seconds)
+      : durationLabelFromRange(detail.started_at, detail.completed_at) ?? '—'
+  const bulkDuration = bulkDurationFromRaw(detail.raw) ?? '—'
+
   return (
     <div className="space-y-4">
+      <div className="flex flex-wrap gap-2">
+        <DurationVizCard
+          label="Stage duration"
+          value={stageDuration}
+          running={stageRunning}
+        />
+        <DurationVizCard label="Bulk run duration" value={bulkDuration} />
+      </div>
       <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <Metric label="Job" value={jobLabel(detail.job)} />
         <Metric label="Step" value={detail.step ?? '—'} mono />

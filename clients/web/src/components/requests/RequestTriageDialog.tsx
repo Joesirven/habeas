@@ -21,19 +21,77 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useMe } from '@/lib/auth'
 import {
+  DROP_RESPONSE_STATUS_OPTIONS,
   getDropMatchingResultDetail,
   getFulfillmentArtifact,
   getRequestJourney,
   patchAccessDeliveryStatus,
   postDropMatchingResultDecline,
   postDropMatchingResultPromote,
+  suggestedDropResponseStatus,
+  type DropResponseStatusCode,
   type FulfillmentArtifact,
   type JourneyStage,
   type MatchingAttemptRow,
   type MatchingResultDetail,
+  type MatchedPersonContact,
   type RunTimelineStep,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
+
+/** CA DROP response_status picker for Inbox fulfill confirms. */
+export function DropResponseStatusPicker({
+  value,
+  onChange,
+  disabled,
+  suggested,
+}: {
+  value: DropResponseStatusCode | null
+  onChange: (code: DropResponseStatusCode) => void
+  disabled?: boolean
+  suggested?: DropResponseStatusCode | null
+}) {
+  return (
+    <fieldset className="space-y-1.5" disabled={disabled}>
+      <legend className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+        CA DROP status result
+      </legend>
+      <p className="text-[0.65rem] text-ink-soft">
+        Confirm the response status code written to DROP (3 Deleted · 4 Opted out ·
+        5 Not found). Distinct from ingest Promote-to-raw.
+      </p>
+      <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="DROP response status">
+        {DROP_RESPONSE_STATUS_OPTIONS.map((option) => {
+          const selected = value === option.code
+          const isSuggested = suggested === option.code
+          return (
+            <button
+              key={option.code}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              disabled={disabled}
+              onClick={() => onChange(option.code)}
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors',
+                selected
+                  ? 'border-habeas-navy bg-habeas-navy/10 font-medium text-habeas-navy'
+                  : 'border-line bg-paper text-ink hover:border-habeas-navy/35',
+                disabled && 'opacity-50',
+              )}
+            >
+              <span className="font-mono tabular-nums">{option.code}</span>
+              <span>{option.label}</span>
+              {isSuggested && !selected ? (
+                <span className="text-[0.55rem] text-mute">suggested</span>
+              ) : null}
+            </button>
+          )
+        })}
+      </div>
+    </fieldset>
+  )
+}
 
 const SOURCE_LABELS: Record<string, string> = {
   webform: 'Gravity Forms',
@@ -318,7 +376,7 @@ export function AccessHandoffPanel({
         <p className="mt-1 break-all font-mono text-[0.7rem] text-ink">{url}</p>
       </div>
       {artifact.fulfillment_artifact_uri &&
-      artifact.fulfillment_artifact_uri !== artifact.shareable_url ? (
+        artifact.fulfillment_artifact_uri !== artifact.shareable_url ? (
         <div className="rounded-lg border border-line/60 px-3 py-2">
           <p className="taste-micro">Internal artifact (ops only)</p>
           <p className="mt-1 break-all font-mono text-[0.65rem] text-mute">
@@ -428,6 +486,120 @@ export function AccessHandoffPanel({
   )
 }
 
+function MatchingDetailGrid({
+  rows,
+}: {
+  rows: { label: string; value: ReactNode }[]
+}) {
+  return (
+    <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-3">
+      {rows.map((row) => (
+        <div key={row.label} className="min-w-0">
+          <dt className="text-[0.65rem] text-mute">{row.label}</dt>
+          <dd className="mt-0.5 text-ink">{row.value}</dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+function formatInitials(contact: MatchedPersonContact): string {
+  const first = contact.first_initial ?? '·'
+  const last = contact.last_initial ?? '·'
+  return `${first}${last}`
+}
+
+function MatchedContactDetails({ contact }: { contact: MatchedPersonContact }) {
+  const phoneSummary =
+    contact.phones.length > 0
+      ? contact.phones.map((p) => `${p.type}: ${p.number}`).join(' · ')
+      : '—'
+  return (
+    <MatchingDetailGrid
+      rows={[
+        { label: 'DWID', value: <span className="font-mono tabular-nums">{contact.dwid}</span> },
+        { label: 'State', value: <span className="font-mono">{contact.state}</span> },
+        {
+          label: 'Initials',
+          value: <span className="font-mono">{formatInitials(contact)}</span>,
+        },
+        { label: 'DOB', value: contact.dob ?? '—' },
+        { label: 'Email', value: contact.email ?? '—' },
+        { label: 'Phones', value: phoneSummary },
+      ]}
+    />
+  )
+}
+
+function MatchedContactsPanel({
+  matching,
+}: {
+  matching: MatchingResultDetail
+}) {
+  const contacts = matching.matched_contacts ?? []
+  const status = matching.matched_contacts_status
+
+  if (matching.match_count <= 0) return null
+
+  if (status === 'unavailable') {
+    return (
+      <p className="text-[0.7rem] text-mute">
+        Matched person details are unavailable (BigQuery lookup failed or is not configured
+        locally).
+      </p>
+    )
+  }
+
+  if (contacts.length === 0) {
+    return (
+      <p className="text-[0.7rem] text-mute">
+        No person records returned for the matched DWID(s).
+      </p>
+    )
+  }
+
+  if (matching.match_type === 'single_match' && contacts.length === 1) {
+    return (
+      <div className="space-y-1.5">
+        <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+          Matched person
+        </p>
+        <MatchedContactDetails contact={contacts[0]!} />
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+        Matched persons ({contacts.length})
+      </p>
+      <div className="space-y-1">
+        {contacts.map((contact) => (
+          <Collapsible key={contact.dwid}>
+            <div className="rounded-md border border-line/80 bg-paper/40">
+              <CollapsibleTrigger asChild>
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left text-[0.7rem] hover:bg-paper/60"
+                >
+                  <span className="min-w-0 truncate font-mono tabular-nums">{contact.dwid}</span>
+                  <span className="shrink-0 text-mute">
+                    {contact.state} · {formatInitials(contact)}
+                  </span>
+                </button>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="border-t border-line/60 px-2.5 py-2">
+                <MatchedContactDetails contact={contact} />
+              </CollapsibleContent>
+            </div>
+          </Collapsible>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export function MatchingReviewPanel({
   requestId,
   matching,
@@ -439,6 +611,8 @@ export function MatchingReviewPanel({
   onPromote,
   onDecline,
   compact = false,
+  layout = 'accordion',
+  hideActions = false,
 }: {
   requestId: string
   matching: MatchingResultDetail | null | undefined
@@ -447,20 +621,175 @@ export function MatchingReviewPanel({
   canReviewActions: boolean
   actionPending: boolean
   actionError: string | null
-  onPromote: () => void
+  onPromote: (responseStatus: DropResponseStatusCode) => void
   onDecline: () => void
   /** Denser layout for inbox review pane. */
   compact?: boolean
+  /** Tabbed sections instead of collapsible accordions (inbox detail). */
+  layout?: 'accordion' | 'tabs'
+  /** Hide fulfill/decline buttons (e.g. when inbox header owns actions). */
+  hideActions?: boolean
 }) {
   const [confirm, setConfirm] = useState<'fulfill' | 'decline' | null>(null)
+  const suggestedStatus = suggestedDropResponseStatus(
+    matching?.match_type,
+    matching?.match_count,
+  )
+  const [fulfillStatus, setFulfillStatus] = useState<DropResponseStatusCode | null>(
+    suggestedStatus,
+  )
   const wasActionPending = useRef(false)
   useEffect(() => {
     if (wasActionPending.current && !actionPending) setConfirm(null)
     wasActionPending.current = actionPending
   }, [actionPending])
+  useEffect(() => {
+    if (confirm === 'fulfill') {
+      setFulfillStatus(
+        suggestedDropResponseStatus(matching?.match_type, matching?.match_count),
+      )
+    }
+  }, [confirm, matching?.match_type, matching?.match_count])
   const attempts = matching?.attempts ?? []
   const attemptStatus = attemptGlance(attempts)
   const assignment = matching?.assignment?.assignee_identity
+
+  const reviewActions = canReviewActions && !hideActions ? (
+    <div className="flex flex-wrap items-center gap-2 pt-1">
+      <Button size="sm" disabled={actionPending} onClick={() => setConfirm('fulfill')}>
+        {actionPending && confirm === 'fulfill' ? 'Fulfilling…' : 'Fulfill'}
+      </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={actionPending}
+        onClick={() => setConfirm('decline')}
+      >
+        {actionPending && confirm === 'decline' ? 'Declining…' : 'Decline'}
+      </Button>
+    </div>
+  ) : null
+
+  const actionErrorLine = actionError ? (
+    <p className="text-[0.65rem] text-red-700">{actionError}</p>
+  ) : null
+
+  const tabsBody =
+    matching && layout === 'tabs' ? (
+      <Tabs defaultValue="overview" className="text-xs">
+        <TabsList className="h-7 w-full justify-start">
+          <TabsTrigger value="overview" className="h-6 px-2 text-[0.65rem]">
+            Overview
+          </TabsTrigger>
+          <TabsTrigger value="review" className="h-6 px-2 text-[0.65rem]">
+            Review
+          </TabsTrigger>
+          <TabsTrigger value="attempts" className="h-6 px-2 text-[0.65rem]">
+            Attempts
+            {attempts.length > 0 ? (
+              <span className="tabular-nums opacity-70">({attempts.length})</span>
+            ) : null}
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="overview" className="mt-2 space-y-3">
+          <MatchingDetailGrid
+            rows={[
+              {
+                label: 'Match type',
+                value: (matching.match_type ?? '—').replaceAll('_', ' '),
+              },
+              {
+                label: 'Matched',
+                value: matching.matched ? 'Yes' : 'No',
+              },
+              {
+                label: 'Count',
+                value: <span className="tabular-nums">{matching.match_count}</span>,
+              },
+              {
+                label: 'Via',
+                value: matching.matched_via ?? '—',
+              },
+              {
+                label: 'Recorded',
+                value: (
+                  <span className="tabular-nums">{formatTimestamp(matching.recorded_at)}</span>
+                ),
+              },
+              {
+                label: 'Requestor state',
+                value: (
+                  <span className="font-mono">{matching.requestor_state ?? '—'}</span>
+                ),
+              },
+            ]}
+          />
+          <MatchedContactsPanel matching={matching} />
+        </TabsContent>
+        <TabsContent value="review" className="mt-2 space-y-3">
+          <MatchingDetailGrid
+            rows={[
+              {
+                label: 'Review status',
+                value: (
+                  <Badge
+                    variant={reviewStatusVariant(matching.review_status)}
+                    className="normal-case tracking-normal"
+                  >
+                    {matching.review_status}
+                  </Badge>
+                ),
+              },
+              {
+                label: 'Approval id',
+                value: (
+                  <span className="tabular-nums">{matching.approval_id ?? '—'}</span>
+                ),
+              },
+              {
+                label: 'Assignee',
+                value: assignment ?? 'Unassigned',
+              },
+              {
+                label: 'Attempt id',
+                value: (
+                  <span className="tabular-nums">{matching.attempt_id ?? '—'}</span>
+                ),
+              },
+              {
+                label: 'Decided by',
+                value: matching.decided_by ?? '—',
+              },
+              {
+                label: 'Decided at',
+                value: (
+                  <span className="tabular-nums">
+                    {formatTimestamp(matching.decided_at)}
+                  </span>
+                ),
+              },
+              {
+                label: 'Reason',
+                value: matching.decision_reason ?? '—',
+              },
+            ]}
+          />
+          {reviewActions}
+          {actionErrorLine}
+        </TabsContent>
+        <TabsContent value="attempts" className="mt-2 space-y-1.5">
+          {attempts.length === 0 ? (
+            <p className="text-[0.7rem] text-mute">No matching attempts recorded.</p>
+          ) : (
+            <div className="space-y-1">
+              {attempts.map((attempt) => (
+                <AttemptRow key={attempt.id} attempt={attempt} />
+              ))}
+            </div>
+          )}
+        </TabsContent>
+      </Tabs>
+    ) : null
 
   return (
     <div className={cn('text-xs', compact ? 'space-y-1.5' : 'space-y-2')}>
@@ -470,11 +799,21 @@ export function MatchingReviewPanel({
           if (!open && !actionPending) setConfirm(null)
         }}
         title="Fulfill this match?"
-        description={`Approve matching review for ${requestId.slice(0, 8)}… and release it to fulfillment. This cannot be undone from the inbox.`}
+        description={`Approve matching review for ${requestId.slice(0, 8)}… and set the CA DROP status result. This cannot be undone from the inbox.`}
         confirmLabel="Fulfill"
         confirming={actionPending && confirm === 'fulfill'}
-        onConfirm={() => onPromote()}
-      />
+        confirmDisabled={fulfillStatus == null}
+        onConfirm={() => {
+          if (fulfillStatus != null) onPromote(fulfillStatus)
+        }}
+      >
+        <DropResponseStatusPicker
+          value={fulfillStatus}
+          onChange={setFulfillStatus}
+          disabled={actionPending}
+          suggested={suggestedStatus}
+        />
+      </ConfirmActionDialog>
       <ConfirmActionDialog
         open={confirm === 'decline'}
         onOpenChange={(open) => {
@@ -504,7 +843,8 @@ export function MatchingReviewPanel({
           </p>
         </div>
       ) : null}
-      {matching ? (
+      {matching && layout === 'tabs' ? tabsBody : null}
+      {matching && layout !== 'tabs' ? (
         <>
           <StatusAccordion
             title="Match result"
@@ -542,6 +882,9 @@ export function MatchingReviewPanel({
                 </dd>
               </div>
             </dl>
+            <div className="mt-2">
+              <MatchedContactsPanel matching={matching} />
+            </div>
           </StatusAccordion>
 
           <StatusAccordion
@@ -617,28 +960,8 @@ export function MatchingReviewPanel({
                 </dd>
               </div>
             </dl>
-            {canReviewActions ? (
-              <div className="flex flex-wrap items-center gap-2 pt-0.5">
-                <Button
-                  size="sm"
-                  disabled={actionPending}
-                  onClick={() => setConfirm('fulfill')}
-                >
-                  {actionPending && confirm === 'fulfill' ? 'Fulfilling…' : 'Fulfill'}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={actionPending}
-                  onClick={() => setConfirm('decline')}
-                >
-                  {actionPending && confirm === 'decline' ? 'Declining…' : 'Decline'}
-                </Button>
-              </div>
-            ) : null}
-            {actionError ? (
-              <p className="text-[0.65rem] text-red-700">{actionError}</p>
-            ) : null}
+            {reviewActions}
+            {actionErrorLine}
           </StatusAccordion>
 
           <StatusAccordion
@@ -729,7 +1052,8 @@ export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDe
   })
 
   const promoteMutation = useMutation({
-    mutationFn: () => postDropMatchingResultPromote(requestId!),
+    mutationFn: (responseStatus: DropResponseStatusCode) =>
+      postDropMatchingResultPromote(requestId!, { response_status: responseStatus }),
     onSuccess: async () => {
       setActionError(null)
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
@@ -914,7 +1238,9 @@ export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDe
                     canReviewActions={canReviewActions}
                     actionPending={actionPending}
                     actionError={actionError}
-                    onPromote={() => promoteMutation.mutate()}
+                    onPromote={(responseStatus) =>
+                      promoteMutation.mutate(responseStatus)
+                    }
                     onDecline={() => declineMutation.mutate()}
                   />
                 </TabsContent>
