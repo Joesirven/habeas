@@ -10,14 +10,19 @@ and verified Google ID token Bearer (application default credentials / Cloud Run
 | `parse_iap_email` | Strip `accounts.google.com:` prefix from IAP email header |
 | `actor_from_iap_header` | Actor string from IAP header (`unknown` if missing) |
 | `actor_from_bearer_id_token` | Verify `Authorization: Bearer` Google ID token; return email or `unknown` |
-| `resolve_actor` | IAP header first, else verified Bearer email; returns `ResolvedActor` |
+| `resolve_actor` | Verified Bearer + optional IAP header (see below); returns `ResolvedActor` |
 | `is_authenticated_actor` | True when actor is not the unknown placeholder |
 
 `ResolvedActor` includes `email` and `source` (`iap_header` \| `bearer_jwt` \| `None`).
 
 Bearer verification uses `google.oauth2.id_token.verify_oauth2_token`. Audience
 defaults to `ADMIN_API_ID_TOKEN_AUDIENCE` or the request URL origin (Cloud Run
-service origin). Invalid tokens fail closed (`unknown`).
+service origin). Invalid tokens and `email_verified=false` fail closed (`unknown`).
+
+`resolve_actor` when Bearer verifies: matching IAP email header → `iap_header`;
+service-account Bearer + distinct user header → `iap_header`; disagreeing user
+Bearer vs header → trust Bearer (`bearer_jwt`, ignore spoof); Bearer alone →
+`bearer_jwt`. Header alone → `iap_header`.
 
 Prefer `resolve_actor` / `ResolvedActor.email` in new code; keep
 `actor_from_iap_header` for backward compatibility.
