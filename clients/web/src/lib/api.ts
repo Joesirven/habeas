@@ -776,7 +776,7 @@ export function patchAccessDeliveryStatus(
   body: { status: 'pending' | 'delivered' | 'failed' | 'recalled'; notes?: string },
 ) {
   return fetchAdminApi<FulfillmentArtifact>(
-    `/ops/fulfillment/requests/${encodeURIComponent(requestId)}/delivery-status`,
+    `/ops/drop/workflow/delivery/${encodeURIComponent(requestId)}/status`,
     {
       method: 'PATCH',
       body: JSON.stringify(body),
@@ -1354,7 +1354,9 @@ export function getRequestJourney(requestId: string) {
 }
 
 export function getNeedsAttention(
-  limitOrParams?: number | { limit?: number; kind?: NeedsAttentionKind },
+  limitOrParams?:
+    | number
+    | { limit?: number; kind?: NeedsAttentionKind; assignee?: string },
 ) {
   const params =
     typeof limitOrParams === 'number'
@@ -1363,6 +1365,7 @@ export function getNeedsAttention(
   const search = new URLSearchParams()
   if (params.limit != null) search.set('limit', String(params.limit))
   if (params.kind) search.set('kind', params.kind)
+  if (params.assignee) search.set('assignee', params.assignee)
   const query = search.toString()
   return fetchAdminApi<NeedsAttentionResponse>(
     `/ops/requests/needs-attention${query ? `?${query}` : ''}`,

@@ -341,18 +341,21 @@ function LegalHome() {
 }
 
 function DataOwnerHome() {
-  const { me } = useMe()
   const attentionQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'do-home'],
     queryFn: () => getNeedsAttention({ limit: 1000, kind: 'matching' }),
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })
+  const assignedQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'do-assigned'],
+    queryFn: () =>
+      getNeedsAttention({ limit: 1000, kind: 'matching', assignee: 'me' }),
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  })
   const items = attentionQuery.data?.items ?? []
-  const mine = items.filter((item) => {
-    const assignee = item.assignment?.assignee_identity?.trim().toLowerCase()
-    return Boolean(me?.email && assignee === me.email.trim().toLowerCase())
-  }).length
+  const mine = assignedQuery.data?.items.length ?? 0
 
   return (
     <section className="space-y-6">
@@ -369,6 +372,7 @@ function DataOwnerHome() {
       <div className="grid gap-3 sm:grid-cols-2">
         <Link
           to="/requests/needs-attention"
+          search={{ kind: 'matching' }}
           className="taste-panel-soft block space-y-1 p-4"
         >
           <p className="text-[0.65rem] uppercase tracking-wide text-mute">Matching review</p>
@@ -378,16 +382,19 @@ function DataOwnerHome() {
         </Link>
         <Link
           to="/requests/needs-attention"
+          search={{ kind: 'pending_tasks' }}
           className="taste-panel-soft block space-y-1 p-4"
         >
           <p className="text-[0.65rem] uppercase tracking-wide text-mute">Assigned to me</p>
           <p className="font-display text-3xl tabular-nums text-ink">
-            {attentionQuery.isPending && !attentionQuery.data ? '—' : mine}
+            {assignedQuery.isPending && !assignedQuery.data ? '—' : mine}
           </p>
         </Link>
       </div>
       <Button asChild size="sm">
-        <Link to="/requests/needs-attention">Open Inbox</Link>
+        <Link to="/requests/needs-attention" search={{ kind: 'matching' }}>
+          Open Inbox
+        </Link>
       </Button>
     </section>
   )

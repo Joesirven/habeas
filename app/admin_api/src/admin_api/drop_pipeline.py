@@ -32,6 +32,7 @@ from admin_api.approvals import (
     match_type_for_count,
     promote_matching_review_for_request,
     recommended_response_status_for_match_count,
+    record_access_delivery_status,
     send_legal_triage_to_matching,
 )
 from admin_api.cloud_run_auth import auth_headers_for
@@ -279,6 +280,13 @@ class NoticeApproveBody(BaseModel):
     request_ids: list[str] = Field(min_length=1, max_length=200)
     decision_reason: str | None = None
     decided_by: str | None = None
+
+
+class AccessDeliveryStatusBody(BaseModel):
+    """Legal Delivery: record access handoff status after external email."""
+
+    status: str = Field(min_length=3, max_length=20)
+    notes: str | None = Field(default=None, max_length=500)
 
 
 def _require_database() -> None:
@@ -2743,6 +2751,33 @@ async def drop_workflow_notice_approve(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": "ok", **result}
+
+
+@router.patch("/workflow/delivery/{request_id}/status")
+async def drop_workflow_delivery_status(
+    request_id: str,
+    body: AccessDeliveryStatusBody,
+    _principal: LegalPrincipal,
+    actor: DropMutationActor,
+):
+    """Legal Delivery: append access_delivery status (no platform mailer)."""
+    _require_database()
+    contacted_by = decided_by_for_mutation(actor, None)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await record_access_delivery_status(
+                conn,
+                request_id=request_id,
+                status=body.status,
+                contacted_by=contacted_by,
+                notes=body.notes,
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            code = 404 if detail == "request not found" else 422
+            raise HTTPException(status_code=code, detail=detail) from exc
+    return result
 
 
 @router.get("/workflow/conditions/route-triage")

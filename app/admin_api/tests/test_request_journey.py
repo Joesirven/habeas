@@ -113,6 +113,7 @@ def test_journey_routes_registered() -> None:
     assert "/ops/requests/{request_id}/journey" in openapi_paths
     needs_params = openapi_paths["/ops/requests/needs-attention"]["get"]["parameters"]
     assert any(param.get("name") == "kind" for param in needs_params)
+    assert any(param.get("name") == "assignee" for param in needs_params)
 
 
 @pytest.mark.asyncio
@@ -171,6 +172,48 @@ async def test_list_needs_attention_kind_triage_and_escalations() -> None:
     assert [item.request_id for item in triage.items] == [triage_id]
     assert escalations.kind == "escalations"
     assert [item.request_id for item in escalations.items] == [escalate_id]
+
+
+@pytest.mark.asyncio
+async def test_list_needs_attention_assignee_filter() -> None:
+    from admin_api.request_journey import NeedsAttentionAssignment, NeedsAttentionItem
+
+    mine = NeedsAttentionItem(
+        request_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        reason="matching.review",
+        kind="matching",
+        current_stage="review",
+        intake_source="drop",
+        received_at=None,
+        assignment=NeedsAttentionAssignment(
+            target_role="reviewer",
+            kind="assign",
+            assignee_identity="rev@habeas.com",
+        ),
+    )
+    other = NeedsAttentionItem(
+        request_id="ffffffff-1111-2222-3333-444444444444",
+        reason="matching.review",
+        kind="matching",
+        current_stage="review",
+        intake_source="drop",
+        received_at=None,
+        assignment=NeedsAttentionAssignment(
+            target_role="reviewer",
+            kind="assign",
+            assignee_identity="other@habeas.com",
+        ),
+    )
+    conn = AsyncMock()
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        new_callable=AsyncMock,
+        return_value=[mine, other],
+    ):
+        response = await request_journey.list_needs_attention(
+            conn, limit=50, kind="matching", assignee="rev@habeas.com"
+        )
+    assert [item.request_id for item in response.items] == [mine.request_id]
 
 
 @pytest.mark.asyncio

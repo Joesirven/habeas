@@ -17,9 +17,9 @@
 - Below `md`: show queue **or** detail (← Queue), never stack the pane under the list.
 - Kind tabs (ops): All · Matching · Triage · Escalations · Delivery · Notice · Comms · Tasks.
 - Kind tabs (Legal): Triage · Escalations · Notice · Delivery · Tasks — default Triage; no Matching/Comms/All. Fetch Legal lanes only (`getLegalNeedsAttention`) so matching volume cannot crowd the case queue. URL `?kind=`.
-- Legal / data-owner persona: Home / My work (not pipeline Dashboard); hide Workers; Triage bulk Reject `2` / Send to matching; Escalations resolve via fulfill path + comments; Notice/Delivery empty until feeds wire; DO approve uses recommended `3`/`4`/`5`.
+- Legal / data-owner persona: Home / My work (not pipeline Dashboard); hide Workers; Triage bulk Reject `2` / Send to matching; Escalations resolve via fulfill path + comments; DO approve uses recommended `3`/`4`/`5`. DO **Tasks** = `assignee=me` (My work Assigned card → `?kind=pending_tasks`).
 - Legal **Conditions** (`/requests/conditions`): version `intake.route_triage` via allowlist (`requestor_state_not_in`) or explicit Triage list (`state_in`); save closes active rule and inserts replacement.
-- Legal **Notice**: fulfilled DROP rows (`response_status` set + `notice_review_status=pending`); bulk/detail **Approve notice**. **Delivery**: `communication_attempts` purpose `access_delivery` awaiting status (empty until access packs land).
+- Legal **Notice**: fulfilled DROP rows (`response_status` set + `notice_review_status=pending`); bulk/detail **Approve notice**. **Delivery**: `communication_attempts` purpose `access_delivery` awaiting status; Legal **Mark delivered / failed / recalled** via `PATCH …/workflow/delivery/{id}/status` (shareable URL when access packs land).
 - Queue rows: human title first, then source · lane · id, blocker/due — not id-first mono soup.
 - Detail pane: title + meta strip, compact journey chips, focused Matching / Delivery / Notice body, comments footer.
 - Delivery: shareable URL, Copy URL, **Draft outbound** (template with URL in body), delivery status.

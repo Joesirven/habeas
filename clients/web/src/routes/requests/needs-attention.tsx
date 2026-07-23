@@ -777,9 +777,14 @@ function InboxReviewPane({
     mutationFn: (status: 'delivered' | 'failed' | 'recalled') =>
       patchAccessDeliveryStatus(item.request_id, { status }),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({
-        queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', item.request_id],
-      })
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', item.request_id],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ['admin-api', 'ops', 'requests', 'needs-attention'],
+        }),
+      ])
     },
   })
 
@@ -1721,12 +1726,16 @@ export function NeedsAttentionPage() {
       'ops',
       'requests',
       'needs-attention',
-      legalPersona ? 'legal' : 'ops',
+      legalPersona ? 'legal' : dataOwnerPersona ? 'data-owner' : 'ops',
     ],
     // Max allowed by admin-api — Select all must cover every filter match loaded,
     // not just the rows currently scrolled into the queue pane.
     queryFn: () =>
-      legalPersona ? getLegalNeedsAttention(1000) : getNeedsAttention(1000),
+      legalPersona
+        ? getLegalNeedsAttention(1000)
+        : dataOwnerPersona
+          ? getNeedsAttention({ limit: 1000, kind: 'matching' })
+          : getNeedsAttention(1000),
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })

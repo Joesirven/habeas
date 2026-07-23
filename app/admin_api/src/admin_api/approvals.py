@@ -735,6 +735,50 @@ async def approve_legal_notice_review(
     }
 
 
+_ACCESS_DELIVERY_STATUSES = frozenset(
+    {"pending", "recorded", "sent", "failed", "delivered", "recalled"}
+)
+
+
+async def record_access_delivery_status(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    status: str,
+    contacted_by: str,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    """Append an access_delivery ledger row (external email; no SMTP)."""
+    status_norm = status.strip().lower()
+    if status_norm not in _ACCESS_DELIVERY_STATUSES:
+        raise ValueError(f"invalid delivery status: {status!r}")
+    exists = await conn.fetchval(
+        "SELECT 1 FROM requests WHERE id = $1",
+        UUID(request_id),
+    )
+    if exists is None:
+        raise ValueError("request not found")
+    await conn.execute(
+        """
+        INSERT INTO communication_attempts (
+            request_id, direction, method, purpose, status, contacted_by, notes
+        ) VALUES ($1, 'outbound', 'manual', 'access_delivery', $2, $3, $4)
+        """,
+        UUID(request_id),
+        status_norm,
+        contacted_by.strip()[:200],
+        notes,
+    )
+    return {
+        "request_id": request_id,
+        "kind": "access",
+        "fulfillment_artifact_uri": None,
+        "shareable_url": None,
+        "access_delivery_status": status_norm,
+        "attempt_status": None,
+    }
+
+
 __all__ = [
     "ASSIGNMENT_TARGETS",
     "MATCHING_REVIEW_ACTION",
@@ -762,5 +806,6 @@ __all__ = [
     "match_type_for_count",
     "promote_matching_review_for_request",
     "recommended_response_status_for_match_count",
+    "record_access_delivery_status",
     "send_legal_triage_to_matching",
 ]

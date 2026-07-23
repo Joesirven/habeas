@@ -1756,6 +1756,59 @@ def test_legal_triage_bulk_reject_and_send_to_matching(
     assert forbidden.status_code == 403
 
 
+def test_delivery_status_legal_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_record(
+        conn: Any,
+        *,
+        request_id: str,
+        status: str,
+        contacted_by: str,
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        captured["record"] = {
+            "request_id": request_id,
+            "status": status,
+            "contacted_by": contacted_by,
+            "notes": notes,
+        }
+        return {
+            "request_id": request_id,
+            "kind": "access",
+            "fulfillment_artifact_uri": None,
+            "shareable_url": None,
+            "access_delivery_status": status,
+            "attempt_status": None,
+        }
+
+    _fake_pool(monkeypatch)
+    roles.settings.admin_api_legals = "legal@example.com"
+    roles.settings.admin_api_data_owners = "owner@example.com"
+    roles.settings.admin_api_super_admins = ""
+    roles.settings.admin_api_admins = ""
+    monkeypatch.setattr(drop_pipeline, "record_access_delivery_status", fake_record)
+
+    rid = "00000000-0000-0000-0000-000000000099"
+    with TestClient(app) as client:
+        ok = client.patch(
+            f"/ops/drop/workflow/delivery/{rid}/status",
+            headers={IAP_EMAIL_HEADER: "legal@example.com"},
+            json={"status": "delivered"},
+        )
+        forbidden = client.patch(
+            f"/ops/drop/workflow/delivery/{rid}/status",
+            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            json={"status": "delivered"},
+        )
+
+    assert ok.status_code == 200
+    assert ok.json()["access_delivery_status"] == "delivered"
+    assert captured["record"]["request_id"] == rid
+    assert captured["record"]["contacted_by"] == "legal@example.com"
+    assert forbidden.status_code == 403
+
+
 def test_notice_approve_legal_only(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 

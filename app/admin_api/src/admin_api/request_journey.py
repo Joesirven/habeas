@@ -964,8 +964,13 @@ async def list_needs_attention(
     *,
     limit: int,
     kind: NeedsAttentionKind = "all",
+    assignee: str | None = None,
 ) -> NeedsAttentionResponse:
-    """Inbox queue by kind (matching · triage · escalations · notice · delivery · all)."""
+    """Inbox queue by kind (matching · triage · escalations · notice · delivery · all).
+
+    Optional ``assignee`` (email) keeps only rows whose current assignment
+    ``assignee_identity`` matches (case-insensitive) — My work · Tasks.
+    """
     if kind not in NEEDS_ATTENTION_KINDS:
         raise ValueError(f"invalid needs-attention kind: {kind!r}")
 
@@ -986,6 +991,17 @@ async def list_needs_attention(
         items.extend(await list_notice_needs_attention(conn, limit=limit))
     if kind in {"delivery", "all"}:
         items.extend(await list_delivery_needs_attention(conn, limit=limit))
+
+    assignee_norm = assignee.strip().lower() if assignee and assignee.strip() else None
+    if assignee_norm is not None:
+        items = [
+            item
+            for item in items
+            if (item.assignment and item.assignment.assignee_identity or "")
+            .strip()
+            .lower()
+            == assignee_norm
+        ]
 
     # Stable sort + hard limit when unioning kinds.
     items.sort(key=lambda item: item.requested_at or item.received_at or "")
@@ -1152,15 +1168,27 @@ def assert_no_pii_keys(payload: Any) -> None:
 
 @router.get("/needs-attention", response_model=NeedsAttentionResponse)
 async def needs_attention(
-    _viewer: RequestOpsViewer,
+    viewer: RequestOpsViewer,
     kind: NeedsAttentionKind = Query(default="all"),
     limit: int = Query(default=200, ge=1, le=1000),
+    assignee: str | None = Query(
+        default=None,
+        description="Filter by assignment assignee_identity; use 'me' for the caller.",
+    ),
 ) -> NeedsAttentionResponse:
     _require_database()
+    assignee_filter = assignee
+    if assignee_filter is not None and assignee_filter.strip().lower() == "me":
+        assignee_filter = viewer.email
     pool = get_pool()
     async with pool.acquire() as conn:
         try:
-            response = await list_needs_attention(conn, limit=limit, kind=kind)
+            response = await list_needs_attention(
+                conn,
+                limit=limit,
+                kind=kind,
+                assignee=assignee_filter,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     assert_no_pii_keys(response.model_dump())
