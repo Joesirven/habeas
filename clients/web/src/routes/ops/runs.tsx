@@ -35,9 +35,11 @@ const STATUS_TABS: {
 }[] = [
   { key: 'all', label: 'All' },
   { key: 'failed', label: 'Failed', apiStatus: 'failed' },
-  { key: 'in_flight', label: 'In progress', apiStatus: 'in_flight' },
+  { key: 'pending', label: 'Queued', apiStatus: 'pending' },
+  { key: 'in_flight', label: 'In flight', apiStatus: 'in_flight' },
   { key: 'claimed', label: 'Claimed', apiStatus: 'claimed' },
-  { key: 'success', label: 'Success', apiStatus: 'success' },
+  { key: 'abandoned', label: 'Abandoned', apiStatus: 'abandoned' },
+  { key: 'success', label: 'Finished', apiStatus: 'success' },
 ]
 
 const JOB_LABELS: Record<RunsJobFilter, string> = {

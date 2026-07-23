@@ -157,6 +157,7 @@ async def test_fetch_run_summaries_connector_request_id_null() -> None:
         job="drop_connector",
         status=None,
         request_id=None,
+        process_id=None,
         since=None,
         limit=50,
         offset=0,
@@ -165,6 +166,63 @@ async def test_fetch_run_summaries_connector_request_id_null() -> None:
     assert len(rows) == 1
     assert rows[0].request_id is None
     assert rows[0].run_id == "drop_connector:3"
+
+
+def test_list_runs_filters_by_process_id(mock_pool: MagicMock) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_fetch(sql: str, *args: Any) -> list[_Row]:
+        captured["sql"] = sql
+        captured["args"] = args
+        return [
+            _Row(
+                job="drop_ingestor",
+                attempt_id=5,
+                step="land",
+                status="success",
+                request_id=None,
+                attempted_at=_STARTED,
+                completed_at=_COMPLETED,
+                attempt_number=1,
+            )
+        ]
+
+    mock_pool.fetch = AsyncMock(side_effect=fake_fetch)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/runs",
+            params={
+                "process_id": 12,
+                "job": "drop_ingestor",
+                "status": "success",
+                "window": "1w",
+            },
+            headers=_SUPER_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert response.json()[0]["run_id"] == "drop_ingestor:5"
+    sql = captured["sql"]
+    assert "job = 'drop_connector' AND attempt_id =" in sql
+    assert "drop_ingest_attempts" in sql
+    assert "matching_attempts" in sql
+    assert "c.step = 'download'" in sql
+    assert 12 in captured["args"]
+    assert "drop_ingestor" in captured["args"]
+    assert "success" in captured["args"]
+
+
+def test_list_runs_rejects_invalid_process_id(mock_pool: MagicMock) -> None:
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/runs",
+            params={"process_id": 0},
+            headers=_SUPER_HEADERS,
+        )
+
+    assert response.status_code == 422
+    mock_pool.fetch.assert_not_called()
 
 
 def test_list_runs_forbidden_for_admin(mock_pool: MagicMock) -> None:
