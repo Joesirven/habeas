@@ -38,6 +38,7 @@ General Amigo frost: [`.agent/modules/design-taste.md`](../../.agent/modules/des
 - Top tabs: Pipeline · Hash refresh · History · Configurations (`tab=`). **Run Pipeline** (CA DROP) queues download → land → promote.
 - Stage tabs Download / Ingest / Matching / Fulfillment live inside each bulk card (`stage=`); Land+Promote combined as Ingest — not top console tabs.
 - Bulk cards: compact collapsed row (Dur/Prog + tiny stage chips); Matching completion % from `matching_attempts` only (do not blend review); **Matching results** only when Matching stage is selected.
+- Bulk-card state tiles → `/ops/runs?process=<id>&job=…&status=…&window=…` (`process` = download attempt id; API query `process_id`).
 - Individual view: status toggles (Open & failed / Queued / Failed / Abandoned / Finished / All) on the same filter row as Intake/Window.
 - Hash-index: **Refresh state** / **Refresh all** enqueue then process in one action (USPS 50+DC); rematch-on-refresh for every successful state.
 - Matching review / fulfill-decline live in Inbox (`?bulk=`). Bulk card runs support pagination, re-run, assign, detail dialog.
@@ -45,8 +46,13 @@ General Amigo frost: [`.agent/modules/design-taste.md`](../../.agent/modules/des
 ## Local admin-api proxy
 
 - Default: `VITE_PROXY_TARGET=http://127.0.0.1:8000` (no Identity-Aware Proxy).
-- Deployed admin-api-dev (`*.run.app`): Vite mints a cached ADC ID token (audience = service origin) and injects `Authorization: Bearer`. Super_admin allowlist only; actor email from verified JWT. Optional `IAP_ID_TOKEN` / `CLOUD_RUN_ID_TOKEN` override; `IAP_USER_EMAIL` legacy header still forwarded if set.
-- Non-super_admin: use ops-ia IAP front door, not the ADC proxy.
+- Deployed admin-api-dev (`*.run.app`): Vite impersonates the admin-api runtime SA via
+  `gcloud auth print-identity-token --audiences=<service> --impersonate-service-account=…`
+  (user ADC cannot mint Cloud Run audiences). Injects `Authorization: Bearer` +
+  `X-Goog-Authenticated-User-Email` from `IAP_USER_EMAIL`. Requires
+  `IAP_IMPERSONATE_SERVICE_ACCOUNT` (defaults to project compute SA).
+- Do not put an IAP OAuth-client audience token in `IAP_ID_TOKEN` — admin-api will 401.
+- Non-super_admin: use ops-ia IAP front door, not the local proxy.
 - Super_admin can simulate effective role via banner `View as` → `X-Dev-Simulate-Role` (sessionStorage).
 
 ## Rules

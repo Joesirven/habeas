@@ -7,6 +7,8 @@
 Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Server-Sent Events live stream, mutation routes for web and Habeas CLI.
 
 - Routes: approvals, dashboard, admin rules, ops, `GET /live/events`
+- Unified Runs: `GET /ops/runs` — filters `job`, `status`, `request_id`, `process_id`
+  (bulk download attempt id; ingest/matching via download `gcs_uri`), `window`/`since`
 - DROP ops: `GET /ops/drop/pipeline`, spine proxies, hash-index refresh enqueue /
   enqueue-all (USPS 50+DC) / process
 - Fleet visibility (U23): `GET /ops/drop/workers`, `GET /ops/health/queues` —

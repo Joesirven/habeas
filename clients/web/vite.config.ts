@@ -1,8 +1,14 @@
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
-import { GoogleAuth } from 'google-auth-library'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { defineConfig, loadEnv, type Plugin } from 'vite'
 import { fileURLToPath, URL } from 'node:url'
+
+const execFileAsync = promisify(execFile)
+
+const DEFAULT_IMPERSONATE_SA =
+  '95660886550-compute@developer.gserviceaccount.com'
 
 function isCloudRunTarget(target: string): boolean {
   try {
@@ -24,6 +30,7 @@ function jwtExpiryMs(token: string): number {
     if (!payload) return Date.now() + 3_600_000
     const json = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
       exp?: number
+      aud?: string | string[]
     }
     return typeof json.exp === 'number' ? json.exp * 1000 : Date.now() + 3_600_000
   } catch {
@@ -31,10 +38,34 @@ function jwtExpiryMs(token: string): number {
   }
 }
 
-function createAdcIdTokenCache(audience: string) {
+function jwtAudience(token: string): string | null {
+  try {
+    const payload = token.split('.')[1]
+    if (!payload) return null
+    const json = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
+      aud?: string | string[]
+    }
+    if (typeof json.aud === 'string') return json.aud
+    if (Array.isArray(json.aud) && typeof json.aud[0] === 'string') return json.aud[0]
+    return null
+  } catch {
+    return null
+  }
+}
+
+function normalizeIapEmail(raw: string): string {
+  const trimmed = raw.trim()
+  if (!trimmed) return ''
+  return trimmed.includes(':') ? trimmed : `accounts.google.com:${trimmed}`
+}
+
+/**
+ * User ADC cannot mint Cloud Run ``--audiences`` ID tokens. Mirror the CLI:
+ * impersonate the admin-api runtime SA and include email.
+ */
+function createImpersonatedIdTokenCache(audience: string, impersonateSa: string) {
   let cached: { token: string; expiresAt: number } | null = null
   let inflight: Promise<string> | null = null
-  const auth = new GoogleAuth()
 
   return async function getIdToken(): Promise<string> {
     const skewMs = 60_000
@@ -43,8 +74,23 @@ function createAdcIdTokenCache(audience: string) {
     }
     if (!inflight) {
       inflight = (async () => {
-        const client = await auth.getIdTokenClient(audience)
-        const token = await client.idTokenProvider.fetchIdToken(audience)
+        const { stdout, stderr } = await execFileAsync(
+          'gcloud',
+          [
+            'auth',
+            'print-identity-token',
+            `--audiences=${audience}`,
+            `--impersonate-service-account=${impersonateSa}`,
+            '--include-email',
+          ],
+          { timeout: 30_000, maxBuffer: 1024 * 1024 },
+        )
+        const token = stdout.trim()
+        if (!token) {
+          throw new Error(
+            `gcloud returned empty identity token${stderr ? `: ${stderr.trim()}` : ''}`,
+          )
+        }
         cached = { token, expiresAt: jwtExpiryMs(token) }
         return token
       })().finally(() => {
@@ -56,19 +102,28 @@ function createAdcIdTokenCache(audience: string) {
 }
 
 /**
- * Inject Cloud Run invoker Authorization (ADC-minted or static env override) before
- * Vite's /api proxy. Browser headers such as X-Dev-Simulate-Role pass through unchanged.
+ * Inject Cloud Run invoker Authorization + actor email before Vite's /api proxy.
+ * Browser headers such as X-Dev-Simulate-Role pass through unchanged.
  */
 function adcProxyAuthPlugin(options: {
-  useAdc: boolean
   audience: string
   staticToken: string
-  /** Only set when VITE_UNSAFE_IAP_USER_EMAIL=1 — spoofable; omit on ADC path. */
+  impersonateSa: string
   iapUserEmail: string
 }): Plugin {
-  const getAdcToken = options.useAdc ? createAdcIdTokenCache(options.audience) : null
-  const hasBearer = Boolean(options.staticToken || getAdcToken)
-  const injectAuth = hasBearer || Boolean(options.iapUserEmail)
+  const staticAudOk =
+    Boolean(options.staticToken) &&
+    Boolean(options.audience) &&
+    jwtAudience(options.staticToken) === options.audience
+
+  // Prefer a correct static Cloud Run token; otherwise mint via SA impersonation.
+  // Ignore wrong-audience static tokens (common: IAP OAuth client aud pasted into IAP_ID_TOKEN).
+  const getImpersonatedToken =
+    options.audience && options.impersonateSa && !staticAudOk
+      ? createImpersonatedIdTokenCache(options.audience, options.impersonateSa)
+      : null
+
+  const injectAuth = Boolean(getImpersonatedToken) || staticAudOk
 
   return {
     name: 'adc-proxy-auth',
@@ -81,15 +136,14 @@ function adcProxyAuthPlugin(options: {
           return
         }
         try {
-          if (options.staticToken) {
+          if (staticAudOk) {
             req.headers.authorization = `Bearer ${options.staticToken}`
-          } else if (getAdcToken) {
-            const token = await getAdcToken()
+          } else if (getImpersonatedToken) {
+            const token = await getImpersonatedToken()
             req.headers.authorization = `Bearer ${token}`
           }
-          // Never attach spoofable IAP email alongside ADC/static Bearer — admin-api
-          // would treat matching/disagreeing headers specially; JWT email is identity.
-          if (options.iapUserEmail && !hasBearer) {
+          // SA Bearer needs the user email header for allowlists (CLI auth login pattern).
+          if (options.iapUserEmail) {
             req.headers['x-goog-authenticated-user-email'] = options.iapUserEmail
           }
           next()
@@ -98,9 +152,9 @@ function adcProxyAuthPlugin(options: {
           res.statusCode = 502
           res.setHeader('Content-Type', 'text/plain; charset=utf-8')
           res.end(
-            `Failed to mint ADC ID token for ${options.audience}: ${message}\n` +
-              'Ensure Application Default Credentials (gcloud auth application-default login) ' +
-              'and that this principal is in SUPER_ADMINS on admin-api-dev.\n',
+            `Failed to mint Cloud Run ID token for ${options.audience}: ${message}\n` +
+              'Ensure gcloud auth login, permission to impersonate ' +
+              `${options.impersonateSa}, and IAP_USER_EMAIL is set to your @habeas.us address.\n`,
           )
         }
       })
@@ -111,27 +165,26 @@ function adcProxyAuthPlugin(options: {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const proxyTarget = env.VITE_PROXY_TARGET || 'http://127.0.0.1:8000'
-  // Optional override: skip ADC minting when a pre-minted token is provided.
   const staticToken = (env.IAP_ID_TOKEN || env.CLOUD_RUN_ID_TOKEN || '').trim()
-  // Spoofable header — only when explicitly opted in AND not using Bearer ADC.
-  const unsafeIapEmail = env.VITE_UNSAFE_IAP_USER_EMAIL === '1'
-  const rawEmail = unsafeIapEmail ? (env.IAP_USER_EMAIL || '').trim() : ''
-  const iapUserEmail = rawEmail
-    ? rawEmail.includes(':')
-      ? rawEmail
-      : `accounts.google.com:${rawEmail}`
-    : ''
+  const impersonateSa = (
+    env.IAP_IMPERSONATE_SERVICE_ACCOUNT || DEFAULT_IMPERSONATE_SA
+  ).trim()
+  const iapUserEmail = normalizeIapEmail(env.IAP_USER_EMAIL || '')
   const cloudRun = isCloudRunTarget(proxyTarget)
   const audience = cloudRun ? audienceFromTarget(proxyTarget) : ''
 
   return {
     plugins: [
-      adcProxyAuthPlugin({
-        useAdc: cloudRun && !staticToken,
-        audience,
-        staticToken,
-        iapUserEmail,
-      }),
+      ...(cloudRun
+        ? [
+            adcProxyAuthPlugin({
+              audience,
+              staticToken,
+              impersonateSa,
+              iapUserEmail,
+            }),
+          ]
+        : []),
       react(),
       tailwindcss(),
     ],
