@@ -166,10 +166,10 @@ function buildRunsSearch(
   const next: RunsSearch = {
     window: patch.window ?? current.window ?? DEFAULT_RUNS_WINDOW,
   }
-  const job = patch.job !== undefined ? patch.job : current.job
-  const status = patch.status !== undefined ? patch.status : current.status
-  const requestId = patch.request_id !== undefined ? patch.request_id : current.request_id
-  const since = patch.since !== undefined ? patch.since : current.since
+  const job = 'job' in patch ? patch.job : current.job
+  const status = 'status' in patch ? patch.status : current.status
+  const requestId = 'request_id' in patch ? patch.request_id : current.request_id
+  const since = 'since' in patch ? patch.since : current.since
   if (job) next.job = job
   if (status) next.status = status
   if (requestId) next.request_id = requestId

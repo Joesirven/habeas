@@ -25,6 +25,7 @@ Keep Habeas Amigo/`taste-*` tokens (navy, frost chips, matte panels). On **Runs,
 
 - Table-first / rail-first composition — not landing-page heroes.
 - Compact rows (`text-xs`, tight `py`), status tabs/filters, URL search params.
+- Search-param merges: use `'key' in patch` (not `!== undefined`) so All/clear can pass `undefined` — see frontend-stack.
 - Horizontal stage rail for request journey; dense run list like Dagster Runs.
 - One volume strip/chart on ops dashboard (Prefect overview) — not four equal marketing KPI tiles as the whole page.
 - Do **not** invent a second design system or copy Prefect dark/purple chrome.

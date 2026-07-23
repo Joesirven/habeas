@@ -155,15 +155,14 @@ export function RequestsPage() {
     void navigate({
       to: '/requests',
       search: {
-        source: patch.source !== undefined ? patch.source : search.source,
-        state: patch.state !== undefined ? patch.state : search.state,
-        attention: patch.attention !== undefined ? patch.attention : search.attention,
-        raw: patch.raw !== undefined ? patch.raw : search.raw,
-        q: patch.q !== undefined ? patch.q : search.q,
-        received_after:
-          patch.received_after !== undefined ? patch.received_after : search.received_after,
+        source: 'source' in patch ? patch.source : search.source,
+        state: 'state' in patch ? patch.state : search.state,
+        attention: 'attention' in patch ? patch.attention : search.attention,
+        raw: 'raw' in patch ? patch.raw : search.raw,
+        q: 'q' in patch ? patch.q : search.q,
+        received_after: 'received_after' in patch ? patch.received_after : search.received_after,
         received_before:
-          patch.received_before !== undefined ? patch.received_before : search.received_before,
+          'received_before' in patch ? patch.received_before : search.received_before,
       },
       replace: true,
     })

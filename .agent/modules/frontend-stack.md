@@ -34,3 +34,18 @@ Visual design: load [`design-taste.md`](design-taste.md). For DROP Ops IA (Runs 
 - Thin client — no business rules in browser; all authorization on admin-api.
 - Not Next.js — single-page app on Cloud Run (`admin-web-*`) behind Identity-Aware Proxy.
 - Mutations never bypass admin-api.
+
+## Search-param merge (filter clear)
+
+When merging a filter patch into current URL search, **do not** use `patch.x !== undefined ? patch.x : current.x`. Passing `{ x: undefined }` (All / clear) is treated as “keep current,” so the filter cannot clear.
+
+Use key presence instead:
+
+```ts
+const x = 'x' in patch ? patch.x : current.x
+```
+
+- Omit the key → preserve current value.
+- Pass explicit `undefined` → clear.
+
+Applies to Runs `buildRunsSearch`, Requests/Workers `patchSearch`, and any similar ops toolbar merge.

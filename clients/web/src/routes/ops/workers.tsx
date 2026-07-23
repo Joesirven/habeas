@@ -295,8 +295,8 @@ function WorkersBody() {
       search: {
         window: patch.window ?? window,
         tab: patch.tab ?? tab,
-        job: patch.job !== undefined ? patch.job : job,
-        since: patch.since !== undefined ? patch.since : since,
+        job: 'job' in patch ? patch.job : job,
+        since: 'since' in patch ? patch.since : since,
       },
       replace: true,
     })
