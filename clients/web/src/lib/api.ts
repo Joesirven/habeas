@@ -3,17 +3,51 @@ const API_BASE = import.meta.env.VITE_ADMIN_API_URL || '/api'
 
 export type UserRole = 'super_admin' | 'admin' | 'data_owner'
 
+/** sessionStorage key for X-Dev-Simulate-Role (super_admin local/dev only). */
+export const SIMULATE_ROLE_STORAGE_KEY = 'habeas-cli.simulate-role'
+
+export const SIMULATE_ROLE_VALUES: UserRole[] = ['super_admin', 'admin', 'data_owner']
+
 export type MePayload = {
   email: string
+  /** Effective role (after X-Dev-Simulate-Role when allowed). */
   role: UserRole
+  /** Allowlist role before simulate override. */
+  real_role: UserRole
+}
+
+export function getStoredSimulateRole(): UserRole | null {
+  if (typeof sessionStorage === 'undefined') return null
+  const value = sessionStorage.getItem(SIMULATE_ROLE_STORAGE_KEY)
+  if (value === 'super_admin' || value === 'admin' || value === 'data_owner') {
+    return value
+  }
+  return null
+}
+
+export function setStoredSimulateRole(role: UserRole | null) {
+  if (typeof sessionStorage === 'undefined') return
+  if (role == null) {
+    sessionStorage.removeItem(SIMULATE_ROLE_STORAGE_KEY)
+  } else {
+    sessionStorage.setItem(SIMULATE_ROLE_STORAGE_KEY, role)
+  }
 }
 
 export async function fetchAdminApi<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+  }
+  const simulateRole = getStoredSimulateRole()
+  if (simulateRole) {
+    headers['X-Dev-Simulate-Role'] = simulateRole
+  }
+
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
+      ...headers,
       ...init?.headers,
     },
   })
@@ -54,8 +88,12 @@ export type ManualRequestInput = {
   external_id?: string
 }
 
-export function getMe() {
-  return fetchAdminApi<MePayload>('/me')
+export async function getMe() {
+  const me = await fetchAdminApi<MePayload>('/me')
+  return {
+    ...me,
+    real_role: me.real_role ?? me.role,
+  }
 }
 
 export function getHealth() {

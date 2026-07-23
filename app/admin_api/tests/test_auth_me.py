@@ -19,7 +19,11 @@ def test_auth_me_without_iap_header(monkeypatch) -> None:
         response = client.get("/auth/me")
 
     assert response.status_code == 200
-    assert response.json() == {"email": "unknown", "role": ROLE_SUPER_ADMIN}
+    assert response.json() == {
+        "email": "unknown",
+        "role": ROLE_SUPER_ADMIN,
+        "real_role": ROLE_SUPER_ADMIN,
+    }
 
 
 def test_auth_me_with_iap_header(monkeypatch) -> None:
@@ -36,4 +40,5 @@ def test_auth_me_with_iap_header(monkeypatch) -> None:
     assert response.json() == {
         "email": "dev-owner-1@example.com",
         "role": ROLE_SUPER_ADMIN,
+        "real_role": ROLE_SUPER_ADMIN,
     }

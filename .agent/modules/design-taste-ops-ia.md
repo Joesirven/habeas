@@ -35,7 +35,8 @@
 - Top console tabs: **Pipeline** · Hash refresh · History · Configurations.
 - Header: **Run Pipeline** (shadcn dropdown → CA DROP + confirm dialog with staged queue). Compact metric cards with ring/spark viz + hover detail popovers.
 - Pipeline list: shadcn Tabs (Bulk / Individual); compact Popover filters.
-- Bulk cards: Duration + Progress (collapsed) or Est. completion / error viz (expanded); stage cards act as tabs (**Download · Ingest · Matching · Fulfillment**); idle steps stay compact but full labels; current/selected step large with Finished/Queued/Failed/Abandoned chips; compact **Matching results** control.
+- Bulk cards: human title from `process_at`; collapsed ~1–2 lines with Dur/Prog inline + tiny stage chips (no Matching results in header); expanded title row shares Dur + Est/err; stage tabs stay local (no URL write per click — apply `?stage=` once on expand).
+- Stage strip: only **selected** tab is large (Finished/Queued/Failed/Abandoned); current-not-selected stays compact with an in-progress cue; **Matching results** only when Matching tab is selected.
 - Expanded runs: toggle filters, pagination, bulk Re-run / Assign / Details dialog → full Runs page.
 
 ### Workers

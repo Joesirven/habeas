@@ -140,13 +140,21 @@ def _approval_record(row: dict[str, Any]) -> ApprovalRecord:
 
 @app.get("/me", response_model=MeResponse)
 async def me(principal: CurrentRolePrincipal) -> MeResponse:
-    return MeResponse(email=principal.email, role=principal.role)
+    return MeResponse(
+        email=principal.email,
+        role=principal.role,
+        real_role=principal.real_role,
+    )
 
 
 @app.get("/auth/me", response_model=MeResponse)
 async def auth_me(principal: CurrentRolePrincipal) -> MeResponse:
     """Alias for /me — primary IAP branch used /auth/me as the identity probe."""
-    return MeResponse(email=principal.email, role=principal.role)
+    return MeResponse(
+        email=principal.email,
+        role=principal.role,
+        real_role=principal.real_role,
+    )
 
 
 @app.get("/healthz")

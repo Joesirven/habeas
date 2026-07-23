@@ -2,7 +2,7 @@
 
 import typer
 
-from habeas_cli.commands import audit, db, drop, queue, request, worker
+from habeas_cli.commands import audit, auth, db, drop, queue, request, worker
 
 app = typer.Typer(help="Habeas privacy automation command-line interface")
 app.add_typer(db.app, name="db")
@@ -11,6 +11,7 @@ app.add_typer(queue.app, name="queue")
 app.add_typer(worker.app, name="worker")
 app.add_typer(audit.app, name="audit")
 app.add_typer(drop.app, name="drop")
+app.add_typer(auth.app, name="auth")
 
 
 @app.callback()
@@ -55,6 +56,9 @@ def commands(human: bool = typer.Option(False, "--human")):
                 "drop match",
                 "drop fulfill",
                 "drop hash-index-refresh enqueue|process|status",
+                "auth login [--adc]",
+                "auth logout",
+                "auth status",
             ]
         },
         human=human,

@@ -14,7 +14,7 @@ Shared library package. Each submodule under `src/habeas_privacy_core/` has its 
 | [`audit/`](src/habeas_privacy_core/audit/) | Audit writer, middleware, redaction |
 | [`adapters/`](src/habeas_privacy_core/adapters/) | Protocol bases and shared integration helpers |
 | [`observability/`](src/habeas_privacy_core/observability/) | Logging, tracing, metrics |
-| [`auth/`](src/habeas_privacy_core/auth/) | Identity-Aware Proxy identity parsing |
+| [`auth/`](src/habeas_privacy_core/auth/) | IAP header + Bearer Google ID token identity parsing |
 | [`live/`](src/habeas_privacy_core/live/) | NOTIFY helpers for live events |
 
 Vendor adapters belong in `app/<name>/adapters/`, not here.

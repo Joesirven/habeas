@@ -31,6 +31,8 @@ def test_is_remote_admin_api():
 def test_local_admin_api_skips_iap(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("IAP_OAUTH_CLIENT_ID", raising=False)
     monkeypatch.delenv("IAP_ID_TOKEN", raising=False)
+    monkeypatch.delenv("ADMIN_API_AUTH", raising=False)
+    monkeypatch.setenv("HABEAS_CREDENTIALS", "/tmp/habeas-cli-missing-creds.json")
     headers = _auth_headers("http://127.0.0.1:8000")
     assert headers["X-Client"] == "habeas-cli"
     assert "Authorization" not in headers
@@ -39,20 +41,40 @@ def test_local_admin_api_skips_iap(monkeypatch: pytest.MonkeyPatch):
 def test_prefetched_iap_id_token(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("IAP_ID_TOKEN", "prefab.jwt.token")
     monkeypatch.delenv("IAP_OAUTH_CLIENT_ID", raising=False)
+    monkeypatch.delenv("ADMIN_API_AUTH", raising=False)
+    monkeypatch.setenv("HABEAS_CREDENTIALS", "/tmp/habeas-cli-missing-creds.json")
     headers = _auth_headers("https://admin-api-dev-hsa55rg7ja-uk.a.run.app")
     assert headers["Authorization"] == "Bearer prefab.jwt.token"
 
 
-def test_remote_requires_iap_config(monkeypatch: pytest.MonkeyPatch):
+def test_remote_requires_auth_when_adc_fails(monkeypatch: pytest.MonkeyPatch):
+    """auto on remote with no IAP env tries ADC; fail closed if mint fails."""
     monkeypatch.delenv("IAP_OAUTH_CLIENT_ID", raising=False)
     monkeypatch.delenv("IAP_ID_TOKEN", raising=False)
-    with pytest.raises(AdminApiError, match="Identity-Aware Proxy"):
+    monkeypatch.delenv("ADMIN_API_AUTH", raising=False)
+    monkeypatch.setenv("HABEAS_CREDENTIALS", "/tmp/habeas-cli-missing-creds.json")
+    with patch(
+        "habeas_cli.admin_api_client.fetch_adc_id_token",
+        side_effect=AdminApiError("ADC Cloud Run ID token failed"),
+    ):
+        with pytest.raises(AdminApiError, match="ADC Cloud Run ID token failed"):
+            _auth_headers("https://admin-api-dev-hsa55rg7ja-uk.a.run.app")
+
+
+def test_explicit_iap_requires_config(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("ADMIN_API_AUTH", "iap")
+    monkeypatch.delenv("IAP_OAUTH_CLIENT_ID", raising=False)
+    monkeypatch.delenv("IAP_ID_TOKEN", raising=False)
+    monkeypatch.setenv("HABEAS_CREDENTIALS", "/tmp/habeas-cli-missing-creds.json")
+    with pytest.raises(AdminApiError, match="IAP"):
         _auth_headers("https://admin-api-dev-hsa55rg7ja-uk.a.run.app")
 
 
 def test_oauth_client_id_mints_bearer(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("IAP_OAUTH_CLIENT_ID", "123.apps.googleusercontent.com")
     monkeypatch.delenv("IAP_ID_TOKEN", raising=False)
+    monkeypatch.delenv("ADMIN_API_AUTH", raising=False)
+    monkeypatch.setenv("HABEAS_CREDENTIALS", "/tmp/habeas-cli-missing-creds.json")
     with patch(
         "habeas_cli.admin_api_client.fetch_iap_id_token",
         return_value="minted.jwt",

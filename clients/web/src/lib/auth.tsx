@@ -11,7 +11,10 @@ type AuthContextValue = {
   isLoading: boolean
   isError: boolean
   error: Error | null
+  /** Effective role (may be simulated). */
   role: UserRole | undefined
+  /** Allowlist role before simulate override. */
+  realRole: UserRole | undefined
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -30,6 +33,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isError: query.isError,
     error: query.error instanceof Error ? query.error : null,
     role: query.data?.role,
+    realRole: query.data?.real_role ?? query.data?.role,
   }
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
@@ -45,12 +49,14 @@ export function useAuth() {
 
 /** Role session hook — shared query via AuthProvider. */
 export function useMe() {
-  const { me, isLoading, isError, role } = useAuth()
+  const { me, isLoading, isError, role, realRole } = useAuth()
 
   return {
     me,
     isLoading,
     isError,
+    role,
+    realRole,
     isSuperAdmin: role === 'super_admin',
     isAdmin: role === 'admin' || role === 'super_admin',
   }
