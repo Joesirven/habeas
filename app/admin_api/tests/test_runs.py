@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+from admin_api import main as admin_main
 from admin_api import roles, runs
 from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER, ROLE_SUPER_ADMIN
@@ -26,6 +27,8 @@ class _Row(dict):
 
 @pytest.fixture(autouse=True)
 def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Avoid lifespan create_pool when DATABASE_URL points at an unreachable host.
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
     monkeypatch.setattr(roles.settings, "admin_api_admins", "")
     monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")

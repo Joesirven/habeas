@@ -1141,6 +1141,7 @@ export async function listRuns(params?: {
   job?: string
   status?: string
   request_id?: string
+  process_id?: number
   window?: OpsTimeWindow
   since?: string
   limit?: number
@@ -1151,6 +1152,7 @@ export async function listRuns(params?: {
   if (apiJob) search.set('job', apiJob)
   if (params?.status) search.set('status', params.status)
   if (params?.request_id) search.set('request_id', params.request_id)
+  if (params?.process_id != null) search.set('process_id', String(params.process_id))
   if (params?.window && params.window !== 'custom') {
     search.set('window', params.window)
   }

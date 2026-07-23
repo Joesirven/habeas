@@ -160,6 +160,7 @@ function buildRunsSearch(
     job: RunsJobFilter | undefined
     window: RunsWindow
     request_id: string | undefined
+    process: number | undefined
     since: string | undefined
   }>,
 ): RunsSearch {
@@ -169,10 +170,12 @@ function buildRunsSearch(
   const job = 'job' in patch ? patch.job : current.job
   const status = 'status' in patch ? patch.status : current.status
   const requestId = 'request_id' in patch ? patch.request_id : current.request_id
+  const process = 'process' in patch ? patch.process : current.process
   const since = 'since' in patch ? patch.since : current.since
   if (job) next.job = job
   if (status) next.status = status
   if (requestId) next.request_id = requestId
+  if (process != null) next.process = process
   if (next.window === 'custom' && since) next.since = since
   return next
 }
@@ -289,6 +292,23 @@ function RunsToolbar({
           ) : null}
         </form>
 
+        {search.process != null ? (
+          <div className="flex flex-wrap items-end gap-2">
+            <span className="taste-frost-chip font-mono text-xs">
+              process #{search.process}
+            </span>
+            <button
+              type="button"
+              className="taste-btn text-xs"
+              onClick={() =>
+                onSearchChange(buildRunsSearch(search, { process: undefined }))
+              }
+            >
+              Clear process
+            </button>
+          </div>
+        ) : null}
+
         {window === 'custom' ? (
           <label className="flex flex-col gap-1">
             <span className="taste-micro">Since</span>
@@ -382,17 +402,23 @@ function RunsTable({ runs }: { runs: RunSummary[] }) {
 function RunsContent() {
   const navigate = useNavigate()
   const search = useSearch({ from: '/ops/runs' })
-  const { job, status, request_id: requestId, since } = search
+  const { job, status, request_id: requestId, process, since } = search
   const window = search.window ?? DEFAULT_RUNS_WINDOW
 
   const timeParams = resolveRunsTimeParams(window as OpsTimeWindow, since)
   const runsQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'runs', { job, status, window, requestId, since, timeParams }],
+    queryKey: [
+      'admin-api',
+      'ops',
+      'runs',
+      { job, status, window, requestId, process, since, timeParams },
+    ],
     queryFn: () =>
       listRuns({
         job,
         status,
         request_id: requestId,
+        process_id: process,
         ...timeParams,
         limit: 100,
       }),
@@ -418,7 +444,8 @@ function RunsContent() {
             ) : null}
           </div>
           <p className="mt-1 text-xs text-ink-soft">
-            Job attempts across DROP workers — filter by status, worker, request, and time.
+            Job attempts across DROP workers — filter by status, worker, process,
+            request, and time.
           </p>
         </div>
       </header>
