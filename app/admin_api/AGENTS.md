@@ -15,7 +15,12 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
   `ops_retry_config` overrides (floor 4); reaper merges on next `/reap` cycle
 - Home summary: `GET /ops/drop/stats/global` (ids/counts only)
 - Matching result detail includes attempt history + allowlisted `audit_payload`
-- `POST /ops/drop/match` proxies matching worker and opens a pending `matching.review` gate on success
+- `POST /ops/drop/match` proxies matching worker `/process` (one row) and opens a
+  pending `matching.review` gate on success
+- Matching drain: `POST /ops/drop/ensure-drain` proxies matching `/ensure-drain`
+  (starts Job when configured). Wave kick after `/ops/drop/dispatch` and after
+  hash-index refresh process when rematch enqueued. Pipeline JSON includes
+  `matching_attempts.drain` (active/holder/expires_at — ids/counts only)
 - Matching results (Unit 8b / U15): `GET /ops/drop/matching-results` (list + global stats),
   filters: `match_type`, `q`/`request_id` (substring on uuid text), `state` (normalized
   `requests.requestor_state`), `recorded_after`/`recorded_before` (ISO date/datetime on

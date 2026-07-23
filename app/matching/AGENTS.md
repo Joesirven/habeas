@@ -21,5 +21,13 @@ Consumer record matching for privacy requests, across all intake sources — not
   (adapter, duration, match_count, lookup_state, BQ table names, redacted errors —
   never hashes/dwids/emails/phones). Reaper `max_attempts` default is **5**
   (≥3 retries after the initial attempt).
+- **Chunk drain (Method E):** queue stays one `matching_attempts` row per request.
+  Hot path is set-based BigQuery (`lookup_dwids_by_hashes`) in ≤10K homogeneous
+  chunks. `POST /ensure-drain` acquires singleton `matching_drain_lease` and starts
+  Cloud Run Job `matching-drain-dev` (5 tasks → `python -m matching.chunk_drain`).
+  Catch-all Scheduler hits `/ensure-drain` (not one-row `/process`). Small/ops path:
+  `POST /process` still claims one row. Wave kick: admin-api after dispatch and after
+  rematch-on-refresh. Logs/ops: ids/counts only (`matching_attempts.drain` on pipeline).
 - Vendor adapter code in `adapters/` inside this app only — no top-level `adapters/`.
 - Schema in [`db/migrations/`](../../db/migrations/) — prefix `matching_` as appropriate.
+  Drain lease: `matching_create_matching_drain_lease`.
