@@ -112,13 +112,21 @@ gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
 
 | Surface | Invoker |
 |---------|---------|
-| `admin-api-dev` | Compute SA (`95660886550-compute@developer.gserviceaccount.com`) — ops-ia / admin-web nginx mints identity tokens; app-level `REQUIRE_IAP_IDENTITY` |
+| `admin-api-dev` | Compute SA + allowlisted user invokers; Cloud Run **IAP off** (`--no-iap`); app-level `REQUIRE_IAP_IDENTITY` accepts IAP email header **or** verified Bearer Google ID token (ADC) |
 | `admin-web-dev` / `ops-ia-web-dev` | Public Cloud Run + browser IAP front door (see `admin-web-dev.yaml` / ops-ia deploy) |
 | Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`, `hash-index-refresh-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) — never user/IAP direct |
 
-Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Operators never call workers directly — process/enqueue goes through admin-api with IAP. Localhost worker URLs skip auth.
+Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Operators never call workers directly — process/enqueue goes through admin-api. Localhost worker URLs skip auth.
 
-One-shot re-lock admin-api invoker to IAP SA: `infra/cloudbuild/admin-api-dev-iam.yaml`.
+**Local tooling → admin-api-dev:**
+
+| Caller | Auth |
+|--------|------|
+| super_admin (CLI / local Vite) | ADC Cloud Run ID token (`habeas-cli auth login --adc` or Vite ADC proxy); email must be on `ADMIN_API_SUPER_ADMINS` |
+| admin / data_owner (CLI) | `habeas-cli auth login` (Cloud Run audience token via ADC + email header bound to gcloud account) |
+| Browser SSO | ops-ia / admin-web IAP front door (unchanged) |
+
+Do **not** re-run [`admin-api-dev-iam.yaml`](cloudbuild/admin-api-dev-iam.yaml) for the ADC workflow — it re-enables Cloud Run IAP and strips user invoker.
 
 #### DROP mutation identity (app layer)
 
@@ -137,35 +145,45 @@ Map IAP email → role (pipe- or comma-separated). Highest privilege wins if an 
 | `DROP_OPS_DATA_OWNER_EMAILS` | `data_owner` | Same review paths as `admin` |
 | `DROP_OPS_LOCAL_ROLE` | any of the three | Local-only default when `REQUIRE_IAP_IDENTITY` is false (default `super_admin`) |
 
-**Web session contract:** `GET /me` → `{ "email", "role" }`. `GET /auth/me` remains an identity probe (also includes `role` when resolvable).
+**Web session contract:** `GET /me` → `{ "email", "role", "real_role" }` (`role` is effective after optional `X-Dev-Simulate-Role`; `real_role` is the allowlist role). `GET /auth/me` is the same probe.
 
-#### Calling admin-api with IAP (CLI / curl) — machine path
+#### Calling admin-api (CLI) — preferred paths
 
-User ADC **cannot** mint `--audiences` ID tokens. Mint via the ops/runtime
-service account (impersonation). Audience = IAP OAuth client ID for
-`admin-api-dev` (not the Cloud Run URL).
+```bash
+export ADMIN_API_URL=https://admin-api-dev-hsa55rg7ja-uk.a.run.app
 
-Dev client ID (custom OAuth applied to Cloud Run IAP):
+# Super_admin — ADC (Cloud Run ID token; no IAP email header)
+gcloud auth application-default login
+uv run --package habeas-cli habeas-cli auth login --adc
+uv run --package habeas-cli habeas-cli auth status
+
+# Admin / data_owner — IAP login (email bound to gcloud account)
+export IAP_OAUTH_CLIENT_ID=95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com
+export IAP_IMPERSONATE_SERVICE_ACCOUNT=95660886550-compute@developer.gserviceaccount.com
+uv run --package habeas-cli habeas-cli auth login
+
+uv run --package habeas-cli habeas-cli drop pipeline
+uv run --package habeas-cli habeas-cli drop hash-index-refresh process --execute
+```
+
+#### Legacy IAP mint (curl / env) — machine path
+
+User ADC **cannot** mint IAP `--audiences` ID tokens. Mint via the ops/runtime
+service account (impersonation). Audience = IAP OAuth client ID (not the Cloud Run URL).
+
+Dev client ID:
 
 `95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com`
 
 ```bash
-export ADMIN_API_URL=https://admin-api-dev-hsa55rg7ja-uk.a.run.app
-export IAP_OAUTH_CLIENT_ID=95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com
-export IAP_IMPERSONATE_SERVICE_ACCOUNT=95660886550-compute@developer.gserviceaccount.com
-
-# Prefetch (CLI also mints this automatically when IAP_OAUTH_CLIENT_ID is set):
 export IAP_ID_TOKEN="$(gcloud auth print-identity-token \
   --audiences="$IAP_OAUTH_CLIENT_ID" \
   --impersonate-service-account="$IAP_IMPERSONATE_SERVICE_ACCOUNT" \
   --include-email)"
 
-curl -sS -H "Authorization: Bearer $IAP_ID_TOKEN" "$ADMIN_API_URL/me"
-# Expect { "email": "<ops SA or user>", "role": "super_admin"|"admin"|"data_owner" }
-# Ensure that email is on DROP_OPS_SUPER_ADMIN_EMAILS (or ADMIN / DATA_OWNER).
-
-uv run --package habeas-cli habeas-cli drop pipeline
-uv run --package habeas-cli habeas-cli drop hash-index-refresh process --execute
+curl -sS -H "Authorization: Bearer $IAP_ID_TOKEN" \
+  -H "X-Goog-Authenticated-User-Email: accounts.google.com:you@example.com" \
+  "$ADMIN_API_URL/me"
 ```
 
 Prerequisites Jose must keep granted:
@@ -173,32 +191,33 @@ Prerequisites Jose must keep granted:
 | Grant | Principal | Resource |
 |-------|-----------|----------|
 | `roles/iam.serviceAccountTokenCreator` | `user:jsirven@…` (agents) | ops SA (`95660886550-compute@…`) |
-| `roles/iap.httpsResourceAccessor` | ops SA + Jose | IAP on `admin-api-dev` |
-| `roles/run.invoker` | **only** `service-…@gcp-sa-iap.iam.gserviceaccount.com` | `admin-api-dev` |
-| `DROP_OPS_SUPER_ADMIN_EMAILS` (etc.) env | include ops SA / operator emails | Cloud Run env on admin-api |
+| `roles/run.invoker` | compute SA + allowlisted users (e.g. `user:jsirven@…`) | `admin-api-dev` (Cloud Run IAP **off**) |
+| `ADMIN_API_SUPER_ADMINS` / admins / data_owners env | operator emails | Cloud Run env on admin-api (Bearer ADC → super_admins only) |
 | Worker `roles/run.invoker` | **only** admin-api runtime SA | `hash-index-refresh-dev`, `matching-dev`, … |
 | `roles/cloudscheduler.admin` | admin-api runtime SA (`95660886550-compute@…`) | project (live schedule GET/PATCH) |
 
 Do **not** use `DATABASE_URL` for ops mutations — SELECT-only analysis only.
 Do **not** curl workers or grant yourself worker `run.invoker`.
 
-Local web against remote admin-api (Vite proxy injects the bearer):
+Local web against remote admin-api (super_admin ADC — Vite mints/caches ID token):
 
 ```bash
 cd clients/web
-export VITE_PROXY_TARGET="$ADMIN_API_URL"
-export IAP_ID_TOKEN  # as above (must be SA-impersonated + --include-email)
+# gcloud auth application-default login  # once
+export VITE_PROXY_TARGET="$ADMIN_API_URL"   # admin-api-dev *.run.app
 bun run dev   # leave VITE_ADMIN_API_URL unset so the app uses /api
+# Banner "View as" sends X-Dev-Simulate-Role when real_role is super_admin
 ```
+
+Non–super_admin browsers: use the ops-ia IAP front door, not the ADC Vite proxy.
 
 **Residual:**
 
-1. Full IAP JWT assertion verification in admin-api (email header alone is trusted at the edge today — see `habeas_privacy_core.auth` README).
-2. Deployed SPA→admin-api is cross-origin; cookie IAP is best-effort (`credentials: 'include'`). Prefer CLI + IAP token for mutations until a same-origin `/api` BFF exists.
-3. Re-lock admin-api invoker / grant worker invoker:
+1. IAP email header path still trusts the header when present (Bearer path verifies Google ID tokens — see `habeas_privacy_core.auth` README).
+2. Deployed SPA→admin-api is cross-origin; cookie IAP is best-effort (`credentials: 'include'`). Prefer CLI auth login for mutations until a same-origin `/api` BFF exists.
+3. Do **not** re-run `admin-api-dev-iam.yaml` for the ADC workflow (re-enables Cloud Run IAP). Worker invoker lock:
 
 ```bash
-gcloud builds submit --config=infra/cloudbuild/admin-api-dev-iam.yaml --project=example-gcp-project
 gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev-iam.yaml \
   --project=example-gcp-project
 ```

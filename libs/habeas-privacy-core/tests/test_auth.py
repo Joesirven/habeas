@@ -47,9 +47,9 @@ def test_is_authenticated_actor():
     assert not is_authenticated_actor("")
 
 
-def test_resolve_actor_prefers_iap_header_over_bearer(monkeypatch):
+def test_resolve_actor_matching_header_and_bearer_is_iap(monkeypatch):
     def _fake_verify(token, request, audience):
-        return {"email": "bearer@example.com"}
+        return {"email": "ops@example.com", "email_verified": True}
 
     monkeypatch.setattr(
         "google.oauth2.id_token.verify_oauth2_token",
@@ -57,12 +57,53 @@ def test_resolve_actor_prefers_iap_header_over_bearer(monkeypatch):
     )
     request = _Request(
         {
-            "X-Goog-Authenticated-User-Email": "accounts.google.com:iap@example.com",
+            "X-Goog-Authenticated-User-Email": "accounts.google.com:ops@example.com",
             "Authorization": "Bearer fake-token",
         }
     )
     resolved = resolve_actor(request)
-    assert resolved.email == "iap@example.com"
+    assert resolved.email == "ops@example.com"
+    assert resolved.source == "iap_header"
+
+
+def test_resolve_actor_rejects_spoofed_header_when_bearer_is_user(monkeypatch):
+    def _fake_verify(token, request, audience):
+        return {"email": "attacker@example.com", "email_verified": True}
+
+    monkeypatch.setattr(
+        "google.oauth2.id_token.verify_oauth2_token",
+        _fake_verify,
+    )
+    request = _Request(
+        {
+            "X-Goog-Authenticated-User-Email": "accounts.google.com:victim@example.com",
+            "Authorization": "Bearer fake-token",
+        }
+    )
+    resolved = resolve_actor(request)
+    assert resolved.email == "attacker@example.com"
+    assert resolved.source == "bearer_jwt"
+
+
+def test_resolve_actor_sa_bearer_trusts_user_header(monkeypatch):
+    def _fake_verify(token, request, audience):
+        return {
+            "email": "95660886550-compute@developer.gserviceaccount.com",
+            "email_verified": True,
+        }
+
+    monkeypatch.setattr(
+        "google.oauth2.id_token.verify_oauth2_token",
+        _fake_verify,
+    )
+    request = _Request(
+        {
+            "X-Goog-Authenticated-User-Email": "accounts.google.com:ops@example.com",
+            "Authorization": "Bearer fake-token",
+        }
+    )
+    resolved = resolve_actor(request)
+    assert resolved.email == "ops@example.com"
     assert resolved.source == "iap_header"
 
 
@@ -70,7 +111,7 @@ def test_actor_from_bearer_id_token_mocked_verify(monkeypatch):
     def _fake_verify(token, request, audience):
         assert token == "fake-token"
         assert audience == "https://admin-api.example.run.app"
-        return {"email": "ops@example.com"}
+        return {"email": "ops@example.com", "email_verified": True}
 
     monkeypatch.setattr(
         "google.oauth2.id_token.verify_oauth2_token",
@@ -82,6 +123,17 @@ def test_actor_from_bearer_id_token_mocked_verify(monkeypatch):
     resolved = resolve_actor(request)
     assert resolved.email == "ops@example.com"
     assert resolved.source == "bearer_jwt"
+
+
+def test_bearer_rejects_unverified_email(monkeypatch):
+    def _fake_verify(token, request, audience):
+        return {"email": "ops@example.com", "email_verified": False}
+
+    monkeypatch.setattr(
+        "google.oauth2.id_token.verify_oauth2_token",
+        _fake_verify,
+    )
+    assert actor_from_bearer_id_token(_Request({"Authorization": "Bearer t"})) == UNKNOWN_ACTOR
 
 
 def test_invalid_bearer_returns_unknown(monkeypatch):
@@ -104,3 +156,12 @@ def test_missing_bearer_returns_unknown():
     resolved = resolve_actor(_Request({}))
     assert resolved.email == UNKNOWN_ACTOR
     assert resolved.source is None
+
+
+def test_header_only_still_resolves():
+    request = _Request(
+        {"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@example.com"}
+    )
+    resolved = resolve_actor(request)
+    assert resolved.email == "ops@example.com"
+    assert resolved.source == "iap_header"

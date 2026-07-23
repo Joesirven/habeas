@@ -124,6 +124,9 @@ def actor_from_bearer_id_token(request: Any, *, audience: str | None = None) -> 
 
     if not isinstance(info, dict):
         return UNKNOWN_ACTOR
+    # Defense in depth: Google Workspace ID tokens should assert email_verified.
+    if info.get("email_verified") is False:
+        return UNKNOWN_ACTOR
     email = info.get("email")
     if not isinstance(email, str):
         return UNKNOWN_ACTOR
@@ -131,15 +134,39 @@ def actor_from_bearer_id_token(request: Any, *, audience: str | None = None) -> 
     return email or UNKNOWN_ACTOR
 
 
+def _is_service_account_email(email: str) -> bool:
+    return email.lower().endswith(".gserviceaccount.com")
+
+
 def resolve_actor(request: Any, *, audience: str | None = None) -> ResolvedActor:
-    """IAP email header first; else verified Bearer email; else UNKNOWN + source None."""
+    """Resolve actor from verified Bearer and/or IAP email header.
+
+    When a Bearer Google ID token verifies:
+
+    - Matching ``X-Goog-Authenticated-User-Email`` → ``iap_header`` (full allowlists;
+      used by CLI ``auth login`` which sends both).
+    - Service-account Bearer + distinct user header → ``iap_header`` (SA impersonation).
+    - Disagreeing user Bearer vs header → trust Bearer only (``bearer_jwt``); ignore spoof.
+    - Bearer alone → ``bearer_jwt`` (ADC super_admin gate in admin-api).
+
+    Header alone (no verified Bearer) remains ``iap_header`` for trusted edges that
+    strip client headers (ops-ia). On ``--no-iap`` Cloud Run, IAM still requires a
+    Bearer to reach the app, so the spoof path is the disagreeing-header case above.
+    """
+    bearer_email = actor_from_bearer_id_token(request, audience=audience)
     iap_email = actor_from_iap_header(request)
+
+    if is_authenticated_actor(bearer_email):
+        if is_authenticated_actor(iap_email):
+            if iap_email.lower() == bearer_email.lower():
+                return ResolvedActor(email=iap_email, source="iap_header")
+            if _is_service_account_email(bearer_email):
+                return ResolvedActor(email=iap_email, source="iap_header")
+            return ResolvedActor(email=bearer_email, source="bearer_jwt")
+        return ResolvedActor(email=bearer_email, source="bearer_jwt")
+
     if is_authenticated_actor(iap_email):
         return ResolvedActor(email=iap_email, source="iap_header")
-
-    bearer_email = actor_from_bearer_id_token(request, audience=audience)
-    if is_authenticated_actor(bearer_email):
-        return ResolvedActor(email=bearer_email, source="bearer_jwt")
 
     return ResolvedActor(email=UNKNOWN_ACTOR, source=None)
 

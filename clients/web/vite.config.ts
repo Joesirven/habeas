@@ -63,10 +63,12 @@ function adcProxyAuthPlugin(options: {
   useAdc: boolean
   audience: string
   staticToken: string
+  /** Only set when VITE_UNSAFE_IAP_USER_EMAIL=1 — spoofable; omit on ADC path. */
   iapUserEmail: string
 }): Plugin {
   const getAdcToken = options.useAdc ? createAdcIdTokenCache(options.audience) : null
-  const injectAuth = Boolean(options.staticToken || getAdcToken || options.iapUserEmail)
+  const hasBearer = Boolean(options.staticToken || getAdcToken)
+  const injectAuth = hasBearer || Boolean(options.iapUserEmail)
 
   return {
     name: 'adc-proxy-auth',
@@ -85,7 +87,9 @@ function adcProxyAuthPlugin(options: {
             const token = await getAdcToken()
             req.headers.authorization = `Bearer ${token}`
           }
-          if (options.iapUserEmail) {
+          // Never attach spoofable IAP email alongside ADC/static Bearer — admin-api
+          // would treat matching/disagreeing headers specially; JWT email is identity.
+          if (options.iapUserEmail && !hasBearer) {
             req.headers['x-goog-authenticated-user-email'] = options.iapUserEmail
           }
           next()
@@ -109,8 +113,9 @@ export default defineConfig(({ mode }) => {
   const proxyTarget = env.VITE_PROXY_TARGET || 'http://127.0.0.1:8000'
   // Optional override: skip ADC minting when a pre-minted token is provided.
   const staticToken = (env.IAP_ID_TOKEN || env.CLOUD_RUN_ID_TOKEN || '').trim()
-  // Legacy spoofable identity header (ops-ia nginx pattern). Prefer ADC JWT email.
-  const rawEmail = (env.IAP_USER_EMAIL || '').trim()
+  // Spoofable header — only when explicitly opted in AND not using Bearer ADC.
+  const unsafeIapEmail = env.VITE_UNSAFE_IAP_USER_EMAIL === '1'
+  const rawEmail = unsafeIapEmail ? (env.IAP_USER_EMAIL || '').trim() : ''
   const iapUserEmail = rawEmail
     ? rawEmail.includes(':')
       ? rawEmail

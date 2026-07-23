@@ -61,7 +61,7 @@ If pre-merge → read [`.agent/modules/review-personas.md`](.agent/modules/revie
 
 - No personally identifiable information in logs or audit payloads.
 - **Mutations** only through `app/admin_api` (web and command-line write path).
-- Deployed admin-api requires **Identity-Aware Proxy** identity (`REQUIRE_IAP_IDENTITY=true`); CLI uses `IAP_OAUTH_CLIENT_ID` + SA impersonation (`IAP_IMPERSONATE_SERVICE_ACCOUNT` / `IAP_ID_TOKEN`) — see `infra/README.md` and [`.agent/modules/cli-agent-interface.md`](.agent/modules/cli-agent-interface.md). Never call workers directly; never grant user→worker `run.invoker`.
+- Deployed admin-api requires authenticated identity (`REQUIRE_IAP_IDENTITY=true`): verified Bearer Google ID token (ADC / super_admin) or IAP email header path. CLI: `habeas-cli auth login --adc` (super_admin) or `auth login` (IAP; `IAP_OAUTH_CLIENT_ID` + SA impersonation) — see `infra/README.md` and [`.agent/modules/cli-agent-interface.md`](.agent/modules/cli-agent-interface.md). Never call workers directly; never grant user→worker `run.invoker`.
 - Command-line **SELECT-only** for ad-hoc analysis — no insert, update, delete, truncate.
 - No production writes without Jose approval.
 - No secrets in git.
