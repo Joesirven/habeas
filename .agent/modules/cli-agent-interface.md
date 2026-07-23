@@ -6,36 +6,50 @@
 
 | Operation | Path |
 |-----------|------|
-| Mutations (approve, reject, retry, rule changes, DROP process/enqueue) | HTTP → **admin-api** via Identity-Aware Proxy bearer token |
+| Mutations (approve, reject, retry, rule changes, DROP process/enqueue) | HTTP → **admin-api** via ADC or IAP bearer |
 | Analysis reads (SELECT, joins, state inspection) | Postgres **read-only role** via Cloud SQL Auth Proxy |
 | Forbidden | insert, update, delete, truncate, data definition language; direct user→worker Cloud Run calls; `DATABASE_URL` as a mutation path |
 
-## Identity-Aware Proxy (required for remote admin-api)
+## Auth to deployed admin-api
 
-Deployed `admin-api-dev` has IAP on, `REQUIRE_IAP_IDENTITY=true`, invoker = IAP SA only.
-User ADC cannot mint audience tokens — impersonate the ops/runtime SA.
-Localhost admin-api needs no token.
+`admin-api-dev` runs with Cloud Run **IAP off** (`--no-iap`) and app-level
+`REQUIRE_IAP_IDENTITY=true`. Identity is either a verified Google ID token
+(ADC / Cloud Run invoker) or an IAP-style email header plus bearer.
+
+| Who | How |
+|-----|-----|
+| **super_admin** | `habeas-cli auth login --adc` (or `ADMIN_API_AUTH=adc`) — ADC Cloud Run ID token; email from JWT; must be on `ADMIN_API_SUPER_ADMINS` |
+| **admin / data_owner** | `habeas-cli auth login` — IAP audience token via SA impersonation; email bound to active `gcloud` account (`@habeas.us`) |
 
 ```bash
 export ADMIN_API_URL=https://admin-api-dev-hsa55rg7ja-uk.a.run.app
+
+# Super_admin (ADC) — principal must be on ADMIN_API_SUPER_ADMINS / allowlists
+gcloud auth application-default login
+uv run --package habeas-cli habeas-cli auth login --adc
+uv run --package habeas-cli habeas-cli auth status
+
+# Admin / data_owner (IAP login) — email = gcloud account, not free-form spoof
 export IAP_OAUTH_CLIENT_ID=95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com
 export IAP_IMPERSONATE_SERVICE_ACCOUNT=95660886550-compute@developer.gserviceaccount.com
-# Optional prefetch (CLI mints the same way when IAP_OAUTH_CLIENT_ID is set):
-export IAP_ID_TOKEN="$(gcloud auth print-identity-token \
-  --audiences="$IAP_OAUTH_CLIENT_ID" \
-  --impersonate-service-account="$IAP_IMPERSONATE_SERVICE_ACCOUNT" \
-  --include-email)"
-
+uv run --package habeas-cli habeas-cli auth login
 uv run --package habeas-cli habeas-cli drop hash-index-refresh process --execute
-curl -sS -H "Authorization: Bearer $IAP_ID_TOKEN" "$ADMIN_API_URL/auth/me"
 ```
 
-There is no `--no-iap` escape. Missing token against `*.run.app` fails closed.
-`--include-email` is required for service-account IAP tokens.
+Credentials live in `~/.config/habeas-cli/credentials.json` (mode `0600`).
+`auth logout` clears them. `ADMIN_API_AUTH` is `auto` (default: prefer stored
+login), `adc`, or `iap`.
+
+Do **not** re-run `infra/cloudbuild/admin-api-dev-iam.yaml` for this workflow —
+it re-enables Cloud Run IAP and strips user invoker.
+
+Optional simulate (super_admin only): `ADMIN_API_SIMULATE_ROLE=admin|data_owner|super_admin`.
+
+Localhost admin-api needs no token.
 
 ## Agent rules
 
-- Use `habeas-cli` subcommands — never raw `psql`; prefer CLI over ad-hoc curl (curl only with IAP bearer as above).
+- Use `habeas-cli` subcommands — never raw `psql`; prefer CLI over ad-hoc curl.
 - Default output: `--json` for machine parsing.
 - `--execute` required for mutation subcommands; without it, dry-run only.
 - Send header `X-Client: habeas-cli` on admin-api calls (audit surface tagging).
