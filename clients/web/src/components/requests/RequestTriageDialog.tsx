@@ -1,10 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 
 import { RunTimeline } from '@/components/ops/RunTimeline'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
 import {
   ConfirmActionDialog,
   Dialog,
@@ -17,10 +22,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useMe } from '@/lib/auth'
 import {
   getDropMatchingResultDetail,
+  getFulfillmentArtifact,
   getRequestJourney,
+  patchAccessDeliveryStatus,
   postDropMatchingResultDecline,
   postDropMatchingResultPromote,
+  type FulfillmentArtifact,
   type JourneyStage,
+  type MatchingAttemptRow,
   type MatchingResultDetail,
   type RunTimelineStep,
 } from '@/lib/api'
@@ -92,6 +101,333 @@ function reviewStatusVariant(status: string): 'default' | 'ok' | 'fail' | 'wait'
   return 'default'
 }
 
+function attemptGlance(attempts: MatchingAttemptRow[]): {
+  label: string
+  tone: 'default' | 'ok' | 'fail' | 'wait' | 'run'
+} {
+  if (attempts.length === 0) return { label: 'None', tone: 'default' }
+  const latest = [...attempts].sort((a, b) => b.attempt_number - a.attempt_number)[0]!
+  if (latest.status === 'success') return { label: `${attempts.length} · ok`, tone: 'ok' }
+  if (latest.status === 'submit_error' || latest.status === 'outcome_error') {
+    return { label: `${attempts.length} · error`, tone: 'fail' }
+  }
+  if (
+    latest.status === 'in_flight' ||
+    latest.status === 'claimed' ||
+    latest.status === 'pending'
+  ) {
+    return { label: `${attempts.length} · ${latest.status}`, tone: 'run' }
+  }
+  return { label: `${attempts.length} · ${latest.status}`, tone: 'wait' }
+}
+
+export function StatusAccordion({
+  title,
+  glance,
+  tone = 'default',
+  defaultOpen = false,
+  children,
+}: {
+  title: string
+  glance: string
+  tone?: 'default' | 'ok' | 'fail' | 'wait' | 'run'
+  defaultOpen?: boolean
+  children: ReactNode
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <div className="rounded-md border border-line/80 bg-paper/40">
+        <CollapsibleTrigger asChild>
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-panel/40"
+          >
+            <span className="min-w-0 flex-1 truncate text-[0.7rem] font-medium text-ink">
+              {title}
+            </span>
+            <Badge variant={tone} className="normal-case tracking-normal shrink-0">
+              {glance}
+            </Badge>
+            <span className="shrink-0 text-[0.65rem] text-mute" aria-hidden>
+              {open ? '▾' : '▸'}
+            </span>
+          </button>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <div className="space-y-1.5 border-t border-line/70 px-2.5 py-2">{children}</div>
+        </CollapsibleContent>
+      </div>
+    </Collapsible>
+  )
+}
+
+function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
+  const [open, setOpen] = useState(false)
+  const auditKeys = Object.keys(attempt.audit_payload ?? {})
+  const tone =
+    attempt.status === 'success'
+      ? 'ok'
+      : attempt.error_code || attempt.status.includes('error')
+        ? 'fail'
+        : attempt.status === 'in_flight' || attempt.status === 'claimed'
+          ? 'run'
+          : 'wait'
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <div className="rounded-md border border-line/70 bg-canvas/40">
+        <CollapsibleTrigger asChild>
+          <button
+            type="button"
+            className="flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left text-[0.7rem] hover:bg-panel/40"
+          >
+            <span className="min-w-0 truncate">
+              <span className="font-medium text-ink">Attempt #{attempt.attempt_number}</span>
+            </span>
+            <span className="flex shrink-0 items-center gap-1.5">
+              <Badge variant={tone} className="normal-case tracking-normal">
+                {attempt.error_code ?? attempt.status}
+              </Badge>
+              <span className="tabular-nums text-[0.6rem] text-mute">
+                {open ? '▾' : '▸'}
+              </span>
+            </span>
+          </button>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <dl className="grid grid-cols-2 gap-x-3 gap-y-1 border-t border-line/60 px-2 py-1.5 text-[0.65rem]">
+            <div>
+              <dt className="text-mute">Attempted</dt>
+              <dd className="tabular-nums text-ink-soft">
+                {formatTimestamp(attempt.attempted_at)}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-mute">Completed</dt>
+              <dd className="tabular-nums text-ink-soft">
+                {formatTimestamp(attempt.completed_at)}
+              </dd>
+            </div>
+            <div className="col-span-2">
+              <dt className="text-mute">Audit keys</dt>
+              <dd className="mt-0.5 font-mono text-ink-soft">
+                {auditKeys.length > 0 ? auditKeys.join(', ') : '—'}
+              </dd>
+            </div>
+          </dl>
+        </CollapsibleContent>
+      </div>
+    </Collapsible>
+  )
+}
+
+/** Outbound email draft for access delivery — operator pastes into external mailer. */
+export function buildAccessDeliveryDraft(opts: {
+  requestId: string
+  shareableUrl: string
+}): { subject: string; body: string } {
+  const short = opts.requestId.slice(0, 8)
+  return {
+    subject: `Your Habeas privacy access package (${short}…)`,
+    body: [
+      'Hello,',
+      '',
+      'Your data privacy access package is ready. Use this link to download it (the link expires for security):',
+      '',
+      opts.shareableUrl,
+      '',
+      'If you did not request this, contact privacy support and do not open the link.',
+      '',
+      '—',
+      'Habeas Data Privacy',
+      '',
+    ].join('\n'),
+  }
+}
+
+export function AccessHandoffPanel({
+  requestId,
+  artifact,
+  isPending,
+  isError,
+  canMutate,
+  onCopyUrl,
+  onSetStatus,
+  busy,
+}: {
+  requestId: string
+  artifact: FulfillmentArtifact | null | undefined
+  isPending: boolean
+  isError: boolean
+  canMutate: boolean
+  onCopyUrl: () => void
+  onSetStatus: (status: 'delivered' | 'failed' | 'recalled') => void
+  busy: boolean
+}) {
+  const [draftOpen, setDraftOpen] = useState(false)
+  const [draftNote, setDraftNote] = useState<string | null>(null)
+
+  if (isPending) {
+    return <p className="py-3 text-xs text-ink-soft">Loading fulfillment artifact…</p>
+  }
+  if (isError || (!artifact?.shareable_url && !artifact?.fulfillment_artifact_uri)) {
+    const placeholderDraft = buildAccessDeliveryDraft({
+      requestId,
+      shareableUrl: '[shareable URL will appear here after fulfillment]',
+    })
+    return (
+      <div className="space-y-3 py-2 text-xs text-ink-soft">
+        <p>
+          No shareable delivery URL yet for{' '}
+          <span className="font-mono text-ink">{requestId.slice(0, 8)}…</span>.
+        </p>
+        <p className="text-mute">
+          Access packs appear here after fulfillment. You can preview the outbound template now.
+        </p>
+        <Button
+          size="sm"
+          variant="outline"
+          type="button"
+          onClick={() => {
+            void navigator.clipboard.writeText(placeholderDraft.body).then(() => {
+              setDraftNote('Copied draft body (placeholder URL)')
+              window.setTimeout(() => setDraftNote(null), 2500)
+            })
+          }}
+        >
+          Draft outbound
+        </Button>
+        {draftNote ? <span className="text-mute">{draftNote}</span> : null}
+      </div>
+    )
+  }
+
+  const url = artifact.shareable_url ?? artifact.fulfillment_artifact_uri ?? ''
+  const draft = buildAccessDeliveryDraft({ requestId, shareableUrl: url })
+
+  return (
+    <div className="space-y-3 py-1 text-xs">
+      <p className="text-ink-soft">
+        Copy the shareable URL or draft an outbound message, then paste into your external
+        mailer. Mark delivery when sent — the platform does not email requesters.
+      </p>
+      <div className="rounded-lg border border-line bg-paper/50 px-3 py-2">
+        <p className="taste-micro">Shareable URL</p>
+        <p className="mt-1 break-all font-mono text-[0.7rem] text-ink">{url}</p>
+      </div>
+      {artifact.fulfillment_artifact_uri &&
+      artifact.fulfillment_artifact_uri !== artifact.shareable_url ? (
+        <div className="rounded-lg border border-line/60 px-3 py-2">
+          <p className="taste-micro">Internal artifact (ops only)</p>
+          <p className="mt-1 break-all font-mono text-[0.65rem] text-mute">
+            {artifact.fulfillment_artifact_uri}
+          </p>
+        </div>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" type="button" onClick={onCopyUrl} disabled={!url}>
+          Copy URL
+        </Button>
+        <Button size="sm" variant="outline" type="button" onClick={() => setDraftOpen(true)}>
+          Draft outbound
+        </Button>
+        {artifact.kind === 'access' && canMutate ? (
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              type="button"
+              disabled={busy}
+              onClick={() => onSetStatus('delivered')}
+            >
+              Mark delivered
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              type="button"
+              disabled={busy}
+              onClick={() => onSetStatus('failed')}
+            >
+              Mark failed
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              type="button"
+              disabled={busy}
+              onClick={() => onSetStatus('recalled')}
+            >
+              Mark recalled
+            </Button>
+          </>
+        ) : null}
+      </div>
+      {artifact.access_delivery_status ? (
+        <p className="text-mute">
+          Delivery status:{' '}
+          <span className="capitalize text-ink">{artifact.access_delivery_status}</span>
+        </p>
+      ) : null}
+
+      <Dialog open={draftOpen} onOpenChange={setDraftOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Draft access delivery</DialogTitle>
+            <DialogDescription>
+              Template for external email — copy subject and body, then send outside the platform.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 text-xs">
+            <div>
+              <p className="taste-micro">Subject</p>
+              <p className="mt-1 rounded-md border border-line bg-paper px-2 py-1.5 text-ink">
+                {draft.subject}
+              </p>
+            </div>
+            <div>
+              <p className="taste-micro">Body</p>
+              <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap rounded-md border border-line bg-paper px-2 py-1.5 font-sans text-[0.75rem] text-ink">
+                {draft.body}
+              </pre>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                type="button"
+                onClick={() => {
+                  void navigator.clipboard.writeText(draft.body).then(() => {
+                    setDraftNote('Copied body')
+                    window.setTimeout(() => setDraftNote(null), 2000)
+                  })
+                }}
+              >
+                Copy body
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                type="button"
+                onClick={() => {
+                  void navigator.clipboard.writeText(draft.subject).then(() => {
+                    setDraftNote('Copied subject')
+                    window.setTimeout(() => setDraftNote(null), 2000)
+                  })
+                }}
+              >
+                Copy subject
+              </Button>
+              {draftNote ? <span className="text-mute">{draftNote}</span> : null}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
 export function MatchingReviewPanel({
   requestId,
   matching,
@@ -102,6 +438,7 @@ export function MatchingReviewPanel({
   actionError,
   onPromote,
   onDecline,
+  compact = false,
 }: {
   requestId: string
   matching: MatchingResultDetail | null | undefined
@@ -112,39 +449,43 @@ export function MatchingReviewPanel({
   actionError: string | null
   onPromote: () => void
   onDecline: () => void
+  /** Denser layout for inbox review pane. */
+  compact?: boolean
 }) {
-  const [confirm, setConfirm] = useState<'promote' | 'decline' | null>(null)
+  const [confirm, setConfirm] = useState<'fulfill' | 'decline' | null>(null)
+  const wasActionPending = useRef(false)
+  useEffect(() => {
+    if (wasActionPending.current && !actionPending) setConfirm(null)
+    wasActionPending.current = actionPending
+  }, [actionPending])
+  const attempts = matching?.attempts ?? []
+  const attemptStatus = attemptGlance(attempts)
+  const assignment = matching?.assignment?.assignee_identity
 
   return (
-    <div className="space-y-4 text-xs">
+    <div className={cn('text-xs', compact ? 'space-y-1.5' : 'space-y-2')}>
       <ConfirmActionDialog
-        open={confirm === 'promote'}
+        open={confirm === 'fulfill'}
         onOpenChange={(open) => {
-          if (!open) setConfirm(null)
+          if (!open && !actionPending) setConfirm(null)
         }}
-        title="Promote to fulfillment?"
-        description={`Promote request ${requestId.slice(0, 8)}… past matching review. This cannot be undone from the inbox.`}
-        confirmLabel="Promote"
-        confirming={actionPending}
-        onConfirm={() => {
-          setConfirm(null)
-          onPromote()
-        }}
+        title="Fulfill this match?"
+        description={`Approve matching review for ${requestId.slice(0, 8)}… and release it to fulfillment. This cannot be undone from the inbox.`}
+        confirmLabel="Fulfill"
+        confirming={actionPending && confirm === 'fulfill'}
+        onConfirm={() => onPromote()}
       />
       <ConfirmActionDialog
         open={confirm === 'decline'}
         onOpenChange={(open) => {
-          if (!open) setConfirm(null)
+          if (!open && !actionPending) setConfirm(null)
         }}
         title="Decline matching review?"
         description={`Decline request ${requestId.slice(0, 8)}… — it will leave the review queue without fulfillment.`}
         confirmLabel="Decline"
         tone="destructive"
-        confirming={actionPending}
-        onConfirm={() => {
-          setConfirm(null)
-          onDecline()
-        }}
+        confirming={actionPending && confirm === 'decline'}
+        onConfirm={() => onDecline()}
       />
       {isPending && matching == null ? (
         <p className="text-ink-soft">Loading matching result…</p>
@@ -155,93 +496,213 @@ export function MatchingReviewPanel({
         </p>
       ) : null}
       {matching == null && !isPending && !isError ? (
-        <div className="space-y-2 text-ink-soft">
+        <div className="space-y-1 text-ink-soft">
           <p>No matching result payload for this request yet.</p>
           <p className="text-[0.65rem] text-mute">
-            Skipped download/land/promote stages are fine. Detail appears once a matching_results
-            row exists; review can still wait on matching.review independently.
+            Detail appears once a matching_results row exists; review can still wait on
+            matching.review independently.
           </p>
         </div>
       ) : null}
       {matching ? (
         <>
-          <dl className="grid gap-2 sm:grid-cols-2">
-            <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
-              <dt className="taste-micro">Matched</dt>
-              <dd className="mt-1">{matching.matched ? 'Yes' : 'No'}</dd>
-            </div>
-            <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
-              <dt className="taste-micro">Match count</dt>
-              <dd className="mt-1 tabular-nums">{matching.match_count}</dd>
-            </div>
-            <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
-              <dt className="taste-micro">Match type</dt>
-              <dd className="mt-1">
-                {(matching.match_type ?? '—').replaceAll('_', ' ')}
-              </dd>
-            </div>
-            <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
-              <dt className="taste-micro">Review status</dt>
-              <dd className="mt-1">
-                <Badge variant={reviewStatusVariant(matching.review_status)}>
-                  {matching.review_status}
-                </Badge>
-              </dd>
-            </div>
-            <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
-              <dt className="taste-micro">Matched via</dt>
-              <dd className="mt-1">{matching.matched_via ?? '—'}</dd>
-            </div>
-            {matching.requestor_state ? (
-              <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
-                <dt className="taste-micro">Requestor state</dt>
-                <dd className="mt-1 font-mono">{matching.requestor_state}</dd>
+          <StatusAccordion
+            title="Match result"
+            glance={
+              matching.match_type
+                ? `${matching.match_type.replaceAll('_', ' ')} · ${matching.match_count}`
+                : matching.matched
+                  ? `Matched · ${matching.match_count}`
+                  : 'Not matched'
+            }
+            tone={
+              matching.match_type === 'multi_match'
+                ? 'fail'
+                : matching.match_type === 'single_match'
+                  ? 'wait'
+                  : matching.matched
+                    ? 'ok'
+                    : 'default'
+            }
+            defaultOpen
+          >
+            <dl className="grid grid-cols-3 gap-1.5">
+              <div className="rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Matched</dt>
+                <dd className="text-[0.7rem]">{matching.matched ? 'Yes' : 'No'}</dd>
+              </div>
+              <div className="rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Count</dt>
+                <dd className="tabular-nums text-[0.7rem]">{matching.match_count}</dd>
+              </div>
+              <div className="rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Type</dt>
+                <dd className="truncate text-[0.7rem]">
+                  {(matching.match_type ?? '—').replaceAll('_', ' ')}
+                </dd>
+              </div>
+            </dl>
+          </StatusAccordion>
+
+          <StatusAccordion
+            title="Match method"
+            glance={matching.matched_via ?? '—'}
+            tone={matching.matched_via ? 'ok' : 'default'}
+          >
+            <dl className="grid grid-cols-2 gap-1.5">
+              <div className="rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Via</dt>
+                <dd className="text-[0.7rem]">{matching.matched_via ?? '—'}</dd>
+              </div>
+              <div className="rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Recorded</dt>
+                <dd className="tabular-nums text-[0.7rem]">
+                  {formatTimestamp(matching.recorded_at)}
+                </dd>
+              </div>
+            </dl>
+          </StatusAccordion>
+
+          <StatusAccordion
+            title="Requestor"
+            glance={matching.requestor_state ?? 'No state'}
+            tone={matching.requestor_state ? 'ok' : 'wait'}
+          >
+            <dl className="grid grid-cols-2 gap-1.5">
+              <div className="rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">State</dt>
+                <dd className="font-mono text-[0.7rem]">
+                  {matching.requestor_state ?? '—'}
+                </dd>
+              </div>
+              <div className="rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Request</dt>
+                <dd className="truncate font-mono text-[0.65rem]">{requestId}</dd>
+              </div>
+            </dl>
+          </StatusAccordion>
+
+          <StatusAccordion
+            title="Review gate"
+            glance={matching.review_status}
+            tone={reviewStatusVariant(matching.review_status)}
+            defaultOpen={matching.review_status === 'pending'}
+          >
+            <dl className="grid grid-cols-2 gap-1.5">
+              <div className="rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Status</dt>
+                <dd>
+                  <Badge
+                    variant={reviewStatusVariant(matching.review_status)}
+                    className="normal-case tracking-normal"
+                  >
+                    {matching.review_status}
+                  </Badge>
+                </dd>
+              </div>
+              <div className="rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Approval id</dt>
+                <dd className="tabular-nums text-[0.7rem]">
+                  {matching.approval_id ?? '—'}
+                </dd>
+              </div>
+              <div className="rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Assignee</dt>
+                <dd className="truncate text-[0.7rem]">{assignment ?? 'Unassigned'}</dd>
+              </div>
+              <div className="rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Attempt id</dt>
+                <dd className="tabular-nums text-[0.7rem]">
+                  {matching.attempt_id ?? '—'}
+                </dd>
+              </div>
+            </dl>
+            {canReviewActions ? (
+              <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                <Button
+                  size="sm"
+                  disabled={actionPending}
+                  onClick={() => setConfirm('fulfill')}
+                >
+                  {actionPending && confirm === 'fulfill' ? 'Fulfilling…' : 'Fulfill'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={actionPending}
+                  onClick={() => setConfirm('decline')}
+                >
+                  {actionPending && confirm === 'decline' ? 'Declining…' : 'Decline'}
+                </Button>
               </div>
             ) : null}
-            {matching.recorded_at ? (
-              <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
-                <dt className="taste-micro">Recorded</dt>
-                <dd className="mt-1 tabular-nums">{formatTimestamp(matching.recorded_at)}</dd>
-              </div>
+            {actionError ? (
+              <p className="text-[0.65rem] text-red-700">{actionError}</p>
             ) : null}
-          </dl>
+          </StatusAccordion>
 
-          {canReviewActions ? (
-            <div className="flex flex-wrap items-center gap-2 border-t border-line pt-4">
-              <Button
-                size="sm"
-                disabled={actionPending}
-                onClick={() => setConfirm('promote')}
-              >
-                Promote to fulfillment
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={actionPending}
-                onClick={() => setConfirm('decline')}
-              >
-                Decline
-              </Button>
-            </div>
-          ) : null}
+          <StatusAccordion
+            title="Matching attempts"
+            glance={attemptStatus.label}
+            tone={attemptStatus.tone}
+          >
+            {attempts.length === 0 ? (
+              <p className="text-[0.7rem] text-mute">No matching attempts recorded.</p>
+            ) : (
+              <div className="space-y-1">
+                {attempts.map((attempt) => (
+                  <AttemptRow key={attempt.id} attempt={attempt} />
+                ))}
+              </div>
+            )}
+          </StatusAccordion>
 
-          {actionError ? <p className="text-[0.65rem] text-red-700">{actionError}</p> : null}
-
-          <p className="text-[0.65rem] text-mute">
-            Review is scoped to{' '}
-            <span className="font-mono text-ink-soft">{requestId}</span> — counts and ids only.
-          </p>
+          <StatusAccordion
+            title="Decision"
+            glance={
+              matching.decided_at
+                ? matching.review_status
+                : matching.review_status === 'pending'
+                  ? 'Awaiting'
+                  : 'None'
+            }
+            tone={
+              matching.decided_at
+                ? reviewStatusVariant(matching.review_status)
+                : matching.review_status === 'pending'
+                  ? 'wait'
+                  : 'default'
+            }
+          >
+            <dl className="grid grid-cols-2 gap-1.5">
+              <div className="rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Decided by</dt>
+                <dd className="truncate text-[0.7rem]">{matching.decided_by ?? '—'}</dd>
+              </div>
+              <div className="rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Decided at</dt>
+                <dd className="tabular-nums text-[0.7rem]">
+                  {formatTimestamp(matching.decided_at)}
+                </dd>
+              </div>
+              <div className="col-span-2 rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Reason</dt>
+                <dd className="text-[0.7rem]">{matching.decision_reason ?? '—'}</dd>
+              </div>
+            </dl>
+          </StatusAccordion>
         </>
       ) : null}
     </div>
   )
 }
 
+
 export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDetailDrawerProps) {
   const queryClient = useQueryClient()
   const { isAdmin, isSuperAdmin } = useMe()
   const [actionError, setActionError] = useState<string | null>(null)
+  const [copyNote, setCopyNote] = useState<string | null>(null)
 
   const journeyQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', requestId, 'journey'],
@@ -259,6 +720,14 @@ export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDe
     placeholderData: (previous) => previous,
   })
 
+  const artifactQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', requestId],
+    queryFn: () => getFulfillmentArtifact(requestId!),
+    enabled: open && Boolean(requestId),
+    refetchInterval: open ? 15_000 : false,
+    retry: false,
+  })
+
   const promoteMutation = useMutation({
     mutationFn: () => postDropMatchingResultPromote(requestId!),
     onSuccess: async () => {
@@ -266,7 +735,7 @@ export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDe
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
     onError: (error) => {
-      setActionError(error instanceof Error ? error.message : 'Promote failed')
+      setActionError(error instanceof Error ? error.message : 'Fulfill failed')
     },
   })
 
@@ -278,6 +747,16 @@ export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDe
     },
     onError: (error) => {
       setActionError(error instanceof Error ? error.message : 'Decline failed')
+    },
+  })
+
+  const deliveryMutation = useMutation({
+    mutationFn: (status: 'delivered' | 'failed' | 'recalled') =>
+      patchAccessDeliveryStatus(requestId!, { status }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', requestId],
+      })
     },
   })
 
@@ -355,12 +834,39 @@ export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDe
                     <dd className="truncate text-ink-soft">{journeyQuery.data.blocker}</dd>
                   </div>
                 ) : null}
+                {journeyQuery.data.source_csv_filename ? (
+                  <div className="flex min-w-0 items-baseline gap-2 sm:max-w-md">
+                    <dt className="taste-micro shrink-0">Intake CSV</dt>
+                    <dd className="truncate font-mono text-[0.7rem] text-ink-soft">
+                      {journeyQuery.data.source_csv_filename}
+                    </dd>
+                  </div>
+                ) : null}
+                {journeyQuery.data.bulk_process_id != null ? (
+                  <div className="flex items-baseline gap-2">
+                    <dt className="taste-micro">Batch</dt>
+                    <dd>
+                      <Link
+                        to="/"
+                        search={{
+                          tab: 'history',
+                          process: journeyQuery.data.bulk_process_id,
+                        }}
+                        className="taste-link tabular-nums text-[0.7rem]"
+                        onClick={() => onOpenChange(false)}
+                      >
+                        process #{journeyQuery.data.bulk_process_id}
+                      </Link>
+                    </dd>
+                  </div>
+                ) : null}
               </dl>
 
               <Tabs defaultValue="history" className="mt-3">
                 <TabsList>
                   <TabsTrigger value="history">History</TabsTrigger>
                   <TabsTrigger value="matching">Matching</TabsTrigger>
+                  <TabsTrigger value="delivery">Delivery</TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="history">
@@ -411,6 +917,36 @@ export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDe
                     onPromote={() => promoteMutation.mutate()}
                     onDecline={() => declineMutation.mutate()}
                   />
+                </TabsContent>
+
+                <TabsContent value="delivery">
+                  <AccessHandoffPanel
+                    requestId={journeyQuery.data.request_id}
+                    artifact={artifactQuery.data}
+                    isPending={artifactQuery.isPending}
+                    isError={artifactQuery.isError}
+                    canMutate={Boolean(isSuperAdmin)}
+                    busy={deliveryMutation.isPending}
+                    onCopyUrl={() => {
+                      const url =
+                        artifactQuery.data?.shareable_url ??
+                        artifactQuery.data?.fulfillment_artifact_uri
+                      if (!url) return
+                      void navigator.clipboard.writeText(url).then(() => {
+                        setCopyNote('Copied URL')
+                        window.setTimeout(() => setCopyNote(null), 2000)
+                      })
+                    }}
+                    onSetStatus={(status) => deliveryMutation.mutate(status)}
+                  />
+                  {copyNote ? <p className="taste-micro text-mute">{copyNote}</p> : null}
+                  {deliveryMutation.isError ? (
+                    <p className="text-[0.65rem] text-red-700">
+                      {deliveryMutation.error instanceof Error
+                        ? deliveryMutation.error.message
+                        : 'Could not update delivery status'}
+                    </p>
+                  ) : null}
                 </TabsContent>
               </Tabs>
             </div>

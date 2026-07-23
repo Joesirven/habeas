@@ -1,8 +1,11 @@
+import { Badge } from '@/components/ui/badge'
 import {
   canAccessOpsSurfaces,
   useAuth,
 } from '@/lib/auth'
+import { getNeedsAttention } from '@/lib/api'
 
+import { useQuery } from '@tanstack/react-query'
 import { Link, useRouterState } from '@tanstack/react-router'
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 
@@ -29,13 +32,6 @@ const WORKERS_GROUP: NavGroup = {
     { label: 'Overview', to: '/ops/workers' },
     { label: 'Trends', to: '/ops/workers/trends' },
     { label: 'Runs', to: '/ops/runs' },
-    { label: 'Failed runs', to: '/ops/workers/failed' },
-    { label: 'drop_connector', to: '/ops/workers/drop_connector' },
-    { label: 'drop_ingestor', to: '/ops/workers/drop_ingestor' },
-    { label: 'matching', to: '/ops/workers/matching' },
-    { label: 'hash_index_refresh', to: '/ops/workers/hash_index_refresh' },
-    { label: 'request_dispatcher', to: '/ops/workers/request_dispatcher' },
-    { label: 'data_fulfillment', to: '/ops/workers/data_fulfillment' },
     { label: 'Settings', to: '/ops/workers/settings' },
   ],
 }
@@ -53,16 +49,26 @@ function NavLink({
   to,
   label,
   exact = false,
+  count,
 }: {
   to: string
   label: string
   exact?: boolean
+  count?: number | null
 }) {
   const pathname = useRouterState({ select: (state) => state.location.pathname })
   const active = exact ? pathname === to : pathMatches(pathname, to)
   return (
-    <Link to={to} className={`${navClass}${active ? ' active' : ''}`}>
+    <Link
+      to={to}
+      className={`inline-flex items-center gap-1.5 ${navClass}${active ? ' active' : ''}`}
+    >
       {label}
+      {count != null && count > 0 ? (
+        <Badge variant="notification" aria-label={`${count} unread`}>
+          {count > 99 ? '99+' : count}
+        </Badge>
+      ) : null}
     </Link>
   )
 }
@@ -175,6 +181,13 @@ function NavDropdown({ group }: { group: NavGroup }) {
 export function NavMenu() {
   const { role, isLoading, isError } = useAuth()
   const showWorkers = canAccessOpsSurfaces(role) || isError
+  const inboxQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention'],
+    queryFn: () => getNeedsAttention(200),
+    refetchInterval: 30_000,
+    staleTime: 15_000,
+  })
+  const inboxCount = inboxQuery.data?.items.length ?? null
 
   return (
     <nav
@@ -183,7 +196,11 @@ export function NavMenu() {
     >
       <NavLink to="/" label="Dashboard" exact />
       <NavLink to="/requests" label="Requests" exact />
-      <NavLink to="/requests/needs-attention" label="Inbox" />
+      <NavLink
+        to="/requests/needs-attention"
+        label="Inbox"
+        count={inboxCount}
+      />
       {showWorkers ? <NavDropdown group={WORKERS_GROUP} /> : null}
     </nav>
   )

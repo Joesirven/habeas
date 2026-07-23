@@ -280,7 +280,7 @@ async def promote_matching_review_for_request(
             }
         raise LookupError("no matching.review gate available to promote")
 
-    reason = decision_reason or "promote to fulfillment"
+    reason = decision_reason or "fulfill — matching review approved"
     decided = await decide_approval(
         conn,
         approval_id=int(pending_id),

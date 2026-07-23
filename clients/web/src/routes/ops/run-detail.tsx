@@ -7,7 +7,7 @@ import { RunTimeline } from '@/components/ops/RunTimeline'
 import { Badge } from '@/components/ui/badge'
 import { getRunDetail, type RunDetail, type RunEvent } from '@/lib/api'
 import { ForbiddenState, useMe } from '@/lib/auth'
-import type { PipelineTab } from '@/router'
+import { runsSearchForWorker, type PipelineSearch } from '@/router'
 
 type DetailTab = 'overview' | 'timeline' | 'output' | 'events'
 
@@ -19,12 +19,12 @@ const JOB_LABELS: Record<string, string> = {
   hash_index_refresh: 'Hash index refresh',
 }
 
-const CONSOLE_TAB_BY_JOB: Record<string, PipelineTab> = {
-  drop_connector: 'download',
-  drop_ingestor: 'ingest',
-  drop_ingest: 'ingest',
-  matching: 'matching',
-  hash_index_refresh: 'hash_refresh',
+const CONSOLE_SEARCH_BY_JOB: Record<string, PipelineSearch> = {
+  drop_connector: { tab: 'pipeline', stage: 'download' },
+  drop_ingestor: { tab: 'pipeline', stage: 'ingest' },
+  drop_ingest: { tab: 'pipeline', stage: 'ingest' },
+  matching: { tab: 'pipeline', stage: 'matching' },
+  hash_index_refresh: { tab: 'hash_refresh' },
 }
 
 function Micro({ children }: { children: ReactNode }) {
@@ -88,7 +88,7 @@ function Metric({ label, value, mono = false }: { label: string; value: ReactNod
 }
 
 function RunDetailHeader({ detail }: { detail: RunDetail }) {
-  const consoleTab = CONSOLE_TAB_BY_JOB[detail.job]
+  const consoleSearch = CONSOLE_SEARCH_BY_JOB[detail.job]
 
   return (
     <header className="space-y-4">
@@ -97,8 +97,8 @@ function RunDetailHeader({ detail }: { detail: RunDetail }) {
           ← Runs
         </Link>
         <Link
-          to="/ops/workers/$workerName"
-          params={{ workerName: detail.job }}
+          to="/ops/runs"
+          search={runsSearchForWorker(detail.job)}
           className="taste-frost-chip"
         >
           {jobLabel(detail.job)}
@@ -130,21 +130,17 @@ function RunDetailHeader({ detail }: { detail: RunDetail }) {
         </p>
       </div>
       <div className="flex flex-wrap gap-2">
-        {consoleTab ? (
-          <Link
-            to="/"
-            search={{ tab: consoleTab }}
-            className="taste-btn text-xs"
-          >
+        {consoleSearch ? (
+          <Link to="/" search={consoleSearch} className="taste-btn text-xs">
             Dashboard · {jobLabel(detail.job)}
           </Link>
         ) : null}
         <Link
-          to="/ops/workers/$workerName"
-          params={{ workerName: detail.job }}
+          to="/ops/runs"
+          search={runsSearchForWorker(detail.job)}
           className="taste-btn text-xs"
         >
-          Worker history →
+          Worker runs →
         </Link>
       </div>
     </header>

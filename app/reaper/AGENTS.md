@@ -11,6 +11,8 @@ Shared worker — releases expired leases, marks timeouts, inserts retry rows ac
   (initial attempt + ≥3 retries before terminal failure)
 - On each `/reap`, merges `ops_retry_config` overrides when the table exists
   (Health Configuration PATCH; floor 4)
+- Also runs `reconcile_ungated_matching_reviews` to backfill missing
+  `matching.review` gates (match success opens the gate in-transaction)
 
 - Vendor adapter code in `adapters/` inside this app only.
 - Schema in [`db/migrations/`](../../db/migrations/) — prefix `reaper_` or `matching_` as appropriate.

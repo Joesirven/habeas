@@ -17,7 +17,7 @@ substitutions:
   # App-level identity required (headers from web proxy after IAP).
   _REQUIRE_IAP_IDENTITY: "true"
   _CORS_ORIGINS: "https://ops-ia-web-dev-hsa55rg7ja-uk.a.run.app|https://admin-web-dev-hsa55rg7ja-uk.a.run.app|http://127.0.0.1:5174|http://localhost:5174|http://127.0.0.1:5173|http://localhost:5173|http://127.0.0.1:8080|http://localhost:8080"
-  _ADMIN_API_SUPER_ADMINS: "dev-owner-1@example.com"
+  _ADMIN_API_SUPER_ADMINS: "dev-owner-1@example.com|dev-owner-9@example.com|dev-owner-6@example.com|dev-owner-12@example.com"
   # Live Cloud Scheduler schedules (Workers Settings / Ops Configuration).
   _CLOUD_SCHEDULER_ENABLED: "true"
   _CLOUD_SCHEDULER_LOCATION: us-east4

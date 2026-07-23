@@ -15,7 +15,7 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
 ## Navigation (Ops IA — Request / Job / Run)
 
 - **Requests** → list (row opens journey), Needs attention, SLAs (shell).
-- **Ops** (super_admin): Dashboard (stages + Hash refresh + Configurations), Workers, Runs, Jobs (shell), Insights (`/ops/health`), Incidents (shell → failed Runs).
+- **Ops** (super_admin): Dashboard (Pipeline + Hash refresh + Configurations), Workers, Runs, Jobs (shell), Insights (`/ops/health`), Incidents (shell → failed Runs).
 - **Console** (super_admin): `/ops/drop-pipeline?tab=` mutation power surface.
 - Browser never calls worker URLs — only admin-api aggregates.
 
@@ -34,15 +34,10 @@ General Amigo frost: [`.agent/modules/design-taste.md`](../../.agent/modules/des
 
 ## DROP pipeline
 
-- Tabbed process UX on `/ops/drop-pipeline` (query `tab=`).
-- Ingest copy: **Unzip** (land) + **Promote to raw** (promote).
-- Hash-index: per-state enqueue + enqueue-all served states (USPS 50+DC); rematch-on-refresh for every successful state.
-- After **Run matching** completes (`status=ok`), required post-match dialog (review / bulk approve); `useBlocker` until choice.
-- Matching tab: stats, list ↔ detail (attempt history + allowlisted `audit_payload`),
-  filters (request_id search, state select, recorded date range + match_type),
-  promote/decline (individual + bulk by match type), assign to reviewer / escalate to
-  legal|data_owner (IAP actor; `workflow.assignment` via admin-api).
-  No deadline / approaching-SLA UI — requires schema not present.
+- Top tabs: Pipeline · Hash refresh · History · Configurations (`tab=`). **Run Pipeline** (CA DROP) queues download → land → promote.
+- Stage tabs Download / Ingest / Matching / Fulfillment are the bulk-card stage strip (`stage=`); Land+Promote combined as Ingest.
+- Hash-index: **Refresh state** / **Refresh all** enqueue then process in one action (USPS 50+DC); rematch-on-refresh for every successful state.
+- Matching review / fulfill-decline live in Inbox (`?bulk=`). Bulk card runs support pagination, re-run, assign, detail dialog.
 
 ## Rules
 

@@ -16,6 +16,7 @@ from habeas_privacy_core.workflow.approval import (
     get_current_assignment,
     is_matching_review_approved,
     list_workflow_assignments,
+    reconcile_ungated_matching_reviews,
     release_approved,
 )
 from habeas_privacy_core.workflow.error_policy import (
@@ -49,5 +50,6 @@ __all__ = [
     "handle_terminal",
     "is_matching_review_approved",
     "list_workflow_assignments",
+    "reconcile_ungated_matching_reviews",
     "release_approved",
 ]

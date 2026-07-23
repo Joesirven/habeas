@@ -104,7 +104,7 @@ export type ConfirmActionDialogProps = {
   onConfirm: () => void
 }
 
-/** Modal confirm for promote / decline / bulk actions. */
+/** Modal confirm for fulfill / decline / bulk actions. */
 export function ConfirmActionDialog({
   open,
   onOpenChange,
@@ -117,12 +117,24 @@ export function ConfirmActionDialog({
   onConfirm,
 }: ConfirmActionDialogProps) {
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        // Keep the dialog up while a mutation is in flight so "Working…" is visible.
+        if (!next && confirming) return
+        onOpenChange(next)
+      }}
+    >
       <DialogContent className="max-w-md" onOpenAutoFocus={(event) => event.preventDefault()}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
+        {confirming ? (
+          <p className="text-xs text-ink-soft" role="status" aria-live="polite">
+            Working — do not close this tab…
+          </p>
+        ) : null}
         <DialogFooter>
           <button
             type="button"

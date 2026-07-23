@@ -61,7 +61,7 @@ Optional: copy `.env.example` to `.env` and set `VITE_ADMIN_API_URL` when not us
 
 ### Drop ops navigation
 
-- **Pipeline** (`/ops/drop-pipeline?tab=`) — tabbed Download / Ingest / Matching / Fulfillment; home tab is Configurations (hash-index enqueue / enqueue-all).
+- **Pipeline** (`/?tab=pipeline`) — fleet actions + bulk cards; Download / Ingest / Matching / Fulfillment tabs live inside each bulk card (`stage=`). Hash refresh / Configurations remain top tabs.
 - **Health** (`/ops/health`) — workers + queues from admin_api; Escalations/retries and Configuration (retry `max_attempts`) under the Health hover menu.
 - Browser never calls worker URLs — only admin-api aggregates.
 

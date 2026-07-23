@@ -651,6 +651,35 @@ export function postDropFulfill(body?: { request_id?: string }) {
   })
 }
 
+/** Access / suppression artifact for operator handoff (admin-api fulfillment ops). */
+export type FulfillmentArtifact = {
+  request_id: string
+  kind: 'access' | 'suppression' | null
+  fulfillment_artifact_uri: string | null
+  shareable_url: string | null
+  access_delivery_status: string | null
+  attempt_status: string | null
+}
+
+export function getFulfillmentArtifact(requestId: string) {
+  return fetchAdminApi<FulfillmentArtifact>(
+    `/ops/fulfillment/requests/${encodeURIComponent(requestId)}/artifact`,
+  )
+}
+
+export function patchAccessDeliveryStatus(
+  requestId: string,
+  body: { status: 'pending' | 'delivered' | 'failed' | 'recalled'; notes?: string },
+) {
+  return fetchAdminApi<FulfillmentArtifact>(
+    `/ops/fulfillment/requests/${encodeURIComponent(requestId)}/delivery-status`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
 export function postHashIndexRefreshEnqueueAll(body?: { list_types?: string[] }) {
   return fetchAdminApi<Record<string, unknown>>('/ops/drop/hash-index-refresh/enqueue-all', {
     method: 'POST',
@@ -734,7 +763,7 @@ export function postDropMatchingResultPromote(
       method: 'POST',
       body: JSON.stringify({
         decided_by: 'web-admin@habeas.com',
-        decision_reason: body?.decision_reason ?? 'promote to fulfillment',
+        decision_reason: body?.decision_reason ?? 'fulfill — matching review approved',
       }),
     },
   )
@@ -1120,6 +1149,10 @@ export type RequestJourneyResponse = {
   current_stage: string
   blocker: string | null
   stages: JourneyStage[]
+  /** CSV member linking this request into a bulk ZIP process. */
+  source_csv_filename?: string | null
+  /** drop_connector download attempt id (bulk process key). */
+  bulk_process_id?: number | null
 }
 
 export type NeedsAttentionAssignment = {
@@ -1143,6 +1176,10 @@ export type NeedsAttentionItem = {
   requestor_state?: string | null
   review_status?: string | null
   assignment?: NeedsAttentionAssignment | null
+  /** drop_connector download attempt id — batch key for inbox threads */
+  bulk_process_id?: number | null
+  /** ZIP member name — fallback batch key when download ledger is missing */
+  source_csv_filename?: string | null
 }
 
 export type NeedsAttentionResponse = {

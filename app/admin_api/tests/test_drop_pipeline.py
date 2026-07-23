@@ -1348,14 +1348,18 @@ def test_match_proxy_opens_matching_review_gate(monkeypatch: pytest.MonkeyPatch)
         def acquire(self):
             return _Acquire()
 
-    async def fake_create(conn: Any, *, request_id: str, **kwargs: Any) -> dict[str, Any]:
+    async def fake_ensure(conn: Any, *, request_id: str, **kwargs: Any) -> dict[str, Any]:
         created["request_id"] = request_id
         return {"id": 42, "request_id": request_id, "status": "pending"}
+
+    from admin_api import main as admin_main
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
     monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
     monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
-    monkeypatch.setattr(drop_pipeline, "create_matching_review_approval", fake_create)
+    monkeypatch.setattr(drop_pipeline, "ensure_pending_matching_review", fake_ensure)
+    # Avoid lifespan create_pool when DATABASE_URL points at an unreachable host.
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
 
     with TestClient(app) as client:
         response = client.post("/ops/drop/match")
@@ -1770,10 +1774,12 @@ async def test_collect_bulk_process_progress_shape():
             return _Row(
                 raw_rows=10,
                 request_rows=8,
+                land_csv_count=1,
                 matching_none=1,
                 matching_open=2,
                 matching_success=4,
                 matching_failed=1,
+                matching_results_count=4,
                 review_pending=2,
                 review_approved=3,
                 fulfill_unset=5,
@@ -1803,6 +1809,62 @@ async def test_collect_bulk_process_progress_shape():
     assert detail["request_rows"] == 8
     assert "gcs_uri" not in detail
     assert "percent" in detail["overall"]
+
+
+@pytest.mark.asyncio
+async def test_collect_bulk_process_progress_reconciles_stale_land():
+    """Land attempts stuck pending still count success when raw CSVs exist."""
+    attempted = datetime(2026, 7, 17, 16, 50, tzinfo=timezone.utc)
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        if "FROM drop_connector_attempts" in sql and "step = 'download'" in sql:
+            return _Row(
+                id=7,
+                status="success",
+                attempted_at=attempted,
+                completed_at=attempted,
+                gcs_uri="gs://bucket/drop.zip",
+            )
+        if "batch_raw" in sql or "WITH batch_raw" in sql:
+            return _Row(
+                raw_rows=200,
+                request_rows=100,
+                land_csv_count=3,
+                matching_none=99,
+                matching_open=0,
+                matching_success=1,
+                matching_failed=0,
+                matching_results_count=1,
+                review_pending=0,
+                review_approved=1,
+                fulfill_unset=99,
+                fulfill_done=1,
+            )
+        return None
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        if "drop_ingest_attempts" in sql:
+            return [
+                _Row(step="land", status="pending", list_type="Email", count=1),
+                _Row(step="land", status="pending", list_type="NDZ", count=1),
+                _Row(step="land", status="pending", list_type="Phone", count=1),
+            ]
+        return []
+
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    conn.fetch = AsyncMock(side_effect=fetch)
+
+    detail = await drop_pipeline.collect_bulk_process_progress(conn, process_id=7)
+    assert detail is not None
+    assert detail["stages"]["land"]["success"] == 3
+    assert detail["stages"]["land"]["open"] == 0
+    assert detail["stages"]["promote"]["success"] == 3
+    assert detail["stages"]["promote"]["total"] == 3
+    assert detail["overall"]["current_stage"] != "land"
+    # Matching still open → review/fulfill must not look ahead/done.
+    assert detail["stages"]["review"]["total"] == 0
+    assert detail["stages"]["fulfillment"]["total"] == 0
 
 
 def test_bulk_processes_route(monkeypatch: pytest.MonkeyPatch):

@@ -14,7 +14,7 @@ import {
   type WorkersTimeWindow,
 } from '@/lib/api'
 import { RoleGate, isSuperAdmin } from '@/lib/auth'
-import type { WorkersSearch, WorkersStatusTab } from '@/router'
+import { runsSearchForWorker, type WorkersSearch, type WorkersStatusTab } from '@/router'
 
 const WINDOW_OPTIONS: WorkersTimeWindow[] = ['8h', '1w', '3m', 'custom']
 
@@ -321,8 +321,12 @@ function WorkersBody() {
             Fleet health, queue depth, and run triage — poll 15s · refreshed {refreshedAt}
           </p>
         </div>
-        <Link to="/ops/workers/failed" search={{ window, since }} className="taste-btn text-xs">
-          Failed runs →
+        <Link
+          to="/ops/runs"
+          search={{ status: 'failed', window: window === 'custom' ? 'custom' : window, since }}
+          className="taste-btn text-xs"
+        >
+          Failed in Runs →
         </Link>
       </header>
 
@@ -441,17 +445,21 @@ function WorkersBody() {
                       className="cursor-pointer transition-colors hover:bg-panel/50"
                       onClick={() =>
                         void navigate({
-                          to: '/ops/workers/$workerName',
-                          params: { workerName: worker.name },
-                          search: { window, since },
+                          to: '/ops/runs',
+                          search: runsSearchForWorker(worker.name, {
+                            window: window === 'custom' ? 'custom' : window,
+                            since,
+                          }),
                         })
                       }
                     >
                       <td className="font-mono text-xs">
                         <Link
-                          to="/ops/workers/$workerName"
-                          params={{ workerName: worker.name }}
-                          search={{ window, since }}
+                          to="/ops/runs"
+                          search={runsSearchForWorker(worker.name, {
+                            window: window === 'custom' ? 'custom' : window,
+                            since,
+                          })}
                           className="text-habeas-mid underline decoration-habeas-mid/30 underline-offset-2"
                           onClick={(event) => event.stopPropagation()}
                         >
@@ -676,8 +684,8 @@ function WorkersTrendsBody() {
                   <tr key={row.worker}>
                     <td className="font-mono text-xs">
                       <Link
-                        to="/ops/workers/$workerName"
-                        params={{ workerName: row.worker }}
+                        to="/ops/runs"
+                        search={runsSearchForWorker(row.worker)}
                         className="text-habeas-mid underline decoration-habeas-mid/30 underline-offset-2"
                       >
                         {row.worker}

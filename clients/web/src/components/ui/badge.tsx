@@ -13,6 +13,9 @@ const badgeVariants = cva(
         fail: 'border-red-200 bg-red-50 text-red-800',
         run: 'border-sky-200 bg-sky-50 text-sky-900',
         wait: 'border-line bg-white text-ink-soft',
+        /** Compact unread / notification count pill */
+        notification:
+          'min-w-4 justify-center rounded-full border-transparent bg-habeas-navy px-1.5 py-0 text-[0.625rem] font-semibold normal-case tracking-normal text-white tabular-nums',
       },
     },
     defaultVariants: {
