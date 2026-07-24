@@ -73,9 +73,10 @@ function RoleStatusBanner() {
 
   const showSimulator = realRole === 'super_admin'
   const selectValue = simulateRole ?? me.role
+  const meRealRole = me.real_role
 
   function applySimulateRole(next: UserRole) {
-    const stored = next === me.real_role ? null : next
+    const stored = next === meRealRole ? null : next
     setStoredSimulateRole(stored)
     setSimulateRole(stored)
     void queryClient.invalidateQueries({ queryKey: ['admin-api', 'me'] })
