@@ -204,6 +204,8 @@ def _require_database() -> None:
 def _iso(value: Any) -> str | None:
     if value is None:
         return None
+    if isinstance(value, str):
+        return value
     return value.isoformat()
 
 
@@ -1266,5 +1268,139 @@ async def request_journey(
     pool = get_pool()
     async with pool.acquire() as conn:
         response = await build_request_journey(conn, request_id=request_id)
+    assert_no_pii_keys(response.model_dump())
+    return response
+
+
+class TimelineEntry(BaseModel):
+    at: str
+    kind: str
+    actor: str | None = None
+    summary: str
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class RequestTimelineResponse(BaseModel):
+    request_id: str
+    entries: list[TimelineEntry] = Field(default_factory=list)
+
+
+async def build_request_timeline(conn: Any, *, request_id: str) -> RequestTimelineResponse:
+    """Merge comments, approvals, and audit rows into chronological history."""
+    try:
+        UUID(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid request_id") from exc
+
+    exists = await conn.fetchval("SELECT 1 FROM requests WHERE id = $1", UUID(request_id))
+    if not exists:
+        raise HTTPException(status_code=404, detail="request not found")
+
+    entries: list[TimelineEntry] = []
+
+    comment_rows = await conn.fetch(
+        """
+        SELECT c.id, c.body, c.created_at, u.email AS actor
+          FROM request_comments c
+          JOIN users u ON u.id = c.author_user_id
+         WHERE c.request_id = $1
+         ORDER BY c.created_at ASC
+        """,
+        UUID(request_id),
+    )
+    for row in comment_rows:
+        entries.append(
+            TimelineEntry(
+                at=_iso(row["created_at"]) or "",
+                kind="comment",
+                actor=str(row["actor"]),
+                summary="Comment added",
+                meta={"comment_id": int(row["id"])},
+            )
+        )
+
+    approval_rows = await conn.fetch(
+        """
+        SELECT id, action_type, status, approver_role, decided_by,
+               decision_reason, requested_at, decided_at, context_jsonb
+          FROM approval_requests
+         WHERE request_id = $1
+         ORDER BY COALESCE(decided_at, requested_at) ASC
+        """,
+        UUID(request_id),
+    )
+    for row in approval_rows:
+        action = str(row["action_type"])
+        status = str(row["status"])
+        context = row["context_jsonb"] or {}
+        if isinstance(context, str):
+            context = json.loads(context)
+        kind = "approval"
+        if action == WORKFLOW_ASSIGNMENT_ACTION and context.get("kind") == "escalate":
+            kind = "escalation"
+        elif action == WORKFLOW_ASSIGNMENT_ACTION:
+            kind = "assignment"
+        actor = row["decided_by"] or row.get("approver_role")
+        summary = f"{action} — {status}"
+        at = _iso(row["decided_at"]) or _iso(row["requested_at"]) or ""
+        entries.append(
+            TimelineEntry(
+                at=at,
+                kind=kind,
+                actor=str(actor) if actor else None,
+                summary=summary,
+                meta={"approval_id": int(row["id"]), "status": status},
+            )
+        )
+
+    audit_rows = await conn.fetch(
+        """
+        SELECT actor, command, result_summary, occurred_at, arguments
+          FROM admin_audit_log
+         WHERE arguments->>'request_id' = $1
+         ORDER BY occurred_at ASC
+         LIMIT 200
+        """,
+        request_id,
+    )
+    for row in audit_rows:
+        entries.append(
+            TimelineEntry(
+                at=_iso(row["occurred_at"]) or "",
+                kind="audit",
+                actor=str(row["actor"]),
+                summary=str(row["result_summary"] or row["command"]),
+                meta={"command": str(row["command"])},
+            )
+        )
+
+    journey = await build_request_journey(conn, request_id=request_id)
+    for stage in journey.stages:
+        if stage.status in ("complete", "failed", "in_progress", "waiting"):
+            ts = stage.completed_at or stage.attempted_at
+            if ts:
+                entries.append(
+                    TimelineEntry(
+                        at=ts,
+                        kind="stage",
+                        actor=None,
+                        summary=f"Stage {stage.label}: {stage.status.replace('_', ' ')}",
+                        meta={"stage": stage.stage, "status": stage.status},
+                    )
+                )
+
+    entries.sort(key=lambda item: item.at)
+    return RequestTimelineResponse(request_id=request_id, entries=entries)
+
+
+@router.get("/{request_id}/timeline", response_model=RequestTimelineResponse)
+async def request_timeline(
+    request_id: str,
+    _viewer: RequestOpsViewer,
+) -> RequestTimelineResponse:
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        response = await build_request_timeline(conn, request_id=request_id)
     assert_no_pii_keys(response.model_dump())
     return response

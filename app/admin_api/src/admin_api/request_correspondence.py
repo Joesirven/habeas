@@ -23,7 +23,7 @@ LegalCorrespondencePrincipal = Annotated[
 ]
 TemplateAdminPrincipal = Annotated[
     RolePrincipal,
-    Depends(require_roles(ROLE_SUPER_ADMIN)),
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN)),
 ]
 
 _PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")

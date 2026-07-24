@@ -321,6 +321,11 @@ LegalPrincipal = Annotated[
     Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL)),
 ]
 
+SettingsWritePrincipal = Annotated[
+    RolePrincipal,
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN)),
+]
+
 
 def decided_by_for_mutation(actor: str, client_decided_by: str | None) -> str:
     """Prefer IAP email over client-supplied decided_by when a principal is present."""
@@ -2795,7 +2800,7 @@ async def get_route_triage_condition(_principal: LegalPrincipal):
 @router.put("/workflow/conditions/route-triage")
 async def put_route_triage_condition(
     body: RouteTriageConditionBody,
-    _principal: LegalPrincipal,
+    _principal: SettingsWritePrincipal,
     actor: DropMutationActor,
 ):
     """Version ``intake.route_triage`` — close active row, insert replacement."""

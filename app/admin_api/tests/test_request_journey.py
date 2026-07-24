@@ -562,3 +562,56 @@ async def test_journey_api_integration_no_pii(pool, monkeypatch: pytest.MonkeyPa
     # source_csv_filename is an intentional ops field on journey (ZIP member name).
 
     await db_pool.close_pool()
+
+
+@pytest.mark.asyncio
+async def test_build_request_timeline_merges_entries(monkeypatch: pytest.MonkeyPatch):
+    from admin_api.request_journey import build_request_timeline
+
+    request_id = "00000000-0000-0000-0000-000000000101"
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=1)
+    conn.fetch = AsyncMock(
+        side_effect=[
+            [],
+            [
+                {
+                    "id": 1,
+                    "action_type": "workflow.assignment",
+                    "status": "pending",
+                    "approver_role": "legal",
+                    "decided_by": None,
+                    "decision_reason": None,
+                    "requested_at": "2026-07-24T12:00:00+00:00",
+                    "decided_at": None,
+                    "context_jsonb": {"kind": "escalate"},
+                }
+            ],
+            [],
+        ]
+    )
+
+    async def fake_journey(_conn, *, request_id: str):
+        from admin_api.request_journey import JourneyStage, RequestJourneyResponse
+
+        return RequestJourneyResponse(
+            request_id=request_id,
+            intake_source="manual",
+            received_at="2026-07-24T10:00:00+00:00",
+            current_stage="review",
+            stages=[
+                JourneyStage(
+                    stage="received",
+                    label="Received",
+                    status="complete",
+                    completed_at="2026-07-24T10:00:00+00:00",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("admin_api.request_journey.build_request_journey", fake_journey)
+
+    result = await build_request_timeline(conn, request_id=request_id)
+    assert result.request_id == request_id
+    assert any(entry.kind == "escalation" for entry in result.entries)
+    assert any(entry.kind == "stage" for entry in result.entries)

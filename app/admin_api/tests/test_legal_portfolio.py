@@ -17,9 +17,11 @@ SUPER = RolePrincipal(email="ops@example.com", role=ROLE_SUPER_ADMIN, real_role=
 @pytest.mark.asyncio
 async def test_legal_portfolio_returns_aggregates(monkeypatch: pytest.MonkeyPatch):
     conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={"drop_count": 2, "other_count": 5})
     conn.fetch = AsyncMock(
         side_effect=[
             [{"request_type": "delete", "count": 3}],
+            [{"stage": "receive", "in_queue": 1, "in_progress": 0, "complete": 2}],
             [{"stage": "review", "count": 2}],
             [{"assignee_identity": "owner@example.com", "pending_count": 1}],
         ]
@@ -49,5 +51,8 @@ async def test_legal_portfolio_returns_aggregates(monkeypatch: pytest.MonkeyPatc
 
     assert result.type_counts[0].request_type == "delete"
     assert result.type_counts[0].count == 3
+    assert result.source_buckets.drop == 2
+    assert result.source_buckets.other == 5
+    assert len(result.stage_matrix) == 6
     assert result.schedule_excerpt is not None
     assert result.schedule_excerpt.label == "CA DROP"

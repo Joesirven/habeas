@@ -33,12 +33,8 @@ from habeas_privacy_core.audit import AuditMiddleware
 from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_LEGAL, ROLE_SUPER_ADMIN
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
-from habeas_privacy_core.db.requests import (
-    get_request,
-    insert_request,
-    list_requests,
-    promote_manual_request,
-)
+from admin_api.requests_list import RequestListItem, search_requests
+from habeas_privacy_core.db.requests import get_request, insert_request, promote_manual_request
 from habeas_privacy_core.health import health_payload, ready_payload
 from habeas_privacy_core.models.intake import (
     CreateRequestInput,
@@ -205,16 +201,25 @@ async def live_events():
     return EventSourceResponse(event_generator())
 
 
-@app.get("/requests", response_model=list[RequestRecord])
+@app.get("/requests", response_model=list[RequestListItem])
 async def requests_list(
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=50, ge=1, le=100),
     intake_source: IntakeSource | None = None,
+    q: str | None = Query(default=None, max_length=200),
 ):
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
     pool = get_pool()
     async with pool.acquire() as conn:
-        return await list_requests(conn, limit=limit, intake_source=intake_source)
+        try:
+            return await search_requests(
+                conn,
+                limit=limit,
+                intake_source=intake_source,
+                q=q,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/requests/{request_id}", response_model=RequestRecord)

@@ -1908,14 +1908,20 @@ def test_route_triage_conditions_get_put_legal_only(
         }
 
     _fake_pool(monkeypatch)
+    from admin_api import main as admin_main
+
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
+    monkeypatch.setattr(admin_main, "create_pool", AsyncMock())
+    monkeypatch.setattr(admin_main, "close_pool", AsyncMock())
     roles.settings.admin_api_legals = "legal@example.com"
+    roles.settings.admin_api_admins = "admin@example.com"
     roles.settings.admin_api_data_owners = "owner@example.com"
     roles.settings.admin_api_super_admins = ""
-    roles.settings.admin_api_admins = ""
     monkeypatch.setattr(drop_pipeline, "fetch_intake_route_triage_rule", fake_fetch)
     monkeypatch.setattr(drop_pipeline, "version_intake_route_triage_rule", fake_version)
 
     legal_headers = {IAP_EMAIL_HEADER: "legal@example.com"}
+    admin_headers = {IAP_EMAIL_HEADER: "admin@example.com"}
     owner_headers = {IAP_EMAIL_HEADER: "owner@example.com"}
 
     with TestClient(app) as client:
@@ -1923,9 +1929,17 @@ def test_route_triage_conditions_get_put_legal_only(
             "/ops/drop/workflow/conditions/route-triage",
             headers=legal_headers,
         )
-        put_ok = client.put(
+        put_legal = client.put(
             "/ops/drop/workflow/conditions/route-triage",
             headers=legal_headers,
+            json={
+                "condition_jsonb": {"state_in": ["NY", "TX"]},
+                "rationale": "Route NY/TX to Triage",
+            },
+        )
+        put_admin = client.put(
+            "/ops/drop/workflow/conditions/route-triage",
+            headers=admin_headers,
             json={
                 "condition_jsonb": {"state_in": ["NY", "TX"]},
                 "rationale": "Route NY/TX to Triage",
@@ -1938,8 +1952,9 @@ def test_route_triage_conditions_get_put_legal_only(
 
     assert get_ok.status_code == 200
     assert get_ok.json()["condition_jsonb"]["requestor_state_not_in"] == ["CA", "CO"]
-    assert put_ok.status_code == 200
-    assert put_ok.json()["rule"]["id"] == 2
+    assert put_legal.status_code == 403
+    assert put_admin.status_code == 200
+    assert put_admin.json()["rule"]["id"] == 2
     assert captured["version"]["condition_jsonb"] == {"state_in": ["NY", "TX"]}
     assert get_forbidden.status_code == 403
 

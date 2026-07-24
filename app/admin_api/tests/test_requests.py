@@ -133,3 +133,38 @@ def test_agent_batch_upload_route(monkeypatch: pytest.MonkeyPatch):
     assert empty.status_code == 400
     assert forbidden.status_code == 403
     assert ROLE_LEGAL == "legal"
+
+
+@pytest.mark.asyncio
+async def test_search_requests_rejects_short_query():
+    from admin_api.requests_list import search_requests
+
+    conn = AsyncMock()
+    with pytest.raises(ValueError, match="at least 2"):
+        await search_requests(conn, q="a")
+
+
+def test_requests_list_short_query_returns_400(monkeypatch: pytest.MonkeyPatch):
+    from admin_api import main as admin_main
+
+    monkeypatch.setattr(admin_main.settings, "database_url", "postgres://local")
+    monkeypatch.setattr(admin_main, "create_pool", AsyncMock())
+    monkeypatch.setattr(admin_main, "close_pool", AsyncMock())
+
+    class _Acquire:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            return None
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(admin_main, "get_pool", lambda: _Pool())
+
+    with TestClient(app) as client:
+        response = client.get("/requests?q=a")
+
+    assert response.status_code == 400
