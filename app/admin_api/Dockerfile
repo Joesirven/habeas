@@ -6,7 +6,8 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY libs/habeas-privacy-core/ ./libs/habeas-privacy-core/
 COPY app/admin_api/ ./app/admin_api/
-RUN uv sync --frozen --no-dev --package admin-api
+COPY app/data_fulfillment_dispatcher/ ./app/data_fulfillment_dispatcher/
+RUN uv sync --frozen --no-dev --no-editable --package admin-api
 
 FROM python:3.12-slim
 WORKDIR /app

@@ -45,6 +45,7 @@ version = "0.1.0"
 source = { editable = "app/admin_api" }
 dependencies = [
     { name = "habeas-privacy-core" },
+    { name = "data-fulfillment-dispatcher" },
     { name = "fastapi" },
     { name = "google-auth" },
     { name = "google-cloud-bigquery" },
@@ -57,6 +58,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "data-fulfillment-dispatcher", editable = "app/data_fulfillment_dispatcher" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "google-auth", specifier = ">=2.36" },
     { name = "google-cloud-bigquery", specifier = ">=3.25" },

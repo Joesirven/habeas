@@ -4,6 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "habeas-privacy-core",
+    "data-fulfillment-dispatcher",
     "fastapi>=0.115",
     "google-auth>=2.36",
     "google-cloud-bigquery>=3.25",
@@ -15,6 +16,7 @@ dependencies = [
 
 [tool.uv.sources]
 habeas-privacy-core = { workspace = true }
+data-fulfillment-dispatcher = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
