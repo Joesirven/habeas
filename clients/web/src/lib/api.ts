@@ -776,7 +776,7 @@ export function patchAccessDeliveryStatus(
   body: { status: 'pending' | 'delivered' | 'failed' | 'recalled'; notes?: string },
 ) {
   return fetchAdminApi<FulfillmentArtifact>(
-    `/ops/drop/workflow/delivery/${encodeURIComponent(requestId)}/status`,
+    `/ops/fulfillment/requests/${encodeURIComponent(requestId)}/delivery-status`,
     {
       method: 'PATCH',
       body: JSON.stringify(body),
@@ -1391,6 +1391,26 @@ export async function getLegalNeedsAttention(limit = 1000): Promise<NeedsAttenti
     ),
   )
   return { items, kind: 'all' }
+}
+
+export type LegalPortfolio = {
+  type_counts: Array<{ request_type: string; count: number }>
+  pipeline_stages: Array<{ stage: string; count: number }>
+  data_owner_queues: Array<{
+    assignee_identity: string | null
+    pending_count: number
+    outreach_hint: string | null
+  }>
+  warnings: Array<{ code: string; message: string; count: number }>
+  schedule_excerpt: {
+    label: string
+    next_run_at: string | null
+    cadence: string | null
+  } | null
+}
+
+export function getLegalPortfolio() {
+  return fetchAdminApi<LegalPortfolio>('/legal/home/portfolio')
 }
 
 export function postTriageBulkReject(body: {

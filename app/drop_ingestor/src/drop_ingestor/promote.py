@@ -171,6 +171,7 @@ async def run_promote(
                     intake_source=IntakeSource.DROP,
                     raw_record_id=raw_id,
                     requestor_state=requestor_state,
+                    request_type="delete",
                 ),
             )
             result.request_ids.append(request_id)

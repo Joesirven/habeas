@@ -22,6 +22,9 @@ from admin_api.approvals import (
 )
 from admin_api.drop_pipeline import health_router as ops_health_router
 from admin_api.drop_pipeline import router as drop_pipeline_router
+from admin_api.fulfillment_ops import router as fulfillment_ops_router
+from admin_api.legal_portfolio import router as legal_portfolio_router
+from admin_api.request_correspondence import router as request_correspondence_router
 from admin_api.runs import router as runs_router
 from admin_api.request_journey import router as request_journey_router
 from admin_api.roles import CurrentRolePrincipal, MeResponse, RolePrincipal, require_roles
@@ -40,7 +43,9 @@ from habeas_privacy_core.health import health_payload, ready_payload
 from habeas_privacy_core.models.intake import (
     CreateRequestInput,
     RequestRecord,
+    VendorShapeError,
     clean_agent_batch_csv,
+    validate_agent_vendor_shape,
 )
 from habeas_privacy_core.models.request import IntakeSource
 from habeas_privacy_core.observability.logging import configure_logging
@@ -136,6 +141,9 @@ app.add_middleware(
 app.add_middleware(AuditMiddleware)
 app.include_router(drop_pipeline_router)
 app.include_router(ops_health_router)
+app.include_router(fulfillment_ops_router)
+app.include_router(legal_portfolio_router)
+app.include_router(request_correspondence_router)
 app.include_router(runs_router)
 app.include_router(request_journey_router)
 app.include_router(worker_schedules_router)
@@ -235,6 +243,7 @@ async def requests_create(_body: ManualRequestBody):
                 intake_source=IntakeSource.MANUAL,
                 raw_record_id=None,
                 requestor_state=_body.state,
+                request_type=_body.request_type,
             ),
         )
         record = await get_request(conn, request_id)
@@ -260,6 +269,7 @@ class AgentBatchUploadResponse(BaseModel):
 async def requests_agent_batch(
     _principal: LegalIntakePrincipal,
     file: UploadFile = File(...),
+    vendor_profile: str = Query(default="generic", max_length=50),
 ):
     """Legal agent-batch upload — platform cleans; dispatcher routes triage/match."""
     if not settings.database_url:
@@ -281,6 +291,15 @@ async def requests_agent_batch(
     raw = await file.read()
     if not raw or not raw.strip():
         raise HTTPException(status_code=400, detail="empty file")
+
+    import csv
+    import io
+
+    try:
+        reader = csv.DictReader(io.StringIO(raw.decode("utf-8-sig")))
+        validate_agent_vendor_shape(profile=vendor_profile, fieldnames=reader.fieldnames)
+    except VendorShapeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     batch_id = str(uuid4())
     cleaned = clean_agent_batch_csv(

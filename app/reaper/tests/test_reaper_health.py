@@ -75,3 +75,9 @@ def test_reap_runs_matching_review_reconcile(monkeypatch):
     assert body["status"] == "ok"
     assert body["matching_review_reconcile"]["ensured_count"] == 1
     reconcile.assert_awaited_once()
+
+
+def test_data_fulfillment_attempts_registered_with_attempt_retry():
+    by_table = {cfg.table: cfg for cfg in DEFAULT_REAPED_TABLES}
+    assert "data_fulfillment_attempts" in by_table
+    assert by_table["data_fulfillment_attempts"].supports_attempt_retry is True

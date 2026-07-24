@@ -10,6 +10,7 @@ import {
   getDropPipeline,
   getHealth,
   getLegalNeedsAttention,
+  getLegalPortfolio,
   getNeedsAttention,
   type NeedsAttentionItemKind,
 } from '@/lib/api'
@@ -250,7 +251,14 @@ function LegalHome() {
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })
+  const portfolioQuery = useQuery({
+    queryKey: ['admin-api', 'legal', 'home', 'portfolio'],
+    queryFn: getLegalPortfolio,
+    refetchInterval: 15_000,
+    placeholderData: (previous) => previous,
+  })
   const items = attentionQuery.data?.items ?? []
+  const portfolio = portfolioQuery.data
   const triage = items.filter(
     (item) => item.kind === 'triage' || item.assignment?.kind === 'triage',
   ).length
@@ -307,6 +315,75 @@ function LegalHome() {
           data-vertical fulfill. Upload agent batches when ready.
         </p>
       </header>
+      {portfolio ? (
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div className="taste-panel-soft p-4">
+            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Open by type</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {portfolio.type_counts.map((row) => (
+                <span key={row.request_type} className="taste-frost-chip text-[0.7rem]">
+                  {row.request_type}: {row.count}
+                </span>
+              ))}
+            </div>
+          </div>
+          <div className="taste-panel-soft p-4">
+            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Pipeline volume</p>
+            <div className="mt-3 space-y-2">
+              {portfolio.pipeline_stages.map((row) => (
+                <div key={row.stage} className="flex items-center justify-between text-xs">
+                  <span className="capitalize text-ink-soft">{row.stage}</span>
+                  <span className="tabular-nums text-ink">{row.count}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          {portfolio.schedule_excerpt ? (
+            <div className="taste-panel-soft p-4 lg:col-span-2">
+              <p className="text-[0.65rem] uppercase tracking-wide text-mute">Next bulk intake</p>
+              <p className="mt-2 text-sm text-ink">
+                {portfolio.schedule_excerpt.label}
+                {portfolio.schedule_excerpt.next_run_at
+                  ? ` — ${new Date(portfolio.schedule_excerpt.next_run_at).toLocaleString()}`
+                  : ''}
+              </p>
+            </div>
+          ) : null}
+          {portfolio.warnings.length > 0 ? (
+            <div className="taste-panel-soft border-amber-200/60 p-4 lg:col-span-2">
+              <p className="text-[0.65rem] uppercase tracking-wide text-mute">Attention</p>
+              <ul className="mt-2 space-y-1 text-xs text-ink-soft">
+                {portfolio.warnings.map((w) => (
+                  <li key={w.code}>
+                    {w.message} ({w.count})
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {portfolio.data_owner_queues.length > 0 ? (
+            <div className="taste-panel-soft p-4 lg:col-span-2">
+              <p className="text-[0.65rem] uppercase tracking-wide text-mute">
+                Data owner queues
+              </p>
+              <ul className="mt-2 space-y-2 text-xs">
+                {portfolio.data_owner_queues.map((row) => (
+                  <li key={row.assignee_identity ?? 'unassigned'} className="text-ink-soft">
+                    <span className="font-mono text-ink">
+                      {row.assignee_identity ?? 'Unassigned'}
+                    </span>
+                    {' — '}
+                    {row.pending_count} pending
+                    {row.outreach_hint ? (
+                      <p className="mt-1 text-mute">{row.outreach_hint}</p>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {cards.map((card) => (
           <Link

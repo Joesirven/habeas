@@ -265,8 +265,14 @@ def test_legal_can_read_needs_attention(monkeypatch: pytest.MonkeyPatch) -> None
     roles.settings.admin_api_legals = "legal@example.com"
     monkeypatch.setattr(request_journey.settings, "database_url", "postgres://local")
 
-    async def fake_list(conn: Any, *, limit: int, kind: str = "all"):
-        del conn, limit
+    async def fake_list(
+        conn: Any,
+        *,
+        limit: int,
+        kind: str = "all",
+        assignee: str | None = None,
+    ):
+        del conn, limit, assignee
         return request_journey.NeedsAttentionResponse(items=[], kind=kind)  # type: ignore[arg-type]
 
     class _Acquire:

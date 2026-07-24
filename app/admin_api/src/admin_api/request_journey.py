@@ -101,6 +101,9 @@ _FORBIDDEN_RESPONSE_KEYS = frozenset(
         "gcs_uri",
         "response_file_name",
         "raw_payload",
+        "shareable_url",
+        "fulfillment_artifact_uri",
+        "signed_url",
     }
 )
 # Ops may return source_csv_filename (ZIP member name) and bulk_process_id.

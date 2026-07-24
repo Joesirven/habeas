@@ -1020,7 +1020,6 @@ export function MatchingReviewPanel({
   )
 }
 
-
 export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDetailDrawerProps) {
   const queryClient = useQueryClient()
   const { isAdmin, isSuperAdmin } = useMe()
@@ -1051,6 +1050,16 @@ export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDe
     retry: false,
   })
 
+  const deliveryMutation = useMutation({
+    mutationFn: (status: 'delivered' | 'failed' | 'recalled') =>
+      patchAccessDeliveryStatus(requestId!, { status }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', requestId],
+      })
+    },
+  })
+
   const promoteMutation = useMutation({
     mutationFn: (responseStatus: DropResponseStatusCode) =>
       postDropMatchingResultPromote(requestId!, { response_status: responseStatus }),
@@ -1071,16 +1080,6 @@ export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDe
     },
     onError: (error) => {
       setActionError(error instanceof Error ? error.message : 'Decline failed')
-    },
-  })
-
-  const deliveryMutation = useMutation({
-    mutationFn: (status: 'delivered' | 'failed' | 'recalled') =>
-      patchAccessDeliveryStatus(requestId!, { status }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({
-        queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', requestId],
-      })
     },
   })
 
@@ -1251,7 +1250,7 @@ export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDe
                     artifact={artifactQuery.data}
                     isPending={artifactQuery.isPending}
                     isError={artifactQuery.isError}
-                    canMutate={Boolean(isSuperAdmin)}
+                    canMutate={Boolean(isSuperAdmin || isAdmin)}
                     busy={deliveryMutation.isPending}
                     onCopyUrl={() => {
                       const url =

@@ -1509,6 +1509,7 @@ def test_matching_result_promote_and_decline_routes(monkeypatch: pytest.MonkeyPa
         request_id: str,
         decided_by: str,
         decision_reason: str | None = None,
+        response_status: int | None = None,
     ) -> dict[str, Any]:
         captured["promote"] = {
             "request_id": request_id,

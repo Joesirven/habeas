@@ -181,6 +181,7 @@ class CreateRequestInput(BaseModel):
     intake_source: IntakeSource
     raw_record_id: int | None = None
     requestor_state: str = Field(min_length=1, max_length=64)
+    request_type: str = Field(default="delete", min_length=1, max_length=20)
 
 
 class DropListType(StrEnum):
@@ -214,3 +215,30 @@ class RequestRecord(BaseModel):
     intake_source: IntakeSource
     raw_record_id: int | None = None
     requestor_state: str
+    request_type: str = "delete"
+
+
+class VendorShapeError(ValueError):
+    """Expected-shape quality check failed for an authorized agent profile."""
+
+
+def validate_agent_vendor_shape(
+    *,
+    profile: str,
+    fieldnames: list[str] | None,
+) -> None:
+    """Vendor-specific expected-shape QC after header normalization (KTD-9)."""
+    if fieldnames is None:
+        raise VendorShapeError("CSV has no header row")
+    normalized = {_normalize_header(h) for h in fieldnames if h}
+    if profile in {"ca_drop_standard", "ca_drop"}:
+        if not {"state", "requestor_state", "st"} & normalized:
+            raise VendorShapeError("CA DROP profile requires a state column")
+        if not (
+            {"email", "email_address", "e_mail"} & normalized
+            or {"phone", "phone_number", "mobile"} & normalized
+        ):
+            raise VendorShapeError("CA DROP profile requires email or phone column")
+        return
+    if not {"state", "requestor_state", "st"} & normalized:
+        raise VendorShapeError("generic profile requires a state column")

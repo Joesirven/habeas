@@ -15,6 +15,7 @@ dependencies = [
     "opentelemetry-sdk>=1.29",
     "opentelemetry-exporter-gcp-trace>=1.9",
     "starlette>=0.41",
+    "google-cloud-storage>=2.18",
 ]
 
 [build-system]

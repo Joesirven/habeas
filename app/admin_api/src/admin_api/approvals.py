@@ -17,10 +17,12 @@ from habeas_privacy_core.workflow.approval import (
     WORKFLOW_ASSIGNMENT_ACTION,
     close_pending_legal_triage,
     create_pending_matching_review,
+    create_pending_notice_review,
     create_workflow_assignment,
     ensure_pending_matching_review,
     get_current_assignment,
     is_matching_review_approved,
+    is_notice_review_approved,
     list_workflow_assignments,
 )
 
@@ -77,6 +79,22 @@ async def create_matching_review_approval(
     )
 
 
+async def create_notice_review_approval(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    context: dict[str, Any] | None = None,
+    expires_in: timedelta = DEFAULT_APPROVAL_TTL,
+) -> dict[str, Any]:
+    """Insert a pending notice.review approval_requests row for a request."""
+    return await create_pending_notice_review(
+        conn,
+        request_id=request_id,
+        context=context,
+        expires_in=expires_in,
+    )
+
+
 async def decide_approval(
     conn: asyncpg.Connection,
     *,
@@ -106,7 +124,22 @@ async def decide_approval(
         decided_by,
         decision_reason,
     )
-    return dict(row) if row else None
+    if row is None:
+        return None
+    result = dict(row)
+    if status == "approved" and result["action_type"] == NOTICE_REVIEW_ACTION:
+        await conn.execute(
+            """
+            UPDATE drop_raw_requests AS drr
+               SET notice_review_status = 'approved'
+              FROM requests AS r
+             WHERE r.id = $1
+               AND r.intake_source = 'drop'
+               AND r.raw_record_id = drr.id
+            """,
+            result["request_id"],
+        )
+    return result
 
 
 async def list_approvals(
@@ -793,6 +826,7 @@ __all__ = [
     "bulk_decline_matching_review_by_match_type",
     "bulk_reject_legal_triage",
     "create_matching_review_approval",
+    "create_notice_review_approval",
     "create_workflow_assignment",
     "decide_approval",
     "decline_matching_review_for_request",
@@ -800,6 +834,7 @@ __all__ = [
     "escalate_requests",
     "get_current_assignment",
     "is_matching_review_approved",
+    "is_notice_review_approved",
     "list_approvals",
     "list_workflow_assignments",
     "match_count_predicate_sql",

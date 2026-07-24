@@ -72,7 +72,7 @@ _WORKER_QUEUE_TABLES: dict[str, str | None] = {
     "drop_ingestor": "drop_ingest_attempts",
     "request_dispatcher": None,
     "matching": "matching_attempts",
-    "data_fulfillment": None,
+    "data_fulfillment": "data_fulfillment_attempts",
     "hash_index_refresh": "hash_index_refresh_attempts",
 }
 
