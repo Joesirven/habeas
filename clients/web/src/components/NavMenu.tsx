@@ -1,7 +1,9 @@
 import { Badge } from '@/components/ui/badge'
+import { LegalSettingsSheet } from '@/components/LegalSettingsSheet'
 import {
   canAccessLegalSurfaces,
   canAccessOpsSurfaces,
+  isLegalAdminPersona,
   useAuth,
 } from '@/lib/auth'
 import { getLegalNeedsAttention, getNeedsAttention } from '@/lib/api'
@@ -186,14 +188,14 @@ export function NavMenu() {
   const { role, isLoading, isError } = useAuth()
   const showWorkers = canAccessOpsSurfaces(role) || isError
   const showLegalExtras = canAccessLegalSurfaces(role)
-  const homeLabel =
-    canAccessOpsSurfaces(role)
-      ? 'Dashboard'
-      : role === 'legal'
-        ? 'Home'
-        : 'My work'
+  const legalAdminNav = isLegalAdminPersona(role)
+  const homeLabel = canAccessOpsSurfaces(role)
+    ? 'Dashboard'
+    : legalAdminNav
+      ? 'Home'
+      : 'My work'
 
-  const isLegalNav = role === 'legal'
+  const isLegalNav = legalAdminNav
   const inboxQuery = useQuery({
     queryKey: [
       'admin-api',
@@ -218,14 +220,19 @@ export function NavMenu() {
       aria-busy={isLoading}
     >
       <NavLink to="/" label={homeLabel} exact />
-      <NavLink to="/requests" label="Requests" exact />
+      <NavLink
+        to="/requests"
+        label={legalAdminNav ? 'All requests' : 'Requests'}
+        exact
+      />
       <NavLink
         to="/requests/needs-attention"
         label="Inbox"
         count={inboxCount}
         search={isLegalNav ? { kind: 'triage' } : undefined}
       />
-      {showLegalExtras ? (
+      {legalAdminNav ? <LegalSettingsSheet /> : null}
+      {showLegalExtras && !legalAdminNav ? (
         <>
           <NavLink to="/requests/slas" label="SLAs" />
           <NavLink to="/requests/conditions" label="Conditions" />

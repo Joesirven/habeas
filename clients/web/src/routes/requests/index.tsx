@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react'
 
 import { Skeleton } from '@/components/AppShell'
 import { RequestDetailDrawer } from '@/components/requests/RequestTriageDialog'
+import { UploadMenu } from '@/components/UploadMenu'
 import { Badge } from '@/components/ui/badge'
 import {
   getDropGlobalStats,
@@ -12,6 +13,7 @@ import {
   type IntakeSource,
   type RequestRecord,
 } from '@/lib/api'
+import { isLegalAdminPersona, useMe } from '@/lib/auth'
 import type { RequestsSearch } from '@/router'
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -75,6 +77,11 @@ function matchesFilters(
 ): boolean {
   if (search.source && request.intake_source !== search.source) return false
 
+  if (search.source_bucket === 'drop' && request.intake_source !== 'drop') return false
+  if (search.source_bucket === 'other' && request.intake_source === 'drop') return false
+
+  if (search.request_type && request.request_type !== search.request_type) return false
+
   if (search.state) {
     const state = (request.requestor_state ?? '').toUpperCase()
     if (state !== search.state.toUpperCase()) return false
@@ -82,7 +89,10 @@ function matchesFilters(
 
   if (search.q) {
     const needle = search.q.trim().toLowerCase()
-    if (needle && !request.id.toLowerCase().includes(needle)) return false
+    if (!needle) return true
+    if (request.id.toLowerCase().includes(needle)) return true
+    if (request.display_label?.toLowerCase().includes(needle)) return true
+    return false
   }
 
   if (search.raw === 'yes' && request.raw_record_id == null) return false
@@ -107,12 +117,19 @@ function matchesFilters(
 export function RequestsPage() {
   const navigate = useNavigate()
   const search = useSearch({ from: '/requests' })
+  const { role } = useMe()
+  const legalAdmin = isLegalAdminPersona(role)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [dialogRequestId, setDialogRequestId] = useState<string | null>(null)
 
   const requestsQuery = useQuery({
-    queryKey: ['admin-api', 'requests', search.source ?? 'all'],
-    queryFn: () => listRequests(search.source || undefined),
+    queryKey: ['admin-api', 'requests', search.source ?? 'all', search.q ?? ''],
+    queryFn: () =>
+      listRequests({
+        intakeSource: search.source,
+        limit: 200,
+        q: search.q,
+      }),
     refetchInterval: 15_000,
   })
 
@@ -156,6 +173,10 @@ export function RequestsPage() {
       to: '/requests',
       search: {
         source: 'source' in patch ? patch.source : search.source,
+        source_bucket: 'source_bucket' in patch ? patch.source_bucket : search.source_bucket,
+        request_type: 'request_type' in patch ? patch.request_type : search.request_type,
+        stage: 'stage' in patch ? patch.stage : search.stage,
+        posture: 'posture' in patch ? patch.posture : search.posture,
         state: 'state' in patch ? patch.state : search.state,
         attention: 'attention' in patch ? patch.attention : search.attention,
         raw: 'raw' in patch ? patch.raw : search.raw,
@@ -180,6 +201,10 @@ export function RequestsPage() {
   const stats = statsQuery.data
   const activeFilterCount = [
     search.source,
+    search.source_bucket,
+    search.request_type,
+    search.stage,
+    search.posture,
     search.state,
     search.attention,
     search.raw,
@@ -220,9 +245,13 @@ export function RequestsPage() {
               </span>
             ) : null}
           </Link>
-          <Link to="/requests/new" className="taste-btn-primary text-xs">
-            Manual submit
-          </Link>
+          {legalAdmin ? (
+            <UploadMenu />
+          ) : (
+            <Link to="/requests/new" className="taste-btn-primary text-xs">
+              Manual submit
+            </Link>
+          )}
         </div>
       </header>
 
@@ -329,11 +358,11 @@ export function RequestsPage() {
             </select>
           </label>
           <label className="flex flex-col gap-1 text-[0.7rem] text-ink-soft sm:col-span-2">
-            Request id contains
+            Name or request ID
             <input
               type="search"
-              className="glass rounded-lg px-2 py-1.5 font-mono text-xs text-ink"
-              placeholder="uuid fragment…"
+              className="glass rounded-lg px-2 py-1.5 text-xs text-ink"
+              placeholder="Name or request ID"
               value={search.q ?? ''}
               onChange={(event) => patchSearch({ q: event.target.value || undefined })}
             />
@@ -391,6 +420,7 @@ export function RequestsPage() {
                   <th>Received</th>
                   <th>Source</th>
                   <th>State</th>
+                  {legalAdmin ? <th>Name</th> : null}
                   <th>Request ID</th>
                   <th>Raw record</th>
                   <th>Attention</th>
@@ -416,6 +446,13 @@ export function RequestsPage() {
                       <td className="font-mono text-xs">
                         {request.requestor_state ?? '—'}
                       </td>
+                      {legalAdmin ? (
+                        <td className="text-xs text-ink-soft">
+                          {request.intake_source === 'drop'
+                            ? '—'
+                            : (request.display_label ?? '—')}
+                        </td>
+                      ) : null}
                       <td>
                         <Link
                           to="/requests/$requestId"

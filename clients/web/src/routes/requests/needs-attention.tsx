@@ -28,7 +28,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { useMe } from '@/lib/auth'
+import { isLegalAdminPersona, useMe } from '@/lib/auth'
 import {
   getDropMatchingResultDetail,
   getFulfillmentArtifact,
@@ -1668,8 +1668,8 @@ export function NeedsAttentionPage() {
   const navigate = useNavigate()
   const search = useSearch({ from: '/requests/needs-attention' })
   const bulkFilter = search.bulk
-  const { isAdmin, isLegal, role, me, isLoading: meLoading } = useMe()
-  const legalPersona = Boolean(isLegal) || role === 'legal'
+  const { isAdmin, role, me, isLoading: meLoading } = useMe()
+  const legalPersona = isLegalAdminPersona(role)
   const dataOwnerPersona = role === 'data_owner'
   const canReviewActions =
     Boolean(isAdmin) || legalPersona || dataOwnerPersona
@@ -2244,7 +2244,7 @@ export function NeedsAttentionPage() {
           </div>
           <p className="mt-1 max-w-lg text-xs text-ink-soft">
             {legalPersona
-              ? 'Case queue — Triage condition holds, Escalations from data owners, then Notice and Delivery after fulfill. Matching review stays on data-owner My work.'
+              ? 'Work to do — escalations, notice, delivery, triage. Distinct from the All requests inventory.'
               : dataOwnerPersona
                 ? 'Approve recommended CA DROP status on Matching, or open Tasks assigned to you. Escalate to Legal when you need a hold.'
                 : 'Pending work stays in Inbox lanes — matching, delivery (shareable URL), DROP notice, and requester comms. Exact 1:1 matches in one DROP batch group as a thread for bulk fulfill.'}

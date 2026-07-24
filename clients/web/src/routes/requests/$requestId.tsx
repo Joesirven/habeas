@@ -5,16 +5,19 @@ import { useState, type ReactNode } from 'react'
 import { SkeletonLines } from '@/components/AppShell'
 import { MatchingReviewPanel } from '@/components/requests/RequestTriageDialog'
 import { RunTimeline } from '@/components/ops/RunTimeline'
-import { useMe } from '@/lib/auth'
+import { useMe, isLegalAdminPersona } from '@/lib/auth'
 import {
   getDropMatchingResultDetail,
   getRequestJourney,
+  getRequestTimeline,
   postDropMatchingResultDecline,
   postDropMatchingResultPromote,
+  postRequestComment,
   type DropResponseStatusCode,
   type JourneyStage,
   type MatchingResultDetail,
   type RunTimelineStep,
+  type TimelineEntry,
 } from '@/lib/api'
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -24,7 +27,7 @@ const SOURCE_LABELS: Record<string, string> = {
   manual: 'Manual',
 }
 
-type RequestTab = 'overview' | 'journey' | 'matching'
+type RequestTab = 'history' | 'overview' | 'journey' | 'matching'
 
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
@@ -98,6 +101,7 @@ function RequestTabs({
   onTabChange: (tab: RequestTab) => void
 }) {
   const tabs: { id: RequestTab; label: string }[] = [
+    { id: 'history', label: 'History' },
     { id: 'overview', label: 'Overview' },
     { id: 'journey', label: 'Journey' },
     { id: 'matching', label: 'Matching' },
@@ -287,15 +291,99 @@ function MatchingPanel({ requestId }: { requestId: string }) {
   )
 }
 
+function HistoryPanel({
+  requestId,
+  entries,
+  isPending,
+}: {
+  requestId: string
+  entries: TimelineEntry[]
+  isPending: boolean
+}) {
+  const queryClient = useQueryClient()
+  const [comment, setComment] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  const commentMutation = useMutation({
+    mutationFn: () => postRequestComment(requestId, comment.trim()),
+    onSuccess: async () => {
+      setComment('')
+      setError(null)
+      await queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'ops', 'requests', requestId, 'timeline'],
+      })
+    },
+    onError: (err) => {
+      setError(err instanceof Error ? err.message : 'Comment failed')
+    },
+  })
+
+  return (
+    <div className="grid gap-4 p-4 lg:grid-cols-[1fr_18rem]">
+      <div className="space-y-3">
+        <p className="taste-micro">Timeline</p>
+        {isPending ? <SkeletonLines lines={4} /> : null}
+        {!isPending && entries.length === 0 ? (
+          <p className="text-xs text-ink-soft">No history yet.</p>
+        ) : null}
+        <ol className="space-y-2">
+          {entries.map((entry, index) => (
+            <li
+              key={`${entry.at}-${entry.kind}-${index}`}
+              className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2 text-xs"
+            >
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="taste-frost-chip text-[0.65rem] capitalize">{entry.kind}</span>
+                <time className="tabular-nums text-mute">{formatTimestamp(entry.at)}</time>
+              </div>
+              <p className="mt-1 text-ink">{entry.summary}</p>
+              {entry.actor ? (
+                <p className="mt-1 text-mute">{entry.actor}</p>
+              ) : null}
+            </li>
+          ))}
+        </ol>
+      </div>
+      <div className="space-y-2">
+        <p className="taste-micro">Add comment</p>
+        <textarea
+          className="min-h-[6rem] w-full rounded-lg border border-line bg-paper-raised px-3 py-2 text-xs text-ink"
+          value={comment}
+          onChange={(event) => setComment(event.target.value)}
+          maxLength={2000}
+        />
+        <button
+          type="button"
+          className="taste-btn-primary text-xs"
+          disabled={comment.trim().length === 0 || commentMutation.isPending}
+          onClick={() => commentMutation.mutate()}
+        >
+          {commentMutation.isPending ? 'Posting…' : 'Post comment'}
+        </button>
+        {error ? <p className="text-xs text-red-700">{error}</p> : null}
+      </div>
+    </div>
+  )
+}
+
 export function RequestDetailPage() {
   const { requestId } = useParams({ from: '/requests/$requestId' })
-  const { isSuperAdmin } = useMe()
-  const [tab, setTab] = useState<RequestTab>('overview')
+  const { isSuperAdmin, role } = useMe()
+  const legalAdmin = isLegalAdminPersona(role)
+  const [tab, setTab] = useState<RequestTab>(legalAdmin ? 'history' : 'overview')
 
   const journeyQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', requestId, 'journey'],
     queryFn: () => getRequestJourney(requestId),
     refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  })
+
+  const timelineQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', requestId, 'timeline'],
+    queryFn: () => getRequestTimeline(requestId),
+    refetchInterval: 10_000,
+    enabled: legalAdmin || tab === 'history',
     placeholderData: (previous) => previous,
   })
 
@@ -308,7 +396,7 @@ export function RequestDetailPage() {
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <Link to="/requests" className="taste-link text-xs">
-            ← Requests
+            ← All requests
           </Link>
           <div className="mt-1.5 flex flex-wrap items-baseline gap-2">
             <h2 className="truncate font-mono text-lg font-medium tracking-tight text-ink">
@@ -359,6 +447,13 @@ export function RequestDetailPage() {
             blocker={journeyQuery.data.blocker}
           />
           <RequestTabs tab={tab} onTabChange={setTab} />
+          {tab === 'history' ? (
+            <HistoryPanel
+              requestId={requestId}
+              entries={timelineQuery.data?.entries ?? []}
+              isPending={timelineQuery.isPending && !timelineQuery.data}
+            />
+          ) : null}
           {tab === 'overview' ? (
             <OverviewPanel
               intakeSource={journeyQuery.data.intake_source}

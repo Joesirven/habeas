@@ -348,6 +348,10 @@ const indexRoute = createRoute({
 
 export type RequestsSearch = {
   source?: 'webform' | 'drop' | 'csv' | 'manual'
+  source_bucket?: 'drop' | 'other'
+  request_type?: string
+  stage?: string
+  posture?: 'in_queue' | 'in_progress' | 'complete'
   state?: string
   attention?: 'needs' | 'clear'
   raw?: 'yes' | 'no'
@@ -363,6 +367,22 @@ function parseRequestsSearch(search: Record<string, unknown>): RequestsSearch {
     ['webform', 'drop', 'csv', 'manual'].includes(search.source)
   ) {
     parsed.source = search.source as RequestsSearch['source']
+  }
+  if (search.source_bucket === 'drop' || search.source_bucket === 'other') {
+    parsed.source_bucket = search.source_bucket
+  }
+  if (typeof search.request_type === 'string' && search.request_type.trim()) {
+    parsed.request_type = search.request_type.trim()
+  }
+  if (typeof search.stage === 'string' && search.stage.trim()) {
+    parsed.stage = search.stage.trim()
+  }
+  if (
+    search.posture === 'in_queue' ||
+    search.posture === 'in_progress' ||
+    search.posture === 'complete'
+  ) {
+    parsed.posture = search.posture
   }
   if (typeof search.state === 'string' && search.state.trim()) {
     parsed.state = search.state.trim().toUpperCase()

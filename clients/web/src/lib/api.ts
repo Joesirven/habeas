@@ -84,6 +84,9 @@ export type RequestRecord = {
   raw_record_id: number | null
   /** 2-letter USPS acronym — not PII */
   requestor_state?: string | null
+  request_type?: string
+  /** Non-DROP display label when available — not logged server-side */
+  display_label?: string | null
 }
 
 export type ManualRequestInput = {
@@ -111,12 +114,17 @@ export function getHealth() {
   return fetchAdminApi<HealthPayload>('/readyz')
 }
 
-export function listRequests(intakeSource?: IntakeSource, limit: number = 200) {
+export function listRequests(options?: {
+  intakeSource?: IntakeSource
+  limit?: number
+  q?: string
+}) {
   const search = new URLSearchParams()
-  if (intakeSource) search.set('intake_source', intakeSource)
-  search.set('limit', String(limit))
+  if (options?.intakeSource) search.set('intake_source', options.intakeSource)
+  if (options?.limit != null) search.set('limit', String(options.limit))
+  if (options?.q?.trim()) search.set('q', options.q.trim())
   const query = search.toString()
-  return fetchAdminApi<RequestRecord[]>(`/requests?${query}`)
+  return fetchAdminApi<RequestRecord[]>(`/requests${query ? `?${query}` : ''}`)
 }
 
 export function createManualRequest(body: ManualRequestInput) {
@@ -1394,7 +1402,14 @@ export async function getLegalNeedsAttention(limit = 1000): Promise<NeedsAttenti
 }
 
 export type LegalPortfolio = {
+  source_buckets: { drop: number; other: number }
   type_counts: Array<{ request_type: string; count: number }>
+  stage_matrix: Array<{
+    stage: string
+    in_queue: number
+    in_progress: number
+    complete: number
+  }>
   pipeline_stages: Array<{ stage: string; count: number }>
   data_owner_queues: Array<{
     assignee_identity: string | null
@@ -1533,4 +1548,36 @@ export function postRequestComment(requestId: string, body: string) {
       body: JSON.stringify({ body }),
     },
   )
+}
+
+export type TimelineEntry = {
+  at: string
+  kind: string
+  actor: string | null
+  summary: string
+  meta: Record<string, unknown>
+}
+
+export type RequestTimeline = {
+  request_id: string
+  entries: TimelineEntry[]
+}
+
+export function getRequestTimeline(requestId: string) {
+  return fetchAdminApi<RequestTimeline>(
+    `/ops/requests/${encodeURIComponent(requestId)}/timeline`,
+  )
+}
+
+export type EmailTemplateRecord = {
+  id: number
+  slug: string
+  subject: string
+  body: string
+  placeholder_schema: string[]
+  active: boolean
+}
+
+export function listEmailTemplates() {
+  return fetchAdminApi<EmailTemplateRecord[]>('/requests/email-templates')
 }

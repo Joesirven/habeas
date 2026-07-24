@@ -10,7 +10,7 @@ import {
   putRouteTriageCondition,
   type RouteTriageCondition,
 } from '@/lib/api'
-import { canAccessLegalSurfaces, ForbiddenState, useMe } from '@/lib/auth'
+import { canAccessLegalSurfaces, canMutateLegalSettings, ForbiddenState, useMe } from '@/lib/auth'
 
 const USPS_STATES = [
   'AL',
@@ -85,6 +85,7 @@ export function ConditionsPage() {
   const queryClient = useQueryClient()
   const { role, isLoading: meLoading } = useMe()
   const allowed = canAccessLegalSurfaces(role)
+  const canWrite = canMutateLegalSettings(role)
 
   const ruleQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop', 'conditions', 'route-triage'],
@@ -173,6 +174,12 @@ export function ConditionsPage() {
 
       {ruleQuery.data ? (
         <div className="taste-panel-soft space-y-6 p-6 sm:p-7">
+          {!canWrite ? (
+            <p className="flex items-center gap-2 text-xs text-mute">
+              <span aria-hidden="true">🔒</span>
+              Read-only — admin role required to save changes.
+            </p>
+          ) : null}
           <div className="flex flex-wrap items-center gap-2 text-xs text-mute">
             <Badge variant="default" className="normal-case tracking-normal">
               Rule #{ruleQuery.data.id}
@@ -192,6 +199,7 @@ export function ConditionsPage() {
                 type="radio"
                 className="mt-1 accent-habeas-navy"
                 checked={mode === 'requestor_state_not_in'}
+                disabled={!canWrite}
                 onChange={() => {
                   setMode('requestor_state_not_in')
                   setDirty(true)
@@ -209,6 +217,7 @@ export function ConditionsPage() {
                 type="radio"
                 className="mt-1 accent-habeas-navy"
                 checked={mode === 'state_in'}
+                disabled={!canWrite}
                 onChange={() => {
                   setMode('state_in')
                   setDirty(true)
@@ -241,6 +250,7 @@ export function ConditionsPage() {
                   <button
                     key={code}
                     type="button"
+                    disabled={!canWrite}
                     onClick={() => toggleState(code)}
                     className={
                       active
@@ -261,8 +271,9 @@ export function ConditionsPage() {
               Rationale
             </span>
             <textarea
-              className="min-h-[5rem] w-full rounded-lg border border-line bg-paper-raised px-3 py-2 text-sm text-ink outline-none focus:border-habeas-mid"
+              className="min-h-[5rem] w-full rounded-lg border border-line bg-paper-raised px-3 py-2 text-sm text-ink outline-none focus:border-habeas-mid disabled:opacity-60"
               value={rationale}
+              disabled={!canWrite}
               onChange={(event) => {
                 setRationale(event.target.value)
                 setDirty(true)
@@ -276,6 +287,7 @@ export function ConditionsPage() {
               type="button"
               size="sm"
               disabled={
+                !canWrite ||
                 !dirty ||
                 states.length === 0 ||
                 rationale.trim().length === 0 ||

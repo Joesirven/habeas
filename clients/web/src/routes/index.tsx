@@ -4,7 +4,8 @@ import { Link } from '@tanstack/react-router'
 import { SkeletonLines } from '@/components/AppShell'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { useMe } from '@/lib/auth'
+import { UploadMenu } from '@/components/UploadMenu'
+import { useMe, isLegalAdminPersona } from '@/lib/auth'
 import {
   getDropGlobalStats,
   getDropPipeline,
@@ -244,6 +245,15 @@ function OperatorDashboardHome() {
   )
 }
 
+const STAGE_LABELS: Record<string, string> = {
+  receive: 'Receive',
+  matching: 'Matching',
+  data_owner_review: 'Data owner review',
+  legal_review: 'Legal review',
+  fulfillment: 'Fulfillment',
+  delivery_notice: 'Delivery / notice',
+}
+
 function LegalHome() {
   const attentionQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'legal'],
@@ -305,38 +315,102 @@ function LegalHome() {
 
   return (
     <section className="space-y-6">
-      <header>
-        <p className="taste-micro">Legal</p>
-        <h2 className="mt-2 font-display text-2xl font-medium tracking-tight text-ink">
-          Command Center
-        </h2>
-        <p className="mt-2 max-w-xl text-sm text-ink-soft">
-          Clear Triage and Escalations first. Notice and Delivery light up after
-          data-vertical fulfill. Upload agent batches when ready.
-        </p>
+      <header className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p className="taste-micro">Legal</p>
+          <h2 className="mt-2 font-display text-2xl font-medium tracking-tight text-ink">
+            Home
+          </h2>
+          <p className="mt-2 max-w-xl text-sm text-ink-soft">
+            Portfolio by source, request type, and pipeline stage. Clear Inbox work first.
+          </p>
+        </div>
+        <UploadMenu />
       </header>
+      {portfolioQuery.isError ? (
+        <p className="text-sm text-red-700">
+          Could not load portfolio — retrying automatically.
+        </p>
+      ) : null}
       {portfolio ? (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Link
+              to="/requests"
+              search={{ source_bucket: 'drop' }}
+              className="taste-panel-soft block p-4 transition-colors hover:border-habeas-navy/30"
+            >
+              <p className="text-[0.65rem] uppercase tracking-wide text-mute">California DROP</p>
+              <p className="font-display text-3xl tabular-nums text-ink">
+                {portfolio.source_buckets.drop}
+              </p>
+            </Link>
+            <Link
+              to="/requests"
+              search={{ source_bucket: 'other' }}
+              className="taste-panel-soft block p-4 transition-colors hover:border-habeas-navy/30"
+            >
+              <p className="text-[0.65rem] uppercase tracking-wide text-mute">Other sources</p>
+              <p className="font-display text-3xl tabular-nums text-ink">
+                {portfolio.source_buckets.other}
+              </p>
+            </Link>
+          </div>
           <div className="taste-panel-soft p-4">
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Open by type</p>
+            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Access vs delete</p>
             <div className="mt-3 flex flex-wrap gap-2">
               {portfolio.type_counts.map((row) => (
-                <span key={row.request_type} className="taste-frost-chip text-[0.7rem]">
+                <Link
+                  key={row.request_type}
+                  to="/requests"
+                  search={{ request_type: row.request_type }}
+                  className="taste-frost-chip text-[0.7rem] transition-colors hover:border-habeas-navy/40"
+                >
                   {row.request_type}: {row.count}
-                </span>
+                </Link>
               ))}
             </div>
           </div>
-          <div className="taste-panel-soft p-4">
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Pipeline volume</p>
-            <div className="mt-3 space-y-2">
-              {portfolio.pipeline_stages.map((row) => (
-                <div key={row.stage} className="flex items-center justify-between text-xs">
-                  <span className="capitalize text-ink-soft">{row.stage}</span>
-                  <span className="tabular-nums text-ink">{row.count}</span>
-                </div>
-              ))}
-            </div>
+          <div className="taste-panel-soft overflow-x-auto p-4">
+            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Coarse pipeline stages</p>
+            <table className="mt-3 w-full min-w-[28rem] text-xs">
+              <thead>
+                <tr className="text-left text-mute">
+                  <th className="pb-2 pr-3 font-medium">Stage</th>
+                  <th className="pb-2 pr-3 font-medium">In queue</th>
+                  <th className="pb-2 pr-3 font-medium">In progress</th>
+                  <th className="pb-2 font-medium">Complete</th>
+                </tr>
+              </thead>
+              <tbody>
+                {portfolio.stage_matrix.map((row) => (
+                  <tr key={row.stage} className="border-t border-line/60">
+                    <td className="py-2 pr-3 capitalize text-ink-soft">
+                      {STAGE_LABELS[row.stage] ?? row.stage.replaceAll('_', ' ')}
+                    </td>
+                    <td className="py-2 pr-3 tabular-nums">
+                      <Link
+                        to="/requests"
+                        search={{ stage: row.stage, posture: 'in_queue' }}
+                        className="text-ink hover:underline"
+                      >
+                        {row.in_queue}
+                      </Link>
+                    </td>
+                    <td className="py-2 pr-3 tabular-nums">
+                      <Link
+                        to="/requests"
+                        search={{ stage: row.stage, posture: 'in_progress' }}
+                        className="text-ink hover:underline"
+                      >
+                        {row.in_progress}
+                      </Link>
+                    </td>
+                    <td className="py-2 tabular-nums text-ink">{row.complete}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
           {portfolio.schedule_excerpt ? (
             <div className="taste-panel-soft p-4 lg:col-span-2">
@@ -407,10 +481,7 @@ function LegalHome() {
           </Link>
         </Button>
         <Button asChild size="sm" variant="outline">
-          <Link to="/requests/conditions">Conditions</Link>
-        </Button>
-        <Button asChild size="sm" variant="outline">
-          <Link to="/requests/new">Upload / New</Link>
+          <Link to="/requests">All requests</Link>
         </Button>
       </div>
     </section>
@@ -478,7 +549,7 @@ function DataOwnerHome() {
 }
 
 export function DashboardPage() {
-  const { isSuperAdmin, isLegal, isLoading, role } = useMe()
+  const { isSuperAdmin, isLoading, role } = useMe()
 
   if (isLoading) {
     return (
@@ -492,7 +563,7 @@ export function DashboardPage() {
     return <DropPipelinePage />
   }
 
-  if (isLegal || role === 'legal') {
+  if (isLegalAdminPersona(role)) {
     return <LegalHome />
   }
 
