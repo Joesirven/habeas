@@ -144,6 +144,11 @@ async def get_legal_portfolio(_principal: LegalPortfolioPrincipal):
                               AND ar.status = 'pending'
                          ) THEN 'delivery_notice'
                          WHEN EXISTS (
+                           SELECT 1 FROM data_fulfillment_attempts dfa
+                            WHERE dfa.request_id = o.id
+                              AND dfa.status IN ('pending', 'claimed', 'in_flight')
+                         ) THEN 'fulfillment'
+                         WHEN EXISTS (
                            SELECT 1 FROM approval_requests ar
                             WHERE ar.request_id = o.id
                               AND ar.action_type = 'workflow.assignment'

@@ -77,9 +77,6 @@ function matchesFilters(
 ): boolean {
   if (search.source && request.intake_source !== search.source) return false
 
-  if (search.source_bucket === 'drop' && request.intake_source !== 'drop') return false
-  if (search.source_bucket === 'other' && request.intake_source === 'drop') return false
-
   if (search.request_type && request.request_type !== search.request_type) return false
 
   if (search.state) {
@@ -123,11 +120,22 @@ export function RequestsPage() {
   const [dialogRequestId, setDialogRequestId] = useState<string | null>(null)
 
   const requestsQuery = useQuery({
-    queryKey: ['admin-api', 'requests', search.source ?? 'all', search.q ?? ''],
+    queryKey: [
+      'admin-api',
+      'requests',
+      search.source ?? 'all',
+      search.source_bucket ?? '',
+      search.stage ?? '',
+      search.posture ?? '',
+      search.q ?? '',
+    ],
     queryFn: () =>
       listRequests({
         intakeSource: search.source,
-        limit: 200,
+        sourceBucket: search.source_bucket,
+        stage: search.stage,
+        posture: search.posture,
+        limit: 100,
         q: search.q,
       }),
     refetchInterval: 15_000,

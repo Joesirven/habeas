@@ -30,10 +30,16 @@ from admin_api.request_journey import router as request_journey_router
 from admin_api.roles import CurrentRolePrincipal, MeResponse, RolePrincipal, require_roles
 from admin_api.worker_schedules import router as worker_schedules_router
 from habeas_privacy_core.audit import AuditMiddleware
-from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_LEGAL, ROLE_SUPER_ADMIN
+from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_DATA_OWNER, ROLE_LEGAL, ROLE_SUPER_ADMIN
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
-from admin_api.requests_list import RequestListItem, search_requests
+from admin_api.requests_list import (
+    CoarseStage,
+    RequestListItem,
+    SourceBucket,
+    StagePosture,
+    search_requests,
+)
 from habeas_privacy_core.db.requests import get_request, insert_request, promote_manual_request
 from habeas_privacy_core.health import health_payload, ready_payload
 from habeas_privacy_core.models.intake import (
@@ -52,6 +58,11 @@ logger = logging.getLogger(__name__)
 LegalIntakePrincipal = Annotated[
     RolePrincipal,
     Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL)),
+]
+
+RequestsListPrincipal = Annotated[
+    RolePrincipal,
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL, ROLE_DATA_OWNER)),
 ]
 
 
@@ -203,12 +214,17 @@ async def live_events():
 
 @app.get("/requests", response_model=list[RequestListItem])
 async def requests_list(
+    viewer: RequestsListPrincipal,
     limit: int = Query(default=50, ge=1, le=100),
     intake_source: IntakeSource | None = None,
+    source_bucket: SourceBucket | None = None,
+    stage: CoarseStage | None = None,
+    posture: StagePosture | None = None,
     q: str | None = Query(default=None, max_length=200),
 ):
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
+    include_display_labels = viewer.role in (ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL)
     pool = get_pool()
     async with pool.acquire() as conn:
         try:
@@ -216,7 +232,11 @@ async def requests_list(
                 conn,
                 limit=limit,
                 intake_source=intake_source,
+                source_bucket=source_bucket,
+                stage=stage,
+                posture=posture,
                 q=q,
+                include_display_labels=include_display_labels,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -1309,12 +1309,14 @@ async def build_request_timeline(conn: Any, *, request_id: str) -> RequestTimeli
         UUID(request_id),
     )
     for row in comment_rows:
+        body = str(row["body"]).strip()
+        summary = body if len(body) <= 120 else f"{body[:117]}…"
         entries.append(
             TimelineEntry(
                 at=_iso(row["created_at"]) or "",
                 kind="comment",
                 actor=str(row["actor"]),
-                summary="Comment added",
+                summary=summary,
                 meta={"comment_id": int(row["id"])},
             )
         )

@@ -87,6 +87,8 @@ export type RequestRecord = {
   request_type?: string
   /** Non-DROP display label when available — not logged server-side */
   display_label?: string | null
+  /** True when DROP row is still open on the spine */
+  drop_open?: boolean | null
 }
 
 export type ManualRequestInput = {
@@ -116,11 +118,17 @@ export function getHealth() {
 
 export function listRequests(options?: {
   intakeSource?: IntakeSource
+  sourceBucket?: 'drop' | 'other'
+  stage?: string
+  posture?: 'in_queue' | 'in_progress' | 'complete'
   limit?: number
   q?: string
 }) {
   const search = new URLSearchParams()
   if (options?.intakeSource) search.set('intake_source', options.intakeSource)
+  if (options?.sourceBucket) search.set('source_bucket', options.sourceBucket)
+  if (options?.stage) search.set('stage', options.stage)
+  if (options?.posture) search.set('posture', options.posture)
   if (options?.limit != null) search.set('limit', String(options.limit))
   if (options?.q?.trim()) search.set('q', options.q.trim())
   const query = search.toString()

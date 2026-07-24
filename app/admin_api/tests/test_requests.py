@@ -147,6 +147,7 @@ async def test_search_requests_rejects_short_query():
 def test_requests_list_short_query_returns_400(monkeypatch: pytest.MonkeyPatch):
     from admin_api import main as admin_main
 
+    roles.settings.admin_api_super_admins = "ops@example.com"
     monkeypatch.setattr(admin_main.settings, "database_url", "postgres://local")
     monkeypatch.setattr(admin_main, "create_pool", AsyncMock())
     monkeypatch.setattr(admin_main, "close_pool", AsyncMock())
@@ -163,8 +164,9 @@ def test_requests_list_short_query_returns_400(monkeypatch: pytest.MonkeyPatch):
             return _Acquire()
 
     monkeypatch.setattr(admin_main, "get_pool", lambda: _Pool())
+    headers = {IAP_EMAIL_HEADER: "ops@example.com"}
 
     with TestClient(app) as client:
-        response = client.get("/requests?q=a")
+        response = client.get("/requests?q=a", headers=headers)
 
     assert response.status_code == 400
