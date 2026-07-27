@@ -199,13 +199,15 @@ Prerequisites Jose must keep granted:
 Do **not** use `DATABASE_URL` for ops mutations — SELECT-only analysis only.
 Do **not** curl workers or grant yourself worker `run.invoker`.
 
-Local web against remote admin-api (super_admin ADC — Vite mints/caches ID token):
+Local web against remote admin-api (super_admin ADC — Vite mints/caches ID token via
+`google-auth-library` Application Default Credentials; JWT email must be on super_admins):
 
 ```bash
 cd clients/web
-# gcloud auth application-default login  # once
+gcloud auth application-default login   # once per machine
 export VITE_PROXY_TARGET="$ADMIN_API_URL"   # admin-api-dev *.run.app
 bun run dev   # leave VITE_ADMIN_API_URL unset so the app uses /api
+# IAP_USER_EMAIL optional for ADC; required only for SA impersonation fallback
 # Banner "View as" sends X-Dev-Simulate-Role when real_role is super_admin
 ```
 

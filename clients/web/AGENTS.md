@@ -46,11 +46,12 @@ General Amigo frost: [`.agent/modules/design-taste.md`](../../.agent/modules/des
 ## Local admin-api proxy
 
 - Default: `VITE_PROXY_TARGET=http://127.0.0.1:8000` (no Identity-Aware Proxy).
-- Deployed admin-api-dev (`*.run.app`): Vite impersonates the admin-api runtime SA via
-  `gcloud auth print-identity-token --audiences=<service> --impersonate-service-account=…`
-  (user ADC cannot mint Cloud Run audiences). Injects `Authorization: Bearer` +
-  `X-Goog-Authenticated-User-Email` from `IAP_USER_EMAIL`. Requires
-  `IAP_IMPERSONATE_SERVICE_ACCOUNT` (defaults to project compute SA).
+- Deployed admin-api-dev (`*.run.app`): Vite mints a Cloud Run ID token via Application
+  Default Credentials (`google-auth-library` `getIdTokenClient`, audience = service origin).
+  Setup: `gcloud auth application-default login`, then `bun run dev` with `VITE_PROXY_TARGET`.
+  ADC JWT email alone grants super_admin when on `ADMIN_API_SUPER_ADMINS` (no IAP header).
+  Optional `IAP_USER_EMAIL` only for SA impersonation fallback when ADC mint fails.
+  Precedence: static `CLOUD_RUN_ID_TOKEN` / `IAP_ID_TOKEN` (correct aud) → ADC → gcloud SA impersonation.
 - Do not put an IAP OAuth-client audience token in `IAP_ID_TOKEN` — admin-api will 401.
 - Non-super_admin: use ops-ia IAP front door, not the local proxy.
 - Super_admin can simulate effective role via banner `View as` → `X-Dev-Simulate-Role` (sessionStorage).
