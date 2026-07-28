@@ -39,8 +39,8 @@ WITH open_requests AS (
       LEFT JOIN drop_raw_requests drr
         ON drr.id = r.raw_record_id
        AND r.intake_source = 'drop'
-     WHERE r.intake_source != 'drop'
-        OR drr.response_status IS NULL
+     WHERE r.closed_at IS NULL
+       AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
 ),
 latest_mr AS (
     SELECT DISTINCT ON (mr.request_id)

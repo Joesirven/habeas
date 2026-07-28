@@ -36,9 +36,13 @@ import {
   patchAccessDeliveryStatus,
   postIdentityVerification,
   postNoticeApprove,
+  postRequestClose,
   postRequestComment,
+  postDropMatchingResultDecline,
+  postDropMatchingResultPromote,
   postTriageBulkReject,
   postTriageSendToMatching,
+  type DropResponseStatusCode,
   type JourneyStage,
   type MatchingResultDetail,
   type NeedsAttentionItem,
@@ -305,7 +309,9 @@ function buildStageActions(opts: {
     softWarning: incompleteWarning,
     hint: 'Unrestricted close (KD40) — records operator note',
     run: async () => {
-      await postRequestComment(requestId, 'Operator closed request from detail overlay.')
+      await postRequestClose(requestId, {
+        note: 'Operator closed request from detail overlay.',
+      })
     },
   })
 
@@ -356,7 +362,7 @@ function RequestStageActionBar({
             disabled={pendingId != null}
             className={cn(action.destructive && 'border-red-300 text-red-800 hover:bg-red-50')}
             onClick={() => {
-              if (action.softWarning || action.id === 'close') {
+              if (action.softWarning) {
                 setConfirmAction(action)
                 return
               }
@@ -411,6 +417,7 @@ function RequesterMetaRail({
   requestorState,
   identityStatus,
   matching,
+  dropPreMatch = false,
 }: {
   requestId: string
   intakeSource: string
@@ -418,10 +425,29 @@ function RequesterMetaRail({
   requestorState?: string | null
   identityStatus?: string | null
   matching?: MatchingResultDetail | null
+  dropPreMatch?: boolean
 }) {
   const channel = SOURCE_LABELS[intakeSource] ?? intakeSource
   const isDrop = intakeSource === 'drop'
   const contact = matching?.matched_contacts?.[0]
+
+  if (isDrop && dropPreMatch) {
+    return (
+      <aside className="space-y-3 border-l border-line bg-paper/40 p-4 text-xs lg:w-56 shrink-0">
+        <p className="taste-micro">Request</p>
+        <dl className="space-y-2">
+          <div>
+            <dt className="text-[0.65rem] text-mute">Request id</dt>
+            <dd className="font-mono text-[0.7rem]">{requestId}</dd>
+          </div>
+          <div>
+            <dt className="text-[0.65rem] text-mute">Channel</dt>
+            <dd>{channel}</dd>
+          </div>
+        </dl>
+      </aside>
+    )
+  }
 
   return (
     <aside className="space-y-3 border-l border-line bg-paper/40 p-4 text-xs lg:w-56 shrink-0">
@@ -559,6 +585,11 @@ export function RequestDetailBody({
   const legalAdmin = isLegalAdminPersona(role)
   const [tab, setTab] = useState<RequestDetailTab>(defaultTab)
   const [copyNote, setCopyNote] = useState<string | null>(null)
+  const [matchingActionError, setMatchingActionError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setTab(defaultTab)
+  }, [requestId, defaultTab])
 
   const requestQuery = useQuery({
     queryKey: ['admin-api', 'requests', requestId],
@@ -620,6 +651,32 @@ export function RequestDetailBody({
     },
   })
 
+  const matchingDispositionMutation = useMutation({
+    mutationFn: async ({
+      action,
+      responseStatus,
+    }: {
+      action: 'promote' | 'decline'
+      responseStatus?: DropResponseStatusCode
+    }) => {
+      if (action === 'promote') {
+        return postDropMatchingResultPromote(requestId, {
+          response_status: responseStatus,
+        })
+      }
+      return postDropMatchingResultDecline(requestId)
+    },
+    onSuccess: async () => {
+      setMatchingActionError(null)
+      await invalidateAll()
+    },
+    onError: (mutationError) => {
+      setMatchingActionError(
+        mutationError instanceof Error ? mutationError.message : 'Matching action failed',
+      )
+    },
+  })
+
   const invalidateAll = async () => {
     await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
   }
@@ -635,11 +692,19 @@ export function RequestDetailBody({
 
   const assignmentToLegal = isAssignmentToLegalContext(attentionItem)
   const canMatchingDisposition =
-    !legalAdmin &&
-    isAdmin &&
     matching != null &&
     matching.review_status === 'pending' &&
-    Boolean(matching.approval_id)
+    Boolean(matching.approval_id) &&
+    ((legalAdmin && assignmentToLegal) || (role === 'data_owner' && !legalAdmin))
+
+  const dropPreMatch =
+    intakeSource === 'drop' &&
+    matching == null &&
+    (journey?.current_stage === 'received' ||
+      journey?.current_stage === 'download' ||
+      journey?.current_stage === 'land' ||
+      journey?.current_stage === 'promote' ||
+      journey?.current_stage === 'match')
 
   const stageActions = journey
     ? buildStageActions({
@@ -744,13 +809,18 @@ export function RequestDetailBody({
                 isPending={matchingQuery.isPending}
                 isError={matchingQuery.isError}
                 canReviewActions={canMatchingDisposition}
-                actionPending={false}
-                actionError={null}
-                hideActions={legalAdmin || !canMatchingDisposition}
+                actionPending={matchingDispositionMutation.isPending}
+                actionError={matchingActionError}
+                hideActions={!canMatchingDisposition}
                 layout="tabs"
                 compact
-                onPromote={() => undefined}
-                onDecline={() => undefined}
+                onPromote={(responseStatus) =>
+                  matchingDispositionMutation.mutate({
+                    action: 'promote',
+                    responseStatus,
+                  })
+                }
+                onDecline={() => matchingDispositionMutation.mutate({ action: 'decline' })}
               />
             </TabsContent>
             <TabsContent value="activity">
@@ -789,6 +859,7 @@ export function RequestDetailBody({
           requestorState={requestQuery.data?.requestor_state}
           identityStatus={identityQuery.data?.status}
           matching={matching}
+          dropPreMatch={dropPreMatch}
         />
       </div>
     </div>

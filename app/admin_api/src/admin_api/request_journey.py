@@ -29,7 +29,9 @@ from habeas_privacy_core.db.pool import get_pool
 from habeas_privacy_core.workflow.approval import (
     MATCHING_REVIEW_ACTION,
     NOTICE_REVIEW_ACTION,
+    REQUEST_CLOSE_COMMAND,
     WORKFLOW_ASSIGNMENT_ACTION,
+    close_request,
     get_current_assignment,
     is_matching_review_approved,
 )
@@ -125,6 +127,11 @@ RequestOpsViewer = Annotated[
     ),
 ]
 
+LegalClosePrincipal = Annotated[
+    RolePrincipal,
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL)),
+]
+
 
 class JourneyStage(BaseModel):
     stage: str
@@ -185,6 +192,21 @@ class RequestCommentBody(BaseModel):
     """Ops note — no DROP PII; body is operator text only."""
 
     body: str = Field(min_length=1, max_length=2000)
+
+
+class RequestCloseBody(BaseModel):
+    """Unrestricted close (KD40) — optional note persists to correspondence."""
+
+    note: str | None = Field(default=None, max_length=2000)
+    drop_response_status: int | None = Field(default=None, ge=3, le=5)
+
+
+class RequestCloseResponse(BaseModel):
+    request_id: str
+    closed_at: str
+    closed_by: str | None = None
+    already_closed: bool = False
+    drop_response_status_set: bool = False
 
 
 class RequestComment(BaseModel):
@@ -621,6 +643,7 @@ async def list_matching_needs_attention(
                AND r.intake_source = 'drop'
              WHERE COALESCE(lr.review_status, 'none') IN ('pending', 'none')
                AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
+               AND r.closed_at IS NULL
 
             UNION
 
@@ -787,6 +810,7 @@ async def list_assignment_needs_attention(
            AND ar.approver_role = 'legal'
            AND ar.context_jsonb->>'kind' = $2
            AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
+           AND r.closed_at IS NULL
          ORDER BY ar.requested_at ASC
          LIMIT $3
         """,
@@ -870,6 +894,7 @@ async def list_notice_needs_attention(
                ) ar ON TRUE
          WHERE drr.response_status IS NOT NULL
            AND drr.notice_review_status = 'pending'
+           AND r.closed_at IS NULL
          ORDER BY COALESCE(ar.requested_at, r.received_at) ASC NULLS LAST
          LIMIT $2
         """,
@@ -939,6 +964,7 @@ async def list_delivery_needs_attention(
           FROM latest l
           JOIN requests r ON r.id = l.request_id
          WHERE l.delivery_status IN ('pending', 'recorded', 'failed', 'sent')
+           AND r.closed_at IS NULL
          ORDER BY l.contacted_at ASC NULLS LAST
          LIMIT $1
         """,
@@ -1252,6 +1278,69 @@ async def post_request_comment(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     assert_no_pii_keys(comment.model_dump())
     return comment
+
+
+@router.post("/{request_id}/close", response_model=RequestCloseResponse)
+async def post_request_close(
+    request_id: str,
+    body: RequestCloseBody,
+    request: Request,
+    viewer: LegalClosePrincipal,
+) -> RequestCloseResponse:
+    """Close a request — stamps closed_at, clears pending gates, sets DROP status when unset."""
+    _require_database()
+    try:
+        UUID(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid request_id") from exc
+
+    actor = resolve_actor(request).email
+    if not is_authenticated_actor(actor):
+        actor = viewer.email or actor
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await close_request(
+                conn,
+                request_id=request_id,
+                closed_by=actor,
+                drop_response_status=body.drop_response_status,
+            )
+            if body.note and body.note.strip():
+                await create_request_comment(
+                    conn,
+                    request_id=request_id,
+                    body=body.note.strip(),
+                    actor=actor,
+                )
+            await write_audit(
+                actor=actor,
+                interface="admin-api",
+                command=REQUEST_CLOSE_COMMAND,
+                arguments={
+                    "request_id": request_id,
+                    "already_closed": result.get("already_closed", False),
+                    "drop_response_status_set": result.get("drop_response_status_set", False),
+                },
+                result_status=200,
+                result_summary="request closed",
+                conn=conn,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="request not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    response = RequestCloseResponse(
+        request_id=result["request_id"],
+        closed_at=result["closed_at"],
+        closed_by=result.get("closed_by"),
+        already_closed=bool(result.get("already_closed")),
+        drop_response_status_set=bool(result.get("drop_response_status_set")),
+    )
+    assert_no_pii_keys(response.model_dump())
+    return response
 
 
 @router.get("/{request_id}/journey", response_model=RequestJourneyResponse)

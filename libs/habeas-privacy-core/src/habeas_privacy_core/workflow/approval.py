@@ -553,6 +553,7 @@ async def reconcile_ungated_matching_reviews(
                         )
                )
            AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
+           AND r.closed_at IS NULL
          ORDER BY l.matching_result_id ASC
          LIMIT $2
         """,
@@ -1004,6 +1005,109 @@ async def release_approved(
         """,
     )
     return [row["id"] for row in rows]
+
+
+REQUEST_CLOSE_COMMAND = "request.close"
+_DROP_CLOSE_RESPONSE_CODES = frozenset({3, 4, 5})
+
+
+async def close_request(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    closed_by: str,
+    drop_response_status: int | None = None,
+) -> dict[str, Any]:
+    """Close a request: stamp ``closed_at``, clear pending gates, set DROP status when needed.
+
+    For DROP rows with unset ``response_status``, writes ``drop_response_status`` when
+    provided (3/4/5) or defaults to 5 (Not found). Non-DROP rows only need ``closed_at``.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT r.id,
+               r.intake_source,
+               r.raw_record_id,
+               r.closed_at,
+               r.closed_by,
+               drr.response_status AS drop_response_status
+          FROM requests r
+          LEFT JOIN drop_raw_requests drr
+            ON drr.id = r.raw_record_id
+           AND r.intake_source = 'drop'
+         WHERE r.id = $1
+        """,
+        UUID(request_id),
+    )
+    if row is None:
+        raise LookupError("request not found")
+
+    if row["closed_at"] is not None:
+        return {
+            "request_id": request_id,
+            "already_closed": True,
+            "closed_at": row["closed_at"].isoformat(),
+            "closed_by": row.get("closed_by"),
+        }
+
+    drop_status_set = False
+    if row["intake_source"] == "drop" and row["drop_response_status"] is None:
+        status = drop_response_status if drop_response_status is not None else 5
+        if status not in _DROP_CLOSE_RESPONSE_CODES:
+            raise ValueError(
+                "drop_response_status must be 3 (Deleted), 4 (Opted out), or 5 (Not found)"
+            )
+        result = await conn.execute(
+            """
+            UPDATE drop_raw_requests AS drr
+               SET response_status = $2
+              FROM requests AS r
+             WHERE r.id = $1
+               AND r.intake_source = 'drop'
+               AND r.raw_record_id = drr.id
+               AND drr.response_status IS NULL
+            """,
+            UUID(request_id),
+            status,
+        )
+        drop_status_set = isinstance(result, str) and result.endswith("1")
+
+    closed_row = await conn.fetchrow(
+        """
+        UPDATE requests
+           SET closed_at = NOW(),
+               closed_by = $2
+         WHERE id = $1
+           AND closed_at IS NULL
+        RETURNING closed_at
+        """,
+        UUID(request_id),
+        closed_by,
+    )
+    if closed_row is None:
+        raise RuntimeError("request close failed")
+
+    await conn.execute(
+        """
+        UPDATE approval_requests
+           SET status = 'rejected',
+               decided_by = $2,
+               decided_at = NOW(),
+               decision_reason = 'request closed by operator'
+         WHERE request_id = $1
+           AND status = 'pending'
+        """,
+        UUID(request_id),
+        closed_by,
+    )
+
+    return {
+        "request_id": request_id,
+        "already_closed": False,
+        "closed_at": closed_row["closed_at"].isoformat(),
+        "closed_by": closed_by,
+        "drop_response_status_set": drop_status_set,
+    }
 
 
 async def abandon_rejected(

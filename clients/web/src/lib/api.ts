@@ -1677,6 +1677,22 @@ export function postRequestComment(requestId: string, body: string) {
   )
 }
 
+export function postRequestClose(
+  requestId: string,
+  body?: { note?: string; drop_response_status?: DropResponseStatusCode },
+) {
+  return fetchAdminApi<{
+    request_id: string
+    closed_at: string
+    closed_by: string | null
+    already_closed: boolean
+    drop_response_status_set: boolean
+  }>(`/ops/requests/${encodeURIComponent(requestId)}/close`, {
+    method: 'POST',
+    body: JSON.stringify(body ?? {}),
+  })
+}
+
 export type TimelineEntry = {
   at: string
   kind: string

@@ -186,8 +186,8 @@ async def get_legal_portfolio(
               FROM requests r
              LEFT JOIN drop_raw_requests drr
                ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-             WHERE r.intake_source != 'drop'
-                OR drr.response_status IS NULL
+             WHERE r.closed_at IS NULL
+               AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
             """
         )
         type_rows = await conn.fetch(
@@ -196,8 +196,8 @@ async def get_legal_portfolio(
               FROM requests r
              LEFT JOIN drop_raw_requests drr
                ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-             WHERE r.intake_source != 'drop'
-                OR drr.response_status IS NULL
+             WHERE r.closed_at IS NULL
+               AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
              GROUP BY request_type
              ORDER BY request_type
             """
@@ -209,8 +209,8 @@ async def get_legal_portfolio(
                   FROM requests r
                   LEFT JOIN drop_raw_requests drr
                     ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-                 WHERE r.intake_source != 'drop'
-                    OR drr.response_status IS NULL
+                 WHERE r.closed_at IS NULL
+                   AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
             ),
             latest_mr AS (
                 SELECT DISTINCT ON (mr.request_id)
@@ -301,8 +301,8 @@ async def get_legal_portfolio(
                   FROM requests r
                   LEFT JOIN drop_raw_requests drr
                     ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-                 WHERE r.intake_source != 'drop'
-                    OR drr.response_status IS NULL
+                 WHERE r.closed_at IS NULL
+                   AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
             ),
             staged AS (
                 SELECT o.id,
@@ -379,7 +379,8 @@ async def get_legal_portfolio(
               FROM requests r
              LEFT JOIN drop_raw_requests drr
                ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-             WHERE (r.intake_source != 'drop' OR drr.response_status IS NULL)
+             WHERE r.closed_at IS NULL
+               AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
         """
         batch_args: list[Any] = []
         batch_sql, batch_args, _ = _append_analytics_scope(
@@ -397,7 +398,8 @@ async def get_legal_portfolio(
               FROM requests r
              LEFT JOIN drop_raw_requests drr
                ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-             WHERE (r.intake_source != 'drop' OR drr.response_status IS NULL)
+             WHERE r.closed_at IS NULL
+               AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
         """
         heatmap_args: list[Any] = []
         heatmap_sql, heatmap_args, _ = _append_analytics_scope(
@@ -415,7 +417,8 @@ async def get_legal_portfolio(
                   FROM requests r
                   LEFT JOIN drop_raw_requests drr
                     ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-                 WHERE (r.intake_source != 'drop' OR drr.response_status IS NULL)
+                 WHERE r.closed_at IS NULL
+               AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
         """
         reach_args: list[Any] = []
         reach_sql, reach_args, _ = _append_analytics_scope(
@@ -507,7 +510,8 @@ async def get_legal_portfolio(
               FROM requests r
              LEFT JOIN drop_raw_requests drr
                ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-             WHERE (r.intake_source != 'drop' OR drr.response_status IS NULL)
+             WHERE r.closed_at IS NULL
+               AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
         """
         deadline_args: list[Any] = []
         deadline_sql, deadline_args, _ = _append_analytics_scope(

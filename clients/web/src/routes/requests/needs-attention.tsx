@@ -10,6 +10,10 @@ import {
   DropResponseStatusPicker,
   MatchingReviewPanel,
 } from '@/components/requests/RequestTriageDialog'
+import {
+  RequestDetailOverlay,
+  useRequestDetailOverlay,
+} from '@/components/requests/RequestDetailOverlay'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -48,9 +52,11 @@ import {
   postTriageSendToMatching,
   suggestedDropResponseStatus,
   type DropResponseStatusCode,
+  type IntakeSource,
   type JourneyStage,
   type MatchingResultDetail,
   type NeedsAttentionItem,
+  type RequestRecord,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
@@ -949,12 +955,23 @@ export function LegalInboxComposer({
   )
 }
 
+function inboxItemToSeedRequest(item: NeedsAttentionItem): RequestRecord {
+  return {
+    id: item.request_id,
+    received_at: item.received_at ?? item.requested_at ?? '',
+    intake_source: item.intake_source as IntakeSource,
+    raw_record_id: null,
+    requestor_state: item.requestor_state,
+  }
+}
+
 function InboxReviewPane({
   item,
   canReviewActions,
   assigneeCandidates,
   legalPersona = false,
   onBackToQueue,
+  onOpenDetail,
 }: {
   item: NeedsAttentionItem
   canReviewActions: boolean
@@ -962,6 +979,7 @@ function InboxReviewPane({
   /** Legal case-queue mode — no matching disposition; status-required composer. */
   legalPersona?: boolean
   onBackToQueue?: () => void
+  onOpenDetail?: (item: NeedsAttentionItem, trigger: HTMLElement) => void
 }) {
   const queryClient = useQueryClient()
   const { me } = useMe()
@@ -1496,16 +1514,20 @@ function InboxReviewPane({
             ) : null}
             <Tooltip>
               <TooltipTrigger asChild>
-                <Link
-                  to="/requests/$requestId"
-                  params={{ requestId: item.request_id }}
-                  className="inline-flex h-7 w-7 items-center justify-center rounded-md text-ink hover:bg-canvas"
-                  aria-label="Open full request page"
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 w-7 px-0"
+                  aria-label="Full details"
+                  onClick={(event) => {
+                    onOpenDetail?.(item, event.currentTarget)
+                  }}
                 >
                   <IconExternal className="h-3.5 w-3.5" />
-                </Link>
+                </Button>
               </TooltipTrigger>
-              <TooltipContent>Open full request history</TooltipContent>
+              <TooltipContent>Full details — overlay on top of Inbox</TooltipContent>
             </Tooltip>
             {copyNote ? (
               <span className="ml-1 text-[0.65rem] text-mute">{copyNote}</span>
@@ -2113,6 +2135,7 @@ export function NeedsAttentionPage() {
   >(null)
   /** Narrow viewports: queue or detail — never stack the pane under the list. */
   const [mobilePane, setMobilePane] = useState<'queue' | 'detail'>('queue')
+  const detailOverlay = useRequestDetailOverlay()
 
   const attentionQuery = useQuery({
     queryKey: [
@@ -3321,6 +3344,13 @@ export function NeedsAttentionPage() {
               assigneeCandidates={assigneeCandidates}
               legalPersona={legalPersona}
               onBackToQueue={() => setMobilePane('queue')}
+              onOpenDetail={(item, trigger) => {
+                detailOverlay.openOverlay(
+                  item.request_id,
+                  trigger,
+                  inboxItemToSeedRequest(item),
+                )
+              }}
             />
           ) : (
             <div className="flex h-full items-center justify-center p-8 text-xs text-ink-soft">
@@ -3329,6 +3359,13 @@ export function NeedsAttentionPage() {
           )}
         </div>
       </div>
+      <RequestDetailOverlay
+        requestId={detailOverlay.requestId}
+        open={detailOverlay.open}
+        onOpenChange={detailOverlay.onOpenChange}
+        returnFocusRef={detailOverlay.returnFocusRef}
+        seedRequest={detailOverlay.seedRequest}
+      />
     </section>
   )
 }

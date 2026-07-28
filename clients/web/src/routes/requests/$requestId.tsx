@@ -6,13 +6,12 @@ import {
   RequestDetailBody,
   requestDetailHeaderLabel,
 } from '@/components/requests/RequestDetailOverlay'
-import { useMe, isLegalAdminPersona } from '@/lib/auth'
+import { useMe } from '@/lib/auth'
 import { getRequest, getRequestJourney } from '@/lib/api'
 
 export function RequestDetailPage() {
   const { requestId } = useParams({ from: '/requests/$requestId' })
-  const { isSuperAdmin, role } = useMe()
-  const legalAdmin = isLegalAdminPersona(role)
+  const { isSuperAdmin } = useMe()
 
   const requestQuery = useQuery({
     queryKey: ['admin-api', 'requests', requestId],
@@ -88,7 +87,7 @@ export function RequestDetailPage() {
           <RequestDetailBody
             requestId={requestId}
             variant="page"
-            defaultTab={legalAdmin ? 'fulfillment' : 'fulfillment'}
+            defaultTab="fulfillment"
             seedRequest={requestQuery.data}
           />
         </div>
