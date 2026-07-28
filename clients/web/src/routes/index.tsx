@@ -12,7 +12,7 @@ import {
   OperationsPulse,
   PipelineFunnel,
   type HomeWindow,
-} from '@/components/legal/home/LegalHomeModules'
+} from '@/components/legal/home'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { UploadMenu } from '@/components/UploadMenu'
@@ -24,7 +24,6 @@ import {
   getLegalPortfolio,
   getNeedsAttention,
 } from '@/lib/api'
-import { stageLabel } from '@/lib/legalJourneyLabels'
 import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
 
 function OperatorDashboardHome() {
@@ -318,29 +317,6 @@ function LegalHome() {
             </div>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Link
-              to="/requests"
-              search={{ source_bucket: 'drop' }}
-              className="taste-panel-soft block p-4 transition-colors hover:border-habeas-navy/30"
-            >
-              <p className="text-[0.65rem] uppercase tracking-wide text-mute">California DROP</p>
-              <p className="font-display text-3xl tabular-nums text-ink">
-                {portfolio.source_buckets.drop}
-              </p>
-            </Link>
-            <Link
-              to="/requests"
-              search={{ source_bucket: 'other' }}
-              className="taste-panel-soft block p-4 transition-colors hover:border-habeas-navy/30"
-            >
-              <p className="text-[0.65rem] uppercase tracking-wide text-mute">Other sources</p>
-              <p className="font-display text-3xl tabular-nums text-ink">
-                {portfolio.source_buckets.other}
-              </p>
-            </Link>
-          </div>
-
           <div className="taste-panel-soft p-4">
             <p className="text-[0.65rem] uppercase tracking-wide text-mute">Type by source</p>
             <div className="mt-3">
@@ -355,46 +331,6 @@ function LegalHome() {
             <div className="mt-3">
               <DeadlineRiskBand risk={portfolio.deadline_risk} />
             </div>
-          </div>
-
-          <div className="taste-panel-soft overflow-x-auto p-4">
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Coarse pipeline stages</p>
-            <table className="mt-3 w-full min-w-[28rem] text-xs">
-              <thead>
-                <tr className="text-left text-mute">
-                  <th className="pb-2 pr-3 font-medium">Stage</th>
-                  <th className="pb-2 pr-3 font-medium">In queue</th>
-                  <th className="pb-2 pr-3 font-medium">In progress</th>
-                  <th className="pb-2 font-medium">Complete</th>
-                </tr>
-              </thead>
-              <tbody>
-                {portfolio.stage_matrix.map((row) => (
-                  <tr key={row.stage} className="border-t border-line/60">
-                    <td className="py-2 pr-3 text-ink-soft">{stageLabel(row.stage)}</td>
-                    <td className="py-2 pr-3 tabular-nums">
-                      <Link
-                        to="/requests"
-                        search={{ stage: row.stage, posture: 'in_queue' }}
-                        className="text-ink hover:underline"
-                      >
-                        {row.in_queue}
-                      </Link>
-                    </td>
-                    <td className="py-2 pr-3 tabular-nums">
-                      <Link
-                        to="/requests"
-                        search={{ stage: row.stage, posture: 'in_progress' }}
-                        className="text-ink hover:underline"
-                      >
-                        {row.in_progress}
-                      </Link>
-                    </td>
-                    <td className="py-2 tabular-nums text-ink">{row.complete}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
           </div>
 
           {portfolio.data_owner_queues.length > 0 ? (
