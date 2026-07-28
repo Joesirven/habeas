@@ -21,8 +21,10 @@ describe('legalJourneyLabels', () => {
 
   test('stageLabel maps KD29 user-facing labels', () => {
     expect(stageLabel('receive')).toBe('receive')
+    expect(stageLabel('matching')).toBe('matching')
     expect(stageLabel('data_owner_review')).toBe('data owner review')
     expect(stageLabel('legal_review')).toBe('legal / pre-fulfillment')
+    expect(stageLabel('fulfillment')).toBe('fulfillment')
     expect(stageLabel('delivery_notice')).toBe('delivery / DROP notice')
   })
 

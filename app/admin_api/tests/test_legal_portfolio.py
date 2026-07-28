@@ -15,6 +15,31 @@ from habeas_privacy_core.auth.roles import ROLE_LEGAL, ROLE_SUPER_ADMIN
 LEGAL = RolePrincipal(email="legal@example.com", role=ROLE_LEGAL, real_role=ROLE_LEGAL)
 SUPER = RolePrincipal(email="ops@example.com", role=ROLE_SUPER_ADMIN, real_role=ROLE_SUPER_ADMIN)
 
+# Requester PII keys — assignee_identity may hold operator emails (authorized staff).
+_REQUESTER_PII_KEYS = frozenset(
+    {
+        "consumer_id",
+        "display_label",
+        "email",
+        "first_name",
+        "last_name",
+        "phone",
+        "requester_email",
+        "requester_name",
+        "requester_phone",
+    }
+)
+
+
+def _assert_no_requester_pii(payload: object) -> None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            assert key not in _REQUESTER_PII_KEYS, f"requester PII key in response: {key}"
+            _assert_no_requester_pii(value)
+    elif isinstance(payload, list):
+        for item in payload:
+            _assert_no_requester_pii(item)
+
 
 def _mock_conn(
     *,
@@ -197,6 +222,32 @@ async def test_legal_portfolio_response_has_no_pii_fields(monkeypatch: pytest.Mo
         result = await legal_portfolio.get_legal_portfolio(LEGAL)
 
     payload = json.loads(result.model_dump_json())
-    serialized = json.dumps(payload).lower()
-    for forbidden in ("email", "first_name", "last_name", "phone", "display_label"):
-        assert forbidden not in serialized
+    # assignee_identity may contain operator emails for authorized staff — not requester PII.
+    assert any(
+        queue.get("assignee_identity") == "owner@example.com"
+        for queue in payload["data_owner_queues"]
+    )
+    _assert_no_requester_pii(payload)
+
+
+@pytest.mark.asyncio
+async def test_legal_portfolio_empty_window_returns_zeroed_analytics(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = _mock_conn(batch_rows=[], heatmap_rows=[], reach_rows=[])
+    monkeypatch.setattr(legal_portfolio, "_require_database", lambda: None)
+    monkeypatch.setattr(legal_portfolio, "get_pool", lambda: _mock_pool(conn))
+    with patch(
+        "admin_api.legal_portfolio.ca_drop_schedule_payload",
+        new=AsyncMock(return_value=None),
+    ):
+        result = await legal_portfolio.get_legal_portfolio(
+            LEGAL,
+            window_days="7",
+            batch_key="drop:2099-01-01T00:00",
+        )
+
+    assert result.fulfillment_batches == []
+    assert result.heatmap_cells == []
+    assert len(result.stage_reach_counts) == 6
+    assert all(row.reached_count == 0 for row in result.stage_reach_counts)
