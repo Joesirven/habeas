@@ -126,8 +126,7 @@ _FULFILLMENT_BATCH_CAP = 5
 def _batch_key_expr(alias: str = "r") -> str:
     return (
         f"COALESCE({alias}.intake_source, 'unknown') || ':' || "
-        f"to_char(COALESCE({alias}.received_at, {alias}.created_at), "
-        f"'YYYY-MM-DD\"T\"HH24:MI')"
+        f"to_char({alias}.received_at, 'YYYY-MM-DD\"T\"HH24:MI')"
     )
 
 
@@ -140,7 +139,7 @@ def _append_analytics_scope(
     param_idx: int = 1,
 ) -> tuple[str, list[Any], int]:
     if window_cutoff is not None:
-        sql += f" AND COALESCE(r.received_at, r.created_at) >= ${param_idx}"
+        sql += f" AND r.received_at >= ${param_idx}"
         args.append(window_cutoff)
         param_idx += 1
     if batch_key:
@@ -374,7 +373,7 @@ async def get_legal_portfolio(
             SELECT
               {_batch_key_expr()} AS batch_key,
               COALESCE(r.intake_source, 'unknown') AS source_label,
-              COALESCE(r.received_at, r.created_at) AS received_at,
+              r.received_at AS received_at,
               COUNT(*)::int AS request_count
               FROM requests r
              LEFT JOIN drop_raw_requests drr
