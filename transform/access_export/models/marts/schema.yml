@@ -1,0 +1,81 @@
+version: 2
+
+models:
+  - name: dim_person
+    description: >
+      Person spine for access reproduction packs. Grain (dwid, state) —
+      uniqueness enforced by tests/assert_dim_person_unique_dwid_state.sql.
+      Fulfillment reads these marts (dataset access_export) instead of raw
+      person_db mirrors once ACCESS_EXPORT_BQ_DATASET is flipped (KTD-13).
+    columns:
+      - name: dwid
+        description: Habeas person id
+        tests:
+          - not_null
+      - name: state
+        description: Two-letter USPS state
+        tests:
+          - not_null
+      - name: dbt_updated_at
+        tests:
+          - not_null
+
+  - name: dim_vote_history
+    description: Vote participation history per dwid.
+    columns:
+      - name: dwid
+        tests:
+          - not_null
+      - name: state
+        tests:
+          - not_null
+
+  - name: dim_district
+    description: District assignments per dwid.
+    columns:
+      - name: dwid
+        tests:
+          - not_null
+      - name: state
+        tests:
+          - not_null
+
+  - name: dim_phones
+    description: Cell/land phones keyed (dwid, state).
+    columns:
+      - name: dwid
+        tests:
+          - not_null
+      - name: state
+        tests:
+          - not_null
+
+  - name: fct_ballots
+    description: Ballot records; multi-row per dwid by design.
+    columns:
+      - name: dwid
+        tests:
+          - not_null
+      - name: state
+        tests:
+          - not_null
+
+  - name: dim_analytics_continuous
+    description: Continuous analytics scores per dwid (thin).
+    columns:
+      - name: dwid
+        tests:
+          - not_null
+      - name: state
+        tests:
+          - not_null
+
+  - name: dim_models
+    description: Model scores per dwid (hub-backed view source).
+    columns:
+      - name: dwid
+        tests:
+          - not_null
+      - name: state
+        tests:
+          - not_null

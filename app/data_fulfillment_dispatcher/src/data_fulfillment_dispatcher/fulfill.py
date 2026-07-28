@@ -22,6 +22,9 @@ from habeas_privacy_core.workflow.approval import (
 )
 
 from data_fulfillment_dispatcher.access_export import (
+    ACCESS_TABLE_ALLOWLIST,
+    DEFAULT_BQ_DATASET,
+    DEFAULT_BQ_PROJECT,
     AccessBigQueryClient,
     export_access_pack,
 )
@@ -67,6 +70,10 @@ class FulfillDeps:
     # Build a per-request zero-arg resolver (used when dwid_resolver is unset).
     dwid_resolver_factory: DwidResolverFactory | None = None
     bq_client: AccessBigQueryClient | None = None
+    # Access export source; override to read the access_export dbt marts.
+    bq_project: str = DEFAULT_BQ_PROJECT
+    bq_dataset: str = DEFAULT_BQ_DATASET
+    bq_tables: tuple[str, ...] = ACCESS_TABLE_ALLOWLIST
 
 
 @dataclass
@@ -554,6 +561,9 @@ async def _fulfill_access(
             state=state,
             bq_client=deps.bq_client,
             transport=deps.gcs_transport,
+            project=deps.bq_project,
+            dataset=deps.bq_dataset,
+            tables=deps.bq_tables,
         )
     except Exception as exc:
         await mark_attempt_error(

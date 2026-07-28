@@ -44,11 +44,18 @@ def interim_access_prefix(process_id: str, request_id: str) -> str:
     return f"bulk-run/{process_id}/request/{request_id}/interim/"
 
 
-def signed_url_for_gcs_uri(gcs_uri: str, *, ttl_days: int = 30) -> str | None:
-    """Return a shareable HTTPS URL for a gs:// URI (~30-day TTL per KD13).
+# Google hard-caps V4 signed URLs at 7 days. Longer retention comes from the
+# bucket 30-day lifecycle rule (KD13); operators re-generate URLs as needed.
+SIGNED_URL_MAX_TTL_DAYS = 7
 
-    In-memory / test mode returns a deterministic stub URL. Production uses V4 signed URLs
-    when ``GCS_TRANSPORT`` is google.
+
+def signed_url_for_gcs_uri(gcs_uri: str, *, ttl_days: int = 7) -> str | None:
+    """Return a shareable HTTPS URL for a gs:// URI (V4 max 7-day TTL).
+
+    In-memory / test mode returns a deterministic stub URL. Production uses V4
+    signed URLs when ``GCS_TRANSPORT`` is google. ADC without a private key
+    (Cloud Run runtime, local user credentials) cannot sign directly; set
+    ``GCS_SIGNING_SERVICE_ACCOUNT`` to sign via IAM signBlob impersonation.
     """
     if not gcs_uri or not gcs_uri.startswith("gs://"):
         return None
@@ -58,6 +65,7 @@ def signed_url_for_gcs_uri(gcs_uri: str, *, ttl_days: int = 30) -> str | None:
         return None
     bucket = without_scheme[:slash]
     path = without_scheme[slash + 1 :]
+    ttl_days = min(ttl_days, SIGNED_URL_MAX_TTL_DAYS)
     mode = os.environ.get("GCS_TRANSPORT", "").strip().lower()
     if mode in {"google", "gcs", "storage"}:
         try:
@@ -66,10 +74,27 @@ def signed_url_for_gcs_uri(gcs_uri: str, *, ttl_days: int = 30) -> str | None:
 
             client = storage.Client()
             blob = client.bucket(bucket).blob(path)
+            kwargs: dict[str, object] = {}
+            signer_email = os.environ.get(
+                "GCS_SIGNING_SERVICE_ACCOUNT", ""
+            ).strip()
+            if signer_email:
+                import google.auth
+                from google.auth import impersonated_credentials
+
+                source_credentials, _ = google.auth.default()
+                kwargs["credentials"] = impersonated_credentials.Credentials(
+                    source_credentials=source_credentials,
+                    target_principal=signer_email,
+                    target_scopes=[
+                        "https://www.googleapis.com/auth/devstorage.read_only"
+                    ],
+                )
             return blob.generate_signed_url(
                 version="v4",
                 expiration=timedelta(days=ttl_days),
                 method="GET",
+                **kwargs,
             )
         except Exception:
             logger.warning(
