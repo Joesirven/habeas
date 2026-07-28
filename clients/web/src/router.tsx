@@ -20,6 +20,7 @@ import { ConditionsPage } from '@/routes/requests/conditions'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
 import { RequestsSlasPage } from '@/routes/requests/slas'
+import { HOME_WINDOWS, type HomeWindow } from '@/components/legal/home/DateToolbar'
 
 export const PIPELINE_TABS = [
   'pipeline',
@@ -45,6 +46,11 @@ export type PipelineSearch = {
   tab: PipelineTab
   process?: number
   stage?: PipelineStageTab
+}
+
+export type IndexSearch = PipelineSearch & {
+  /** Legal Home analytics window — not used by DROP pipeline console. */
+  home_window?: HomeWindow
 }
 
 function parsePipelineTab(value: unknown): PipelineTab {
@@ -100,6 +106,17 @@ function parsePipelineSearch(search: Record<string, unknown>): PipelineSearch {
   if (process != null) parsed.process = process
   const stage = parsePipelineStage(search.stage, search.tab)
   if (stage != null) parsed.stage = stage
+  return parsed
+}
+
+function parseIndexSearch(search: Record<string, unknown>): IndexSearch {
+  const parsed: IndexSearch = parsePipelineSearch(search)
+  if (
+    typeof search.home_window === 'string' &&
+    HOME_WINDOWS.includes(search.home_window as HomeWindow)
+  ) {
+    parsed.home_window = search.home_window as HomeWindow
+  }
   return parsed
 }
 
@@ -342,9 +359,12 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
-  validateSearch: (search: Record<string, unknown>) => parsePipelineSearch(search),
+  validateSearch: (search: Record<string, unknown>) => parseIndexSearch(search),
   component: DashboardPage,
 })
+
+export const REQUESTS_DUE_FILTERS = ['overdue', 'due_soon', 'on_track'] as const
+export type RequestsDueFilter = (typeof REQUESTS_DUE_FILTERS)[number]
 
 export type RequestsSearch = {
   source?: 'webform' | 'drop' | 'csv' | 'manual'
@@ -354,6 +374,7 @@ export type RequestsSearch = {
   posture?: 'in_queue' | 'in_progress' | 'complete'
   state?: string
   attention?: 'needs' | 'clear'
+  due?: RequestsDueFilter
   raw?: 'yes' | 'no'
   received_after?: string
   received_before?: string
@@ -388,6 +409,12 @@ function parseRequestsSearch(search: Record<string, unknown>): RequestsSearch {
   }
   if (search.attention === 'needs' || search.attention === 'clear') {
     parsed.attention = search.attention
+  }
+  if (
+    typeof search.due === 'string' &&
+    REQUESTS_DUE_FILTERS.includes(search.due as RequestsDueFilter)
+  ) {
+    parsed.due = search.due as RequestsDueFilter
   }
   if (search.raw === 'yes' || search.raw === 'no') {
     parsed.raw = search.raw
@@ -439,6 +466,8 @@ export type NeedsAttentionSearch = {
   kind?: NeedsAttentionSearchKind
   /** Legal/admin filter chips (OQ14) — supersedes kind tabs when set. */
   filter?: LegalInboxFilter
+  /** Scope matching review queue to a data-owner assignee (API `assignee` param). */
+  assignee?: string
 }
 
 function parseNeedsAttentionSearch(search: Record<string, unknown>): NeedsAttentionSearch {
@@ -462,6 +491,9 @@ function parseNeedsAttentionSearch(search: Record<string, unknown>): NeedsAttent
     (LEGAL_INBOX_FILTERS as readonly string[]).includes(search.filter)
   ) {
     parsed.filter = search.filter as LegalInboxFilter
+  }
+  if (typeof search.assignee === 'string' && search.assignee.trim()) {
+    parsed.assignee = search.assignee.trim()
   }
   return parsed
 }

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
-import { useState } from 'react'
+import { Link, useNavigate, useSearch } from '@tanstack/react-router'
+import { useEffect, useState } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import {
@@ -255,8 +255,28 @@ function OperatorDashboardHome() {
 }
 
 function LegalHome() {
-  const [homeWindow, setHomeWindow] = useState<HomeWindow>('30')
+  const search = useSearch({ from: '/' })
+  const navigate = useNavigate()
+  const homeWindow: HomeWindow = search.home_window ?? '30'
   const [selectedBatch, setSelectedBatch] = useState<string | null>(null)
+
+  function setHomeWindow(next: HomeWindow) {
+    void navigate({
+      to: '/',
+      search: {
+        tab: search.tab,
+        process: search.process,
+        stage: search.stage,
+        home_window: next === '30' ? undefined : next,
+      },
+      replace: true,
+    })
+  }
+
+  useEffect(() => {
+    setSelectedBatch(null)
+  }, [homeWindow])
+
   const portfolioQuery = useQuery({
     queryKey: ['admin-api', 'legal', 'home', 'portfolio', homeWindow, selectedBatch],
     queryFn: () =>
@@ -268,6 +288,14 @@ function LegalHome() {
     placeholderData: (previous) => previous,
   })
   const portfolio = portfolioQuery.data
+
+  useEffect(() => {
+    if (!portfolio || selectedBatch == null) return
+    const batchKeys = portfolio.fulfillment_batches.map((batch) => batch.batch_key)
+    if (!batchKeys.includes(selectedBatch)) {
+      setSelectedBatch(null)
+    }
+  }, [portfolio, selectedBatch])
 
   return (
     <section className="space-y-6">

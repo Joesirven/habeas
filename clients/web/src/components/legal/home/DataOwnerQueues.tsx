@@ -54,7 +54,12 @@ export function DataOwnerQueues({ queues }: DataOwnerQueuesProps) {
                   <span className="truncate font-medium text-ink">{displayName(row.assignee_identity)}</span>
                   <Link
                     to="/requests/needs-attention"
-                    search={{ kind: 'matching' }}
+                    search={{
+                      kind: 'matching',
+                      ...(row.assignee_identity
+                        ? { assignee: row.assignee_identity }
+                        : {}),
+                    }}
                     className="shrink-0 tabular-nums text-habeas-navy hover:underline"
                   >
                     {row.pending_count} pending

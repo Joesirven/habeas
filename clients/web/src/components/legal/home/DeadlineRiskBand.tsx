@@ -13,21 +13,21 @@ const SEGMENTS = [
     countKey: 'overdue' as const,
     label: 'Overdue',
     className: 'bg-red-500',
-    search: { attention: 'needs' as const },
+    search: { due: 'overdue' as const },
   },
   {
     key: 'due7',
     countKey: 'due_within_7_days' as const,
     label: 'Due ≤7d',
     className: 'bg-amber-400',
-    search: { attention: 'needs' as const },
+    search: { due: 'due_soon' as const },
   },
   {
     key: 'on_track',
     countKey: 'on_track' as const,
     label: 'On track',
     className: 'bg-emerald-500',
-    search: { attention: 'clear' as const },
+    search: { due: 'on_track' as const },
   },
 ] as const
 

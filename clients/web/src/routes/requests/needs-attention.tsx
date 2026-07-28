@@ -2083,6 +2083,10 @@ export function NeedsAttentionPage() {
       setLegalInboxFilter(search.filter)
       return
     }
+    if (search.assignee) {
+      setInboxKind('matching')
+      return
+    }
     if (search.kind) {
       setInboxKind(search.kind as InboxKind)
       return
@@ -2093,7 +2097,7 @@ export function NeedsAttentionPage() {
     }
     if (legalPersona) setInboxKind('triage')
     else if (dataOwnerPersona) setInboxKind('matching')
-  }, [bulkFilter, dataOwnerPersona, legalPersona, search.filter, search.kind])
+  }, [bulkFilter, dataOwnerPersona, legalPersona, search.assignee, search.filter, search.kind])
 
   const [bulkError, setBulkError] = useState<string | null>(null)
   const [bulkAssignee, setBulkAssignee] = useState('')
@@ -2117,15 +2121,24 @@ export function NeedsAttentionPage() {
       'requests',
       'needs-attention',
       legalPersona ? 'legal' : dataOwnerPersona ? 'data-owner' : 'ops',
+      search.assignee ?? null,
     ],
     // Max allowed by admin-api — Select all must cover every filter match loaded,
     // not just the rows currently scrolled into the queue pane.
-    queryFn: () =>
-      legalPersona
+    queryFn: () => {
+      if (search.assignee) {
+        return getNeedsAttention({
+          limit: 1000,
+          kind: 'matching',
+          assignee: search.assignee,
+        })
+      }
+      return legalPersona
         ? getLegalNeedsAttention(1000)
         : dataOwnerPersona
           ? getNeedsAttention({ limit: 1000, kind: 'matching' })
-          : getNeedsAttention(1000),
+          : getNeedsAttention(1000)
+    },
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })

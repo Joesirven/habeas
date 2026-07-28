@@ -154,6 +154,12 @@ const POSTURE_LABELS: Record<NonNullable<RequestsSearch['posture']>, string> = {
   complete: 'Complete',
 }
 
+const DUE_LABELS: Record<NonNullable<RequestsSearch['due']>, string> = {
+  overdue: 'Overdue',
+  due_soon: 'Due within 7 days',
+  on_track: 'On track',
+}
+
 function activeUrlFilterChips(search: RequestsSearch): { key: keyof RequestsSearch; label: string }[] {
   const chips: { key: keyof RequestsSearch; label: string }[] = []
   if (search.source) {
@@ -169,6 +175,7 @@ function activeUrlFilterChips(search: RequestsSearch): { key: keyof RequestsSear
   if (search.state) chips.push({ key: 'state', label: search.state })
   if (search.attention === 'needs') chips.push({ key: 'attention', label: 'Needs attention' })
   if (search.attention === 'clear') chips.push({ key: 'attention', label: 'No attention flag' })
+  if (search.due) chips.push({ key: 'due', label: DUE_LABELS[search.due] })
   if (search.raw === 'yes') chips.push({ key: 'raw', label: 'Has raw record' })
   if (search.raw === 'no') chips.push({ key: 'raw', label: 'Missing raw record' })
   if (search.received_after) {
@@ -345,6 +352,7 @@ export function RequestsPage() {
         posture: 'posture' in patch ? patch.posture : search.posture,
         state: 'state' in patch ? patch.state : search.state,
         attention: 'attention' in patch ? patch.attention : search.attention,
+        due: 'due' in patch ? patch.due : search.due,
         raw: 'raw' in patch ? patch.raw : search.raw,
         received_after: 'received_after' in patch ? patch.received_after : search.received_after,
         received_before:
@@ -371,6 +379,7 @@ export function RequestsPage() {
     search.posture,
     search.state,
     search.attention,
+    search.due,
     search.raw,
     search.received_after,
     search.received_before,

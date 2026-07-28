@@ -1,19 +1,17 @@
 import { cn } from '@/lib/utils'
 
-export type HomeWindow = '7' | '30' | '90' | 'ytd' | 'all'
+export const HOME_WINDOWS = ['7', '30', '90', 'ytd', 'all'] as const
+export type HomeWindow = (typeof HOME_WINDOWS)[number]
 
 type DateToolbarProps = {
   value: HomeWindow
   onChange: (next: HomeWindow) => void
 }
 
-const WINDOWS: { value: HomeWindow; label: string }[] = [
-  { value: '7', label: '7d' },
-  { value: '30', label: '30d' },
-  { value: '90', label: '90d' },
-  { value: 'ytd', label: 'YTD' },
-  { value: 'all', label: 'All' },
-]
+const WINDOWS: { value: HomeWindow; label: string }[] = HOME_WINDOWS.map((value) => ({
+  value,
+  label: value === 'ytd' ? 'YTD' : value === 'all' ? 'All' : `${value}d`,
+}))
 
 function activateWindow(onChange: (next: HomeWindow) => void, next: HomeWindow) {
   onChange(next)
