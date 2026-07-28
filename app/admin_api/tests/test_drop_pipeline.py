@@ -1531,7 +1531,26 @@ def test_matching_result_promote_and_decline_routes(monkeypatch: pytest.MonkeyPa
         }
         return {"request_id": request_id, "review_status": "rejected", "approval_id": 4}
 
+    async def fake_legal_team(conn: Any) -> list[str]:
+        return []
+
+    async def fake_has_assignment(conn: Any, rid: str) -> bool:
+        return True
+
+    async def fake_matching_approved(conn: Any, rid: str) -> bool:
+        return False
+
+    async def fake_due_at(conn: Any, rid: str, *, stage: str) -> None:
+        return None
+
     _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "fetch_active_legal_team_emails", fake_legal_team)
+    monkeypatch.setattr(drop_pipeline, "has_assignment_to_legal", fake_has_assignment)
+    monkeypatch.setattr(drop_pipeline, "is_matching_review_approved", fake_matching_approved)
+    monkeypatch.setattr(
+        "admin_api.legal_sla.apply_request_due_at_for_stage",
+        fake_due_at,
+    )
     monkeypatch.setattr(drop_pipeline, "promote_matching_review_for_request", fake_promote)
     monkeypatch.setattr(drop_pipeline, "decline_matching_review_for_request", fake_decline)
 
@@ -1581,27 +1600,27 @@ def test_workflow_assign_escalate_and_list(monkeypatch: pytest.MonkeyPatch):
             "request_ids": request_ids,
         }
 
-    async def fake_escalate(
+    async def fake_fanout(
         conn: Any,
         *,
-        request_ids: list[str],
-        target_role: str,
+        request_id: str,
         decided_by: str,
-        assignee_identity: str | None = None,
-    ) -> dict[str, Any]:
-        captured["escalate"] = {
-            "request_ids": request_ids,
-            "target_role": target_role,
-            "decided_by": decided_by,
-        }
-        return {
-            "kind": "escalate",
-            "target_role": target_role,
-            "assignee_identity": assignee_identity,
-            "count": len(request_ids),
-            "assignments": [],
-            "request_ids": request_ids,
-        }
+    ) -> list[dict[str, Any]]:
+        captured.setdefault("fanout", []).append(
+            {"request_id": request_id, "decided_by": decided_by}
+        )
+        return [
+            {
+                "id": 1,
+                "request_id": request_id,
+                "target_role": "legal",
+                "kind": "escalate",
+                "assignee_identity": None,
+            }
+        ]
+
+    async def fake_due_at(conn: Any, rid: str, *, stage: str) -> None:
+        return None
 
     async def fake_list(
         conn: Any,
@@ -1629,7 +1648,11 @@ def test_workflow_assign_escalate_and_list(monkeypatch: pytest.MonkeyPatch):
 
     _fake_pool(monkeypatch)
     monkeypatch.setattr(drop_pipeline, "assign_requests", fake_assign)
-    monkeypatch.setattr(drop_pipeline, "escalate_requests", fake_escalate)
+    monkeypatch.setattr(drop_pipeline, "escalate_to_legal_with_fanout", fake_fanout)
+    monkeypatch.setattr(
+        "admin_api.legal_sla.apply_request_due_at_for_stage",
+        fake_due_at,
+    )
     monkeypatch.setattr(drop_pipeline, "list_workflow_assignments", fake_list)
 
     with TestClient(app) as client:
