@@ -1,6 +1,7 @@
 import { useQueryClient } from '@tanstack/react-query'
-import { useState, type ReactNode } from 'react'
+import { useCallback, useState, type ReactNode } from 'react'
 
+import { CommandPalette, useCommandPaletteShortcut } from '@/components/CommandPalette'
 import { NavMenu } from '@/components/NavMenu'
 import {
   DropdownMenu,
@@ -16,7 +17,7 @@ import {
   SIMULATE_ROLE_VALUES,
   type UserRole,
 } from '@/lib/api'
-import { AuthProvider, useAuth } from '@/lib/auth'
+import { AuthProvider, canAccessLegalSurfaces, useAuth } from '@/lib/auth'
 import { useLiveEvents } from '@/lib/live-events'
 
 type AppShellProps = {
@@ -130,6 +131,11 @@ function RoleStatusBanner() {
 
 function AppShellFrame({ children }: AppShellProps) {
   useLiveEvents()
+  const { role } = useAuth()
+  const showPalette = canAccessLegalSurfaces(role)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const openPalette = useCallback(() => setPaletteOpen(true), [])
+  useCommandPaletteShortcut(openPalette)
 
   return (
     <div className="flex min-h-screen flex-col bg-paper">
@@ -141,12 +147,31 @@ function AppShellFrame({ children }: AppShellProps) {
             </p>
             <h1 className="text-base font-semibold tracking-tight text-ink">Data Privacy</h1>
           </div>
-          <NavMenu />
+          <div className="flex items-center gap-3">
+            {showPalette ? (
+              <button
+                type="button"
+                onClick={() => setPaletteOpen(true)}
+                className="hidden items-center gap-1 rounded border border-line bg-paper px-2 py-1 text-[0.65rem] text-mute transition-colors hover:border-habeas-navy/30 hover:text-ink sm:inline-flex"
+                aria-label="Open command palette"
+              >
+                <span>Search</span>
+                <kbd className="rounded border border-line bg-white px-1 font-mono text-[0.6rem]">
+                  ⌘K
+                </kbd>
+              </button>
+            ) : null}
+            <NavMenu />
+          </div>
         </div>
         <RoleStatusBanner />
       </header>
 
       <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-5 sm:px-6">{children}</main>
+
+      {showPalette ? (
+        <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+      ) : null}
 
       <footer className="mt-auto border-t border-line bg-white">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3 sm:px-6">

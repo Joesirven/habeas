@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dialog'
 import {
   addLegalTeamMember,
+  fetchAdminApi,
   getLegalSlaSettings,
   getLegalTeam,
   getRouteTriageCondition,
@@ -21,6 +22,18 @@ import {
 } from '@/lib/api'
 import { canMutateLegalSettings, useMe } from '@/lib/auth'
 
+export const OPEN_LEGAL_SETTINGS_EVENT = 'open-legal-settings'
+
+const WEEKDAY_OPTIONS = [
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+  'Sunday',
+] as const
+
 type SettingsTab =
   | 'conditions'
   | 'deadlines'
@@ -28,12 +41,40 @@ type SettingsTab =
   | 'drop_schedule'
   | 'legal_team'
 
+type LegalDropSchedule = {
+  day_of_week: number
+  time_local: string
+  timezone: string
+  weekly_label: string
+  updated_at: string | null
+}
+
+function getLegalDropSchedule() {
+  return fetchAdminApi<LegalDropSchedule>('/legal/settings/drop-schedule')
+}
+
+function patchLegalDropSchedule(body: { day_of_week?: number; time_local?: string }) {
+  return fetchAdminApi<LegalDropSchedule>('/legal/settings/drop-schedule', {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
 export function LegalSettingsSheet() {
   const { role } = useMe()
   const canWrite = canMutateLegalSettings(role)
   const queryClient = useQueryClient()
+  const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<SettingsTab>('conditions')
   const [teamEmail, setTeamEmail] = useState('')
+
+  useEffect(() => {
+    function onOpenSettings() {
+      setOpen(true)
+    }
+    document.addEventListener(OPEN_LEGAL_SETTINGS_EVENT, onOpenSettings)
+    return () => document.removeEventListener(OPEN_LEGAL_SETTINGS_EVENT, onOpenSettings)
+  }, [])
 
   const conditionQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop', 'conditions', 'route-triage'],
@@ -59,6 +100,12 @@ export function LegalSettingsSheet() {
     enabled: tab === 'legal_team',
   })
 
+  const dropScheduleQuery = useQuery({
+    queryKey: ['admin-api', 'legal', 'settings', 'drop-schedule'],
+    queryFn: getLegalDropSchedule,
+    enabled: tab === 'drop_schedule',
+  })
+
   const slaMutation = useMutation({
     mutationFn: patchLegalSlaSettings,
     onSuccess: () => {
@@ -81,6 +128,15 @@ export function LegalSettingsSheet() {
     },
   })
 
+  const dropScheduleMutation = useMutation({
+    mutationFn: patchLegalDropSchedule,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'legal', 'settings', 'drop-schedule'],
+      })
+    },
+  })
+
   const tabs: { id: SettingsTab; label: string }[] = [
     { id: 'conditions', label: 'Conditions' },
     { id: 'deadlines', label: 'Deadlines & SLAs' },
@@ -90,7 +146,7 @@ export function LegalSettingsSheet() {
   ]
 
   return (
-    <Dialog>
+    <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
         <button
           type="button"
@@ -172,7 +228,7 @@ export function LegalSettingsSheet() {
               <p className="text-mute">Loading SLA settings…</p>
             )}
             <Link to="/requests/slas" className="text-xs text-habeas-navy hover:underline">
-              Open SLA monitor
+              Open Deadlines & SLAs
             </Link>
           </div>
         ) : null}
@@ -188,11 +244,52 @@ export function LegalSettingsSheet() {
           </div>
         ) : null}
         {tab === 'drop_schedule' ? (
-          <div className="space-y-2 text-sm text-ink-soft">
-            <p>
-              Weekly California DROP batch upload — default Wednesday 00:00 America/Los_Angeles.
-              Configure cadence on the ops worker schedules surface (super_admin).
-            </p>
+          <div className="space-y-3 text-sm">
+            {dropScheduleQuery.data ? (
+              <>
+                <p className="text-ink-soft">{dropScheduleQuery.data.weekly_label}</p>
+                <p className="text-xs text-mute">
+                  Weekly California DROP batch upload · {dropScheduleQuery.data.timezone}
+                </p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <label className="block text-xs text-ink-soft">
+                    Day of week
+                    <select
+                      className="mt-1 w-full rounded border border-line bg-paper px-2 py-1 text-sm"
+                      value={dropScheduleQuery.data.day_of_week}
+                      disabled={!canWrite}
+                      onChange={(event) => {
+                        if (!canWrite) return
+                        dropScheduleMutation.mutate({
+                          day_of_week: Number.parseInt(event.target.value, 10),
+                        })
+                      }}
+                    >
+                      {WEEKDAY_OPTIONS.map((label, index) => (
+                        <option key={label} value={index}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block text-xs text-ink-soft">
+                    Time (PT)
+                    <input
+                      type="time"
+                      className="mt-1 w-full rounded border border-line bg-paper px-2 py-1 text-sm"
+                      defaultValue={dropScheduleQuery.data.time_local}
+                      disabled={!canWrite}
+                      onBlur={(event) => {
+                        if (!canWrite || !event.target.value) return
+                        dropScheduleMutation.mutate({ time_local: event.target.value })
+                      }}
+                    />
+                  </label>
+                </div>
+              </>
+            ) : (
+              <p className="text-mute">Loading DROP schedule…</p>
+            )}
           </div>
         ) : null}
         {tab === 'legal_team' ? (

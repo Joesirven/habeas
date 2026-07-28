@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS legal_sla_settings (
   legal_pre_fulfillment_days int NOT NULL DEFAULT 2,
   fulfillment_days int NOT NULL DEFAULT 3,
   lifecycle_days int NOT NULL DEFAULT 6,
+  drop_upload_day_of_week int NOT NULL DEFAULT 2,
+  drop_upload_time_local text NOT NULL DEFAULT '00:00',
   updated_at timestamptz NOT NULL DEFAULT now(),
   updated_by text
 );
