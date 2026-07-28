@@ -9,6 +9,7 @@ import {
 } from '@/components/requests/RequestDetailOverlay'
 import { LegalChromeActions } from '@/components/UploadMenu'
 import { Badge } from '@/components/ui/badge'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   getDropGlobalStats,
   getNeedsAttention,
@@ -148,49 +149,427 @@ function matchesFilters(
   return true
 }
 
-const POSTURE_LABELS: Record<NonNullable<RequestsSearch['posture']>, string> = {
-  in_queue: 'In queue',
-  in_progress: 'In progress',
-  complete: 'Complete',
+const POSTURE_OPTIONS: { value: '' | NonNullable<RequestsSearch['posture']>; label: string }[] = [
+  { value: '', label: 'Any posture' },
+  { value: 'in_queue', label: 'In queue' },
+  { value: 'in_progress', label: 'In progress' },
+  { value: 'complete', label: 'Complete' },
+]
+
+const DUE_OPTIONS: { value: '' | NonNullable<RequestsSearch['due']>; label: string }[] = [
+  { value: '', label: 'Any due' },
+  { value: 'overdue', label: 'Overdue' },
+  { value: 'due_soon', label: 'Due within 7 days' },
+  { value: 'on_track', label: 'On track' },
+]
+
+const SOURCE_BUCKET_OPTIONS: { value: '' | NonNullable<RequestsSearch['source_bucket']>; label: string }[] = [
+  { value: '', label: 'All intakes' },
+  { value: 'drop', label: 'DROP only' },
+  { value: 'other', label: 'Non-DROP' },
+]
+
+const RAW_OPTIONS: { value: '' | NonNullable<RequestsSearch['raw']>; label: string }[] = [
+  { value: '', label: 'Any' },
+  { value: 'yes', label: 'Has raw record' },
+  { value: 'no', label: 'Missing raw record' },
+]
+
+const ATTENTION_OPTIONS: { value: '' | NonNullable<RequestsSearch['attention']>; label: string }[] = [
+  { value: '', label: 'All' },
+  { value: 'needs', label: 'Needs attention' },
+  { value: 'clear', label: 'No flag' },
+]
+
+function secondaryFilterCount(search: RequestsSearch): number {
+  return [
+    search.state,
+    search.raw,
+    search.posture,
+    search.stage,
+    search.request_type,
+    search.source_bucket,
+    search.due,
+    search.received_after,
+    search.received_before,
+  ].filter(Boolean).length
 }
 
-const DUE_LABELS: Record<NonNullable<RequestsSearch['due']>, string> = {
-  overdue: 'Overdue',
-  due_soon: 'Due within 7 days',
-  on_track: 'On track',
+function FilterPillSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string
+  value: string
+  options: { value: string; label: string }[]
+  onChange: (value: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const selected = options.find((option) => option.value === value)
+  const active = Boolean(value)
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            'inline-flex h-7 max-w-[11rem] items-center gap-1 rounded-md border px-2 text-[0.65rem] font-medium transition-colors',
+            active
+              ? 'border-habeas-navy/30 bg-habeas-navy/8 text-habeas-navy'
+              : 'border-line bg-white text-ink-soft hover:bg-panel/60 hover:text-ink',
+          )}
+          aria-label={label}
+        >
+          <span className="text-mute">{label}</span>
+          <span className="truncate">{selected?.label ?? 'Any'}</span>
+          <span className="text-[0.55rem] opacity-60" aria-hidden>
+            ▾
+          </span>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-48 p-1" align="start">
+        <ul className="max-h-56 overflow-y-auto">
+          {options.map((option) => {
+            const isActive = option.value === value
+            return (
+              <li key={option.value || '__any'}>
+                <button
+                  type="button"
+                  className={cn(
+                    'flex w-full rounded px-2 py-1.5 text-left text-[0.7rem]',
+                    isActive
+                      ? 'bg-habeas-navy/10 font-medium text-habeas-navy'
+                      : 'text-ink hover:bg-panel/60',
+                  )}
+                  onClick={() => {
+                    onChange(option.value)
+                    setOpen(false)
+                  }}
+                >
+                  {option.label}
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      </PopoverContent>
+    </Popover>
+  )
 }
 
-function activeUrlFilterChips(search: RequestsSearch): { key: keyof RequestsSearch; label: string }[] {
-  const chips: { key: keyof RequestsSearch; label: string }[] = []
-  if (search.source) {
-    chips.push({ key: 'source', label: SOURCE_LABELS[search.source] ?? search.source })
-  }
-  if (search.source_bucket === 'drop') chips.push({ key: 'source_bucket', label: 'DROP only' })
-  if (search.source_bucket === 'other') chips.push({ key: 'source_bucket', label: 'Non-DROP' })
-  if (search.request_type) chips.push({ key: 'request_type', label: search.request_type })
-  if (search.stage) chips.push({ key: 'stage', label: `Stage: ${search.stage}` })
-  if (search.posture) {
-    chips.push({ key: 'posture', label: POSTURE_LABELS[search.posture] })
-  }
-  if (search.state) chips.push({ key: 'state', label: search.state })
-  if (search.attention === 'needs') chips.push({ key: 'attention', label: 'Needs attention' })
-  if (search.attention === 'clear') chips.push({ key: 'attention', label: 'No attention flag' })
-  if (search.due) chips.push({ key: 'due', label: DUE_LABELS[search.due] })
-  if (search.raw === 'yes') chips.push({ key: 'raw', label: 'Has raw record' })
-  if (search.raw === 'no') chips.push({ key: 'raw', label: 'Missing raw record' })
-  if (search.received_after) {
-    chips.push({
-      key: 'received_after',
-      label: `After ${new Date(search.received_after).toLocaleString()}`,
-    })
-  }
-  if (search.received_before) {
-    chips.push({
-      key: 'received_before',
-      label: `Before ${new Date(search.received_before).toLocaleString()}`,
-    })
-  }
-  return chips
+function AttentionFilterPills({
+  value,
+  onChange,
+}: {
+  value: RequestsSearch['attention']
+  onChange: (attention: RequestsSearch['attention']) => void
+}) {
+  return (
+    <div
+      className="inline-flex rounded-md border border-line bg-paper p-0.5"
+      role="group"
+      aria-label="Attention"
+    >
+      {ATTENTION_OPTIONS.map((option) => {
+        const active = (value ?? '') === option.value
+        return (
+          <button
+            key={option.value || 'all'}
+            type="button"
+            className={cn(
+              'rounded px-2 py-0.5 text-[0.65rem] font-medium transition-colors',
+              active
+                ? 'bg-habeas-navy/8 text-habeas-navy'
+                : 'text-ink-soft hover:text-ink',
+            )}
+            onClick={() => onChange(option.value || undefined)}
+          >
+            {option.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function MoreFiltersPopover({
+  search,
+  stateOptions,
+  onPatch,
+}: {
+  search: RequestsSearch
+  stateOptions: string[]
+  onPatch: (patch: Partial<RequestsSearch>) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const activeCount = secondaryFilterCount(search)
+  const [stageDraft, setStageDraft] = useState(search.stage ?? '')
+  const [requestTypeDraft, setRequestTypeDraft] = useState(search.request_type ?? '')
+
+  useEffect(() => {
+    if (open) {
+      setStageDraft(search.stage ?? '')
+      setRequestTypeDraft(search.request_type ?? '')
+    }
+  }, [open, search.stage, search.request_type])
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            'inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-[0.65rem] font-medium transition-colors',
+            activeCount > 0
+              ? 'border-habeas-navy/30 bg-habeas-navy/8 text-habeas-navy'
+              : 'border-line bg-white text-ink-soft hover:bg-panel/60 hover:text-ink',
+          )}
+        >
+          More filters
+          {activeCount > 0 ? (
+            <span className="rounded bg-habeas-navy/15 px-1 py-px text-[0.6rem] tabular-nums">
+              {activeCount}
+            </span>
+          ) : null}
+          <span className="text-[0.55rem] opacity-60" aria-hidden>
+            ▾
+          </span>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-72 space-y-3 p-3" align="start">
+        <div className="flex items-center justify-between gap-2">
+          <p className="taste-micro">More filters</p>
+          {activeCount > 0 ? (
+            <button
+              type="button"
+              className="taste-link text-[0.65rem]"
+              onClick={() => {
+                onPatch({
+                  state: undefined,
+                  raw: undefined,
+                  posture: undefined,
+                  stage: undefined,
+                  request_type: undefined,
+                  source_bucket: undefined,
+                  due: undefined,
+                  received_after: undefined,
+                  received_before: undefined,
+                })
+                setStageDraft('')
+                setRequestTypeDraft('')
+              }}
+            >
+              Clear
+            </button>
+          ) : null}
+        </div>
+        <div className="grid gap-2">
+          <label className="flex flex-col gap-1 text-[0.65rem] text-ink-soft">
+            Requestor state
+            <select
+              className="glass rounded-md px-2 py-1.5 text-xs text-ink"
+              value={search.state ?? ''}
+              onChange={(event) => onPatch({ state: event.target.value || undefined })}
+            >
+              <option value="">All states</option>
+              {stateOptions.map((state) => (
+                <option key={state} value={state}>
+                  {state}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-[0.65rem] text-ink-soft">
+            Raw record
+            <select
+              className="glass rounded-md px-2 py-1.5 text-xs text-ink"
+              value={search.raw ?? ''}
+              onChange={(event) =>
+                onPatch({
+                  raw: (event.target.value || undefined) as RequestsSearch['raw'],
+                })
+              }
+            >
+              {RAW_OPTIONS.map((option) => (
+                <option key={option.value || 'any'} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-[0.65rem] text-ink-soft">
+            Posture
+            <select
+              className="glass rounded-md px-2 py-1.5 text-xs text-ink"
+              value={search.posture ?? ''}
+              onChange={(event) =>
+                onPatch({
+                  posture: (event.target.value || undefined) as RequestsSearch['posture'],
+                })
+              }
+            >
+              {POSTURE_OPTIONS.map((option) => (
+                <option key={option.value || 'any'} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-[0.65rem] text-ink-soft">
+            Due
+            <select
+              className="glass rounded-md px-2 py-1.5 text-xs text-ink"
+              value={search.due ?? ''}
+              onChange={(event) =>
+                onPatch({
+                  due: (event.target.value || undefined) as RequestsSearch['due'],
+                })
+              }
+            >
+              {DUE_OPTIONS.map((option) => (
+                <option key={option.value || 'any'} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-[0.65rem] text-ink-soft">
+            Intake bucket
+            <select
+              className="glass rounded-md px-2 py-1.5 text-xs text-ink"
+              value={search.source_bucket ?? ''}
+              onChange={(event) =>
+                onPatch({
+                  source_bucket: (event.target.value || undefined) as RequestsSearch['source_bucket'],
+                })
+              }
+            >
+              {SOURCE_BUCKET_OPTIONS.map((option) => (
+                <option key={option.value || 'any'} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-[0.65rem] text-ink-soft">
+            Stage
+            <input
+              className="glass rounded-md px-2 py-1.5 text-xs text-ink"
+              value={stageDraft}
+              placeholder="e.g. matching"
+              onChange={(event) => setStageDraft(event.target.value)}
+              onBlur={() => onPatch({ stage: stageDraft.trim() || undefined })}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  onPatch({ stage: stageDraft.trim() || undefined })
+                  setOpen(false)
+                }
+              }}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-[0.65rem] text-ink-soft">
+            Request type
+            <input
+              className="glass rounded-md px-2 py-1.5 text-xs text-ink"
+              value={requestTypeDraft}
+              placeholder="e.g. delete"
+              onChange={(event) => setRequestTypeDraft(event.target.value)}
+              onBlur={() => onPatch({ request_type: requestTypeDraft.trim() || undefined })}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  onPatch({ request_type: requestTypeDraft.trim() || undefined })
+                  setOpen(false)
+                }
+              }}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-[0.65rem] text-ink-soft">
+            Received after
+            <input
+              type="datetime-local"
+              className="glass rounded-md px-2 py-1.5 font-mono text-xs text-ink"
+              value={search.received_after?.slice(0, 16) ?? ''}
+              onChange={(event) => {
+                const value = event.target.value
+                onPatch({
+                  received_after: value ? new Date(value).toISOString() : undefined,
+                })
+              }}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-[0.65rem] text-ink-soft">
+            Received before
+            <input
+              type="datetime-local"
+              className="glass rounded-md px-2 py-1.5 font-mono text-xs text-ink"
+              value={search.received_before?.slice(0, 16) ?? ''}
+              onChange={(event) => {
+                const value = event.target.value
+                onPatch({
+                  received_before: value ? new Date(value).toISOString() : undefined,
+                })
+              }}
+            />
+          </label>
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+function RequestsFilterBar({
+  search,
+  stateOptions,
+  ephemeralSearch,
+  onEphemeralSearchChange,
+  onPatch,
+  onClear,
+  activeFilterCount,
+}: {
+  search: RequestsSearch
+  stateOptions: string[]
+  ephemeralSearch: string
+  onEphemeralSearchChange: (value: string) => void
+  onPatch: (patch: Partial<RequestsSearch>) => void
+  onClear: () => void
+  activeFilterCount: number
+}) {
+  return (
+    <div
+      className="flex flex-wrap items-center gap-1.5"
+      role="toolbar"
+      aria-label="Request filters"
+    >
+      <FilterPillSelect
+        label="Source"
+        value={search.source ?? ''}
+        options={SOURCE_OPTIONS}
+        onChange={(next) =>
+          onPatch({ source: (next || undefined) as RequestsSearch['source'] })
+        }
+      />
+      <AttentionFilterPills
+        value={search.attention}
+        onChange={(attention) => onPatch({ attention })}
+      />
+      <input
+        type="search"
+        className="h-7 min-w-[9rem] flex-1 rounded-md border border-line bg-white px-2 text-xs text-ink placeholder:text-mute sm:max-w-[14rem] sm:flex-none"
+        placeholder="Name or request ID"
+        aria-label="Search by name or request ID — not saved to URL"
+        value={ephemeralSearch}
+        onChange={(event) => onEphemeralSearchChange(event.target.value)}
+      />
+      <MoreFiltersPopover search={search} stateOptions={stateOptions} onPatch={onPatch} />
+      {activeFilterCount > 0 ? (
+        <button type="button" className="taste-link text-[0.65rem]" onClick={onClear}>
+          Clear {activeFilterCount}
+        </button>
+      ) : null}
+    </div>
+  )
 }
 
 function groupRequestsByBatch(requests: RequestRecord[]): RequestBatch[] {
@@ -384,7 +763,6 @@ export function RequestsPage() {
     search.received_after,
     search.received_before,
   ].filter(Boolean).length
-  const urlFilterChips = activeUrlFilterChips(search)
 
   const tableHeader = (
     <thead>
@@ -495,141 +873,15 @@ export function RequestsPage() {
         </div>
       ) : null}
 
-      <div className="taste-panel space-y-3 p-3 sm:p-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="taste-micro">Filters</p>
-          {activeFilterCount > 0 ? (
-            <button type="button" className="taste-link text-[0.7rem]" onClick={clearFilters}>
-              Clear {activeFilterCount}
-            </button>
-          ) : null}
-        </div>
-        {urlFilterChips.length > 0 ? (
-          <div className="flex flex-wrap gap-1.5" role="list" aria-label="Active URL filters">
-            {urlFilterChips.map((chip) => (
-              <button
-                key={chip.key}
-                type="button"
-                role="listitem"
-                className="inline-flex items-center gap-1 rounded-md border border-habeas-navy/25 bg-habeas-navy/8 px-2 py-0.5 text-[0.65rem] font-medium text-habeas-navy transition-colors hover:border-habeas-navy/40"
-                onClick={() => patchSearch({ [chip.key]: undefined })}
-              >
-                {chip.label}
-                <span aria-hidden className="text-[0.6rem] opacity-70">
-                  ×
-                </span>
-              </button>
-            ))}
-          </div>
-        ) : null}
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-          <label className="flex flex-col gap-1 text-[0.7rem] text-ink-soft">
-            Source
-            <select
-              className="glass rounded-lg px-2 py-1.5 text-xs text-ink"
-              value={search.source ?? ''}
-              onChange={(event) =>
-                patchSearch({
-                  source: (event.target.value || undefined) as RequestsSearch['source'],
-                })
-              }
-            >
-              {SOURCE_OPTIONS.map((option) => (
-                <option key={option.value || 'all'} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-[0.7rem] text-ink-soft">
-            Requestor state
-            <select
-              className="glass rounded-lg px-2 py-1.5 text-xs text-ink"
-              value={search.state ?? ''}
-              onChange={(event) =>
-                patchSearch({ state: event.target.value || undefined })
-              }
-            >
-              <option value="">All states</option>
-              {stateOptions.map((state) => (
-                <option key={state} value={state}>
-                  {state}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-[0.7rem] text-ink-soft">
-            Attention
-            <select
-              className="glass rounded-lg px-2 py-1.5 text-xs text-ink"
-              value={search.attention ?? ''}
-              onChange={(event) =>
-                patchSearch({
-                  attention: (event.target.value || undefined) as RequestsSearch['attention'],
-                })
-              }
-            >
-              <option value="">All</option>
-              <option value="needs">Needs attention</option>
-              <option value="clear">No attention flag</option>
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-[0.7rem] text-ink-soft">
-            Raw record
-            <select
-              className="glass rounded-lg px-2 py-1.5 text-xs text-ink"
-              value={search.raw ?? ''}
-              onChange={(event) =>
-                patchSearch({
-                  raw: (event.target.value || undefined) as RequestsSearch['raw'],
-                })
-              }
-            >
-              <option value="">All</option>
-              <option value="yes">Has raw record</option>
-              <option value="no">Missing raw record</option>
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-[0.7rem] text-ink-soft sm:col-span-2">
-            Name or request ID
-            <input
-              type="search"
-              className="glass rounded-lg px-2 py-1.5 text-xs text-ink"
-              placeholder="Search — not saved to URL"
-              value={ephemeralSearch}
-              onChange={(event) => setEphemeralSearch(event.target.value)}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-[0.7rem] text-ink-soft">
-            Received after
-            <input
-              type="datetime-local"
-              className="glass rounded-lg px-2 py-1.5 font-mono text-xs text-ink"
-              value={search.received_after?.slice(0, 16) ?? ''}
-              onChange={(event) => {
-                const value = event.target.value
-                patchSearch({
-                  received_after: value ? new Date(value).toISOString() : undefined,
-                })
-              }}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-[0.7rem] text-ink-soft">
-            Received before
-            <input
-              type="datetime-local"
-              className="glass rounded-lg px-2 py-1.5 font-mono text-xs text-ink"
-              value={search.received_before?.slice(0, 16) ?? ''}
-              onChange={(event) => {
-                const value = event.target.value
-                patchSearch({
-                  received_before: value ? new Date(value).toISOString() : undefined,
-                })
-              }}
-            />
-          </label>
-        </div>
-      </div>
+      <RequestsFilterBar
+        search={search}
+        stateOptions={stateOptions}
+        ephemeralSearch={ephemeralSearch}
+        onEphemeralSearchChange={setEphemeralSearch}
+        onPatch={patchSearch}
+        onClear={clearFilters}
+        activeFilterCount={activeFilterCount}
+      />
 
       <div className="taste-panel overflow-hidden">
         {requestsQuery.isPending && <RequestsTableSkeleton />}
