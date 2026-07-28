@@ -15,6 +15,11 @@ type PipelineFunnelProps = {
 
 const COLUMN_HEIGHT_PX = 92
 
+function capPercent(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0
+  return Math.min(100, Math.round(value))
+}
+
 function formatReceivedAt(iso: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return iso
@@ -41,7 +46,7 @@ export function PipelineFunnel({
       dropped: row?.dropped_count ?? 0,
     }
   })
-  const base = Math.max(ordered[0]?.reached ?? 0, 1)
+  const topCount = Math.max(ordered[0]?.reached ?? 0, 1)
 
   return (
     <div className="space-y-3" role="img" aria-label="Pipeline stage reach funnel">
@@ -67,10 +72,11 @@ export function PipelineFunnel({
       <div className="flex items-end gap-2">
         {ordered.map((row, index) => {
           const previousReached = index === 0 ? row.reached : ordered[index - 1]!.reached
-          const continuePct = Math.round((row.reached / base) * 100)
-          const dropCount = Math.max(0, previousReached - row.reached)
-          const dropPct =
-            index === 0 ? 0 : Math.round((dropCount / Math.max(previousReached, 1)) * 100)
+          const ofTopPct = capPercent((row.reached / topCount) * 100)
+          const ofPrevPct =
+            index === 0 ? 100 : capPercent((row.reached / Math.max(previousReached, 1)) * 100)
+          const dropCount = index === 0 ? 0 : Math.max(0, previousReached - row.reached)
+          const dropPct = index === 0 ? 0 : capPercent((dropCount / Math.max(previousReached, 1)) * 100)
 
           return (
             <Link
@@ -98,7 +104,7 @@ export function PipelineFunnel({
                   <div
                     className="w-full rounded-sm bg-line/70"
                     style={{ height: Math.max(4, (dropPct / 100) * COLUMN_HEIGHT_PX) }}
-                    title={`Held upstream of ${stageLabel(row.stage)}: ${dropCount.toLocaleString()} (−${dropPct}%)`}
+                    title={`Dropped before ${stageLabel(row.stage)}: ${dropCount.toLocaleString()} (−${dropPct}% from previous)`}
                   />
                 ) : null}
                 <div
@@ -106,12 +112,13 @@ export function PipelineFunnel({
                     'w-full rounded-sm bg-habeas-navy transition-opacity group-hover:opacity-90',
                     row.reached === 0 && 'opacity-25',
                   )}
-                  style={{ height: Math.max(6, (continuePct / 100) * COLUMN_HEIGHT_PX) }}
-                  title={`Reached ${stageLabel(row.stage)}: ${row.reached.toLocaleString()} (${continuePct}% of received)`}
+                  style={{ height: Math.max(6, (ofTopPct / 100) * COLUMN_HEIGHT_PX) }}
+                  title={`Reached ${stageLabel(row.stage)}: ${row.reached.toLocaleString()} (${ofTopPct}% of received)`}
                 />
               </div>
               <span className="text-[0.65rem] tabular-nums text-ink-soft">
-                {continuePct}%{dropPct > 0 ? ` · −${dropPct}` : ''}
+                {ofTopPct}%
+                {index > 0 ? ` · ${ofPrevPct}% of prev` : ''}
               </span>
             </Link>
           )
@@ -125,12 +132,12 @@ export function PipelineFunnel({
         </span>
         <span className="inline-flex items-center gap-1.5">
           <span className="inline-block h-2 w-2 rounded-full bg-line/80" />
-          Held upstream at step
+          Dropped before step
         </span>
         <span>
           {selectedBatch
-            ? 'Requests reaching each stage in the selected batch · % of the batch received'
-            : 'Requests reaching each stage across all batches · % of received'}{' '}
+            ? 'Cumulative reach per stage in the selected batch · % of batch received'
+            : 'Cumulative reach per stage across all batches · % of received'}{' '}
           · click a column for the cohort list
         </span>
       </div>

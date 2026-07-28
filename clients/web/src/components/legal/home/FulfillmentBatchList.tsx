@@ -38,7 +38,19 @@ export function FulfillmentBatchList({
   selectedKey,
   onSelect,
 }: FulfillmentBatchListProps) {
-  const visible = batches.slice(0, HOME_BATCH_CAP)
+  const deduped = batches.reduce<NonNullable<LegalPortfolio['fulfillment_batches']>>(
+    (acc, batch) => {
+      const existing = acc.find((row) => row.batch_key === batch.batch_key)
+      if (existing) {
+        existing.request_count += batch.request_count
+        return acc
+      }
+      acc.push({ ...batch })
+      return acc
+    },
+    [],
+  )
+  const visible = deduped.slice(0, HOME_BATCH_CAP)
   const hasSelection = selectedKey != null
 
   if (visible.length === 0) {

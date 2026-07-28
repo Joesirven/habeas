@@ -373,7 +373,7 @@ async def get_legal_portfolio(
             SELECT
               {_batch_key_expr()} AS batch_key,
               COALESCE(r.intake_source, 'unknown') AS source_label,
-              r.received_at AS received_at,
+              MIN(r.received_at) AS received_at,
               COUNT(*)::int AS request_count
               FROM requests r
              LEFT JOIN drop_raw_requests drr
@@ -385,11 +385,11 @@ async def get_legal_portfolio(
         batch_sql, batch_args, _ = _append_analytics_scope(
             batch_sql, batch_args, window_cutoff=window_cutoff, batch_key=None
         )
-        batch_sql += f"""
-             GROUP BY 1, 2, 3
+        batch_sql += """
+             GROUP BY 1, 2
              ORDER BY received_at DESC
-             LIMIT {_FULFILLMENT_BATCH_CAP}
-        """
+             LIMIT """
+        batch_sql += f"{_FULFILLMENT_BATCH_CAP}"
         batch_rows = await conn.fetch(batch_sql, *batch_args)
 
         heatmap_sql = """
@@ -603,15 +603,24 @@ async def get_legal_portfolio(
         for stage in _COARSE_STAGES
     ]
 
-    reach_by_stage = {str(r["stage"]): int(r["reached_count"]) for r in reach_rows}
-    stage_reach_counts = [
-        StageReachCount(
-            stage=stage,
-            reached_count=reach_by_stage.get(stage, 0),
-            dropped_count=0,
+    current_by_stage = {str(r["stage"]): int(r["reached_count"]) for r in reach_rows}
+    cumulative_reach: list[int] = []
+    for index, stage in enumerate(_COARSE_STAGES):
+        cumulative_reach.append(
+            sum(current_by_stage.get(s, 0) for s in _COARSE_STAGES[index:])
         )
-        for stage in _COARSE_STAGES
-    ]
+    stage_reach_counts = []
+    for index, stage in enumerate(_COARSE_STAGES):
+        reached = cumulative_reach[index]
+        previous = cumulative_reach[index - 1] if index > 0 else reached
+        dropped = max(0, previous - reached) if index > 0 else 0
+        stage_reach_counts.append(
+            StageReachCount(
+                stage=stage,
+                reached_count=reached,
+                dropped_count=dropped,
+            )
+        )
 
     return LegalPortfolioResponse(
         source_buckets=SourceBuckets(

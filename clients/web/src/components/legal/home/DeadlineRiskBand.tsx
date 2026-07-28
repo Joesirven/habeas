@@ -43,48 +43,51 @@ export function DeadlineRiskBand({ risk }: DeadlineRiskBandProps) {
         </span>
       </div>
 
+      <div
+        className="flex h-2 overflow-hidden rounded-full bg-line/40"
+        role="img"
+        aria-label={`Deadline risk: ${risk.overdue} overdue, ${risk.due_within_7_days} due within 7 days, ${risk.on_track} on track`}
+      >
+        {SEGMENTS.map((segment) => {
+          const count = risk[segment.countKey]
+          const width = openTotal === 0 ? 100 / SEGMENTS.length : (count / barTotal) * 100
+          return (
+            <Link
+              key={segment.key}
+              to="/requests"
+              search={segment.search}
+              className={cn(
+                segment.className,
+                'transition-opacity hover:opacity-90',
+                openTotal === 0 && 'opacity-30',
+              )}
+              style={{ width: `${width}%` }}
+              title={`${segment.label}: ${count}`}
+            />
+          )
+        })}
+      </div>
+
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-soft">
+        {SEGMENTS.map((segment) => (
+          <Link
+            key={segment.key}
+            to="/requests"
+            search={segment.search}
+            className="inline-flex items-center gap-1.5 hover:text-ink"
+          >
+            <span className={cn('inline-block h-2 w-2 rounded-full', segment.className)} />
+            <span>
+              {segment.label}:{' '}
+              <span className="tabular-nums font-medium">{risk[segment.countKey]}</span>
+            </span>
+          </Link>
+        ))}
+      </div>
+
       {openTotal === 0 ? (
         <p className="text-xs text-mute">No open requests with due dates in this window.</p>
-      ) : (
-        <>
-          <div
-            className="flex h-2 overflow-hidden rounded-full bg-line/40"
-            role="img"
-            aria-label={`Deadline risk: ${risk.overdue} overdue, ${risk.due_within_7_days} due within 7 days, ${risk.on_track} on track`}
-          >
-            {SEGMENTS.map((segment) => {
-              const count = risk[segment.countKey]
-              if (count <= 0) return null
-              return (
-                <Link
-                  key={segment.key}
-                  to="/requests"
-                  search={segment.search}
-                  className={cn(segment.className, 'transition-opacity hover:opacity-90')}
-                  style={{ width: `${(count / barTotal) * 100}%` }}
-                  title={`${segment.label}: ${count}`}
-                />
-              )
-            })}
-          </div>
-
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-soft">
-            {SEGMENTS.map((segment) => (
-              <Link
-                key={segment.key}
-                to="/requests"
-                search={segment.search}
-                className="inline-flex items-center gap-1.5 hover:text-ink"
-              >
-                <span className={cn('inline-block h-2 w-2 rounded-full', segment.className)} />
-                <span>
-                  {segment.label}: <span className="tabular-nums font-medium">{risk[segment.countKey]}</span>
-                </span>
-              </Link>
-            ))}
-          </div>
-        </>
-      )}
+      ) : null}
     </div>
   )
 }

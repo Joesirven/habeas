@@ -231,6 +231,51 @@ async def test_legal_portfolio_response_has_no_pii_fields(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
+async def test_legal_portfolio_stage_reach_is_cumulative(monkeypatch: pytest.MonkeyPatch):
+    reach_rows = [
+        {"stage": "receive", "reached_count": 1},
+        {"stage": "matching", "reached_count": 50},
+        {"stage": "data_owner_review", "reached_count": 329},
+        {"stage": "fulfillment", "reached_count": 10},
+    ]
+    conn = _mock_conn(reach_rows=reach_rows)
+    monkeypatch.setattr(legal_portfolio, "_require_database", lambda: None)
+    monkeypatch.setattr(legal_portfolio, "get_pool", lambda: _mock_pool(conn))
+    with patch(
+        "admin_api.legal_portfolio.ca_drop_schedule_payload",
+        new=AsyncMock(return_value=None),
+    ):
+        result = await legal_portfolio.get_legal_portfolio(LEGAL)
+
+    by_stage = {row.stage: row for row in result.stage_reach_counts}
+    assert by_stage["receive"].reached_count == 390
+    assert by_stage["matching"].reached_count == 389
+    assert by_stage["data_owner_review"].reached_count == 339
+    assert by_stage["fulfillment"].reached_count == 10
+    assert by_stage["matching"].dropped_count == 1
+    assert by_stage["data_owner_review"].dropped_count == 50
+
+
+@pytest.mark.asyncio
+async def test_legal_portfolio_fulfillment_batches_group_by_batch_key_only(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = _mock_conn()
+    monkeypatch.setattr(legal_portfolio, "_require_database", lambda: None)
+    monkeypatch.setattr(legal_portfolio, "get_pool", lambda: _mock_pool(conn))
+    with patch(
+        "admin_api.legal_portfolio.ca_drop_schedule_payload",
+        new=AsyncMock(return_value=None),
+    ):
+        await legal_portfolio.get_legal_portfolio(LEGAL)
+
+    batch_sql = conn.fetch.call_args_list[4].args[0]
+    assert "GROUP BY 1, 2" in batch_sql
+    assert "GROUP BY 1, 2, 3" not in batch_sql
+    assert "MIN(r.received_at)" in batch_sql
+
+
+@pytest.mark.asyncio
 async def test_legal_portfolio_empty_window_returns_zeroed_analytics(
     monkeypatch: pytest.MonkeyPatch,
 ):

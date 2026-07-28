@@ -335,12 +335,6 @@ function LegalHome() {
         <LegalChromeActions />
       </header>
 
-      {portfolio?.operations_pulse ? (
-        <OperationsPulse pulse={portfolio.operations_pulse} />
-      ) : null}
-
-      <DateToolbar value={homeWindow} onChange={setHomeWindow} />
-
       {portfolioQuery.isError ? (
         <p className="text-sm text-red-700">Could not load portfolio — retrying automatically.</p>
       ) : null}
@@ -354,6 +348,16 @@ function LegalHome() {
 
       {portfolio && hasVariationB ? (
         <div className="divide-y divide-line rounded-lg border border-line">
+          {portfolio.operations_pulse ? (
+            <section className="px-4 py-4">
+              <OperationsPulse pulse={portfolio.operations_pulse} embedded />
+            </section>
+          ) : null}
+
+          <section className="px-4 py-4">
+            <DateToolbar value={homeWindow} onChange={setHomeWindow} />
+          </section>
+
           <section className="px-4 py-4">
             <HomeModuleHeader
               title="Fulfillment batches"
@@ -389,7 +393,7 @@ function LegalHome() {
             </section>
           </div>
 
-          {portfolio.data_owner_queues.length > 0 ? (
+          {portfolio.data_owner_queues ? (
             <section className="px-4 py-4">
               <HomeModuleHeader
                 title="Data owner review queues"

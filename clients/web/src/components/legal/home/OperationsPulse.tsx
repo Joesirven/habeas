@@ -9,6 +9,7 @@ export type OperationsPulseChip = 'assigned' | 'team' | 'at_risk' | 'overdue' | 
 type OperationsPulseProps = {
   pulse: LegalPortfolio['operations_pulse'] | undefined
   onChipClick?: (chip: Exclude<OperationsPulseChip, 'median_age'>) => void
+  embedded?: boolean
 }
 
 function formatMedianAge(hours: number): string {
@@ -55,7 +56,7 @@ type PulseChipConfig = {
   tone?: 'warning' | 'danger'
 }
 
-export function OperationsPulse({ pulse, onChipClick }: OperationsPulseProps) {
+export function OperationsPulse({ pulse, onChipClick, embedded = false }: OperationsPulseProps) {
   const [expanded, setExpanded] = useState<OperationsPulseChip | null>(null)
 
   if (!pulse) return null
@@ -105,7 +106,7 @@ export function OperationsPulse({ pulse, onChipClick }: OperationsPulseProps) {
   }
 
   return (
-    <div className="rounded-lg border border-line px-3.5 py-2.5">
+    <div className={cn(!embedded && 'rounded-lg border border-line px-3.5 py-2.5')}>
       <div
         className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5"
         role="group"
