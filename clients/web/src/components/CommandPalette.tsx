@@ -8,6 +8,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { OPEN_LEGAL_SETTINGS_EVENT } from '@/components/LegalSettingsSheet'
 import {
   getLegalOperators,
   listRequests,
@@ -16,8 +17,6 @@ import {
 } from '@/lib/api'
 import { canAccessLegalSurfaces, useMe } from '@/lib/auth'
 import type { LegalInboxFilter } from '@/router'
-
-export const OPEN_LEGAL_SETTINGS_EVENT = 'open-legal-settings'
 
 const SOURCE_LABELS: Record<string, string> = {
   drop: 'CA DROP',
@@ -378,7 +377,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
             spellCheck={false}
           />
           <p className="text-[0.65rem] text-mute">
-            {requestSearchEnabled
+            {!requestSearchEnabled && trimmedQuery.length > 0
               ? 'Requests need at least 2 characters.'
               : 'Type to search — arrow keys navigate, Enter selects, Esc closes.'}
           </p>
