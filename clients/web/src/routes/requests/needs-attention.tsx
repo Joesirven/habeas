@@ -74,6 +74,43 @@ const SOURCE_LABELS: Record<string, string> = {
   manual: 'Manual',
 }
 
+const CHANNEL_ORIGIN_BY_INTAKE: Record<string, { label: string; abbr: string }> = {
+  webform: { label: 'Portal', abbr: 'P' },
+  drop: { label: 'Portal', abbr: 'P' },
+  csv: { label: 'Email', abbr: 'E' },
+  manual: { label: 'Postal mail', abbr: 'M' },
+}
+
+function channelOriginForItem(item: NeedsAttentionItem): { label: string; abbr: string } {
+  return (
+    CHANNEL_ORIGIN_BY_INTAKE[item.intake_source] ?? {
+      label: item.intake_source,
+      abbr: item.intake_source.slice(0, 1).toUpperCase() || '?',
+    }
+  )
+}
+
+function legalFilterEmptyMessage(filter: LegalInboxFilter): string {
+  switch (filter) {
+    case 'unassigned':
+      return 'No unassigned work in this filter.'
+    case 'assignment_to_legal':
+      return 'No assignment-to-legal items from data owners right now.'
+    case 'fulfillment':
+      return 'No pre-fulfillment work — identity verification and kickoff live on the Fulfillment tab.'
+    case 'notice':
+      return 'No DROP notice.review items waiting.'
+    case 'delivery':
+      return 'No access delivery handoffs yet.'
+    case 'pre_matching_holds':
+      return 'No pre-matching holds — condition routes land here before matching.'
+    case 'assigned_to_me':
+      return 'No pending tasks assigned to you.'
+    default:
+      return 'Nothing in the Legal inbox right now.'
+  }
+}
+
 /** Mirrors admin-api APPROACHING_SLA_THRESHOLD_HOURS.matching_review */
 const MATCHING_REVIEW_SLA_HOURS = 48
 /** Within this window of due, treat as “due soon”. */
@@ -272,13 +309,12 @@ function inboxItemTitle(item: NeedsAttentionItem): string {
     const state = item.requestor_state?.trim()
     return state ? `Triage hold · ${state}` : 'Triage hold · condition route'
   }
-  if (isEscalationItem(item)) return 'Escalated to Legal'
+  if (isAssignmentToLegalItem(item)) return 'Assignment to legal'
+  if (isEscalationItem(item)) return 'Assignment to legal'
   if (isDeliveryItem(item)) return 'Access pack ready · copy URL'
   if (isNoticeItem(item)) return 'Notice review before Wed upload'
   if (isCommsItem(item)) return 'Requester communications'
-  if (isMatchingItem(item)) {
-    return `Matching review · ${matchTypeLabel(item.match_type)}`
-  }
+  if (isFulfillmentLegalItem(item)) return 'Pre-fulfillment review'
   return reasonLabel(item.reason)
 }
 
@@ -483,8 +519,15 @@ function FilterChip({
     <button
       type="button"
       onClick={onClick}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onClick()
+        }
+      }}
+      aria-pressed={active}
       className={cn(
-        'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[0.7rem] font-medium transition-colors',
+        'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[0.7rem] font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-habeas-navy/40',
         active
           ? 'border-habeas-navy/30 bg-habeas-navy/8 text-habeas-navy'
           : 'border-line bg-paper text-ink-soft hover:border-line hover:text-ink',
@@ -640,6 +683,272 @@ async function fetchMatchingDetailOptional(
   }
 }
 
+export function ChannelOriginAvatar({ item }: { item: NeedsAttentionItem }) {
+  const channel = channelOriginForItem(item)
+  return (
+    <span className="relative inline-flex shrink-0" title={`Channel: ${channel.label}`}>
+      <Avatar className="h-5 w-5">
+        <AvatarFallback className="text-[0.45rem] text-mute">?</AvatarFallback>
+      </Avatar>
+      <span
+        className="absolute -bottom-0.5 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full border border-paper bg-habeas-navy px-0.5 text-[0.4rem] font-semibold leading-none text-white tabular-nums"
+        aria-label={channel.label}
+      >
+        {channel.abbr}
+      </span>
+    </span>
+  )
+}
+
+type LegalComposerOption = {
+  id: string
+  label: string
+  hint: string
+  requiresBody?: boolean
+  run: (body: string) => Promise<void>
+}
+
+function buildLegalComposerOptions(
+  item: NeedsAttentionItem,
+  myEmail?: string,
+): LegalComposerOption[] {
+  const options: LegalComposerOption[] = []
+
+  if (isTriageItem(item)) {
+    options.push(
+      {
+        id: 'triage_reject',
+        label: 'Reject as Exempted',
+        hint: 'Set DROP response_status 2 and release pre-matching hold',
+        run: async (body) => {
+          if (body.trim()) await postRequestComment(item.request_id, body.trim())
+          await postTriageBulkReject({ request_ids: [item.request_id], response_status: 2 })
+        },
+      },
+      {
+        id: 'triage_match',
+        label: 'Send to matching',
+        hint: 'Release hold and enqueue automatic matching',
+        run: async (body) => {
+          if (body.trim()) await postRequestComment(item.request_id, body.trim())
+          await postTriageSendToMatching({ request_ids: [item.request_id] })
+        },
+      },
+    )
+  }
+
+  if (isNoticeItem(item)) {
+    options.push({
+      id: 'notice_approve',
+      label: 'Approve notice review',
+      hint: 'Clear notice.review for weekly DROP upload batch',
+      run: async (body) => {
+        if (body.trim()) await postRequestComment(item.request_id, body.trim())
+        await postNoticeApprove({ request_ids: [item.request_id] })
+      },
+    })
+  }
+
+  if (isDeliveryItem(item)) {
+    options.push(
+      {
+        id: 'delivery_delivered',
+        label: 'Confirm delivered',
+        hint: 'Mark access pack delivery as delivered',
+        run: async (body) => {
+          if (body.trim()) await postRequestComment(item.request_id, body.trim())
+          await patchAccessDeliveryStatus(item.request_id, { status: 'delivered' })
+        },
+      },
+      {
+        id: 'delivery_failed',
+        label: 'Mark delivery failed',
+        hint: 'Record failed delivery attempt',
+        run: async (body) => {
+          if (body.trim()) await postRequestComment(item.request_id, body.trim())
+          await patchAccessDeliveryStatus(item.request_id, { status: 'failed' })
+        },
+      },
+    )
+  }
+
+  if (isAssignmentToLegalItem(item)) {
+    options.push({
+      id: 'assignment_review',
+      label: 'Record legal review note',
+      hint: 'Log review context — open Fulfillment tab for pre-fulfillment actions',
+      requiresBody: true,
+      run: async (body) => {
+        if (!body.trim()) throw new Error('Reply is required for review notes')
+        await postRequestComment(item.request_id, body.trim())
+      },
+    })
+  } else if (isFulfillmentLegalItem(item)) {
+    options.push({
+      id: 'fulfillment_note',
+      label: 'Record pre-fulfillment note',
+      hint: 'Log identity verification or kickoff context',
+      requiresBody: true,
+      run: async (body) => {
+        if (!body.trim()) throw new Error('Reply is required for pre-fulfillment notes')
+        await postRequestComment(item.request_id, body.trim())
+      },
+    })
+  }
+
+  if (!item.assignment?.assignee_identity?.trim() && myEmail) {
+    options.push({
+      id: 'take_it',
+      label: 'Take it — claim assignment',
+      hint: 'Assign this request to you',
+      run: async (body) => {
+        if (body.trim()) await postRequestComment(item.request_id, body.trim())
+        await postDropWorkflowAssign({
+          request_ids: [item.request_id],
+          assignee_identity: myEmail,
+          target_role: 'reviewer',
+        })
+      },
+    })
+  }
+
+  if (options.length === 0) {
+    options.push({
+      id: 'inbox_note',
+      label: 'Record inbox note',
+      hint: 'Add correspondence with paired status',
+      requiresBody: true,
+      run: async (body) => {
+        if (!body.trim()) throw new Error('Reply is required')
+        await postRequestComment(item.request_id, body.trim())
+      },
+    })
+  }
+
+  return options
+}
+
+export function LegalInboxComposer({
+  item,
+  canReviewActions,
+  myEmail,
+  onSuccess,
+}: {
+  item: NeedsAttentionItem
+  canReviewActions: boolean
+  myEmail?: string
+  onSuccess: () => Promise<void>
+}) {
+  const options = useMemo(
+    () => buildLegalComposerOptions(item, myEmail),
+    [item, myEmail],
+  )
+  const [statusId, setStatusId] = useState(() => options[0]?.id ?? '')
+  const [body, setBody] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [retryPayload, setRetryPayload] = useState<{
+    statusId: string
+    body: string
+  } | null>(null)
+
+  useEffect(() => {
+    if (!options.some((option) => option.id === statusId)) {
+      setStatusId(options[0]?.id ?? '')
+    }
+  }, [options, statusId])
+
+  const selected = options.find((option) => option.id === statusId) ?? options[0]
+  const sendMutation = useMutation({
+    mutationFn: async ({
+      statusId: nextStatusId,
+      body: nextBody,
+    }: {
+      statusId: string
+      body: string
+    }) => {
+      const option = options.find((candidate) => candidate.id === nextStatusId)
+      if (!option) throw new Error('Select a status transition')
+      if (option.requiresBody && !nextBody.trim()) {
+        throw new Error('Reply is required for this status')
+      }
+      await option.run(nextBody)
+    },
+    onSuccess: async () => {
+      setError(null)
+      setRetryPayload(null)
+      setBody('')
+      await onSuccess()
+    },
+    onError: (mutationError, variables) => {
+      setError(
+        mutationError instanceof Error ? mutationError.message : 'Status update failed',
+      )
+      setRetryPayload(variables)
+    },
+  })
+
+  if (!canReviewActions || !selected) return null
+
+  return (
+    <div className="space-y-2 border-t border-line pt-2">
+      <label className="flex flex-col gap-1 text-[0.65rem] text-ink-soft">
+        Status transition
+        <select
+          className="rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
+          value={statusId}
+          onChange={(event) => setStatusId(event.target.value)}
+          disabled={sendMutation.isPending}
+          aria-label="Status transition"
+        >
+          {options.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {selected.hint ? <p className="text-[0.65rem] text-mute">{selected.hint}</p> : null}
+      <textarea
+        className="min-h-[2.5rem] max-h-20 w-full resize-y rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
+        value={body}
+        onChange={(event) => setBody(event.target.value)}
+        placeholder={
+          selected.requiresBody
+            ? 'Reply required — persists to correspondence…'
+            : 'Optional reply — persists to correspondence…'
+        }
+        aria-label="Reply body"
+        maxLength={2000}
+        disabled={sendMutation.isPending}
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          disabled={
+            sendMutation.isPending ||
+            !statusId ||
+            (selected.requiresBody === true && body.trim().length === 0)
+          }
+          onClick={() => sendMutation.mutate({ statusId, body: body.trim() })}
+        >
+          {sendMutation.isPending ? 'Sending…' : 'Send and advance'}
+        </Button>
+        {retryPayload && error ? (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={sendMutation.isPending}
+            onClick={() => sendMutation.mutate(retryPayload)}
+          >
+            Retry
+          </Button>
+        ) : null}
+      </div>
+      {error ? <p className="text-[0.65rem] text-red-700">{error}</p> : null}
+    </div>
+  )
+}
+
 function InboxReviewPane({
   item,
   canReviewActions,
@@ -650,11 +959,12 @@ function InboxReviewPane({
   item: NeedsAttentionItem
   canReviewActions: boolean
   assigneeCandidates: string[]
-  /** Legal case-queue mode — hide DO escalate; resolve escalations via fulfill path. */
+  /** Legal case-queue mode — no matching disposition; status-required composer. */
   legalPersona?: boolean
   onBackToQueue?: () => void
 }) {
   const queryClient = useQueryClient()
+  const { me } = useMe()
   const [actionError, setActionError] = useState<string | null>(null)
   const [commentDraft, setCommentDraft] = useState('')
   const [assignError, setAssignError] = useState<string | null>(null)
@@ -672,14 +982,14 @@ function InboxReviewPane({
   const [draftOpen, setDraftOpen] = useState(false)
 
   const showTriage = isTriageItem(item)
+  const showAssignmentToLegal = legalPersona && isAssignmentToLegalItem(item)
   const showEscalation = isEscalationItem(item)
   const showMatching =
-    (isMatchingItem(item) || showEscalation) &&
+    isMatchingItem(item) &&
     !isDeliveryItem(item) &&
     !isNoticeItem(item) &&
     !showTriage &&
     !legalPersona
-  const showLegalEscalation = legalPersona && showEscalation
   const showDelivery = isDeliveryItem(item) || item.current_stage === 'fulfill'
   const showNotice = isNoticeItem(item)
   const showComms = isCommsItem(item) && !legalPersona
@@ -689,7 +999,7 @@ function InboxReviewPane({
     queryFn: () => fetchMatchingDetailOptional(item.request_id),
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
-    enabled: showMatching || showLegalEscalation || showDelivery,
+    enabled: showMatching || showAssignmentToLegal || showDelivery,
   })
 
   const journeyQuery = useQuery({
@@ -866,11 +1176,11 @@ function InboxReviewPane({
     shareableUrl: shareableUrl || '[shareable URL will appear here after fulfillment]',
   })
   const showHandoffTab = showDelivery || showComms
-  const showResolveMatching = showMatching || showLegalEscalation
+  const showResolveMatching = showMatching || showAssignmentToLegal
   const primaryTab = showTriage
     ? 'triage'
-    : showLegalEscalation
-      ? 'comments'
+    : showAssignmentToLegal
+      ? 'matching'
       : showMatching
         ? 'matching'
         : showHandoffTab
@@ -986,13 +1296,13 @@ function InboxReviewPane({
               <div className="flex flex-wrap items-center gap-2">
                 {showTriage ? (
                   <Badge variant="wait" className="normal-case tracking-normal">
-                    Triage
+                    Pre-matching hold
                   </Badge>
-                ) : showEscalation ? (
+                ) : showAssignmentToLegal || showEscalation ? (
                   <Badge variant="fail" className="normal-case tracking-normal">
-                    Escalation
+                    Assignment to legal
                   </Badge>
-                ) : item.match_type ? (
+                ) : item.match_type && !legalPersona ? (
                   <Badge
                     variant={matchTypeBadgeVariant(item.match_type)}
                     className="normal-case tracking-normal text-[0.7rem]"
@@ -1023,7 +1333,7 @@ function InboxReviewPane({
                   variant={
                     bucket === 'overdue' ? 'fail' : bucket === 'due_soon' ? 'wait' : 'default'
                   }
-                  className="normal-case tracking-normal"
+                  className="normal-case tracking-normal tabular-nums"
                 >
                   {formatDueLabel(item)}
                 </Badge>
@@ -1042,7 +1352,7 @@ function InboxReviewPane({
           </div>
 
           <div className="flex flex-wrap items-center gap-0.5">
-            {showTriage && canReviewActions ? (
+            {showTriage && canReviewActions && !legalPersona ? (
               <>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -1078,7 +1388,7 @@ function InboxReviewPane({
                 </Tooltip>
               </>
             ) : null}
-            {showNotice && canReviewActions ? (
+            {showNotice && canReviewActions && !legalPersona ? (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
@@ -1098,7 +1408,7 @@ function InboxReviewPane({
                 </TooltipContent>
               </Tooltip>
             ) : null}
-            {(showMatching || showLegalEscalation) && canReviewActions ? (
+            {showMatching && canReviewActions && !legalPersona ? (
               <>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -1114,11 +1424,7 @@ function InboxReviewPane({
                       <IconCheck className="h-3.5 w-3.5" />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>
-                    {showLegalEscalation
-                      ? 'Resolve escalation — set DROP status and release'
-                      : 'Fulfill — approve and release to fulfillment'}
-                  </TooltipContent>
+                  <TooltipContent>Fulfill — approve and release to fulfillment</TooltipContent>
                 </Tooltip>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -1136,24 +1442,22 @@ function InboxReviewPane({
                   </TooltipTrigger>
                   <TooltipContent>Decline — leave queue without fulfillment</TooltipContent>
                 </Tooltip>
-                {showMatching && !legalPersona ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 px-2 text-[0.65rem]"
-                        disabled={actionPending}
-                        onClick={() => setConfirmAction('escalate')}
-                        aria-label="Escalate to Legal"
-                      >
-                        Legal
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Escalate to Legal Inbox · Escalations</TooltipContent>
-                  </Tooltip>
-                ) : null}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-[0.65rem]"
+                      disabled={actionPending}
+                      onClick={() => setConfirmAction('escalate')}
+                      aria-label="Assign to legal"
+                    >
+                      Legal
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Assign to legal when data owner needs help</TooltipContent>
+                </Tooltip>
               </>
             ) : null}
             {(showDelivery || showComms) && shareableUrl ? (
@@ -1247,7 +1551,7 @@ function InboxReviewPane({
                 </TabsTrigger>
               ) : null}
               <TabsTrigger value="comments" className="h-6 gap-1 px-2 text-[0.65rem]">
-                {showLegalEscalation ? 'Escalation' : 'Comments'}
+                {showAssignmentToLegal ? 'Assignment thread' : 'Comments'}
                 {comments.length > 0 ? (
                   <span className="tabular-nums opacity-70">({comments.length})</span>
                 ) : null}
@@ -1279,7 +1583,7 @@ function InboxReviewPane({
                   matching={matchingQuery.data}
                   isPending={matchingQuery.isPending}
                   isError={matchingQuery.isError}
-                  canReviewActions={canReviewActions}
+                  canReviewActions={canReviewActions && !legalPersona}
                   actionPending={actionPending}
                   actionError={actionError}
                   onPromote={(responseStatus) =>
@@ -1290,6 +1594,12 @@ function InboxReviewPane({
                   layout="tabs"
                   hideActions
                 />
+                {legalPersona && showAssignmentToLegal ? (
+                  <p className="mt-2 text-[0.7rem] text-ink-soft">
+                    Matching is read-only in Inbox — use request detail Fulfillment tab for
+                    pre-fulfillment actions. No confirm / not a match / multi-person here.
+                  </p>
+                ) : null}
               </TabsContent>
             ) : null}
 
@@ -1322,7 +1632,7 @@ function InboxReviewPane({
                   consumer URL.
                 </p>
                 <p className="text-mute">Next upload window: Wed 00:00 America/Los_Angeles</p>
-                {canReviewActions ? (
+                {canReviewActions && !legalPersona ? (
                   <Button
                     type="button"
                     size="sm"
@@ -1368,7 +1678,19 @@ function InboxReviewPane({
                   </div>
                 ))}
               </div>
-              {canReviewActions ? (
+              {canReviewActions && legalPersona ? (
+                <LegalInboxComposer
+                  item={item}
+                  canReviewActions={canReviewActions}
+                  myEmail={me?.email}
+                  onSuccess={async () => {
+                    await queryClient.invalidateQueries({
+                      queryKey: ['admin-api', 'ops', 'requests', item.request_id, 'comments'],
+                    })
+                    await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+                  }}
+                />
+              ) : canReviewActions ? (
                 <div className="flex items-end gap-2 border-t border-line pt-2">
                   <textarea
                     className="min-h-[2.5rem] max-h-20 flex-1 resize-y rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
@@ -2338,7 +2660,7 @@ export function NeedsAttentionPage() {
           </div>
           <p className="mt-1 max-w-lg text-xs text-ink-soft">
             {legalPersona
-              ? 'Work to do — escalations, notice, delivery, triage. Distinct from the All requests inventory.'
+              ? 'Work to do — pre-matching holds, assignment to legal, notice, delivery, and fulfillment. One list with filters; distinct from All requests.'
               : dataOwnerPersona
                 ? 'Approve recommended CA DROP status on Matching, or open Tasks assigned to you. Escalate to Legal when you need a hold.'
                 : 'Pending work stays in Inbox lanes — matching, delivery (shareable URL), DROP notice, and requester comms. Exact 1:1 matches in one DROP batch group as a thread for bulk fulfill.'}
@@ -2516,7 +2838,7 @@ export function NeedsAttentionPage() {
               </>
             ) : null}
 
-            {legalPersona && inboxKind === 'triage' ? (
+            {legalPersona && legalInboxFilter === 'pre_matching_holds' ? (
               <>
                 <Button
                   size="sm"
@@ -2536,7 +2858,7 @@ export function NeedsAttentionPage() {
               </>
             ) : null}
 
-            {legalPersona && inboxKind === 'notice' ? (
+            {legalPersona && legalInboxFilter === 'notice' ? (
               <Button
                 size="sm"
                 disabled={selectedCount === 0 || noticeBulkPending}
@@ -2617,33 +2939,23 @@ export function NeedsAttentionPage() {
             ) : null}
             {!loading && !attentionQuery.isError && filteredItems.length === 0 ? (
               <p className="p-6 text-xs text-ink-soft">
-                {items.length === 0
-                  ? legalPersona
-                    ? inboxKind === 'notice'
-                      ? 'No DROP notice.review items — fulfilled rows with pending notice land here.'
-                      : inboxKind === 'delivery'
-                        ? 'No access delivery handoffs yet — rows appear after access packs get a delivery status.'
-                        : inboxKind === 'triage'
-                          ? 'No Legal Triage holds — condition hits land here before matching.'
-                          : inboxKind === 'escalations'
-                            ? 'No escalations from data owners right now.'
-                            : inboxKind === 'pending_tasks'
-                              ? 'No pending tasks assigned to you.'
-                              : 'Nothing in the Legal case queue right now.'
-                    : 'Nothing needs attention right now.'
-                  : inboxKind === 'triage'
-                    ? 'No Legal Triage holds — condition hits land here before matching.'
-                    : inboxKind === 'escalations'
-                      ? 'No escalations to Legal right now.'
-                      : inboxKind === 'delivery'
-                        ? 'No access delivery tasks in this filter.'
-                        : inboxKind === 'notice'
-                          ? 'No DROP notice.review items waiting.'
-                          : inboxKind === 'communications'
-                            ? 'No requester comms yet — drafts and replies will land here.'
-                            : inboxKind === 'pending_tasks'
-                              ? 'No pending tasks assigned to you.'
-                              : 'No items match the current view.'}
+                {legalPersona
+                  ? legalFilterEmptyMessage(legalInboxFilter)
+                  : items.length === 0
+                    ? 'Nothing needs attention right now.'
+                    : inboxKind === 'triage'
+                      ? 'No Legal Triage holds — condition hits land here before matching.'
+                      : inboxKind === 'escalations'
+                        ? 'No assignment-to-legal items right now.'
+                        : inboxKind === 'delivery'
+                          ? 'No access delivery tasks in this filter.'
+                          : inboxKind === 'notice'
+                            ? 'No DROP notice.review items waiting.'
+                            : inboxKind === 'communications'
+                              ? 'No requester comms yet — drafts and replies will land here.'
+                              : inboxKind === 'pending_tasks'
+                                ? 'No pending tasks assigned to you.'
+                                : 'No items match the current view.'}
               </p>
             ) : null}
 
@@ -2833,11 +3145,13 @@ export function NeedsAttentionPage() {
                     activeTarget.requestId === item.request_id
                   const bucket = dueBucket(item)
                   const assignee = item.assignment?.assignee_identity
+                  const urgentAssignment = legalPersona && isAssignmentToLegalItem(item)
                   return (
                     <li key={item.request_id}>
                       <div
                         className={cn(
                           'flex items-stretch gap-0 transition-colors',
+                          urgentAssignment && 'border-l-2 border-l-red-600',
                           active
                             ? 'bg-habeas-navy/[0.07]'
                             : selected
@@ -2872,32 +3186,54 @@ export function NeedsAttentionPage() {
                             <span className="min-w-0 truncate font-medium text-ink">
                               {inboxItemTitle(item)}
                             </span>
-                            <span className="shrink-0 tabular-nums text-mute">
-                              {formatRelativeTime(item.requested_at ?? item.received_at)}
-                            </span>
+                            <div className="flex shrink-0 items-center gap-1.5">
+                              {urgentAssignment ? (
+                                <Badge
+                                  variant="fail"
+                                  className="normal-case tracking-normal text-[0.55rem]"
+                                >
+                                  Urgent
+                                </Badge>
+                              ) : null}
+                              <span className="tabular-nums text-mute">
+                                {formatRelativeTime(item.requested_at ?? item.received_at)}
+                              </span>
+                            </div>
                           </div>
                           <div className="flex flex-wrap items-center gap-1.5 text-[0.65rem] text-ink-soft">
-                            <Avatar className="h-4 w-4">
-                              <AvatarFallback className="text-[0.45rem]">
-                                {emailInitials(assignee)}
-                              </AvatarFallback>
-                            </Avatar>
-                            <span>
-                              {SOURCE_LABELS[item.intake_source] ?? item.intake_source}
-                            </span>
-                            <span className="text-mute">·</span>
+                            <ChannelOriginAvatar item={item} />
+                            {assignee ? (
+                              <>
+                                <Avatar className="h-4 w-4">
+                                  <AvatarFallback className="text-[0.45rem]">
+                                    {emailInitials(assignee)}
+                                  </AvatarFallback>
+                                </Avatar>
+                                <span className="max-w-[8rem] truncate">{assignee}</span>
+                                <span className="text-mute">·</span>
+                              </>
+                            ) : (
+                              <>
+                                <span className="text-mute">Unassigned</span>
+                                <span className="text-mute">·</span>
+                              </>
+                            )}
                             <span className="capitalize">
-                              {isDeliveryItem(item)
-                                ? 'delivery'
-                                : isNoticeItem(item)
-                                  ? 'notice'
-                                  : isCommsItem(item)
-                                    ? 'comms'
-                                    : isMatchingItem(item)
-                                      ? 'matching'
-                                      : isPendingTaskFor(item, me?.email)
-                                        ? 'task'
-                                        : 'inbox'}
+                              {isAssignmentToLegalItem(item)
+                                ? 'assignment to legal'
+                                : isTriageItem(item)
+                                  ? 'pre-matching hold'
+                                  : isFulfillmentLegalItem(item)
+                                    ? 'fulfillment'
+                                    : isDeliveryItem(item)
+                                      ? 'delivery'
+                                      : isNoticeItem(item)
+                                        ? 'notice'
+                                        : isCommsItem(item)
+                                          ? 'comms'
+                                          : isPendingTaskFor(item, me?.email)
+                                            ? 'task'
+                                            : 'inbox'}
                             </span>
                             <span className="text-mute">·</span>
                             <span className="truncate font-mono text-mute">
@@ -2915,7 +3251,7 @@ export function NeedsAttentionPage() {
                           </div>
                           <p
                             className={cn(
-                              'text-[0.65rem]',
+                              'text-[0.65rem] tabular-nums',
                               bucket === 'overdue'
                                 ? 'text-red-700'
                                 : bucket === 'due_soon'
