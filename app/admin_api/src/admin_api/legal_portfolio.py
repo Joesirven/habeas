@@ -120,6 +120,35 @@ _COARSE_STAGES: tuple[str, ...] = (
     "delivery_notice",
 )
 
+_FULFILLMENT_BATCH_CAP = 5
+
+
+def _batch_key_expr(alias: str = "r") -> str:
+    return (
+        f"COALESCE({alias}.intake_source, 'unknown') || ':' || "
+        f"to_char(COALESCE({alias}.received_at, {alias}.created_at), "
+        f"'YYYY-MM-DD\"T\"HH24:MI')"
+    )
+
+
+def _append_analytics_scope(
+    sql: str,
+    args: list[Any],
+    *,
+    window_cutoff: datetime | None,
+    batch_key: str | None,
+    param_idx: int = 1,
+) -> tuple[str, list[Any], int]:
+    if window_cutoff is not None:
+        sql += f" AND COALESCE(r.received_at, r.created_at) >= ${param_idx}"
+        args.append(window_cutoff)
+        param_idx += 1
+    if batch_key:
+        sql += f" AND {_batch_key_expr()} = ${param_idx}"
+        args.append(batch_key)
+        param_idx += 1
+    return sql, args, param_idx
+
 
 def _window_interval(window_days: str | None) -> timedelta | None:
     if not window_days or window_days == "all":
@@ -341,10 +370,9 @@ async def get_legal_portfolio(
             or 0
         )
 
-        batch_sql = """
+        batch_sql = f"""
             SELECT
-              COALESCE(r.intake_source, 'unknown') || ':' ||
-                to_char(COALESCE(r.received_at, r.created_at), 'YYYY-MM-DD"T"HH24:MI') AS batch_key,
+              {_batch_key_expr()} AS batch_key,
               COALESCE(r.intake_source, 'unknown') AS source_label,
               COALESCE(r.received_at, r.created_at) AS received_at,
               COUNT(*)::int AS request_count
@@ -354,13 +382,13 @@ async def get_legal_portfolio(
              WHERE (r.intake_source != 'drop' OR drr.response_status IS NULL)
         """
         batch_args: list[Any] = []
-        if window_cutoff is not None:
-            batch_sql += " AND COALESCE(r.received_at, r.created_at) >= $1"
-            batch_args.append(window_cutoff)
-        batch_sql += """
+        batch_sql, batch_args, _ = _append_analytics_scope(
+            batch_sql, batch_args, window_cutoff=window_cutoff, batch_key=None
+        )
+        batch_sql += f"""
              GROUP BY 1, 2, 3
              ORDER BY received_at DESC
-             LIMIT 5
+             LIMIT {_FULFILLMENT_BATCH_CAP}
         """
         batch_rows = await conn.fetch(batch_sql, *batch_args)
 
@@ -372,14 +400,93 @@ async def get_legal_portfolio(
              WHERE (r.intake_source != 'drop' OR drr.response_status IS NULL)
         """
         heatmap_args: list[Any] = []
-        if window_cutoff is not None:
-            heatmap_sql += " AND COALESCE(r.received_at, r.created_at) >= $1"
-            heatmap_args.append(window_cutoff)
+        heatmap_sql, heatmap_args, _ = _append_analytics_scope(
+            heatmap_sql,
+            heatmap_args,
+            window_cutoff=window_cutoff,
+            batch_key=batch_key,
+        )
         heatmap_sql += " GROUP BY 1, 2 ORDER BY count DESC"
         heatmap_rows = await conn.fetch(heatmap_sql, *heatmap_args)
 
-        deadline_row = await conn.fetchrow(
-            """
+        reach_sql = """
+            WITH scoped_requests AS (
+                SELECT r.id
+                  FROM requests r
+                  LEFT JOIN drop_raw_requests drr
+                    ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
+                 WHERE (r.intake_source != 'drop' OR drr.response_status IS NULL)
+        """
+        reach_args: list[Any] = []
+        reach_sql, reach_args, _ = _append_analytics_scope(
+            reach_sql,
+            reach_args,
+            window_cutoff=window_cutoff,
+            batch_key=batch_key,
+        )
+        reach_sql += """
+            ),
+            latest_mr AS (
+                SELECT DISTINCT ON (mr.request_id)
+                       mr.request_id,
+                       mr.match_count
+                  FROM matching_results mr
+                 ORDER BY mr.request_id, mr.recorded_at DESC
+            ),
+            classified AS (
+                SELECT o.id,
+                       CASE
+                         WHEN EXISTS (
+                           SELECT 1 FROM approval_requests ar
+                            WHERE ar.request_id = o.id
+                              AND ar.action_type = 'notice.review'
+                              AND ar.status = 'pending'
+                         ) THEN 'delivery_notice'
+                         WHEN EXISTS (
+                           SELECT 1 FROM approval_requests ar
+                            WHERE ar.request_id = o.id
+                              AND ar.action_type IN ('access.delivery', 'delivery.confirm')
+                              AND ar.status = 'pending'
+                         ) THEN 'delivery_notice'
+                         WHEN EXISTS (
+                           SELECT 1 FROM data_fulfillment_attempts dfa
+                            WHERE dfa.request_id = o.id
+                              AND dfa.status IN ('pending', 'claimed', 'in_flight')
+                         ) THEN 'fulfillment'
+                         WHEN EXISTS (
+                           SELECT 1 FROM approval_requests ar
+                            WHERE ar.request_id = o.id
+                              AND ar.action_type = 'workflow.assignment'
+                              AND ar.status = 'pending'
+                              AND ar.approver_role = 'legal'
+                         ) THEN 'legal_review'
+                         WHEN EXISTS (
+                           SELECT 1 FROM approval_requests ar
+                            WHERE ar.request_id = o.id
+                              AND ar.action_type = 'matching.review'
+                              AND ar.status = 'pending'
+                         ) THEN 'data_owner_review'
+                         WHEN EXISTS (
+                           SELECT 1 FROM matching_attempts ma
+                            WHERE ma.request_id = o.id
+                              AND ma.step = 'matching'
+                              AND ma.status IN ('pending', 'claimed', 'in_flight')
+                         ) THEN 'matching'
+                         WHEN EXISTS (
+                           SELECT 1 FROM latest_mr lm WHERE lm.request_id = o.id
+                         ) THEN 'data_owner_review'
+                         ELSE 'receive'
+                       END AS coarse_stage
+                  FROM scoped_requests o
+            )
+            SELECT coarse_stage AS stage, COUNT(*)::int AS reached_count
+              FROM classified
+             GROUP BY coarse_stage
+             ORDER BY coarse_stage
+        """
+        reach_rows = await conn.fetch(reach_sql, *reach_args)
+
+        deadline_sql = """
             SELECT
               COUNT(*) FILTER (
                 WHERE r.due_at IS NOT NULL AND r.due_at < NOW()
@@ -398,8 +505,16 @@ async def get_legal_portfolio(
               )::int AS on_track,
               0::int AS closed_ytd
               FROM requests r
-            """
+             WHERE 1=1
+        """
+        deadline_args: list[Any] = []
+        deadline_sql, deadline_args, _ = _append_analytics_scope(
+            deadline_sql,
+            deadline_args,
+            window_cutoff=window_cutoff,
+            batch_key=batch_key,
         )
+        deadline_row = await conn.fetchrow(deadline_sql, *deadline_args)
 
         pulse_row = await conn.fetchrow(
             """
@@ -483,14 +598,14 @@ async def get_legal_portfolio(
         for stage in _COARSE_STAGES
     ]
 
+    reach_by_stage = {str(r["stage"]): int(r["reached_count"]) for r in reach_rows}
     stage_reach_counts = [
         StageReachCount(
-            stage=row.stage,
-            reached_count=int(row.in_queue + row.in_progress + row.complete),
+            stage=stage,
+            reached_count=reach_by_stage.get(stage, 0),
             dropped_count=0,
         )
-        for row in stage_matrix
-        if not batch_key or True
+        for stage in _COARSE_STAGES
     ]
 
     return LegalPortfolioResponse(
