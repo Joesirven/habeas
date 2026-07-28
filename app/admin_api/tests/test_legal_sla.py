@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -63,3 +64,38 @@ async def test_patch_sla_settings_admin_only(monkeypatch: pytest.MonkeyPatch):
     )
     assert result.lifecycle_days == 7
     conn.execute.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_calculate_due_at_for_stage_lifecycle():
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "data_owner_review_days": 3,
+            "legal_pre_fulfillment_days": 2,
+            "fulfillment_days": 3,
+            "lifecycle_days": 6,
+            "updated_at": None,
+        }
+    )
+    received = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+    due = await legal_sla.calculate_due_at_for_stage(
+        conn,
+        received_at=received,
+        stage=legal_sla.SLA_STAGE_LIFECYCLE,
+    )
+    assert due == datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_apply_request_due_at_on_intake_skips_override():
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "received_at": datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc),
+            "due_at_override_at": datetime.now(timezone.utc),
+        }
+    )
+    result = await legal_sla.apply_request_due_at_on_intake(conn, "00000000-0000-0000-0000-000000000099")
+    assert result is None
+    conn.execute.assert_not_awaited()

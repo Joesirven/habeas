@@ -25,7 +25,7 @@ from admin_api.drop_pipeline import router as drop_pipeline_router
 from admin_api.fulfillment_ops import router as fulfillment_ops_router
 from admin_api.legal_portfolio import router as legal_portfolio_router
 from admin_api.legal_operators import router as legal_operators_router
-from admin_api.legal_sla import router as legal_sla_router
+from admin_api.legal_sla import apply_request_due_at_on_intake, router as legal_sla_router
 from admin_api.legal_team import router as legal_team_router
 from admin_api.request_correspondence import router as request_correspondence_router
 from admin_api.runs import router as runs_router
@@ -277,6 +277,7 @@ async def requests_create(_body: ManualRequestBody):
                 request_type=_body.request_type,
             ),
         )
+        await apply_request_due_at_on_intake(conn, request_id)
         record = await get_request(conn, request_id)
     if record is None:
         raise HTTPException(status_code=500, detail="request insert failed")
@@ -353,6 +354,7 @@ async def requests_agent_batch(
                 requestor_state=row.requestor_state,
                 cleaned_payload=row.cleaned_payload,
             )
+            await apply_request_due_at_on_intake(conn, request_id)
             request_ids.append(request_id)
 
     logger.info(

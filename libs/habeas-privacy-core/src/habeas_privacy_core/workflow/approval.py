@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -34,6 +35,8 @@ WORKFLOW_ASSIGNMENT_ACTION = "workflow.assignment"
 ASSIGNMENT_TARGETS = frozenset({"reviewer", "legal", "data_owner"})
 ASSIGNMENT_KINDS = frozenset({"assign", "escalate", "triage"})
 DEFAULT_ASSIGNMENT_TTL = timedelta(days=30)
+LEGAL_ASSIGNMENT_KIND = "escalate"
+ROLE_LEGAL = "legal"
 
 
 def _validate_table(table: str) -> str:
@@ -741,6 +744,107 @@ async def _supersede_pending_assignments(
         WORKFLOW_ASSIGNMENT_ACTION,
     )
     return [int(r["id"]) for r in rows]
+
+
+async def fetch_active_legal_team_emails(conn: asyncpg.Connection) -> list[str]:
+    """Active Legal team members for assignment-to-legal fan-out.
+
+    Settings **Legal team** is source of truth; ``ADMIN_API_LEGALS`` is bootstrap
+    fallback when the table has no active rows.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT email
+          FROM legal_team_members
+         WHERE active = true
+         ORDER BY email
+        """
+    )
+    if rows:
+        return [str(row["email"]).strip().lower() for row in rows]
+    raw = os.getenv("ADMIN_API_LEGALS", "")
+    return [email.strip().lower() for email in raw.split(",") if email.strip()]
+
+
+async def has_assignment_to_legal(
+    conn: asyncpg.Connection,
+    request_id: str,
+) -> bool:
+    """True when assignment-to-legal exists (pending or completed)."""
+    row = await conn.fetchval(
+        """
+        SELECT 1
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND approver_role = 'legal'
+           AND context_jsonb->>'kind' = $3
+           AND status IN ('pending', 'approved')
+         LIMIT 1
+        """,
+        UUID(request_id),
+        WORKFLOW_ASSIGNMENT_ACTION,
+        LEGAL_ASSIGNMENT_KIND,
+    )
+    return row is not None
+
+
+def assert_matching_promote_allowed_for_role(
+    *,
+    actor_role: str | None,
+    has_legal_assignment: bool,
+    matching_already_approved: bool,
+) -> None:
+    """Block legal persona from matching.review → fulfillment shortcuts (KTD11).
+
+    Legal may review matching only after data owner assignment-to-legal; promote
+    approves matching.review and unlocks fulfillment — data-owner canonical path.
+    """
+    if actor_role != ROLE_LEGAL:
+        return
+    if has_legal_assignment:
+        return
+    raise ValueError(
+        "legal cannot promote matching.review to fulfillment without assignment to legal"
+    )
+
+
+async def escalate_to_legal_with_fanout(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    decided_by: str,
+    expires_in: timedelta = DEFAULT_ASSIGNMENT_TTL,
+) -> list[dict[str, Any]]:
+    """Fan-out assignment-to-legal to every active Legal team member."""
+    members = await fetch_active_legal_team_emails(conn)
+    if not members:
+        raise ValueError("no active legal team members configured")
+    await _supersede_pending_assignments(
+        conn, request_id=request_id, decided_by=decided_by
+    )
+    expires_at = datetime.now(UTC) + expires_in
+    created: list[dict[str, Any]] = []
+    for email in members:
+        context = {"kind": LEGAL_ASSIGNMENT_KIND, "assignee_identity": email}
+        row = await conn.fetchrow(
+            """
+            INSERT INTO approval_requests (
+                request_id, action_type, rule_id, approver_role, status,
+                context_jsonb, expires_at, decided_by
+            ) VALUES ($1, $2, NULL, 'legal', 'pending', $3::jsonb, $4, $5)
+            RETURNING id, request_id, action_type, status, approver_role,
+                      context_jsonb, requested_at, expires_at, decided_by,
+                      decided_at, decision_reason
+            """,
+            UUID(request_id),
+            WORKFLOW_ASSIGNMENT_ACTION,
+            json.dumps(context),
+            expires_at,
+            decided_by,
+        )
+        created.append(_serialize_assignment_row(dict(row)))
+    return created
 
 
 async def create_workflow_assignment(

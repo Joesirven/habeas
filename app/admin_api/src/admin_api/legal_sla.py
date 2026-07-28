@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from admin_api.drop_pipeline import _require_database
 from admin_api.roles import RolePrincipal, require_roles
+from habeas_privacy_core.audit.writer import write_audit
 from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_LEGAL, ROLE_SUPER_ADMIN
 from habeas_privacy_core.db.pool import get_pool
+
+SlaStage = Literal["lifecycle", "data_owner_review", "legal_pre_fulfillment", "fulfillment"]
+SLA_STAGE_LIFECYCLE: SlaStage = "lifecycle"
+SLA_STAGE_DATA_OWNER_REVIEW: SlaStage = "data_owner_review"
+SLA_STAGE_LEGAL_PRE_FULFILLMENT: SlaStage = "legal_pre_fulfillment"
+SLA_STAGE_FULFILLMENT: SlaStage = "fulfillment"
 
 router = APIRouter(prefix="/legal", tags=["legal-sla"])
 
@@ -67,10 +74,89 @@ async def _fetch_sla_settings(conn) -> SlaSettingsResponse:
     )
 
 
-async def calculate_due_at_from_received(received_at: datetime, conn) -> datetime:
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+async def calculate_due_at_for_stage(
+    conn,
+    *,
+    received_at: datetime,
+    stage: SlaStage,
+    stage_entered_at: datetime | None = None,
+) -> datetime:
+    """Compute due_at from global SLA settings and stage-entry timestamp."""
     settings = await _fetch_sla_settings(conn)
-    base = received_at if received_at.tzinfo else received_at.replace(tzinfo=timezone.utc)
-    return base + timedelta(days=int(settings.lifecycle_days))
+    received = _as_utc(received_at)
+    entered = _as_utc(stage_entered_at or datetime.now(timezone.utc))
+    if stage == SLA_STAGE_DATA_OWNER_REVIEW:
+        return entered + timedelta(days=int(settings.data_owner_review_days))
+    if stage == SLA_STAGE_LEGAL_PRE_FULFILLMENT:
+        return entered + timedelta(days=int(settings.legal_pre_fulfillment_days))
+    if stage == SLA_STAGE_FULFILLMENT:
+        return entered + timedelta(days=int(settings.fulfillment_days))
+    return received + timedelta(days=int(settings.lifecycle_days))
+
+
+async def calculate_due_at_from_received(received_at: datetime, conn) -> datetime:
+    return await calculate_due_at_for_stage(
+        conn,
+        received_at=received_at,
+        stage=SLA_STAGE_LIFECYCLE,
+    )
+
+
+async def apply_request_due_at_for_stage(
+    conn,
+    request_id: str,
+    *,
+    stage: SlaStage,
+    stage_entered_at: datetime | None = None,
+) -> datetime | None:
+    """Set calculated due_at unless admin has overridden the request deadline."""
+    row = await conn.fetchrow(
+        """
+        SELECT received_at, due_at_override_at
+          FROM requests
+         WHERE id = $1::uuid
+        """,
+        request_id,
+    )
+    if row is None:
+        raise LookupError("request not found")
+    if row["due_at_override_at"] is not None:
+        return None
+    received_at = row["received_at"]
+    if received_at is None:
+        return None
+    due = await calculate_due_at_for_stage(
+        conn,
+        received_at=received_at,
+        stage=stage,
+        stage_entered_at=stage_entered_at,
+    )
+    await conn.execute(
+        """
+        UPDATE requests
+           SET due_at = $2
+         WHERE id = $1::uuid
+           AND due_at_override_at IS NULL
+        """,
+        request_id,
+        due,
+    )
+    return due
+
+
+async def apply_request_due_at_on_intake(conn, request_id: str) -> datetime | None:
+    """Lifecycle SLA from received_at on intake promote."""
+    return await apply_request_due_at_for_stage(
+        conn,
+        request_id,
+        stage=SLA_STAGE_LIFECYCLE,
+    )
 
 
 @router.get("/settings/sla", response_model=SlaSettingsResponse)
@@ -86,7 +172,6 @@ async def patch_sla_settings(body: SlaSettingsPatch, principal: LegalSlaWritePri
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
-        current = await _fetch_sla_settings(conn)
         await conn.execute(
             """
             UPDATE legal_sla_settings
@@ -134,4 +219,13 @@ async def patch_request_deadline(
         )
         if not updated:
             raise HTTPException(status_code=404, detail="request not found")
+        await write_audit(
+            actor=principal.email,
+            interface="admin-api",
+            command="legal.deadline_override",
+            arguments={"request_id": request_id, "due_at": due.isoformat()},
+            result_status=200,
+            result_summary="request deadline overridden",
+            conn=conn,
+        )
     return {"status": "ok", "request_id": request_id, "due_at": due.isoformat()}
