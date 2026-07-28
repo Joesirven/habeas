@@ -38,6 +38,9 @@ const SOURCE_OPTIONS: { value: '' | IntakeSource; label: string }[] = [
 
 const VIEW_MODE_SESSION_KEY = 'requests-view-mode'
 
+const REQUESTS_TABLE_CLASS =
+  'taste-table [&_th]:px-3 [&_th]:py-1 [&_td]:px-3 [&_td]:py-1'
+
 type ViewMode = 'flat' | 'batch'
 
 type RequestBatch = {
@@ -67,9 +70,20 @@ function requestRowLabel(request: RequestRecord): string {
   return request.display_label?.trim() || request.id
 }
 
+function formatRequestReceivedAt(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
 function RequestsTableSkeleton({ rows = 8 }: { rows?: number }) {
   return (
-    <table className="taste-table" role="status" aria-label="Loading requests">
+    <table className={REQUESTS_TABLE_CLASS} role="status" aria-label="Loading requests">
       <thead>
         <tr>
           {Array.from({ length: 5 }, (_, index) => (
@@ -612,25 +626,36 @@ function RequestRows({
             className="group cursor-pointer transition-colors hover:bg-panel/50"
             onClick={(event) => onOpen(request.id, event.currentTarget, request)}
           >
-            <td className="whitespace-nowrap tabular-nums text-ink-soft">
-              {new Date(request.received_at).toLocaleString()}
+            <td className="whitespace-nowrap tabular-nums text-[0.7rem] leading-tight text-ink-soft">
+              {formatRequestReceivedAt(request.received_at)}
             </td>
-            <td>
-              <span className="font-mono text-xs text-ink">{requestRowLabel(request)}</span>
+            <td className="max-w-[14rem]">
+              <span
+                className="block truncate font-mono text-[0.7rem] leading-tight text-ink"
+                title={requestRowLabel(request)}
+              >
+                {requestRowLabel(request)}
+              </span>
             </td>
-            <td>
-              <span className="taste-frost-chip text-[0.65rem]">
+            <td className="whitespace-nowrap">
+              <span className="taste-frost-chip px-1.5 py-px text-[0.6rem] leading-tight">
                 {SOURCE_LABELS[request.intake_source] ?? request.intake_source}
               </span>
             </td>
-            <td className="font-mono text-xs">{request.requestor_state ?? '—'}</td>
-            <td>
+            <td className="whitespace-nowrap font-mono text-[0.7rem] leading-tight">
+              {request.requestor_state ?? '—'}
+            </td>
+            <td className="max-w-[10rem]">
               {attentionReason ? (
-                <Badge variant="fail" className="normal-case tracking-normal">
+                <Badge
+                  variant="fail"
+                  className="max-w-full truncate py-px text-[0.6rem] normal-case leading-tight tracking-normal"
+                  title={attentionReason}
+                >
                   {attentionReason}
                 </Badge>
               ) : (
-                <span className="text-ink-soft">—</span>
+                <span className="text-[0.7rem] text-ink-soft">—</span>
               )}
             </td>
           </tr>
@@ -899,7 +924,7 @@ export function RequestsPage() {
         )}
         {requestsQuery.isSuccess && filtered.length > 0 && viewMode === 'flat' && (
           <div className="overflow-x-auto">
-            <table className="taste-table">
+            <table className={REQUESTS_TABLE_CLASS}>
               {tableHeader}
               <tbody>
                 <RequestRows
@@ -914,8 +939,8 @@ export function RequestsPage() {
         {requestsQuery.isSuccess && filtered.length > 0 && viewMode === 'batch' && (
           <div className="divide-y divide-line/60">
             {batches.map((batch) => (
-              <section key={batch.batchKey} className="p-3 sm:p-4">
-                <header className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+              <section key={batch.batchKey} className="p-2 sm:p-3">
+                <header className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
                   <h3 className="text-xs font-medium text-ink">
                     {batch.sourceLabel} · {new Date(batch.receivedAt).toLocaleString()}
                   </h3>
@@ -924,7 +949,7 @@ export function RequestsPage() {
                   </span>
                 </header>
                 <div className="overflow-x-auto">
-                  <table className="taste-table">
+                  <table className={REQUESTS_TABLE_CLASS}>
                     {tableHeader}
                     <tbody>
                       <RequestRows
