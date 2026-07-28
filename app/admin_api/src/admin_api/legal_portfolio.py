@@ -505,7 +505,9 @@ async def get_legal_portfolio(
               )::int AS on_track,
               0::int AS closed_ytd
               FROM requests r
-             WHERE 1=1
+             LEFT JOIN drop_raw_requests drr
+               ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
+             WHERE (r.intake_source != 'drop' OR drr.response_status IS NULL)
         """
         deadline_args: list[Any] = []
         deadline_sql, deadline_args, _ = _append_analytics_scope(
