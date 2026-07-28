@@ -39,7 +39,7 @@ const SOURCE_OPTIONS: { value: '' | IntakeSource; label: string }[] = [
 const VIEW_MODE_SESSION_KEY = 'requests-view-mode'
 
 const REQUESTS_TABLE_CLASS =
-  'taste-table [&_th]:px-3 [&_th]:py-1 [&_td]:px-3 [&_td]:py-1'
+  'taste-table table-fixed min-w-[720px] w-full text-[0.7rem] leading-none [&_th]:!px-2 [&_th]:!py-px [&_th]:whitespace-nowrap [&_td]:!px-2 [&_td]:!py-px [&_td]:whitespace-nowrap'
 
 type ViewMode = 'flat' | 'batch'
 
@@ -88,7 +88,7 @@ function RequestsTableSkeleton({ rows = 8 }: { rows?: number }) {
         <tr>
           {Array.from({ length: 5 }, (_, index) => (
             <th key={index}>
-              <Skeleton className="h-3 w-16" />
+              <Skeleton className="h-2.5 w-16" />
             </th>
           ))}
         </tr>
@@ -98,7 +98,7 @@ function RequestsTableSkeleton({ rows = 8 }: { rows?: number }) {
           <tr key={index}>
             {Array.from({ length: 5 }, (_, cell) => (
               <td key={cell}>
-                <Skeleton className="h-3.5 w-20" />
+                <Skeleton className="h-2.5 w-20" />
               </td>
             ))}
           </tr>
@@ -623,39 +623,44 @@ function RequestRows({
         return (
           <tr
             key={request.id}
-            className="group cursor-pointer transition-colors hover:bg-panel/50"
+            className="group h-5 cursor-pointer transition-colors hover:bg-panel/50"
             onClick={(event) => onOpen(request.id, event.currentTarget, request)}
           >
-            <td className="whitespace-nowrap tabular-nums text-[0.7rem] leading-tight text-ink-soft">
+            <td className="w-[8.5rem] tabular-nums text-ink-soft">
               {formatRequestReceivedAt(request.received_at)}
             </td>
-            <td className="max-w-[14rem]">
+            <td className="overflow-hidden">
               <span
-                className="block truncate font-mono text-[0.7rem] leading-tight text-ink"
+                className="block truncate font-mono text-ink"
                 title={requestRowLabel(request)}
               >
                 {requestRowLabel(request)}
               </span>
             </td>
-            <td className="whitespace-nowrap">
-              <span className="taste-frost-chip px-1.5 py-px text-[0.6rem] leading-tight">
+            <td className="w-[6.5rem] overflow-hidden">
+              <span
+                className="inline-block max-w-full truncate taste-frost-chip px-1 py-px text-[0.6rem] leading-none"
+                title={SOURCE_LABELS[request.intake_source] ?? request.intake_source}
+              >
                 {SOURCE_LABELS[request.intake_source] ?? request.intake_source}
               </span>
             </td>
-            <td className="whitespace-nowrap font-mono text-[0.7rem] leading-tight">
-              {request.requestor_state ?? '—'}
+            <td className="w-12 overflow-hidden font-mono">
+              <span className="block truncate" title={request.requestor_state ?? undefined}>
+                {request.requestor_state ?? '—'}
+              </span>
             </td>
-            <td className="max-w-[10rem]">
+            <td className="w-[9rem] overflow-hidden">
               {attentionReason ? (
                 <Badge
                   variant="fail"
-                  className="max-w-full truncate py-px text-[0.6rem] normal-case leading-tight tracking-normal"
+                  className="inline-block max-w-full truncate whitespace-nowrap px-1 py-px text-[0.6rem] normal-case leading-none tracking-normal"
                   title={attentionReason}
                 >
                   {attentionReason}
                 </Badge>
               ) : (
-                <span className="text-[0.7rem] text-ink-soft">—</span>
+                <span className="text-ink-soft">—</span>
               )}
             </td>
           </tr>
@@ -792,11 +797,11 @@ export function RequestsPage() {
   const tableHeader = (
     <thead>
       <tr>
-        <th>Received</th>
+        <th className="w-[8.5rem]">Received</th>
         <th>Request</th>
-        <th>Source</th>
-        <th>State</th>
-        <th>Attention</th>
+        <th className="w-[6.5rem]">Source</th>
+        <th className="w-12">State</th>
+        <th className="w-[9rem]">Attention</th>
       </tr>
     </thead>
   )
@@ -939,12 +944,15 @@ export function RequestsPage() {
         {requestsQuery.isSuccess && filtered.length > 0 && viewMode === 'batch' && (
           <div className="divide-y divide-line/60">
             {batches.map((batch) => (
-              <section key={batch.batchKey} className="p-2 sm:p-3">
-                <header className="mb-1 flex flex-wrap items-baseline justify-between gap-2">
-                  <h3 className="text-xs font-medium text-ink">
-                    {batch.sourceLabel} · {new Date(batch.receivedAt).toLocaleString()}
+              <section key={batch.batchKey} className="p-1.5 sm:p-2">
+                <header className="mb-0.5 flex h-5 items-center justify-between gap-2 whitespace-nowrap">
+                  <h3
+                    className="min-w-0 truncate text-xs font-medium leading-none text-ink"
+                    title={`${batch.sourceLabel} · ${formatRequestReceivedAt(batch.receivedAt)}`}
+                  >
+                    {batch.sourceLabel} · {formatRequestReceivedAt(batch.receivedAt)}
                   </h3>
-                  <span className="taste-frost-chip tabular-nums text-[0.65rem]">
+                  <span className="taste-frost-chip shrink-0 px-1.5 py-px tabular-nums text-[0.65rem] leading-none">
                     {batch.requests.length}
                   </span>
                 </header>
