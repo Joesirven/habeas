@@ -129,8 +129,9 @@ class RequestListItem(BaseModel):
 
 
 def _row_to_item(row: asyncpg.Record, *, include_display_labels: bool) -> RequestListItem:
+    intake_source = IntakeSource(row["intake_source"])
     display_label = None
-    if include_display_labels:
+    if include_display_labels and intake_source != IntakeSource.DROP:
         raw_label = row.get("display_label")
         if raw_label is not None:
             display_label = str(raw_label).strip() or None
@@ -140,7 +141,7 @@ def _row_to_item(row: asyncpg.Record, *, include_display_labels: bool) -> Reques
     return RequestListItem(
         id=str(row["id"]),
         received_at=row["received_at"].isoformat(),
-        intake_source=IntakeSource(row["intake_source"]),
+        intake_source=intake_source,
         raw_record_id=row["raw_record_id"],
         requestor_state=str(row["requestor_state"]),
         request_type=str(row["request_type"]),
@@ -232,10 +233,13 @@ async def _list_requests(
 ) -> list[RequestListItem]:
     label_select = (
         """
-        , NULLIF(TRIM(CONCAT_WS(' ',
-            mrr.cleaned_payload->>'first_name',
-            mrr.cleaned_payload->>'last_name'
-          )), '') AS display_label
+        , CASE
+            WHEN c.intake_source = 'drop' THEN NULL
+            ELSE NULLIF(TRIM(CONCAT_WS(' ',
+              mrr.cleaned_payload->>'first_name',
+              mrr.cleaned_payload->>'last_name'
+            )), '')
+          END AS display_label
         """
         if include_display_labels
         else ", NULL::text AS display_label"

@@ -355,7 +355,6 @@ export type RequestsSearch = {
   state?: string
   attention?: 'needs' | 'clear'
   raw?: 'yes' | 'no'
-  q?: string
   received_after?: string
   received_before?: string
 }
@@ -392,9 +391,6 @@ function parseRequestsSearch(search: Record<string, unknown>): RequestsSearch {
   }
   if (search.raw === 'yes' || search.raw === 'no') {
     parsed.raw = search.raw
-  }
-  if (typeof search.q === 'string' && search.q.trim()) {
-    parsed.q = search.q.trim()
   }
   if (typeof search.received_after === 'string' && search.received_after.trim()) {
     parsed.received_after = search.received_after.trim()

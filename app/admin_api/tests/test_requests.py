@@ -166,7 +166,68 @@ def test_requests_list_short_query_returns_400(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(admin_main, "get_pool", lambda: _Pool())
     headers = {IAP_EMAIL_HEADER: "ops@example.com"}
 
-    with TestClient(app) as client:
+    with TestClient(admin_main.app) as client:
         response = client.get("/requests?q=a", headers=headers)
 
     assert response.status_code == 400
+
+
+def test_request_list_item_drop_omits_display_label():
+    from datetime import UTC, datetime
+
+    from admin_api.requests_list import _row_to_item
+
+    row = {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "received_at": datetime(2026, 7, 28, 12, 0, tzinfo=UTC),
+        "intake_source": "drop",
+        "raw_record_id": 42,
+        "requestor_state": "CA",
+        "request_type": "delete",
+        "display_label": "Should Not Appear",
+        "drop_open": True,
+    }
+    item = _row_to_item(row, include_display_labels=True)
+    assert item.display_label is None
+    assert item.intake_source.value == "drop"
+
+
+def test_request_list_item_non_drop_includes_display_label():
+    from datetime import UTC, datetime
+
+    from admin_api.requests_list import _row_to_item
+
+    row = {
+        "id": "00000000-0000-0000-0000-000000000002",
+        "received_at": datetime(2026, 7, 28, 12, 0, tzinfo=UTC),
+        "intake_source": "webform",
+        "raw_record_id": 7,
+        "requestor_state": "NY",
+        "request_type": "delete",
+        "display_label": "Ada Lovelace",
+        "drop_open": None,
+    }
+    item = _row_to_item(row, include_display_labels=True)
+    assert item.display_label == "Ada Lovelace"
+
+
+@pytest.mark.asyncio
+async def test_search_requests_drop_name_clause_excludes_drop():
+    from admin_api import requests_list
+
+    captured: dict[str, str] = {}
+
+    async def fake_fetch(sql: str, *args):
+        captured["sql"] = sql
+        return []
+
+    conn = AsyncMock()
+    conn.fetch = fake_fetch
+
+    await requests_list.search_requests(
+        conn,
+        q="ada",
+        include_display_labels=True,
+        limit=10,
+    )
+    assert "c.intake_source != 'drop'" in captured["sql"]

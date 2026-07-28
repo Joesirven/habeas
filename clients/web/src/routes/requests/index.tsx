@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { Skeleton } from '@/components/AppShell'
 import { RequestDetailDrawer } from '@/components/requests/RequestTriageDialog'
@@ -14,6 +14,7 @@ import {
   type RequestRecord,
 } from '@/lib/api'
 import { isLegalAdminPersona, useMe } from '@/lib/auth'
+import { cn } from '@/lib/utils'
 import type { RequestsSearch } from '@/router'
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -31,12 +32,52 @@ const SOURCE_OPTIONS: { value: '' | IntakeSource; label: string }[] = [
   { value: 'manual', label: 'Manual' },
 ]
 
+const SEARCH_SESSION_KEY = 'requests-ephemeral-search'
+const VIEW_MODE_SESSION_KEY = 'requests-view-mode'
+
+type ViewMode = 'flat' | 'batch'
+
+type RequestBatch = {
+  batchKey: string
+  sourceLabel: string
+  receivedAt: string
+  requests: RequestRecord[]
+}
+
+function readSessionSearch(): string {
+  try {
+    return sessionStorage.getItem(SEARCH_SESSION_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function readViewMode(): ViewMode {
+  try {
+    return sessionStorage.getItem(VIEW_MODE_SESSION_KEY) === 'batch' ? 'batch' : 'flat'
+  } catch {
+    return 'flat'
+  }
+}
+
+function requestBatchKey(request: RequestRecord): string {
+  return `${request.intake_source}:${request.received_at.slice(0, 16)}`
+}
+
+function requestRowLabel(request: RequestRecord): string {
+  const channel = SOURCE_LABELS[request.intake_source] ?? request.intake_source
+  if (request.intake_source === 'drop') {
+    return `${request.id} · ${channel}`
+  }
+  return request.display_label?.trim() || request.id
+}
+
 function RequestsTableSkeleton({ rows = 8 }: { rows?: number }) {
   return (
     <table className="taste-table" role="status" aria-label="Loading requests">
       <thead>
         <tr>
-          {Array.from({ length: 6 }, (_, index) => (
+          {Array.from({ length: 5 }, (_, index) => (
             <th key={index}>
               <Skeleton className="h-3 w-16" />
             </th>
@@ -46,7 +87,7 @@ function RequestsTableSkeleton({ rows = 8 }: { rows?: number }) {
       <tbody>
         {Array.from({ length: rows }, (_, index) => (
           <tr key={index}>
-            {Array.from({ length: 6 }, (_, cell) => (
+            {Array.from({ length: 5 }, (_, cell) => (
               <td key={cell}>
                 <Skeleton className="h-3.5 w-20" />
               </td>
@@ -74,9 +115,11 @@ function matchesFilters(
   request: RequestRecord,
   search: RequestsSearch,
   attentionByRequestId: Map<string, string>,
+  ephemeralSearch: string,
 ): boolean {
   if (search.source && request.intake_source !== search.source) return false
-
+  if (search.source_bucket === 'drop' && request.intake_source !== 'drop') return false
+  if (search.source_bucket === 'other' && request.intake_source === 'drop') return false
   if (search.request_type && request.request_type !== search.request_type) return false
 
   if (search.state) {
@@ -84,10 +127,10 @@ function matchesFilters(
     if (state !== search.state.toUpperCase()) return false
   }
 
-  if (search.q) {
-    const needle = search.q.trim().toLowerCase()
-    if (!needle) return true
+  const needle = ephemeralSearch.trim().toLowerCase()
+  if (needle) {
     if (request.id.toLowerCase().includes(needle)) return true
+    if (request.intake_source === 'drop') return false
     if (request.display_label?.toLowerCase().includes(needle)) return true
     return false
   }
@@ -111,13 +154,101 @@ function matchesFilters(
   return true
 }
 
+function groupRequestsByBatch(requests: RequestRecord[]): RequestBatch[] {
+  const batches = new Map<string, RequestBatch>()
+  for (const request of requests) {
+    const batchKey = requestBatchKey(request)
+    const existing = batches.get(batchKey)
+    if (existing) {
+      existing.requests.push(request)
+      continue
+    }
+    batches.set(batchKey, {
+      batchKey,
+      sourceLabel: SOURCE_LABELS[request.intake_source] ?? request.intake_source,
+      receivedAt: request.received_at,
+      requests: [request],
+    })
+  }
+  return [...batches.values()].sort(
+    (left, right) => new Date(right.receivedAt).getTime() - new Date(left.receivedAt).getTime(),
+  )
+}
+
+function RequestRows({
+  requests,
+  attentionByRequestId,
+  onOpen,
+}: {
+  requests: RequestRecord[]
+  attentionByRequestId: Map<string, string>
+  onOpen: (requestId: string) => void
+}) {
+  return (
+    <>
+      {requests.map((request) => {
+        const attentionReason = attentionByRequestId.get(request.id)
+        return (
+          <tr
+            key={request.id}
+            className="group cursor-pointer transition-colors hover:bg-panel/50"
+            onClick={() => onOpen(request.id)}
+          >
+            <td className="whitespace-nowrap tabular-nums text-ink-soft">
+              {new Date(request.received_at).toLocaleString()}
+            </td>
+            <td>
+              <span className="font-mono text-xs text-ink">{requestRowLabel(request)}</span>
+            </td>
+            <td>
+              <span className="taste-frost-chip text-[0.65rem]">
+                {SOURCE_LABELS[request.intake_source] ?? request.intake_source}
+              </span>
+            </td>
+            <td className="font-mono text-xs">{request.requestor_state ?? '—'}</td>
+            <td>
+              {attentionReason ? (
+                <Badge variant="fail" className="normal-case tracking-normal">
+                  {attentionReason}
+                </Badge>
+              ) : (
+                <span className="text-ink-soft">—</span>
+              )}
+            </td>
+          </tr>
+        )
+      })}
+    </>
+  )
+}
+
 export function RequestsPage() {
   const navigate = useNavigate()
   const search = useSearch({ from: '/requests' })
   const { role } = useMe()
   const legalAdmin = isLegalAdminPersona(role)
+  const [ephemeralSearch, setEphemeralSearch] = useState(readSessionSearch)
+  const [viewMode, setViewMode] = useState<ViewMode>(readViewMode)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [dialogRequestId, setDialogRequestId] = useState<string | null>(null)
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(SEARCH_SESSION_KEY, ephemeralSearch)
+    } catch {
+      // ignore storage failures
+    }
+  }, [ephemeralSearch])
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(VIEW_MODE_SESSION_KEY, viewMode)
+    } catch {
+      // ignore storage failures
+    }
+  }, [viewMode])
+
+  const listStage = search.stage
 
   const requestsQuery = useQuery({
     queryKey: [
@@ -125,18 +256,18 @@ export function RequestsPage() {
       'requests',
       search.source ?? 'all',
       search.source_bucket ?? '',
-      search.stage ?? '',
+      listStage ?? '',
       search.posture ?? '',
-      search.q ?? '',
+      ephemeralSearch.trim(),
     ],
     queryFn: () =>
       listRequests({
         intakeSource: search.source,
         sourceBucket: search.source_bucket,
-        stage: search.stage,
+        stage: listStage,
         posture: search.posture,
         limit: 100,
-        q: search.q,
+        q: ephemeralSearch.trim().length >= 2 ? ephemeralSearch.trim() : undefined,
       }),
     refetchInterval: 15_000,
   })
@@ -173,8 +304,12 @@ export function RequestsPage() {
 
   const filtered = useMemo(() => {
     const rows = requestsQuery.data ?? []
-    return rows.filter((request) => matchesFilters(request, search, attentionByRequestId))
-  }, [requestsQuery.data, search, attentionByRequestId])
+    return rows.filter((request) =>
+      matchesFilters(request, search, attentionByRequestId, ephemeralSearch),
+    )
+  }, [requestsQuery.data, search, attentionByRequestId, ephemeralSearch])
+
+  const batches = useMemo(() => groupRequestsByBatch(filtered), [filtered])
 
   function patchSearch(patch: Partial<RequestsSearch>) {
     void navigate({
@@ -188,7 +323,6 @@ export function RequestsPage() {
         state: 'state' in patch ? patch.state : search.state,
         attention: 'attention' in patch ? patch.attention : search.attention,
         raw: 'raw' in patch ? patch.raw : search.raw,
-        q: 'q' in patch ? patch.q : search.q,
         received_after: 'received_after' in patch ? patch.received_after : search.received_after,
         received_before:
           'received_before' in patch ? patch.received_before : search.received_before,
@@ -201,6 +335,7 @@ export function RequestsPage() {
     void navigate({ to: '/requests', search: {}, replace: true })
   }
 
+  // TODO(U9): swap row-open to nearly full-screen RequestDetailOverlay — keep drawer until U9 lands.
   function openTriage(requestId: string) {
     setDialogRequestId(requestId)
     setDialogOpen(true)
@@ -216,10 +351,21 @@ export function RequestsPage() {
     search.state,
     search.attention,
     search.raw,
-    search.q,
     search.received_after,
     search.received_before,
   ].filter(Boolean).length
+
+  const tableHeader = (
+    <thead>
+      <tr>
+        <th>Received</th>
+        <th>Request</th>
+        <th>Source</th>
+        <th>State</th>
+        <th>Attention</th>
+      </tr>
+    </thead>
+  )
 
   return (
     <section className="taste-ops-page space-y-4">
@@ -245,6 +391,36 @@ export function RequestsPage() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <div
+            className="inline-flex rounded-md border border-line bg-paper p-0.5"
+            role="toolbar"
+            aria-label="List view mode"
+          >
+            <button
+              type="button"
+              className={cn(
+                'rounded px-2.5 py-1 text-[0.7rem] font-medium transition-colors',
+                viewMode === 'flat'
+                  ? 'bg-habeas-navy/8 text-habeas-navy'
+                  : 'text-ink-soft hover:text-ink',
+              )}
+              onClick={() => setViewMode('flat')}
+            >
+              Flat list
+            </button>
+            <button
+              type="button"
+              className={cn(
+                'rounded px-2.5 py-1 text-[0.7rem] font-medium transition-colors',
+                viewMode === 'batch'
+                  ? 'bg-habeas-navy/8 text-habeas-navy'
+                  : 'text-ink-soft hover:text-ink',
+              )}
+              onClick={() => setViewMode('batch')}
+            >
+              By batch
+            </button>
+          </div>
           <Link to="/requests/needs-attention" className="taste-btn text-xs">
             Inbox
             {attentionQuery.data && attentionQuery.data.items.length > 0 ? (
@@ -370,9 +546,9 @@ export function RequestsPage() {
             <input
               type="search"
               className="glass rounded-lg px-2 py-1.5 text-xs text-ink"
-              placeholder="Name or request ID"
-              value={search.q ?? ''}
-              onChange={(event) => patchSearch({ q: event.target.value || undefined })}
+              placeholder="Search — not saved to URL"
+              value={ephemeralSearch}
+              onChange={(event) => setEphemeralSearch(event.target.value)}
             />
           </label>
           <label className="flex flex-col gap-1 text-[0.7rem] text-ink-soft">
@@ -420,74 +596,46 @@ export function RequestsPage() {
               : 'No requests match the current filters.'}
           </p>
         )}
-        {requestsQuery.isSuccess && filtered.length > 0 && (
+        {requestsQuery.isSuccess && filtered.length > 0 && viewMode === 'flat' && (
           <div className="overflow-x-auto">
             <table className="taste-table">
-              <thead>
-                <tr>
-                  <th>Received</th>
-                  <th>Source</th>
-                  <th>State</th>
-                  {legalAdmin ? <th>Name</th> : null}
-                  <th>Request ID</th>
-                  <th>Raw record</th>
-                  <th>Attention</th>
-                </tr>
-              </thead>
+              {tableHeader}
               <tbody>
-                {filtered.map((request) => {
-                  const attentionReason = attentionByRequestId.get(request.id)
-                  return (
-                    <tr
-                      key={request.id}
-                      className="group cursor-pointer transition-colors hover:bg-panel/50"
-                      onClick={() => openTriage(request.id)}
-                    >
-                      <td className="whitespace-nowrap tabular-nums text-ink-soft">
-                        {new Date(request.received_at).toLocaleString()}
-                      </td>
-                      <td>
-                        <span className="taste-frost-chip text-[0.65rem]">
-                          {SOURCE_LABELS[request.intake_source] ?? request.intake_source}
-                        </span>
-                      </td>
-                      <td className="font-mono text-xs">
-                        {request.requestor_state ?? '—'}
-                      </td>
-                      {legalAdmin ? (
-                        <td className="text-xs text-ink-soft">
-                          {request.intake_source === 'drop'
-                            ? '—'
-                            : (request.display_label ?? '—')}
-                        </td>
-                      ) : null}
-                      <td>
-                        <Link
-                          to="/requests/$requestId"
-                          params={{ requestId: request.id }}
-                          className="relative z-10 font-mono text-xs text-habeas-mid group-hover:text-habeas-navy"
-                          onClick={(event) => event.stopPropagation()}
-                        >
-                          {request.id}
-                        </Link>
-                      </td>
-                      <td className="font-mono text-[0.65rem] text-ink-soft">
-                        {request.raw_record_id ?? '—'}
-                      </td>
-                      <td>
-                        {attentionReason ? (
-                          <Badge variant="fail" className="normal-case tracking-normal">
-                            {attentionReason}
-                          </Badge>
-                        ) : (
-                          <span className="text-ink-soft">—</span>
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
+                <RequestRows
+                  requests={filtered}
+                  attentionByRequestId={attentionByRequestId}
+                  onOpen={openTriage}
+                />
               </tbody>
             </table>
+          </div>
+        )}
+        {requestsQuery.isSuccess && filtered.length > 0 && viewMode === 'batch' && (
+          <div className="divide-y divide-line/60">
+            {batches.map((batch) => (
+              <section key={batch.batchKey} className="p-3 sm:p-4">
+                <header className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+                  <h3 className="text-xs font-medium text-ink">
+                    {batch.sourceLabel} · {new Date(batch.receivedAt).toLocaleString()}
+                  </h3>
+                  <span className="taste-frost-chip tabular-nums text-[0.65rem]">
+                    {batch.requests.length}
+                  </span>
+                </header>
+                <div className="overflow-x-auto">
+                  <table className="taste-table">
+                    {tableHeader}
+                    <tbody>
+                      <RequestRows
+                        requests={batch.requests}
+                        attentionByRequestId={attentionByRequestId}
+                        onOpen={openTriage}
+                      />
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            ))}
           </div>
         )}
       </div>
