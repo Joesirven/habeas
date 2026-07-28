@@ -60,7 +60,11 @@ function patchLegalDropSchedule(body: { day_of_week?: number; time_local?: strin
   })
 }
 
-export function LegalSettingsSheet() {
+type LegalSettingsSheetProps = {
+  triggerVariant?: 'banner' | 'header'
+}
+
+export function LegalSettingsSheet({ triggerVariant = 'banner' }: LegalSettingsSheetProps) {
   const { role } = useMe()
   const canWrite = canMutateLegalSettings(role)
   const queryClient = useQueryClient()
@@ -150,7 +154,11 @@ export function LegalSettingsSheet() {
       <DialogTrigger asChild>
         <button
           type="button"
-          className="rounded border border-line bg-white px-1.5 py-0.5 text-[0.65rem] text-ink-soft outline-none transition-colors hover:border-habeas-navy/35 hover:text-ink focus-visible:border-habeas-navy/40"
+          className={
+            triggerVariant === 'header'
+              ? 'inline-flex h-8 items-center justify-center rounded-md border border-line bg-white px-3 text-xs font-medium text-ink transition hover:bg-panel focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid'
+              : 'rounded border border-line bg-white px-1.5 py-0.5 text-[0.65rem] text-ink-soft outline-none transition-colors hover:border-habeas-navy/35 hover:text-ink focus-visible:border-habeas-navy/40'
+          }
           aria-label="Settings"
         >
           Settings

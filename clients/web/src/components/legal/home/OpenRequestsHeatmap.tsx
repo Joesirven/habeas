@@ -1,16 +1,76 @@
 import { useMemo, useState } from 'react'
-import { Link } from '@tanstack/react-router'
+import { Link, useNavigate } from '@tanstack/react-router'
 
 import type { LegalPortfolio } from '@/lib/api'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 
 type HeatmapProps = {
-  cells: LegalPortfolio['heatmap_cells']
+  cells: NonNullable<LegalPortfolio['heatmap_cells']>
   onCellClick?: (source: string, requestType: string) => void
 }
 
 type HeatmapTab = 'type_by_source' | 'state_map' | 'source_only' | 'type_only'
+
+type StateTile = { id: string; name: string; col: number; row: number }
+
+const STATE_TILES: StateTile[] = [
+  { id: 'AK', name: 'Alaska', col: 0, row: 0 },
+  { id: 'ME', name: 'Maine', col: 11, row: 0 },
+  { id: 'VT', name: 'Vermont', col: 10, row: 1 },
+  { id: 'NH', name: 'New Hampshire', col: 11, row: 1 },
+  { id: 'WA', name: 'Washington', col: 1, row: 2 },
+  { id: 'ID', name: 'Idaho', col: 2, row: 2 },
+  { id: 'MT', name: 'Montana', col: 3, row: 2 },
+  { id: 'ND', name: 'North Dakota', col: 4, row: 2 },
+  { id: 'MN', name: 'Minnesota', col: 5, row: 2 },
+  { id: 'IL', name: 'Illinois', col: 6, row: 2 },
+  { id: 'WI', name: 'Wisconsin', col: 7, row: 2 },
+  { id: 'MI', name: 'Michigan', col: 8, row: 2 },
+  { id: 'NY', name: 'New York', col: 9, row: 2 },
+  { id: 'RI', name: 'Rhode Island', col: 10, row: 2 },
+  { id: 'MA', name: 'Massachusetts', col: 11, row: 2 },
+  { id: 'OR', name: 'Oregon', col: 1, row: 3 },
+  { id: 'NV', name: 'Nevada', col: 2, row: 3 },
+  { id: 'WY', name: 'Wyoming', col: 3, row: 3 },
+  { id: 'SD', name: 'South Dakota', col: 4, row: 3 },
+  { id: 'IA', name: 'Iowa', col: 5, row: 3 },
+  { id: 'IN', name: 'Indiana', col: 6, row: 3 },
+  { id: 'OH', name: 'Ohio', col: 7, row: 3 },
+  { id: 'PA', name: 'Pennsylvania', col: 8, row: 3 },
+  { id: 'NJ', name: 'New Jersey', col: 9, row: 3 },
+  { id: 'CT', name: 'Connecticut', col: 10, row: 3 },
+  { id: 'CA', name: 'California', col: 1, row: 4 },
+  { id: 'UT', name: 'Utah', col: 2, row: 4 },
+  { id: 'CO', name: 'Colorado', col: 3, row: 4 },
+  { id: 'NE', name: 'Nebraska', col: 4, row: 4 },
+  { id: 'MO', name: 'Missouri', col: 5, row: 4 },
+  { id: 'KY', name: 'Kentucky', col: 6, row: 4 },
+  { id: 'WV', name: 'West Virginia', col: 7, row: 4 },
+  { id: 'VA', name: 'Virginia', col: 8, row: 4 },
+  { id: 'MD', name: 'Maryland', col: 9, row: 4 },
+  { id: 'DE', name: 'Delaware', col: 10, row: 4 },
+  { id: 'AZ', name: 'Arizona', col: 2, row: 5 },
+  { id: 'NM', name: 'New Mexico', col: 3, row: 5 },
+  { id: 'KS', name: 'Kansas', col: 4, row: 5 },
+  { id: 'AR', name: 'Arkansas', col: 5, row: 5 },
+  { id: 'TN', name: 'Tennessee', col: 6, row: 5 },
+  { id: 'NC', name: 'North Carolina', col: 7, row: 5 },
+  { id: 'SC', name: 'South Carolina', col: 8, row: 5 },
+  { id: 'DC', name: 'District of Columbia', col: 9, row: 5 },
+  { id: 'OK', name: 'Oklahoma', col: 4, row: 6 },
+  { id: 'LA', name: 'Louisiana', col: 5, row: 6 },
+  { id: 'MS', name: 'Mississippi', col: 6, row: 6 },
+  { id: 'AL', name: 'Alabama', col: 7, row: 6 },
+  { id: 'GA', name: 'Georgia', col: 8, row: 6 },
+  { id: 'HI', name: 'Hawaii', col: 0, row: 7 },
+  { id: 'TX', name: 'Texas', col: 4, row: 7 },
+  { id: 'FL', name: 'Florida', col: 8, row: 7 },
+]
+
+const MAP_COLS = 12
+const MAP_ROWS = 8
+const MAP_CELL = 26
 
 function cellKey(source: string, type: string): string {
   return `${source}:${type}`
@@ -30,7 +90,7 @@ function TypeBySourceGrid({
   showPercent,
   onCellClick,
 }: {
-  cells: LegalPortfolio['heatmap_cells']
+  cells: NonNullable<LegalPortfolio['heatmap_cells']>
   showPercent: boolean
   onCellClick?: (source: string, requestType: string) => void
 }) {
@@ -118,6 +178,95 @@ function TypeBySourceGrid({
   )
 }
 
+function StateTileMap({
+  countsByState,
+}: {
+  countsByState: Map<string, number>
+}) {
+  const navigate = useNavigate()
+  const counts = STATE_TILES.map((tile) => countsByState.get(tile.id) ?? 0)
+  const maxCount = Math.max(1, ...counts)
+  const total = counts.reduce((sum, count) => sum + count, 0)
+
+  function openState(stateId: string) {
+    void navigate({ to: '/requests', search: { state: stateId } })
+  }
+
+  return (
+    <div className="space-y-2">
+      <svg
+        width="100%"
+        viewBox={`0 0 ${MAP_COLS * MAP_CELL} ${MAP_ROWS * MAP_CELL}`}
+        className="max-w-[19.5rem]"
+        role="img"
+        aria-label="Open requests by state"
+      >
+        {STATE_TILES.map((tile) => {
+          const count = countsByState.get(tile.id) ?? 0
+          const intensity =
+            count > 0 ? 0.06 + (Math.log(1 + count) / Math.log(1 + maxCount)) * 0.86 : 0.06
+          const dark = intensity > 0.5
+          const cx = tile.col * MAP_CELL + MAP_CELL / 2
+          const cy = tile.row * MAP_CELL + MAP_CELL / 2
+
+          return (
+            <g
+              key={tile.id}
+              className="cursor-pointer"
+              role="link"
+              tabIndex={0}
+              aria-label={`${tile.name}: ${count.toLocaleString()} open`}
+              onClick={() => openState(tile.id)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  openState(tile.id)
+                }
+              }}
+            >
+              <title>{`${tile.name}: ${count.toLocaleString()} open`}</title>
+              <rect
+                x={tile.col * MAP_CELL + 1}
+                y={tile.row * MAP_CELL + 1}
+                width={MAP_CELL - 2}
+                height={MAP_CELL - 2}
+                rx={3}
+                className="fill-panel"
+              />
+              <rect
+                x={tile.col * MAP_CELL + 1}
+                y={tile.row * MAP_CELL + 1}
+                width={MAP_CELL - 2}
+                height={MAP_CELL - 2}
+                rx={3}
+                className="fill-habeas-navy"
+                opacity={intensity}
+              />
+              <text
+                x={cx}
+                y={cy + 3}
+                textAnchor="middle"
+                fontSize={8}
+                fontWeight={600}
+                className={dark ? 'fill-white' : 'fill-ink-soft'}
+              >
+                {tile.id}
+              </text>
+            </g>
+          )
+        })}
+      </svg>
+      <p className="text-[0.65rem] text-mute">
+        Open requests per state · tile shade ∝ log(count) ·{' '}
+        {total > 0
+          ? `${total.toLocaleString()} open across 50 states + DC`
+          : 'No state attribution in this window yet — map still shows all jurisdictions'}{' '}
+        · click a tile for state drill-down
+      </p>
+    </div>
+  )
+}
+
 function AggregatedBars({
   rows,
   showPercent,
@@ -190,15 +339,40 @@ export function OpenRequestsHeatmap({ cells, onCellClick }: HeatmapProps) {
       .sort((a, b) => b.count - a.count)
   }, [cells])
 
+  const countsByState = useMemo(() => new Map<string, number>(), [])
+
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line/70">
         <Tabs value={tab} onValueChange={(value) => setTab(value as HeatmapTab)}>
-          <TabsList aria-label="Heatmap view">
-            <TabsTrigger value="type_by_source">Type by source</TabsTrigger>
-            <TabsTrigger value="state_map">State map</TabsTrigger>
-            <TabsTrigger value="source_only">Source only</TabsTrigger>
-            <TabsTrigger value="type_only">Type only</TabsTrigger>
+          <TabsList
+            aria-label="Heatmap view"
+            className="h-auto gap-4 rounded-none border-0 bg-transparent p-0"
+          >
+            <TabsTrigger
+              value="type_by_source"
+              className="rounded-none border-0 border-b-2 border-transparent bg-transparent px-0 pb-1.5 shadow-none data-[state=active]:border-habeas-navy data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+            >
+              Type by source
+            </TabsTrigger>
+            <TabsTrigger
+              value="state_map"
+              className="rounded-none border-0 border-b-2 border-transparent bg-transparent px-0 pb-1.5 shadow-none data-[state=active]:border-habeas-navy data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+            >
+              State map
+            </TabsTrigger>
+            <TabsTrigger
+              value="source_only"
+              className="rounded-none border-0 border-b-2 border-transparent bg-transparent px-0 pb-1.5 shadow-none data-[state=active]:border-habeas-navy data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+            >
+              Source only
+            </TabsTrigger>
+            <TabsTrigger
+              value="type_only"
+              className="rounded-none border-0 border-b-2 border-transparent bg-transparent px-0 pb-1.5 shadow-none data-[state=active]:border-habeas-navy data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+            >
+              Type only
+            </TabsTrigger>
           </TabsList>
         </Tabs>
         <button
@@ -220,12 +394,7 @@ export function OpenRequestsHeatmap({ cells, onCellClick }: HeatmapProps) {
         <TypeBySourceGrid cells={cells} showPercent={showPercent} onCellClick={onCellClick} />
       ) : null}
 
-      {tab === 'state_map' ? (
-        <p className="text-xs text-mute">
-          State breakdown is not available in this portfolio window yet. Use type by source or open
-          All requests with a state filter.
-        </p>
-      ) : null}
+      {tab === 'state_map' ? <StateTileMap countsByState={countsByState} /> : null}
 
       {tab === 'source_only' ? (
         <AggregatedBars

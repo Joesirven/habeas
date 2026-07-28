@@ -22,20 +22,20 @@ const CHIP_DRILL: Record<
   { label: string; description: string; to: string; search?: Record<string, string> }
 > = {
   assigned: {
-    label: 'Assigned to you',
-    description: 'Open requests currently assigned to your operator identity.',
+    label: 'Open — you',
+    description: 'Assigned to you across all stages — oldest first.',
     to: '/requests/needs-attention',
     search: { filter: 'assigned_to_me' },
   },
   team: {
-    label: 'Open team-wide',
-    description: 'All open legal and admin work across the portfolio.',
+    label: 'Open — team',
+    description: 'Team-wide open requests across the portfolio.',
     to: '/requests',
     search: { attention: 'needs' },
   },
   at_risk: {
     label: 'SLA at risk',
-    description: 'Requests approaching their due date within the SLA warning window.',
+    description: 'Deadline inside the SLA warning window — needs triage this week.',
     to: '/requests',
     search: { attention: 'needs' },
   },
@@ -47,97 +47,126 @@ const CHIP_DRILL: Record<
   },
 }
 
+type PulseChipConfig = {
+  id: OperationsPulseChip
+  label: string
+  value: string
+  expandable: boolean
+  tone?: 'warning' | 'danger'
+}
+
 export function OperationsPulse({ pulse, onChipClick }: OperationsPulseProps) {
   const [expanded, setExpanded] = useState<OperationsPulseChip | null>(null)
 
   if (!pulse) return null
 
-  const chips: Array<{
-    id: OperationsPulseChip
-    label: string
-    value: string
-    expandable: boolean
-  }> = [
+  const chips: PulseChipConfig[] = [
     {
       id: 'assigned',
-      label: 'Assigned to you',
-      value: String(pulse.open_assigned_to_you),
+      label: 'Open — you',
+      value: pulse.open_assigned_to_you.toLocaleString(),
       expandable: true,
     },
     {
       id: 'team',
-      label: 'Open team-wide',
-      value: String(pulse.open_team_wide),
+      label: 'Open — team',
+      value: pulse.open_team_wide.toLocaleString(),
       expandable: true,
     },
     {
       id: 'at_risk',
       label: 'SLA at risk',
-      value: String(pulse.sla_at_risk),
+      value: pulse.sla_at_risk.toLocaleString(),
       expandable: true,
+      tone: pulse.sla_at_risk > 0 ? 'warning' : undefined,
     },
     {
       id: 'overdue',
       label: 'Overdue',
-      value: String(pulse.overdue),
+      value: pulse.overdue.toLocaleString(),
       expandable: true,
+      tone: pulse.overdue > 0 ? 'danger' : undefined,
     },
     {
       id: 'median_age',
       label: 'Median age',
       value: formatMedianAge(pulse.median_age_hours),
-      expandable: false,
+      expandable: true,
     },
   ]
 
+  function toggleChip(chip: PulseChipConfig) {
+    if (!chip.expandable) return
+    const next = expanded === chip.id ? null : chip.id
+    setExpanded(next)
+    if (next && next !== 'median_age') {
+      onChipClick?.(next)
+    }
+  }
+
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap gap-2" role="group" aria-label="Operations pulse">
+    <div className="rounded-lg border border-line px-3.5 py-2.5">
+      <div
+        className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5"
+        role="group"
+        aria-label="Operations pulse"
+      >
         {chips.map((chip) => (
           <button
             key={chip.id}
             type="button"
             className={cn(
-              'taste-frost-chip tabular-nums text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid',
-              expanded === chip.id && chip.expandable && 'border-habeas-navy/40 bg-white',
+              'rounded-md px-1.5 py-1 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid',
+              expanded === chip.id ? 'bg-panel' : 'hover:bg-panel/60',
             )}
             aria-expanded={chip.expandable ? expanded === chip.id : undefined}
-            onClick={() => {
-              if (!chip.expandable) return
-              const next = expanded === chip.id ? null : chip.id
-              setExpanded(next)
-              if (next && next !== 'median_age') {
-                onChipClick?.(next)
-              }
-            }}
+            onClick={() => toggleChip(chip)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault()
-                if (!chip.expandable) return
-                const next = expanded === chip.id ? null : chip.id
-                setExpanded(next)
-                if (next && next !== 'median_age') {
-                  onChipClick?.(next)
-                }
+                toggleChip(chip)
               }
             }}
           >
-            {chip.label}: {chip.value}
+            <p
+              className={cn(
+                'font-display text-xl font-medium tabular-nums leading-tight',
+                chip.tone === 'warning' && 'text-amber-700',
+                chip.tone === 'danger' && 'text-red-700',
+                !chip.tone && 'text-ink',
+              )}
+            >
+              {chip.value}
+            </p>
+            <p className="mt-0.5 text-[0.65rem] text-mute">{chip.label}</p>
           </button>
         ))}
       </div>
 
-      {expanded && expanded !== 'median_age' ? (
-        <div className="rounded-md border border-line bg-white px-3 py-2 text-xs text-ink-soft">
-          <p className="font-medium text-ink">{CHIP_DRILL[expanded].label}</p>
-          <p className="mt-1">{CHIP_DRILL[expanded].description}</p>
-          <Link
-            to={CHIP_DRILL[expanded].to}
-            search={CHIP_DRILL[expanded].search}
-            className="mt-2 inline-block text-habeas-navy hover:underline"
-          >
-            View in queue →
-          </Link>
+      {expanded ? (
+        <div className="mt-3 border-t border-line/70 pt-3 text-xs text-ink-soft">
+          {expanded === 'median_age' ? (
+            <>
+              <p className="font-medium text-ink">Median age</p>
+              <p className="mt-1">
+                Age distribution of open requests (received → now). Median:{' '}
+                {formatMedianAge(pulse.median_age_hours)}.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="font-medium text-ink">{CHIP_DRILL[expanded].label}</p>
+              <p className="mt-1">{CHIP_DRILL[expanded].description}</p>
+              <Link
+                to={CHIP_DRILL[expanded].to}
+                search={CHIP_DRILL[expanded].search}
+                className="mt-2 inline-block text-habeas-navy hover:underline"
+              >
+                View in queue →
+              </Link>
+            </>
+          )}
+          <p className="mt-2 text-[0.65rem] text-mute">Click the metric again to collapse</p>
         </div>
       ) : null}
     </div>

@@ -1,5 +1,6 @@
 import { Link } from '@tanstack/react-router'
 
+import { LegalSettingsSheet } from '@/components/LegalSettingsSheet'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -11,6 +12,15 @@ import {
 type UploadMenuProps = {
   size?: 'sm' | 'default'
   variant?: 'default' | 'outline'
+}
+
+export function LegalChromeActions() {
+  return (
+    <div className="flex items-center gap-2">
+      <LegalSettingsSheet triggerVariant="header" />
+      <UploadMenu />
+    </div>
+  )
 }
 
 export function UploadMenu({ size = 'sm', variant = 'outline' }: UploadMenuProps) {

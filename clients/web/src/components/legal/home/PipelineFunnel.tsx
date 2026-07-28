@@ -4,12 +4,34 @@ import type { LegalPortfolio } from '@/lib/api'
 import { COARSE_STAGE_ORDER, stageLabel } from '@/lib/legalJourneyLabels'
 import { cn } from '@/lib/utils'
 
+type SelectedBatch = NonNullable<LegalPortfolio['fulfillment_batches']>[number]
+
 type PipelineFunnelProps = {
-  stages: LegalPortfolio['stage_reach_counts']
+  stages: NonNullable<LegalPortfolio['stage_reach_counts']>
+  selectedBatch?: SelectedBatch | null
+  onClearBatch?: () => void
   onStageClick?: (stage: string) => void
 }
 
-export function PipelineFunnel({ stages, onStageClick }: PipelineFunnelProps) {
+const COLUMN_HEIGHT_PX = 92
+
+function formatReceivedAt(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
+export function PipelineFunnel({
+  stages,
+  selectedBatch,
+  onClearBatch,
+  onStageClick,
+}: PipelineFunnelProps) {
   const byStage = new Map(stages.map((row) => [row.stage, row]))
   const ordered = COARSE_STAGE_ORDER.map((key) => {
     const row = byStage.get(key)
@@ -19,51 +41,99 @@ export function PipelineFunnel({ stages, onStageClick }: PipelineFunnelProps) {
       dropped: row?.dropped_count ?? 0,
     }
   })
-  const topReached = Math.max(1, ordered[0]?.reached ?? 1)
+  const base = Math.max(ordered[0]?.reached ?? 0, 1)
 
   return (
-    <div className="space-y-1" role="img" aria-label="Pipeline stage reach funnel">
-      {ordered.map((row, index) => {
-        const widthPct = Math.max((row.reached / topReached) * 100, row.reached > 0 ? 12 : 4)
-        const prev = index > 0 ? ordered[index - 1] : null
-        const showDrop = prev && prev.dropped > 0
+    <div className="space-y-3" role="img" aria-label="Pipeline stage reach funnel">
+      {selectedBatch ? (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-ink-soft">
+          <span>
+            Scoped to batch: {selectedBatch.source_label} · received{' '}
+            {formatReceivedAt(selectedBatch.received_at)} ·{' '}
+            {selectedBatch.request_count.toLocaleString()} requests
+          </span>
+          {onClearBatch ? (
+            <button
+              type="button"
+              className="rounded-full border border-line bg-panel px-2 py-0.5 text-[0.65rem] font-medium text-ink-soft transition-colors hover:border-habeas-navy/35 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid"
+              onClick={onClearBatch}
+            >
+              All batches ✕
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
-        return (
-          <div key={row.stage} className="space-y-0.5">
-            {showDrop ? (
-              <p className="pl-1 text-[0.6rem] tabular-nums text-mute">
-                −{prev!.dropped} did not reach {stageLabel(row.stage)}
-              </p>
-            ) : null}
-            <div className="flex items-center gap-2">
-              <span className="w-[7.5rem] shrink-0 text-right text-[0.65rem] leading-tight text-ink-soft">
-                {stageLabel(row.stage)}
+      <div className="flex items-end gap-2">
+        {ordered.map((row, index) => {
+          const previousReached = index === 0 ? row.reached : ordered[index - 1]!.reached
+          const continuePct = Math.round((row.reached / base) * 100)
+          const dropCount = Math.max(0, previousReached - row.reached)
+          const dropPct =
+            index === 0 ? 0 : Math.round((dropCount / Math.max(previousReached, 1)) * 100)
+
+          return (
+            <Link
+              key={row.stage}
+              to="/requests"
+              search={{ stage: row.stage }}
+              className="group flex min-w-0 flex-1 flex-col gap-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid"
+              title={`Reached ${stageLabel(row.stage)}: ${row.reached.toLocaleString()}`}
+              onClick={(event) => {
+                if (onStageClick) {
+                  event.preventDefault()
+                  onStageClick(row.stage)
+                }
+              }}
+            >
+              <span className="truncate text-[0.65rem] text-mute">{stageLabel(row.stage)}</span>
+              <span className="text-sm font-semibold tabular-nums text-ink">
+                {row.reached.toLocaleString()}
               </span>
-              <div className="flex min-w-0 flex-1 items-center gap-2">
-                <div className="flex h-7 flex-1 justify-center">
-                  <Link
-                    to="/requests"
-                    search={{ stage: row.stage }}
-                    className={cn(
-                      'flex h-full items-center justify-center rounded bg-habeas-navy/80 px-2 text-[0.65rem] font-medium tabular-nums text-white transition-opacity hover:bg-habeas-navy focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid',
-                      row.reached === 0 && 'opacity-30',
-                    )}
-                    style={{ width: `${widthPct}%`, minWidth: row.reached > 0 ? '2.5rem' : '1.5rem' }}
-                    onClick={(event) => {
-                      if (onStageClick) {
-                        event.preventDefault()
-                        onStageClick(row.stage)
-                      }
-                    }}
-                  >
-                    {row.reached}
-                  </Link>
-                </div>
+              <div
+                className="flex w-full flex-col justify-end gap-0.5"
+                style={{ height: COLUMN_HEIGHT_PX }}
+              >
+                {dropPct > 0 ? (
+                  <div
+                    className="w-full rounded-sm bg-line/70"
+                    style={{ height: Math.max(4, (dropPct / 100) * COLUMN_HEIGHT_PX) }}
+                    title={`Held upstream of ${stageLabel(row.stage)}: ${dropCount.toLocaleString()} (−${dropPct}%)`}
+                  />
+                ) : null}
+                <div
+                  className={cn(
+                    'w-full rounded-sm bg-habeas-navy transition-opacity group-hover:opacity-90',
+                    row.reached === 0 && 'opacity-25',
+                  )}
+                  style={{ height: Math.max(6, (continuePct / 100) * COLUMN_HEIGHT_PX) }}
+                  title={`Reached ${stageLabel(row.stage)}: ${row.reached.toLocaleString()} (${continuePct}% of received)`}
+                />
               </div>
-            </div>
-          </div>
-        )
-      })}
+              <span className="text-[0.65rem] tabular-nums text-ink-soft">
+                {continuePct}%{dropPct > 0 ? ` · −${dropPct}` : ''}
+              </span>
+            </Link>
+          )
+        })}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[0.65rem] text-mute">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block h-2 w-2 rounded-full bg-habeas-navy" />
+          Reached stage
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="inline-block h-2 w-2 rounded-full bg-line/80" />
+          Held upstream at step
+        </span>
+        <span>
+          {selectedBatch
+            ? 'Requests reaching each stage in the selected batch · % of the batch received'
+            : 'Requests reaching each stage across all batches · % of received'}{' '}
+          · click a column for the cohort list
+        </span>
+      </div>
     </div>
   )
 }

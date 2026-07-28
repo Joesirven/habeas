@@ -11,7 +11,7 @@ type DataOwnerQueuesProps = {
 }
 
 function initialsFor(identity: string | null): string {
-  if (!identity) return '?'
+  if (!identity) return '—'
   const local = identity.split('@')[0] ?? identity
   const parts = local.split(/[._-]+/).filter(Boolean)
   if (parts.length >= 2) {
@@ -39,33 +39,25 @@ export function DataOwnerQueues({ queues }: DataOwnerQueuesProps) {
         const key = row.assignee_identity ?? 'unassigned'
         const barWidth = (row.pending_count / maxPending) * 100
         return (
-          <li
-            key={key}
-            className="rounded-md border border-line/60 bg-white px-3 py-2 text-xs"
-          >
-            <div className="flex items-center gap-2">
-              <Avatar className="h-7 w-7">
-                <AvatarFallback className="bg-habeas-light/30 text-[0.6rem] font-medium text-habeas-navy">
+          <li key={key}>
+            <Link
+              to="/requests/needs-attention"
+              search={{
+                kind: 'matching',
+                ...(row.assignee_identity ? { assignee: row.assignee_identity } : {}),
+              }}
+              className="flex items-center gap-2.5 rounded-md px-1 py-1.5 text-xs transition-colors hover:bg-panel/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid"
+            >
+              <Avatar className="h-6 w-6">
+                <AvatarFallback className="bg-habeas-light/30 text-[0.55rem] font-medium text-habeas-navy">
                   {initialsFor(row.assignee_identity)}
                 </AvatarFallback>
               </Avatar>
+              <div className="w-[6.5rem] shrink-0 truncate font-medium text-ink">
+                {displayName(row.assignee_identity)}
+              </div>
               <div className="min-w-0 flex-1">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate font-medium text-ink">{displayName(row.assignee_identity)}</span>
-                  <Link
-                    to="/requests/needs-attention"
-                    search={{
-                      kind: 'matching',
-                      ...(row.assignee_identity
-                        ? { assignee: row.assignee_identity }
-                        : {}),
-                    }}
-                    className="shrink-0 tabular-nums text-habeas-navy hover:underline"
-                  >
-                    {row.pending_count} pending
-                  </Link>
-                </div>
-                <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-line/40">
+                <div className="h-1.5 overflow-hidden rounded-full bg-line/40">
                   <div
                     className={cn(
                       'h-full rounded-full',
@@ -76,11 +68,11 @@ export function DataOwnerQueues({ queues }: DataOwnerQueuesProps) {
                     style={{ width: `${barWidth}%` }}
                   />
                 </div>
-                {row.outreach_hint ? (
-                  <p className="mt-1 truncate text-[0.65rem] text-mute">{row.outreach_hint}</p>
-                ) : null}
               </div>
-            </div>
+              <span className="shrink-0 tabular-nums text-ink-soft">
+                {row.pending_count} pending
+              </span>
+            </Link>
           </li>
         )
       })}

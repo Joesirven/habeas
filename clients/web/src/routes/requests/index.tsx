@@ -7,7 +7,7 @@ import {
   RequestDetailOverlay,
   useRequestDetailOverlay,
 } from '@/components/requests/RequestDetailOverlay'
-import { UploadMenu } from '@/components/UploadMenu'
+import { LegalChromeActions } from '@/components/UploadMenu'
 import { Badge } from '@/components/ui/badge'
 import {
   getDropGlobalStats,
@@ -461,7 +461,7 @@ export function RequestsPage() {
             ) : null}
           </Link>
           {legalAdmin ? (
-            <UploadMenu />
+            <LegalChromeActions />
           ) : (
             <Link to="/requests/new" className="taste-btn-primary text-xs">
               Manual submit

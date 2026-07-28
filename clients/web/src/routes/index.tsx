@@ -15,7 +15,7 @@ import {
 } from '@/components/legal/home'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { UploadMenu } from '@/components/UploadMenu'
+import { LegalChromeActions } from '@/components/UploadMenu'
 import { useMe, isLegalAdminPersona } from '@/lib/auth'
 import {
   getDropGlobalStats,
@@ -254,6 +254,15 @@ function OperatorDashboardHome() {
   )
 }
 
+function HomeModuleHeader({ title, hint }: { title: string; hint?: string }) {
+  return (
+    <div className="mb-3">
+      <h3 className="text-sm font-semibold text-ink">{title}</h3>
+      {hint ? <p className="mt-1 text-xs text-mute">{hint}</p> : null}
+    </div>
+  )
+}
+
 function LegalHome() {
   const search = useSearch({ from: '/' })
   const navigate = useNavigate()
@@ -305,8 +314,14 @@ function LegalHome() {
     portfolio.heatmap_cells != null &&
     portfolio.deadline_risk != null
 
+  const selectedBatchRow =
+    selectedBatch != null
+      ? (portfolio?.fulfillment_batches ?? []).find((batch) => batch.batch_key === selectedBatch) ??
+        null
+      : null
+
   return (
-    <section className="space-y-6">
+    <section className="space-y-5">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="taste-micro">Legal</p>
@@ -317,14 +332,11 @@ function LegalHome() {
             Portfolio health and pipeline flow. Work queues show all open items.
           </p>
         </div>
-        <UploadMenu />
+        <LegalChromeActions />
       </header>
 
       {portfolio?.operations_pulse ? (
-        <div className="taste-panel-soft space-y-3 p-4">
-          <p className="text-[0.65rem] uppercase tracking-wide text-mute">Operations pulse</p>
-          <OperationsPulse pulse={portfolio.operations_pulse} />
-        </div>
+        <OperationsPulse pulse={portfolio.operations_pulse} />
       ) : null}
 
       <DateToolbar value={homeWindow} onChange={setHomeWindow} />
@@ -341,77 +353,64 @@ function LegalHome() {
       ) : null}
 
       {portfolio && hasVariationB ? (
-        <div className="space-y-4">
-          <div className="taste-panel-soft p-4">
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Fulfillment batches</p>
-            <div className="mt-3">
-              <FulfillmentBatchList
-                batches={portfolio.fulfillment_batches!}
-                selectedKey={selectedBatch}
-                onSelect={setSelectedBatch}
-              />
-            </div>
-          </div>
+        <div className="divide-y divide-line rounded-lg border border-line">
+          <section className="px-4 py-4">
+            <HomeModuleHeader
+              title="Fulfillment batches"
+              hint="Intake batches by source + received datetime. Select a batch to scope the funnel below."
+            />
+            <FulfillmentBatchList
+              batches={portfolio.fulfillment_batches!}
+              selectedKey={selectedBatch}
+              onSelect={setSelectedBatch}
+            />
+          </section>
 
-          <div className="taste-panel-soft p-4">
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Pipeline funnel</p>
-            <div className="mt-4">
-              <PipelineFunnel stages={portfolio.stage_reach_counts!} />
-            </div>
-          </div>
+          <section className="px-4 py-4">
+            <HomeModuleHeader
+              title="Pipeline — Mixpanel-style funnel"
+              hint="Reached-stage funnel with held-upstream stacks — scoped by batch selection above."
+            />
+            <PipelineFunnel
+              stages={portfolio.stage_reach_counts!}
+              selectedBatch={selectedBatchRow}
+              onClearBatch={() => setSelectedBatch(null)}
+            />
+          </section>
 
-          <div className="taste-panel-soft p-4">
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Type by source</p>
-            <div className="mt-3">
+          <div className="grid lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:divide-x divide-line">
+            <section className="px-4 py-4">
+              <HomeModuleHeader title="Open requests" />
               <OpenRequestsHeatmap cells={portfolio.heatmap_cells!} />
-            </div>
-          </div>
-
-          <div className="taste-panel-soft p-4">
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">
-              Deadlines & cycle time
-            </p>
-            <div className="mt-3">
+            </section>
+            <section className="px-4 py-4">
+              <HomeModuleHeader title="Cycle time & deadline" />
               <DeadlineRiskBand risk={portfolio.deadline_risk!} />
-            </div>
+            </section>
           </div>
 
           {portfolio.data_owner_queues.length > 0 ? (
-            <div className="taste-panel-soft p-4">
-              <p className="text-[0.65rem] uppercase tracking-wide text-mute">Data owner queues</p>
-              <div className="mt-2">
-                <DataOwnerQueues queues={portfolio.data_owner_queues} />
-              </div>
-            </div>
+            <section className="px-4 py-4">
+              <HomeModuleHeader
+                title="Data owner review queues"
+                hint="Compact workload rows — top queues by pending review."
+              />
+              <DataOwnerQueues queues={portfolio.data_owner_queues} />
+            </section>
           ) : null}
 
-          <div className="flex flex-wrap gap-2">
-            <Link
-              to="/requests/needs-attention"
-              search={{ filter: 'unassigned' }}
-              className="taste-btn text-xs"
-            >
-              Unassigned inbox
-            </Link>
-            <Link
-              to="/requests/needs-attention"
-              search={{ filter: 'assignment_to_legal' }}
-              className="taste-btn text-xs"
-            >
-              Assignment to legal
-            </Link>
-          </div>
-
           {portfolio.schedule_excerpt ? (
-            <div className="taste-panel-soft p-4">
-              <p className="text-[0.65rem] uppercase tracking-wide text-mute">DROP schedule</p>
-              <p className="mt-2 text-sm text-ink">
+            <section className="px-4 py-4 text-sm text-ink-soft">
+              <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+                DROP schedule
+              </p>
+              <p className="mt-1 text-ink">
                 Weekly — {portfolio.schedule_excerpt.label}
                 {portfolio.schedule_excerpt.next_run_at
                   ? ` · next ${new Date(portfolio.schedule_excerpt.next_run_at).toLocaleString()}`
                   : ''}
               </p>
-            </div>
+            </section>
           ) : null}
         </div>
       ) : portfolioQuery.isPending ? (
@@ -419,6 +418,20 @@ function LegalHome() {
       ) : null}
 
       <div className="flex flex-wrap gap-2">
+        <Link
+          to="/requests/needs-attention"
+          search={{ filter: 'unassigned' }}
+          className="taste-btn text-xs"
+        >
+          Unassigned inbox
+        </Link>
+        <Link
+          to="/requests/needs-attention"
+          search={{ filter: 'assignment_to_legal' }}
+          className="taste-btn text-xs"
+        >
+          Assignment to legal
+        </Link>
         <Button asChild size="sm">
           <Link to="/requests/needs-attention">Open Inbox</Link>
         </Button>

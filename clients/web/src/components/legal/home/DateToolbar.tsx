@@ -20,14 +20,14 @@ function activateWindow(onChange: (next: HomeWindow) => void, next: HomeWindow) 
 export function DateToolbar({ value, onChange }: DateToolbarProps) {
   return (
     <div
-      className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-paper px-3 py-2"
+      className="flex flex-wrap items-center gap-x-3 gap-y-2"
       role="toolbar"
       aria-label="Analytics date range"
     >
       <span className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
         Analytics window
       </span>
-      <div className="flex flex-wrap items-center gap-1.5">
+      <div className="flex flex-wrap items-center gap-1">
         {WINDOWS.map((window) => (
           <button
             key={window.value}
@@ -36,7 +36,7 @@ export function DateToolbar({ value, onChange }: DateToolbarProps) {
               'rounded px-2.5 py-1 text-xs font-medium tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid',
               value === window.value
                 ? 'bg-habeas-navy text-white'
-                : 'text-ink-soft hover:bg-canvas hover:text-ink',
+                : 'text-ink-soft hover:bg-panel hover:text-ink',
             )}
             aria-pressed={value === window.value}
             onClick={() => activateWindow(onChange, window.value)}

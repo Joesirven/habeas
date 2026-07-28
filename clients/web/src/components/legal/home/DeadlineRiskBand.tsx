@@ -4,7 +4,7 @@ import type { LegalPortfolio } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 type DeadlineRiskBandProps = {
-  risk: LegalPortfolio['deadline_risk']
+  risk: NonNullable<LegalPortfolio['deadline_risk']>
 }
 
 const SEGMENTS = [
