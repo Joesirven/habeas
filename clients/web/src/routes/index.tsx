@@ -254,11 +254,25 @@ function OperatorDashboardHome() {
   )
 }
 
-function HomeModuleHeader({ title, hint }: { title: string; hint?: string }) {
+function HomeModuleHeader({
+  title,
+  hint,
+  compact = false,
+}: {
+  title: string
+  hint?: string
+  compact?: boolean
+}) {
   return (
-    <div className="mb-3">
-      <h3 className="text-sm font-semibold text-ink">{title}</h3>
-      {hint ? <p className="mt-1 text-xs text-mute">{hint}</p> : null}
+    <div className={compact ? 'mb-2' : 'mb-3'}>
+      <h3 className={compact ? 'text-xs font-semibold text-ink' : 'text-sm font-semibold text-ink'}>
+        {title}
+      </h3>
+      {hint ? (
+        <p className={compact ? 'mt-0.5 text-[0.65rem] text-mute' : 'mt-1 text-xs text-mute'}>
+          {hint}
+        </p>
+      ) : null}
     </div>
   )
 }
@@ -321,14 +335,12 @@ function LegalHome() {
       : null
 
   return (
-    <section className="space-y-5">
-      <header className="flex flex-wrap items-end justify-between gap-3">
+    <section className="space-y-4">
+      <header className="flex flex-wrap items-end justify-between gap-2">
         <div>
           <p className="taste-micro">Legal</p>
-          <h2 className="mt-2 font-display text-2xl font-medium tracking-tight text-ink">
-            Home
-          </h2>
-          <p className="mt-2 max-w-xl text-sm text-ink-soft">
+          <h2 className="mt-1 font-display text-2xl font-medium tracking-tight text-ink">Home</h2>
+          <p className="mt-1 max-w-xl text-sm text-ink-soft">
             Portfolio health and pipeline flow. Work queues show all open items.
           </p>
         </div>
@@ -349,17 +361,18 @@ function LegalHome() {
       {portfolio && hasVariationB ? (
         <div className="divide-y divide-line rounded-lg border border-line">
           {portfolio.operations_pulse ? (
-            <section className="px-4 py-4">
+            <section className="px-4 py-2">
               <OperationsPulse pulse={portfolio.operations_pulse} embedded />
             </section>
           ) : null}
 
-          <section className="px-4 py-4">
+          <section className="px-4 py-2">
             <DateToolbar value={homeWindow} onChange={setHomeWindow} />
           </section>
 
-          <section className="px-4 py-4">
+          <section className="px-4 py-2.5">
             <HomeModuleHeader
+              compact
               title="Fulfillment batches"
               hint="Intake batches by source + received datetime. Select a batch to scope the funnel below."
             />
@@ -370,8 +383,9 @@ function LegalHome() {
             />
           </section>
 
-          <section className="px-4 py-4">
+          <section className="px-4 py-2.5">
             <HomeModuleHeader
+              compact
               title="Pipeline — Mixpanel-style funnel"
               hint="Reached-stage funnel with held-upstream stacks — scoped by batch selection above."
             />

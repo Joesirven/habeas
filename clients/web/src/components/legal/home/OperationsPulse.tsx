@@ -106,9 +106,9 @@ export function OperationsPulse({ pulse, onChipClick, embedded = false }: Operat
   }
 
   return (
-    <div className={cn(!embedded && 'rounded-lg border border-line px-3.5 py-2.5')}>
+    <div className={cn(!embedded && 'rounded-lg border border-line px-3 py-2')}>
       <div
-        className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5"
+        className="flex flex-nowrap items-stretch justify-between gap-0.5 overflow-x-auto"
         role="group"
         aria-label="Operations pulse"
       >
@@ -117,7 +117,7 @@ export function OperationsPulse({ pulse, onChipClick, embedded = false }: Operat
             key={chip.id}
             type="button"
             className={cn(
-              'rounded-md px-1.5 py-1 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid',
+              'min-w-0 flex-1 shrink-0 rounded px-1 py-0.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid sm:px-1.5',
               expanded === chip.id ? 'bg-panel' : 'hover:bg-panel/60',
             )}
             aria-expanded={chip.expandable ? expanded === chip.id : undefined}
@@ -131,7 +131,7 @@ export function OperationsPulse({ pulse, onChipClick, embedded = false }: Operat
           >
             <p
               className={cn(
-                'font-display text-xl font-medium tabular-nums leading-tight',
+                'font-display text-base font-medium tabular-nums leading-none sm:text-lg',
                 chip.tone === 'warning' && 'text-amber-700',
                 chip.tone === 'danger' && 'text-red-700',
                 !chip.tone && 'text-ink',
@@ -139,13 +139,15 @@ export function OperationsPulse({ pulse, onChipClick, embedded = false }: Operat
             >
               {chip.value}
             </p>
-            <p className="mt-0.5 text-[0.65rem] text-mute">{chip.label}</p>
+            <p className="mt-0.5 truncate text-[0.6rem] leading-tight text-mute sm:text-[0.65rem]">
+              {chip.label}
+            </p>
           </button>
         ))}
       </div>
 
       {expanded ? (
-        <div className="mt-3 border-t border-line/70 pt-3 text-xs text-ink-soft">
+        <div className="mt-2 border-t border-line/70 pt-2 text-xs text-ink-soft">
           {expanded === 'median_age' ? (
             <>
               <p className="font-medium text-ink">Median age</p>

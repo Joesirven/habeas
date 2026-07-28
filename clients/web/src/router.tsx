@@ -16,7 +16,6 @@ import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
 import { HealthLandingPage } from '@/routes/ops/health/index'
 import { RequestDetailPage } from '@/routes/requests/$requestId'
 import { NeedsAttentionPage } from '@/routes/requests/needs-attention'
-import { ConditionsPage } from '@/routes/requests/conditions'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
 import { RequestsSlasPage } from '@/routes/requests/slas'
@@ -519,12 +518,6 @@ const manualRequestRoute = createRoute({
   component: ManualRequestPage,
 })
 
-const conditionsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/requests/conditions',
-  component: ConditionsPage,
-})
-
 const docsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/docs',
@@ -674,7 +667,6 @@ const routeTree = rootRoute.addChildren([
   needsAttentionRoute,
   requestsSlasRoute,
   manualRequestRoute,
-  conditionsRoute,
   docsRoute,
   requestDetailRoute,
   matchingReviewRoute,

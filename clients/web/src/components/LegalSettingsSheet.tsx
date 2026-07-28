@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 
+import { ConditionsEditor } from '@/components/legal/ConditionsEditor'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -15,7 +16,6 @@ import {
   fetchAdminApi,
   getLegalSlaSettings,
   getLegalTeam,
-  getRouteTriageCondition,
   listEmailTemplates,
   patchLegalSlaSettings,
   removeLegalTeamMember,
@@ -79,12 +79,6 @@ export function LegalSettingsSheet({ triggerVariant = 'banner' }: LegalSettingsS
     document.addEventListener(OPEN_LEGAL_SETTINGS_EVENT, onOpenSettings)
     return () => document.removeEventListener(OPEN_LEGAL_SETTINGS_EVENT, onOpenSettings)
   }, [])
-
-  const conditionQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'drop', 'conditions', 'route-triage'],
-    queryFn: getRouteTriageCondition,
-    enabled: tab === 'conditions',
-  })
 
   const templatesQuery = useQuery({
     queryKey: ['admin-api', 'requests', 'email-templates'],
@@ -187,20 +181,7 @@ export function LegalSettingsSheet({ triggerVariant = 'banner' }: LegalSettingsS
           ))}
         </div>
         {tab === 'conditions' ? (
-          <div className="space-y-3 text-sm text-ink-soft">
-            {conditionQuery.isPending ? <p>Loading conditions…</p> : null}
-            {conditionQuery.data ? (
-              <p>
-                Active rule #{conditionQuery.data.id}:{' '}
-                <code className="text-xs text-ink">
-                  {JSON.stringify(conditionQuery.data.condition_jsonb)}
-                </code>
-              </p>
-            ) : null}
-            <Link to="/requests/conditions" className="text-xs text-habeas-navy hover:underline">
-              Open full Conditions editor
-            </Link>
-          </div>
+          <ConditionsEditor canWrite={canWrite} enabled={open && tab === 'conditions'} compact />
         ) : null}
         {tab === 'deadlines' ? (
           <div className="space-y-3 text-sm">
