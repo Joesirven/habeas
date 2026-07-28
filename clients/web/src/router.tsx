@@ -425,10 +425,24 @@ export const NEEDS_ATTENTION_KINDS = [
 
 export type NeedsAttentionSearchKind = (typeof NEEDS_ATTENTION_KINDS)[number]
 
+export const LEGAL_INBOX_FILTERS = [
+  'unassigned',
+  'assignment_to_legal',
+  'fulfillment',
+  'notice',
+  'delivery',
+  'pre_matching_holds',
+  'assigned_to_me',
+] as const
+
+export type LegalInboxFilter = (typeof LEGAL_INBOX_FILTERS)[number]
+
 export type NeedsAttentionSearch = {
   bulk?: number
   /** Inbox lane tab — Legal defaults to triage when omitted. */
   kind?: NeedsAttentionSearchKind
+  /** Legal/admin filter chips (OQ14) — supersedes kind tabs when set. */
+  filter?: LegalInboxFilter
 }
 
 function parseNeedsAttentionSearch(search: Record<string, unknown>): NeedsAttentionSearch {
@@ -446,6 +460,12 @@ function parseNeedsAttentionSearch(search: Record<string, unknown>): NeedsAttent
     (NEEDS_ATTENTION_KINDS as readonly string[]).includes(search.kind)
   ) {
     parsed.kind = search.kind as NeedsAttentionSearchKind
+  }
+  if (
+    typeof search.filter === 'string' &&
+    (LEGAL_INBOX_FILTERS as readonly string[]).includes(search.filter)
+  ) {
+    parsed.filter = search.filter as LegalInboxFilter
   }
   return parsed
 }

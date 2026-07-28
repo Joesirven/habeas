@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
+import type { LegalInboxFilter } from '@/router'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
@@ -102,7 +103,66 @@ const OPS_INBOX_KIND_TABS: { value: InboxKind; label: string }[] = [
   { value: 'pending_tasks', label: 'Tasks' },
 ]
 
-/** Legal case queue — no Matching / Comms / All (matching stays on data-owner My work). */
+/** Legal case queue — filter chips (OQ14), not named lane tabs. */
+const LEGAL_INBOX_FILTER_CHIPS: { value: LegalInboxFilter; label: string }[] = [
+  { value: 'unassigned', label: 'Unassigned' },
+  { value: 'assignment_to_legal', label: 'Assignment to legal' },
+  { value: 'fulfillment', label: 'Fulfillment' },
+  { value: 'notice', label: 'Notice' },
+  { value: 'delivery', label: 'Delivery' },
+  { value: 'pre_matching_holds', label: 'Pre-matching holds' },
+  { value: 'assigned_to_me', label: 'Assigned to me' },
+]
+
+function isAssignmentToLegalItem(item: NeedsAttentionItem): boolean {
+  return (
+    isEscalationItem(item) &&
+    (item.assignment?.target_role === 'legal' || item.kind === 'escalations')
+  )
+}
+
+function isFulfillmentLegalItem(item: NeedsAttentionItem): boolean {
+  if (isTriageItem(item) || isAssignmentToLegalItem(item)) return false
+  if (isNoticeItem(item) || isDeliveryItem(item)) return false
+  return (
+    item.reason === 'matching.review' ||
+    item.current_stage === 'review' ||
+    item.current_stage === 'fulfillment' ||
+    item.kind === 'matching'
+  )
+}
+
+function isUnassignedItem(item: NeedsAttentionItem): boolean {
+  const assignee = item.assignment?.assignee_identity?.trim()
+  return !assignee
+}
+
+function matchesLegalInboxFilter(
+  item: NeedsAttentionItem,
+  filter: LegalInboxFilter,
+  myEmail?: string,
+): boolean {
+  switch (filter) {
+    case 'unassigned':
+      return isUnassignedItem(item)
+    case 'assignment_to_legal':
+      return isAssignmentToLegalItem(item)
+    case 'fulfillment':
+      return isFulfillmentLegalItem(item)
+    case 'notice':
+      return isNoticeItem(item)
+    case 'delivery':
+      return isDeliveryItem(item)
+    case 'pre_matching_holds':
+      return isTriageItem(item)
+    case 'assigned_to_me':
+      return isPendingTaskFor(item, myEmail)
+    default:
+      return true
+  }
+}
+
+/** @deprecated Legal uses filter chips — kept for ops/DO paths. */
 const LEGAL_INBOX_KIND_TABS: { value: InboxKind; label: string }[] = [
   { value: 'triage', label: 'Triage' },
   { value: 'escalations', label: 'Escalations' },
@@ -1683,6 +1743,10 @@ export function NeedsAttentionPage() {
     : dataOwnerPersona || bulkFilter != null
       ? 'matching'
       : 'all'
+  const defaultLegalFilter: LegalInboxFilter = 'fulfillment'
+  const [legalInboxFilter, setLegalInboxFilter] = useState<LegalInboxFilter>(
+    () => search.filter ?? defaultLegalFilter,
+  )
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [activeTarget, setActiveTarget] = useState<ActiveTarget | null>(null)
   const [expandedThreads, setExpandedThreads] = useState<Set<string>>(new Set())
@@ -1693,6 +1757,10 @@ export function NeedsAttentionPage() {
   const [dueFilter, setDueFilter] = useState<DueFilter>('all')
 
   useEffect(() => {
+    if (search.filter) {
+      setLegalInboxFilter(search.filter)
+      return
+    }
     if (search.kind) {
       setInboxKind(search.kind as InboxKind)
       return
@@ -1703,7 +1771,7 @@ export function NeedsAttentionPage() {
     }
     if (legalPersona) setInboxKind('triage')
     else if (dataOwnerPersona) setInboxKind('matching')
-  }, [bulkFilter, dataOwnerPersona, legalPersona, search.kind])
+  }, [bulkFilter, dataOwnerPersona, legalPersona, search.filter, search.kind])
 
   const [bulkError, setBulkError] = useState<string | null>(null)
   const [bulkAssignee, setBulkAssignee] = useState('')
@@ -1739,6 +1807,19 @@ export function NeedsAttentionPage() {
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })
+
+  function setLegalFilterAndUrl(next: LegalInboxFilter) {
+    setLegalInboxFilter(next)
+    setMobilePane('queue')
+    void navigate({
+      to: '/requests/needs-attention',
+      search: {
+        bulk: bulkFilter,
+        filter: next === defaultLegalFilter ? undefined : next,
+      },
+      replace: true,
+    })
+  }
 
   function setInboxKindAndUrl(next: InboxKind) {
     setInboxKind(next)
@@ -1828,25 +1909,38 @@ export function NeedsAttentionPage() {
     const myEmail = me?.email
     return items.filter((item) => {
       if (bulkFilter != null && item.bulk_process_id !== bulkFilter) return false
-      if (inboxKind === 'matching' && !isMatchingItem(item)) return false
-      if (inboxKind === 'triage' && !isTriageItem(item)) return false
-      if (inboxKind === 'escalations' && !isEscalationItem(item)) return false
-      if (inboxKind === 'delivery' && !isDeliveryItem(item)) return false
-      if (inboxKind === 'notice' && !isNoticeItem(item)) return false
-      if (inboxKind === 'communications' && !isCommsItem(item)) return false
-      if (inboxKind === 'pending_tasks' && !isPendingTaskFor(item, myEmail)) {
-        return false
-      }
-      if (inboxKind === 'matching' || inboxKind === 'all') {
-        if (matchFilter !== 'all') {
-          const key = (item.match_type as MatchFilter | undefined) ?? 'unknown'
-          if (key !== matchFilter) return false
+      if (legalPersona) {
+        if (!matchesLegalInboxFilter(item, legalInboxFilter, myEmail)) return false
+      } else {
+        if (inboxKind === 'matching' && !isMatchingItem(item)) return false
+        if (inboxKind === 'triage' && !isTriageItem(item)) return false
+        if (inboxKind === 'escalations' && !isEscalationItem(item)) return false
+        if (inboxKind === 'delivery' && !isDeliveryItem(item)) return false
+        if (inboxKind === 'notice' && !isNoticeItem(item)) return false
+        if (inboxKind === 'communications' && !isCommsItem(item)) return false
+        if (inboxKind === 'pending_tasks' && !isPendingTaskFor(item, myEmail)) {
+          return false
+        }
+        if (inboxKind === 'matching' || inboxKind === 'all') {
+          if (matchFilter !== 'all') {
+            const key = (item.match_type as MatchFilter | undefined) ?? 'unknown'
+            if (key !== matchFilter) return false
+          }
         }
       }
       if (dueFilter !== 'all' && dueBucket(item) !== dueFilter) return false
       return true
     })
-  }, [items, inboxKind, matchFilter, dueFilter, me?.email, bulkFilter])
+  }, [
+    items,
+    inboxKind,
+    legalInboxFilter,
+    legalPersona,
+    matchFilter,
+    dueFilter,
+    me?.email,
+    bulkFilter,
+  ])
 
   const groupThreads = shouldGroupThreads(inboxKind, matchFilter, dueFilter)
 
@@ -2282,23 +2376,46 @@ export function NeedsAttentionPage() {
           )}
         >
           <div className="space-y-1.5 border-b border-line px-2.5 py-2">
-            <Tabs
-              value={inboxKind}
-              onValueChange={(value) => setInboxKindAndUrl(value as InboxKind)}
-            >
-              <TabsList className="h-7 w-full justify-start gap-0.5 overflow-x-auto bg-canvas p-0.5">
-                {inboxTabs.map((tab) => (
-                  <TabsTrigger
-                    key={tab.value}
-                    value={tab.value}
-                    className="h-6 gap-1 px-1.5 text-[0.65rem]"
-                  >
-                    {tab.label}
-                    <span className="tabular-nums opacity-70">{kindCounts[tab.value]}</span>
-                  </TabsTrigger>
-                ))}
-              </TabsList>
-            </Tabs>
+            {legalPersona ? (
+              <div className="flex flex-wrap gap-1" role="toolbar" aria-label="Inbox filters">
+                {LEGAL_INBOX_FILTER_CHIPS.map((chip) => {
+                  const count = items.filter((item) =>
+                    matchesLegalInboxFilter(item, chip.value, me?.email),
+                  ).length
+                  return (
+                    <FilterChip
+                      key={chip.value}
+                      active={legalInboxFilter === chip.value}
+                      label={chip.label}
+                      count={count}
+                      onClick={() =>
+                        setLegalFilterAndUrl(
+                          legalInboxFilter === chip.value ? defaultLegalFilter : chip.value,
+                        )
+                      }
+                    />
+                  )
+                })}
+              </div>
+            ) : (
+              <Tabs
+                value={inboxKind}
+                onValueChange={(value) => setInboxKindAndUrl(value as InboxKind)}
+              >
+                <TabsList className="h-7 w-full justify-start gap-0.5 overflow-x-auto bg-canvas p-0.5">
+                  {inboxTabs.map((tab) => (
+                    <TabsTrigger
+                      key={tab.value}
+                      value={tab.value}
+                      className="h-6 gap-1 px-1.5 text-[0.65rem]"
+                    >
+                      {tab.label}
+                      <span className="tabular-nums opacity-70">{kindCounts[tab.value]}</span>
+                    </TabsTrigger>
+                  ))}
+                </TabsList>
+              </Tabs>
+            )}
 
             {!legalPersona &&
             (inboxKind === 'matching' || inboxKind === 'all') &&

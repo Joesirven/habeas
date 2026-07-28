@@ -17,13 +17,21 @@ SUPER = RolePrincipal(email="ops@example.com", role=ROLE_SUPER_ADMIN, real_role=
 @pytest.mark.asyncio
 async def test_legal_portfolio_returns_aggregates(monkeypatch: pytest.MonkeyPatch):
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={"drop_count": 2, "other_count": 5})
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"drop_count": 2, "other_count": 5},
+            {"overdue": 0, "due_7d": 1, "on_track": 2, "closed_ytd": 0},
+            {"open_team": 3, "sla_at_risk": 1, "overdue": 0},
+        ]
+    )
     conn.fetch = AsyncMock(
         side_effect=[
             [{"request_type": "delete", "count": 3}],
             [{"stage": "receive", "in_queue": 1, "in_progress": 0, "complete": 2}],
             [{"stage": "review", "count": 2}],
             [{"assignee_identity": "owner@example.com", "pending_count": 1}],
+            [],
+            [],
         ]
     )
     conn.fetchval = AsyncMock(side_effect=[0, 0])

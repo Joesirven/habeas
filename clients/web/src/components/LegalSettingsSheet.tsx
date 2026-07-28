@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { useState } from 'react'
 
@@ -10,15 +10,30 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
-import { getRouteTriageCondition, listEmailTemplates } from '@/lib/api'
+import {
+  addLegalTeamMember,
+  getLegalSlaSettings,
+  getLegalTeam,
+  getRouteTriageCondition,
+  listEmailTemplates,
+  patchLegalSlaSettings,
+  removeLegalTeamMember,
+} from '@/lib/api'
 import { canMutateLegalSettings, useMe } from '@/lib/auth'
 
-type SettingsTab = 'conditions' | 'slas' | 'templates'
+type SettingsTab =
+  | 'conditions'
+  | 'deadlines'
+  | 'templates'
+  | 'drop_schedule'
+  | 'legal_team'
 
 export function LegalSettingsSheet() {
   const { role } = useMe()
   const canWrite = canMutateLegalSettings(role)
+  const queryClient = useQueryClient()
   const [tab, setTab] = useState<SettingsTab>('conditions')
+  const [teamEmail, setTeamEmail] = useState('')
 
   const conditionQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop', 'conditions', 'route-triage'],
@@ -32,10 +47,46 @@ export function LegalSettingsSheet() {
     enabled: tab === 'templates',
   })
 
+  const slaQuery = useQuery({
+    queryKey: ['admin-api', 'legal', 'settings', 'sla'],
+    queryFn: getLegalSlaSettings,
+    enabled: tab === 'deadlines',
+  })
+
+  const teamQuery = useQuery({
+    queryKey: ['admin-api', 'legal', 'team'],
+    queryFn: getLegalTeam,
+    enabled: tab === 'legal_team',
+  })
+
+  const slaMutation = useMutation({
+    mutationFn: patchLegalSlaSettings,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'legal', 'settings', 'sla'] })
+    },
+  })
+
+  const addTeamMutation = useMutation({
+    mutationFn: addLegalTeamMember,
+    onSuccess: () => {
+      setTeamEmail('')
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'legal', 'team'] })
+    },
+  })
+
+  const removeTeamMutation = useMutation({
+    mutationFn: removeLegalTeamMember,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'legal', 'team'] })
+    },
+  })
+
   const tabs: { id: SettingsTab; label: string }[] = [
     { id: 'conditions', label: 'Conditions' },
-    { id: 'slas', label: 'SLAs' },
-    { id: 'templates', label: 'Templates' },
+    { id: 'deadlines', label: 'Deadlines & SLAs' },
+    { id: 'templates', label: 'Email templates' },
+    { id: 'drop_schedule', label: 'DROP schedule' },
+    { id: 'legal_team', label: 'Legal team' },
   ]
 
   return (
@@ -82,37 +133,110 @@ export function LegalSettingsSheet() {
                 </code>
               </p>
             ) : null}
-            <Button asChild size="sm" variant="outline">
-              <Link to="/requests/conditions">
-                {canWrite ? 'Open Conditions editor' : 'View Conditions'}
-              </Link>
-            </Button>
+            <Link to="/requests/conditions" className="text-xs text-habeas-navy hover:underline">
+              Open full Conditions editor
+            </Link>
           </div>
         ) : null}
-        {tab === 'slas' ? (
-          <div className="space-y-3 text-sm text-ink-soft">
-            <p>
-              Breach clocks and waiting-on-review presets ship with journey monitors. Inbox rows
-              show overdue / due soon from the matching-review SLA window.
-            </p>
-            <Button asChild size="sm" variant="outline">
-              <Link to="/requests/slas">Open SLAs</Link>
-            </Button>
+        {tab === 'deadlines' ? (
+          <div className="space-y-3 text-sm">
+            {slaQuery.data ? (
+              <div className="grid gap-2 sm:grid-cols-2">
+                {(
+                  [
+                    ['data_owner_review_days', 'Data owner review (days)'],
+                    ['legal_pre_fulfillment_days', 'Legal / pre-fulfillment (days)'],
+                    ['fulfillment_days', 'Fulfillment (days)'],
+                    ['lifecycle_days', 'Overall lifecycle (days)'],
+                  ] as const
+                ).map(([key, label]) => (
+                  <label key={key} className="block text-xs text-ink-soft">
+                    {label}
+                    <input
+                      type="number"
+                      min={1}
+                      className="mt-1 w-full rounded border border-line bg-paper px-2 py-1 text-sm"
+                      defaultValue={slaQuery.data[key]}
+                      disabled={!canWrite}
+                      onBlur={(event) => {
+                        if (!canWrite) return
+                        const value = Number.parseInt(event.target.value, 10)
+                        if (!Number.isFinite(value)) return
+                        slaMutation.mutate({ [key]: value })
+                      }}
+                    />
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <p className="text-mute">Loading SLA settings…</p>
+            )}
+            <Link to="/requests/slas" className="text-xs text-habeas-navy hover:underline">
+              Open SLA monitor
+            </Link>
           </div>
         ) : null}
         {tab === 'templates' ? (
-          <div className="space-y-3 text-sm text-ink-soft">
+          <div className="space-y-2 text-sm text-ink-soft">
             {templatesQuery.isPending ? <p>Loading templates…</p> : null}
-            <ul className="space-y-2">
-              {(templatesQuery.data ?? []).map((template) => (
-                <li key={template.id} className="rounded border border-line px-3 py-2">
-                  <p className="font-medium text-ink">{template.slug}</p>
-                  <p className="text-xs text-mute">{template.subject}</p>
+            {(templatesQuery.data ?? []).map((template) => (
+              <p key={template.id}>
+                <span className="font-medium text-ink">{template.name}</span>
+                {template.subject ? ` — ${template.subject}` : ''}
+              </p>
+            ))}
+          </div>
+        ) : null}
+        {tab === 'drop_schedule' ? (
+          <div className="space-y-2 text-sm text-ink-soft">
+            <p>
+              Weekly California DROP batch upload — default Wednesday 00:00 America/Los_Angeles.
+              Configure cadence on the ops worker schedules surface (super_admin).
+            </p>
+          </div>
+        ) : null}
+        {tab === 'legal_team' ? (
+          <div className="space-y-3 text-sm">
+            <p className="text-xs text-ink-soft">
+              Members receive assignment-to-legal notifications and Inbox fan-out.
+            </p>
+            <ul className="space-y-1">
+              {(teamQuery.data ?? []).map((member) => (
+                <li key={member.email} className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-xs">{member.email}</span>
+                  {canWrite ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => removeTeamMutation.mutate(member.email)}
+                    >
+                      Remove
+                    </Button>
+                  ) : null}
                 </li>
               ))}
             </ul>
-            {!canWrite ? (
-              <p className="text-xs text-mute">Template editing is admin-only.</p>
+            {canWrite ? (
+              <form
+                className="flex gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  if (!teamEmail.trim()) return
+                  addTeamMutation.mutate(teamEmail.trim())
+                }}
+              >
+                <input
+                  type="email"
+                  className="flex-1 rounded border border-line bg-paper px-2 py-1 text-sm"
+                  placeholder="legal@example.com"
+                  value={teamEmail}
+                  onChange={(event) => setTeamEmail(event.target.value)}
+                />
+                <Button type="submit" size="sm">
+                  Add
+                </Button>
+              </form>
             ) : null}
           </div>
         ) : null}

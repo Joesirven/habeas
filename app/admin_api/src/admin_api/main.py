@@ -24,6 +24,9 @@ from admin_api.drop_pipeline import health_router as ops_health_router
 from admin_api.drop_pipeline import router as drop_pipeline_router
 from admin_api.fulfillment_ops import router as fulfillment_ops_router
 from admin_api.legal_portfolio import router as legal_portfolio_router
+from admin_api.legal_operators import router as legal_operators_router
+from admin_api.legal_sla import router as legal_sla_router
+from admin_api.legal_team import router as legal_team_router
 from admin_api.request_correspondence import router as request_correspondence_router
 from admin_api.runs import router as runs_router
 from admin_api.request_journey import router as request_journey_router
@@ -150,6 +153,9 @@ app.include_router(drop_pipeline_router)
 app.include_router(ops_health_router)
 app.include_router(fulfillment_ops_router)
 app.include_router(legal_portfolio_router)
+app.include_router(legal_sla_router)
+app.include_router(legal_team_router)
+app.include_router(legal_operators_router)
 app.include_router(request_correspondence_router)
 app.include_router(runs_router)
 app.include_router(request_journey_router)

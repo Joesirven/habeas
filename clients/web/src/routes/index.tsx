@@ -1,7 +1,18 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
+import { useState } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
+import {
+  DataOwnerQueues,
+  DateToolbar,
+  DeadlineRiskBand,
+  FulfillmentBatchList,
+  OpenRequestsHeatmap,
+  OperationsPulse,
+  PipelineFunnel,
+  type HomeWindow,
+} from '@/components/legal/home/LegalHomeModules'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { UploadMenu } from '@/components/UploadMenu'
@@ -10,11 +21,10 @@ import {
   getDropGlobalStats,
   getDropPipeline,
   getHealth,
-  getLegalNeedsAttention,
   getLegalPortfolio,
   getNeedsAttention,
-  type NeedsAttentionItemKind,
 } from '@/lib/api'
+import { stageLabel } from '@/lib/legalJourneyLabels'
 import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
 
 function OperatorDashboardHome() {
@@ -245,73 +255,20 @@ function OperatorDashboardHome() {
   )
 }
 
-const STAGE_LABELS: Record<string, string> = {
-  receive: 'Receive',
-  matching: 'Matching',
-  data_owner_review: 'Data owner review',
-  legal_review: 'Legal review',
-  fulfillment: 'Fulfillment',
-  delivery_notice: 'Delivery / notice',
-}
-
 function LegalHome() {
-  const attentionQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'legal'],
-    queryFn: () => getLegalNeedsAttention(1000),
-    refetchInterval: 10_000,
-    placeholderData: (previous) => previous,
-  })
+  const [homeWindow, setHomeWindow] = useState<HomeWindow>('30')
+  const [selectedBatch, setSelectedBatch] = useState<string | null>(null)
   const portfolioQuery = useQuery({
-    queryKey: ['admin-api', 'legal', 'home', 'portfolio'],
-    queryFn: getLegalPortfolio,
+    queryKey: ['admin-api', 'legal', 'home', 'portfolio', homeWindow, selectedBatch],
+    queryFn: () =>
+      getLegalPortfolio({
+        window_days: homeWindow,
+        batch_key: selectedBatch ?? undefined,
+      }),
     refetchInterval: 15_000,
     placeholderData: (previous) => previous,
   })
-  const items = attentionQuery.data?.items ?? []
   const portfolio = portfolioQuery.data
-  const triage = items.filter(
-    (item) => item.kind === 'triage' || item.assignment?.kind === 'triage',
-  ).length
-  const escalations = items.filter(
-    (item) => item.kind === 'escalations' || item.assignment?.kind === 'escalate',
-  ).length
-  const notice = items.filter(
-    (item) => item.kind === 'notice' || item.reason === 'notice.review',
-  ).length
-  const delivery = items.filter(
-    (item) =>
-      item.kind === 'delivery' ||
-      item.reason === 'access.delivery' ||
-      item.reason === 'delivery.confirm',
-  ).length
-
-  const cards: {
-    label: string
-    kind: NeedsAttentionItemKind
-    count: number
-    hint: string
-  }[] = [
-    { label: 'Triage', kind: 'triage', count: triage, hint: 'Condition holds' },
-    {
-      label: 'Escalations',
-      kind: 'escalations',
-      count: escalations,
-      hint: 'From data owners',
-    },
-    {
-      label: 'Notice',
-      kind: 'notice',
-      count: notice,
-      hint: 'DROP notice.review',
-    },
-    {
-      label: 'Delivery',
-      kind: 'delivery',
-      count: delivery,
-      hint:
-        delivery === 0 ? 'Access handoff (empty until packs land)' : 'Access handoff',
-    },
-  ]
 
   return (
     <section className="space-y-6">
@@ -322,18 +279,45 @@ function LegalHome() {
             Home
           </h2>
           <p className="mt-2 max-w-xl text-sm text-ink-soft">
-            Portfolio by source, request type, and pipeline stage. Clear Inbox work first.
+            Portfolio health and pipeline flow. Work queues show all open items.
           </p>
         </div>
         <UploadMenu />
       </header>
-      {portfolioQuery.isError ? (
-        <p className="text-sm text-red-700">
-          Could not load portfolio — retrying automatically.
-        </p>
+
+      {portfolio ? (
+        <div className="taste-panel-soft space-y-3 p-4">
+          <p className="text-[0.65rem] uppercase tracking-wide text-mute">Operations pulse</p>
+          <OperationsPulse pulse={portfolio.operations_pulse} />
+        </div>
       ) : null}
+
+      <DateToolbar value={homeWindow} onChange={setHomeWindow} />
+
+      {portfolioQuery.isError ? (
+        <p className="text-sm text-red-700">Could not load portfolio — retrying automatically.</p>
+      ) : null}
+
       {portfolio ? (
         <div className="space-y-4">
+          <div className="taste-panel-soft p-4">
+            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Fulfillment batches</p>
+            <div className="mt-3">
+              <FulfillmentBatchList
+                batches={portfolio.fulfillment_batches}
+                selectedKey={selectedBatch}
+                onSelect={setSelectedBatch}
+              />
+            </div>
+          </div>
+
+          <div className="taste-panel-soft p-4">
+            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Pipeline funnel</p>
+            <div className="mt-4">
+              <PipelineFunnel stages={portfolio.stage_reach_counts} />
+            </div>
+          </div>
+
           <div className="grid gap-3 sm:grid-cols-2">
             <Link
               to="/requests"
@@ -356,21 +340,23 @@ function LegalHome() {
               </p>
             </Link>
           </div>
+
           <div className="taste-panel-soft p-4">
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Access vs delete</p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {portfolio.type_counts.map((row) => (
-                <Link
-                  key={row.request_type}
-                  to="/requests"
-                  search={{ request_type: row.request_type }}
-                  className="taste-frost-chip text-[0.7rem] transition-colors hover:border-habeas-navy/40"
-                >
-                  {row.request_type}: {row.count}
-                </Link>
-              ))}
+            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Type by source</p>
+            <div className="mt-3">
+              <OpenRequestsHeatmap cells={portfolio.heatmap_cells} />
             </div>
           </div>
+
+          <div className="taste-panel-soft p-4">
+            <p className="text-[0.65rem] uppercase tracking-wide text-mute">
+              Deadlines & cycle time
+            </p>
+            <div className="mt-3">
+              <DeadlineRiskBand risk={portfolio.deadline_risk} />
+            </div>
+          </div>
+
           <div className="taste-panel-soft overflow-x-auto p-4">
             <p className="text-[0.65rem] uppercase tracking-wide text-mute">Coarse pipeline stages</p>
             <table className="mt-3 w-full min-w-[28rem] text-xs">
@@ -385,9 +371,7 @@ function LegalHome() {
               <tbody>
                 {portfolio.stage_matrix.map((row) => (
                   <tr key={row.stage} className="border-t border-line/60">
-                    <td className="py-2 pr-3 capitalize text-ink-soft">
-                      {STAGE_LABELS[row.stage] ?? row.stage.replaceAll('_', ' ')}
-                    </td>
+                    <td className="py-2 pr-3 text-ink-soft">{stageLabel(row.stage)}</td>
                     <td className="py-2 pr-3 tabular-nums">
                       <Link
                         to="/requests"
@@ -412,73 +396,52 @@ function LegalHome() {
               </tbody>
             </table>
           </div>
+
+          {portfolio.data_owner_queues.length > 0 ? (
+            <div className="taste-panel-soft p-4">
+              <p className="text-[0.65rem] uppercase tracking-wide text-mute">Data owner queues</p>
+              <div className="mt-2">
+                <DataOwnerQueues queues={portfolio.data_owner_queues} />
+              </div>
+            </div>
+          ) : null}
+
+          <div className="flex flex-wrap gap-2">
+            <Link
+              to="/requests/needs-attention"
+              search={{ filter: 'unassigned' }}
+              className="taste-btn text-xs"
+            >
+              Unassigned inbox
+            </Link>
+            <Link
+              to="/requests/needs-attention"
+              search={{ filter: 'assignment_to_legal' }}
+              className="taste-btn text-xs"
+            >
+              Assignment to legal
+            </Link>
+          </div>
+
           {portfolio.schedule_excerpt ? (
-            <div className="taste-panel-soft p-4 lg:col-span-2">
-              <p className="text-[0.65rem] uppercase tracking-wide text-mute">Next bulk intake</p>
+            <div className="taste-panel-soft p-4">
+              <p className="text-[0.65rem] uppercase tracking-wide text-mute">DROP schedule</p>
               <p className="mt-2 text-sm text-ink">
-                {portfolio.schedule_excerpt.label}
+                Weekly — {portfolio.schedule_excerpt.label}
                 {portfolio.schedule_excerpt.next_run_at
-                  ? ` — ${new Date(portfolio.schedule_excerpt.next_run_at).toLocaleString()}`
+                  ? ` · next ${new Date(portfolio.schedule_excerpt.next_run_at).toLocaleString()}`
                   : ''}
               </p>
             </div>
           ) : null}
-          {portfolio.warnings.length > 0 ? (
-            <div className="taste-panel-soft border-amber-200/60 p-4 lg:col-span-2">
-              <p className="text-[0.65rem] uppercase tracking-wide text-mute">Attention</p>
-              <ul className="mt-2 space-y-1 text-xs text-ink-soft">
-                {portfolio.warnings.map((w) => (
-                  <li key={w.code}>
-                    {w.message} ({w.count})
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-          {portfolio.data_owner_queues.length > 0 ? (
-            <div className="taste-panel-soft p-4 lg:col-span-2">
-              <p className="text-[0.65rem] uppercase tracking-wide text-mute">
-                Data owner queues
-              </p>
-              <ul className="mt-2 space-y-2 text-xs">
-                {portfolio.data_owner_queues.map((row) => (
-                  <li key={row.assignee_identity ?? 'unassigned'} className="text-ink-soft">
-                    <span className="font-mono text-ink">
-                      {row.assignee_identity ?? 'Unassigned'}
-                    </span>
-                    {' — '}
-                    {row.pending_count} pending
-                    {row.outreach_hint ? (
-                      <p className="mt-1 text-mute">{row.outreach_hint}</p>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
         </div>
+      ) : portfolioQuery.isPending ? (
+        <SkeletonLines lines={6} />
       ) : null}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {cards.map((card) => (
-          <Link
-            key={card.label}
-            to="/requests/needs-attention"
-            search={{ kind: card.kind }}
-            className="taste-panel-soft block space-y-1 p-4 transition-colors hover:border-habeas-navy/30"
-          >
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">{card.label}</p>
-            <p className="font-display text-3xl tabular-nums text-ink">
-              {attentionQuery.isPending && !attentionQuery.data ? '—' : card.count}
-            </p>
-            <p className="text-[0.7rem] text-ink-soft">{card.hint}</p>
-          </Link>
-        ))}
-      </div>
+
       <div className="flex flex-wrap gap-2">
         <Button asChild size="sm">
-          <Link to="/requests/needs-attention" search={{ kind: 'triage' }}>
-            Open Inbox
-          </Link>
+          <Link to="/requests/needs-attention">Open Inbox</Link>
         </Button>
         <Button asChild size="sm" variant="outline">
           <Link to="/requests">All requests</Link>

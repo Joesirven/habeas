@@ -1430,10 +1430,87 @@ export type LegalPortfolio = {
     next_run_at: string | null
     cadence: string | null
   } | null
+  fulfillment_batches: Array<{
+    batch_key: string
+    source_label: string
+    received_at: string
+    request_count: number
+  }>
+  stage_reach_counts: Array<{
+    stage: string
+    reached_count: number
+    dropped_count: number
+  }>
+  heatmap_cells: Array<{
+    intake_source: string
+    request_type: string
+    count: number
+  }>
+  deadline_risk: {
+    overdue: number
+    due_within_7_days: number
+    on_track: number
+    closed_ytd: number
+  }
+  operations_pulse: {
+    open_assigned_to_you: number
+    open_team_wide: number
+    sla_at_risk: number
+    overdue: number
+    median_age_hours: number
+  }
 }
 
-export function getLegalPortfolio() {
-  return fetchAdminApi<LegalPortfolio>('/legal/home/portfolio')
+export function getLegalPortfolio(params?: { window_days?: string; batch_key?: string }) {
+  const search = new URLSearchParams()
+  if (params?.window_days) search.set('window_days', params.window_days)
+  if (params?.batch_key) search.set('batch_key', params.batch_key)
+  const qs = search.toString()
+  return fetchAdminApi<LegalPortfolio>(`/legal/home/portfolio${qs ? `?${qs}` : ''}`)
+}
+
+export type LegalSlaSettings = {
+  data_owner_review_days: number
+  legal_pre_fulfillment_days: number
+  fulfillment_days: number
+  lifecycle_days: number
+  updated_at: string | null
+}
+
+export function getLegalSlaSettings() {
+  return fetchAdminApi<LegalSlaSettings>('/legal/settings/sla')
+}
+
+export function patchLegalSlaSettings(body: Partial<LegalSlaSettings>) {
+  return fetchAdminApi<LegalSlaSettings>('/legal/settings/sla', {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+export type LegalTeamMember = { email: string; active: boolean; added_at: string | null }
+
+export function getLegalTeam() {
+  return fetchAdminApi<LegalTeamMember[]>('/legal/team')
+}
+
+export function addLegalTeamMember(email: string) {
+  return fetchAdminApi<LegalTeamMember>('/legal/team', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+}
+
+export function removeLegalTeamMember(email: string) {
+  return fetchAdminApi<{ status: string }>(`/legal/team/${encodeURIComponent(email)}`, {
+    method: 'DELETE',
+  })
+}
+
+export type LegalOperator = { email: string; kind: string }
+
+export function getLegalOperators() {
+  return fetchAdminApi<LegalOperator[]>('/legal/operators')
 }
 
 export function postTriageBulkReject(body: {

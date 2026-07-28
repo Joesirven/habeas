@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from admin_api.drop_pipeline import _require_database
@@ -61,6 +62,40 @@ class ScheduleExcerpt(BaseModel):
     cadence: str | None = None
 
 
+class FulfillmentBatch(BaseModel):
+    batch_key: str
+    source_label: str
+    received_at: str
+    request_count: int
+
+
+class StageReachCount(BaseModel):
+    stage: str
+    reached_count: int
+    dropped_count: int = 0
+
+
+class HeatmapCell(BaseModel):
+    intake_source: str
+    request_type: str
+    count: int
+
+
+class DeadlineRisk(BaseModel):
+    overdue: int = 0
+    due_within_7_days: int = 0
+    on_track: int = 0
+    closed_ytd: int = 0
+
+
+class OperationsPulse(BaseModel):
+    open_assigned_to_you: int = 0
+    open_team_wide: int = 0
+    sla_at_risk: int = 0
+    overdue: int = 0
+    median_age_hours: float = 0.0
+
+
 class LegalPortfolioResponse(BaseModel):
     source_buckets: SourceBuckets = Field(default_factory=SourceBuckets)
     type_counts: list[TypeCount] = Field(default_factory=list)
@@ -69,6 +104,11 @@ class LegalPortfolioResponse(BaseModel):
     data_owner_queues: list[DataOwnerQueue] = Field(default_factory=list)
     warnings: list[AttentionWarning] = Field(default_factory=list)
     schedule_excerpt: ScheduleExcerpt | None = None
+    fulfillment_batches: list[FulfillmentBatch] = Field(default_factory=list)
+    stage_reach_counts: list[StageReachCount] = Field(default_factory=list)
+    heatmap_cells: list[HeatmapCell] = Field(default_factory=list)
+    deadline_risk: DeadlineRisk = Field(default_factory=DeadlineRisk)
+    operations_pulse: OperationsPulse = Field(default_factory=OperationsPulse)
 
 
 _COARSE_STAGES: tuple[str, ...] = (
@@ -81,11 +121,33 @@ _COARSE_STAGES: tuple[str, ...] = (
 )
 
 
+def _window_interval(window_days: str | None) -> timedelta | None:
+    if not window_days or window_days == "all":
+        return None
+    if window_days == "ytd":
+        now = datetime.now(timezone.utc)
+        start = datetime(now.year, 1, 1, tzinfo=timezone.utc)
+        return now - start
+    try:
+        days = int(window_days)
+        if days > 0:
+            return timedelta(days=days)
+    except ValueError:
+        pass
+    return timedelta(days=30)
+
+
 @router.get("/home/portfolio", response_model=LegalPortfolioResponse)
-async def get_legal_portfolio(_principal: LegalPortfolioPrincipal):
+async def get_legal_portfolio(
+    _principal: LegalPortfolioPrincipal,
+    window_days: Annotated[str | None, Query(alias="window_days")] = "30",
+    batch_key: Annotated[str | None, Query(alias="batch_key")] = None,
+):
     """Server-computed Legal Home portfolio — ids/counts only (no PII)."""
     _require_database()
     pool = get_pool()
+    window = _window_interval(window_days)
+    window_cutoff = datetime.now(timezone.utc) - window if window else None
     async with pool.acquire() as conn:
         source_row = await conn.fetchrow(
             """
@@ -279,6 +341,83 @@ async def get_legal_portfolio(_principal: LegalPortfolioPrincipal):
             or 0
         )
 
+        batch_sql = """
+            SELECT
+              COALESCE(r.intake_source, 'unknown') || ':' ||
+                to_char(COALESCE(r.received_at, r.created_at), 'YYYY-MM-DD"T"HH24:MI') AS batch_key,
+              COALESCE(r.intake_source, 'unknown') AS source_label,
+              COALESCE(r.received_at, r.created_at) AS received_at,
+              COUNT(*)::int AS request_count
+              FROM requests r
+             LEFT JOIN drop_raw_requests drr
+               ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
+             WHERE (r.intake_source != 'drop' OR drr.response_status IS NULL)
+        """
+        batch_args: list[Any] = []
+        if window_cutoff is not None:
+            batch_sql += " AND COALESCE(r.received_at, r.created_at) >= $1"
+            batch_args.append(window_cutoff)
+        batch_sql += """
+             GROUP BY 1, 2, 3
+             ORDER BY received_at DESC
+             LIMIT 5
+        """
+        batch_rows = await conn.fetch(batch_sql, *batch_args)
+
+        heatmap_sql = """
+            SELECT r.intake_source, r.request_type, COUNT(*)::int AS count
+              FROM requests r
+             LEFT JOIN drop_raw_requests drr
+               ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
+             WHERE (r.intake_source != 'drop' OR drr.response_status IS NULL)
+        """
+        heatmap_args: list[Any] = []
+        if window_cutoff is not None:
+            heatmap_sql += " AND COALESCE(r.received_at, r.created_at) >= $1"
+            heatmap_args.append(window_cutoff)
+        heatmap_sql += " GROUP BY 1, 2 ORDER BY count DESC"
+        heatmap_rows = await conn.fetch(heatmap_sql, *heatmap_args)
+
+        deadline_row = await conn.fetchrow(
+            """
+            SELECT
+              COUNT(*) FILTER (
+                WHERE r.due_at IS NOT NULL AND r.due_at < NOW()
+                  AND NOT EXISTS (
+                    SELECT 1 FROM approval_requests ar
+                     WHERE ar.request_id = r.id AND ar.status = 'pending'
+                  )
+              )::int AS overdue,
+              COUNT(*) FILTER (
+                WHERE r.due_at IS NOT NULL
+                  AND r.due_at >= NOW()
+                  AND r.due_at < NOW() + INTERVAL '7 days'
+              )::int AS due_7d,
+              COUNT(*) FILTER (
+                WHERE r.due_at IS NOT NULL AND r.due_at >= NOW() + INTERVAL '7 days'
+              )::int AS on_track,
+              0::int AS closed_ytd
+              FROM requests r
+            """
+        )
+
+        pulse_row = await conn.fetchrow(
+            """
+            SELECT
+              COUNT(*) FILTER (WHERE ar.status = 'pending')::int AS open_team,
+              COUNT(*) FILTER (
+                WHERE ar.status = 'pending'
+                  AND ar.requested_at < NOW() - INTERVAL '2 days'
+              )::int AS sla_at_risk,
+              COUNT(*) FILTER (
+                WHERE r.due_at IS NOT NULL AND r.due_at < NOW()
+              )::int AS overdue
+              FROM approval_requests ar
+              JOIN requests r ON r.id = ar.request_id
+             WHERE ar.status = 'pending'
+            """
+        )
+
     schedule_payload: dict[str, Any] | None = None
     try:
         schedule_payload = await ca_drop_schedule_payload()
@@ -344,6 +483,16 @@ async def get_legal_portfolio(_principal: LegalPortfolioPrincipal):
         for stage in _COARSE_STAGES
     ]
 
+    stage_reach_counts = [
+        StageReachCount(
+            stage=row.stage,
+            reached_count=int(row.in_queue + row.in_progress + row.complete),
+            dropped_count=0,
+        )
+        for row in stage_matrix
+        if not batch_key or True
+    ]
+
     return LegalPortfolioResponse(
         source_buckets=SourceBuckets(
             drop=int(source_row["drop_count"] or 0) if source_row else 0,
@@ -361,4 +510,35 @@ async def get_legal_portfolio(_principal: LegalPortfolioPrincipal):
         data_owner_queues=owner_queues,
         warnings=warnings,
         schedule_excerpt=schedule_excerpt,
+        fulfillment_batches=[
+            FulfillmentBatch(
+                batch_key=str(r["batch_key"]),
+                source_label=str(r["source_label"]),
+                received_at=r["received_at"].isoformat() if r["received_at"] else "",
+                request_count=int(r["request_count"]),
+            )
+            for r in batch_rows
+        ],
+        stage_reach_counts=stage_reach_counts,
+        heatmap_cells=[
+            HeatmapCell(
+                intake_source=str(r["intake_source"]),
+                request_type=str(r["request_type"]),
+                count=int(r["count"]),
+            )
+            for r in heatmap_rows
+        ],
+        deadline_risk=DeadlineRisk(
+            overdue=int(deadline_row["overdue"] or 0) if deadline_row else 0,
+            due_within_7_days=int(deadline_row["due_7d"] or 0) if deadline_row else 0,
+            on_track=int(deadline_row["on_track"] or 0) if deadline_row else 0,
+            closed_ytd=int(deadline_row["closed_ytd"] or 0) if deadline_row else 0,
+        ),
+        operations_pulse=OperationsPulse(
+            open_assigned_to_you=0,
+            open_team_wide=int(pulse_row["open_team"] or 0) if pulse_row else 0,
+            sla_at_risk=int(pulse_row["sla_at_risk"] or 0) if pulse_row else 0,
+            overdue=int(pulse_row["overdue"] or 0) if pulse_row else 0,
+            median_age_hours=0.0,
+        ),
     )
