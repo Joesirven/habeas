@@ -181,7 +181,7 @@ export function LegalSettingsSheet() {
             {templatesQuery.isPending ? <p>Loading templates…</p> : null}
             {(templatesQuery.data ?? []).map((template) => (
               <p key={template.id}>
-                <span className="font-medium text-ink">{template.name}</span>
+                <span className="font-medium text-ink">{template.slug}</span>
                 {template.subject ? ` — ${template.subject}` : ''}
               </p>
             ))}
