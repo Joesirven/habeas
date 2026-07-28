@@ -38,13 +38,17 @@ const SOURCE_OPTIONS: { value: '' | IntakeSource; label: string }[] = [
 
 const VIEW_MODE_SESSION_KEY = 'requests-view-mode'
 
-const REQUESTS_TABLE_CLASS =
-  'taste-table table-fixed min-w-[720px] w-full text-[0.7rem] leading-none [&_th]:!px-2 [&_th]:!py-px [&_th]:whitespace-nowrap [&_td]:!px-2 [&_td]:!py-px [&_td]:whitespace-nowrap'
+const FLAT_REQUESTS_TABLE_CLASS =
+  'taste-table table-fixed min-w-[720px] w-full text-xs leading-snug [&_th]:!px-2.5 [&_th]:!py-1.5 [&_th]:whitespace-nowrap [&_td]:!px-2.5 [&_td]:!py-1.5 [&_td]:whitespace-nowrap'
+
+const BATCH_REQUESTS_TABLE_CLASS =
+  'taste-table table-fixed min-w-[520px] w-full text-xs leading-snug [&_th]:!px-2.5 [&_th]:!py-1 [&_th]:whitespace-nowrap [&_td]:!px-2.5 [&_td]:!py-1 [&_td]:whitespace-nowrap'
 
 type ViewMode = 'flat' | 'batch'
 
 type RequestBatch = {
   batchKey: string
+  intakeSource: IntakeSource
   sourceLabel: string
   receivedAt: string
   requests: RequestRecord[]
@@ -81,9 +85,39 @@ function formatRequestReceivedAt(iso: string): string {
   })
 }
 
-function RequestsTableSkeleton({ rows = 8 }: { rows?: number }) {
+function batchReceivedWindow(receivedAt: string): { received_after: string; received_before: string } {
+  const minutePrefix = receivedAt.slice(0, 16)
+  const start = new Date(minutePrefix)
+  const end = new Date(start)
+  end.setMinutes(end.getMinutes() + 1)
+  end.setMilliseconds(-1)
+  return {
+    received_after: start.toISOString(),
+    received_before: end.toISOString(),
+  }
+}
+
+function summarizeBatchAttention(
+  requests: RequestRecord[],
+  attentionByRequestId: Map<string, string>,
+): { flagged: number; label: string } {
+  let flagged = 0
+  for (const request of requests) {
+    if (attentionByRequestId.has(request.id)) flagged++
+  }
+  if (flagged === 0) return { flagged: 0, label: '—' }
+  return { flagged, label: `${flagged} flagged` }
+}
+
+function RequestsTableSkeleton({
+  rows = 8,
+  tableClass = FLAT_REQUESTS_TABLE_CLASS,
+}: {
+  rows?: number
+  tableClass?: string
+}) {
   return (
-    <table className={REQUESTS_TABLE_CLASS} role="status" aria-label="Loading requests">
+    <table className={tableClass} role="status" aria-label="Loading requests">
       <thead>
         <tr>
           {Array.from({ length: 5 }, (_, index) => (
@@ -597,6 +631,7 @@ function groupRequestsByBatch(requests: RequestRecord[]): RequestBatch[] {
     }
     batches.set(batchKey, {
       batchKey,
+      intakeSource: request.intake_source,
       sourceLabel: SOURCE_LABELS[request.intake_source] ?? request.intake_source,
       receivedAt: request.received_at,
       requests: [request],
@@ -604,6 +639,64 @@ function groupRequestsByBatch(requests: RequestRecord[]): RequestBatch[] {
   }
   return [...batches.values()].sort(
     (left, right) => new Date(right.receivedAt).getTime() - new Date(left.receivedAt).getTime(),
+  )
+}
+
+function BatchRows({
+  batches,
+  attentionByRequestId,
+  onDrillIn,
+}: {
+  batches: RequestBatch[]
+  attentionByRequestId: Map<string, string>
+  onDrillIn: (batch: RequestBatch) => void
+}) {
+  return (
+    <>
+      {batches.map((batch) => {
+        const attention = summarizeBatchAttention(batch.requests, attentionByRequestId)
+        const batchTitle = `${batch.sourceLabel} · ${formatRequestReceivedAt(batch.receivedAt)}`
+        return (
+          <tr
+            key={batch.batchKey}
+            className="group h-8 cursor-pointer transition-colors hover:bg-panel/50"
+            onClick={() => onDrillIn(batch)}
+            title={`View ${batch.requests.length} requests by request`}
+          >
+            <td className="w-[8.5rem] tabular-nums text-ink-soft">
+              {formatRequestReceivedAt(batch.receivedAt)}
+            </td>
+            <td className="overflow-hidden">
+              <span className="block truncate font-medium text-ink" title={batchTitle}>
+                {batchTitle}
+              </span>
+            </td>
+            <td className="w-[6.5rem] overflow-hidden">
+              <span
+                className="inline-block max-w-full truncate taste-frost-chip px-1.5 py-0.5 text-[0.65rem]"
+                title={batch.sourceLabel}
+              >
+                {batch.sourceLabel}
+              </span>
+            </td>
+            <td className="w-12 tabular-nums text-ink-soft">{batch.requests.length}</td>
+            <td className="w-[9rem] overflow-hidden">
+              {attention.flagged > 0 ? (
+                <Badge
+                  variant="fail"
+                  className="inline-block max-w-full truncate whitespace-nowrap px-1.5 py-0.5 text-[0.65rem] normal-case tracking-normal"
+                  title={attention.label}
+                >
+                  {attention.label}
+                </Badge>
+              ) : (
+                <span className="text-ink-soft">—</span>
+              )}
+            </td>
+          </tr>
+        )
+      })}
+    </>
   )
 }
 
@@ -623,7 +716,7 @@ function RequestRows({
         return (
           <tr
             key={request.id}
-            className="group h-5 cursor-pointer transition-colors hover:bg-panel/50"
+            className="group h-8 cursor-pointer transition-colors hover:bg-panel/50"
             onClick={(event) => onOpen(request.id, event.currentTarget, request)}
           >
             <td className="w-[8.5rem] tabular-nums text-ink-soft">
@@ -639,13 +732,13 @@ function RequestRows({
             </td>
             <td className="w-[6.5rem] overflow-hidden">
               <span
-                className="inline-block max-w-full truncate taste-frost-chip px-1 py-px text-[0.6rem] leading-none"
+                className="inline-block max-w-full truncate taste-frost-chip px-1.5 py-0.5 text-[0.65rem]"
                 title={SOURCE_LABELS[request.intake_source] ?? request.intake_source}
               >
                 {SOURCE_LABELS[request.intake_source] ?? request.intake_source}
               </span>
             </td>
-            <td className="w-12 overflow-hidden font-mono">
+            <td className="w-12 overflow-hidden font-mono text-xs">
               <span className="block truncate" title={request.requestor_state ?? undefined}>
                 {request.requestor_state ?? '—'}
               </span>
@@ -654,7 +747,7 @@ function RequestRows({
               {attentionReason ? (
                 <Badge
                   variant="fail"
-                  className="inline-block max-w-full truncate whitespace-nowrap px-1 py-px text-[0.6rem] normal-case leading-none tracking-normal"
+                  className="inline-block max-w-full truncate whitespace-nowrap px-1.5 py-0.5 text-[0.65rem] normal-case tracking-normal"
                   title={attentionReason}
                 >
                   {attentionReason}
@@ -779,6 +872,21 @@ export function RequestsPage() {
     overlay.openOverlay(requestId, trigger, request)
   }
 
+  function drillIntoBatch(batch: RequestBatch) {
+    const window = batchReceivedWindow(batch.receivedAt)
+    setViewMode('flat')
+    void navigate({
+      to: '/requests',
+      search: {
+        source: batch.intakeSource,
+        source_bucket: undefined,
+        received_after: window.received_after,
+        received_before: window.received_before,
+      },
+      replace: true,
+    })
+  }
+
   const stats = statsQuery.data
   const activeFilterCount = [
     search.source,
@@ -794,13 +902,25 @@ export function RequestsPage() {
     search.received_before,
   ].filter(Boolean).length
 
-  const tableHeader = (
+  const flatTableHeader = (
     <thead>
       <tr>
         <th className="w-[8.5rem]">Received</th>
         <th>Request</th>
         <th className="w-[6.5rem]">Source</th>
         <th className="w-12">State</th>
+        <th className="w-[9rem]">Attention</th>
+      </tr>
+    </thead>
+  )
+
+  const batchTableHeader = (
+    <thead>
+      <tr>
+        <th className="w-[8.5rem]">Received</th>
+        <th>Batch</th>
+        <th className="w-[6.5rem]">Source</th>
+        <th className="w-12">Count</th>
         <th className="w-[9rem]">Attention</th>
       </tr>
     </thead>
@@ -830,35 +950,38 @@ export function RequestsPage() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <div
-            className="inline-flex rounded-md border border-line bg-paper p-0.5"
-            role="toolbar"
-            aria-label="List view mode"
-          >
-            <button
-              type="button"
-              className={cn(
-                'rounded px-2.5 py-1 text-[0.7rem] font-medium transition-colors',
-                viewMode === 'flat'
-                  ? 'bg-habeas-navy/8 text-habeas-navy'
-                  : 'text-ink-soft hover:text-ink',
-              )}
-              onClick={() => setViewMode('flat')}
+          <div className="flex items-center gap-2">
+            <span className="text-[0.65rem] font-medium text-mute">Group by</span>
+            <div
+              className="inline-flex rounded-md border border-line bg-paper p-0.5"
+              role="toolbar"
+              aria-label="Group by"
             >
-              Flat list
-            </button>
-            <button
-              type="button"
-              className={cn(
-                'rounded px-2.5 py-1 text-[0.7rem] font-medium transition-colors',
-                viewMode === 'batch'
-                  ? 'bg-habeas-navy/8 text-habeas-navy'
-                  : 'text-ink-soft hover:text-ink',
-              )}
-              onClick={() => setViewMode('batch')}
-            >
-              By batch
-            </button>
+              <button
+                type="button"
+                className={cn(
+                  'rounded px-2.5 py-1 text-[0.7rem] font-medium transition-colors',
+                  viewMode === 'flat'
+                    ? 'bg-habeas-navy/8 text-habeas-navy'
+                    : 'text-ink-soft hover:text-ink',
+                )}
+                onClick={() => setViewMode('flat')}
+              >
+                By request
+              </button>
+              <button
+                type="button"
+                className={cn(
+                  'rounded px-2.5 py-1 text-[0.7rem] font-medium transition-colors',
+                  viewMode === 'batch'
+                    ? 'bg-habeas-navy/8 text-habeas-navy'
+                    : 'text-ink-soft hover:text-ink',
+                )}
+                onClick={() => setViewMode('batch')}
+              >
+                By batch
+              </button>
+            </div>
           </div>
           <Link to="/requests/needs-attention" className="taste-btn text-xs">
             Inbox
@@ -914,7 +1037,7 @@ export function RequestsPage() {
       />
 
       <div className="taste-panel overflow-hidden">
-        {requestsQuery.isPending && <RequestsTableSkeleton />}
+        {requestsQuery.isPending && <RequestsTableSkeleton tableClass={FLAT_REQUESTS_TABLE_CLASS} />}
         {requestsQuery.isError && (
           <p className="p-4 text-xs text-red-700">
             Could not load requests. Is admin-api running with DATABASE_URL?
@@ -929,8 +1052,8 @@ export function RequestsPage() {
         )}
         {requestsQuery.isSuccess && filtered.length > 0 && viewMode === 'flat' && (
           <div className="overflow-x-auto">
-            <table className={REQUESTS_TABLE_CLASS}>
-              {tableHeader}
+            <table className={FLAT_REQUESTS_TABLE_CLASS}>
+              {flatTableHeader}
               <tbody>
                 <RequestRows
                   requests={filtered}
@@ -942,34 +1065,17 @@ export function RequestsPage() {
           </div>
         )}
         {requestsQuery.isSuccess && filtered.length > 0 && viewMode === 'batch' && (
-          <div className="divide-y divide-line/60">
-            {batches.map((batch) => (
-              <section key={batch.batchKey} className="p-1.5 sm:p-2">
-                <header className="mb-0.5 flex h-5 items-center justify-between gap-2 whitespace-nowrap">
-                  <h3
-                    className="min-w-0 truncate text-xs font-medium leading-none text-ink"
-                    title={`${batch.sourceLabel} · ${formatRequestReceivedAt(batch.receivedAt)}`}
-                  >
-                    {batch.sourceLabel} · {formatRequestReceivedAt(batch.receivedAt)}
-                  </h3>
-                  <span className="taste-frost-chip shrink-0 px-1.5 py-px tabular-nums text-[0.65rem] leading-none">
-                    {batch.requests.length}
-                  </span>
-                </header>
-                <div className="overflow-x-auto">
-                  <table className={REQUESTS_TABLE_CLASS}>
-                    {tableHeader}
-                    <tbody>
-                      <RequestRows
-                        requests={batch.requests}
-                        attentionByRequestId={attentionByRequestId}
-                        onOpen={openTriage}
-                      />
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-            ))}
+          <div className="overflow-x-auto">
+            <table className={BATCH_REQUESTS_TABLE_CLASS}>
+              {batchTableHeader}
+              <tbody>
+                <BatchRows
+                  batches={batches}
+                  attentionByRequestId={attentionByRequestId}
+                  onDrillIn={drillIntoBatch}
+                />
+              </tbody>
+            </table>
           </div>
         )}
       </div>
