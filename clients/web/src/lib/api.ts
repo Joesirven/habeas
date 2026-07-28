@@ -116,6 +116,43 @@ export function getHealth() {
   return fetchAdminApi<HealthPayload>('/readyz')
 }
 
+export function getRequest(requestId: string) {
+  return fetchAdminApi<RequestRecord>(`/requests/${encodeURIComponent(requestId)}`)
+}
+
+export type IdentityVerificationRecord = {
+  id: number
+  request_id: string
+  status: string
+  method: string | null
+  verified_by: string
+  notes: string | null
+  verified_at: string
+}
+
+export function getLatestIdentityVerification(requestId: string) {
+  return fetchAdminApi<IdentityVerificationRecord | null>(
+    `/requests/${encodeURIComponent(requestId)}/identity-verification/latest`,
+  )
+}
+
+export function postIdentityVerification(
+  requestId: string,
+  body: {
+    status?: 'verified' | 'failed' | 'pending'
+    method?: string
+    notes?: string
+  },
+) {
+  return fetchAdminApi<IdentityVerificationRecord>(
+    `/requests/${encodeURIComponent(requestId)}/identity-verification`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
 export function listRequests(options?: {
   intakeSource?: IntakeSource
   sourceBucket?: 'drop' | 'other'

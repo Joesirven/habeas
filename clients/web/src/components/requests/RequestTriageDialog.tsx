@@ -1,8 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 
-import { RunTimeline } from '@/components/ops/RunTimeline'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -19,15 +16,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { useMe } from '@/lib/auth'
 import {
   DROP_RESPONSE_STATUS_OPTIONS,
   getDropMatchingResultDetail,
-  getFulfillmentArtifact,
-  getRequestJourney,
-  patchAccessDeliveryStatus,
-  postDropMatchingResultDecline,
-  postDropMatchingResultPromote,
   suggestedDropResponseStatus,
   type DropResponseStatusCode,
   type FulfillmentArtifact,
@@ -93,12 +84,6 @@ export function DropResponseStatusPicker({
   )
 }
 
-const SOURCE_LABELS: Record<string, string> = {
-  webform: 'Gravity Forms',
-  drop: 'CA DROP',
-  csv: 'Authorized Agent',
-  manual: 'Manual',
-}
 
 export type RequestDetailDrawerProps = {
   requestId: string | null
@@ -114,7 +99,7 @@ function formatTimestamp(value: string | null | undefined): string {
   return new Date(value).toLocaleString()
 }
 
-function journeyStageToTimelineStep(stage: JourneyStage): RunTimelineStep {
+export function journeyStageToTimelineStep(stage: JourneyStage): RunTimelineStep {
   const statusMap: Record<JourneyStage['status'], RunTimelineStep['status']> = {
     not_started: 'pending',
     skipped: 'skipped',
@@ -132,7 +117,7 @@ function journeyStageToTimelineStep(stage: JourneyStage): RunTimelineStep {
   }
 }
 
-async function fetchMatchingDetailOptional(
+export async function fetchMatchingDetailOptional(
   requestId: string,
 ): Promise<MatchingResultDetail | null> {
   try {
@@ -1020,265 +1005,15 @@ export function MatchingReviewPanel({
   )
 }
 
-export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDetailDrawerProps) {
-  const queryClient = useQueryClient()
-  const { isAdmin, isSuperAdmin } = useMe()
-  const [actionError, setActionError] = useState<string | null>(null)
-  const [copyNote, setCopyNote] = useState<string | null>(null)
+import { RequestDetailOverlay } from '@/components/requests/RequestDetailOverlay'
 
-  const journeyQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'requests', requestId, 'journey'],
-    queryFn: () => getRequestJourney(requestId!),
-    enabled: open && Boolean(requestId),
-    refetchInterval: open ? 10_000 : false,
-    placeholderData: (previous) => previous,
-  })
-
-  const matchingQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'drop', 'matching-results', requestId],
-    queryFn: () => fetchMatchingDetailOptional(requestId!),
-    enabled: open && Boolean(requestId),
-    refetchInterval: open ? 10_000 : false,
-    placeholderData: (previous) => previous,
-  })
-
-  const artifactQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', requestId],
-    queryFn: () => getFulfillmentArtifact(requestId!),
-    enabled: open && Boolean(requestId),
-    refetchInterval: open ? 15_000 : false,
-    retry: false,
-  })
-
-  const deliveryMutation = useMutation({
-    mutationFn: (status: 'delivered' | 'failed' | 'recalled') =>
-      patchAccessDeliveryStatus(requestId!, { status }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({
-        queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', requestId],
-      })
-    },
-  })
-
-  const promoteMutation = useMutation({
-    mutationFn: (responseStatus: DropResponseStatusCode) =>
-      postDropMatchingResultPromote(requestId!, { response_status: responseStatus }),
-    onSuccess: async () => {
-      setActionError(null)
-      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
-    },
-    onError: (error) => {
-      setActionError(error instanceof Error ? error.message : 'Fulfill failed')
-    },
-  })
-
-  const declineMutation = useMutation({
-    mutationFn: () => postDropMatchingResultDecline(requestId!),
-    onSuccess: async () => {
-      setActionError(null)
-      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
-    },
-    onError: (error) => {
-      setActionError(error instanceof Error ? error.message : 'Decline failed')
-    },
-  })
-
-  const timelineSteps = journeyQuery.data?.stages.map(journeyStageToTimelineStep) ?? []
-  const matching = matchingQuery.data
-  const loading = journeyQuery.isPending && !journeyQuery.data
-  const actionPending = promoteMutation.isPending || declineMutation.isPending
-  const canReviewActions =
-    isAdmin &&
-    matching != null &&
-    matching.review_status === 'pending' &&
-    Boolean(matching.approval_id)
-
+export function RequestDetailDrawer({
+  requestId,
+  open,
+  onOpenChange,
+}: RequestDetailDrawerProps) {
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className={cn(
-          'inset-y-0 right-0 left-auto top-0 h-full max-h-none w-full max-w-xl translate-x-0 translate-y-0 gap-0 overflow-hidden rounded-none border-y-0 border-l border-r-0 p-0 shadow-xl sm:max-w-xl',
-        )}
-      >
-        <DialogHeader className="shrink-0 border-b border-line px-5 py-4 pr-12">
-          <p className="taste-micro">Request detail</p>
-          <DialogTitle className="font-mono text-base">{requestId ?? '—'}</DialogTitle>
-          <DialogDescription>
-            Full journey history and matching review — counts and ids only.
-          </DialogDescription>
-          {journeyQuery.isFetching && !journeyQuery.isPending ? (
-            <span className="taste-frost-chip w-fit text-[0.65rem]">Refreshing</span>
-          ) : null}
-        </DialogHeader>
-
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {loading ? (
-            <div className="px-5 py-8 text-xs text-ink-soft">Loading journey…</div>
-          ) : null}
-
-          {journeyQuery.isError ? (
-            <div className="px-5 py-6">
-              <p className="text-xs text-red-700">Could not load request journey.</p>
-              <p className="mt-1 font-mono text-[0.65rem] text-ink-soft">
-                {journeyQuery.error instanceof Error
-                  ? journeyQuery.error.message
-                  : 'Unknown error'}
-              </p>
-            </div>
-          ) : null}
-
-          {journeyQuery.data ? (
-            <div className="px-5 pb-8">
-              <dl className="flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-line py-3 text-xs">
-                <div className="flex items-baseline gap-2">
-                  <dt className="taste-micro">Source</dt>
-                  <dd>
-                    {SOURCE_LABELS[journeyQuery.data.intake_source] ??
-                      journeyQuery.data.intake_source}
-                  </dd>
-                </div>
-                <div className="flex items-baseline gap-2">
-                  <dt className="taste-micro">Received</dt>
-                  <dd className="tabular-nums">
-                    {formatTimestamp(journeyQuery.data.received_at)}
-                  </dd>
-                </div>
-                <div className="flex items-baseline gap-2">
-                  <dt className="taste-micro">Stage</dt>
-                  <dd>
-                    <span className="taste-frost-chip text-[0.65rem] capitalize">
-                      {(journeyQuery.data.current_stage ?? 'unknown').replaceAll('_', ' ')}
-                    </span>
-                  </dd>
-                </div>
-                {journeyQuery.data.blocker ? (
-                  <div className="flex min-w-0 items-baseline gap-2 sm:max-w-md">
-                    <dt className="taste-micro shrink-0">Blocker</dt>
-                    <dd className="truncate text-ink-soft">{journeyQuery.data.blocker}</dd>
-                  </div>
-                ) : null}
-                {journeyQuery.data.source_csv_filename ? (
-                  <div className="flex min-w-0 items-baseline gap-2 sm:max-w-md">
-                    <dt className="taste-micro shrink-0">Intake CSV</dt>
-                    <dd className="truncate font-mono text-[0.7rem] text-ink-soft">
-                      {journeyQuery.data.source_csv_filename}
-                    </dd>
-                  </div>
-                ) : null}
-                {journeyQuery.data.bulk_process_id != null ? (
-                  <div className="flex items-baseline gap-2">
-                    <dt className="taste-micro">Batch</dt>
-                    <dd>
-                      <Link
-                        to="/"
-                        search={{
-                          tab: 'history',
-                          process: journeyQuery.data.bulk_process_id,
-                        }}
-                        className="taste-link tabular-nums text-[0.7rem]"
-                        onClick={() => onOpenChange(false)}
-                      >
-                        process #{journeyQuery.data.bulk_process_id}
-                      </Link>
-                    </dd>
-                  </div>
-                ) : null}
-              </dl>
-
-              <Tabs defaultValue="history" className="mt-3">
-                <TabsList>
-                  <TabsTrigger value="history">History</TabsTrigger>
-                  <TabsTrigger value="matching">Matching</TabsTrigger>
-                  <TabsTrigger value="delivery">Delivery</TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="history">
-                  <div className="space-y-4">
-                    <div className="overflow-x-auto rounded-lg border border-line/80 bg-paper/40 p-3">
-                      <RunTimeline
-                        steps={timelineSteps}
-                        orientation="horizontal"
-                        emptyMessage="No journey stages recorded."
-                      />
-                    </div>
-                    <RunTimeline
-                      steps={timelineSteps}
-                      emptyMessage="No journey stages recorded."
-                    />
-                    <div className="flex flex-wrap gap-2 border-t border-line pt-4">
-                      <Link
-                        to="/requests/$requestId"
-                        params={{ requestId: journeyQuery.data.request_id }}
-                        className="taste-btn text-xs"
-                        onClick={() => onOpenChange(false)}
-                      >
-                        Open full page →
-                      </Link>
-                      {isSuperAdmin ? (
-                        <Link
-                          to="/ops/runs"
-                          search={{ request_id: journeyQuery.data.request_id }}
-                          className="taste-btn text-xs"
-                          onClick={() => onOpenChange(false)}
-                        >
-                          Runs for request →
-                        </Link>
-                      ) : null}
-                    </div>
-                  </div>
-                </TabsContent>
-
-                <TabsContent value="matching">
-                  <MatchingReviewPanel
-                    requestId={journeyQuery.data.request_id}
-                    matching={matching}
-                    isPending={matchingQuery.isPending}
-                    isError={matchingQuery.isError}
-                    canReviewActions={canReviewActions}
-                    actionPending={actionPending}
-                    actionError={actionError}
-                    onPromote={(responseStatus) =>
-                      promoteMutation.mutate(responseStatus)
-                    }
-                    onDecline={() => declineMutation.mutate()}
-                  />
-                </TabsContent>
-
-                <TabsContent value="delivery">
-                  <AccessHandoffPanel
-                    requestId={journeyQuery.data.request_id}
-                    artifact={artifactQuery.data}
-                    isPending={artifactQuery.isPending}
-                    isError={artifactQuery.isError}
-                    canMutate={Boolean(isSuperAdmin || isAdmin)}
-                    busy={deliveryMutation.isPending}
-                    onCopyUrl={() => {
-                      const url =
-                        artifactQuery.data?.shareable_url ??
-                        artifactQuery.data?.fulfillment_artifact_uri
-                      if (!url) return
-                      void navigator.clipboard.writeText(url).then(() => {
-                        setCopyNote('Copied URL')
-                        window.setTimeout(() => setCopyNote(null), 2000)
-                      })
-                    }}
-                    onSetStatus={(status) => deliveryMutation.mutate(status)}
-                  />
-                  {copyNote ? <p className="taste-micro text-mute">{copyNote}</p> : null}
-                  {deliveryMutation.isError ? (
-                    <p className="text-[0.65rem] text-red-700">
-                      {deliveryMutation.error instanceof Error
-                        ? deliveryMutation.error.message
-                        : 'Could not update delivery status'}
-                    </p>
-                  ) : null}
-                </TabsContent>
-              </Tabs>
-            </div>
-          ) : null}
-        </div>
-      </DialogContent>
-    </Dialog>
+    <RequestDetailOverlay requestId={requestId} open={open} onOpenChange={onOpenChange} />
   )
 }
 

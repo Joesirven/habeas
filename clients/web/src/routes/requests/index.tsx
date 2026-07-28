@@ -3,7 +3,10 @@ import { Link, useNavigate, useSearch } from '@tanstack/react-router'
 import { useEffect, useMemo, useState } from 'react'
 
 import { Skeleton } from '@/components/AppShell'
-import { RequestDetailDrawer } from '@/components/requests/RequestTriageDialog'
+import {
+  RequestDetailOverlay,
+  useRequestDetailOverlay,
+} from '@/components/requests/RequestDetailOverlay'
 import { UploadMenu } from '@/components/UploadMenu'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -32,7 +35,6 @@ const SOURCE_OPTIONS: { value: '' | IntakeSource; label: string }[] = [
   { value: 'manual', label: 'Manual' },
 ]
 
-const SEARCH_SESSION_KEY = 'requests-ephemeral-search'
 const VIEW_MODE_SESSION_KEY = 'requests-view-mode'
 
 type ViewMode = 'flat' | 'batch'
@@ -42,14 +44,6 @@ type RequestBatch = {
   sourceLabel: string
   receivedAt: string
   requests: RequestRecord[]
-}
-
-function readSessionSearch(): string {
-  try {
-    return sessionStorage.getItem(SEARCH_SESSION_KEY) ?? ''
-  } catch {
-    return ''
-  }
 }
 
 function readViewMode(): ViewMode {
@@ -154,6 +148,44 @@ function matchesFilters(
   return true
 }
 
+const POSTURE_LABELS: Record<NonNullable<RequestsSearch['posture']>, string> = {
+  in_queue: 'In queue',
+  in_progress: 'In progress',
+  complete: 'Complete',
+}
+
+function activeUrlFilterChips(search: RequestsSearch): { key: keyof RequestsSearch; label: string }[] {
+  const chips: { key: keyof RequestsSearch; label: string }[] = []
+  if (search.source) {
+    chips.push({ key: 'source', label: SOURCE_LABELS[search.source] ?? search.source })
+  }
+  if (search.source_bucket === 'drop') chips.push({ key: 'source_bucket', label: 'DROP only' })
+  if (search.source_bucket === 'other') chips.push({ key: 'source_bucket', label: 'Non-DROP' })
+  if (search.request_type) chips.push({ key: 'request_type', label: search.request_type })
+  if (search.stage) chips.push({ key: 'stage', label: `Stage: ${search.stage}` })
+  if (search.posture) {
+    chips.push({ key: 'posture', label: POSTURE_LABELS[search.posture] })
+  }
+  if (search.state) chips.push({ key: 'state', label: search.state })
+  if (search.attention === 'needs') chips.push({ key: 'attention', label: 'Needs attention' })
+  if (search.attention === 'clear') chips.push({ key: 'attention', label: 'No attention flag' })
+  if (search.raw === 'yes') chips.push({ key: 'raw', label: 'Has raw record' })
+  if (search.raw === 'no') chips.push({ key: 'raw', label: 'Missing raw record' })
+  if (search.received_after) {
+    chips.push({
+      key: 'received_after',
+      label: `After ${new Date(search.received_after).toLocaleString()}`,
+    })
+  }
+  if (search.received_before) {
+    chips.push({
+      key: 'received_before',
+      label: `Before ${new Date(search.received_before).toLocaleString()}`,
+    })
+  }
+  return chips
+}
+
 function groupRequestsByBatch(requests: RequestRecord[]): RequestBatch[] {
   const batches = new Map<string, RequestBatch>()
   for (const request of requests) {
@@ -182,7 +214,7 @@ function RequestRows({
 }: {
   requests: RequestRecord[]
   attentionByRequestId: Map<string, string>
-  onOpen: (requestId: string) => void
+  onOpen: (requestId: string, trigger?: HTMLElement | null, request?: RequestRecord) => void
 }) {
   return (
     <>
@@ -192,7 +224,7 @@ function RequestRows({
           <tr
             key={request.id}
             className="group cursor-pointer transition-colors hover:bg-panel/50"
-            onClick={() => onOpen(request.id)}
+            onClick={(event) => onOpen(request.id, event.currentTarget, request)}
           >
             <td className="whitespace-nowrap tabular-nums text-ink-soft">
               {new Date(request.received_at).toLocaleString()}
@@ -227,18 +259,9 @@ export function RequestsPage() {
   const search = useSearch({ from: '/requests' })
   const { role } = useMe()
   const legalAdmin = isLegalAdminPersona(role)
-  const [ephemeralSearch, setEphemeralSearch] = useState(readSessionSearch)
+  const [ephemeralSearch, setEphemeralSearch] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>(readViewMode)
-  const [dialogOpen, setDialogOpen] = useState(false)
-  const [dialogRequestId, setDialogRequestId] = useState<string | null>(null)
-
-  useEffect(() => {
-    try {
-      sessionStorage.setItem(SEARCH_SESSION_KEY, ephemeralSearch)
-    } catch {
-      // ignore storage failures
-    }
-  }, [ephemeralSearch])
+  const overlay = useRequestDetailOverlay()
 
   useEffect(() => {
     try {
@@ -335,10 +358,8 @@ export function RequestsPage() {
     void navigate({ to: '/requests', search: {}, replace: true })
   }
 
-  // TODO(U9): swap row-open to nearly full-screen RequestDetailOverlay — keep drawer until U9 lands.
-  function openTriage(requestId: string) {
-    setDialogRequestId(requestId)
-    setDialogOpen(true)
+  function openTriage(requestId: string, trigger?: HTMLElement | null, request?: RequestRecord) {
+    overlay.openOverlay(requestId, trigger, request)
   }
 
   const stats = statsQuery.data
@@ -354,6 +375,7 @@ export function RequestsPage() {
     search.received_after,
     search.received_before,
   ].filter(Boolean).length
+  const urlFilterChips = activeUrlFilterChips(search)
 
   const tableHeader = (
     <thead>
@@ -473,6 +495,24 @@ export function RequestsPage() {
             </button>
           ) : null}
         </div>
+        {urlFilterChips.length > 0 ? (
+          <div className="flex flex-wrap gap-1.5" role="list" aria-label="Active URL filters">
+            {urlFilterChips.map((chip) => (
+              <button
+                key={chip.key}
+                type="button"
+                role="listitem"
+                className="inline-flex items-center gap-1 rounded-md border border-habeas-navy/25 bg-habeas-navy/8 px-2 py-0.5 text-[0.65rem] font-medium text-habeas-navy transition-colors hover:border-habeas-navy/40"
+                onClick={() => patchSearch({ [chip.key]: undefined })}
+              >
+                {chip.label}
+                <span aria-hidden className="text-[0.6rem] opacity-70">
+                  ×
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : null}
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
           <label className="flex flex-col gap-1 text-[0.7rem] text-ink-soft">
             Source
@@ -640,10 +680,12 @@ export function RequestsPage() {
         )}
       </div>
 
-      <RequestDetailDrawer
-        requestId={dialogRequestId}
-        open={dialogOpen}
-        onOpenChange={setDialogOpen}
+      <RequestDetailOverlay
+        requestId={overlay.requestId}
+        open={overlay.open}
+        onOpenChange={overlay.onOpenChange}
+        returnFocusRef={overlay.returnFocusRef}
+        seedRequest={overlay.seedRequest}
       />
     </section>
   )
