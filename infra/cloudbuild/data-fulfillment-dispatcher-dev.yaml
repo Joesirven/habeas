@@ -4,6 +4,8 @@ substitutions:
   _SERVICE: data-fulfillment-dispatcher-dev
   _TAG: latest
   _CLOUDSQL_INSTANCE: example-gcp-project:us-east4:dpra-dev-temp
+  # 30-day object lifecycle: infra/gcs/privacy-fulfillment-lifecycle.json
+  _FULFILLMENT_GCS_BUCKET: privacy-fulfillment-dev
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -37,7 +39,7 @@ steps:
       - --platform=managed
       - --no-allow-unauthenticated
       - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
-      - --set-env-vars=SERVICE_NAME=data-fulfillment-dispatcher,WORKER_ID=data-fulfillment-dispatcher-dev,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL}
+      - --set-env-vars=SERVICE_NAME=data-fulfillment-dispatcher,WORKER_ID=data-fulfillment-dispatcher-dev,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},FULFILLMENT_GCS_BUCKET=${_FULFILLMENT_GCS_BUCKET}
 
 images:
   - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}

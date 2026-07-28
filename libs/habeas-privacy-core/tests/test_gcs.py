@@ -49,6 +49,20 @@ async def test_missing_object_raises_file_not_found():
         await read_object("fulfillment-bucket", "missing")
 
 
+def test_signed_url_ttl_clamped_to_v4_limit():
+    from habeas_privacy_core.adapters.gcs import signed_url_for_gcs_uri
+
+    # Google rejects V4 signed URLs beyond 7 days; 30-day retention comes from
+    # the bucket lifecycle rule, not the URL.
+    url = signed_url_for_gcs_uri("gs://b/bulk-run/p/request/r/f.txt", ttl_days=30)
+    assert url is not None
+    assert "ttl_days=7" in url
+
+    default_url = signed_url_for_gcs_uri("gs://b/bulk-run/p/request/r/f.txt")
+    assert default_url is not None
+    assert "ttl_days=7" in default_url
+
+
 @pytest.mark.asyncio
 async def test_custom_transport_failure_surfaces_without_body():
     async def boom(_bucket: str, _path: str, _data: bytes | None) -> bytes | None:

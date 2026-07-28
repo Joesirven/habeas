@@ -1,0 +1,27 @@
+name: access_export
+version: 1.0.0
+config-version: 2
+
+profile: access_export
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+
+clean-targets:
+  - target
+  - dbt_packages
+  - logs
+
+# mart_materialization: view (default, no raw-table copy) | table (clustered
+# (state, dwid) per KTD-13 so per-request export queries prune).
+models:
+  access_export:
+    staging:
+      +tags: [daily]
+      +materialized: view
+      +schema: access_export_stg
+    marts:
+      +tags: [daily]
+      +materialized: "{{ var('mart_materialization', 'view') }}"
+      +schema: access_export

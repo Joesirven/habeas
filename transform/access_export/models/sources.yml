@@ -1,0 +1,27 @@
+version: 2
+
+sources:
+  - name: person_db
+    database: example-gcp-project
+    schema: person_db
+    description: >
+      Habeas MDR mirrors in example-gcp-project. These are the privacy-install
+      mapped tables present today (2026-07-21 probe; see
+      docs/plans/2026-07-21-001-feat-fulfillment-access-suppression-plan.md).
+      CEE_* and analytics_cyclic/frozen/retired are pending source grants and
+      join this project as staging + marts once loaded.
+    tables:
+      - name: person
+        description: Person spine keyed (dwid, state); ~228 columns.
+      - name: vote_history
+        description: Per-dwid vote participation history.
+      - name: district
+        description: Per-dwid district assignments.
+      - name: phones
+        description: Cell/land phones keyed (dwid, state).
+      - name: ballots
+        description: Ballot records; multi-row per dwid.
+      - name: analytics_continuous
+        description: Thin continuous analytics scores per dwid.
+      - name: models
+        description: Model scores view (backed by hub; prefer hub columns once IAM lands).
