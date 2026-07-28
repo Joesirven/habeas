@@ -62,8 +62,10 @@ from habeas_privacy_core.workflow.approval import (
     assert_matching_promote_allowed_for_role,
     ensure_pending_matching_review,
     escalate_to_legal_with_fanout,
+    fetch_active_legal_team_emails,
     fetch_intake_route_triage_rule,
     has_assignment_to_legal,
+    is_legal_persona_for_promote_gate,
     is_matching_review_approved,
     version_intake_route_triage_rule,
 )
@@ -1668,6 +1670,8 @@ async def drop_promote(
     _actor: DropMutationActor,
     body: PromoteProxyBody | None = None,
 ):
+    # TODO(QC): apply_request_due_at_on_intake per promoted request — promote is a
+    # thin proxy to drop_ingestor; intake due_at belongs after ingest creates rows.
     url = f"{settings.drop_ingestor_url.rstrip('/')}/ingest/promote"
     payload = _model_dump_nonzero(body) if body is not None else {}
     return await proxy_post(url, json_body=payload)
@@ -2569,10 +2573,16 @@ async def drop_matching_result_promote(
     async with pool.acquire() as conn:
         try:
             actor_role = _role_for_actor_email(decided_by)
+            legal_team_emails = frozenset(await fetch_active_legal_team_emails(conn))
+            actor_is_legal = is_legal_persona_for_promote_gate(
+                actor_role=actor_role,
+                actor_email=decided_by,
+                legal_team_emails=legal_team_emails,
+            )
             legal_assignment = await has_assignment_to_legal(conn, request_id)
             matching_approved = await is_matching_review_approved(conn, request_id)
             assert_matching_promote_allowed_for_role(
-                actor_role=actor_role,
+                actor_is_legal=actor_is_legal,
                 has_legal_assignment=legal_assignment,
                 matching_already_approved=matching_approved,
             )

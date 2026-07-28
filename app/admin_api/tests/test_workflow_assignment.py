@@ -13,18 +13,18 @@ from fastapi.testclient import TestClient
 from admin_api import drop_pipeline, roles
 from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
-from habeas_privacy_core.auth.roles import ROLE_LEGAL
 from habeas_privacy_core.workflow.approval import (
     assert_matching_promote_allowed_for_role,
     escalate_to_legal_with_fanout,
     fetch_active_legal_team_emails,
+    is_legal_persona_for_promote_gate,
 )
 
 
 def test_assert_matching_promote_blocks_legal_without_assignment():
     with pytest.raises(ValueError, match="assignment to legal"):
         assert_matching_promote_allowed_for_role(
-            actor_role=ROLE_LEGAL,
+            actor_is_legal=True,
             has_legal_assignment=False,
             matching_already_approved=False,
         )
@@ -32,17 +32,41 @@ def test_assert_matching_promote_blocks_legal_without_assignment():
 
 def test_assert_matching_promote_allows_legal_with_assignment():
     assert_matching_promote_allowed_for_role(
-        actor_role=ROLE_LEGAL,
+        actor_is_legal=True,
         has_legal_assignment=True,
         matching_already_approved=False,
     )
 
 
+def test_assert_matching_promote_allows_legal_when_matching_already_approved():
+    assert_matching_promote_allowed_for_role(
+        actor_is_legal=True,
+        has_legal_assignment=False,
+        matching_already_approved=True,
+    )
+
+
 def test_assert_matching_promote_allows_admin_without_assignment():
     assert_matching_promote_allowed_for_role(
-        actor_role="admin",
+        actor_is_legal=False,
         has_legal_assignment=False,
         matching_already_approved=False,
+    )
+
+
+def test_is_legal_persona_for_promote_gate_team_member_not_on_allowlist():
+    assert is_legal_persona_for_promote_gate(
+        actor_role=None,
+        actor_email="intern@example.com",
+        legal_team_emails=frozenset({"intern@example.com"}),
+    )
+
+
+def test_is_legal_persona_for_promote_gate_admin_not_gated():
+    assert not is_legal_persona_for_promote_gate(
+        actor_role="admin",
+        actor_email="admin@example.com",
+        legal_team_emails=frozenset({"admin@example.com"}),
     )
 
 
@@ -63,6 +87,22 @@ async def test_fetch_active_legal_team_emails_env_fallback(monkeypatch: pytest.M
     monkeypatch.setenv("ADMIN_API_LEGALS", "legal1@example.com, legal2@example.com")
     emails = await fetch_active_legal_team_emails(conn)
     assert emails == ["legal1@example.com", "legal2@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_escalate_to_legal_with_fanout_raises_when_no_members(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+    monkeypatch.delenv("ADMIN_API_LEGALS", raising=False)
+
+    with pytest.raises(ValueError, match="no active legal team members"):
+        await escalate_to_legal_with_fanout(
+            conn,
+            request_id=str(uuid4()),
+            decided_by="owner@example.com",
+        )
 
 
 @pytest.mark.asyncio
@@ -205,6 +245,41 @@ def test_workflow_escalate_to_legal_fans_out_and_writes_comment(
     assert captured["comment"]["body"] == "Need legal review on multi-match"
 
 
+def test_matching_promote_blocks_legal_team_member_without_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    request_id = "00000000-0000-0000-0000-000000000003"
+    team_email = "team-only@example.com"
+
+    async def fake_has_assignment(conn: Any, rid: str) -> bool:
+        return False
+
+    async def fake_matching_approved(conn: Any, rid: str) -> bool:
+        return False
+
+    async def fake_legal_team(conn: Any) -> list[str]:
+        return [team_email]
+
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "has_assignment_to_legal", fake_has_assignment)
+    monkeypatch.setattr(drop_pipeline, "is_matching_review_approved", fake_matching_approved)
+    monkeypatch.setattr(drop_pipeline, "fetch_active_legal_team_emails", fake_legal_team)
+
+    client = TestClient(app)
+    response = client.post(
+        f"/ops/drop/matching-results/{request_id}/promote",
+        headers={IAP_EMAIL_HEADER: f"accounts.google.com:{team_email}"},
+        json={"decision_reason": "promote"},
+    )
+
+    assert response.status_code == 422
+    assert "assignment to legal" in response.json()["detail"]
+
+
 def test_matching_promote_blocks_legal_without_assignment(monkeypatch: pytest.MonkeyPatch):
     request_id = "00000000-0000-0000-0000-000000000002"
 
@@ -214,10 +289,14 @@ def test_matching_promote_blocks_legal_without_assignment(monkeypatch: pytest.Mo
     async def fake_matching_approved(conn: Any, rid: str) -> bool:
         return False
 
+    async def fake_legal_team(conn: Any) -> list[str]:
+        return []
+
     monkeypatch.setattr(roles.settings, "admin_api_legals", "legal@example.com")
     _fake_pool(monkeypatch)
     monkeypatch.setattr(drop_pipeline, "has_assignment_to_legal", fake_has_assignment)
     monkeypatch.setattr(drop_pipeline, "is_matching_review_approved", fake_matching_approved)
+    monkeypatch.setattr(drop_pipeline, "fetch_active_legal_team_emails", fake_legal_team)
 
     client = TestClient(app)
     response = client.post(

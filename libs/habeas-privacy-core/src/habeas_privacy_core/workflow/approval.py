@@ -789,20 +789,38 @@ async def has_assignment_to_legal(
     return row is not None
 
 
-def assert_matching_promote_allowed_for_role(
+def is_legal_persona_for_promote_gate(
     *,
     actor_role: str | None,
+    actor_email: str,
+    legal_team_emails: frozenset[str],
+) -> bool:
+    """True when actor should be treated as legal for matching.review promote (KTD11).
+
+    Active ``legal_team_members`` count as legal persona even when absent from
+    ``ADMIN_API_LEGALS``; admin/super_admin roles are never gated.
+    """
+    if actor_role in ("super_admin", "admin"):
+        return False
+    if actor_role == ROLE_LEGAL:
+        return True
+    return actor_email.strip().lower() in legal_team_emails
+
+
+def assert_matching_promote_allowed_for_role(
+    *,
+    actor_is_legal: bool,
     has_legal_assignment: bool,
     matching_already_approved: bool,
 ) -> None:
     """Block legal persona from matching.review → fulfillment shortcuts (KTD11).
 
-    Legal may review matching only after data owner assignment-to-legal; promote
-    approves matching.review and unlocks fulfillment — data-owner canonical path.
+    Legal may promote when data owner completed assignment-to-legal or when
+    data-owner matching review is already approved; otherwise promote is blocked.
     """
-    if actor_role != ROLE_LEGAL:
+    if not actor_is_legal:
         return
-    if has_legal_assignment:
+    if has_legal_assignment or matching_already_approved:
         return
     raise ValueError(
         "legal cannot promote matching.review to fulfillment without assignment to legal"
