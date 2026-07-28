@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils'
 export type OperationsPulseChip = 'assigned' | 'team' | 'at_risk' | 'overdue' | 'median_age'
 
 type OperationsPulseProps = {
-  pulse: LegalPortfolio['operations_pulse']
+  pulse: LegalPortfolio['operations_pulse'] | undefined
   onChipClick?: (chip: Exclude<OperationsPulseChip, 'median_age'>) => void
 }
 
@@ -49,6 +49,8 @@ const CHIP_DRILL: Record<
 
 export function OperationsPulse({ pulse, onChipClick }: OperationsPulseProps) {
   const [expanded, setExpanded] = useState<OperationsPulseChip | null>(null)
+
+  if (!pulse) return null
 
   const chips: Array<{
     id: OperationsPulseChip

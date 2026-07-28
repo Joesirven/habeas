@@ -150,10 +150,10 @@ export function LegalSettingsSheet() {
       <DialogTrigger asChild>
         <button
           type="button"
-          className="text-mute transition-colors hover:text-ink"
+          className="rounded border border-line bg-white px-1.5 py-0.5 text-[0.65rem] text-ink-soft outline-none transition-colors hover:border-habeas-navy/35 hover:text-ink focus-visible:border-habeas-navy/40"
           aria-label="Settings"
         >
-          ⚙
+          Settings
         </button>
       </DialogTrigger>
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">

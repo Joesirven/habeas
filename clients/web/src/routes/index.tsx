@@ -291,11 +291,19 @@ function LegalHome() {
 
   useEffect(() => {
     if (!portfolio || selectedBatch == null) return
-    const batchKeys = portfolio.fulfillment_batches.map((batch) => batch.batch_key)
+    const batchKeys = (portfolio.fulfillment_batches ?? []).map((batch) => batch.batch_key)
     if (!batchKeys.includes(selectedBatch)) {
       setSelectedBatch(null)
     }
   }, [portfolio, selectedBatch])
+
+  const hasVariationB =
+    portfolio != null &&
+    portfolio.operations_pulse != null &&
+    portfolio.fulfillment_batches != null &&
+    portfolio.stage_reach_counts != null &&
+    portfolio.heatmap_cells != null &&
+    portfolio.deadline_risk != null
 
   return (
     <section className="space-y-6">
@@ -312,7 +320,7 @@ function LegalHome() {
         <UploadMenu />
       </header>
 
-      {portfolio ? (
+      {portfolio?.operations_pulse ? (
         <div className="taste-panel-soft space-y-3 p-4">
           <p className="text-[0.65rem] uppercase tracking-wide text-mute">Operations pulse</p>
           <OperationsPulse pulse={portfolio.operations_pulse} />
@@ -325,13 +333,20 @@ function LegalHome() {
         <p className="text-sm text-red-700">Could not load portfolio — retrying automatically.</p>
       ) : null}
 
-      {portfolio ? (
+      {portfolio && !hasVariationB ? (
+        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950">
+          Legal Home modules need a newer admin-api (portfolio enrichment not deployed yet). Inbox
+          and All requests still work.
+        </p>
+      ) : null}
+
+      {portfolio && hasVariationB ? (
         <div className="space-y-4">
           <div className="taste-panel-soft p-4">
             <p className="text-[0.65rem] uppercase tracking-wide text-mute">Fulfillment batches</p>
             <div className="mt-3">
               <FulfillmentBatchList
-                batches={portfolio.fulfillment_batches}
+                batches={portfolio.fulfillment_batches!}
                 selectedKey={selectedBatch}
                 onSelect={setSelectedBatch}
               />
@@ -341,14 +356,14 @@ function LegalHome() {
           <div className="taste-panel-soft p-4">
             <p className="text-[0.65rem] uppercase tracking-wide text-mute">Pipeline funnel</p>
             <div className="mt-4">
-              <PipelineFunnel stages={portfolio.stage_reach_counts} />
+              <PipelineFunnel stages={portfolio.stage_reach_counts!} />
             </div>
           </div>
 
           <div className="taste-panel-soft p-4">
             <p className="text-[0.65rem] uppercase tracking-wide text-mute">Type by source</p>
             <div className="mt-3">
-              <OpenRequestsHeatmap cells={portfolio.heatmap_cells} />
+              <OpenRequestsHeatmap cells={portfolio.heatmap_cells!} />
             </div>
           </div>
 
@@ -357,7 +372,7 @@ function LegalHome() {
               Deadlines & cycle time
             </p>
             <div className="mt-3">
-              <DeadlineRiskBand risk={portfolio.deadline_risk} />
+              <DeadlineRiskBand risk={portfolio.deadline_risk!} />
             </div>
           </div>
 

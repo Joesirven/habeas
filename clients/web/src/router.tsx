@@ -20,6 +20,7 @@ import { ConditionsPage } from '@/routes/requests/conditions'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
 import { RequestsSlasPage } from '@/routes/requests/slas'
+import { DocsPage } from '@/routes/docs'
 import { HOME_WINDOWS, type HomeWindow } from '@/components/legal/home/DateToolbar'
 
 export const PIPELINE_TABS = [
@@ -524,6 +525,12 @@ const conditionsRoute = createRoute({
   component: ConditionsPage,
 })
 
+const docsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/docs',
+  component: DocsPage,
+})
+
 const requestDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests/$requestId',
@@ -668,6 +675,7 @@ const routeTree = rootRoute.addChildren([
   requestsSlasRoute,
   manualRequestRoute,
   conditionsRoute,
+  docsRoute,
   requestDetailRoute,
   matchingReviewRoute,
   opsDashboardRoute,

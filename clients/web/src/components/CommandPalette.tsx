@@ -86,6 +86,25 @@ function staticActions(
       onSelect: finish(() => inbox()),
     },
     {
+      id: 'action-docs',
+      group: 'actions',
+      label: 'Go to Docs',
+      onSelect: finish(() => navigate({ to: '/docs' })),
+    },
+    {
+      id: 'action-workers',
+      group: 'actions',
+      label: 'Go to Workers',
+      onSelect: finish(() => navigate({ to: '/ops/workers' })),
+    },
+    {
+      id: 'action-runs',
+      group: 'actions',
+      label: 'Go to Runs',
+      onSelect: finish(() => navigate({ to: '/ops/runs' })),
+    },
+
+    {
       id: 'action-inbox-unassigned',
       group: 'actions',
       label: 'Inbox · Unassigned',

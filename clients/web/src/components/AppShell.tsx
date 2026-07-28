@@ -2,6 +2,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useCallback, useState, type ReactNode } from 'react'
 
 import { CommandPalette, useCommandPaletteShortcut } from '@/components/CommandPalette'
+import { LegalSettingsSheet } from '@/components/LegalSettingsSheet'
 import { NavMenu } from '@/components/NavMenu'
 import {
   DropdownMenu,
@@ -55,7 +56,7 @@ function roleLabel(role: UserRole) {
 }
 
 function RoleStatusBanner() {
-  const { me, isError, error, isLoading, realRole } = useAuth()
+  const { me, isError, error, isLoading, realRole, role } = useAuth()
   const queryClient = useQueryClient()
   const [simulateRole, setSimulateRole] = useState<UserRole | null>(() => getStoredSimulateRole())
   if (isLoading) return null
@@ -73,6 +74,7 @@ function RoleStatusBanner() {
   if (!me) return null
 
   const showSimulator = realRole === 'super_admin'
+  const showSettings = canAccessLegalSurfaces(role)
   const selectValue = simulateRole ?? me.role
   const meRealRole = me.real_role
 
@@ -109,19 +111,26 @@ function RoleStatusBanner() {
               <DropdownMenuContent align="center" className="min-w-[9rem]">
                 <DropdownMenuLabel>Effective role</DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                {SIMULATE_ROLE_VALUES.map((role) => (
+                {SIMULATE_ROLE_VALUES.map((roleOption) => (
                   <DropdownMenuItem
-                    key={role}
-                    onSelect={() => applySimulateRole(role)}
+                    key={roleOption}
+                    onSelect={() => applySimulateRole(roleOption)}
                     className={
-                      role === selectValue ? 'bg-panel font-medium text-habeas-navy' : undefined
+                      roleOption === selectValue
+                        ? 'bg-panel font-medium text-habeas-navy'
+                        : undefined
                     }
                   >
-                    {roleLabel(role)}
+                    {roleLabel(roleOption)}
                   </DropdownMenuItem>
                 ))}
               </DropdownMenuContent>
             </DropdownMenu>
+          </div>
+        ) : null}
+        {showSettings ? (
+          <div className="inline-flex items-center">
+            <LegalSettingsSheet />
           </div>
         ) : null}
       </div>
