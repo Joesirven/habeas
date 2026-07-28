@@ -1409,6 +1409,8 @@ export async function getLegalNeedsAttention(limit = 1000): Promise<NeedsAttenti
   return { items, kind: 'all' }
 }
 
+export type LegalPortfolioWindowDays = '7' | '30' | '90' | 'ytd' | 'all'
+
 export type LegalPortfolio = {
   source_buckets: { drop: number; other: number }
   type_counts: Array<{ request_type: string; count: number }>
@@ -1461,7 +1463,10 @@ export type LegalPortfolio = {
   }
 }
 
-export function getLegalPortfolio(params?: { window_days?: string; batch_key?: string }) {
+export function getLegalPortfolio(params?: {
+  window_days?: LegalPortfolioWindowDays
+  batch_key?: string
+}) {
   const search = new URLSearchParams()
   if (params?.window_days) search.set('window_days', params.window_days)
   if (params?.batch_key) search.set('batch_key', params.batch_key)

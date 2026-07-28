@@ -6,6 +6,7 @@ import { SkeletonLines } from '@/components/AppShell'
 import { MatchingReviewPanel } from '@/components/requests/RequestTriageDialog'
 import { RunTimeline } from '@/components/ops/RunTimeline'
 import { useMe, isLegalAdminPersona } from '@/lib/auth'
+import { stageLabel } from '@/lib/legalJourneyLabels'
 import {
   getDropMatchingResultDetail,
   getRequestJourney,
@@ -49,7 +50,7 @@ function journeyStageToTimelineStep(stage: JourneyStage): RunTimelineStep {
   }
   return {
     key: stage.stage,
-    label: stage.label,
+    label: stageLabel(stage.stage),
     status: statusMap[stage.status],
     timestamp: stage.completed_at ?? stage.attempted_at,
     detail: stage.blocker ?? undefined,
@@ -79,9 +80,9 @@ function MetaStrip({
       </div>
       <div className="flex items-baseline gap-2">
         <dt className="taste-micro">Stage</dt>
-        <dd className="capitalize">
+        <dd>
           <span className="taste-frost-chip text-[0.65rem]">
-            {(currentStage ?? 'unknown').replaceAll('_', ' ')}
+            {stageLabel(currentStage ?? 'unknown')}
           </span>
         </dd>
       </div>
@@ -159,9 +160,7 @@ function OverviewPanel({
         </div>
         <div className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2">
           <dt className="taste-micro">Current stage</dt>
-          <dd className="mt-1 text-xs capitalize">
-            {(currentStage ?? 'unknown').replaceAll('_', ' ')}
-          </dd>
+          <dd className="mt-1 text-xs">{stageLabel(currentStage ?? 'unknown')}</dd>
         </div>
         {runningStage ? (
           <div className="rounded-lg border border-habeas-mid/30 bg-panel/60 px-3 py-2 sm:col-span-2">
