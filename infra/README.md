@@ -42,7 +42,24 @@ On-prem Cassandra (`restricted_person_id`) is reached over TLS with INF IP allow
 | Prod | `dpra-egress-prod` | `203.0.113.11` | attached |
 | Spare | `dpra-egress-spare` | `136.70.136.95` | reserved only — whitelist when attached |
 
-Credentials (Cassandra service account + SSL PEM) go in Secret Manager; never in git. Wire the `cassandra` Cloud Run service with Direct VPC egress to `dpra-run-dev` or `dpra-run-prod` when the worker ships.
+### Endpoint (INF — confirmed 2026-07-29)
+
+| Field | Value |
+|-------|-------|
+| Host | `broker-db.example.internal` (resolves to `38.100.36.166`) |
+| Port | `9042` (native CQL) |
+| TLS | Required (`SSL_CERTFILE` / verify with INF PEM, e.g. wildcard CA) |
+| Cluster | `PERSON_DB_PROD_CLUSTER` |
+| Server | Cassandra `3.11.4` · CQL `3.4.4` · native protocol v4 |
+| Auth | Username + password (INF service account — Secret Manager only) |
+
+Smoke-test shape (do **not** put passwords on the CLI in shared history; use `~/.cassandra/cqlshrc` or env from Secret Manager):
+
+```bash
+SSL_CERTFILE=/path/to/inf-ca.pem cqlsh --ssl broker-db.example.internal -u <service-account>
+```
+
+Credentials (Cassandra service account + SSL PEM) go in Secret Manager; never in git. Wire the `cassandra` Cloud Run service with Direct VPC egress to `dpra-run-dev` or `dpra-run-prod` when the worker ships. Driver must target Cassandra 3.11-compatible protocol (avoid assuming 5.x-only features).
 
 ```bash
 # Inspect
