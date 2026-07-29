@@ -13,6 +13,7 @@ from drop_notice_dispatcher.batch import (
     build_id_status_csv,
     connector_amend_body,
     connector_upload_body,
+    find_amend_rows,
     find_ready_rows,
     group_batches,
     is_notice_review_approved,
@@ -59,6 +60,47 @@ async def test_t10_1_find_ready_rows_requires_notice_review():
     assert "response_status IS NOT NULL" in sql
     assert "drop_response_submission_ids" in sql
     assert "submission_type = 'upload'" in sql
+
+
+@pytest.mark.asyncio
+async def test_find_ready_rows_requires_successful_fulfillment():
+    """U2 · KTD7: a set response_status alone must not open the upload.
+
+    Statuses 3 and 4 need a suppression attempt that succeeded with a file;
+    status 5 is eligible on the no-op completion, which writes no file.
+    """
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    await find_ready_rows(conn, limit=10)
+
+    sql = conn.fetch.await_args.args[0]
+    assert "data_fulfillment_attempts" in sql
+    assert "dfa.step = 'suppression'" in sql
+    assert "dfa.status = 'success'" in sql
+    assert "drr.response_status = 5" in sql
+    assert "dfa.gcs_uri IS NOT NULL" in sql
+
+
+@pytest.mark.asyncio
+async def test_find_amend_rows_requires_successful_fulfillment():
+    """U2 · KTD7: amend path must not re-open the fulfillment gate hole.
+
+    A post-upload disposition edit changing ``response_status`` must not be
+    amend-uploaded to CPPA without the same fresh successful suppression
+    proof required on the initial upload path.
+    """
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    await find_amend_rows(conn, limit=10)
+
+    sql = conn.fetch.await_args.args[0]
+    assert "data_fulfillment_attempts" in sql
+    assert "dfa.step = 'suppression'" in sql
+    assert "dfa.status = 'success'" in sql
+    assert "drr.response_status = 5" in sql
+    assert "dfa.gcs_uri IS NOT NULL" in sql
 
 
 @pytest.mark.asyncio

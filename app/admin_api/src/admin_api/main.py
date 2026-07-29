@@ -22,6 +22,7 @@ from admin_api.approvals import (
 )
 from admin_api.drop_pipeline import health_router as ops_health_router
 from admin_api.drop_pipeline import router as drop_pipeline_router
+from admin_api.fulfillment_kickoff import router as fulfillment_kickoff_router
 from admin_api.fulfillment_ops import router as fulfillment_ops_router
 from admin_api.legal_portfolio import router as legal_portfolio_router
 from admin_api.legal_operators import router as legal_operators_router
@@ -153,6 +154,7 @@ app.add_middleware(AuditMiddleware)
 app.include_router(drop_pipeline_router)
 app.include_router(ops_health_router)
 app.include_router(fulfillment_ops_router)
+app.include_router(fulfillment_kickoff_router)
 app.include_router(legal_portfolio_router)
 app.include_router(legal_sla_router)
 app.include_router(legal_team_router)

@@ -1,13 +1,22 @@
-"""Fulfill approved matches: DROP suppression + access reproduction.
+"""Fulfill kicked-off verticals: DROP suppression + access reproduction.
+
+Readiness is a hard gate (U2 · KTD7): a data-owner ``matching.review`` approval
+is only a prerequisite queue signal. Work starts for a vertical when that
+vertical has a disposition (status 3 / 4 / 5) **and** an approved Legal
+``fulfillment.kickoff``. The disposition is the source of record for the status
+and the dwid selection; ``drop_raw_requests.response_status`` is kept in sync as
+the DROP upload field.
 
 No Tier-C suppression HTTP. CPPA codes: 2 Exempted, 3 Deleted, 4 Opted out, 5 Not found.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
@@ -17,6 +26,7 @@ from habeas_privacy_core.queue.constants import (
     DATA_FULFILLMENT_STEP_SUPPRESSION,
 )
 from habeas_privacy_core.workflow.approval import (
+    FULFILLMENT_KICKOFF_ACTION,
     ensure_pending_notice_review,
     is_matching_review_approved,
 )
@@ -44,8 +54,18 @@ RESPONSE_STATUS_DELETED = 3
 RESPONSE_STATUS_OPTED_OUT = 4
 RESPONSE_STATUS_NOT_FOUND = 5
 
+# 3 / 4 produce an artifact; 5 (Not found) completes as a no-op so Notice can
+# open without a suppression file or access pack (KD9).
+ARTIFACT_STATUSES = frozenset({RESPONSE_STATUS_DELETED, RESPONSE_STATUS_OPTED_OUT})
+
 SUPPRESSION_TYPES = frozenset({"delete", "opt_out"})
 ACCESS_TYPES = frozenset({"access"})
+
+# Live vertical today is the CA DROP hash index; coming-soon verticals never get
+# a disposition row, so they can never be kicked off (KTD3).
+VERTICAL_DATA = "data"
+
+OPEN_ATTEMPT_STATUSES = ("pending", "claimed", "in_flight")
 
 
 class DbConnection(Protocol):
@@ -109,19 +129,39 @@ async def find_requests_ready_to_fulfill(
     conn: DbConnection,
     *,
     limit: int = 100,
+    vertical: str = VERTICAL_DATA,
 ) -> list[str]:
-    """Requests with matching results + approved matching.review ready to fulfill.
+    """Requests whose live vertical is disposed **and** kicked off by Legal.
 
-    DROP rows require unset response_status. Access (non-DROP or request_type
-    access) is ready when no successful reproduction attempt exists yet.
+    Matching review stays a prerequisite (it is the data-owner queue signal),
+    but it never makes a request ready on its own (R11). ``response_status`` is
+    no longer part of readiness — the disposition row is the source of record,
+    and it is written before the DROP column is synced.
+
+    Idempotency is measured from the newest kickoff decision: an open attempt
+    blocks re-enqueue, and a success from a superseded kickoff (reopen path) no
+    longer blocks the rework.
     """
     rows = await conn.fetch(
         """
+        WITH kickoff AS (
+            SELECT ar.request_id,
+                   MAX(ar.decided_at) AS decided_at
+              FROM approval_requests ar
+             WHERE ar.action_type = $3
+               AND ar.status = 'approved'
+               AND ar.decided_at IS NOT NULL
+               AND ar.context_jsonb->>'vertical' = $2
+             GROUP BY ar.request_id
+        )
         SELECT r.id::text AS id
           FROM requests r
-          LEFT JOIN drop_raw_requests drr
-            ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-         WHERE EXISTS (
+          JOIN kickoff k ON k.request_id = r.id
+          JOIN request_vertical_dispositions rvd
+            ON rvd.request_id = r.id AND rvd.vertical = $2
+         WHERE r.closed_at IS NULL
+           AND rvd.status IN (3, 4, 5)
+           AND EXISTS (
                  SELECT 1
                    FROM matching_results mr
                   WHERE mr.request_id = r.id
@@ -141,9 +181,20 @@ async def find_requests_ready_to_fulfill(
                )
            AND (
                  (
-                   r.intake_source = 'drop'
-                   AND COALESCE(r.request_type, 'delete') IN ('delete', 'opt_out')
-                   AND drr.response_status IS NULL
+                   COALESCE(r.request_type, 'delete') IN ('delete', 'opt_out')
+                   AND NOT EXISTS (
+                         SELECT 1
+                           FROM data_fulfillment_attempts dfa
+                          WHERE dfa.request_id = r.id
+                            AND dfa.step = 'suppression'
+                            AND (
+                                  dfa.status IN ('pending', 'claimed', 'in_flight')
+                                  OR (
+                                       dfa.status = 'success'
+                                       AND dfa.completed_at >= k.decided_at
+                                     )
+                                )
+                       )
                  )
                  OR (
                    r.request_type = 'access'
@@ -152,7 +203,13 @@ async def find_requests_ready_to_fulfill(
                            FROM data_fulfillment_attempts dfa
                           WHERE dfa.request_id = r.id
                             AND dfa.step = 'reproduction'
-                            AND dfa.status = 'success'
+                            AND (
+                                  dfa.status IN ('pending', 'claimed', 'in_flight')
+                                  OR (
+                                       dfa.status = 'success'
+                                       AND dfa.completed_at >= k.decided_at
+                                     )
+                                )
                        )
                  )
                )
@@ -160,8 +217,106 @@ async def find_requests_ready_to_fulfill(
          LIMIT $1
         """,
         limit,
+        vertical,
+        FULFILLMENT_KICKOFF_ACTION,
     )
     return [str(row["id"]) for row in rows]
+
+
+@dataclass(frozen=True)
+class VerticalGate:
+    """Disposition + kickoff state the dispatcher must see before starting work."""
+
+    vertical: str
+    status: int
+    selected_dwids: list[str]
+    kickoff_decided_at: datetime | None
+
+    @property
+    def kicked_off(self) -> bool:
+        return self.kickoff_decided_at is not None
+
+    @property
+    def needs_artifact(self) -> bool:
+        return self.status in ARTIFACT_STATUSES
+
+
+def _parse_selected_dwids(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw]
+
+
+async def _load_vertical_gate(
+    conn: DbConnection,
+    request_id: str,
+    *,
+    vertical: str = VERTICAL_DATA,
+) -> VerticalGate | None:
+    """Disposition and newest kickoff decision for one vertical, or None."""
+    row = await conn.fetchrow(
+        """
+        SELECT rvd.status,
+               rvd.selected_dwids,
+               (
+                 SELECT MAX(ar.decided_at)
+                   FROM approval_requests ar
+                  WHERE ar.request_id = rvd.request_id
+                    AND ar.action_type = $3
+                    AND ar.status = 'approved'
+                    AND ar.context_jsonb->>'vertical' = $2
+               ) AS kickoff_decided_at
+          FROM request_vertical_dispositions rvd
+         WHERE rvd.request_id = $1
+           AND rvd.vertical = $2
+        """,
+        UUID(request_id),
+        vertical,
+        FULFILLMENT_KICKOFF_ACTION,
+    )
+    if row is None:
+        return None
+    return VerticalGate(
+        vertical=vertical,
+        status=int(row["status"]),
+        selected_dwids=_parse_selected_dwids(row["selected_dwids"]),
+        kickoff_decided_at=row["kickoff_decided_at"],
+    )
+
+
+async def _has_blocking_attempt(
+    conn: DbConnection,
+    request_id: str,
+    *,
+    step: str,
+    since: datetime | None,
+) -> bool:
+    """True when an attempt is open, or already succeeded under this kickoff."""
+    row = await conn.fetchval(
+        """
+        SELECT 1
+          FROM data_fulfillment_attempts
+         WHERE request_id = $1
+           AND step = $2
+           AND (
+                 status = ANY($4::text[])
+                 OR (
+                      status = 'success'
+                      AND ($3::timestamptz IS NULL OR completed_at >= $3)
+                    )
+               )
+         LIMIT 1
+        """,
+        UUID(request_id),
+        step,
+        since,
+        list(OPEN_ATTEMPT_STATUSES),
+    )
+    return row is not None
 
 
 async def _latest_match(
@@ -221,20 +376,16 @@ async def _resolve_bulk_process_id(conn: DbConnection) -> str:
     return str(row)
 
 
-def response_status_for_match_count(match_count: int) -> int:
-    """Map match_count → CPPA DROP response status."""
-    if match_count <= 0:
-        return RESPONSE_STATUS_NOT_FOUND
-    if match_count == 1:
-        return RESPONSE_STATUS_DELETED
-    return RESPONSE_STATUS_OPTED_OUT
-
-
-async def _set_response_status(
+async def _sync_response_status(
     conn: DbConnection,
     request_id: str,
     response_status: int,
 ) -> bool:
+    """Mirror the disposition status onto the DROP upload column.
+
+    The disposition write already syncs this column, so a no-op update is the
+    normal case and must not fail the attempt.
+    """
     result = await conn.execute(
         """
         UPDATE drop_raw_requests AS drr
@@ -243,7 +394,7 @@ async def _set_response_status(
          WHERE r.id = $1
            AND r.intake_source = 'drop'
            AND r.raw_record_id = drr.id
-           AND drr.response_status IS NULL
+           AND drr.response_status IS DISTINCT FROM $2
         """,
         UUID(request_id),
         response_status,
@@ -251,12 +402,16 @@ async def _set_response_status(
     return result.endswith("1") if isinstance(result, str) else bool(result)
 
 
-async def _default_dwids(
+async def _resolve_dwids(
     *,
+    selected_dwids: list[str],
     match_count: int,
     consumer_id: str | None,
     resolver: DwidResolver | None,
 ) -> list[str]:
+    """Disposition selection wins; matching results are a fallback only."""
+    if selected_dwids:
+        return list(selected_dwids)
     if match_count <= 0:
         return []
     if match_count == 1 and consumer_id:
@@ -308,6 +463,7 @@ async def _fulfill_suppression(
     conn: DbConnection,
     request_id: str,
     *,
+    gate: VerticalGate,
     matched: bool,
     match_count: int,
     matching_result_id: int | None,
@@ -316,7 +472,8 @@ async def _fulfill_suppression(
     attempt_id: int | None = None,
     claim_by_id: bool = True,
 ) -> FulfillItemResult:
-    response_status = response_status_for_match_count(match_count)
+    """Write the suppression file for status 3 / 4, or complete 5 as a no-op."""
+    response_status = gate.status
     process_id = await _resolve_bulk_process_id(conn)
 
     if attempt_id is None:
@@ -350,9 +507,10 @@ async def _fulfill_suppression(
         "match_count": match_count,
         "dwid_count": 0,
         "process_id": process_id,
+        "disposition_status": gate.status,
     }
 
-    if match_count > 0:
+    if gate.needs_artifact:
         if not deps.gcs_bucket:
             await mark_attempt_error(
                 conn,
@@ -371,7 +529,8 @@ async def _fulfill_suppression(
                 request_type="delete",
             )
 
-        dwids = await _default_dwids(
+        dwids = await _resolve_dwids(
+            selected_dwids=gate.selected_dwids,
             match_count=match_count,
             consumer_id=consumer_id,
             resolver=deps.dwid_resolver,
@@ -428,27 +587,10 @@ async def _fulfill_suppression(
                 request_type="delete",
             )
     else:
-        audit["reason"] = "not_found"
+        # Status 5 (Not found) — no suppression file, completed so Notice opens.
+        audit["reason"] = "not_found_no_op"
 
-    updated = await _set_response_status(conn, request_id, response_status)
-    if not updated:
-        await mark_attempt_error(
-            conn,
-            attempt_id,
-            status="abandoned",
-            error_code="status_not_set",
-            error_message="response_status_already_set_or_not_drop",
-            audit_payload=audit,
-        )
-        return FulfillItemResult(
-            request_id=request_id,
-            outcome="skipped",
-            matched=matched,
-            match_count=match_count,
-            response_status=response_status,
-            reason="response_status_already_set_or_not_drop",
-            request_type="delete",
-        )
+    await _sync_response_status(conn, request_id, response_status)
 
     await mark_attempt_success(
         conn,
@@ -465,7 +607,7 @@ async def _fulfill_suppression(
         match_count=match_count,
         response_status=response_status,
         gcs_uri=gcs_uri,
-        reason="not_found" if match_count <= 0 else None,
+        reason=None if gate.needs_artifact else "not_found_no_op",
         request_type="delete",
     )
 
@@ -474,6 +616,7 @@ async def _fulfill_access(
     conn: DbConnection,
     request_id: str,
     *,
+    gate: VerticalGate,
     matched: bool,
     match_count: int,
     matching_result_id: int | None,
@@ -483,6 +626,7 @@ async def _fulfill_access(
     attempt_id: int | None = None,
     claim_by_id: bool = True,
 ) -> FulfillItemResult:
+    """Export the access pack for status 3 / 4, or complete 5 as a no-op."""
     process_id = await _resolve_bulk_process_id(conn)
     if process_id == "unknown":
         process_id = f"manual/{request_id}"
@@ -513,7 +657,28 @@ async def _fulfill_access(
             request_type="access",
         )
 
-    dwids = await _default_dwids(
+    if not gate.needs_artifact:
+        # Status 5 (Not found) — nothing to reproduce; complete so Notice opens.
+        await mark_attempt_success(
+            conn,
+            attempt_id,
+            audit_payload={
+                "disposition_status": gate.status,
+                "dwid_count": 0,
+                "reason": "not_found_no_op",
+            },
+        )
+        return FulfillItemResult(
+            request_id=request_id,
+            outcome="fulfilled",
+            matched=matched,
+            match_count=match_count,
+            reason="not_found_no_op",
+            request_type="access",
+        )
+
+    dwids = await _resolve_dwids(
+        selected_dwids=gate.selected_dwids,
         match_count=match_count,
         consumer_id=consumer_id,
         resolver=deps.dwid_resolver,
@@ -643,7 +808,7 @@ async def _route_fulfill(
     claim_by_id: bool = True,
     step: str | None = None,
 ) -> FulfillItemResult:
-    """Gate + load match/meta, then route by request_type / claimed step."""
+    """Gate on disposition + kickoff, then route by request_type / claimed step."""
     if deps.dwid_resolver is None and deps.dwid_resolver_factory is not None:
         deps = replace(
             deps,
@@ -655,6 +820,20 @@ async def _route_fulfill(
             request_id=request_id,
             outcome="skipped",
             reason="matching.review_not_approved",
+        )
+
+    gate = await _load_vertical_gate(conn, request_id)
+    if gate is None:
+        return FulfillItemResult(
+            request_id=request_id,
+            outcome="skipped",
+            reason="vertical_disposition_missing",
+        )
+    if not gate.kicked_off:
+        return FulfillItemResult(
+            request_id=request_id,
+            outcome="skipped",
+            reason="fulfillment.kickoff_not_approved",
         )
 
     meta = await _load_request_meta(conn, request_id)
@@ -680,9 +859,24 @@ async def _route_fulfill(
     if step == DATA_FULFILLMENT_STEP_REPRODUCTION or (
         step is None and request_type in ACCESS_TYPES
     ):
+        if attempt_id is None and await _has_blocking_attempt(
+            conn,
+            request_id,
+            step=DATA_FULFILLMENT_STEP_REPRODUCTION,
+            since=gate.kickoff_decided_at,
+        ):
+            return FulfillItemResult(
+                request_id=request_id,
+                outcome="skipped",
+                reason="fulfillment_already_recorded",
+                request_type=request_type,
+                matched=matched,
+                match_count=match_count,
+            )
         return await _fulfill_access(
             conn,
             request_id,
+            gate=gate,
             matched=matched,
             match_count=match_count,
             matching_result_id=matching_result_id,
@@ -703,9 +897,25 @@ async def _route_fulfill(
             match_count=match_count,
         )
 
+    if attempt_id is None and await _has_blocking_attempt(
+        conn,
+        request_id,
+        step=DATA_FULFILLMENT_STEP_SUPPRESSION,
+        since=gate.kickoff_decided_at,
+    ):
+        return FulfillItemResult(
+            request_id=request_id,
+            outcome="skipped",
+            reason="fulfillment_already_recorded",
+            request_type=request_type,
+            matched=matched,
+            match_count=match_count,
+        )
+
     return await _fulfill_suppression(
         conn,
         request_id,
+        gate=gate,
         matched=matched,
         match_count=match_count,
         matching_result_id=matching_result_id,
@@ -722,7 +932,7 @@ async def fulfill_one(
     *,
     deps: FulfillDeps | None = None,
 ) -> FulfillItemResult:
-    """Gate on matching.review, enqueue+claim by id, then fulfill."""
+    """Gate on disposition + kickoff, enqueue+claim by id, then fulfill."""
     deps = deps or FulfillDeps()
     return await _route_fulfill(conn, request_id, deps=deps, claim_by_id=True)
 
@@ -733,9 +943,17 @@ async def _enqueue_ready_attempt(
     *,
     deps: FulfillDeps,
 ) -> int | None:
-    """Enqueue a pending attempt for a ready request (batch path)."""
+    """Enqueue a pending attempt for a ready request (batch path).
+
+    Re-checks the same gates as ``_route_fulfill`` so a kickoff superseded
+    between readiness and enqueue cannot slip work through.
+    """
     approved = await is_matching_review_approved(conn, request_id)  # type: ignore[arg-type]
     if not approved:
+        return None
+
+    gate = await _load_vertical_gate(conn, request_id)
+    if gate is None or not gate.kicked_off:
         return None
 
     meta = await _load_request_meta(conn, request_id)
@@ -750,6 +968,13 @@ async def _enqueue_ready_attempt(
     process_id = await _resolve_bulk_process_id(conn)
 
     if request_type in ACCESS_TYPES:
+        if await _has_blocking_attempt(
+            conn,
+            request_id,
+            step=DATA_FULFILLMENT_STEP_REPRODUCTION,
+            since=gate.kickoff_decided_at,
+        ):
+            return None
         if process_id == "unknown":
             process_id = f"manual/{request_id}"
         return await enqueue_fulfillment_attempt(
@@ -761,6 +986,14 @@ async def _enqueue_ready_attempt(
         )
 
     if request_type not in SUPPRESSION_TYPES and meta.get("intake_source") != "drop":
+        return None
+
+    if await _has_blocking_attempt(
+        conn,
+        request_id,
+        step=DATA_FULFILLMENT_STEP_SUPPRESSION,
+        since=gate.kickoff_decided_at,
+    ):
         return None
 
     return await enqueue_fulfillment_attempt(

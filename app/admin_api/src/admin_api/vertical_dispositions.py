@@ -31,6 +31,10 @@ from habeas_privacy_core.auth import (
 )
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
+from habeas_privacy_core.workflow.approval import (
+    FULFILLMENT_KICKOFF_ACTION,
+    is_vertical_kickoff_approved,
+)
 
 # Live vertical today is the CA DROP hash index. Coming-soon verticals are
 # catalog constants only — they never receive disposition rows (KTD3 / R6).
@@ -58,11 +62,6 @@ DISPOSITION_STATUS_CODES = frozenset({3, 4, 5})
 STATUS_REQUIRING_DWIDS = frozenset({3, 4})
 
 DISPOSITION_UPSERT_COMMAND = "request.vertical_disposition"
-
-# U2 owns fulfillment.kickoff. Referencing the action type here keeps the
-# overwrite lock honest the moment U2 lands; today no rows exist so the
-# soft check no-ops (KTD5).
-FULFILLMENT_KICKOFF_ACTION = "fulfillment.kickoff"
 
 
 class VerticalDispositionSettings(CoreSettings):
@@ -228,24 +227,12 @@ async def is_vertical_kickoff_locked(
 ) -> bool:
     """True once Legal kickoff is approved for this vertical (KTD5 overwrite lock).
 
-    U2 introduces ``fulfillment.kickoff``; until then no rows match and the
-    lock stays open so a data owner can still correct a disposition.
+    Reopen (``POST /requests/{id}/fulfillment/reopen``) supersedes the approved
+    kickoff, which reopens the disposition for edits.
     """
-    locked = await conn.fetchval(
-        """
-        SELECT 1
-          FROM approval_requests
-         WHERE request_id = $1
-           AND action_type = $2
-           AND status = 'approved'
-           AND context_jsonb->>'vertical' = $3
-         LIMIT 1
-        """,
-        UUID(request_id),
-        FULFILLMENT_KICKOFF_ACTION,
-        vertical,
+    return await is_vertical_kickoff_approved(
+        conn, request_id=request_id, vertical=vertical
     )
-    return bool(locked)
 
 
 async def _sync_drop_response_status(
@@ -353,6 +340,27 @@ async def upsert_vertical_disposition(
         await _sync_drop_response_status(conn, request_id=request_id, status=status)
 
     return _row_to_disposition(row)
+
+
+async def fetch_vertical_disposition(
+    conn: Any,
+    *,
+    request_id: str,
+    vertical: str,
+) -> VerticalDisposition | None:
+    """One decided vertical, or None when it has no disposition yet."""
+    row = await conn.fetchrow(
+        """
+        SELECT request_id, vertical, status, selected_dwids, decided_by,
+               actor_role, decided_at, updated_at
+          FROM request_vertical_dispositions
+         WHERE request_id = $1
+           AND vertical = $2
+        """,
+        UUID(request_id),
+        normalize_vertical(vertical),
+    )
+    return _row_to_disposition(row) if row is not None else None
 
 
 async def list_vertical_dispositions(
@@ -491,6 +499,7 @@ __all__ = [
     "VerticalDispositionsResponse",
     "assert_disposition_valid",
     "default_dwids_for_request",
+    "fetch_vertical_disposition",
     "is_live_vertical",
     "is_vertical_kickoff_locked",
     "list_vertical_dispositions",
