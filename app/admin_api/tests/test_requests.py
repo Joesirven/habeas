@@ -133,3 +133,144 @@ def test_agent_batch_upload_route(monkeypatch: pytest.MonkeyPatch):
     assert empty.status_code == 400
     assert forbidden.status_code == 403
     assert ROLE_LEGAL == "legal"
+
+
+@pytest.mark.asyncio
+async def test_search_requests_rejects_short_query():
+    from admin_api.requests_list import search_requests
+
+    conn = AsyncMock()
+    with pytest.raises(ValueError, match="at least 2"):
+        await search_requests(conn, q="a")
+
+
+def test_requests_list_short_query_returns_400(monkeypatch: pytest.MonkeyPatch):
+    from admin_api import main as admin_main
+
+    roles.settings.admin_api_super_admins = "ops@example.com"
+    monkeypatch.setattr(admin_main.settings, "database_url", "postgres://local")
+    monkeypatch.setattr(admin_main, "create_pool", AsyncMock())
+    monkeypatch.setattr(admin_main, "close_pool", AsyncMock())
+
+    class _Acquire:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            return None
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(admin_main, "get_pool", lambda: _Pool())
+    headers = {IAP_EMAIL_HEADER: "ops@example.com"}
+
+    with TestClient(admin_main.app) as client:
+        response = client.get("/requests?q=a", headers=headers)
+
+    assert response.status_code == 400
+
+
+def test_request_list_item_drop_omits_display_label():
+    from datetime import UTC, datetime
+
+    from admin_api.requests_list import _row_to_item
+
+    row = {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "received_at": datetime(2026, 7, 28, 12, 0, tzinfo=UTC),
+        "intake_source": "drop",
+        "raw_record_id": 42,
+        "requestor_state": "CA",
+        "request_type": "delete",
+        "display_label": "Should Not Appear",
+        "drop_open": True,
+    }
+    item = _row_to_item(row, include_display_labels=True)
+    assert item.display_label is None
+    assert item.intake_source.value == "drop"
+
+
+def test_request_list_item_non_drop_includes_display_label():
+    from datetime import UTC, datetime
+
+    from admin_api.requests_list import _row_to_item
+
+    row = {
+        "id": "00000000-0000-0000-0000-000000000002",
+        "received_at": datetime(2026, 7, 28, 12, 0, tzinfo=UTC),
+        "intake_source": "webform",
+        "raw_record_id": 7,
+        "requestor_state": "NY",
+        "request_type": "delete",
+        "display_label": "Ada Lovelace",
+        "drop_open": None,
+    }
+    item = _row_to_item(row, include_display_labels=True)
+    assert item.display_label == "Ada Lovelace"
+
+
+@pytest.mark.asyncio
+async def test_search_requests_drop_name_clause_excludes_drop():
+    from admin_api import requests_list
+
+    captured: dict[str, str] = {}
+
+    async def fake_fetch(sql: str, *args):
+        captured["sql"] = sql
+        return []
+
+    conn = AsyncMock()
+    conn.fetch = fake_fetch
+
+    await requests_list.search_requests(
+        conn,
+        q="ada",
+        include_display_labels=True,
+        limit=10,
+    )
+    assert "c.intake_source != 'drop'" in captured["sql"]
+
+
+@pytest.mark.asyncio
+async def test_load_non_drop_contact_reads_cleaned_payload():
+    from admin_api.main import _load_non_drop_contact
+    from habeas_privacy_core.models.request import IntakeSource
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "cleaned_payload": {
+                "first_name": "Ada",
+                "last_name": "Lovelace",
+                "email": "ada@example.com",
+                "phone": "555-0100",
+            }
+        }
+    )
+    display_label, contact = await _load_non_drop_contact(
+        conn,
+        intake_source=IntakeSource.WEBFORM,
+        raw_record_id=7,
+    )
+    assert display_label == "Ada Lovelace"
+    assert contact is not None
+    assert contact.email == "ada@example.com"
+    assert contact.phone == "555-0100"
+
+
+@pytest.mark.asyncio
+async def test_load_non_drop_contact_skips_drop():
+    from admin_api.main import _load_non_drop_contact
+    from habeas_privacy_core.models.request import IntakeSource
+
+    conn = AsyncMock()
+    display_label, contact = await _load_non_drop_contact(
+        conn,
+        intake_source=IntakeSource.DROP,
+        raw_record_id=7,
+    )
+    assert display_label is None
+    assert contact is None
+    conn.fetchrow.assert_not_called()

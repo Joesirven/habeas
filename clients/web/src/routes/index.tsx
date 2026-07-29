@@ -1,18 +1,28 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
+import { Link, useNavigate, useSearch } from '@tanstack/react-router'
+import { useEffect, useState } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
+import {
+  DataOwnerQueues,
+  DateToolbar,
+  DeadlineRiskBand,
+  FulfillmentBatchList,
+  OpenRequestsHeatmap,
+  OperationsPulse,
+  PipelineFunnel,
+  type HomeWindow,
+} from '@/components/legal/home'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { useMe } from '@/lib/auth'
+import { LegalChromeActions } from '@/components/UploadMenu'
+import { useMe, isLegalAdminPersona } from '@/lib/auth'
 import {
   getDropGlobalStats,
   getDropPipeline,
   getHealth,
-  getLegalNeedsAttention,
   getLegalPortfolio,
   getNeedsAttention,
-  type NeedsAttentionItemKind,
 } from '@/lib/api'
 import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
 
@@ -123,7 +133,7 @@ function OperatorDashboardHome() {
               <p className="mt-2 text-3xl font-semibold tabular-nums text-ink">
                 {dropStats?.matching_review_pending ?? '—'}
               </p>
-              <p className="mt-2 text-xs text-ink-soft">matching.review gates</p>
+              <p className="mt-2 text-xs text-ink-soft">Matching review gates</p>
             </div>
             <div className="rounded-lg border border-line bg-paper p-4">
               <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
@@ -244,173 +254,208 @@ function OperatorDashboardHome() {
   )
 }
 
+function HomeModuleHeader({
+  title,
+  hint,
+  compact = false,
+}: {
+  title: string
+  hint?: string
+  compact?: boolean
+}) {
+  return (
+    <div className={compact ? 'mb-2' : 'mb-3'}>
+      <h3 className={compact ? 'text-xs font-semibold text-ink' : 'text-sm font-semibold text-ink'}>
+        {title}
+      </h3>
+      {hint ? (
+        <p className={compact ? 'mt-0.5 text-[0.65rem] text-mute' : 'mt-1 text-xs text-mute'}>
+          {hint}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
 function LegalHome() {
-  const attentionQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'legal'],
-    queryFn: () => getLegalNeedsAttention(1000),
-    refetchInterval: 10_000,
-    placeholderData: (previous) => previous,
-  })
+  const search = useSearch({ from: '/' })
+  const navigate = useNavigate()
+  const homeWindow: HomeWindow = search.home_window ?? '30'
+  const [selectedBatch, setSelectedBatch] = useState<string | null>(null)
+
+  function setHomeWindow(next: HomeWindow) {
+    void navigate({
+      to: '/',
+      // Omit default 30d so Reset/All→30d can clear a stuck home_window param.
+      search: {
+        tab: search.tab,
+        ...(search.process != null ? { process: search.process } : {}),
+        ...(search.stage ? { stage: search.stage } : {}),
+        ...(next !== '30' ? { home_window: next } : {}),
+      },
+      replace: true,
+    })
+  }
+
+  useEffect(() => {
+    setSelectedBatch(null)
+  }, [homeWindow])
+
   const portfolioQuery = useQuery({
-    queryKey: ['admin-api', 'legal', 'home', 'portfolio'],
-    queryFn: getLegalPortfolio,
+    queryKey: ['admin-api', 'legal', 'home', 'portfolio', homeWindow, selectedBatch],
+    queryFn: () =>
+      getLegalPortfolio({
+        window_days: homeWindow,
+        batch_key: selectedBatch ?? undefined,
+      }),
     refetchInterval: 15_000,
     placeholderData: (previous) => previous,
   })
-  const items = attentionQuery.data?.items ?? []
   const portfolio = portfolioQuery.data
-  const triage = items.filter(
-    (item) => item.kind === 'triage' || item.assignment?.kind === 'triage',
-  ).length
-  const escalations = items.filter(
-    (item) => item.kind === 'escalations' || item.assignment?.kind === 'escalate',
-  ).length
-  const notice = items.filter(
-    (item) => item.kind === 'notice' || item.reason === 'notice.review',
-  ).length
-  const delivery = items.filter(
-    (item) =>
-      item.kind === 'delivery' ||
-      item.reason === 'access.delivery' ||
-      item.reason === 'delivery.confirm',
-  ).length
 
-  const cards: {
-    label: string
-    kind: NeedsAttentionItemKind
-    count: number
-    hint: string
-  }[] = [
-    { label: 'Triage', kind: 'triage', count: triage, hint: 'Condition holds' },
-    {
-      label: 'Escalations',
-      kind: 'escalations',
-      count: escalations,
-      hint: 'From data owners',
-    },
-    {
-      label: 'Notice',
-      kind: 'notice',
-      count: notice,
-      hint: 'DROP notice.review',
-    },
-    {
-      label: 'Delivery',
-      kind: 'delivery',
-      count: delivery,
-      hint:
-        delivery === 0 ? 'Access handoff (empty until packs land)' : 'Access handoff',
-    },
-  ]
+  useEffect(() => {
+    if (!portfolio || selectedBatch == null) return
+    const batchKeys = (portfolio.fulfillment_batches ?? []).map((batch) => batch.batch_key)
+    if (!batchKeys.includes(selectedBatch)) {
+      setSelectedBatch(null)
+    }
+  }, [portfolio, selectedBatch])
+
+  const hasVariationB =
+    portfolio != null &&
+    portfolio.operations_pulse != null &&
+    portfolio.fulfillment_batches != null &&
+    portfolio.stage_reach_counts != null &&
+    portfolio.heatmap_cells != null &&
+    portfolio.deadline_risk != null
+
+  const selectedBatchRow =
+    selectedBatch != null
+      ? (portfolio?.fulfillment_batches ?? []).find((batch) => batch.batch_key === selectedBatch) ??
+        null
+      : null
 
   return (
-    <section className="space-y-6">
-      <header>
-        <p className="taste-micro">Legal</p>
-        <h2 className="mt-2 font-display text-2xl font-medium tracking-tight text-ink">
-          Command Center
-        </h2>
-        <p className="mt-2 max-w-xl text-sm text-ink-soft">
-          Clear Triage and Escalations first. Notice and Delivery light up after
-          data-vertical fulfill. Upload agent batches when ready.
-        </p>
+    <section className="space-y-4">
+      <header className="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <p className="taste-micro">Legal</p>
+          <h2 className="mt-1 font-display text-2xl font-medium tracking-tight text-ink">Home</h2>
+          <p className="mt-1 max-w-xl text-sm text-ink-soft">
+            Portfolio health and pipeline flow. Work queues show all open items.
+          </p>
+        </div>
+        <LegalChromeActions />
       </header>
-      {portfolio ? (
-        <div className="grid gap-4 lg:grid-cols-2">
-          <div className="taste-panel-soft p-4">
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Open by type</p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {portfolio.type_counts.map((row) => (
-                <span key={row.request_type} className="taste-frost-chip text-[0.7rem]">
-                  {row.request_type}: {row.count}
-                </span>
-              ))}
-            </div>
+
+      {portfolioQuery.isError ? (
+        <p className="text-sm text-red-700">Could not load portfolio — retrying automatically.</p>
+      ) : null}
+
+      {portfolio && !hasVariationB ? (
+        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-950">
+          Legal Home modules need a newer admin-api (portfolio enrichment not deployed yet). Inbox
+          and All requests still work.
+        </p>
+      ) : null}
+
+      {portfolio && hasVariationB ? (
+        <div className="divide-y divide-line rounded-lg border border-line">
+          {portfolio.operations_pulse ? (
+            <section className="px-4 py-2">
+              <OperationsPulse pulse={portfolio.operations_pulse} embedded />
+            </section>
+          ) : null}
+
+          <section className="px-4 py-2">
+            <DateToolbar value={homeWindow} onChange={setHomeWindow} />
+          </section>
+
+          <section className="px-4 py-2.5">
+            <HomeModuleHeader
+              compact
+              title="Fulfillment batches"
+              hint="Intake batches by source + received datetime. Select a batch to scope the funnel below."
+            />
+            <FulfillmentBatchList
+              batches={portfolio.fulfillment_batches!}
+              selectedKey={selectedBatch}
+              onSelect={setSelectedBatch}
+            />
+          </section>
+
+          <section className="px-4 py-2.5">
+            <HomeModuleHeader
+              compact
+              title="Pipeline — Mixpanel-style funnel"
+              hint="Reached-stage funnel with held-upstream stacks — scoped by batch selection above."
+            />
+            <PipelineFunnel
+              stages={portfolio.stage_reach_counts!}
+              selectedBatch={selectedBatchRow}
+              onClearBatch={() => setSelectedBatch(null)}
+            />
+          </section>
+
+          <div className="grid lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:divide-x divide-line">
+            <section className="px-4 py-2.5">
+              <HomeModuleHeader compact title="Open requests" />
+              <OpenRequestsHeatmap cells={portfolio.heatmap_cells!} />
+            </section>
+            <aside className="flex flex-col divide-y divide-line">
+              <section className="px-4 py-2.5">
+                <HomeModuleHeader
+                  compact
+                  title="Data owner review queues"
+                  hint="Top queues by pending review."
+                />
+                <DataOwnerQueues queues={portfolio.data_owner_queues ?? []} />
+              </section>
+              <section className="px-4 py-2.5">
+                <HomeModuleHeader compact title="Cycle time & deadline" />
+                <DeadlineRiskBand risk={portfolio.deadline_risk!} />
+              </section>
+            </aside>
           </div>
-          <div className="taste-panel-soft p-4">
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Pipeline volume</p>
-            <div className="mt-3 space-y-2">
-              {portfolio.pipeline_stages.map((row) => (
-                <div key={row.stage} className="flex items-center justify-between text-xs">
-                  <span className="capitalize text-ink-soft">{row.stage}</span>
-                  <span className="tabular-nums text-ink">{row.count}</span>
-                </div>
-              ))}
-            </div>
-          </div>
+
           {portfolio.schedule_excerpt ? (
-            <div className="taste-panel-soft p-4 lg:col-span-2">
-              <p className="text-[0.65rem] uppercase tracking-wide text-mute">Next bulk intake</p>
-              <p className="mt-2 text-sm text-ink">
-                {portfolio.schedule_excerpt.label}
+            <section className="px-4 py-4 text-sm text-ink-soft">
+              <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+                DROP schedule
+              </p>
+              <p className="mt-1 text-ink">
+                Weekly — {portfolio.schedule_excerpt.label}
                 {portfolio.schedule_excerpt.next_run_at
-                  ? ` — ${new Date(portfolio.schedule_excerpt.next_run_at).toLocaleString()}`
+                  ? ` · next ${new Date(portfolio.schedule_excerpt.next_run_at).toLocaleString()}`
                   : ''}
               </p>
-            </div>
-          ) : null}
-          {portfolio.warnings.length > 0 ? (
-            <div className="taste-panel-soft border-amber-200/60 p-4 lg:col-span-2">
-              <p className="text-[0.65rem] uppercase tracking-wide text-mute">Attention</p>
-              <ul className="mt-2 space-y-1 text-xs text-ink-soft">
-                {portfolio.warnings.map((w) => (
-                  <li key={w.code}>
-                    {w.message} ({w.count})
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-          {portfolio.data_owner_queues.length > 0 ? (
-            <div className="taste-panel-soft p-4 lg:col-span-2">
-              <p className="text-[0.65rem] uppercase tracking-wide text-mute">
-                Data owner queues
-              </p>
-              <ul className="mt-2 space-y-2 text-xs">
-                {portfolio.data_owner_queues.map((row) => (
-                  <li key={row.assignee_identity ?? 'unassigned'} className="text-ink-soft">
-                    <span className="font-mono text-ink">
-                      {row.assignee_identity ?? 'Unassigned'}
-                    </span>
-                    {' — '}
-                    {row.pending_count} pending
-                    {row.outreach_hint ? (
-                      <p className="mt-1 text-mute">{row.outreach_hint}</p>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            </div>
+            </section>
           ) : null}
         </div>
+      ) : portfolioQuery.isPending ? (
+        <SkeletonLines lines={6} />
       ) : null}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {cards.map((card) => (
-          <Link
-            key={card.label}
-            to="/requests/needs-attention"
-            search={{ kind: card.kind }}
-            className="taste-panel-soft block space-y-1 p-4 transition-colors hover:border-habeas-navy/30"
-          >
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">{card.label}</p>
-            <p className="font-display text-3xl tabular-nums text-ink">
-              {attentionQuery.isPending && !attentionQuery.data ? '—' : card.count}
-            </p>
-            <p className="text-[0.7rem] text-ink-soft">{card.hint}</p>
-          </Link>
-        ))}
-      </div>
+
       <div className="flex flex-wrap gap-2">
+        <Link
+          to="/requests/needs-attention"
+          search={{ filter: 'unassigned' }}
+          className="taste-btn text-xs"
+        >
+          Unassigned inbox
+        </Link>
+        <Link
+          to="/requests/needs-attention"
+          search={{ filter: 'assignment_to_legal' }}
+          className="taste-btn text-xs"
+        >
+          Assignment to legal
+        </Link>
         <Button asChild size="sm">
-          <Link to="/requests/needs-attention" search={{ kind: 'triage' }}>
-            Open Inbox
-          </Link>
+          <Link to="/requests/needs-attention">Open Inbox</Link>
         </Button>
         <Button asChild size="sm" variant="outline">
-          <Link to="/requests/conditions">Conditions</Link>
-        </Button>
-        <Button asChild size="sm" variant="outline">
-          <Link to="/requests/new">Upload / New</Link>
+          <Link to="/requests">All requests</Link>
         </Button>
       </div>
     </section>
@@ -478,7 +523,7 @@ function DataOwnerHome() {
 }
 
 export function DashboardPage() {
-  const { isSuperAdmin, isLegal, isLoading, role } = useMe()
+  const { isSuperAdmin, isLoading, role } = useMe()
 
   if (isLoading) {
     return (
@@ -492,7 +537,7 @@ export function DashboardPage() {
     return <DropPipelinePage />
   }
 
-  if (isLegal || role === 'legal') {
+  if (isLegalAdminPersona(role)) {
     return <LegalHome />
   }
 

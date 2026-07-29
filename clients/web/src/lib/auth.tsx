@@ -74,6 +74,16 @@ export function canAccessLegalSurfaces(role: UserRole | undefined): boolean {
   return role === 'legal' || role === 'super_admin' || role === 'admin'
 }
 
+/** Legal Home / inbox persona — admin and legal share surfaces (KD1). */
+export function isLegalAdminPersona(role: UserRole | undefined): boolean {
+  return role === 'legal' || role === 'admin'
+}
+
+/** Conditions, SLAs, email templates — admin write only (KD2). */
+export function canMutateLegalSettings(role: UserRole | undefined): boolean {
+  return role === 'admin' || role === 'super_admin'
+}
+
 export function canAccessInsights(role: UserRole | undefined): boolean {
   return role === 'super_admin' || role === 'admin'
 }

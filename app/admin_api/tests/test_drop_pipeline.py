@@ -1531,7 +1531,26 @@ def test_matching_result_promote_and_decline_routes(monkeypatch: pytest.MonkeyPa
         }
         return {"request_id": request_id, "review_status": "rejected", "approval_id": 4}
 
+    async def fake_legal_team(conn: Any) -> list[str]:
+        return []
+
+    async def fake_has_assignment(conn: Any, rid: str) -> bool:
+        return True
+
+    async def fake_matching_approved(conn: Any, rid: str) -> bool:
+        return False
+
+    async def fake_due_at(conn: Any, rid: str, *, stage: str) -> None:
+        return None
+
     _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "fetch_active_legal_team_emails", fake_legal_team)
+    monkeypatch.setattr(drop_pipeline, "has_assignment_to_legal", fake_has_assignment)
+    monkeypatch.setattr(drop_pipeline, "is_matching_review_approved", fake_matching_approved)
+    monkeypatch.setattr(
+        "admin_api.legal_sla.apply_request_due_at_for_stage",
+        fake_due_at,
+    )
     monkeypatch.setattr(drop_pipeline, "promote_matching_review_for_request", fake_promote)
     monkeypatch.setattr(drop_pipeline, "decline_matching_review_for_request", fake_decline)
 
@@ -1581,27 +1600,27 @@ def test_workflow_assign_escalate_and_list(monkeypatch: pytest.MonkeyPatch):
             "request_ids": request_ids,
         }
 
-    async def fake_escalate(
+    async def fake_fanout(
         conn: Any,
         *,
-        request_ids: list[str],
-        target_role: str,
+        request_id: str,
         decided_by: str,
-        assignee_identity: str | None = None,
-    ) -> dict[str, Any]:
-        captured["escalate"] = {
-            "request_ids": request_ids,
-            "target_role": target_role,
-            "decided_by": decided_by,
-        }
-        return {
-            "kind": "escalate",
-            "target_role": target_role,
-            "assignee_identity": assignee_identity,
-            "count": len(request_ids),
-            "assignments": [],
-            "request_ids": request_ids,
-        }
+    ) -> list[dict[str, Any]]:
+        captured.setdefault("fanout", []).append(
+            {"request_id": request_id, "decided_by": decided_by}
+        )
+        return [
+            {
+                "id": 1,
+                "request_id": request_id,
+                "target_role": "legal",
+                "kind": "escalate",
+                "assignee_identity": None,
+            }
+        ]
+
+    async def fake_due_at(conn: Any, rid: str, *, stage: str) -> None:
+        return None
 
     async def fake_list(
         conn: Any,
@@ -1629,7 +1648,11 @@ def test_workflow_assign_escalate_and_list(monkeypatch: pytest.MonkeyPatch):
 
     _fake_pool(monkeypatch)
     monkeypatch.setattr(drop_pipeline, "assign_requests", fake_assign)
-    monkeypatch.setattr(drop_pipeline, "escalate_requests", fake_escalate)
+    monkeypatch.setattr(drop_pipeline, "escalate_to_legal_with_fanout", fake_fanout)
+    monkeypatch.setattr(
+        "admin_api.legal_sla.apply_request_due_at_for_stage",
+        fake_due_at,
+    )
     monkeypatch.setattr(drop_pipeline, "list_workflow_assignments", fake_list)
 
     with TestClient(app) as client:
@@ -1908,14 +1931,20 @@ def test_route_triage_conditions_get_put_legal_only(
         }
 
     _fake_pool(monkeypatch)
+    from admin_api import main as admin_main
+
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
+    monkeypatch.setattr(admin_main, "create_pool", AsyncMock())
+    monkeypatch.setattr(admin_main, "close_pool", AsyncMock())
     roles.settings.admin_api_legals = "legal@example.com"
+    roles.settings.admin_api_admins = "admin@example.com"
     roles.settings.admin_api_data_owners = "owner@example.com"
     roles.settings.admin_api_super_admins = ""
-    roles.settings.admin_api_admins = ""
     monkeypatch.setattr(drop_pipeline, "fetch_intake_route_triage_rule", fake_fetch)
     monkeypatch.setattr(drop_pipeline, "version_intake_route_triage_rule", fake_version)
 
     legal_headers = {IAP_EMAIL_HEADER: "legal@example.com"}
+    admin_headers = {IAP_EMAIL_HEADER: "admin@example.com"}
     owner_headers = {IAP_EMAIL_HEADER: "owner@example.com"}
 
     with TestClient(app) as client:
@@ -1923,9 +1952,17 @@ def test_route_triage_conditions_get_put_legal_only(
             "/ops/drop/workflow/conditions/route-triage",
             headers=legal_headers,
         )
-        put_ok = client.put(
+        put_legal = client.put(
             "/ops/drop/workflow/conditions/route-triage",
             headers=legal_headers,
+            json={
+                "condition_jsonb": {"state_in": ["NY", "TX"]},
+                "rationale": "Route NY/TX to Triage",
+            },
+        )
+        put_admin = client.put(
+            "/ops/drop/workflow/conditions/route-triage",
+            headers=admin_headers,
             json={
                 "condition_jsonb": {"state_in": ["NY", "TX"]},
                 "rationale": "Route NY/TX to Triage",
@@ -1938,8 +1975,9 @@ def test_route_triage_conditions_get_put_legal_only(
 
     assert get_ok.status_code == 200
     assert get_ok.json()["condition_jsonb"]["requestor_state_not_in"] == ["CA", "CO"]
-    assert put_ok.status_code == 200
-    assert put_ok.json()["rule"]["id"] == 2
+    assert put_legal.status_code == 403
+    assert put_admin.status_code == 200
+    assert put_admin.json()["rule"]["id"] == 2
     assert captured["version"]["condition_jsonb"] == {"state_in": ["NY", "TX"]}
     assert get_forbidden.status_code == 403
 

@@ -44,7 +44,7 @@ async def test_get_artifact_returns_uri(monkeypatch: pytest.MonkeyPatch):
     assert result.kind == "access"
     assert result.fulfillment_artifact_uri == "gs://b/bulk-run/p/request/r/"
     assert result.shareable_url is not None
-    assert "ttl_days=30" in (result.shareable_url or "")
+    assert "ttl_days=7" in (result.shareable_url or "")
     assert result.access_delivery_status == "pending"
 
 
@@ -55,4 +55,5 @@ async def test_signed_url_stub_for_memory_transport():
     url = signed_url_for_gcs_uri("gs://bucket/bulk-run/p/request/r/file.txt")
     assert url is not None
     assert "storage.example.com" in url
-    assert "ttl_days=30" in url
+    # V4 signed URLs cap at 7 days; 30-day retention is the bucket lifecycle.
+    assert "ttl_days=7" in url

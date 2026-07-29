@@ -1,0 +1,116 @@
+/* Executor 21: KEYHOLE OFFSET — brand mark assemble (Slot Slide-In) */
+/* Real production bumper, not a CRT-lab bit — light stage, locked brand hex. */
+
+.keyhole-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 100%;
+  width: 100%;
+  background: var(--color-paper, #f8fafc);
+  opacity: 1;
+  transition: opacity 0.35s ease;
+}
+
+.keyhole-phase-out {
+  opacity: 0;
+}
+
+.keyhole-lockup {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: min(200px, 40vw);
+}
+
+.keyhole-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.keyhole-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+  filter: drop-shadow(0 8px 20px rgb(46 76 246 / 0.25));
+}
+
+.keyhole-square,
+.keyhole-circle {
+  opacity: 0;
+  /* Percentage + fill-box centers on each shape's own bbox — an absolute
+     px origin here would center on the wrong point per-shape (the circle
+     and square have different bboxes) and visibly offset the mark. */
+  transform-origin: 50% 50%;
+  transform-box: fill-box;
+  transform: scale(0.7);
+}
+
+.keyhole-slot {
+  opacity: 0;
+  transform-origin: 50% 50%;
+  transform-box: fill-box;
+  transform: translateY(26px);
+}
+
+.keyhole-square {
+  animation: keyhole-fade-scale-in 0.3s ease-out forwards;
+}
+
+.keyhole-circle {
+  animation: keyhole-fade-scale-in 0.3s ease-out 0.05s forwards;
+}
+
+.keyhole-slot {
+  animation: keyhole-slot-slide-in 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) 0.3s forwards;
+}
+
+/* —— Keyframes —— */
+
+@keyframes keyhole-fade-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.7);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes keyhole-slot-slide-in {
+  0% {
+    opacity: 0;
+    transform: translateY(26px);
+  }
+  70% {
+    opacity: 1;
+    transform: translateY(-4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .keyhole-square,
+  .keyhole-circle,
+  .keyhole-slot {
+    animation: none !important;
+    opacity: 1;
+    transform: none;
+  }
+
+  .keyhole-stage {
+    transition: none;
+  }
+}

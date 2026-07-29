@@ -1,8 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 
-import { RunTimeline } from '@/components/ops/RunTimeline'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -19,15 +16,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { useMe } from '@/lib/auth'
 import {
   DROP_RESPONSE_STATUS_OPTIONS,
   getDropMatchingResultDetail,
-  getFulfillmentArtifact,
-  getRequestJourney,
-  patchAccessDeliveryStatus,
-  postDropMatchingResultDecline,
-  postDropMatchingResultPromote,
   suggestedDropResponseStatus,
   type DropResponseStatusCode,
   type FulfillmentArtifact,
@@ -37,6 +28,7 @@ import {
   type MatchedPersonContact,
   type RunTimelineStep,
 } from '@/lib/api'
+import { actionReasonLabel } from '@/lib/legalJourneyLabels'
 import { cn } from '@/lib/utils'
 
 /** CA DROP response_status picker for Inbox fulfill confirms. */
@@ -93,12 +85,6 @@ export function DropResponseStatusPicker({
   )
 }
 
-const SOURCE_LABELS: Record<string, string> = {
-  webform: 'Gravity Forms',
-  drop: 'CA DROP',
-  csv: 'Authorized Agent',
-  manual: 'Manual',
-}
 
 export type RequestDetailDrawerProps = {
   requestId: string | null
@@ -114,7 +100,139 @@ function formatTimestamp(value: string | null | undefined): string {
   return new Date(value).toLocaleString()
 }
 
-function journeyStageToTimelineStep(stage: JourneyStage): RunTimelineStep {
+/** Dense process context strip — inbox/detail panes, not marketing cards. */
+function ProcessContextStrip({
+  items,
+  compact = false,
+}: {
+  items: { label: string; value: ReactNode; show?: boolean }[]
+  compact?: boolean
+}) {
+  const visible = items.filter((item) => item.show !== false)
+  if (visible.length === 0) return null
+  return (
+    <dl
+      className={cn(
+        'grid gap-x-3 gap-y-1 rounded-md border border-line/70 bg-paper/40',
+        compact
+          ? 'grid-cols-2 px-2 py-1.5 sm:grid-cols-3'
+          : 'grid-cols-2 px-2.5 py-2 sm:grid-cols-3',
+      )}
+    >
+      {visible.map((item) => (
+        <div key={item.label} className="min-w-0">
+          <dt className="text-[0.55rem] font-medium uppercase tracking-wide text-mute">
+            {item.label}
+          </dt>
+          <dd className="mt-0.5 truncate text-[0.7rem] text-ink">{item.value}</dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+/** Human matching-status noun — aligns with overlay / inbox "Matching status". */
+function matchingStatusLabel(reviewStatus: string | null | undefined): string {
+  const normalized = (reviewStatus ?? '').trim().toLowerCase()
+  if (normalized === 'pending') return 'Pending review'
+  if (normalized === 'approved') return 'Approved'
+  if (normalized === 'declined' || normalized === 'rejected') return 'Declined'
+  if (normalized === 'none' || normalized === '') return 'None'
+  return (reviewStatus ?? '').replaceAll('_', ' ')
+}
+
+/** Compact "Matching results" value — type · count (overlay convention). */
+function matchingResultsLabel(matching: MatchingResultDetail): string {
+  const type = (
+    matching.match_type ?? (matching.matched ? 'matched' : 'not matched')
+  ).replaceAll('_', ' ')
+  return `${type} · ${matching.match_count}`
+}
+
+function matchingProcessStripItems(
+  matching: MatchingResultDetail,
+): { label: string; value: ReactNode; show?: boolean }[] {
+  const latestAttempt =
+    matching.attempts && matching.attempts.length > 0
+      ? [...matching.attempts].sort((a, b) => b.attempt_number - a.attempt_number)[0]
+      : null
+  return [
+    {
+      label: 'Matching results',
+      value: matchingResultsLabel(matching),
+    },
+    {
+      label: 'Matching status',
+      value: (
+        <Badge
+          variant={reviewStatusVariant(matching.review_status)}
+          className="normal-case tracking-normal"
+        >
+          {matchingStatusLabel(matching.review_status)}
+        </Badge>
+      ),
+    },
+    {
+      label: 'Requestor',
+      value: (
+        <span className="font-mono">{matching.requestor_state ?? '—'}</span>
+      ),
+      show: Boolean(matching.requestor_state),
+    },
+    {
+      label: 'Recorded',
+      value: (
+        <span className="tabular-nums">{formatTimestamp(matching.recorded_at)}</span>
+      ),
+      show: Boolean(matching.recorded_at),
+    },
+    {
+      label: 'Attempted',
+      value: (
+        <span className="tabular-nums">
+          {formatTimestamp(latestAttempt?.attempted_at)}
+        </span>
+      ),
+      show: Boolean(latestAttempt?.attempted_at),
+    },
+    {
+      label: 'Attempt id',
+      value: (
+        <span className="font-mono tabular-nums">{matching.attempt_id ?? '—'}</span>
+      ),
+      show: matching.attempt_id != null,
+    },
+    {
+      label: 'Approval id',
+      value: (
+        <span className="font-mono tabular-nums">{matching.approval_id ?? '—'}</span>
+      ),
+      show: matching.approval_id != null,
+    },
+  ]
+}
+
+function accessHandoffNextStep(opts: {
+  hasShareableUrl: boolean
+  deliveryStatus: string | null | undefined
+}): string {
+  const status = (opts.deliveryStatus ?? '').toLowerCase()
+  if (status === 'delivered') {
+    return 'Delivered — no further handoff step unless recalled.'
+  }
+  if (status === 'recalled') {
+    return 'Recalled — regenerate or re-send only after ops confirms a new artifact.'
+  }
+  if (status === 'failed') {
+    return 'Delivery failed — fix the outbound path, then copy URL → send outside → mark delivered.'
+  }
+  if (!opts.hasShareableUrl) {
+    return 'Next: wait for a shareable URL after fulfillment, then copy → send outside → mark delivered.'
+  }
+  return 'Next: Copy URL → send outside the platform → Mark delivered.'
+}
+
+export function journeyStageToTimelineStep(stage: JourneyStage): RunTimelineStep {
   const statusMap: Record<JourneyStage['status'], RunTimelineStep['status']> = {
     not_started: 'pending',
     skipped: 'skipped',
@@ -132,7 +250,7 @@ function journeyStageToTimelineStep(stage: JourneyStage): RunTimelineStep {
   }
 }
 
-async function fetchMatchingDetailOptional(
+export async function fetchMatchingDetailOptional(
   requestId: string,
 ): Promise<MatchingResultDetail | null> {
   try {
@@ -330,13 +448,52 @@ export function AccessHandoffPanel({
   if (isPending) {
     return <p className="py-3 text-xs text-ink-soft">Loading fulfillment artifact…</p>
   }
-  if (isError || (!artifact?.shareable_url && !artifact?.fulfillment_artifact_uri)) {
+
+  const hasShareableUrl = Boolean(artifact?.shareable_url)
+  const hasArtifactUri = Boolean(artifact?.fulfillment_artifact_uri)
+  const deliveryStatus = artifact?.access_delivery_status ?? null
+  const attemptStatus = artifact?.attempt_status ?? null
+  const processStrip = (
+    <ProcessContextStrip
+      compact
+      items={[
+        {
+          label: 'Delivery',
+          value: (
+            <span className="capitalize">{deliveryStatus ?? 'not set'}</span>
+          ),
+        },
+        {
+          label: 'Artifact',
+          value: hasArtifactUri || hasShareableUrl ? 'Present' : 'Missing',
+        },
+        {
+          label: 'Shareable URL',
+          value: hasShareableUrl ? 'Ready' : 'Not ready',
+        },
+        {
+          label: 'Fulfillment attempt',
+          value: <span className="capitalize">{attemptStatus ?? '—'}</span>,
+          show: Boolean(attemptStatus),
+        },
+      ]}
+    />
+  )
+  const nextStep = (
+    <p className="text-[0.7rem] text-ink-soft">
+      {accessHandoffNextStep({ hasShareableUrl, deliveryStatus })}
+    </p>
+  )
+
+  if (isError || (!hasShareableUrl && !hasArtifactUri)) {
     const placeholderDraft = buildAccessDeliveryDraft({
       requestId,
       shareableUrl: '[shareable URL will appear here after fulfillment]',
     })
     return (
-      <div className="space-y-3 py-2 text-xs text-ink-soft">
+      <div className="space-y-2 py-2 text-xs text-ink-soft">
+        {processStrip}
+        {nextStep}
         <p>
           No shareable delivery URL yet for{' '}
           <span className="font-mono text-ink">{requestId.slice(0, 8)}…</span>.
@@ -362,25 +519,29 @@ export function AccessHandoffPanel({
     )
   }
 
-  const url = artifact.shareable_url ?? artifact.fulfillment_artifact_uri ?? ''
+  // Guard above: shareable URL and/or internal artifact URI is present.
+  const readyArtifact = artifact as FulfillmentArtifact
+  const url = readyArtifact.shareable_url ?? readyArtifact.fulfillment_artifact_uri ?? ''
   const draft = buildAccessDeliveryDraft({ requestId, shareableUrl: url })
 
   return (
-    <div className="space-y-3 py-1 text-xs">
+    <div className="space-y-2 py-1 text-xs">
+      {processStrip}
+      {nextStep}
       <p className="text-ink-soft">
         Copy the shareable URL or draft an outbound message, then paste into your external
-        mailer. Mark delivery when sent — the platform does not email requesters.
+        mailer. Mark delivered when sent — the platform does not email requesters.
       </p>
-      <div className="rounded-lg border border-line bg-paper/50 px-3 py-2">
+      <div className="rounded-md border border-line bg-paper/50 px-2.5 py-1.5">
         <p className="taste-micro">Shareable URL</p>
         <p className="mt-1 break-all font-mono text-[0.7rem] text-ink">{url}</p>
       </div>
-      {artifact.fulfillment_artifact_uri &&
-        artifact.fulfillment_artifact_uri !== artifact.shareable_url ? (
-        <div className="rounded-lg border border-line/60 px-3 py-2">
+      {readyArtifact.fulfillment_artifact_uri &&
+        readyArtifact.fulfillment_artifact_uri !== readyArtifact.shareable_url ? (
+        <div className="rounded-md border border-line/60 px-2.5 py-1.5">
           <p className="taste-micro">Internal artifact (ops only)</p>
           <p className="mt-1 break-all font-mono text-[0.65rem] text-mute">
-            {artifact.fulfillment_artifact_uri}
+            {readyArtifact.fulfillment_artifact_uri}
           </p>
         </div>
       ) : null}
@@ -391,7 +552,7 @@ export function AccessHandoffPanel({
         <Button size="sm" variant="outline" type="button" onClick={() => setDraftOpen(true)}>
           Draft outbound
         </Button>
-        {artifact.kind === 'access' && canMutate ? (
+        {readyArtifact.kind === 'access' && canMutate ? (
           <>
             <Button
               size="sm"
@@ -423,12 +584,6 @@ export function AccessHandoffPanel({
           </>
         ) : null}
       </div>
-      {artifact.access_delivery_status ? (
-        <p className="text-mute">
-          Delivery status:{' '}
-          <span className="capitalize text-ink">{artifact.access_delivery_status}</span>
-        </p>
-      ) : null}
 
       <Dialog open={draftOpen} onOpenChange={setDraftOpen}>
         <DialogContent className="max-w-lg">
@@ -653,6 +808,12 @@ export function MatchingReviewPanel({
   const attempts = matching?.attempts ?? []
   const attemptStatus = attemptGlance(attempts)
   const assignment = matching?.assignment?.assignee_identity
+  const processStrip = matching ? (
+    <ProcessContextStrip
+      compact={compact}
+      items={matchingProcessStripItems(matching)}
+    />
+  ) : null
 
   const reviewActions = canReviewActions && !hideActions ? (
     <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -695,16 +856,12 @@ export function MatchingReviewPanel({
           <MatchingDetailGrid
             rows={[
               {
-                label: 'Match type',
-                value: (matching.match_type ?? '—').replaceAll('_', ' '),
+                label: 'Matching results',
+                value: matchingResultsLabel(matching),
               },
               {
                 label: 'Matched',
                 value: matching.matched ? 'Yes' : 'No',
-              },
-              {
-                label: 'Count',
-                value: <span className="tabular-nums">{matching.match_count}</span>,
               },
               {
                 label: 'Via',
@@ -730,13 +887,13 @@ export function MatchingReviewPanel({
           <MatchingDetailGrid
             rows={[
               {
-                label: 'Review status',
+                label: 'Matching status',
                 value: (
                   <Badge
                     variant={reviewStatusVariant(matching.review_status)}
                     className="normal-case tracking-normal"
                   >
-                    {matching.review_status}
+                    {matchingStatusLabel(matching.review_status)}
                   </Badge>
                 ),
               },
@@ -770,7 +927,9 @@ export function MatchingReviewPanel({
               },
               {
                 label: 'Reason',
-                value: matching.decision_reason ?? '—',
+                value: matching.decision_reason
+                  ? actionReasonLabel(matching.decision_reason)
+                  : '—',
               },
             ]}
           />
@@ -827,34 +986,29 @@ export function MatchingReviewPanel({
         onConfirm={() => onDecline()}
       />
       {isPending && matching == null ? (
-        <p className="text-ink-soft">Loading matching result…</p>
+        <p className="text-ink-soft">Loading matching results…</p>
       ) : null}
       {isError ? (
         <p className="text-red-700">
-          Could not load matching result. Retry or open Workers → matching.
+          Could not load matching results. Retry or open Workers → matching.
         </p>
       ) : null}
       {matching == null && !isPending && !isError ? (
         <div className="space-y-1 text-ink-soft">
-          <p>No matching result payload for this request yet.</p>
+          <p>No matching results for this request yet.</p>
           <p className="text-[0.65rem] text-mute">
-            Detail appears once a matching_results row exists; review can still wait on
-            matching.review independently.
+            Detail appears once matching results exist; the queue can still wait on{' '}
+            {actionReasonLabel('matching.review')} independently.
           </p>
         </div>
       ) : null}
+      {processStrip}
       {matching && layout === 'tabs' ? tabsBody : null}
       {matching && layout !== 'tabs' ? (
         <>
           <StatusAccordion
-            title="Match result"
-            glance={
-              matching.match_type
-                ? `${matching.match_type.replaceAll('_', ' ')} · ${matching.match_count}`
-                : matching.matched
-                  ? `Matched · ${matching.match_count}`
-                  : 'Not matched'
-            }
+            title="Matching results"
+            glance={matchingResultsLabel(matching)}
             tone={
               matching.match_type === 'multi_match'
                 ? 'fail'
@@ -926,8 +1080,8 @@ export function MatchingReviewPanel({
           </StatusAccordion>
 
           <StatusAccordion
-            title="Review gate"
-            glance={matching.review_status}
+            title="Matching status"
+            glance={matchingStatusLabel(matching.review_status)}
             tone={reviewStatusVariant(matching.review_status)}
             defaultOpen={matching.review_status === 'pending'}
           >
@@ -939,7 +1093,7 @@ export function MatchingReviewPanel({
                     variant={reviewStatusVariant(matching.review_status)}
                     className="normal-case tracking-normal"
                   >
-                    {matching.review_status}
+                    {matchingStatusLabel(matching.review_status)}
                   </Badge>
                 </dd>
               </div>
@@ -984,7 +1138,7 @@ export function MatchingReviewPanel({
             title="Decision"
             glance={
               matching.decided_at
-                ? matching.review_status
+                ? matchingStatusLabel(matching.review_status)
                 : matching.review_status === 'pending'
                   ? 'Awaiting'
                   : 'None'
@@ -1010,7 +1164,11 @@ export function MatchingReviewPanel({
               </div>
               <div className="col-span-2 rounded-md border border-line/70 px-2 py-1">
                 <dt className="text-[0.6rem] text-mute">Reason</dt>
-                <dd className="text-[0.7rem]">{matching.decision_reason ?? '—'}</dd>
+                <dd className="text-[0.7rem]">
+                  {matching.decision_reason
+                    ? actionReasonLabel(matching.decision_reason)
+                    : '—'}
+                </dd>
               </div>
             </dl>
           </StatusAccordion>
@@ -1020,265 +1178,15 @@ export function MatchingReviewPanel({
   )
 }
 
-export function RequestDetailDrawer({ requestId, open, onOpenChange }: RequestDetailDrawerProps) {
-  const queryClient = useQueryClient()
-  const { isAdmin, isSuperAdmin } = useMe()
-  const [actionError, setActionError] = useState<string | null>(null)
-  const [copyNote, setCopyNote] = useState<string | null>(null)
+import { RequestDetailOverlay } from '@/components/requests/RequestDetailOverlay'
 
-  const journeyQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'requests', requestId, 'journey'],
-    queryFn: () => getRequestJourney(requestId!),
-    enabled: open && Boolean(requestId),
-    refetchInterval: open ? 10_000 : false,
-    placeholderData: (previous) => previous,
-  })
-
-  const matchingQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'drop', 'matching-results', requestId],
-    queryFn: () => fetchMatchingDetailOptional(requestId!),
-    enabled: open && Boolean(requestId),
-    refetchInterval: open ? 10_000 : false,
-    placeholderData: (previous) => previous,
-  })
-
-  const artifactQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', requestId],
-    queryFn: () => getFulfillmentArtifact(requestId!),
-    enabled: open && Boolean(requestId),
-    refetchInterval: open ? 15_000 : false,
-    retry: false,
-  })
-
-  const deliveryMutation = useMutation({
-    mutationFn: (status: 'delivered' | 'failed' | 'recalled') =>
-      patchAccessDeliveryStatus(requestId!, { status }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({
-        queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', requestId],
-      })
-    },
-  })
-
-  const promoteMutation = useMutation({
-    mutationFn: (responseStatus: DropResponseStatusCode) =>
-      postDropMatchingResultPromote(requestId!, { response_status: responseStatus }),
-    onSuccess: async () => {
-      setActionError(null)
-      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
-    },
-    onError: (error) => {
-      setActionError(error instanceof Error ? error.message : 'Fulfill failed')
-    },
-  })
-
-  const declineMutation = useMutation({
-    mutationFn: () => postDropMatchingResultDecline(requestId!),
-    onSuccess: async () => {
-      setActionError(null)
-      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
-    },
-    onError: (error) => {
-      setActionError(error instanceof Error ? error.message : 'Decline failed')
-    },
-  })
-
-  const timelineSteps = journeyQuery.data?.stages.map(journeyStageToTimelineStep) ?? []
-  const matching = matchingQuery.data
-  const loading = journeyQuery.isPending && !journeyQuery.data
-  const actionPending = promoteMutation.isPending || declineMutation.isPending
-  const canReviewActions =
-    isAdmin &&
-    matching != null &&
-    matching.review_status === 'pending' &&
-    Boolean(matching.approval_id)
-
+export function RequestDetailDrawer({
+  requestId,
+  open,
+  onOpenChange,
+}: RequestDetailDrawerProps) {
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className={cn(
-          'inset-y-0 right-0 left-auto top-0 h-full max-h-none w-full max-w-xl translate-x-0 translate-y-0 gap-0 overflow-hidden rounded-none border-y-0 border-l border-r-0 p-0 shadow-xl sm:max-w-xl',
-        )}
-      >
-        <DialogHeader className="shrink-0 border-b border-line px-5 py-4 pr-12">
-          <p className="taste-micro">Request detail</p>
-          <DialogTitle className="font-mono text-base">{requestId ?? '—'}</DialogTitle>
-          <DialogDescription>
-            Full journey history and matching review — counts and ids only.
-          </DialogDescription>
-          {journeyQuery.isFetching && !journeyQuery.isPending ? (
-            <span className="taste-frost-chip w-fit text-[0.65rem]">Refreshing</span>
-          ) : null}
-        </DialogHeader>
-
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {loading ? (
-            <div className="px-5 py-8 text-xs text-ink-soft">Loading journey…</div>
-          ) : null}
-
-          {journeyQuery.isError ? (
-            <div className="px-5 py-6">
-              <p className="text-xs text-red-700">Could not load request journey.</p>
-              <p className="mt-1 font-mono text-[0.65rem] text-ink-soft">
-                {journeyQuery.error instanceof Error
-                  ? journeyQuery.error.message
-                  : 'Unknown error'}
-              </p>
-            </div>
-          ) : null}
-
-          {journeyQuery.data ? (
-            <div className="px-5 pb-8">
-              <dl className="flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-line py-3 text-xs">
-                <div className="flex items-baseline gap-2">
-                  <dt className="taste-micro">Source</dt>
-                  <dd>
-                    {SOURCE_LABELS[journeyQuery.data.intake_source] ??
-                      journeyQuery.data.intake_source}
-                  </dd>
-                </div>
-                <div className="flex items-baseline gap-2">
-                  <dt className="taste-micro">Received</dt>
-                  <dd className="tabular-nums">
-                    {formatTimestamp(journeyQuery.data.received_at)}
-                  </dd>
-                </div>
-                <div className="flex items-baseline gap-2">
-                  <dt className="taste-micro">Stage</dt>
-                  <dd>
-                    <span className="taste-frost-chip text-[0.65rem] capitalize">
-                      {(journeyQuery.data.current_stage ?? 'unknown').replaceAll('_', ' ')}
-                    </span>
-                  </dd>
-                </div>
-                {journeyQuery.data.blocker ? (
-                  <div className="flex min-w-0 items-baseline gap-2 sm:max-w-md">
-                    <dt className="taste-micro shrink-0">Blocker</dt>
-                    <dd className="truncate text-ink-soft">{journeyQuery.data.blocker}</dd>
-                  </div>
-                ) : null}
-                {journeyQuery.data.source_csv_filename ? (
-                  <div className="flex min-w-0 items-baseline gap-2 sm:max-w-md">
-                    <dt className="taste-micro shrink-0">Intake CSV</dt>
-                    <dd className="truncate font-mono text-[0.7rem] text-ink-soft">
-                      {journeyQuery.data.source_csv_filename}
-                    </dd>
-                  </div>
-                ) : null}
-                {journeyQuery.data.bulk_process_id != null ? (
-                  <div className="flex items-baseline gap-2">
-                    <dt className="taste-micro">Batch</dt>
-                    <dd>
-                      <Link
-                        to="/"
-                        search={{
-                          tab: 'history',
-                          process: journeyQuery.data.bulk_process_id,
-                        }}
-                        className="taste-link tabular-nums text-[0.7rem]"
-                        onClick={() => onOpenChange(false)}
-                      >
-                        process #{journeyQuery.data.bulk_process_id}
-                      </Link>
-                    </dd>
-                  </div>
-                ) : null}
-              </dl>
-
-              <Tabs defaultValue="history" className="mt-3">
-                <TabsList>
-                  <TabsTrigger value="history">History</TabsTrigger>
-                  <TabsTrigger value="matching">Matching</TabsTrigger>
-                  <TabsTrigger value="delivery">Delivery</TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="history">
-                  <div className="space-y-4">
-                    <div className="overflow-x-auto rounded-lg border border-line/80 bg-paper/40 p-3">
-                      <RunTimeline
-                        steps={timelineSteps}
-                        orientation="horizontal"
-                        emptyMessage="No journey stages recorded."
-                      />
-                    </div>
-                    <RunTimeline
-                      steps={timelineSteps}
-                      emptyMessage="No journey stages recorded."
-                    />
-                    <div className="flex flex-wrap gap-2 border-t border-line pt-4">
-                      <Link
-                        to="/requests/$requestId"
-                        params={{ requestId: journeyQuery.data.request_id }}
-                        className="taste-btn text-xs"
-                        onClick={() => onOpenChange(false)}
-                      >
-                        Open full page →
-                      </Link>
-                      {isSuperAdmin ? (
-                        <Link
-                          to="/ops/runs"
-                          search={{ request_id: journeyQuery.data.request_id }}
-                          className="taste-btn text-xs"
-                          onClick={() => onOpenChange(false)}
-                        >
-                          Runs for request →
-                        </Link>
-                      ) : null}
-                    </div>
-                  </div>
-                </TabsContent>
-
-                <TabsContent value="matching">
-                  <MatchingReviewPanel
-                    requestId={journeyQuery.data.request_id}
-                    matching={matching}
-                    isPending={matchingQuery.isPending}
-                    isError={matchingQuery.isError}
-                    canReviewActions={canReviewActions}
-                    actionPending={actionPending}
-                    actionError={actionError}
-                    onPromote={(responseStatus) =>
-                      promoteMutation.mutate(responseStatus)
-                    }
-                    onDecline={() => declineMutation.mutate()}
-                  />
-                </TabsContent>
-
-                <TabsContent value="delivery">
-                  <AccessHandoffPanel
-                    requestId={journeyQuery.data.request_id}
-                    artifact={artifactQuery.data}
-                    isPending={artifactQuery.isPending}
-                    isError={artifactQuery.isError}
-                    canMutate={Boolean(isSuperAdmin || isAdmin)}
-                    busy={deliveryMutation.isPending}
-                    onCopyUrl={() => {
-                      const url =
-                        artifactQuery.data?.shareable_url ??
-                        artifactQuery.data?.fulfillment_artifact_uri
-                      if (!url) return
-                      void navigator.clipboard.writeText(url).then(() => {
-                        setCopyNote('Copied URL')
-                        window.setTimeout(() => setCopyNote(null), 2000)
-                      })
-                    }}
-                    onSetStatus={(status) => deliveryMutation.mutate(status)}
-                  />
-                  {copyNote ? <p className="taste-micro text-mute">{copyNote}</p> : null}
-                  {deliveryMutation.isError ? (
-                    <p className="text-[0.65rem] text-red-700">
-                      {deliveryMutation.error instanceof Error
-                        ? deliveryMutation.error.message
-                        : 'Could not update delivery status'}
-                    </p>
-                  ) : null}
-                </TabsContent>
-              </Tabs>
-            </div>
-          ) : null}
-        </div>
-      </DialogContent>
-    </Dialog>
+    <RequestDetailOverlay requestId={requestId} open={open} onOpenChange={onOpenChange} />
   )
 }
 

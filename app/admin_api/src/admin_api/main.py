@@ -24,21 +24,26 @@ from admin_api.drop_pipeline import health_router as ops_health_router
 from admin_api.drop_pipeline import router as drop_pipeline_router
 from admin_api.fulfillment_ops import router as fulfillment_ops_router
 from admin_api.legal_portfolio import router as legal_portfolio_router
+from admin_api.legal_operators import router as legal_operators_router
+from admin_api.legal_sla import apply_request_due_at_on_intake, router as legal_sla_router
+from admin_api.legal_team import router as legal_team_router
 from admin_api.request_correspondence import router as request_correspondence_router
 from admin_api.runs import router as runs_router
 from admin_api.request_journey import router as request_journey_router
 from admin_api.roles import CurrentRolePrincipal, MeResponse, RolePrincipal, require_roles
 from admin_api.worker_schedules import router as worker_schedules_router
 from habeas_privacy_core.audit import AuditMiddleware
-from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_LEGAL, ROLE_SUPER_ADMIN
+from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_DATA_OWNER, ROLE_LEGAL, ROLE_SUPER_ADMIN
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
-from habeas_privacy_core.db.requests import (
-    get_request,
-    insert_request,
-    list_requests,
-    promote_manual_request,
+from admin_api.requests_list import (
+    CoarseStage,
+    RequestListItem,
+    SourceBucket,
+    StagePosture,
+    search_requests,
 )
+from habeas_privacy_core.db.requests import get_request, insert_request, promote_manual_request
 from habeas_privacy_core.health import health_payload, ready_payload
 from habeas_privacy_core.models.intake import (
     CreateRequestInput,
@@ -56,6 +61,11 @@ logger = logging.getLogger(__name__)
 LegalIntakePrincipal = Annotated[
     RolePrincipal,
     Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL)),
+]
+
+RequestsListPrincipal = Annotated[
+    RolePrincipal,
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL, ROLE_DATA_OWNER)),
 ]
 
 
@@ -143,6 +153,9 @@ app.include_router(drop_pipeline_router)
 app.include_router(ops_health_router)
 app.include_router(fulfillment_ops_router)
 app.include_router(legal_portfolio_router)
+app.include_router(legal_sla_router)
+app.include_router(legal_team_router)
+app.include_router(legal_operators_router)
 app.include_router(request_correspondence_router)
 app.include_router(runs_router)
 app.include_router(request_journey_router)
@@ -205,28 +218,107 @@ async def live_events():
     return EventSourceResponse(event_generator())
 
 
-@app.get("/requests", response_model=list[RequestRecord])
+@app.get("/requests", response_model=list[RequestListItem])
 async def requests_list(
-    limit: int = Query(default=50, ge=1, le=200),
+    viewer: RequestsListPrincipal,
+    limit: int = Query(default=50, ge=1, le=100),
     intake_source: IntakeSource | None = None,
+    source_bucket: SourceBucket | None = None,
+    stage: CoarseStage | None = None,
+    posture: StagePosture | None = None,
+    q: str | None = Query(default=None, max_length=200),
 ):
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
+    include_display_labels = viewer.role in (ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL)
     pool = get_pool()
     async with pool.acquire() as conn:
-        return await list_requests(conn, limit=limit, intake_source=intake_source)
+        try:
+            return await search_requests(
+                conn,
+                limit=limit,
+                intake_source=intake_source,
+                source_bucket=source_bucket,
+                stage=stage,
+                posture=posture,
+                q=q,
+                include_display_labels=include_display_labels,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.get("/requests/{request_id}", response_model=RequestRecord)
-async def requests_get(request_id: str):
+class RequesterContact(BaseModel):
+    """Authorized-viewer contact for non-DROP intake — never logged or audited."""
+
+    name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+
+
+class RequestDetailRecord(RequestRecord):
+    """Request spine plus optional display/contact for legal/admin viewers."""
+
+    display_label: str | None = None
+    contact: RequesterContact | None = None
+
+
+async def _load_non_drop_contact(
+    conn: Any,
+    *,
+    intake_source: IntakeSource,
+    raw_record_id: int | None,
+) -> tuple[str | None, RequesterContact | None]:
+    """Name/email/phone from manual_raw_requests for non-DROP intakes only."""
+    if intake_source == IntakeSource.DROP or raw_record_id is None:
+        return None, None
+    row = await conn.fetchrow(
+        """
+        SELECT cleaned_payload
+          FROM manual_raw_requests
+         WHERE id = $1
+        """,
+        raw_record_id,
+    )
+    if not row:
+        return None, None
+    payload = row["cleaned_payload"] or {}
+    if not isinstance(payload, dict):
+        return None, None
+    first = str(payload.get("first_name") or "").strip()
+    last = str(payload.get("last_name") or "").strip()
+    name = " ".join(part for part in (first, last) if part) or None
+    email = str(payload.get("email") or payload.get("email_address") or "").strip() or None
+    phone = str(payload.get("phone") or payload.get("phone_number") or "").strip() or None
+    display_label = name
+    if not name and not email and not phone:
+        return display_label, None
+    return display_label, RequesterContact(name=name, email=email, phone=phone)
+
+
+@app.get("/requests/{request_id}", response_model=RequestDetailRecord)
+async def requests_get(request_id: str, viewer: RequestsListPrincipal):
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
     pool = get_pool()
     async with pool.acquire() as conn:
         record = await get_request(conn, request_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="request not found")
-    return record
+        if record is None:
+            raise HTTPException(status_code=404, detail="request not found")
+        include_contact = viewer.role in (ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL)
+        display_label: str | None = None
+        contact: RequesterContact | None = None
+        if include_contact:
+            display_label, contact = await _load_non_drop_contact(
+                conn,
+                intake_source=record.intake_source,
+                raw_record_id=record.raw_record_id,
+            )
+    return RequestDetailRecord(
+        **record.model_dump(),
+        display_label=display_label,
+        contact=contact,
+    )
 
 
 @app.post("/requests", response_model=RequestRecord, status_code=201)
@@ -246,6 +338,7 @@ async def requests_create(_body: ManualRequestBody):
                 request_type=_body.request_type,
             ),
         )
+        await apply_request_due_at_on_intake(conn, request_id)
         record = await get_request(conn, request_id)
     if record is None:
         raise HTTPException(status_code=500, detail="request insert failed")
@@ -322,6 +415,7 @@ async def requests_agent_batch(
                 requestor_state=row.requestor_state,
                 cleaned_payload=row.cleaned_payload,
             )
+            await apply_request_due_at_on_intake(conn, request_id)
             request_ids.append(request_id)
 
     logger.info(

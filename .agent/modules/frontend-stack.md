@@ -25,9 +25,11 @@ Visual design: load [`design-taste.md`](design-taste.md). For DROP Ops IA (Runs 
 ## Admin-api access (Identity-Aware Proxy)
 
 - Local: leave `VITE_ADMIN_API_URL` unset → Vite proxies `/api` → `http://127.0.0.1:8000` (no IAP).
-- Local against deployed admin-api: set `VITE_PROXY_TARGET` (Cloud Run URL), `IAP_USER_EMAIL`, and
-  `IAP_IMPERSONATE_SERVICE_ACCOUNT` — Vite mints a Cloud Run ID token via gcloud SA impersonation
-  (same as CLI). Do not paste an IAP OAuth-client audience token into `IAP_ID_TOKEN`.
+- Local against deployed admin-api: `gcloud auth application-default login`, set
+  `VITE_PROXY_TARGET` (Cloud Run URL) — Vite mints a Cloud Run ID token via ADC
+  (`google-auth-library`, same audience as `habeas-cli auth login --adc`). Optional
+  `IAP_USER_EMAIL` only for SA impersonation fallback. Do not paste an IAP OAuth-client
+  audience token into `IAP_ID_TOKEN`.
 - Deployed SPA may set `VITE_ADMIN_API_URL` to admin-api; `fetch` uses `credentials: 'include'` for IAP cookies. Cross-origin IAP is best-effort — use CLI for reliable mutations.
 - Never call worker Cloud Run URLs from the browser.
 

@@ -16,10 +16,11 @@ import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
 import { HealthLandingPage } from '@/routes/ops/health/index'
 import { RequestDetailPage } from '@/routes/requests/$requestId'
 import { NeedsAttentionPage } from '@/routes/requests/needs-attention'
-import { ConditionsPage } from '@/routes/requests/conditions'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
 import { RequestsSlasPage } from '@/routes/requests/slas'
+import { DocsPage } from '@/routes/docs'
+import { HOME_WINDOWS, type HomeWindow } from '@/components/legal/home/DateToolbar'
 
 export const PIPELINE_TABS = [
   'pipeline',
@@ -45,6 +46,11 @@ export type PipelineSearch = {
   tab: PipelineTab
   process?: number
   stage?: PipelineStageTab
+}
+
+export type IndexSearch = PipelineSearch & {
+  /** Legal Home analytics window — not used by DROP pipeline console. */
+  home_window?: HomeWindow
 }
 
 function parsePipelineTab(value: unknown): PipelineTab {
@@ -100,6 +106,17 @@ function parsePipelineSearch(search: Record<string, unknown>): PipelineSearch {
   if (process != null) parsed.process = process
   const stage = parsePipelineStage(search.stage, search.tab)
   if (stage != null) parsed.stage = stage
+  return parsed
+}
+
+function parseIndexSearch(search: Record<string, unknown>): IndexSearch {
+  const parsed: IndexSearch = parsePipelineSearch(search)
+  if (
+    typeof search.home_window === 'string' &&
+    HOME_WINDOWS.includes(search.home_window as HomeWindow)
+  ) {
+    parsed.home_window = search.home_window as HomeWindow
+  }
   return parsed
 }
 
@@ -342,16 +359,23 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
-  validateSearch: (search: Record<string, unknown>) => parsePipelineSearch(search),
+  validateSearch: (search: Record<string, unknown>) => parseIndexSearch(search),
   component: DashboardPage,
 })
 
+export const REQUESTS_DUE_FILTERS = ['overdue', 'due_soon', 'on_track'] as const
+export type RequestsDueFilter = (typeof REQUESTS_DUE_FILTERS)[number]
+
 export type RequestsSearch = {
   source?: 'webform' | 'drop' | 'csv' | 'manual'
+  source_bucket?: 'drop' | 'other'
+  request_type?: string
+  stage?: string
+  posture?: 'in_queue' | 'in_progress' | 'complete'
   state?: string
   attention?: 'needs' | 'clear'
+  due?: RequestsDueFilter
   raw?: 'yes' | 'no'
-  q?: string
   received_after?: string
   received_before?: string
 }
@@ -364,17 +388,36 @@ function parseRequestsSearch(search: Record<string, unknown>): RequestsSearch {
   ) {
     parsed.source = search.source as RequestsSearch['source']
   }
+  if (search.source_bucket === 'drop' || search.source_bucket === 'other') {
+    parsed.source_bucket = search.source_bucket
+  }
+  if (typeof search.request_type === 'string' && search.request_type.trim()) {
+    parsed.request_type = search.request_type.trim()
+  }
+  if (typeof search.stage === 'string' && search.stage.trim()) {
+    parsed.stage = search.stage.trim()
+  }
+  if (
+    search.posture === 'in_queue' ||
+    search.posture === 'in_progress' ||
+    search.posture === 'complete'
+  ) {
+    parsed.posture = search.posture
+  }
   if (typeof search.state === 'string' && search.state.trim()) {
     parsed.state = search.state.trim().toUpperCase()
   }
   if (search.attention === 'needs' || search.attention === 'clear') {
     parsed.attention = search.attention
   }
+  if (
+    typeof search.due === 'string' &&
+    REQUESTS_DUE_FILTERS.includes(search.due as RequestsDueFilter)
+  ) {
+    parsed.due = search.due as RequestsDueFilter
+  }
   if (search.raw === 'yes' || search.raw === 'no') {
     parsed.raw = search.raw
-  }
-  if (typeof search.q === 'string' && search.q.trim()) {
-    parsed.q = search.q.trim()
   }
   if (typeof search.received_after === 'string' && search.received_after.trim()) {
     parsed.received_after = search.received_after.trim()
@@ -405,10 +448,26 @@ export const NEEDS_ATTENTION_KINDS = [
 
 export type NeedsAttentionSearchKind = (typeof NEEDS_ATTENTION_KINDS)[number]
 
+export const LEGAL_INBOX_FILTERS = [
+  'unassigned',
+  'assignment_to_legal',
+  'fulfillment',
+  'notice',
+  'delivery',
+  'pre_matching_holds',
+  'assigned_to_me',
+] as const
+
+export type LegalInboxFilter = (typeof LEGAL_INBOX_FILTERS)[number]
+
 export type NeedsAttentionSearch = {
   bulk?: number
   /** Inbox lane tab — Legal defaults to triage when omitted. */
   kind?: NeedsAttentionSearchKind
+  /** Legal/admin filter chips (OQ14) — supersedes kind tabs when set. */
+  filter?: LegalInboxFilter
+  /** Scope matching review queue to a data-owner assignee (API `assignee` param). */
+  assignee?: string
 }
 
 function parseNeedsAttentionSearch(search: Record<string, unknown>): NeedsAttentionSearch {
@@ -426,6 +485,15 @@ function parseNeedsAttentionSearch(search: Record<string, unknown>): NeedsAttent
     (NEEDS_ATTENTION_KINDS as readonly string[]).includes(search.kind)
   ) {
     parsed.kind = search.kind as NeedsAttentionSearchKind
+  }
+  if (
+    typeof search.filter === 'string' &&
+    (LEGAL_INBOX_FILTERS as readonly string[]).includes(search.filter)
+  ) {
+    parsed.filter = search.filter as LegalInboxFilter
+  }
+  if (typeof search.assignee === 'string' && search.assignee.trim()) {
+    parsed.assignee = search.assignee.trim()
   }
   return parsed
 }
@@ -450,11 +518,12 @@ const manualRequestRoute = createRoute({
   component: ManualRequestPage,
 })
 
-const conditionsRoute = createRoute({
+const docsRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: '/requests/conditions',
-  component: ConditionsPage,
+  path: '/docs',
+  component: DocsPage,
 })
+
 
 const requestDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -599,7 +668,7 @@ const routeTree = rootRoute.addChildren([
   needsAttentionRoute,
   requestsSlasRoute,
   manualRequestRoute,
-  conditionsRoute,
+  docsRoute,
   requestDetailRoute,
   matchingReviewRoute,
   opsDashboardRoute,

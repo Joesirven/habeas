@@ -77,6 +77,12 @@ export type HealthPayload = {
 
 export type IntakeSource = 'webform' | 'drop' | 'csv' | 'manual'
 
+export type RequesterContact = {
+  name?: string | null
+  email?: string | null
+  phone?: string | null
+}
+
 export type RequestRecord = {
   id: string
   received_at: string
@@ -84,6 +90,13 @@ export type RequestRecord = {
   raw_record_id: number | null
   /** 2-letter USPS acronym — not PII */
   requestor_state?: string | null
+  request_type?: string
+  /** Non-DROP display label when available — not logged server-side */
+  display_label?: string | null
+  /** Non-DROP contact for legal/admin — authorized display only */
+  contact?: RequesterContact | null
+  /** True when DROP row is still open on the spine */
+  drop_open?: boolean | null
 }
 
 export type ManualRequestInput = {
@@ -111,12 +124,60 @@ export function getHealth() {
   return fetchAdminApi<HealthPayload>('/readyz')
 }
 
-export function listRequests(intakeSource?: IntakeSource, limit: number = 200) {
+export function getRequest(requestId: string) {
+  return fetchAdminApi<RequestRecord>(`/requests/${encodeURIComponent(requestId)}`)
+}
+
+export type IdentityVerificationRecord = {
+  id: number
+  request_id: string
+  status: string
+  method: string | null
+  verified_by: string
+  notes: string | null
+  verified_at: string
+}
+
+export function getLatestIdentityVerification(requestId: string) {
+  return fetchAdminApi<IdentityVerificationRecord | null>(
+    `/requests/${encodeURIComponent(requestId)}/identity-verification/latest`,
+  )
+}
+
+export function postIdentityVerification(
+  requestId: string,
+  body: {
+    status?: 'verified' | 'failed' | 'pending'
+    method?: string
+    notes?: string
+  },
+) {
+  return fetchAdminApi<IdentityVerificationRecord>(
+    `/requests/${encodeURIComponent(requestId)}/identity-verification`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+export function listRequests(options?: {
+  intakeSource?: IntakeSource
+  sourceBucket?: 'drop' | 'other'
+  stage?: string
+  posture?: 'in_queue' | 'in_progress' | 'complete'
+  limit?: number
+  q?: string
+}) {
   const search = new URLSearchParams()
-  if (intakeSource) search.set('intake_source', intakeSource)
-  search.set('limit', String(limit))
+  if (options?.intakeSource) search.set('intake_source', options.intakeSource)
+  if (options?.sourceBucket) search.set('source_bucket', options.sourceBucket)
+  if (options?.stage) search.set('stage', options.stage)
+  if (options?.posture) search.set('posture', options.posture)
+  if (options?.limit != null) search.set('limit', String(options.limit))
+  if (options?.q?.trim()) search.set('q', options.q.trim())
   const query = search.toString()
-  return fetchAdminApi<RequestRecord[]>(`/requests?${query}`)
+  return fetchAdminApi<RequestRecord[]>(`/requests${query ? `?${query}` : ''}`)
 }
 
 export function createManualRequest(body: ManualRequestInput) {
@@ -1292,6 +1353,8 @@ export type RequestJourneyResponse = {
   source_csv_filename?: string | null
   /** drop_connector download attempt id (bulk process key). */
   bulk_process_id?: number | null
+  /** CA DROP response_status when fulfillment has written it. */
+  response_status?: number | null
 }
 
 export type NeedsAttentionAssignment = {
@@ -1323,6 +1386,8 @@ export type NeedsAttentionItem = {
   match_type?: string | null
   /** Computed at read time from match_count (0→5, 1→3, N→4). */
   recommended_response_status?: number | null
+  /** CA DROP response_status when already fulfilled (notice rows). */
+  response_status?: number | null
   matched_via?: string | null
   requestor_state?: string | null
   review_status?: string | null
@@ -1393,8 +1458,17 @@ export async function getLegalNeedsAttention(limit = 1000): Promise<NeedsAttenti
   return { items, kind: 'all' }
 }
 
+export type LegalPortfolioWindowDays = '7' | '30' | '90' | 'ytd' | 'all'
+
 export type LegalPortfolio = {
+  source_buckets: { drop: number; other: number }
   type_counts: Array<{ request_type: string; count: number }>
+  stage_matrix: Array<{
+    stage: string
+    in_queue: number
+    in_progress: number
+    complete: number
+  }>
   pipeline_stages: Array<{ stage: string; count: number }>
   data_owner_queues: Array<{
     assignee_identity: string | null
@@ -1407,10 +1481,91 @@ export type LegalPortfolio = {
     next_run_at: string | null
     cadence: string | null
   } | null
+  /** Variation B fields — absent until admin-api with legal Home enrichment is deployed. */
+  fulfillment_batches?: Array<{
+    batch_key: string
+    source_label: string
+    received_at: string
+    request_count: number
+  }>
+  stage_reach_counts?: Array<{
+    stage: string
+    reached_count: number
+    dropped_count: number
+  }>
+  heatmap_cells?: Array<{
+    intake_source: string
+    request_type: string
+    count: number
+  }>
+  deadline_risk?: {
+    overdue: number
+    due_within_7_days: number
+    on_track: number
+    closed_ytd: number
+  }
+  operations_pulse?: {
+    open_assigned_to_you: number
+    open_team_wide: number
+    sla_at_risk: number
+    overdue: number
+    median_age_hours: number
+  }
 }
 
-export function getLegalPortfolio() {
-  return fetchAdminApi<LegalPortfolio>('/legal/home/portfolio')
+export function getLegalPortfolio(params?: {
+  window_days?: LegalPortfolioWindowDays
+  batch_key?: string
+}) {
+  const search = new URLSearchParams()
+  if (params?.window_days) search.set('window_days', params.window_days)
+  if (params?.batch_key) search.set('batch_key', params.batch_key)
+  const qs = search.toString()
+  return fetchAdminApi<LegalPortfolio>(`/legal/home/portfolio${qs ? `?${qs}` : ''}`)
+}
+
+export type LegalSlaSettings = {
+  data_owner_review_days: number
+  legal_pre_fulfillment_days: number
+  fulfillment_days: number
+  lifecycle_days: number
+  updated_at: string | null
+}
+
+export function getLegalSlaSettings() {
+  return fetchAdminApi<LegalSlaSettings>('/legal/settings/sla')
+}
+
+export function patchLegalSlaSettings(body: Partial<LegalSlaSettings>) {
+  return fetchAdminApi<LegalSlaSettings>('/legal/settings/sla', {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+export type LegalTeamMember = { email: string; active: boolean; added_at: string | null }
+
+export function getLegalTeam() {
+  return fetchAdminApi<LegalTeamMember[]>('/legal/team')
+}
+
+export function addLegalTeamMember(email: string) {
+  return fetchAdminApi<LegalTeamMember>('/legal/team', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+}
+
+export function removeLegalTeamMember(email: string) {
+  return fetchAdminApi<{ status: string }>(`/legal/team/${encodeURIComponent(email)}`, {
+    method: 'DELETE',
+  })
+}
+
+export type LegalOperator = { email: string; kind: string }
+
+export function getLegalOperators() {
+  return fetchAdminApi<LegalOperator[]>('/legal/operators')
 }
 
 export function postTriageBulkReject(body: {
@@ -1533,4 +1688,52 @@ export function postRequestComment(requestId: string, body: string) {
       body: JSON.stringify({ body }),
     },
   )
+}
+
+export function postRequestClose(
+  requestId: string,
+  body?: { note?: string; drop_response_status?: DropResponseStatusCode },
+) {
+  return fetchAdminApi<{
+    request_id: string
+    closed_at: string
+    closed_by: string | null
+    already_closed: boolean
+    drop_response_status_set: boolean
+  }>(`/ops/requests/${encodeURIComponent(requestId)}/close`, {
+    method: 'POST',
+    body: JSON.stringify(body ?? {}),
+  })
+}
+
+export type TimelineEntry = {
+  at: string
+  kind: string
+  actor: string | null
+  summary: string
+  meta: Record<string, unknown>
+}
+
+export type RequestTimeline = {
+  request_id: string
+  entries: TimelineEntry[]
+}
+
+export function getRequestTimeline(requestId: string) {
+  return fetchAdminApi<RequestTimeline>(
+    `/ops/requests/${encodeURIComponent(requestId)}/timeline`,
+  )
+}
+
+export type EmailTemplateRecord = {
+  id: number
+  slug: string
+  subject: string
+  body: string
+  placeholder_schema: string[]
+  active: boolean
+}
+
+export function listEmailTemplates() {
+  return fetchAdminApi<EmailTemplateRecord[]>('/requests/email-templates')
 }

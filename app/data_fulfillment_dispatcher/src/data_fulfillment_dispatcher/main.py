@@ -104,6 +104,10 @@ async def fulfill(body: FulfillRequest | None = None):
                 def dwid_resolver_factory(db: Any, request_id: str):
                     return make_dwid_resolver(db, request_id, bq_client=bq_client)
 
+            from data_fulfillment_dispatcher.access_export import (
+                ACCESS_TABLE_ALLOWLIST,
+            )
+
             result = await run_fulfill(
                 conn,
                 request_id=req.request_id,
@@ -114,6 +118,10 @@ async def fulfill(body: FulfillRequest | None = None):
                     worker_id=settings.worker_id,
                     bq_client=bq_client,
                     dwid_resolver_factory=dwid_resolver_factory,
+                    bq_project=settings.access_export_bq_project,
+                    bq_dataset=settings.access_export_bq_dataset,
+                    bq_tables=settings.access_export_tables()
+                    or ACCESS_TABLE_ALLOWLIST,
                 ),
             )
         except Exception:

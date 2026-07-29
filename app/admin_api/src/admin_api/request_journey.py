@@ -29,9 +29,12 @@ from habeas_privacy_core.db.pool import get_pool
 from habeas_privacy_core.workflow.approval import (
     MATCHING_REVIEW_ACTION,
     NOTICE_REVIEW_ACTION,
+    REQUEST_CLOSE_COMMAND,
     WORKFLOW_ASSIGNMENT_ACTION,
+    close_request,
     get_current_assignment,
     is_matching_review_approved,
+    is_notice_review_approved,
 )
 
 NeedsAttentionItemKind = Literal[
@@ -68,6 +71,7 @@ JOURNEY_STAGES: tuple[str, ...] = (
     "match",
     "review",
     "fulfill",
+    "notice",
 )
 
 STAGE_LABELS: dict[str, str] = {
@@ -78,7 +82,36 @@ STAGE_LABELS: dict[str, str] = {
     "match": "Match",
     "review": "Review",
     "fulfill": "Fulfill",
+    "notice": "Notice",
 }
+
+# Activity timeline labels for approval/action summaries (KD16/R31).
+_TIMELINE_ACTION_LABELS: dict[str, str] = {
+    NOTICE_REVIEW_ACTION: "Fulfillment notice",
+    MATCHING_REVIEW_ACTION: "Matching review",
+    "access.delivery": "Access delivery",
+    WORKFLOW_ASSIGNMENT_ACTION: "Assignment",
+}
+
+
+def _timeline_action_label(
+    action_type: str, *, context: dict[str, Any] | None = None
+) -> str:
+    """Map approval action_type to plain-English Activity summary labels."""
+    ctx = context or {}
+    if (
+        action_type == WORKFLOW_ASSIGNMENT_ACTION
+        and ctx.get("kind") == "escalate"
+    ):
+        return "Assignment to legal"
+    mapped = _TIMELINE_ACTION_LABELS.get(action_type)
+    if mapped:
+        return mapped
+    return action_type.replace(".", " ").replace("_", " ").strip() or action_type
+
+
+def _timeline_status_label(status: str) -> str:
+    return status.replace("_", " ").strip() or status
 
 StageStatus = Literal[
     "not_started",
@@ -125,6 +158,11 @@ RequestOpsViewer = Annotated[
     ),
 ]
 
+LegalClosePrincipal = Annotated[
+    RolePrincipal,
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL)),
+]
+
 
 class JourneyStage(BaseModel):
     stage: str
@@ -145,6 +183,8 @@ class RequestJourneyResponse(BaseModel):
     # CSV member name for ops; batch key is download attempt id (not intake gcs_uri).
     source_csv_filename: str | None = None
     bulk_process_id: int | None = None
+    # CA DROP response_status when set (fulfillment result) — PII-safe code only.
+    response_status: int | None = None
 
 
 class NeedsAttentionAssignment(BaseModel):
@@ -174,6 +214,8 @@ class NeedsAttentionItem(BaseModel):
     bulk_process_id: int | None = None
     # ZIP member name — fallback batch key when download ledger is missing (seed/broker)
     source_csv_filename: str | None = None
+    # CA DROP response_status when already fulfilled (notice/delivery rows)
+    response_status: int | None = None
 
 
 class NeedsAttentionResponse(BaseModel):
@@ -185,6 +227,21 @@ class RequestCommentBody(BaseModel):
     """Ops note — no DROP PII; body is operator text only."""
 
     body: str = Field(min_length=1, max_length=2000)
+
+
+class RequestCloseBody(BaseModel):
+    """Unrestricted close (KD40) — optional note persists to correspondence."""
+
+    note: str | None = Field(default=None, max_length=2000)
+    drop_response_status: int | None = Field(default=None, ge=3, le=5)
+
+
+class RequestCloseResponse(BaseModel):
+    request_id: str
+    closed_at: str
+    closed_by: str | None = None
+    already_closed: bool = False
+    drop_response_status_set: bool = False
 
 
 class RequestComment(BaseModel):
@@ -204,6 +261,8 @@ def _require_database() -> None:
 def _iso(value: Any) -> str | None:
     if value is None:
         return None
+    if isinstance(value, str):
+        return value
     return value.isoformat()
 
 
@@ -371,6 +430,84 @@ def _current_blocker(stages: list[JourneyStage], current_stage: str) -> str | No
     return None
 
 
+def _infer_pipeline_stage_completion(
+    stages: list[JourneyStage],
+    *,
+    has_match_result: bool,
+    pipeline_applicable: bool,
+    pipeline_bypassed: bool,
+) -> list[JourneyStage]:
+    """Paint earlier DROP pipeline stages green when later progress proves they ran.
+
+    Does not invent attempt ids — only adjusts status / completed_at / soft blocker.
+    Never overwrites ``failed``. Prefer ``complete`` over ``skipped`` when bypassed.
+    """
+    if not pipeline_applicable:
+        return stages
+
+    by_name = {stage.stage: stage for stage in stages}
+    land = by_name.get("land")
+    promote = by_name.get("promote")
+    match = by_name.get("match")
+
+    land_ok = land is not None and land.status == "complete"
+    promote_ok = promote is not None and promote.status == "complete"
+    match_ok = has_match_result or (match is not None and match.status == "complete")
+
+    # Anchor completed_at from the furthest successful later stage when inferring.
+    completed_anchor: str | None = None
+    for candidate in (match, promote, land):
+        if candidate is not None and candidate.status == "complete" and candidate.completed_at:
+            completed_anchor = candidate.completed_at
+            break
+
+    result: list[JourneyStage] = []
+    for stage in stages:
+        if stage.stage == "match" and has_match_result and stage.status not in (
+            "failed",
+            "complete",
+        ):
+            result.append(
+                stage.model_copy(
+                    update={
+                        "status": "complete",
+                        "completed_at": stage.completed_at or completed_anchor,
+                        "blocker": None,
+                    }
+                )
+            )
+            continue
+
+        if stage.stage not in _PIPELINE_STAGES or stage.status == "failed":
+            result.append(stage)
+            continue
+
+        should_complete = False
+        if stage.stage == "download":
+            should_complete = land_ok or promote_ok or match_ok or pipeline_bypassed
+        elif stage.stage == "land":
+            should_complete = promote_ok or match_ok or pipeline_bypassed
+        elif stage.stage == "promote":
+            should_complete = match_ok or pipeline_bypassed
+
+        if not should_complete or stage.status == "complete":
+            result.append(stage)
+            continue
+
+        update: dict[str, Any] = {
+            "status": "complete",
+            "completed_at": stage.completed_at or completed_anchor,
+        }
+        if pipeline_bypassed:
+            update["blocker"] = (
+                "bypassed — matched without batch download/land/promote"
+            )
+        elif stage.blocker:
+            update["blocker"] = None
+        result.append(stage.model_copy(update=update))
+    return result
+
+
 async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourneyResponse:
     """Derive ordered stage rail for a privacy request (PII-safe)."""
     row = await conn.fetchrow(
@@ -379,7 +516,8 @@ async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourney
                r.intake_source,
                r.received_at,
                drr.source_csv_filename,
-               drr.response_status
+               drr.response_status,
+               drr.notice_review_status
           FROM requests r
           LEFT JOIN drop_raw_requests drr
             ON drr.id = r.raw_record_id
@@ -457,41 +595,40 @@ async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourney
         _stage_from_attempt(
             stage="download",
             attempt=download_attempt,
-            skipped=not pipeline_applicable or pipeline_bypassed,
+            skipped=not pipeline_applicable,
         ),
         _stage_from_attempt(
             stage="land",
             attempt=land_attempt,
-            skipped=not pipeline_applicable or pipeline_bypassed,
+            skipped=not pipeline_applicable,
         ),
         _stage_from_attempt(
             stage="promote",
             attempt=promote_attempt,
-            skipped=not pipeline_applicable or pipeline_bypassed,
+            skipped=not pipeline_applicable,
         ),
         _stage_from_attempt(stage="match", attempt=match_attempt),
     ]
-    if pipeline_bypassed:
-        stages = [
-            (
-                stage.model_copy(
-                    update={
-                        "blocker": "bypassed — matched without batch download/land/promote",
-                    }
-                )
-                if stage.stage in _PIPELINE_STAGES and stage.status == "skipped"
-                else stage
-            )
-            for stage in stages
-        ]
+    stages = _infer_pipeline_stage_completion(
+        stages,
+        has_match_result=has_match_result,
+        pipeline_applicable=pipeline_applicable,
+        pipeline_bypassed=pipeline_bypassed,
+    )
 
     review_status: StageStatus = "not_started"
     review_blocker: str | None = None
     review_attempted_at: str | None = None
     review_completed_at: str | None = None
 
+    # Fulfillment (response_status set) proves review was satisfied or bypassed
+    # (e.g. close/triage). Keep review green so current_stage can advance to notice.
+    review_passed_by_fulfill = (
+        intake_source == "drop" and row["response_status"] is not None
+    )
+
     if has_match_result:
-        if review_approved:
+        if review_approved or review_passed_by_fulfill:
             review_status = "complete"
             approval_row = await conn.fetchrow(
                 """
@@ -511,11 +648,14 @@ async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourney
                 review_completed_at = _iso(approval_row["decided_at"])
         elif pending_review is not None:
             review_status = "waiting"
-            review_blocker = "matching.review pending"
+            review_blocker = "Matching review pending"
             review_attempted_at = _iso(pending_review["requested_at"])
         else:
             review_status = "waiting"
-            review_blocker = "matching.review required"
+            review_blocker = "Matching review pending"
+    elif review_passed_by_fulfill:
+        # DROP fulfilled without a matching_results row (e.g. triage/close).
+        review_status = "complete"
 
     stages.append(
         JourneyStage(
@@ -557,7 +697,73 @@ async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourney
         )
     )
 
+    if intake_source == "drop":
+        notice_status: StageStatus = "not_started"
+        notice_blocker: str | None = None
+        notice_attempted_at: str | None = None
+        notice_completed_at: str | None = None
+        notice_review_status = row["notice_review_status"]
+        pending_notice = await conn.fetchrow(
+            """
+            SELECT requested_at
+              FROM approval_requests
+             WHERE request_id = $1
+               AND action_type = $2
+               AND status = 'pending'
+             ORDER BY requested_at DESC
+             LIMIT 1
+            """,
+            UUID(request_id),
+            NOTICE_REVIEW_ACTION,
+        )
+        notice_approved = await is_notice_review_approved(conn, request_id)
+        if row["response_status"] is None:
+            notice_status = "not_started"
+        elif notice_approved or str(notice_review_status or "") == "approved":
+            notice_status = "complete"
+            if pending_notice is None:
+                approved_notice = await conn.fetchrow(
+                    """
+                    SELECT requested_at, decided_at
+                      FROM approval_requests
+                     WHERE request_id = $1
+                       AND action_type = $2
+                       AND status = 'approved'
+                     ORDER BY decided_at DESC
+                     LIMIT 1
+                    """,
+                    UUID(request_id),
+                    NOTICE_REVIEW_ACTION,
+                )
+                if approved_notice is not None:
+                    notice_attempted_at = _iso(approved_notice["requested_at"])
+                    notice_completed_at = _iso(approved_notice["decided_at"])
+        elif (
+            pending_notice is not None
+            or str(notice_review_status or "") == "pending"
+        ):
+            notice_status = "waiting"
+            notice_blocker = "Fulfillment notice pending"
+            if pending_notice is not None:
+                notice_attempted_at = _iso(pending_notice["requested_at"])
+        else:
+            # Fulfilled but notice gate not opened yet — still yellow for Legal.
+            notice_status = "waiting"
+            notice_blocker = "Fulfillment notice pending"
+
+        stages.append(
+            JourneyStage(
+                stage="notice",
+                label=STAGE_LABELS["notice"],
+                status=notice_status,
+                attempted_at=notice_attempted_at,
+                completed_at=notice_completed_at,
+                blocker=notice_blocker,
+            )
+        )
+
     current_stage = _compute_current_stage(stages)
+    response_status = row["response_status"]
     return RequestJourneyResponse(
         request_id=row["request_id"],
         intake_source=intake_source,
@@ -567,6 +773,7 @@ async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourney
         stages=stages,
         source_csv_filename=source_csv_filename,
         bulk_process_id=bulk_process_id,
+        response_status=int(response_status) if response_status is not None else None,
     )
 
 
@@ -619,6 +826,7 @@ async def list_matching_needs_attention(
                AND r.intake_source = 'drop'
              WHERE COALESCE(lr.review_status, 'none') IN ('pending', 'none')
                AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
+               AND r.closed_at IS NULL
 
             UNION
 
@@ -785,6 +993,7 @@ async def list_assignment_needs_attention(
            AND ar.approver_role = 'legal'
            AND ar.context_jsonb->>'kind' = $2
            AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
+           AND r.closed_at IS NULL
          ORDER BY ar.requested_at ASC
          LIMIT $3
         """,
@@ -868,6 +1077,7 @@ async def list_notice_needs_attention(
                ) ar ON TRUE
          WHERE drr.response_status IS NOT NULL
            AND drr.notice_review_status = 'pending'
+           AND r.closed_at IS NULL
          ORDER BY COALESCE(ar.requested_at, r.received_at) ASC NULLS LAST
          LIMIT $2
         """,
@@ -900,6 +1110,16 @@ async def list_notice_needs_attention(
                 ),
                 requestor_state=state_acronym,
                 review_status=str(row["review_status"] or "pending"),
+                recommended_response_status=(
+                    int(row["response_status"])
+                    if row["response_status"] is not None
+                    else None
+                ),
+                response_status=(
+                    int(row["response_status"])
+                    if row["response_status"] is not None
+                    else None
+                ),
                 bulk_process_id=bulk_process_id,
                 source_csv_filename=(
                     str(row["source_csv_filename"])
@@ -937,6 +1157,7 @@ async def list_delivery_needs_attention(
           FROM latest l
           JOIN requests r ON r.id = l.request_id
          WHERE l.delivery_status IN ('pending', 'recorded', 'failed', 'sent')
+           AND r.closed_at IS NULL
          ORDER BY l.contacted_at ASC NULLS LAST
          LIMIT $1
         """,
@@ -1252,6 +1473,69 @@ async def post_request_comment(
     return comment
 
 
+@router.post("/{request_id}/close", response_model=RequestCloseResponse)
+async def post_request_close(
+    request_id: str,
+    body: RequestCloseBody,
+    request: Request,
+    viewer: LegalClosePrincipal,
+) -> RequestCloseResponse:
+    """Close a request — stamps closed_at, clears pending gates, sets DROP status when unset."""
+    _require_database()
+    try:
+        UUID(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid request_id") from exc
+
+    actor = resolve_actor(request).email
+    if not is_authenticated_actor(actor):
+        actor = viewer.email or actor
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await close_request(
+                conn,
+                request_id=request_id,
+                closed_by=actor,
+                drop_response_status=body.drop_response_status,
+            )
+            if body.note and body.note.strip():
+                await create_request_comment(
+                    conn,
+                    request_id=request_id,
+                    body=body.note.strip(),
+                    actor=actor,
+                )
+            await write_audit(
+                actor=actor,
+                interface="admin-api",
+                command=REQUEST_CLOSE_COMMAND,
+                arguments={
+                    "request_id": request_id,
+                    "already_closed": result.get("already_closed", False),
+                    "drop_response_status_set": result.get("drop_response_status_set", False),
+                },
+                result_status=200,
+                result_summary="request closed",
+                conn=conn,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="request not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    response = RequestCloseResponse(
+        request_id=result["request_id"],
+        closed_at=result["closed_at"],
+        closed_by=result.get("closed_by"),
+        already_closed=bool(result.get("already_closed")),
+        drop_response_status_set=bool(result.get("drop_response_status_set")),
+    )
+    assert_no_pii_keys(response.model_dump())
+    return response
+
+
 @router.get("/{request_id}/journey", response_model=RequestJourneyResponse)
 async def request_journey(
     request_id: str,
@@ -1266,5 +1550,153 @@ async def request_journey(
     pool = get_pool()
     async with pool.acquire() as conn:
         response = await build_request_journey(conn, request_id=request_id)
+    assert_no_pii_keys(response.model_dump())
+    return response
+
+
+class TimelineEntry(BaseModel):
+    at: str
+    kind: str
+    actor: str | None = None
+    summary: str
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class RequestTimelineResponse(BaseModel):
+    request_id: str
+    entries: list[TimelineEntry] = Field(default_factory=list)
+
+
+async def build_request_timeline(conn: Any, *, request_id: str) -> RequestTimelineResponse:
+    """Merge comments, approvals, and audit rows into chronological history."""
+    try:
+        UUID(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid request_id") from exc
+
+    exists = await conn.fetchval("SELECT 1 FROM requests WHERE id = $1", UUID(request_id))
+    if not exists:
+        raise HTTPException(status_code=404, detail="request not found")
+
+    entries: list[TimelineEntry] = []
+
+    comment_rows = await conn.fetch(
+        """
+        SELECT c.id, c.body, c.created_at, u.email AS actor
+          FROM request_comments c
+          JOIN users u ON u.id = c.author_user_id
+         WHERE c.request_id = $1
+         ORDER BY c.created_at ASC
+        """,
+        UUID(request_id),
+    )
+    for row in comment_rows:
+        body = str(row["body"]).strip()
+        summary = body if len(body) <= 120 else f"{body[:117]}…"
+        entries.append(
+            TimelineEntry(
+                at=_iso(row["created_at"]) or "",
+                kind="comment",
+                actor=str(row["actor"]),
+                summary=summary,
+                meta={"comment_id": int(row["id"])},
+            )
+        )
+
+    approval_rows = await conn.fetch(
+        """
+        SELECT id, action_type, status, approver_role, decided_by,
+               decision_reason, requested_at, decided_at, context_jsonb
+          FROM approval_requests
+         WHERE request_id = $1
+         ORDER BY COALESCE(decided_at, requested_at) ASC
+        """,
+        UUID(request_id),
+    )
+    for row in approval_rows:
+        action = str(row["action_type"])
+        status = str(row["status"])
+        context = row["context_jsonb"] or {}
+        if isinstance(context, str):
+            context = json.loads(context)
+        if not isinstance(context, dict):
+            context = {}
+        kind = "approval"
+        if action == WORKFLOW_ASSIGNMENT_ACTION and context.get("kind") == "escalate":
+            kind = "escalation"
+        elif action == WORKFLOW_ASSIGNMENT_ACTION:
+            kind = "assignment"
+        actor = row["decided_by"] or row.get("approver_role")
+        action_label = _timeline_action_label(action, context=context)
+        status_label = _timeline_status_label(status)
+        summary = f"{action_label} — {status_label}"
+        at = _iso(row["decided_at"]) or _iso(row["requested_at"]) or ""
+        entries.append(
+            TimelineEntry(
+                at=at,
+                kind=kind,
+                actor=str(actor) if actor else None,
+                summary=summary,
+                meta={"approval_id": int(row["id"]), "status": status},
+            )
+        )
+
+    audit_rows = await conn.fetch(
+        """
+        SELECT actor, command, result_summary, occurred_at, arguments
+          FROM admin_audit_log
+         WHERE arguments->>'request_id' = $1
+         ORDER BY occurred_at ASC
+         LIMIT 200
+        """,
+        request_id,
+    )
+    for row in audit_rows:
+        entries.append(
+            TimelineEntry(
+                at=_iso(row["occurred_at"]) or "",
+                kind="audit",
+                actor=str(row["actor"]),
+                summary=str(row["result_summary"] or row["command"]),
+                meta={"command": str(row["command"])},
+            )
+        )
+
+    journey = await build_request_journey(conn, request_id=request_id)
+    for stage in journey.stages:
+        if stage.status in ("complete", "failed", "in_progress", "waiting"):
+            ts = stage.completed_at or stage.attempted_at
+            if ts:
+                stage_label = (
+                    stage.label
+                    or STAGE_LABELS.get(stage.stage)
+                    or stage.stage.replace("_", " ")
+                )
+                entries.append(
+                    TimelineEntry(
+                        at=ts,
+                        kind="stage",
+                        actor=None,
+                        summary=(
+                            f"Stage {stage_label}: "
+                            f"{_timeline_status_label(stage.status)}"
+                        ),
+                        meta={"stage": stage.stage, "status": stage.status},
+                    )
+                )
+
+    entries.sort(key=lambda item: item.at)
+    return RequestTimelineResponse(request_id=request_id, entries=entries)
+
+
+@router.get("/{request_id}/timeline", response_model=RequestTimelineResponse)
+async def request_timeline(
+    request_id: str,
+    _viewer: RequestOpsViewer,
+) -> RequestTimelineResponse:
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        response = await build_request_timeline(conn, request_id=request_id)
     assert_no_pii_keys(response.model_dump())
     return response

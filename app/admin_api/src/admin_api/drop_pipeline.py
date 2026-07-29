@@ -36,7 +36,7 @@ from admin_api.approvals import (
     send_legal_triage_to_matching,
 )
 from admin_api.cloud_run_auth import auth_headers_for
-from admin_api.roles import RolePrincipal, require_roles
+from admin_api.roles import RolePrincipal, require_roles, settings as role_settings
 from habeas_privacy_core.auth import (
     ROLE_ADMIN,
     ROLE_DATA_OWNER,
@@ -53,10 +53,20 @@ from habeas_privacy_core.db.request_resolver import request_resolver
 from habeas_privacy_core.geo.state import InvalidStateAcronymError, normalize_state_acronym
 from habeas_privacy_core.models.intake import DropListType
 from habeas_privacy_core.models.request import IntakeSource
+from habeas_privacy_core.auth.roles import (
+    parse_email_allowlist,
+    resolve_role_from_allowlists,
+)
 from habeas_privacy_core.workflow.approval import (
     MATCHING_REVIEW_ACTION,
+    assert_matching_promote_allowed_for_role,
     ensure_pending_matching_review,
+    escalate_to_legal_with_fanout,
+    fetch_active_legal_team_emails,
     fetch_intake_route_triage_rule,
+    has_assignment_to_legal,
+    is_legal_persona_for_promote_gate,
+    is_matching_review_approved,
     version_intake_route_triage_rule,
 )
 
@@ -246,6 +256,7 @@ class EscalateBody(BaseModel):
     request_ids: list[str] = Field(min_length=1, max_length=200)
     target_role: str
     assignee_identity: str | None = None
+    comment: str | None = Field(default=None, max_length=2000)
     decided_by: str | None = None
 
 
@@ -321,6 +332,11 @@ LegalPrincipal = Annotated[
     Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL)),
 ]
 
+SettingsWritePrincipal = Annotated[
+    RolePrincipal,
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN)),
+]
+
 
 def decided_by_for_mutation(actor: str, client_decided_by: str | None) -> str:
     """Prefer IAP email over client-supplied decided_by when a principal is present."""
@@ -329,6 +345,18 @@ def decided_by_for_mutation(actor: str, client_decided_by: str | None) -> str:
     if client_decided_by and client_decided_by.strip():
         return client_decided_by.strip()
     return UNKNOWN_ACTOR
+
+
+def _role_for_actor_email(email: str) -> str | None:
+    return resolve_role_from_allowlists(
+        email,
+        super_admins=parse_email_allowlist(role_settings.admin_api_super_admins),
+        admins=parse_email_allowlist(role_settings.admin_api_admins),
+        legals=parse_email_allowlist(role_settings.admin_api_legals),
+        data_owners=parse_email_allowlist(role_settings.admin_api_data_owners),
+        require_identity=role_settings.require_iap_identity,
+        is_authenticated=is_authenticated_actor(email),
+    )
 
 
 async def _probe_worker_health(name: str, base_url: str) -> dict[str, Any]:
@@ -1642,6 +1670,8 @@ async def drop_promote(
     _actor: DropMutationActor,
     body: PromoteProxyBody | None = None,
 ):
+    # TODO(QC): apply_request_due_at_on_intake per promoted request — promote is a
+    # thin proxy to drop_ingestor; intake due_at belongs after ingest creates rows.
     url = f"{settings.drop_ingestor_url.rstrip('/')}/ingest/promote"
     payload = _model_dump_nonzero(body) if body is not None else {}
     return await proxy_post(url, json_body=payload)
@@ -2542,12 +2572,33 @@ async def drop_matching_result_promote(
     pool = get_pool()
     async with pool.acquire() as conn:
         try:
+            actor_role = _role_for_actor_email(decided_by)
+            legal_team_emails = frozenset(await fetch_active_legal_team_emails(conn))
+            actor_is_legal = is_legal_persona_for_promote_gate(
+                actor_role=actor_role,
+                actor_email=decided_by,
+                legal_team_emails=legal_team_emails,
+            )
+            legal_assignment = await has_assignment_to_legal(conn, request_id)
+            matching_approved = await is_matching_review_approved(conn, request_id)
+            assert_matching_promote_allowed_for_role(
+                actor_is_legal=actor_is_legal,
+                has_legal_assignment=legal_assignment,
+                matching_already_approved=matching_approved,
+            )
             result = await promote_matching_review_for_request(
                 conn,
                 request_id=request_id,
                 decided_by=decided_by,
                 decision_reason=body.decision_reason,
                 response_status=body.response_status,
+            )
+            from admin_api.legal_sla import SLA_STAGE_FULFILLMENT, apply_request_due_at_for_stage
+
+            await apply_request_due_at_for_stage(
+                conn,
+                request_id,
+                stage=SLA_STAGE_FULFILLMENT,
             )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -2660,7 +2711,7 @@ async def drop_workflow_escalate(
     body: EscalateBody,
     actor: DropMutationActor,
 ):
-    """Escalate request(s) to legal or data_owner."""
+    """Assignment to legal fans out to every active Legal team member."""
     _require_database()
     if body.target_role not in {"legal", "data_owner"}:
         raise HTTPException(
@@ -2671,13 +2722,49 @@ async def drop_workflow_escalate(
     pool = get_pool()
     async with pool.acquire() as conn:
         try:
-            result = await escalate_requests(
-                conn,
-                request_ids=body.request_ids,
-                target_role=body.target_role,
-                decided_by=decided_by,
-                assignee_identity=body.assignee_identity,
-            )
+            if body.target_role == "legal":
+                from admin_api.legal_sla import (
+                    SLA_STAGE_LEGAL_PRE_FULFILLMENT,
+                    apply_request_due_at_for_stage,
+                )
+                from admin_api.request_journey import create_request_comment
+
+                created: list[dict[str, Any]] = []
+                for request_id in body.request_ids:
+                    assignments = await escalate_to_legal_with_fanout(
+                        conn,
+                        request_id=request_id,
+                        decided_by=decided_by,
+                    )
+                    created.extend(assignments)
+                    await apply_request_due_at_for_stage(
+                        conn,
+                        request_id,
+                        stage=SLA_STAGE_LEGAL_PRE_FULFILLMENT,
+                    )
+                    if body.comment and body.comment.strip():
+                        await create_request_comment(
+                            conn,
+                            request_id=request_id,
+                            body=body.comment,
+                            actor=decided_by,
+                        )
+                result = {
+                    "kind": "escalate",
+                    "target_role": "legal",
+                    "assignee_identity": None,
+                    "count": len(created),
+                    "assignments": created,
+                    "request_ids": list(body.request_ids),
+                }
+            else:
+                result = await escalate_requests(
+                    conn,
+                    request_ids=body.request_ids,
+                    target_role=body.target_role,
+                    decided_by=decided_by,
+                    assignee_identity=body.assignee_identity,
+                )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": "ok", **result}
@@ -2795,7 +2882,7 @@ async def get_route_triage_condition(_principal: LegalPrincipal):
 @router.put("/workflow/conditions/route-triage")
 async def put_route_triage_condition(
     body: RouteTriageConditionBody,
-    _principal: LegalPrincipal,
+    _principal: SettingsWritePrincipal,
     actor: DropMutationActor,
 ):
     """Version ``intake.route_triage`` — close active row, insert replacement."""

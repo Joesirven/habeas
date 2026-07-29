@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -34,6 +35,8 @@ WORKFLOW_ASSIGNMENT_ACTION = "workflow.assignment"
 ASSIGNMENT_TARGETS = frozenset({"reviewer", "legal", "data_owner"})
 ASSIGNMENT_KINDS = frozenset({"assign", "escalate", "triage"})
 DEFAULT_ASSIGNMENT_TTL = timedelta(days=30)
+LEGAL_ASSIGNMENT_KIND = "escalate"
+ROLE_LEGAL = "legal"
 
 
 def _validate_table(table: str) -> str:
@@ -550,6 +553,7 @@ async def reconcile_ungated_matching_reviews(
                         )
                )
            AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
+           AND r.closed_at IS NULL
          ORDER BY l.matching_result_id ASC
          LIMIT $2
         """,
@@ -743,6 +747,125 @@ async def _supersede_pending_assignments(
     return [int(r["id"]) for r in rows]
 
 
+async def fetch_active_legal_team_emails(conn: asyncpg.Connection) -> list[str]:
+    """Active Legal team members for assignment-to-legal fan-out.
+
+    Settings **Legal team** is source of truth; ``ADMIN_API_LEGALS`` is bootstrap
+    fallback when the table has no active rows.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT email
+          FROM legal_team_members
+         WHERE active = true
+         ORDER BY email
+        """
+    )
+    if rows:
+        return [str(row["email"]).strip().lower() for row in rows]
+    raw = os.getenv("ADMIN_API_LEGALS", "")
+    return [email.strip().lower() for email in raw.split(",") if email.strip()]
+
+
+async def has_assignment_to_legal(
+    conn: asyncpg.Connection,
+    request_id: str,
+) -> bool:
+    """True when assignment-to-legal exists (pending or completed)."""
+    row = await conn.fetchval(
+        """
+        SELECT 1
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND approver_role = 'legal'
+           AND context_jsonb->>'kind' = $3
+           AND status IN ('pending', 'approved')
+         LIMIT 1
+        """,
+        UUID(request_id),
+        WORKFLOW_ASSIGNMENT_ACTION,
+        LEGAL_ASSIGNMENT_KIND,
+    )
+    return row is not None
+
+
+def is_legal_persona_for_promote_gate(
+    *,
+    actor_role: str | None,
+    actor_email: str,
+    legal_team_emails: frozenset[str],
+) -> bool:
+    """True when actor should be treated as legal for matching.review promote (KTD11).
+
+    Active ``legal_team_members`` count as legal persona even when absent from
+    ``ADMIN_API_LEGALS``; admin/super_admin roles are never gated.
+    """
+    if actor_role in ("super_admin", "admin"):
+        return False
+    if actor_role == ROLE_LEGAL:
+        return True
+    return actor_email.strip().lower() in legal_team_emails
+
+
+def assert_matching_promote_allowed_for_role(
+    *,
+    actor_is_legal: bool,
+    has_legal_assignment: bool,
+    matching_already_approved: bool,
+) -> None:
+    """Block legal persona from matching.review → fulfillment shortcuts (KTD11).
+
+    Legal may promote when data owner completed assignment-to-legal or when
+    data-owner matching review is already approved; otherwise promote is blocked.
+    """
+    if not actor_is_legal:
+        return
+    if has_legal_assignment or matching_already_approved:
+        return
+    raise ValueError(
+        "legal cannot promote matching.review to fulfillment without assignment to legal"
+    )
+
+
+async def escalate_to_legal_with_fanout(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    decided_by: str,
+    expires_in: timedelta = DEFAULT_ASSIGNMENT_TTL,
+) -> list[dict[str, Any]]:
+    """Fan-out assignment-to-legal to every active Legal team member."""
+    members = await fetch_active_legal_team_emails(conn)
+    if not members:
+        raise ValueError("no active legal team members configured")
+    await _supersede_pending_assignments(
+        conn, request_id=request_id, decided_by=decided_by
+    )
+    expires_at = datetime.now(UTC) + expires_in
+    created: list[dict[str, Any]] = []
+    for email in members:
+        context = {"kind": LEGAL_ASSIGNMENT_KIND, "assignee_identity": email}
+        row = await conn.fetchrow(
+            """
+            INSERT INTO approval_requests (
+                request_id, action_type, rule_id, approver_role, status,
+                context_jsonb, expires_at, decided_by
+            ) VALUES ($1, $2, NULL, 'legal', 'pending', $3::jsonb, $4, $5)
+            RETURNING id, request_id, action_type, status, approver_role,
+                      context_jsonb, requested_at, expires_at, decided_by,
+                      decided_at, decision_reason
+            """,
+            UUID(request_id),
+            WORKFLOW_ASSIGNMENT_ACTION,
+            json.dumps(context),
+            expires_at,
+            decided_by,
+        )
+        created.append(_serialize_assignment_row(dict(row)))
+    return created
+
+
 async def create_workflow_assignment(
     conn: asyncpg.Connection,
     *,
@@ -882,6 +1005,109 @@ async def release_approved(
         """,
     )
     return [row["id"] for row in rows]
+
+
+REQUEST_CLOSE_COMMAND = "request.close"
+_DROP_CLOSE_RESPONSE_CODES = frozenset({3, 4, 5})
+
+
+async def close_request(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    closed_by: str,
+    drop_response_status: int | None = None,
+) -> dict[str, Any]:
+    """Close a request: stamp ``closed_at``, clear pending gates, set DROP status when needed.
+
+    For DROP rows with unset ``response_status``, writes ``drop_response_status`` when
+    provided (3/4/5) or defaults to 5 (Not found). Non-DROP rows only need ``closed_at``.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT r.id,
+               r.intake_source,
+               r.raw_record_id,
+               r.closed_at,
+               r.closed_by,
+               drr.response_status AS drop_response_status
+          FROM requests r
+          LEFT JOIN drop_raw_requests drr
+            ON drr.id = r.raw_record_id
+           AND r.intake_source = 'drop'
+         WHERE r.id = $1
+        """,
+        UUID(request_id),
+    )
+    if row is None:
+        raise LookupError("request not found")
+
+    if row["closed_at"] is not None:
+        return {
+            "request_id": request_id,
+            "already_closed": True,
+            "closed_at": row["closed_at"].isoformat(),
+            "closed_by": row.get("closed_by"),
+        }
+
+    drop_status_set = False
+    if row["intake_source"] == "drop" and row["drop_response_status"] is None:
+        status = drop_response_status if drop_response_status is not None else 5
+        if status not in _DROP_CLOSE_RESPONSE_CODES:
+            raise ValueError(
+                "drop_response_status must be 3 (Deleted), 4 (Opted out), or 5 (Not found)"
+            )
+        result = await conn.execute(
+            """
+            UPDATE drop_raw_requests AS drr
+               SET response_status = $2
+              FROM requests AS r
+             WHERE r.id = $1
+               AND r.intake_source = 'drop'
+               AND r.raw_record_id = drr.id
+               AND drr.response_status IS NULL
+            """,
+            UUID(request_id),
+            status,
+        )
+        drop_status_set = isinstance(result, str) and result.endswith("1")
+
+    closed_row = await conn.fetchrow(
+        """
+        UPDATE requests
+           SET closed_at = NOW(),
+               closed_by = $2
+         WHERE id = $1
+           AND closed_at IS NULL
+        RETURNING closed_at
+        """,
+        UUID(request_id),
+        closed_by,
+    )
+    if closed_row is None:
+        raise RuntimeError("request close failed")
+
+    await conn.execute(
+        """
+        UPDATE approval_requests
+           SET status = 'rejected',
+               decided_by = $2,
+               decided_at = NOW(),
+               decision_reason = 'request closed by operator'
+         WHERE request_id = $1
+           AND status = 'pending'
+        """,
+        UUID(request_id),
+        closed_by,
+    )
+
+    return {
+        "request_id": request_id,
+        "already_closed": False,
+        "closed_at": closed_row["closed_at"].isoformat(),
+        "closed_by": closed_by,
+        "drop_response_status_set": drop_status_set,
+    }
 
 
 async def abandon_rejected(

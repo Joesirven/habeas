@@ -363,6 +363,71 @@ async def test_access_export_writes_manifest():
 
 
 @pytest.mark.asyncio
+async def test_access_export_uses_configured_dataset_and_tables():
+    """Dataset/tables from deps must reach the BigQuery SQL (dbt mart flip)."""
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            _meta_row(request_type="access", intake_source="manual"),
+            _match_row(match_count=1, consumer_id="1001"),
+            {
+                "id": 88,
+                "request_id": REQUEST_ID,
+                "step": "reproduction",
+                "status": "claimed",
+            },
+        ]
+    )
+    conn.fetchval = AsyncMock(side_effect=["unknown", 1, 88])
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    captured_sql: list[str] = []
+
+    class CapturingBQ:
+        def query(self, sql: str, job_config: Any = None) -> list[dict[str, Any]]:
+            del job_config
+            captured_sql.append(sql)
+            return [{"dwid": "1001", "state": "CA"}]
+
+    _store, transport = _memory_transport()
+
+    with patch(
+        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
+        new_callable=AsyncMock,
+        return_value=True,
+    ):
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(
+                gcs_bucket="bucket",
+                gcs_transport=transport,
+                bq_client=CapturingBQ(),
+                bq_project="example-gcp-project",
+                bq_dataset="access_export",
+                bq_tables=("dim_person", "fct_ballots"),
+            ),
+        )
+
+    assert result.outcome == "fulfilled"
+    assert len(captured_sql) == 2
+    assert "`example-gcp-project.access_export.dim_person`" in captured_sql[0]
+    assert "`example-gcp-project.access_export.fct_ballots`" in captured_sql[1]
+
+
+def test_settings_access_export_tables_parsing():
+    from data_fulfillment_dispatcher.config import DataFulfillmentDispatcherSettings
+
+    settings = DataFulfillmentDispatcherSettings(
+        access_export_bq_tables=" dim_person, fct_ballots ,,"
+    )
+    assert settings.access_export_tables() == ("dim_person", "fct_ballots")
+    assert DataFulfillmentDispatcherSettings(
+        access_export_bq_tables=""
+    ).access_export_tables() == ()
+
+
+@pytest.mark.asyncio
 async def test_access_empty_pack_rejects_attempt():
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(

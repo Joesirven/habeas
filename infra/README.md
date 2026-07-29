@@ -256,13 +256,15 @@ Prerequisites Jose must keep granted:
 Do **not** use `DATABASE_URL` for ops mutations — SELECT-only analysis only.
 Do **not** curl workers or grant yourself worker `run.invoker`.
 
-Local web against remote admin-api (super_admin ADC — Vite mints/caches ID token):
+Local web against remote admin-api (super_admin ADC — Vite mints/caches ID token via
+`google-auth-library` Application Default Credentials; JWT email must be on super_admins):
 
 ```bash
 cd clients/web
-# gcloud auth application-default login  # once
+gcloud auth application-default login   # once per machine
 export VITE_PROXY_TARGET="$ADMIN_API_URL"   # admin-api-dev *.run.app
 bun run dev   # leave VITE_ADMIN_API_URL unset so the app uses /api
+# IAP_USER_EMAIL optional for ADC; required only for SA impersonation fallback
 # Banner "View as" sends X-Dev-Simulate-Role when real_role is super_admin
 ```
 
@@ -347,6 +349,25 @@ Before first deploy, point Cloud Run at the reaper SA and Cloud SQL instance (ed
 --service-account=reaper@example-gcp-project.iam.gserviceaccount.com
 --add-cloudsql-instances=example-gcp-project:us-east4:dev-dpra
 ```
+
+## Fulfillment artifact bucket (`privacy-fulfillment-dev`)
+
+Access reproduction packs and suppression DWID files land under
+`gs://privacy-fulfillment-dev/bulk-run/...`
+(`data-fulfillment-dispatcher` env `FULFILLMENT_GCS_BUCKET`, set in
+`cloudbuild/data-fulfillment-dispatcher-dev.yaml`). Objects auto-delete after
+**30 days** via the versioned lifecycle rule:
+
+```bash
+gcloud storage buckets update gs://privacy-fulfillment-dev \
+  --lifecycle-file=infra/gcs/privacy-fulfillment-lifecycle.json
+```
+
+Shareable links are V4 signed URLs (7-day Google cap — regenerate as needed;
+retention is the lifecycle rule). Signing from keyless ADC (Cloud Run runtime,
+local user credentials) uses IAM signBlob impersonation via
+`GCS_SIGNING_SERVICE_ACCOUNT` (admin-api dev: the compute runtime SA, which
+needs `roles/iam.serviceAccountTokenCreator` on itself).
 
 ## Cloud Scheduler (worker ticks)
 
