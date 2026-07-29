@@ -388,7 +388,8 @@ async def test_get_unknown_request_is_404(monkeypatch: pytest.MonkeyPatch):
 async def test_promote_upserts_data_vertical_disposition(monkeypatch: pytest.MonkeyPatch):
     """Promote writes the Data disposition and mirrors DROP response_status."""
     conn = FakeConn()
-    _patch_promote_internals(monkeypatch, conn)
+    status_writes: list[dict[str, Any]] = []
+    _patch_promote_internals(monkeypatch, conn, status_writes=status_writes)
 
     result = await promote_matching_review_for_request(
         conn,
@@ -399,6 +400,7 @@ async def test_promote_upserts_data_vertical_disposition(monkeypatch: pytest.Mon
         actor_role=ROLE_DATA_OWNER,
     )
     assert result["review_status"] == "approved"
+    assert result["response_status_set"] is True
     assert result["disposition"] == {
         "vertical": "data",
         "status": 3,
@@ -408,6 +410,28 @@ async def test_promote_upserts_data_vertical_disposition(monkeypatch: pytest.Mon
     }
     assert conn.upserts[0]["vertical"] == "data"
     assert json.loads(conn.upserts[0]["selected_dwids"]) == ["dwid-9"]
+    assert status_writes and status_writes[0]["response_status"] == 3
+
+
+@pytest.mark.asyncio
+async def test_kickoff_lock_requires_explicit_vertical_in_context():
+    """Malformed kickoff rows without vertical must not lock every vertical."""
+    conn = FakeConn()
+    captured: list[str] = []
+    original = conn.fetchval
+
+    async def _fetchval(sql: str, *args: Any) -> Any:
+        captured.append(sql)
+        return await original(sql, *args)
+
+    conn.fetchval = _fetchval  # type: ignore[method-assign]
+    assert (
+        await vd.is_vertical_kickoff_locked(conn, request_id=REQUEST_ID, vertical="data")
+        is False
+    )
+    assert captured
+    assert "COALESCE" not in captured[0]
+    assert "context_jsonb->>'vertical' = $3" in captured[0]
 
 
 @pytest.mark.asyncio
@@ -431,9 +455,14 @@ async def test_promote_status_5_records_disposition_without_dwids(
 async def test_promote_still_approves_when_no_dwid_resolves(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Multi-match promote without a resolvable dwid leaves the vertical un-startable."""
+    """Multi-match promote without a resolvable dwid leaves the vertical un-startable.
+
+    Matching.review still approves, but DROP response_status must not be written
+    without a disposition row (KTD3 SoR sync).
+    """
     conn = FakeConn()
-    _patch_promote_internals(monkeypatch, conn)
+    status_writes: list[dict[str, Any]] = []
+    _patch_promote_internals(monkeypatch, conn, status_writes=status_writes)
 
     result = await promote_matching_review_for_request(
         conn,
@@ -443,8 +472,10 @@ async def test_promote_still_approves_when_no_dwid_resolves(
     )
     assert result["review_status"] == "approved"
     assert result["disposition"]["recorded"] is False
+    assert result["response_status_set"] is False
     assert "must select one" in result["disposition"]["reason"]
     assert conn.upserts == []
+    assert status_writes == []
 
 
 def _fake_request() -> Any:
@@ -466,6 +497,7 @@ def _patch_promote_internals(
     conn: FakeConn,
     *,
     pending_id: int = 7,
+    status_writes: list[dict[str, Any]] | None = None,
 ) -> None:
     """Stub the matching.review gate so promote exercises the disposition write."""
 
@@ -482,7 +514,9 @@ def _patch_promote_internals(
     ) -> dict[str, Any]:
         return {"id": approval_id, "status": status}
 
-    async def fake_set_status(_conn: Any, **_kwargs: Any) -> bool:
+    async def fake_set_status(_conn: Any, **kwargs: Any) -> bool:
+        if status_writes is not None:
+            status_writes.append(dict(kwargs))
         return True
 
     monkeypatch.setattr("admin_api.approvals.ensure_pending_matching_review", fake_ensure)

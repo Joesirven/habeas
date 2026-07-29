@@ -238,7 +238,7 @@ async def is_vertical_kickoff_locked(
          WHERE request_id = $1
            AND action_type = $2
            AND status = 'approved'
-           AND COALESCE(context_jsonb->>'vertical', $3) = $3
+           AND context_jsonb->>'vertical' = $3
          LIMIT 1
         """,
         UUID(request_id),

@@ -348,9 +348,10 @@ async def _record_data_vertical_disposition(
 
     Status 3/4 default to the matching-result dwids when the caller omits a
     selection. When no dwid is resolvable the review still promotes but the
-    disposition is left unrecorded (``recorded=false``) — fulfillment readiness
-    reads the disposition, so the vertical simply stays un-startable until a
-    reviewer picks a dwid. Returns counts only; dwids never enter logged payloads.
+    disposition is left unrecorded (``recorded=false``) and callers must not
+    write ``response_status`` (KTD3 SoR sync). Fulfillment readiness reads the
+    disposition, so the vertical stays un-startable until a reviewer picks a
+    dwid. Returns counts only; dwids never enter logged payloads.
     """
     selected = list(dwids or [])
     if not selected and response_status in (3, 4):
@@ -377,6 +378,39 @@ async def _record_data_vertical_disposition(
         "recorded": True,
         "selected_dwid_count": disposition.selected_dwid_count,
         "actor_role": disposition.actor_role,
+    }
+
+
+async def _apply_promote_disposition_and_status(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    response_status: int,
+    decided_by: str,
+    dwids: list[str] | None,
+    actor_role: str | None,
+) -> dict[str, Any]:
+    """Record disposition first; mirror DROP status only when recorded (KTD3)."""
+    disposition = await _record_data_vertical_disposition(
+        conn,
+        request_id=request_id,
+        response_status=response_status,
+        decided_by=decided_by,
+        dwids=dwids,
+        actor_role=actor_role,
+    )
+    set_ok = False
+    if disposition.get("recorded"):
+        set_ok = await _set_drop_response_status(
+            conn,
+            request_id=request_id,
+            response_status=response_status,
+            allow_codes=_MATCHING_PROMOTE_STATUS_CODES,
+        )
+    return {
+        "response_status": response_status,
+        "response_status_set": set_ok,
+        "disposition": disposition,
     }
 
 
@@ -420,21 +454,15 @@ async def promote_matching_review_for_request(
                 "approval_id": None,
             }
             if response_status is not None:
-                set_ok = await _set_drop_response_status(
-                    conn,
-                    request_id=request_id,
-                    response_status=response_status,
-                    allow_codes=_MATCHING_PROMOTE_STATUS_CODES,
-                )
-                payload["response_status"] = response_status
-                payload["response_status_set"] = set_ok
-                payload["disposition"] = await _record_data_vertical_disposition(
-                    conn,
-                    request_id=request_id,
-                    response_status=response_status,
-                    decided_by=decided_by,
-                    dwids=dwids,
-                    actor_role=actor_role,
+                payload.update(
+                    await _apply_promote_disposition_and_status(
+                        conn,
+                        request_id=request_id,
+                        response_status=response_status,
+                        decided_by=decided_by,
+                        dwids=dwids,
+                        actor_role=actor_role,
+                    )
                 )
             return payload
         raise LookupError("no matching.review gate available to promote")
@@ -463,21 +491,15 @@ async def promote_matching_review_for_request(
         "approval_id": int(decided["id"]),
     }
     if response_status is not None:
-        set_ok = await _set_drop_response_status(
-            conn,
-            request_id=request_id,
-            response_status=response_status,
-            allow_codes=_MATCHING_PROMOTE_STATUS_CODES,
-        )
-        payload["response_status"] = response_status
-        payload["response_status_set"] = set_ok
-        payload["disposition"] = await _record_data_vertical_disposition(
-            conn,
-            request_id=request_id,
-            response_status=response_status,
-            decided_by=decided_by,
-            dwids=dwids,
-            actor_role=actor_role,
+        payload.update(
+            await _apply_promote_disposition_and_status(
+                conn,
+                request_id=request_id,
+                response_status=response_status,
+                decided_by=decided_by,
+                dwids=dwids,
+                actor_role=actor_role,
+            )
         )
     return payload
 
