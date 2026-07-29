@@ -51,12 +51,12 @@ On-prem Cassandra (`restricted_person_id`) is reached over TLS with INF IP allow
 | TLS | Required (`SSL_CERTFILE` / verify with INF PEM, e.g. wildcard CA) |
 | Cluster | `PERSON_DB_PROD_CLUSTER` |
 | Server | Cassandra `3.11.4` · CQL `3.4.4` · native protocol v4 |
-| Auth | Username + password (INF service account — Secret Manager only) |
+| Auth | Username `dprwrk` + password (INF service account — password in Secret Manager only) |
 
 Smoke-test shape (do **not** put passwords on the CLI in shared history; use `~/.cassandra/cqlshrc` or env from Secret Manager):
 
 ```bash
-SSL_CERTFILE=/path/to/inf-ca.pem cqlsh --ssl broker-db.example.internal -u <service-account>
+SSL_CERTFILE=/path/to/inf-ca.pem cqlsh --ssl broker-db.example.internal -u dprwrk
 ```
 
 Credentials (Cassandra service account + SSL PEM) go in Secret Manager; never in git. Wire the `cassandra` Cloud Run service with Direct VPC egress to `dpra-run-dev` or `dpra-run-prod` when the worker ships. Driver must target Cassandra 3.11-compatible protocol (avoid assuming 5.x-only features).
