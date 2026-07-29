@@ -1510,11 +1510,14 @@ def test_matching_result_promote_and_decline_routes(monkeypatch: pytest.MonkeyPa
         decided_by: str,
         decision_reason: str | None = None,
         response_status: int | None = None,
+        dwids: list[str] | None = None,
+        actor_role: str | None = None,
     ) -> dict[str, Any]:
         captured["promote"] = {
             "request_id": request_id,
             "decided_by": decided_by,
             "decision_reason": decision_reason,
+            "dwids": dwids,
         }
         return {"request_id": request_id, "review_status": "approved", "approval_id": 3}
 

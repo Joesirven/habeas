@@ -8,6 +8,11 @@ from uuid import UUID
 
 import asyncpg
 
+from admin_api.vertical_dispositions import (
+    VERTICAL_DATA,
+    default_dwids_for_request,
+    upsert_vertical_disposition,
+)
 from habeas_privacy_core.db.requests import enqueue_matching
 from habeas_privacy_core.workflow.approval import (
     ASSIGNMENT_TARGETS,
@@ -330,6 +335,51 @@ async def _set_drop_response_status(
     return result.endswith("1") if isinstance(result, str) else bool(result)
 
 
+async def _record_data_vertical_disposition(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    response_status: int,
+    decided_by: str,
+    dwids: list[str] | None,
+    actor_role: str | None,
+) -> dict[str, Any]:
+    """Persist the promote decision as the Data vertical disposition (KTD3).
+
+    Status 3/4 default to the matching-result dwids when the caller omits a
+    selection. When no dwid is resolvable the review still promotes but the
+    disposition is left unrecorded (``recorded=false``) — fulfillment readiness
+    reads the disposition, so the vertical simply stays un-startable until a
+    reviewer picks a dwid. Returns counts only; dwids never enter logged payloads.
+    """
+    selected = list(dwids or [])
+    if not selected and response_status in (3, 4):
+        selected = await default_dwids_for_request(conn, request_id=request_id)
+    if not selected and response_status in (3, 4):
+        return {
+            "vertical": VERTICAL_DATA,
+            "status": response_status,
+            "recorded": False,
+            "reason": "no dwid resolved for status 3/4 — reviewer must select one",
+        }
+    disposition = await upsert_vertical_disposition(
+        conn,
+        request_id=request_id,
+        vertical=VERTICAL_DATA,
+        status=response_status,
+        dwids=selected,
+        decided_by=decided_by,
+        actor_role=actor_role,
+    )
+    return {
+        "vertical": disposition.vertical,
+        "status": disposition.status,
+        "recorded": True,
+        "selected_dwid_count": disposition.selected_dwid_count,
+        "actor_role": disposition.actor_role,
+    }
+
+
 async def promote_matching_review_for_request(
     conn: asyncpg.Connection,
     *,
@@ -337,12 +387,16 @@ async def promote_matching_review_for_request(
     decided_by: str,
     decision_reason: str | None = None,
     response_status: int | None = None,
+    dwids: list[str] | None = None,
+    actor_role: str | None = None,
 ) -> dict[str, Any]:
     """Ensure a pending matching.review gate, then approve (promote to fulfillment).
 
     Optional ``response_status`` (3/4/5) writes the CA DROP status result after
     approval — used by Inbox fulfill; omit to leave status unset for the
-    fulfillment dispatcher path.
+    fulfillment dispatcher path. When a status is given, the Data vertical
+    disposition is upserted as the durable source of record (KTD3) and
+    ``drop_raw_requests.response_status`` is kept in sync.
     """
     await ensure_pending_matching_review(conn, request_id=request_id)
     pending_id = await conn.fetchval(
@@ -374,6 +428,14 @@ async def promote_matching_review_for_request(
                 )
                 payload["response_status"] = response_status
                 payload["response_status_set"] = set_ok
+                payload["disposition"] = await _record_data_vertical_disposition(
+                    conn,
+                    request_id=request_id,
+                    response_status=response_status,
+                    decided_by=decided_by,
+                    dwids=dwids,
+                    actor_role=actor_role,
+                )
             return payload
         raise LookupError("no matching.review gate available to promote")
 
@@ -409,6 +471,14 @@ async def promote_matching_review_for_request(
         )
         payload["response_status"] = response_status
         payload["response_status_set"] = set_ok
+        payload["disposition"] = await _record_data_vertical_disposition(
+            conn,
+            request_id=request_id,
+            response_status=response_status,
+            decided_by=decided_by,
+            dwids=dwids,
+            actor_role=actor_role,
+        )
     return payload
 
 
