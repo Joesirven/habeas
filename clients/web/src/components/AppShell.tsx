@@ -1,8 +1,14 @@
 import { useQueryClient } from '@tanstack/react-query'
-import { useCallback, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 
 import { CommandPalette, useCommandPaletteShortcut } from '@/components/CommandPalette'
 import { NavMenu } from '@/components/NavMenu'
+import {
+  KEYHOLE_SLOT_SLIDE_IN_ID,
+  markPostAuthSplashSeen,
+  PostAuthSplash,
+  shouldPlayPostAuthSplash,
+} from '@/components/PostAuthSplash'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -133,11 +139,40 @@ function RoleStatusBanner() {
 
 function AppShellFrame({ children }: AppShellProps) {
   useLiveEvents()
-  const { role } = useAuth()
+  const { role, me } = useAuth()
   const showPalette = canAccessLegalSurfaces(role)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const openPalette = useCallback(() => setPaletteOpen(true), [])
   useCommandPaletteShortcut(openPalette)
+
+  // Post-sign-in entrance bumper — fires once per session, right after /me
+  // resolves for the first time (not on every app load/reload of an already
+  // -signed-in session; shouldPlayPostAuthSplash gates on sessionStorage).
+  const [showPostAuthSplash, setShowPostAuthSplash] = useState(false)
+  const splashTriggered = useRef(false)
+
+  useEffect(() => {
+    if (me && !splashTriggered.current) {
+      splashTriggered.current = true
+      if (shouldPlayPostAuthSplash()) {
+        setShowPostAuthSplash(true)
+      }
+    }
+  }, [me])
+
+  if (showPostAuthSplash) {
+    return (
+      <PostAuthSplash
+        variant={KEYHOLE_SLOT_SLIDE_IN_ID}
+        autoFinish
+        onDone={() => {
+          markPostAuthSplashSeen()
+          setShowPostAuthSplash(false)
+        }}
+        className="min-h-screen"
+      />
+    )
+  }
 
   return (
     <div className="flex min-h-screen flex-col bg-paper">

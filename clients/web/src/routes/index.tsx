@@ -133,7 +133,7 @@ function OperatorDashboardHome() {
               <p className="mt-2 text-3xl font-semibold tabular-nums text-ink">
                 {dropStats?.matching_review_pending ?? '—'}
               </p>
-              <p className="mt-2 text-xs text-ink-soft">matching.review gates</p>
+              <p className="mt-2 text-xs text-ink-soft">Matching review gates</p>
             </div>
             <div className="rounded-lg border border-line bg-paper p-4">
               <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
@@ -286,11 +286,12 @@ function LegalHome() {
   function setHomeWindow(next: HomeWindow) {
     void navigate({
       to: '/',
+      // Omit default 30d so Reset/All→30d can clear a stuck home_window param.
       search: {
         tab: search.tab,
-        process: search.process,
-        stage: search.stage,
-        home_window: next === '30' ? undefined : next,
+        ...(search.process != null ? { process: search.process } : {}),
+        ...(search.stage ? { stage: search.stage } : {}),
+        ...(next !== '30' ? { home_window: next } : {}),
       },
       replace: true,
     })
@@ -397,25 +398,25 @@ function LegalHome() {
           </section>
 
           <div className="grid lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:divide-x divide-line">
-            <section className="px-4 py-4">
-              <HomeModuleHeader title="Open requests" />
+            <section className="px-4 py-2.5">
+              <HomeModuleHeader compact title="Open requests" />
               <OpenRequestsHeatmap cells={portfolio.heatmap_cells!} />
             </section>
-            <section className="px-4 py-4">
-              <HomeModuleHeader title="Cycle time & deadline" />
-              <DeadlineRiskBand risk={portfolio.deadline_risk!} />
-            </section>
+            <aside className="flex flex-col divide-y divide-line">
+              <section className="px-4 py-2.5">
+                <HomeModuleHeader
+                  compact
+                  title="Data owner review queues"
+                  hint="Top queues by pending review."
+                />
+                <DataOwnerQueues queues={portfolio.data_owner_queues ?? []} />
+              </section>
+              <section className="px-4 py-2.5">
+                <HomeModuleHeader compact title="Cycle time & deadline" />
+                <DeadlineRiskBand risk={portfolio.deadline_risk!} />
+              </section>
+            </aside>
           </div>
-
-          {portfolio.data_owner_queues ? (
-            <section className="px-4 py-4">
-              <HomeModuleHeader
-                title="Data owner review queues"
-                hint="Compact workload rows — top queues by pending review."
-              />
-              <DataOwnerQueues queues={portfolio.data_owner_queues} />
-            </section>
-          ) : null}
 
           {portfolio.schedule_excerpt ? (
             <section className="px-4 py-4 text-sm text-ink-soft">

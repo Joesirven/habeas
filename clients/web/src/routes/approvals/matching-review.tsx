@@ -79,7 +79,7 @@ export function MatchingReviewPage({ embedded = false }: MatchingReviewPageProps
             Matching review
           </h2>
           <p className="mt-3 max-w-xl text-sm text-ink-soft">
-            Approve matching.review gates before fulfillment dispatch can proceed.
+            Approve matching review gates before fulfillment dispatch can proceed.
           </p>
         </header>
       )}
@@ -87,10 +87,10 @@ export function MatchingReviewPage({ embedded = false }: MatchingReviewPageProps
       <div className="taste-panel overflow-hidden">
         {approvalsQuery.isPending && <MatchingReviewTableSkeleton />}
         {approvalsQuery.isError && (
-          <p className="p-6 text-sm text-red-700">Could not load matching.review approvals.</p>
+          <p className="p-6 text-sm text-red-700">Could not load matching approvals.</p>
         )}
         {approvalsQuery.isSuccess && approvalsQuery.data.length === 0 && (
-          <p className="p-6 text-sm text-ink-soft">No pending matching.review items.</p>
+          <p className="p-6 text-sm text-ink-soft">No pending matching review items.</p>
         )}
         {approvalsQuery.isSuccess && approvalsQuery.data.length > 0 && (
           <table className="taste-table">

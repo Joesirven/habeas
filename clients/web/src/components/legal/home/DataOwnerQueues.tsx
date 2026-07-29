@@ -34,7 +34,7 @@ export function DataOwnerQueues({ queues }: DataOwnerQueuesProps) {
   }
 
   return (
-    <ul className="space-y-2" aria-label="Data owner review queues">
+    <ul className="space-y-0.5" aria-label="Data owner review queues">
       {top.map((row) => {
         const key = row.assignee_identity ?? 'unassigned'
         const barWidth = (row.pending_count / maxPending) * 100
@@ -46,18 +46,18 @@ export function DataOwnerQueues({ queues }: DataOwnerQueuesProps) {
                 kind: 'matching',
                 ...(row.assignee_identity ? { assignee: row.assignee_identity } : {}),
               }}
-              className="flex items-center gap-2.5 rounded-md px-1 py-1.5 text-xs transition-colors hover:bg-panel/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid"
+              className="flex items-center gap-2 rounded px-0.5 py-1 text-[0.65rem] transition-colors hover:bg-panel/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid"
             >
-              <Avatar className="h-6 w-6">
-                <AvatarFallback className="bg-habeas-light/30 text-[0.55rem] font-medium text-habeas-navy">
+              <Avatar className="h-5 w-5">
+                <AvatarFallback className="bg-habeas-light/30 text-[0.5rem] font-medium text-habeas-navy">
                   {initialsFor(row.assignee_identity)}
                 </AvatarFallback>
               </Avatar>
-              <div className="w-[6.5rem] shrink-0 truncate font-medium text-ink">
+              <div className="w-[5.5rem] shrink-0 truncate font-medium text-ink">
                 {displayName(row.assignee_identity)}
               </div>
               <div className="min-w-0 flex-1">
-                <div className="h-1.5 overflow-hidden rounded-full bg-line/40">
+                <div className="h-1 overflow-hidden rounded-full bg-line/40">
                   <div
                     className={cn(
                       'h-full rounded-full',
@@ -70,7 +70,7 @@ export function DataOwnerQueues({ queues }: DataOwnerQueuesProps) {
                 </div>
               </div>
               <span className="shrink-0 tabular-nums text-ink-soft">
-                {row.pending_count} pending
+                {row.pending_count}
               </span>
             </Link>
           </li>

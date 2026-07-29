@@ -85,15 +85,24 @@ function formatRequestReceivedAt(iso: string): string {
   })
 }
 
+/** Minute window in UTC — must match `requestBatchKey` (ISO minute prefix), not local time. */
 function batchReceivedWindow(receivedAt: string): { received_after: string; received_before: string } {
-  const minutePrefix = receivedAt.slice(0, 16)
-  const start = new Date(minutePrefix)
-  const end = new Date(start)
-  end.setMinutes(end.getMinutes() + 1)
-  end.setMilliseconds(-1)
+  const received = new Date(receivedAt)
+  if (Number.isNaN(received.getTime())) {
+    return { received_after: receivedAt, received_before: receivedAt }
+  }
+  const startMs = Date.UTC(
+    received.getUTCFullYear(),
+    received.getUTCMonth(),
+    received.getUTCDate(),
+    received.getUTCHours(),
+    received.getUTCMinutes(),
+    0,
+    0,
+  )
   return {
-    received_after: start.toISOString(),
-    received_before: end.toISOString(),
+    received_after: new Date(startMs).toISOString(),
+    received_before: new Date(startMs + 60_000 - 1).toISOString(),
   }
 }
 
@@ -386,8 +395,13 @@ function MoreFiltersPopover({
           </span>
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-72 space-y-3 p-3" align="start">
-        <div className="flex items-center justify-between gap-2">
+      <PopoverContent
+        className="w-72 max-h-[min(28rem,var(--radix-popover-content-available-height))] overflow-y-auto overscroll-contain space-y-3 p-3"
+        align="start"
+        side="bottom"
+        collisionPadding={16}
+      >
+        <div className="sticky top-0 z-10 -mx-3 -mt-3 mb-0 flex items-center justify-between gap-2 border-b border-line/70 bg-paper px-3 py-2">
           <p className="taste-micro">More filters</p>
           {activeCount > 0 ? (
             <button
@@ -659,7 +673,7 @@ function BatchRows({
         return (
           <tr
             key={batch.batchKey}
-            className="group h-8 cursor-pointer transition-colors hover:bg-panel/50"
+            className="group h-10 cursor-pointer border-l-2 border-l-habeas-navy/55 bg-habeas-navy/[0.02] transition-colors hover:bg-habeas-navy/[0.05]"
             onClick={() => onDrillIn(batch)}
             title={`View ${batch.requests.length} requests by request`}
           >
@@ -667,8 +681,17 @@ function BatchRows({
               {formatRequestReceivedAt(batch.receivedAt)}
             </td>
             <td className="overflow-hidden">
-              <span className="block truncate font-medium text-ink" title={batchTitle}>
-                {batchTitle}
+              <span className="flex min-w-0 items-center gap-2" title={batchTitle}>
+                <span
+                  className="relative flex h-5 w-6 shrink-0 items-center justify-center"
+                  aria-hidden
+                >
+                  <span className="absolute left-0 top-0.5 h-3.5 w-3.5 rounded border border-habeas-navy/25 bg-habeas-navy/5" />
+                  <span className="relative flex h-3.5 w-3.5 items-center justify-center rounded border border-habeas-navy/45 bg-paper text-[0.5rem] font-semibold tabular-nums text-habeas-navy">
+                    {batch.requests.length > 99 ? '99+' : batch.requests.length}
+                  </span>
+                </span>
+                <span className="truncate font-medium text-ink">{batchTitle}</span>
               </span>
             </td>
             <td className="w-[6.5rem] overflow-hidden">
@@ -679,7 +702,9 @@ function BatchRows({
                 {batch.sourceLabel}
               </span>
             </td>
-            <td className="w-12 tabular-nums text-ink-soft">{batch.requests.length}</td>
+            <td className="w-12 tabular-nums font-medium text-habeas-navy">
+              {batch.requests.length}
+            </td>
             <td className="w-[9rem] overflow-hidden">
               {attention.flagged > 0 ? (
                 <Badge
@@ -880,6 +905,13 @@ export function RequestsPage() {
       search: {
         source: batch.intakeSource,
         source_bucket: undefined,
+        request_type: undefined,
+        stage: undefined,
+        posture: undefined,
+        state: undefined,
+        attention: undefined,
+        due: undefined,
+        raw: undefined,
         received_after: window.received_after,
         received_before: window.received_before,
       },
@@ -950,39 +982,37 @@ export function RequestsPage() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-2">
-            <span className="text-[0.65rem] font-medium text-mute">Group by</span>
-            <div
-              className="inline-flex rounded-md border border-line bg-paper p-0.5"
-              role="toolbar"
-              aria-label="Group by"
+          <label className="flex items-center gap-1.5 text-[0.65rem] text-ink-soft">
+            <span className="uppercase tracking-wide text-mute">Batch</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={viewMode === 'batch'}
+              aria-label="Group all requests by intake batch"
+              title={
+                viewMode === 'batch'
+                  ? 'Batch grouping on — click for flat request list'
+                  : 'Batch grouping off — click to group by intake batch'
+              }
+              onClick={() =>
+                setViewMode((current) => (current === 'batch' ? 'flat' : 'batch'))
+              }
+              className={cn(
+                'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
+                viewMode === 'batch'
+                  ? 'border-habeas-navy/40 bg-habeas-navy'
+                  : 'border-line bg-canvas',
+              )}
             >
-              <button
-                type="button"
+              <span
                 className={cn(
-                  'rounded px-2.5 py-1 text-[0.7rem] font-medium transition-colors',
-                  viewMode === 'flat'
-                    ? 'bg-habeas-navy/8 text-habeas-navy'
-                    : 'text-ink-soft hover:text-ink',
+                  'pointer-events-none block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform duration-150',
+                  viewMode === 'batch' ? 'translate-x-[1.125rem]' : 'translate-x-0.5',
                 )}
-                onClick={() => setViewMode('flat')}
-              >
-                By request
-              </button>
-              <button
-                type="button"
-                className={cn(
-                  'rounded px-2.5 py-1 text-[0.7rem] font-medium transition-colors',
-                  viewMode === 'batch'
-                    ? 'bg-habeas-navy/8 text-habeas-navy'
-                    : 'text-ink-soft hover:text-ink',
-                )}
-                onClick={() => setViewMode('batch')}
-              >
-                By batch
-              </button>
-            </div>
-          </div>
+                aria-hidden
+              />
+            </button>
+          </label>
           <Link to="/requests/needs-attention" className="taste-btn text-xs">
             Inbox
             {attentionQuery.data && attentionQuery.data.items.length > 0 ? (
@@ -1035,6 +1065,36 @@ export function RequestsPage() {
         onClear={clearFilters}
         activeFilterCount={activeFilterCount}
       />
+
+      {search.received_after && search.received_before && viewMode === 'flat' ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-habeas-navy/20 bg-habeas-navy/[0.04] px-3 py-2 text-[0.7rem] text-ink-soft">
+          <span>
+            Showing requests in one intake batch
+            {search.source ? (
+              <>
+                {' '}
+                ·{' '}
+                <span className="font-medium text-ink">
+                  {SOURCE_LABELS[search.source] ?? search.source}
+                </span>
+              </>
+            ) : null}
+            {filtered.length > 0 ? (
+              <span className="tabular-nums"> · {filtered.length}</span>
+            ) : null}
+          </span>
+          <button
+            type="button"
+            className="taste-link ml-auto text-[0.65rem]"
+            onClick={() => {
+              clearFilters()
+              setViewMode('batch')
+            }}
+          >
+            Back to batches
+          </button>
+        </div>
+      ) : null}
 
       <div className="taste-panel overflow-hidden">
         {requestsQuery.isPending && <RequestsTableSkeleton tableClass={FLAT_REQUESTS_TABLE_CLASS} />}

@@ -231,3 +231,46 @@ async def test_search_requests_drop_name_clause_excludes_drop():
         limit=10,
     )
     assert "c.intake_source != 'drop'" in captured["sql"]
+
+
+@pytest.mark.asyncio
+async def test_load_non_drop_contact_reads_cleaned_payload():
+    from admin_api.main import _load_non_drop_contact
+    from habeas_privacy_core.models.request import IntakeSource
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "cleaned_payload": {
+                "first_name": "Ada",
+                "last_name": "Lovelace",
+                "email": "ada@example.com",
+                "phone": "555-0100",
+            }
+        }
+    )
+    display_label, contact = await _load_non_drop_contact(
+        conn,
+        intake_source=IntakeSource.WEBFORM,
+        raw_record_id=7,
+    )
+    assert display_label == "Ada Lovelace"
+    assert contact is not None
+    assert contact.email == "ada@example.com"
+    assert contact.phone == "555-0100"
+
+
+@pytest.mark.asyncio
+async def test_load_non_drop_contact_skips_drop():
+    from admin_api.main import _load_non_drop_contact
+    from habeas_privacy_core.models.request import IntakeSource
+
+    conn = AsyncMock()
+    display_label, contact = await _load_non_drop_contact(
+        conn,
+        intake_source=IntakeSource.DROP,
+        raw_record_id=7,
+    )
+    assert display_label is None
+    assert contact is None
+    conn.fetchrow.assert_not_called()

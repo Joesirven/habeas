@@ -23,6 +23,7 @@ from habeas_privacy_core.auth import IAP_EMAIL_HEADER
 from habeas_privacy_core.db.migrations import run_migrations
 from habeas_privacy_core.workflow.approval import (
     MATCHING_REVIEW_ACTION,
+    NOTICE_REVIEW_ACTION,
     WORKFLOW_ASSIGNMENT_ACTION,
     clear_rule_cache,
     ensure_pending_matching_review,
@@ -104,6 +105,7 @@ def test_journey_stage_order_constant() -> None:
         "match",
         "review",
         "fulfill",
+        "notice",
     )
 
 
@@ -360,11 +362,75 @@ def test_compute_current_stage_prefers_waiting_over_earlier_not_started() -> Non
             stage="review",
             label="Review",
             status="waiting",
-            blocker="matching.review required",
+            blocker="Matching review pending",
         ),
         request_journey.JourneyStage(stage="fulfill", label="Fulfill", status="complete"),
     ]
     assert request_journey._compute_current_stage(stages) == "review"
+
+
+def test_infer_pipeline_complete_when_later_match_exists() -> None:
+    stages = [
+        request_journey.JourneyStage(stage="received", label="Received", status="complete"),
+        request_journey.JourneyStage(stage="download", label="Download", status="not_started"),
+        request_journey.JourneyStage(stage="land", label="Land", status="not_started"),
+        request_journey.JourneyStage(stage="promote", label="Promote", status="not_started"),
+        request_journey.JourneyStage(stage="match", label="Match", status="complete"),
+    ]
+    inferred = request_journey._infer_pipeline_stage_completion(
+        stages,
+        has_match_result=True,
+        pipeline_applicable=True,
+        pipeline_bypassed=False,
+    )
+    by_stage = {stage.stage: stage for stage in inferred}
+    assert by_stage["download"].status == "complete"
+    assert by_stage["land"].status == "complete"
+    assert by_stage["promote"].status == "complete"
+
+
+def test_infer_pipeline_bypassed_prefers_complete_not_skipped() -> None:
+    stages = [
+        request_journey.JourneyStage(stage="received", label="Received", status="complete"),
+        request_journey.JourneyStage(stage="download", label="Download", status="not_started"),
+        request_journey.JourneyStage(stage="land", label="Land", status="not_started"),
+        request_journey.JourneyStage(stage="promote", label="Promote", status="not_started"),
+        request_journey.JourneyStage(stage="match", label="Match", status="complete"),
+    ]
+    inferred = request_journey._infer_pipeline_stage_completion(
+        stages,
+        has_match_result=True,
+        pipeline_applicable=True,
+        pipeline_bypassed=True,
+    )
+    by_stage = {stage.stage: stage for stage in inferred}
+    for name in ("download", "land", "promote"):
+        assert by_stage[name].status == "complete"
+        assert by_stage[name].status != "skipped"
+        assert by_stage[name].blocker is not None
+        assert "bypassed" in (by_stage[name].blocker or "")
+
+
+def test_infer_pipeline_never_overwrites_failed() -> None:
+    stages = [
+        request_journey.JourneyStage(stage="received", label="Received", status="complete"),
+        request_journey.JourneyStage(
+            stage="download", label="Download", status="failed", blocker="download failed"
+        ),
+        request_journey.JourneyStage(stage="land", label="Land", status="not_started"),
+        request_journey.JourneyStage(stage="promote", label="Promote", status="not_started"),
+        request_journey.JourneyStage(stage="match", label="Match", status="complete"),
+    ]
+    inferred = request_journey._infer_pipeline_stage_completion(
+        stages,
+        has_match_result=True,
+        pipeline_applicable=True,
+        pipeline_bypassed=False,
+    )
+    by_stage = {stage.stage: stage for stage in inferred}
+    assert by_stage["download"].status == "failed"
+    assert by_stage["land"].status == "complete"
+    assert by_stage["promote"].status == "complete"
 
 
 def test_journey_allows_data_owner(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -431,7 +497,16 @@ async def test_journey_manual_request_received_stage(pool) -> None:
     # After received, next non-skipped work is match (not yet started).
     assert journey.current_stage == "match"
     assert journey.intake_source == "manual"
-    assert len(journey.stages) == len(JOURNEY_STAGES)
+    # notice is DROP-only; manual rail stops at fulfill.
+    assert [stage.stage for stage in journey.stages] == [
+        "received",
+        "download",
+        "land",
+        "promote",
+        "match",
+        "review",
+        "fulfill",
+    ]
     assert journey.stages[0].status == "complete"
     assert journey.stages[1].status == "skipped"
     assert_no_pii_keys(journey.model_dump())
@@ -457,7 +532,8 @@ async def test_journey_matching_pending_review(pool) -> None:
     assert journey.current_stage == "review"
     review_stage = next(stage for stage in journey.stages if stage.stage == "review")
     assert review_stage.status == "waiting"
-    assert review_stage.blocker == "matching.review pending"
+    assert review_stage.blocker == "Matching review pending"
+    assert "matching.review" not in (review_stage.blocker or "")
     assert_no_pii_keys(journey.model_dump())
 
 
@@ -565,6 +641,215 @@ async def test_journey_api_integration_no_pii(pool, monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
+@pytestmark_integration
+async def test_journey_later_match_implies_pipeline_stages_complete(pool) -> None:
+    """Match result without ledger rows still paints download/land/promote green."""
+    async with pool.acquire() as conn:
+        drop_raw_id = await conn.fetchval(
+            """
+            INSERT INTO drop_raw_requests (
+                source_csv_filename, drop_record_id, list_type
+            ) VALUES ($1, $2, 'Email')
+            RETURNING id
+            """,
+            f"journey-infer-{uuid4().hex[:8]}.csv",
+            f"drop-{uuid4().hex[:8]}",
+        )
+        request_id = str(
+            await conn.fetchval(
+                """
+                INSERT INTO requests (intake_source, raw_record_id)
+                VALUES ('drop', $1)
+                RETURNING id
+                """,
+                drop_raw_id,
+            )
+        )
+        await _insert_matching_result(conn, request_id=request_id, match_count=1)
+        journey = await build_request_journey(conn, request_id=request_id)
+
+    by_stage = {stage.stage: stage for stage in journey.stages}
+    assert by_stage["download"].status == "complete"
+    assert by_stage["land"].status == "complete"
+    assert by_stage["promote"].status == "complete"
+    assert by_stage["match"].status == "complete"
+    # Bypassed soft note allowed; status must stay complete (green), not skipped.
+    for name in ("download", "land", "promote"):
+        assert by_stage[name].status != "skipped"
+        assert by_stage[name].blocker is not None
+        assert "bypassed" in (by_stage[name].blocker or "")
+    assert_no_pii_keys(journey.model_dump())
+
+
+@pytest.mark.asyncio
+@pytestmark_integration
+async def test_journey_fulfill_in_progress_when_review_approved_no_response(pool) -> None:
+    from admin_api.approvals import (
+        create_matching_review_approval,
+        decide_approval,
+    )
+
+    async with pool.acquire() as conn:
+        drop_raw_id = await conn.fetchval(
+            """
+            INSERT INTO drop_raw_requests (
+                source_csv_filename, drop_record_id, list_type
+            ) VALUES ($1, $2, 'Email')
+            RETURNING id
+            """,
+            f"journey-fulfill-{uuid4().hex[:8]}.csv",
+            f"drop-{uuid4().hex[:8]}",
+        )
+        request_id = str(
+            await conn.fetchval(
+                """
+                INSERT INTO requests (intake_source, raw_record_id)
+                VALUES ('drop', $1)
+                RETURNING id
+                """,
+                drop_raw_id,
+            )
+        )
+        await _insert_matching_result(conn, request_id=request_id, match_count=1)
+        created = await create_matching_review_approval(conn, request_id=request_id)
+        await decide_approval(
+            conn,
+            approval_id=int(created["id"]),
+            status="approved",
+            decided_by="compliance@habeas.com",
+            decision_reason="match verified",
+        )
+        journey = await build_request_journey(conn, request_id=request_id)
+
+    fulfill = next(stage for stage in journey.stages if stage.stage == "fulfill")
+    assert fulfill.status == "in_progress"
+    assert fulfill.status != "not_started"
+    notice = next(stage for stage in journey.stages if stage.stage == "notice")
+    assert notice.status == "not_started"
+    assert journey.current_stage == "fulfill"
+    assert_no_pii_keys(journey.model_dump())
+
+
+@pytest.mark.asyncio
+@pytestmark_integration
+async def test_journey_notice_waiting_when_fulfill_done_notice_pending(pool) -> None:
+    from admin_api.approvals import create_notice_review_approval
+
+    async with pool.acquire() as conn:
+        drop_raw_id = await conn.fetchval(
+            """
+            INSERT INTO drop_raw_requests (
+                source_csv_filename, drop_record_id, list_type, response_status
+            ) VALUES ($1, $2, 'Email', 4)
+            RETURNING id
+            """,
+            f"journey-notice-{uuid4().hex[:8]}.csv",
+            f"drop-{uuid4().hex[:8]}",
+        )
+        request_id = str(
+            await conn.fetchval(
+                """
+                INSERT INTO requests (intake_source, raw_record_id)
+                VALUES ('drop', $1)
+                RETURNING id
+                """,
+                drop_raw_id,
+            )
+        )
+        await create_notice_review_approval(conn, request_id=request_id)
+        journey = await build_request_journey(conn, request_id=request_id)
+
+    by_stage = {stage.stage: stage for stage in journey.stages}
+    assert "notice" in by_stage
+    assert by_stage["fulfill"].status == "complete"
+    assert by_stage["notice"].status == "waiting"
+    assert by_stage["notice"].blocker == "Fulfillment notice pending"
+    assert "notice.review" not in (by_stage["notice"].blocker or "")
+    assert journey.current_stage == "notice"
+    assert journey.response_status == 4
+    assert_no_pii_keys(journey.model_dump())
+    # Wire action_type comparisons stay technical in needs-attention reasons.
+    assert NOTICE_REVIEW_ACTION == "notice.review"
+
+
+@pytest.mark.asyncio
+@pytestmark_integration
+async def test_journey_fulfilled_with_match_does_not_stall_on_review(pool) -> None:
+    """response_status set + match result must paint review green and current=notice.
+
+    Without this, Matching review pending steals current_stage from notice even
+    after fulfill (close/triage/seed paths that skip matching.review approval).
+    """
+    from admin_api.approvals import create_notice_review_approval
+
+    async with pool.acquire() as conn:
+        drop_raw_id = await conn.fetchval(
+            """
+            INSERT INTO drop_raw_requests (
+                source_csv_filename, drop_record_id, list_type, response_status
+            ) VALUES ($1, $2, 'Email', 3)
+            RETURNING id
+            """,
+            f"journey-fulfilled-review-{uuid4().hex[:8]}.csv",
+            f"drop-{uuid4().hex[:8]}",
+        )
+        request_id = str(
+            await conn.fetchval(
+                """
+                INSERT INTO requests (intake_source, raw_record_id)
+                VALUES ('drop', $1)
+                RETURNING id
+                """,
+                drop_raw_id,
+            )
+        )
+        await _insert_matching_result(conn, request_id=request_id, match_count=1)
+        # Intentionally no matching.review approval — fulfill already done.
+        await create_notice_review_approval(conn, request_id=request_id)
+        journey = await build_request_journey(conn, request_id=request_id)
+
+    by_stage = {stage.stage: stage for stage in journey.stages}
+    assert by_stage["download"].status == "complete"
+    assert by_stage["land"].status == "complete"
+    assert by_stage["promote"].status == "complete"
+    assert by_stage["match"].status == "complete"
+    assert by_stage["review"].status == "complete"
+    assert by_stage["review"].blocker is None
+    assert by_stage["fulfill"].status == "complete"
+    assert by_stage["notice"].status == "waiting"
+    assert journey.current_stage == "notice"
+    assert journey.response_status == 3
+    assert_no_pii_keys(journey.model_dump())
+
+
+def test_infer_pipeline_land_ok_completes_download_without_match() -> None:
+    """Partial ledger: land success alone should paint download green."""
+    stages = [
+        request_journey.JourneyStage(stage="received", label="Received", status="complete"),
+        request_journey.JourneyStage(stage="download", label="Download", status="not_started"),
+        request_journey.JourneyStage(
+            stage="land",
+            label="Land",
+            status="complete",
+            completed_at="2026-07-17T12:00:00+00:00",
+        ),
+        request_journey.JourneyStage(stage="promote", label="Promote", status="not_started"),
+        request_journey.JourneyStage(stage="match", label="Match", status="not_started"),
+    ]
+    inferred = request_journey._infer_pipeline_stage_completion(
+        stages,
+        has_match_result=False,
+        pipeline_applicable=True,
+        pipeline_bypassed=False,
+    )
+    by_stage = {stage.stage: stage for stage in inferred}
+    assert by_stage["download"].status == "complete"
+    assert by_stage["download"].completed_at == "2026-07-17T12:00:00+00:00"
+    assert by_stage["promote"].status == "not_started"
+    assert by_stage["match"].status == "not_started"
+
+
+@pytest.mark.asyncio
 async def test_build_request_timeline_merges_entries(monkeypatch: pytest.MonkeyPatch):
     from admin_api.request_journey import build_request_timeline
 
@@ -585,7 +870,40 @@ async def test_build_request_timeline_merges_entries(monkeypatch: pytest.MonkeyP
                     "requested_at": "2026-07-24T12:00:00+00:00",
                     "decided_at": None,
                     "context_jsonb": {"kind": "escalate"},
-                }
+                },
+                {
+                    "id": 2,
+                    "action_type": "notice.review",
+                    "status": "approved",
+                    "approver_role": "legal",
+                    "decided_by": "legal@example.com",
+                    "decision_reason": "ok to proceed",
+                    "requested_at": "2026-07-24T11:00:00+00:00",
+                    "decided_at": "2026-07-24T11:30:00+00:00",
+                    "context_jsonb": {},
+                },
+                {
+                    "id": 3,
+                    "action_type": "matching.review",
+                    "status": "pending",
+                    "approver_role": "reviewer",
+                    "decided_by": None,
+                    "decision_reason": None,
+                    "requested_at": "2026-07-24T11:15:00+00:00",
+                    "decided_at": None,
+                    "context_jsonb": {},
+                },
+                {
+                    "id": 4,
+                    "action_type": "access.delivery",
+                    "status": "pending",
+                    "approver_role": "legal",
+                    "decided_by": None,
+                    "decision_reason": None,
+                    "requested_at": "2026-07-24T11:45:00+00:00",
+                    "decided_at": None,
+                    "context_jsonb": {},
+                },
             ],
             [],
         ]
@@ -613,5 +931,22 @@ async def test_build_request_timeline_merges_entries(monkeypatch: pytest.MonkeyP
 
     result = await build_request_timeline(conn, request_id=request_id)
     assert result.request_id == request_id
-    assert any(entry.kind == "escalation" for entry in result.entries)
-    assert any(entry.kind == "stage" for entry in result.entries)
+    summaries = {entry.summary for entry in result.entries}
+    assert "Assignment to legal — pending" in summaries
+    assert "Fulfillment notice — approved" in summaries
+    assert "Matching review — pending" in summaries
+    assert "Access delivery — pending" in summaries
+    escalate_entries = [entry for entry in result.entries if entry.kind == "escalation"]
+    assert escalate_entries
+    assert "decision_reason" not in escalate_entries[0].meta
+    assert "body" not in escalate_entries[0].meta
+    notice_entries = [
+        entry
+        for entry in result.entries
+        if entry.summary == "Fulfillment notice — approved"
+    ]
+    assert notice_entries
+    assert notice_entries[0].meta == {"approval_id": 2, "status": "approved"}
+    stage_entries = [entry for entry in result.entries if entry.kind == "stage"]
+    assert stage_entries
+    assert stage_entries[0].summary == "Stage Received: complete"

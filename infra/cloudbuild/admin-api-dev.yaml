@@ -18,8 +18,8 @@ substitutions:
   _REQUIRE_IAP_IDENTITY: "true"
   _CORS_ORIGINS: "https://ops-ia-web-dev-hsa55rg7ja-uk.a.run.app|https://admin-web-dev-hsa55rg7ja-uk.a.run.app|http://127.0.0.1:5174|http://localhost:5174|http://127.0.0.1:5173|http://localhost:5173|http://127.0.0.1:8080|http://localhost:8080"
   _ADMIN_API_SUPER_ADMINS: "dev-owner-1@example.com|dev-owner-9@example.com|dev-owner-6@example.com|dev-owner-12@example.com|dev-owner-4@example.com"
-  _ADMIN_API_ADMINS: "dev-owner-3@example.com"
-  _ADMIN_API_LEGALS: "dev-owner-3@example.com"
+  _ADMIN_API_ADMINS: "dev-owner-3@example.com|dev-owner-13@example.com"
+  _ADMIN_API_LEGALS: "dev-owner-3@example.com|dev-owner-5@example.com"
   # Real V4 signed URLs for fulfillment artifacts; signer needs
   # roles/iam.serviceAccountTokenCreator on itself (signBlob).
   _GCS_TRANSPORT: google

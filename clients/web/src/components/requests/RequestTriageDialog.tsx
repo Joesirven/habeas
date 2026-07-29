@@ -28,6 +28,7 @@ import {
   type MatchedPersonContact,
   type RunTimelineStep,
 } from '@/lib/api'
+import { actionReasonLabel } from '@/lib/legalJourneyLabels'
 import { cn } from '@/lib/utils'
 
 /** CA DROP response_status picker for Inbox fulfill confirms. */
@@ -97,6 +98,138 @@ export type RequestTriageDialogProps = RequestDetailDrawerProps
 function formatTimestamp(value: string | null | undefined): string {
   if (!value) return '—'
   return new Date(value).toLocaleString()
+}
+
+/** Dense process context strip — inbox/detail panes, not marketing cards. */
+function ProcessContextStrip({
+  items,
+  compact = false,
+}: {
+  items: { label: string; value: ReactNode; show?: boolean }[]
+  compact?: boolean
+}) {
+  const visible = items.filter((item) => item.show !== false)
+  if (visible.length === 0) return null
+  return (
+    <dl
+      className={cn(
+        'grid gap-x-3 gap-y-1 rounded-md border border-line/70 bg-paper/40',
+        compact
+          ? 'grid-cols-2 px-2 py-1.5 sm:grid-cols-3'
+          : 'grid-cols-2 px-2.5 py-2 sm:grid-cols-3',
+      )}
+    >
+      {visible.map((item) => (
+        <div key={item.label} className="min-w-0">
+          <dt className="text-[0.55rem] font-medium uppercase tracking-wide text-mute">
+            {item.label}
+          </dt>
+          <dd className="mt-0.5 truncate text-[0.7rem] text-ink">{item.value}</dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+/** Human matching-status noun — aligns with overlay / inbox "Matching status". */
+function matchingStatusLabel(reviewStatus: string | null | undefined): string {
+  const normalized = (reviewStatus ?? '').trim().toLowerCase()
+  if (normalized === 'pending') return 'Pending review'
+  if (normalized === 'approved') return 'Approved'
+  if (normalized === 'declined' || normalized === 'rejected') return 'Declined'
+  if (normalized === 'none' || normalized === '') return 'None'
+  return (reviewStatus ?? '').replaceAll('_', ' ')
+}
+
+/** Compact "Matching results" value — type · count (overlay convention). */
+function matchingResultsLabel(matching: MatchingResultDetail): string {
+  const type = (
+    matching.match_type ?? (matching.matched ? 'matched' : 'not matched')
+  ).replaceAll('_', ' ')
+  return `${type} · ${matching.match_count}`
+}
+
+function matchingProcessStripItems(
+  matching: MatchingResultDetail,
+): { label: string; value: ReactNode; show?: boolean }[] {
+  const latestAttempt =
+    matching.attempts && matching.attempts.length > 0
+      ? [...matching.attempts].sort((a, b) => b.attempt_number - a.attempt_number)[0]
+      : null
+  return [
+    {
+      label: 'Matching results',
+      value: matchingResultsLabel(matching),
+    },
+    {
+      label: 'Matching status',
+      value: (
+        <Badge
+          variant={reviewStatusVariant(matching.review_status)}
+          className="normal-case tracking-normal"
+        >
+          {matchingStatusLabel(matching.review_status)}
+        </Badge>
+      ),
+    },
+    {
+      label: 'Requestor',
+      value: (
+        <span className="font-mono">{matching.requestor_state ?? '—'}</span>
+      ),
+      show: Boolean(matching.requestor_state),
+    },
+    {
+      label: 'Recorded',
+      value: (
+        <span className="tabular-nums">{formatTimestamp(matching.recorded_at)}</span>
+      ),
+      show: Boolean(matching.recorded_at),
+    },
+    {
+      label: 'Attempted',
+      value: (
+        <span className="tabular-nums">
+          {formatTimestamp(latestAttempt?.attempted_at)}
+        </span>
+      ),
+      show: Boolean(latestAttempt?.attempted_at),
+    },
+    {
+      label: 'Attempt id',
+      value: (
+        <span className="font-mono tabular-nums">{matching.attempt_id ?? '—'}</span>
+      ),
+      show: matching.attempt_id != null,
+    },
+    {
+      label: 'Approval id',
+      value: (
+        <span className="font-mono tabular-nums">{matching.approval_id ?? '—'}</span>
+      ),
+      show: matching.approval_id != null,
+    },
+  ]
+}
+
+function accessHandoffNextStep(opts: {
+  hasShareableUrl: boolean
+  deliveryStatus: string | null | undefined
+}): string {
+  const status = (opts.deliveryStatus ?? '').toLowerCase()
+  if (status === 'delivered') {
+    return 'Delivered — no further handoff step unless recalled.'
+  }
+  if (status === 'recalled') {
+    return 'Recalled — regenerate or re-send only after ops confirms a new artifact.'
+  }
+  if (status === 'failed') {
+    return 'Delivery failed — fix the outbound path, then copy URL → send outside → mark delivered.'
+  }
+  if (!opts.hasShareableUrl) {
+    return 'Next: wait for a shareable URL after fulfillment, then copy → send outside → mark delivered.'
+  }
+  return 'Next: Copy URL → send outside the platform → Mark delivered.'
 }
 
 export function journeyStageToTimelineStep(stage: JourneyStage): RunTimelineStep {
@@ -315,13 +448,52 @@ export function AccessHandoffPanel({
   if (isPending) {
     return <p className="py-3 text-xs text-ink-soft">Loading fulfillment artifact…</p>
   }
-  if (isError || (!artifact?.shareable_url && !artifact?.fulfillment_artifact_uri)) {
+
+  const hasShareableUrl = Boolean(artifact?.shareable_url)
+  const hasArtifactUri = Boolean(artifact?.fulfillment_artifact_uri)
+  const deliveryStatus = artifact?.access_delivery_status ?? null
+  const attemptStatus = artifact?.attempt_status ?? null
+  const processStrip = (
+    <ProcessContextStrip
+      compact
+      items={[
+        {
+          label: 'Delivery',
+          value: (
+            <span className="capitalize">{deliveryStatus ?? 'not set'}</span>
+          ),
+        },
+        {
+          label: 'Artifact',
+          value: hasArtifactUri || hasShareableUrl ? 'Present' : 'Missing',
+        },
+        {
+          label: 'Shareable URL',
+          value: hasShareableUrl ? 'Ready' : 'Not ready',
+        },
+        {
+          label: 'Fulfillment attempt',
+          value: <span className="capitalize">{attemptStatus ?? '—'}</span>,
+          show: Boolean(attemptStatus),
+        },
+      ]}
+    />
+  )
+  const nextStep = (
+    <p className="text-[0.7rem] text-ink-soft">
+      {accessHandoffNextStep({ hasShareableUrl, deliveryStatus })}
+    </p>
+  )
+
+  if (isError || (!hasShareableUrl && !hasArtifactUri)) {
     const placeholderDraft = buildAccessDeliveryDraft({
       requestId,
       shareableUrl: '[shareable URL will appear here after fulfillment]',
     })
     return (
-      <div className="space-y-3 py-2 text-xs text-ink-soft">
+      <div className="space-y-2 py-2 text-xs text-ink-soft">
+        {processStrip}
+        {nextStep}
         <p>
           No shareable delivery URL yet for{' '}
           <span className="font-mono text-ink">{requestId.slice(0, 8)}…</span>.
@@ -347,25 +519,29 @@ export function AccessHandoffPanel({
     )
   }
 
-  const url = artifact.shareable_url ?? artifact.fulfillment_artifact_uri ?? ''
+  // Guard above: shareable URL and/or internal artifact URI is present.
+  const readyArtifact = artifact as FulfillmentArtifact
+  const url = readyArtifact.shareable_url ?? readyArtifact.fulfillment_artifact_uri ?? ''
   const draft = buildAccessDeliveryDraft({ requestId, shareableUrl: url })
 
   return (
-    <div className="space-y-3 py-1 text-xs">
+    <div className="space-y-2 py-1 text-xs">
+      {processStrip}
+      {nextStep}
       <p className="text-ink-soft">
         Copy the shareable URL or draft an outbound message, then paste into your external
-        mailer. Mark delivery when sent — the platform does not email requesters.
+        mailer. Mark delivered when sent — the platform does not email requesters.
       </p>
-      <div className="rounded-lg border border-line bg-paper/50 px-3 py-2">
+      <div className="rounded-md border border-line bg-paper/50 px-2.5 py-1.5">
         <p className="taste-micro">Shareable URL</p>
         <p className="mt-1 break-all font-mono text-[0.7rem] text-ink">{url}</p>
       </div>
-      {artifact.fulfillment_artifact_uri &&
-        artifact.fulfillment_artifact_uri !== artifact.shareable_url ? (
-        <div className="rounded-lg border border-line/60 px-3 py-2">
+      {readyArtifact.fulfillment_artifact_uri &&
+        readyArtifact.fulfillment_artifact_uri !== readyArtifact.shareable_url ? (
+        <div className="rounded-md border border-line/60 px-2.5 py-1.5">
           <p className="taste-micro">Internal artifact (ops only)</p>
           <p className="mt-1 break-all font-mono text-[0.65rem] text-mute">
-            {artifact.fulfillment_artifact_uri}
+            {readyArtifact.fulfillment_artifact_uri}
           </p>
         </div>
       ) : null}
@@ -376,7 +552,7 @@ export function AccessHandoffPanel({
         <Button size="sm" variant="outline" type="button" onClick={() => setDraftOpen(true)}>
           Draft outbound
         </Button>
-        {artifact.kind === 'access' && canMutate ? (
+        {readyArtifact.kind === 'access' && canMutate ? (
           <>
             <Button
               size="sm"
@@ -408,12 +584,6 @@ export function AccessHandoffPanel({
           </>
         ) : null}
       </div>
-      {artifact.access_delivery_status ? (
-        <p className="text-mute">
-          Delivery status:{' '}
-          <span className="capitalize text-ink">{artifact.access_delivery_status}</span>
-        </p>
-      ) : null}
 
       <Dialog open={draftOpen} onOpenChange={setDraftOpen}>
         <DialogContent className="max-w-lg">
@@ -638,6 +808,12 @@ export function MatchingReviewPanel({
   const attempts = matching?.attempts ?? []
   const attemptStatus = attemptGlance(attempts)
   const assignment = matching?.assignment?.assignee_identity
+  const processStrip = matching ? (
+    <ProcessContextStrip
+      compact={compact}
+      items={matchingProcessStripItems(matching)}
+    />
+  ) : null
 
   const reviewActions = canReviewActions && !hideActions ? (
     <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -680,16 +856,12 @@ export function MatchingReviewPanel({
           <MatchingDetailGrid
             rows={[
               {
-                label: 'Match type',
-                value: (matching.match_type ?? '—').replaceAll('_', ' '),
+                label: 'Matching results',
+                value: matchingResultsLabel(matching),
               },
               {
                 label: 'Matched',
                 value: matching.matched ? 'Yes' : 'No',
-              },
-              {
-                label: 'Count',
-                value: <span className="tabular-nums">{matching.match_count}</span>,
               },
               {
                 label: 'Via',
@@ -715,13 +887,13 @@ export function MatchingReviewPanel({
           <MatchingDetailGrid
             rows={[
               {
-                label: 'Review status',
+                label: 'Matching status',
                 value: (
                   <Badge
                     variant={reviewStatusVariant(matching.review_status)}
                     className="normal-case tracking-normal"
                   >
-                    {matching.review_status}
+                    {matchingStatusLabel(matching.review_status)}
                   </Badge>
                 ),
               },
@@ -755,7 +927,9 @@ export function MatchingReviewPanel({
               },
               {
                 label: 'Reason',
-                value: matching.decision_reason ?? '—',
+                value: matching.decision_reason
+                  ? actionReasonLabel(matching.decision_reason)
+                  : '—',
               },
             ]}
           />
@@ -812,34 +986,29 @@ export function MatchingReviewPanel({
         onConfirm={() => onDecline()}
       />
       {isPending && matching == null ? (
-        <p className="text-ink-soft">Loading matching result…</p>
+        <p className="text-ink-soft">Loading matching results…</p>
       ) : null}
       {isError ? (
         <p className="text-red-700">
-          Could not load matching result. Retry or open Workers → matching.
+          Could not load matching results. Retry or open Workers → matching.
         </p>
       ) : null}
       {matching == null && !isPending && !isError ? (
         <div className="space-y-1 text-ink-soft">
-          <p>No matching result payload for this request yet.</p>
+          <p>No matching results for this request yet.</p>
           <p className="text-[0.65rem] text-mute">
-            Detail appears once a matching_results row exists; review can still wait on
-            matching.review independently.
+            Detail appears once matching results exist; the queue can still wait on{' '}
+            {actionReasonLabel('matching.review')} independently.
           </p>
         </div>
       ) : null}
+      {processStrip}
       {matching && layout === 'tabs' ? tabsBody : null}
       {matching && layout !== 'tabs' ? (
         <>
           <StatusAccordion
-            title="Match result"
-            glance={
-              matching.match_type
-                ? `${matching.match_type.replaceAll('_', ' ')} · ${matching.match_count}`
-                : matching.matched
-                  ? `Matched · ${matching.match_count}`
-                  : 'Not matched'
-            }
+            title="Matching results"
+            glance={matchingResultsLabel(matching)}
             tone={
               matching.match_type === 'multi_match'
                 ? 'fail'
@@ -911,8 +1080,8 @@ export function MatchingReviewPanel({
           </StatusAccordion>
 
           <StatusAccordion
-            title="Review gate"
-            glance={matching.review_status}
+            title="Matching status"
+            glance={matchingStatusLabel(matching.review_status)}
             tone={reviewStatusVariant(matching.review_status)}
             defaultOpen={matching.review_status === 'pending'}
           >
@@ -924,7 +1093,7 @@ export function MatchingReviewPanel({
                     variant={reviewStatusVariant(matching.review_status)}
                     className="normal-case tracking-normal"
                   >
-                    {matching.review_status}
+                    {matchingStatusLabel(matching.review_status)}
                   </Badge>
                 </dd>
               </div>
@@ -969,7 +1138,7 @@ export function MatchingReviewPanel({
             title="Decision"
             glance={
               matching.decided_at
-                ? matching.review_status
+                ? matchingStatusLabel(matching.review_status)
                 : matching.review_status === 'pending'
                   ? 'Awaiting'
                   : 'None'
@@ -995,7 +1164,11 @@ export function MatchingReviewPanel({
               </div>
               <div className="col-span-2 rounded-md border border-line/70 px-2 py-1">
                 <dt className="text-[0.6rem] text-mute">Reason</dt>
-                <dd className="text-[0.7rem]">{matching.decision_reason ?? '—'}</dd>
+                <dd className="text-[0.7rem]">
+                  {matching.decision_reason
+                    ? actionReasonLabel(matching.decision_reason)
+                    : '—'}
+                </dd>
               </div>
             </dl>
           </StatusAccordion>

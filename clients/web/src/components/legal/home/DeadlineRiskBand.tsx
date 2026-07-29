@@ -36,15 +36,15 @@ export function DeadlineRiskBand({ risk }: DeadlineRiskBandProps) {
   const barTotal = openTotal || 1
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="taste-frost-chip tabular-nums normal-case tracking-normal">
+        <span className="taste-frost-chip tabular-nums text-[0.65rem] normal-case tracking-normal">
           Closed YTD: {risk.closed_ytd}
         </span>
       </div>
 
       <div
-        className="flex h-2 overflow-hidden rounded-full bg-line/40"
+        className="flex h-1.5 overflow-hidden rounded-full bg-line/40"
         role="img"
         aria-label={`Deadline risk: ${risk.overdue} overdue, ${risk.due_within_7_days} due within 7 days, ${risk.on_track} on track`}
       >
@@ -68,15 +68,15 @@ export function DeadlineRiskBand({ risk }: DeadlineRiskBandProps) {
         })}
       </div>
 
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-soft">
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[0.65rem] text-ink-soft">
         {SEGMENTS.map((segment) => (
           <Link
             key={segment.key}
             to="/requests"
             search={segment.search}
-            className="inline-flex items-center gap-1.5 hover:text-ink"
+            className="inline-flex items-center gap-1 hover:text-ink"
           >
-            <span className={cn('inline-block h-2 w-2 rounded-full', segment.className)} />
+            <span className={cn('inline-block h-1.5 w-1.5 rounded-full', segment.className)} />
             <span>
               {segment.label}:{' '}
               <span className="tabular-nums font-medium">{risk[segment.countKey]}</span>
@@ -86,7 +86,7 @@ export function DeadlineRiskBand({ risk }: DeadlineRiskBandProps) {
       </div>
 
       {openTotal === 0 ? (
-        <p className="text-xs text-mute">No open requests with due dates in this window.</p>
+        <p className="text-[0.65rem] text-mute">No open requests with due dates in this window.</p>
       ) : null}
     </div>
   )

@@ -524,6 +524,7 @@ const docsRoute = createRoute({
   component: DocsPage,
 })
 
+
 const requestDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests/$requestId',

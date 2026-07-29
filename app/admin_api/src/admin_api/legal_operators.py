@@ -8,8 +8,9 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from admin_api.drop_pipeline import _require_database
-from admin_api.roles import RolePrincipal, require_roles
+from admin_api.roles import RolePrincipal, require_roles, settings
 from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_LEGAL, ROLE_SUPER_ADMIN
+from habeas_privacy_core.auth.roles import parse_email_allowlist
 from habeas_privacy_core.db.pool import get_pool
 
 router = APIRouter(prefix="/legal", tags=["legal-operators"])
@@ -22,12 +23,12 @@ LegalOperatorsPrincipal = Annotated[
 
 class LegalOperator(BaseModel):
     email: str
-    kind: str  # assignee | legal_team
+    kind: str  # assignee | legal_team | data_owner
 
 
 @router.get("/operators", response_model=list[LegalOperator])
 async def list_legal_operators(_principal: LegalOperatorsPrincipal):
-    """Assignees and legal-team members only — no requester directory (KD18)."""
+    """Assignees, legal-team, and data-owner allowlist — no requester directory (KD18)."""
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -59,4 +60,10 @@ async def list_legal_operators(_principal: LegalOperatorsPrincipal):
             continue
         seen.add(email)
         operators.append(LegalOperator(email=email, kind="legal_team"))
+    for email in sorted(parse_email_allowlist(settings.admin_api_data_owners)):
+        normalized = email.strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        operators.append(LegalOperator(email=normalized, kind="data_owner"))
     return sorted(operators, key=lambda o: o.email)

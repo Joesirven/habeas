@@ -248,16 +248,77 @@ async def requests_list(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.get("/requests/{request_id}", response_model=RequestRecord)
-async def requests_get(request_id: str):
+class RequesterContact(BaseModel):
+    """Authorized-viewer contact for non-DROP intake — never logged or audited."""
+
+    name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+
+
+class RequestDetailRecord(RequestRecord):
+    """Request spine plus optional display/contact for legal/admin viewers."""
+
+    display_label: str | None = None
+    contact: RequesterContact | None = None
+
+
+async def _load_non_drop_contact(
+    conn: Any,
+    *,
+    intake_source: IntakeSource,
+    raw_record_id: int | None,
+) -> tuple[str | None, RequesterContact | None]:
+    """Name/email/phone from manual_raw_requests for non-DROP intakes only."""
+    if intake_source == IntakeSource.DROP or raw_record_id is None:
+        return None, None
+    row = await conn.fetchrow(
+        """
+        SELECT cleaned_payload
+          FROM manual_raw_requests
+         WHERE id = $1
+        """,
+        raw_record_id,
+    )
+    if not row:
+        return None, None
+    payload = row["cleaned_payload"] or {}
+    if not isinstance(payload, dict):
+        return None, None
+    first = str(payload.get("first_name") or "").strip()
+    last = str(payload.get("last_name") or "").strip()
+    name = " ".join(part for part in (first, last) if part) or None
+    email = str(payload.get("email") or payload.get("email_address") or "").strip() or None
+    phone = str(payload.get("phone") or payload.get("phone_number") or "").strip() or None
+    display_label = name
+    if not name and not email and not phone:
+        return display_label, None
+    return display_label, RequesterContact(name=name, email=email, phone=phone)
+
+
+@app.get("/requests/{request_id}", response_model=RequestDetailRecord)
+async def requests_get(request_id: str, viewer: RequestsListPrincipal):
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
     pool = get_pool()
     async with pool.acquire() as conn:
         record = await get_request(conn, request_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="request not found")
-    return record
+        if record is None:
+            raise HTTPException(status_code=404, detail="request not found")
+        include_contact = viewer.role in (ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL)
+        display_label: str | None = None
+        contact: RequesterContact | None = None
+        if include_contact:
+            display_label, contact = await _load_non_drop_contact(
+                conn,
+                intake_source=record.intake_source,
+                raw_record_id=record.raw_record_id,
+            )
+    return RequestDetailRecord(
+        **record.model_dump(),
+        display_label=display_label,
+        contact=contact,
+    )
 
 
 @app.post("/requests", response_model=RequestRecord, status_code=201)

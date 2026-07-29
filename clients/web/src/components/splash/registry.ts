@@ -10,6 +10,7 @@ import { art07 } from './variants/art-07'
 import { art08 } from './variants/art-08'
 import { art09 } from './variants/art-09'
 import { art10 } from './variants/art-10'
+import { keyholeOffset } from './variants/keyhole-offset'
 import type { SplashVariantMeta, SplashVariantModule } from './types'
 
 const modules: SplashVariantModule[] = [
@@ -23,6 +24,7 @@ const modules: SplashVariantModule[] = [
   art08,
   art09,
   art10,
+  keyholeOffset,
 ]
 
 export const SPLASH_VARIANTS: SplashVariantMeta[] = modules.flatMap((m) => m.meta)

@@ -45,6 +45,7 @@ function requestPaletteLabel(request: RequestRecord): string {
 
 function operatorSublabel(operator: LegalOperator): string {
   if (operator.kind === 'legal_team') return 'Legal team'
+  if (operator.kind === 'data_owner') return 'Data team'
   if (operator.kind === 'assignee') return 'Assignee'
   return operator.kind
 }

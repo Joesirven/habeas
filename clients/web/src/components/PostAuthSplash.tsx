@@ -1,6 +1,7 @@
+import { KEYHOLE_SLOT_SLIDE_IN_ID } from './splash/variants/keyhole-offset'
 import { renderSplashVariant, SPLASH_VARIANT_COUNT, SPLASH_VARIANTS } from './splash/registry'
 
-export { SPLASH_VARIANT_COUNT, SPLASH_VARIANTS }
+export { SPLASH_VARIANT_COUNT, SPLASH_VARIANTS, KEYHOLE_SLOT_SLIDE_IN_ID }
 
 type PostAuthSplashProps = {
   variant?: number

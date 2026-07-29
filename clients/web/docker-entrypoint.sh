@@ -76,6 +76,9 @@ server {
         proxy_set_header Authorization "Bearer ${token}";
         proxy_set_header X-Goog-Authenticated-User-Email \$http_x_goog_authenticated_user_email;
         proxy_set_header X-Goog-Authenticated-User-Id \$http_x_goog_authenticated_user_id;
+        # Super-admin "View as" — browser sets this; Vite local proxy passes it through,
+        # but proxy_pass_request_headers off would otherwise drop it here.
+        proxy_set_header X-Dev-Simulate-Role \$http_x_dev_simulate_role;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_read_timeout 3600s;

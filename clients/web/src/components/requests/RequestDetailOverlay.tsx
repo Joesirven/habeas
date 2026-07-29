@@ -9,7 +9,9 @@ import {
 } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
+import { AccessDeliveryEmailCard } from '@/components/fulfillment/AccessDeliveryEmail'
 import { RunTimeline } from '@/components/ops/RunTimeline'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   ConfirmActionDialog,
@@ -23,10 +25,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { isLegalAdminPersona, useMe } from '@/lib/auth'
 import {
   COARSE_STAGE_ORDER,
+  NOTICE_APPROVAL,
+  actionReasonLabel,
   stageLabel,
   type CoarseStageKey,
 } from '@/lib/legalJourneyLabels'
 import {
+  dropResponseStatusLabel,
   getFulfillmentArtifact,
   getLatestIdentityVerification,
   getRequest,
@@ -44,9 +49,12 @@ import {
   postTriageSendToMatching,
   type DropResponseStatusCode,
   type JourneyStage,
+  type MatchedPersonContact,
   type MatchingResultDetail,
   type NeedsAttentionItem,
+  type RequestJourneyResponse,
   type RequestRecord,
+  type RequesterContact,
   type RunTimelineStep,
   type TimelineEntry,
 } from '@/lib/api'
@@ -66,7 +74,7 @@ const SOURCE_LABELS: Record<string, string> = {
   manual: 'Manual',
 }
 
-export type RequestDetailTab = 'fulfillment' | 'matching' | 'activity'
+export type RequestDetailTab = 'details' | 'fulfillment' | 'matching' | 'activity'
 
 export type RequestDetailOverlayProps = {
   requestId: string | null
@@ -128,6 +136,51 @@ export function requestDetailHeaderLabel(
 function formatTimestamp(value: string | null | undefined): string {
   if (!value) return '—'
   return new Date(value).toLocaleString()
+}
+
+function journeyResponseStatus(
+  journey: RequestJourneyResponse | null | undefined,
+): number | null {
+  const value = journey?.response_status
+  return typeof value === 'number' ? value : null
+}
+
+function resolveDropStatusCode(opts: {
+  journey?: RequestJourneyResponse | null
+  matching?: MatchingResultDetail | null
+  attentionItem?: NeedsAttentionItem | null
+}): { code: number | null; isRecommended: boolean } {
+  const fromJourney = journeyResponseStatus(opts.journey)
+  if (fromJourney != null) return { code: fromJourney, isRecommended: false }
+  // Fulfilled notice/delivery rows carry response_status on needs-attention.
+  const fromAttention = opts.attentionItem?.response_status
+  if (typeof fromAttention === 'number') {
+    return { code: fromAttention, isRecommended: false }
+  }
+  const recommended =
+    opts.matching?.recommended_response_status ??
+    opts.attentionItem?.recommended_response_status
+  if (typeof recommended === 'number') {
+    return { code: recommended, isRecommended: true }
+  }
+  return { code: null, isRecommended: false }
+}
+
+function matchingResultsLabel(matching: MatchingResultDetail): string {
+  const type = (matching.match_type ?? (matching.matched ? 'matched' : 'not matched')).replaceAll(
+    '_',
+    ' ',
+  )
+  return `${type} · ${matching.match_count}`
+}
+
+function matchingStatusLabel(reviewStatus: string): string {
+  const normalized = reviewStatus.trim().toLowerCase()
+  if (normalized === 'pending') return 'Pending review'
+  if (normalized === 'approved') return 'Approved'
+  if (normalized === 'declined' || normalized === 'rejected') return 'Declined'
+  if (normalized === 'none' || normalized === '') return 'None'
+  return reviewStatus.replaceAll('_', ' ')
 }
 
 function mapTechnicalStageToCoarse(stage: string): CoarseStageKey {
@@ -220,6 +273,8 @@ type StageAction = {
   primary?: boolean
   destructive?: boolean
   softWarning?: string
+  /** When set, show confirm dialog before running (title/description override softWarning path). */
+  confirm?: { title: string; description: string }
   run: () => Promise<void>
 }
 
@@ -258,16 +313,22 @@ function buildStageActions(opts: {
   if (isNoticeContext(attentionItem, journeyStage)) {
     actions.push({
       id: 'notice_approve',
-      label: 'Approve notice review',
+      label: NOTICE_APPROVAL.action,
       primary: true,
-      hint: 'Clear notice.review for weekly DROP upload',
+      hint: NOTICE_APPROVAL.hint,
+      confirm: {
+        title: NOTICE_APPROVAL.confirmTitle,
+        description: NOTICE_APPROVAL.hint,
+      },
       run: async () => {
         await postNoticeApprove({ request_ids: [requestId] })
       },
     })
   }
 
-  if (isDeliveryContext(attentionItem, journeyStage)) {
+  const noticeContext = isNoticeContext(attentionItem, journeyStage)
+  // Fulfill stage historically matched delivery context — skip when the work is fulfillment notice.
+  if (!noticeContext && isDeliveryContext(attentionItem, journeyStage)) {
     actions.push(
       {
         id: 'delivery_delivered',
@@ -288,15 +349,17 @@ function buildStageActions(opts: {
     )
   }
 
-  actions.push({
-    id: 'idv_verified',
-    label: 'Identity verified',
-    primary: actions.length === 0,
-    hint: 'Record identity verification on Fulfillment tab',
-    run: async () => {
-      await postIdentityVerification(requestId, { status: 'verified', method: 'manual' })
-    },
-  })
+  if (!noticeContext) {
+    actions.push({
+      id: 'idv_verified',
+      label: 'Identity verified',
+      primary: actions.length === 0,
+      hint: 'Record identity verification on Fulfillment tab',
+      run: async () => {
+        await postIdentityVerification(requestId, { status: 'verified', method: 'manual' })
+      },
+    })
+  }
 
   const incompleteWarning =
     artifactPending && !accessDelivered
@@ -326,22 +389,26 @@ function RequestStageActionBar({
   onInvalidate: () => Promise<void>
 }) {
   const [pendingId, setPendingId] = useState<string | null>(null)
+  const [failedActionId, setFailedActionId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [confirmAction, setConfirmAction] = useState<StageAction | null>(null)
 
   const runAction = useMutation({
     mutationFn: async (action: StageAction) => {
       setPendingId(action.id)
+      setFailedActionId(null)
       await action.run()
     },
     onSuccess: async () => {
       setError(null)
       setConfirmAction(null)
       setPendingId(null)
+      setFailedActionId(null)
       await onInvalidate()
     },
-    onError: (mutationError) => {
+    onError: (mutationError, action) => {
       setPendingId(null)
+      setFailedActionId(action.id)
       setError(
         mutationError instanceof Error ? mutationError.message : 'Action failed — retry needed',
       )
@@ -351,9 +418,9 @@ function RequestStageActionBar({
   if (actions.length === 0) return null
 
   return (
-    <div className="border-b border-line bg-panel/30 px-4 py-3">
-      <p className="taste-micro mb-2">Stage actions</p>
-      <div className="flex flex-wrap gap-2">
+    <div className="shrink-0 border-b border-line bg-panel/30 px-4 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="taste-micro shrink-0">Next</p>
         {actions.map((action) => (
           <Button
             key={action.id}
@@ -362,7 +429,7 @@ function RequestStageActionBar({
             disabled={pendingId != null}
             className={cn(action.destructive && 'border-red-300 text-red-800 hover:bg-red-50')}
             onClick={() => {
-              if (action.softWarning) {
+              if (action.softWarning || action.confirm) {
                 setConfirmAction(action)
                 return
               }
@@ -381,7 +448,7 @@ function RequestStageActionBar({
             variant="outline"
             disabled={runAction.isPending}
             onClick={() => {
-              const last = actions.find((action) => action.id === pendingId)
+              const last = actions.find((action) => action.id === failedActionId)
               if (last) runAction.mutate(last)
             }}
           >
@@ -394,11 +461,12 @@ function RequestStageActionBar({
         onOpenChange={(next) => {
           if (!next && !runAction.isPending) setConfirmAction(null)
         }}
-        title={confirmAction?.label ?? 'Confirm'}
+        title={confirmAction?.confirm?.title ?? confirmAction?.label ?? 'Confirm'}
         description={
-          confirmAction?.softWarning
+          confirmAction?.confirm?.description ??
+          (confirmAction?.softWarning
             ? `${confirmAction.softWarning} This does not block close.`
-            : (confirmAction?.hint ?? 'Confirm this action.')
+            : (confirmAction?.hint ?? 'Confirm this action.'))
         }
         confirmLabel={confirmAction?.label ?? 'Confirm'}
         confirming={runAction.isPending}
@@ -410,89 +478,256 @@ function RequestStageActionBar({
   )
 }
 
-function RequesterMetaRail({
+function matchedContactDisplayName(contact: MatchedPersonContact): string | null {
+  const first = contact.first_initial?.trim()
+  const last = contact.last_initial?.trim()
+  if (first || last) return [first, last].filter(Boolean).join('')
+  return null
+}
+
+function phoneSummaryFromMatched(contact: MatchedPersonContact): string | null {
+  if (!contact.phones?.length) return null
+  return contact.phones.map((phone) => `${phone.type}: ${phone.number}`).join(' · ')
+}
+
+/** Requester contact for Details / Inbox Overview — DROP after match, else intake contact. */
+export function RequesterContactSection({
+  intakeSource,
+  displayLabel,
+  requestContact,
+  matching,
+  dropPreMatch = false,
+  compact = false,
+}: {
+  intakeSource: string
+  displayLabel?: string | null
+  requestContact?: RequesterContact | null
+  matching?: MatchingResultDetail | null
+  dropPreMatch?: boolean
+  compact?: boolean
+}) {
+  const isDrop = intakeSource === 'drop'
+  const matched = matching?.matched_contacts ?? []
+  const matchStatus = matching?.matched_contacts_status
+  const primaryMatched = matched[0] ?? null
+
+  const rows: { label: string; value: string }[] = []
+
+  if (isDrop) {
+    if (dropPreMatch || matching == null) {
+      return (
+        <div className={cn('space-y-1.5', compact ? 'text-[0.7rem]' : 'text-xs')}>
+          <p className="taste-micro">Requester contact</p>
+          <p className="text-mute">
+            Available after a person match (DROP does not include requester contact at
+            intake).
+          </p>
+        </div>
+      )
+    }
+    if (matchStatus === 'unavailable') {
+      return (
+        <div className={cn('space-y-1.5', compact ? 'text-[0.7rem]' : 'text-xs')}>
+          <p className="taste-micro">Requester contact</p>
+          <p className="text-mute">Matched person details unavailable right now.</p>
+        </div>
+      )
+    }
+    if (matched.length === 0 || matching.match_count <= 0) {
+      return (
+        <div className={cn('space-y-1.5', compact ? 'text-[0.7rem]' : 'text-xs')}>
+          <p className="taste-micro">Requester contact</p>
+          <p className="text-mute">No matched person contact on file yet.</p>
+        </div>
+      )
+    }
+    const initials = matchedContactDisplayName(primaryMatched!)
+    if (initials) rows.push({ label: 'Initials', value: initials })
+    if (primaryMatched?.state) rows.push({ label: 'State', value: primaryMatched.state })
+    if (primaryMatched?.email) rows.push({ label: 'Email', value: primaryMatched.email })
+    const phones = phoneSummaryFromMatched(primaryMatched!)
+    if (phones) rows.push({ label: 'Phone', value: phones })
+    if (primaryMatched?.dob) rows.push({ label: 'DOB', value: primaryMatched.dob })
+    if (matched.length > 1) {
+      rows.push({ label: 'Persons', value: `${matched.length} matched` })
+    }
+  } else {
+    const name = requestContact?.name?.trim() || displayLabel?.trim() || null
+    const email = requestContact?.email?.trim() || null
+    const phone = requestContact?.phone?.trim() || null
+    if (name) rows.push({ label: 'Name', value: name })
+    if (email) rows.push({ label: 'Email', value: email })
+    if (phone) rows.push({ label: 'Phone', value: phone })
+    if (rows.length === 0) {
+      return (
+        <div className={cn('space-y-1.5', compact ? 'text-[0.7rem]' : 'text-xs')}>
+          <p className="taste-micro">Requester contact</p>
+          <p className="text-mute">No contact on file for this intake.</p>
+        </div>
+      )
+    }
+  }
+
+  return (
+    <div className={cn('space-y-1.5', compact ? 'text-[0.7rem]' : 'text-xs')}>
+      <p className="taste-micro">Requester contact</p>
+      <dl
+        className={cn(
+          'grid gap-x-4 gap-y-2',
+          compact ? 'grid-cols-2 sm:grid-cols-3' : 'grid-cols-1 sm:grid-cols-2',
+        )}
+      >
+        {rows.map((row) => (
+          <div key={row.label} className="min-w-0">
+            <dt className="text-[0.6rem] text-mute">{row.label}</dt>
+            <dd
+              className={cn(
+                'mt-0.5 text-ink',
+                row.label === 'Email' || row.label === 'Phone' || row.label === 'Initials'
+                  ? 'break-all'
+                  : 'truncate',
+                row.label === 'Initials' || row.label === 'State' ? 'font-mono' : null,
+              )}
+              title={row.value}
+            >
+              {row.value}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  )
+}
+
+/** Request / requester facts — shown as the Details tab (not a side rail). */
+function RequestDetailsPanel({
   requestId,
   intakeSource,
   displayLabel,
+  requestContact,
   requestorState,
   identityStatus,
   matching,
+  dropStatusCode = null,
+  dropStatusIsRecommended = false,
   dropPreMatch = false,
 }: {
   requestId: string
   intakeSource: string
   displayLabel?: string | null
+  requestContact?: RequesterContact | null
   requestorState?: string | null
   identityStatus?: string | null
   matching?: MatchingResultDetail | null
+  dropStatusCode?: number | null
+  dropStatusIsRecommended?: boolean
   dropPreMatch?: boolean
 }) {
   const channel = SOURCE_LABELS[intakeSource] ?? intakeSource
   const isDrop = intakeSource === 'drop'
-  const contact = matching?.matched_contacts?.[0]
 
-  if (isDrop && dropPreMatch) {
-    return (
-      <aside className="space-y-3 border-l border-line bg-paper/40 p-4 text-xs lg:w-56 shrink-0">
-        <p className="taste-micro">Request</p>
-        <dl className="space-y-2">
-          <div>
-            <dt className="text-[0.65rem] text-mute">Request id</dt>
-            <dd className="font-mono text-[0.7rem]">{requestId}</dd>
-          </div>
-          <div>
-            <dt className="text-[0.65rem] text-mute">Channel</dt>
-            <dd>{channel}</dd>
-          </div>
-        </dl>
-      </aside>
-    )
+  const rows: { label: string; value: string }[] = []
+  rows.push({
+    label: 'Display',
+    value: requestDetailHeaderLabel(requestId, intakeSource, displayLabel),
+  })
+  rows.push({ label: 'Request id', value: requestId })
+  rows.push({ label: 'Channel', value: channel })
+  if (isDrop) {
+    rows.push({
+      label: 'CA DROP status',
+      value:
+        dropStatusCode != null
+          ? `${dropResponseStatusLabel(dropStatusCode)}${
+              dropStatusIsRecommended ? ' (recommended)' : ''
+            }`
+          : 'Pending',
+    })
+  }
+  if (!(isDrop && dropPreMatch)) {
+    rows.push({
+      label: 'State',
+      value: requestorState ?? matching?.requestor_state ?? '—',
+    })
+    rows.push({
+      label: 'Identity verification',
+      value: identityStatus ?? 'none recorded',
+    })
+    if (matching) {
+      rows.push({ label: 'Matching results', value: matchingResultsLabel(matching) })
+      rows.push({
+        label: 'Matching status',
+        value: matchingStatusLabel(matching.review_status),
+      })
+    }
   }
 
   return (
-    <aside className="space-y-3 border-l border-line bg-paper/40 p-4 text-xs lg:w-56 shrink-0">
-      <p className="taste-micro">Requester</p>
-      <dl className="space-y-2">
-        <div>
-          <dt className="text-[0.65rem] text-mute">Display</dt>
-          <dd className="font-mono text-[0.7rem]">
-            {requestDetailHeaderLabel(requestId, intakeSource, displayLabel)}
-          </dd>
-        </div>
-        <div>
-          <dt className="text-[0.65rem] text-mute">Channel</dt>
-          <dd>{channel}</dd>
-        </div>
-        <div>
-          <dt className="text-[0.65rem] text-mute">State</dt>
-          <dd className="font-mono">{requestorState ?? matching?.requestor_state ?? '—'}</dd>
-        </div>
-        <div>
-          <dt className="text-[0.65rem] text-mute">Identity verification</dt>
-          <dd className="capitalize">{identityStatus ?? 'none recorded'}</dd>
-        </div>
-        {!isDrop && displayLabel ? (
-          <div>
-            <dt className="text-[0.65rem] text-mute">Name</dt>
-            <dd>{displayLabel}</dd>
-          </div>
-        ) : null}
-        {contact?.email ? (
-          <div>
-            <dt className="text-[0.65rem] text-mute">Email</dt>
-            <dd>{contact.email}</dd>
-          </div>
-        ) : null}
-        {contact?.phones?.length ? (
-          <div>
-            <dt className="text-[0.65rem] text-mute">Phone</dt>
-            <dd>
-              {contact.phones.map((phone) => `${phone.type}: ${phone.number}`).join(' · ')}
-            </dd>
-          </div>
-        ) : null}
-      </dl>
-    </aside>
+    <div className="space-y-5 text-xs">
+      <RequesterContactSection
+        intakeSource={intakeSource}
+        displayLabel={displayLabel}
+        requestContact={requestContact}
+        matching={matching}
+        dropPreMatch={dropPreMatch}
+      />
+      <div className="space-y-3">
+        <p className="taste-micro">Request details</p>
+        <dl className="grid grid-cols-1 gap-x-6 gap-y-2.5 sm:grid-cols-2">
+          {rows.map((row) => (
+            <div key={row.label} className="min-w-0">
+              <dt className="text-[0.65rem] text-mute">{row.label}</dt>
+              <dd
+                className={cn(
+                  'mt-0.5 text-ink',
+                  row.label === 'Request id' || row.label === 'Display' || row.label === 'State'
+                    ? 'font-mono text-[0.7rem]'
+                    : null,
+                  row.label === 'Identity verification' ? 'capitalize' : null,
+                )}
+              >
+                {row.value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    </div>
+  )
+}
+
+type ActivityFilter = 'all' | 'notes' | 'system'
+
+const HUMAN_ACTIVITY_KINDS = new Set(['comment', 'assignment', 'escalation'])
+
+function isHumanActivityKind(kind: string): boolean {
+  return HUMAN_ACTIVITY_KINDS.has(kind.trim().toLowerCase())
+}
+
+function activityKindLabel(kind: string): string | null {
+  switch (kind.trim().toLowerCase()) {
+    case 'comment':
+      return 'Note'
+    case 'assignment':
+      return 'Assignment'
+    case 'escalation':
+      return 'Assignment to legal'
+    case 'approval':
+      return 'Approval'
+    case 'stage':
+      return 'Stage'
+    case 'audit':
+      return null
+    default:
+      return null
+  }
+}
+
+/** Humanize dotted reason keys that may appear in timeline summaries. */
+function humanizeActivitySummary(summary: string): string {
+  return summary.replace(
+    /\b[\w]+(?:\.[\w]+)+\b/g,
+    (match) => actionReasonLabel(match),
   )
 }
 
@@ -506,6 +741,7 @@ function ActivityPanel({
   isPending: boolean
 }) {
   const queryClient = useQueryClient()
+  const [filter, setFilter] = useState<ActivityFilter>('all')
   const [comment, setComment] = useState('')
   const [error, setError] = useState<string | null>(null)
 
@@ -523,46 +759,114 @@ function ActivityPanel({
     },
   })
 
+  const filtered = entries.filter((entry) => {
+    const human = isHumanActivityKind(entry.kind)
+    if (filter === 'notes') return human
+    if (filter === 'system') return !human
+    return true
+  })
+
+  const filters: { id: ActivityFilter; label: string }[] = [
+    { id: 'all', label: 'All' },
+    { id: 'notes', label: 'Notes & assignment' },
+    { id: 'system', label: 'System' },
+  ]
+
   return (
-    <div className="grid gap-4 p-4 lg:grid-cols-[1fr_16rem]">
-      <div className="space-y-3">
-        <p className="taste-micro">Activity timeline</p>
-        {isPending ? <SkeletonLines lines={4} /> : null}
-        {!isPending && entries.length === 0 ? (
-          <p className="text-xs text-ink-soft">No activity yet.</p>
-        ) : null}
-        <ol className="space-y-2">
-          {entries.map((entry, index) => (
+    <div className="space-y-3 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="taste-micro">Activity</p>
+        <div className="flex flex-wrap gap-1" role="group" aria-label="Activity filter">
+          {filters.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={cn(
+                'rounded border px-2 py-0.5 text-[0.65rem] transition-colors',
+                filter === item.id
+                  ? 'border-habeas-navy bg-habeas-navy text-white'
+                  : 'border-line bg-paper text-ink-soft hover:border-ink/30',
+              )}
+              aria-pressed={filter === item.id}
+              onClick={() => setFilter(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {isPending ? <SkeletonLines lines={4} /> : null}
+      {!isPending && filtered.length === 0 ? (
+        <p className="text-xs text-ink-soft">
+          {entries.length === 0 ? 'No activity yet.' : 'No matching activity for this filter.'}
+        </p>
+      ) : null}
+
+      <ol className="space-y-1.5">
+        {filtered.map((entry, index) => {
+          const human = isHumanActivityKind(entry.kind)
+          const kindLabel = activityKindLabel(entry.kind)
+          const summary = humanizeActivitySummary(entry.summary)
+
+          if (!human) {
+            return (
+              <li
+                key={`${entry.at}-${entry.kind}-${index}`}
+                className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 py-1 text-xs text-mute"
+              >
+                <time className="shrink-0 tabular-nums text-[0.65rem]">
+                  {formatTimestamp(entry.at)}
+                </time>
+                <span className="min-w-0 text-ink-soft">{summary}</span>
+              </li>
+            )
+          }
+
+          return (
             <li
               key={`${entry.at}-${entry.kind}-${index}`}
-              className="rounded-lg border border-line/80 bg-paper/60 px-3 py-2 text-xs"
+              className="rounded-lg border border-line/80 bg-paper/70 px-3 py-2 text-xs"
             >
               <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <span className="taste-frost-chip text-[0.65rem] capitalize">{entry.kind}</span>
-                <time className="tabular-nums text-mute">{formatTimestamp(entry.at)}</time>
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  {kindLabel ? (
+                    <Badge variant="wait" className="normal-case tracking-normal">
+                      {kindLabel}
+                    </Badge>
+                  ) : null}
+                  <span className="font-medium text-ink">
+                    {entry.actor?.trim() || 'Operator'}
+                  </span>
+                </div>
+                <time className="shrink-0 tabular-nums text-[0.65rem] text-mute">
+                  {formatTimestamp(entry.at)}
+                </time>
               </div>
-              <p className="mt-1 text-ink">{entry.summary}</p>
-              {entry.actor ? <p className="mt-1 text-mute">{entry.actor}</p> : null}
+              <p className="mt-1.5 whitespace-pre-wrap text-ink">{summary}</p>
             </li>
-          ))}
-        </ol>
-      </div>
-      <div className="space-y-2">
-        <p className="taste-micro">Add comment</p>
+          )
+        })}
+      </ol>
+
+      <div className="space-y-2 border-t border-line pt-3">
+        <p className="taste-micro">Add a note</p>
         <textarea
-          className="min-h-[5rem] w-full rounded-lg border border-line bg-paper-raised px-3 py-2 text-xs text-ink"
+          className="min-h-[4.5rem] w-full rounded-lg border border-line bg-paper-raised px-3 py-2 text-xs text-ink"
           value={comment}
           onChange={(event) => setComment(event.target.value)}
           maxLength={2000}
+          placeholder="Add a note…"
+          aria-label="Add a note"
         />
-        <button
+        <Button
           type="button"
-          className="taste-btn-primary text-xs"
+          size="sm"
           disabled={comment.trim().length === 0 || commentMutation.isPending}
           onClick={() => commentMutation.mutate()}
         >
-          {commentMutation.isPending ? 'Posting…' : 'Post comment'}
-        </button>
+          {commentMutation.isPending ? 'Posting…' : 'Post note'}
+        </Button>
         {error ? <p className="text-xs text-red-700">{error}</p> : null}
       </div>
     </div>
@@ -706,6 +1010,17 @@ export function RequestDetailBody({
       journey?.current_stage === 'promote' ||
       journey?.current_stage === 'match')
 
+  const dropResolved =
+    intakeSource === 'drop'
+      ? resolveDropStatusCode({
+          journey,
+          matching,
+          attentionItem,
+        })
+      : null
+  const dropStatusCode = dropResolved?.code ?? null
+  const dropStatusIsRecommended = dropResolved?.isRecommended ?? false
+
   const stageActions = journey
     ? buildStageActions({
         requestId,
@@ -736,25 +1051,80 @@ export function RequestDetailBody({
     )
   }
 
+  const currentCoarse =
+    coarseSteps.find((step) => step.status === 'running' || step.status === 'waiting') ??
+    coarseSteps.find((step) => step.status === 'failed') ??
+    coarseSteps[coarseSteps.length - 1]
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <RequestStageActionBar actions={stageActions} onInvalidate={invalidateAll} />
-      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="overflow-x-auto border-b border-line px-4 py-3">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        {/* Compact stage strip — full rail only on the dedicated page */}
+        {variant === 'overlay' ? (
+          <div className="shrink-0 border-b border-line px-4 py-2">
+            <p className="text-[0.7rem] text-mute">
+              Stage{' '}
+              <span className="font-medium text-ink">
+                {currentCoarse?.label ?? stageLabel(journey.current_stage)}
+              </span>
+              {coarseSteps.length > 0 ? (
+                <span className="text-mute">
+                  {' '}
+                  · {coarseSteps.filter((step) => step.status === 'completed').length}/
+                  {coarseSteps.length} complete
+                </span>
+              ) : null}
+            </p>
+          </div>
+        ) : (
+          <div className="shrink-0 overflow-x-auto border-b border-line px-4 py-3">
             <RunTimeline
               steps={coarseSteps}
               orientation="horizontal"
               emptyMessage="No stage rail."
             />
           </div>
-          <Tabs value={tab} onValueChange={(value) => setTab(value as RequestDetailTab)}>
-            <TabsList className="mx-4 mt-3">
-              <TabsTrigger value="fulfillment">Fulfillment</TabsTrigger>
-              <TabsTrigger value="matching">Matching</TabsTrigger>
-              <TabsTrigger value="activity">Activity</TabsTrigger>
+        )}
+
+        <Tabs
+          value={tab}
+          onValueChange={(value) => setTab(value as RequestDetailTab)}
+          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+        >
+          <div className="shrink-0 border-b border-line px-4 py-2">
+            <TabsList className="h-9 w-full justify-start gap-1 bg-canvas p-1">
+              <TabsTrigger value="details" className="h-7 px-3">
+                Details
+              </TabsTrigger>
+              <TabsTrigger value="fulfillment" className="h-7 px-3">
+                Fulfillment
+              </TabsTrigger>
+              <TabsTrigger value="matching" className="h-7 px-3">
+                Matching
+              </TabsTrigger>
+              <TabsTrigger value="activity" className="h-7 px-3">
+                Activity
+              </TabsTrigger>
             </TabsList>
-            <TabsContent value="fulfillment" className="px-4 pb-6">
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <TabsContent value="details" className="mt-0 px-4 py-4">
+              <RequestDetailsPanel
+                requestId={requestId}
+                intakeSource={intakeSource}
+                displayLabel={displayLabel}
+                requestContact={requestQuery.data?.contact}
+                requestorState={requestQuery.data?.requestor_state}
+                identityStatus={identityQuery.data?.status}
+                matching={matching}
+                dropStatusCode={dropStatusCode}
+                dropStatusIsRecommended={dropStatusIsRecommended}
+                dropPreMatch={dropPreMatch}
+              />
+            </TabsContent>
+            <TabsContent value="fulfillment" className="mt-0 px-4 py-4">
               <div className="space-y-4">
                 <AccessHandoffPanel
                   requestId={requestId}
@@ -776,23 +1146,33 @@ export function RequestDetailBody({
                   onSetStatus={(status) => deliveryMutation.mutate(status)}
                 />
                 {copyNote ? <p className="taste-micro text-mute">{copyNote}</p> : null}
-                {identityQuery.data ? (
-                  <p className="text-xs text-ink-soft">
-                    Latest identity verification:{' '}
-                    <span className="capitalize text-ink">{identityQuery.data.status}</span>
-                    <span className="text-mute">
-                      {' '}
-                      · {formatTimestamp(identityQuery.data.verified_at)}
-                    </span>
-                  </p>
-                ) : (
-                  <p className="text-xs text-mute">
-                    No identity verification recorded — use stage actions or Fulfillment workflow.
-                  </p>
-                )}
+                <div className="space-y-1">
+                  <p className="taste-micro">Identity verification</p>
+                  {identityQuery.data ? (
+                    <p className="text-xs text-ink-soft">
+                      Status:{' '}
+                      <span className="capitalize text-ink">{identityQuery.data.status}</span>
+                      <span className="text-mute">
+                        {' '}
+                        · {formatTimestamp(identityQuery.data.verified_at)}
+                      </span>
+                      {identityQuery.data.method ? (
+                        <span className="text-mute">
+                          {' '}
+                          · {identityQuery.data.method}
+                        </span>
+                      ) : null}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-mute">
+                      None recorded — use Identity verified in stage actions when ready.
+                    </p>
+                  )}
+                </div>
+                <AccessDeliveryEmailCard requestId={requestId} />
               </div>
             </TabsContent>
-            <TabsContent value="matching" className="px-4 pb-6">
+            <TabsContent value="matching" className="mt-0 px-4 py-4">
               {assignmentToLegal ? (
                 <p className="mb-2 text-[0.65rem] text-habeas-navy">
                   Assignment to legal — review matching context (disposition remains data-owner
@@ -823,44 +1203,36 @@ export function RequestDetailBody({
                 onDecline={() => matchingDispositionMutation.mutate({ action: 'decline' })}
               />
             </TabsContent>
-            <TabsContent value="activity">
+            <TabsContent value="activity" className="mt-0">
               <ActivityPanel
                 requestId={requestId}
                 entries={timelineQuery.data?.entries ?? []}
                 isPending={timelineQuery.isPending && !timelineQuery.data}
               />
             </TabsContent>
-          </Tabs>
-          {variant === 'overlay' ? (
-            <div className="flex flex-wrap gap-2 border-t border-line px-4 py-3">
+          </div>
+        </Tabs>
+
+        {variant === 'overlay' ? (
+          <div className="flex shrink-0 flex-wrap gap-2 border-t border-line px-4 py-2">
+            <Link
+              to="/requests/$requestId"
+              params={{ requestId }}
+              className="text-[0.7rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
+            >
+              Open full page →
+            </Link>
+            {isSuperAdmin ? (
               <Link
-                to="/requests/$requestId"
-                params={{ requestId }}
-                className="taste-btn text-xs"
+                to="/ops/runs"
+                search={{ request_id: requestId }}
+                className="text-[0.7rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
               >
-                Open full page →
+                Runs for request →
               </Link>
-              {isSuperAdmin ? (
-                <Link
-                  to="/ops/runs"
-                  search={{ request_id: requestId }}
-                  className="taste-btn text-xs"
-                >
-                  Runs for request →
-                </Link>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-        <RequesterMetaRail
-          requestId={requestId}
-          intakeSource={intakeSource}
-          displayLabel={displayLabel}
-          requestorState={requestQuery.data?.requestor_state}
-          identityStatus={identityQuery.data?.status}
-          matching={matching}
-          dropPreMatch={dropPreMatch}
-        />
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </div>
   )
@@ -886,12 +1258,50 @@ export function RequestDetailOverlay({
     return () => window.clearTimeout(timer)
   }, [open, requestId])
 
+  // Shared query keys with RequestDetailBody — cache hit, no extra network when body loads.
+  const journeyQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', requestId, 'journey'],
+    queryFn: () => getRequestJourney(requestId!),
+    enabled: open && Boolean(requestId),
+    placeholderData: (previous) => previous,
+  })
+
+  const matchingQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'drop', 'matching-results', requestId],
+    queryFn: () => fetchMatchingDetailOptional(requestId!),
+    enabled: open && Boolean(requestId),
+    placeholderData: (previous) => previous,
+  })
+
+  const attentionQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'overlay', requestId],
+    queryFn: async () => {
+      const response = await getNeedsAttention(200)
+      return response.items.find((item) => item.request_id === requestId)
+    },
+    enabled: open && Boolean(requestId),
+    staleTime: 10_000,
+  })
+
+  const intakeSource =
+    journeyQuery.data?.intake_source ?? seedRequest?.intake_source ?? 'manual'
+  const dropResolved =
+    intakeSource === 'drop'
+      ? resolveDropStatusCode({
+          journey: journeyQuery.data,
+          matching: matchingQuery.data,
+          attentionItem: attentionQuery.data,
+        })
+      : null
+  const dropStatusCode = dropResolved?.code ?? null
+  const dropStatusIsRecommended = dropResolved?.isRecommended ?? false
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         ref={contentRef}
         className={cn(
-          'flex h-[90vh] max-h-[90vh] w-[95vw] max-w-[95vw] flex-col gap-0 overflow-hidden p-0',
+          'flex h-[96vh] max-h-[96vh] w-[96vw] max-w-[96vw] flex-col gap-0 overflow-hidden p-0',
           'translate-x-[-50%] translate-y-[-50%]',
         )}
         onCloseAutoFocus={(event) => {
@@ -903,29 +1313,49 @@ export function RequestDetailOverlay({
         }}
         onEscapeKeyDown={() => onOpenChange(false)}
       >
-        <DialogHeader className="shrink-0 border-b border-line px-5 py-4 pr-12">
-          <p className="taste-micro">Request detail</p>
-          <DialogTitle className="font-mono text-base">
-            {requestId
-              ? requestDetailHeaderLabel(
-                  requestId,
-                  seedRequest?.intake_source ?? 'manual',
-                  seedRequest?.display_label,
-                )
-              : '—'}
-          </DialogTitle>
-          <DialogDescription>
-            Fulfillment-default review — matching read-only for legal/admin unless assignment to
-            legal.
+        <DialogHeader className="shrink-0 space-y-1 border-b border-line px-4 py-2.5 pr-12">
+          <div className="flex flex-wrap items-center gap-2">
+            <DialogTitle className="font-mono text-sm">
+              {requestId
+                ? requestDetailHeaderLabel(
+                    requestId,
+                    intakeSource,
+                    seedRequest?.display_label,
+                  )
+                : '—'}
+            </DialogTitle>
+            {intakeSource === 'drop' && dropStatusCode != null ? (
+              <Badge
+                variant="run"
+                className="normal-case tracking-normal"
+                title={
+                  dropStatusIsRecommended
+                    ? 'Recommended CA DROP status from matching'
+                    : 'CA DROP response status'
+                }
+              >
+                CA DROP · {dropResponseStatusLabel(dropStatusCode)}
+                {dropStatusIsRecommended ? ' (recommended)' : ''}
+              </Badge>
+            ) : intakeSource === 'drop' ? (
+              <Badge variant="wait" className="normal-case tracking-normal">
+                CA DROP · status pending
+              </Badge>
+            ) : null}
+          </div>
+          <DialogDescription className="sr-only">
+            Request detail overlay — fulfillment, matching, and activity.
           </DialogDescription>
         </DialogHeader>
         {requestId && open ? (
-          <RequestDetailBody
-            requestId={requestId}
-            variant="overlay"
-            defaultTab="fulfillment"
-            seedRequest={seedRequest}
-          />
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <RequestDetailBody
+              requestId={requestId}
+              variant="overlay"
+              defaultTab="fulfillment"
+              seedRequest={seedRequest}
+            />
+          </div>
         ) : null}
       </DialogContent>
     </Dialog>

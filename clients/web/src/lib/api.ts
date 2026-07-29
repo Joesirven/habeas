@@ -77,6 +77,12 @@ export type HealthPayload = {
 
 export type IntakeSource = 'webform' | 'drop' | 'csv' | 'manual'
 
+export type RequesterContact = {
+  name?: string | null
+  email?: string | null
+  phone?: string | null
+}
+
 export type RequestRecord = {
   id: string
   received_at: string
@@ -87,6 +93,8 @@ export type RequestRecord = {
   request_type?: string
   /** Non-DROP display label when available — not logged server-side */
   display_label?: string | null
+  /** Non-DROP contact for legal/admin — authorized display only */
+  contact?: RequesterContact | null
   /** True when DROP row is still open on the spine */
   drop_open?: boolean | null
 }
@@ -1345,6 +1353,8 @@ export type RequestJourneyResponse = {
   source_csv_filename?: string | null
   /** drop_connector download attempt id (bulk process key). */
   bulk_process_id?: number | null
+  /** CA DROP response_status when fulfillment has written it. */
+  response_status?: number | null
 }
 
 export type NeedsAttentionAssignment = {
@@ -1376,6 +1386,8 @@ export type NeedsAttentionItem = {
   match_type?: string | null
   /** Computed at read time from match_count (0→5, 1→3, N→4). */
   recommended_response_status?: number | null
+  /** CA DROP response_status when already fulfilled (notice rows). */
+  response_status?: number | null
   matched_via?: string | null
   requestor_state?: string | null
   review_status?: string | null

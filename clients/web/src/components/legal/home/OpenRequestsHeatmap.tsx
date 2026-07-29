@@ -12,6 +12,24 @@ type HeatmapProps = {
 
 type HeatmapTab = 'type_by_source' | 'state_map' | 'source_only' | 'type_only'
 
+/** Canonical intake rows — always shown so operators see the full channel set. */
+const CANONICAL_SOURCES: { id: string; label: string }[] = [
+  { id: 'webform', label: 'Webform' },
+  { id: 'csv', label: 'Agents' },
+  { id: 'drop', label: 'CA DROP' },
+  { id: 'manual', label: 'Manual' },
+]
+
+/**
+ * Canonical type columns — access is always included even when open count is 0
+ * (delete-only windows must not hide the access axis).
+ */
+const CANONICAL_TYPES: { id: string; label: string }[] = [
+  { id: 'access', label: 'Access' },
+  { id: 'delete', label: 'Delete' },
+  { id: 'combined', label: 'Both' },
+]
+
 type StateTile = { id: string; name: string; col: number; row: number }
 
 const STATE_TILES: StateTile[] = [
@@ -85,6 +103,30 @@ function heatColor(count: number, max: number): string {
   return 'bg-habeas-light/20 text-ink'
 }
 
+function mergeHeatmapAxes(cells: NonNullable<LegalPortfolio['heatmap_cells']>) {
+  const lookup = new Map(cells.map((c) => [cellKey(c.intake_source, c.request_type), c.count]))
+  const knownSources = new Set(CANONICAL_SOURCES.map((s) => s.id))
+  const knownTypes = new Set(CANONICAL_TYPES.map((t) => t.id))
+
+  const sources = [
+    ...CANONICAL_SOURCES,
+    ...[...new Set(cells.map((c) => c.intake_source))]
+      .filter((id) => !knownSources.has(id))
+      .sort()
+      .map((id) => ({ id, label: id })),
+  ]
+  const types = [
+    ...CANONICAL_TYPES,
+    ...[...new Set(cells.map((c) => c.request_type))]
+      .filter((id) => !knownTypes.has(id))
+      .sort()
+      .map((id) => ({ id, label: id })),
+  ]
+  const grandTotal = cells.reduce((sum, c) => sum + c.count, 0)
+  const max = Math.max(1, ...cells.map((c) => c.count), 0)
+  return { sources, types, lookup, grandTotal, max }
+}
+
 function TypeBySourceGrid({
   cells,
   showPercent,
@@ -94,57 +136,61 @@ function TypeBySourceGrid({
   showPercent: boolean
   onCellClick?: (source: string, requestType: string) => void
 }) {
-  const sources = [...new Set(cells.map((c) => c.intake_source))].sort()
-  const types = [...new Set(cells.map((c) => c.request_type))].sort()
-  const lookup = new Map(cells.map((c) => [cellKey(c.intake_source, c.request_type), c.count]))
-  const grandTotal = cells.reduce((sum, c) => sum + c.count, 0) || 1
-  const max = Math.max(1, ...cells.map((c) => c.count))
-
-  if (sources.length === 0 || types.length === 0) {
-    return <p className="text-xs text-mute">No open requests in this window.</p>
-  }
+  const { sources, types, lookup, grandTotal, max } = mergeHeatmapAxes(cells)
+  const percentBase = grandTotal || 1
 
   return (
     <div className="overflow-x-auto">
-      <table className="min-w-full border-collapse text-xs">
+      <table className="w-full min-w-0 border-collapse text-[0.65rem] leading-tight">
         <thead>
           <tr>
-            <th className="sticky left-0 bg-paper p-1.5 text-left font-medium text-mute">Source</th>
+            <th className="sticky left-0 bg-paper px-1 py-1 text-left font-medium text-mute">
+              Source
+            </th>
             {types.map((type) => (
-              <th key={type} className="p-1.5 text-center font-medium text-mute">
-                {type}
+              <th
+                key={type.id}
+                className="px-1 py-1 text-center font-medium text-mute"
+                title={type.id === 'combined' ? 'Access + delete' : type.label}
+              >
+                {type.label}
               </th>
             ))}
-            <th className="p-1.5 text-center font-medium text-mute">Total</th>
+            <th className="px-1 py-1 text-center font-medium text-mute">Total</th>
           </tr>
         </thead>
         <tbody>
           {sources.map((source) => {
-            const rowTotal = types.reduce((sum, type) => sum + (lookup.get(cellKey(source, type)) ?? 0), 0)
+            const rowTotal = types.reduce(
+              (sum, type) => sum + (lookup.get(cellKey(source.id, type.id)) ?? 0),
+              0,
+            )
             return (
-              <tr key={source} className="border-t border-line/50">
-                <td className="sticky left-0 bg-paper p-1.5 font-medium text-ink-soft">{source}</td>
+              <tr key={source.id} className="border-t border-line/50">
+                <td className="sticky left-0 bg-paper px-1 py-0.5 font-medium text-ink-soft">
+                  {source.label}
+                </td>
                 {types.map((type) => {
-                  const count = lookup.get(cellKey(source, type)) ?? 0
+                  const count = lookup.get(cellKey(source.id, type.id)) ?? 0
                   const display = showPercent
-                    ? `${Math.round((count / grandTotal) * 100)}%`
+                    ? `${Math.round((count / percentBase) * 100)}%`
                     : String(count)
                   return (
-                    <td key={type} className="p-0.5">
+                    <td key={type.id} className="p-px">
                       <Link
                         to="/requests"
                         search={{
-                          source: source as 'drop',
-                          request_type: type,
+                          source: source.id as 'drop',
+                          request_type: type.id,
                         }}
                         className={cn(
-                          'flex min-h-[1.75rem] items-center justify-center rounded px-1 tabular-nums hover:ring-1 hover:ring-habeas-mid focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid',
+                          'flex min-h-[1.35rem] items-center justify-center rounded-sm px-0.5 tabular-nums hover:ring-1 hover:ring-habeas-mid focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid',
                           heatColor(count, max),
                         )}
                         onClick={(event) => {
                           if (onCellClick) {
                             event.preventDefault()
-                            onCellClick(source, type)
+                            onCellClick(source.id, type.id)
                           }
                         }}
                       >
@@ -153,27 +199,32 @@ function TypeBySourceGrid({
                     </td>
                   )
                 })}
-                <td className="p-1.5 text-center tabular-nums font-medium text-ink">{rowTotal}</td>
+                <td className="px-1 py-0.5 text-center tabular-nums font-medium text-ink">
+                  {rowTotal}
+                </td>
               </tr>
             )
           })}
           <tr className="border-t border-line bg-canvas/60 font-medium">
-            <td className="sticky left-0 bg-canvas/60 p-1.5 text-mute">Total</td>
+            <td className="sticky left-0 bg-canvas/60 px-1 py-0.5 text-mute">Total</td>
             {types.map((type) => {
               const colTotal = sources.reduce(
-                (sum, source) => sum + (lookup.get(cellKey(source, type)) ?? 0),
+                (sum, source) => sum + (lookup.get(cellKey(source.id, type.id)) ?? 0),
                 0,
               )
               return (
-                <td key={type} className="p-1.5 text-center tabular-nums text-ink">
-                  {showPercent ? `${Math.round((colTotal / grandTotal) * 100)}%` : colTotal}
+                <td key={type.id} className="px-1 py-0.5 text-center tabular-nums text-ink">
+                  {showPercent ? `${Math.round((colTotal / percentBase) * 100)}%` : colTotal}
                 </td>
               )
             })}
-            <td className="p-1.5 text-center tabular-nums text-ink">{grandTotal}</td>
+            <td className="px-1 py-0.5 text-center tabular-nums text-ink">{grandTotal}</td>
           </tr>
         </tbody>
       </table>
+      {grandTotal === 0 ? (
+        <p className="mt-1.5 text-[0.65rem] text-mute">No open requests in this window.</p>
+      ) : null}
     </div>
   )
 }
@@ -272,9 +323,9 @@ function AggregatedBars({
   showPercent,
   linkSearch,
 }: {
-  rows: Array<{ label: string; count: number }>
+  rows: Array<{ id: string; label: string; count: number }>
   showPercent: boolean
-  linkSearch: (label: string) => Record<string, string>
+  linkSearch: (id: string) => Record<string, string>
 }) {
   const total = rows.reduce((sum, row) => sum + row.count, 0) || 1
   const max = Math.max(1, ...rows.map((row) => row.count))
@@ -291,12 +342,12 @@ function AggregatedBars({
           ? `${Math.round((row.count / total) * 100)}%`
           : String(row.count)
         return (
-          <li key={row.label}>
+          <li key={row.id}>
             <div className="mb-0.5 flex items-center justify-between gap-2">
               <span className="truncate text-ink-soft">{row.label}</span>
               <Link
                 to="/requests"
-                search={linkSearch(row.label)}
+                search={linkSearch(row.id)}
                 className="shrink-0 tabular-nums text-habeas-navy hover:underline"
               >
                 {display}
@@ -324,9 +375,16 @@ export function OpenRequestsHeatmap({ cells, onCellClick }: HeatmapProps) {
     for (const cell of cells) {
       map.set(cell.intake_source, (map.get(cell.intake_source) ?? 0) + cell.count)
     }
-    return [...map.entries()]
-      .map(([label, count]) => ({ label, count }))
-      .sort((a, b) => b.count - a.count)
+    const known = new Set(CANONICAL_SOURCES.map((s) => s.id))
+    const rows = CANONICAL_SOURCES.map((source) => ({
+      id: source.id,
+      label: source.label,
+      count: map.get(source.id) ?? 0,
+    }))
+    for (const [id, count] of map) {
+      if (!known.has(id)) rows.push({ id, label: id, count })
+    }
+    return rows
   }, [cells])
 
   const byType = useMemo(() => {
@@ -334,51 +392,50 @@ export function OpenRequestsHeatmap({ cells, onCellClick }: HeatmapProps) {
     for (const cell of cells) {
       map.set(cell.request_type, (map.get(cell.request_type) ?? 0) + cell.count)
     }
-    return [...map.entries()]
-      .map(([label, count]) => ({ label, count }))
-      .sort((a, b) => b.count - a.count)
+    const known = new Set(CANONICAL_TYPES.map((t) => t.id))
+    const rows = CANONICAL_TYPES.map((type) => ({
+      id: type.id,
+      label: type.label,
+      count: map.get(type.id) ?? 0,
+    }))
+    for (const [id, count] of map) {
+      if (!known.has(id)) rows.push({ id, label: id, count })
+    }
+    return rows
   }, [cells])
 
   const countsByState = useMemo(() => new Map<string, number>(), [])
 
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line/70">
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b border-line/70">
         <Tabs value={tab} onValueChange={(value) => setTab(value as HeatmapTab)}>
           <TabsList
             aria-label="Heatmap view"
-            className="h-auto gap-4 rounded-none border-0 bg-transparent p-0"
+            className="h-auto gap-2.5 rounded-none border-0 bg-transparent p-0"
           >
-            <TabsTrigger
-              value="type_by_source"
-              className="rounded-none border-0 border-b-2 border-transparent bg-transparent px-0 pb-1.5 shadow-none data-[state=active]:border-habeas-navy data-[state=active]:bg-transparent data-[state=active]:shadow-none"
-            >
-              Type by source
-            </TabsTrigger>
-            <TabsTrigger
-              value="state_map"
-              className="rounded-none border-0 border-b-2 border-transparent bg-transparent px-0 pb-1.5 shadow-none data-[state=active]:border-habeas-navy data-[state=active]:bg-transparent data-[state=active]:shadow-none"
-            >
-              State map
-            </TabsTrigger>
-            <TabsTrigger
-              value="source_only"
-              className="rounded-none border-0 border-b-2 border-transparent bg-transparent px-0 pb-1.5 shadow-none data-[state=active]:border-habeas-navy data-[state=active]:bg-transparent data-[state=active]:shadow-none"
-            >
-              Source only
-            </TabsTrigger>
-            <TabsTrigger
-              value="type_only"
-              className="rounded-none border-0 border-b-2 border-transparent bg-transparent px-0 pb-1.5 shadow-none data-[state=active]:border-habeas-navy data-[state=active]:bg-transparent data-[state=active]:shadow-none"
-            >
-              Type only
-            </TabsTrigger>
+            {(
+              [
+                ['type_by_source', 'Type × source'],
+                ['state_map', 'State'],
+                ['source_only', 'Source'],
+                ['type_only', 'Type'],
+              ] as const
+            ).map(([value, label]) => (
+              <TabsTrigger
+                key={value}
+                value={value}
+                className="rounded-none border-0 border-b-2 border-transparent bg-transparent px-0 pb-1 text-[0.65rem] shadow-none data-[state=active]:border-habeas-navy data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+              >
+                {label}
+              </TabsTrigger>
+            ))}
           </TabsList>
         </Tabs>
         <button
           type="button"
           className={cn(
-            'rounded border px-2 py-0.5 text-[0.65rem] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid',
+            'rounded border px-1.5 py-px text-[0.6rem] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid',
             showPercent
               ? 'border-habeas-navy bg-habeas-navy text-white'
               : 'border-line text-ink-soft hover:bg-canvas',
@@ -400,7 +457,7 @@ export function OpenRequestsHeatmap({ cells, onCellClick }: HeatmapProps) {
         <AggregatedBars
           rows={bySource}
           showPercent={showPercent}
-          linkSearch={(label) => ({ source: label as 'drop' })}
+          linkSearch={(id) => ({ source: id as 'drop' })}
         />
       ) : null}
 
@@ -408,7 +465,7 @@ export function OpenRequestsHeatmap({ cells, onCellClick }: HeatmapProps) {
         <AggregatedBars
           rows={byType}
           showPercent={showPercent}
-          linkSearch={(label) => ({ request_type: label })}
+          linkSearch={(id) => ({ request_type: id })}
         />
       ) : null}
     </div>
