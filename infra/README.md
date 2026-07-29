@@ -18,6 +18,46 @@
 | Cloud SQL IAM DB user | `reaper@example-gcp-project.iam` |
 | `roles/iam.serviceAccountUser` on reaper SA | Cloud Build SA + default compute SA (can `actAs` on deploy) |
 
+## Cassandra egress — Cloud NAT (2026-07-29)
+
+On-prem Cassandra (`restricted_person_id`) is reached over TLS with INF IP allowlisting — **not** Cloud VPN for the suppression cutover path. Static egress comes from Cloud NAT on a custom VPC; Cloud Run `cassandra` workers attach via Direct VPC egress.
+
+| Resource | ID |
+|----------|----|
+| VPC | `dpra` (custom, regional BGP) |
+| Subnet (dev) | `dpra-run-dev` · `us-east4` · `10.20.0.0/26` |
+| Subnet (prod) | `dpra-run-prod` · `us-east4` · `10.20.0.64/26` |
+| Cloud Router | `dpra-router-us-east4` |
+| Cloud NAT (dev) | `dpra-nat-dev` → subnet `dpra-run-dev` → `dpra-egress-dev` |
+| Cloud NAT (prod) | `dpra-nat-prod` → subnet `dpra-run-prod` → `dpra-egress-prod` |
+| Reserved IP (dev, in use) | `dpra-egress-dev` → **`203.0.113.10`** |
+| Reserved IP (prod, in use) | `dpra-egress-prod` → **`203.0.113.11`** |
+| Reserved IP (spare, not attached) | `dpra-egress-spare` → **`136.70.136.95`** |
+
+**INF allowlist (send these):**
+
+| Environment | Address name | Public IP | NAT |
+|-------------|--------------|-----------|-----|
+| Dev | `dpra-egress-dev` | `203.0.113.10` | attached |
+| Prod | `dpra-egress-prod` | `203.0.113.11` | attached |
+| Spare | `dpra-egress-spare` | `136.70.136.95` | reserved only — whitelist when attached |
+
+Credentials (Cassandra service account + SSL PEM) go in Secret Manager; never in git. Wire the `cassandra` Cloud Run service with Direct VPC egress to `dpra-run-dev` or `dpra-run-prod` when the worker ships.
+
+```bash
+# Inspect
+gcloud compute addresses list --project=example-gcp-project --filter='region:(us-east4)' \
+  --format='table(name,address,status)'
+gcloud compute routers nats list --project=example-gcp-project \
+  --router=dpra-router-us-east4 --region=us-east4
+
+# Attach spare later (example: add to prod NAT pool)
+# gcloud compute routers nats update dpra-nat-prod \
+#   --router=dpra-router-us-east4 --region=us-east4 \
+#   --nat-external-ip-pool=dpra-egress-prod,dpra-egress-spare \
+#   --project=example-gcp-project
+```
+
 ## Temp dev database (`dpra-dev-temp`)
 
 Use while Secret Manager / `database-url` is blocked. Do not use for production cutover until INF lands.
