@@ -264,3 +264,15 @@ async def test_t4_3_drop_raw_requests_required_columns(migrated_pool):
                 ) VALUES ('bad-list', 'MAID', '20260716_broker_MAID.csv')
                 """
             )
+
+
+def test_integration_connections_migration_exists():
+    migration = (
+        migrations_dir() / "20260730170001_core_integration_connections.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+    assert "CREATE TABLE integration_connections" in content
+    assert "CREATE TABLE connection_invites" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content

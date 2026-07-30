@@ -88,6 +88,9 @@ def _should_audit(
     path = request.url.path
     if path in skip_paths:
         return False
+    # Owner invite redeem — URL path embeds the raw token; never persist to audit_log.
+    if path.startswith("/connect/"):
+        return False
     if request.method in _MUTATING_METHODS:
         return True
     if request.method == "GET" and path in sensitive_get_paths:
