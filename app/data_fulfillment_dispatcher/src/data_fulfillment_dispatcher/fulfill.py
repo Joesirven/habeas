@@ -60,6 +60,10 @@ ARTIFACT_STATUSES = frozenset({RESPONSE_STATUS_DELETED, RESPONSE_STATUS_OPTED_OU
 
 SUPPRESSION_TYPES = frozenset({"delete", "opt_out"})
 ACCESS_TYPES = frozenset({"access"})
+# Combined has both a suppression leg (no identity, KD8) and an access leg
+# (identity-gated, KD7); it is deliberately not folded into SUPPRESSION_TYPES
+# or ACCESS_TYPES so each call site opts in to the leg it is routing.
+COMBINED_TYPE = "combined"
 
 # Live vertical today is the CA DROP hash index; coming-soon verticals never get
 # a disposition row, so they can never be kicked off (KTD3).
@@ -141,6 +145,14 @@ async def find_requests_ready_to_fulfill(
     Idempotency is measured from the newest kickoff decision: an open attempt
     blocks re-enqueue, and a success from a superseded kickoff (reopen path) no
     longer blocks the rework.
+
+    ``combined`` (U3 / KD8 / AE4) is listed by either OR branch independently:
+    it is ready whenever its delete leg (suppression) *or* its access leg
+    (reproduction) still has work outstanding, so the two legs progress on
+    their own schedules. The delete leg never needs identity; the access leg
+    is gated on identity+notes in ``_route_fulfill`` / ``_fulfill_access``
+    (KTD6), not here — this query only proves a leg's *attempt ledger* is
+    open, not that every precondition for that leg is satisfied.
     """
     rows = await conn.fetch(
         """
@@ -181,7 +193,7 @@ async def find_requests_ready_to_fulfill(
                )
            AND (
                  (
-                   COALESCE(r.request_type, 'delete') IN ('delete', 'opt_out')
+                   COALESCE(r.request_type, 'delete') IN ('delete', 'opt_out', 'combined')
                    AND NOT EXISTS (
                          SELECT 1
                            FROM data_fulfillment_attempts dfa
@@ -197,7 +209,7 @@ async def find_requests_ready_to_fulfill(
                        )
                  )
                  OR (
-                   r.request_type = 'access'
+                   r.request_type IN ('access', 'combined')
                    AND NOT EXISTS (
                          SELECT 1
                            FROM data_fulfillment_attempts dfa
@@ -317,6 +329,32 @@ async def _has_blocking_attempt(
         list(OPEN_ATTEMPT_STATUSES),
     )
     return row is not None
+
+
+async def _access_identity_verified(
+    conn: DbConnection,
+    request_id: str,
+) -> bool:
+    """KTD6 / R13: latest identity row must be ``verified`` with non-empty notes.
+
+    Latest wins — a later ``failed``/``pending`` row re-blocks the Access pack
+    even after an earlier row cleared (KD7). CA DROP / delete / opt_out never
+    call this (R12); only the access leg (``_fulfill_access``) does.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT status, notes
+          FROM request_identity_verifications
+         WHERE request_id = $1
+         ORDER BY verified_at DESC
+         LIMIT 1
+        """,
+        UUID(request_id),
+    )
+    if row is None:
+        return False
+    notes = row["notes"]
+    return row["status"] == "verified" and bool(notes and str(notes).strip())
 
 
 async def _latest_match(
@@ -659,6 +697,8 @@ async def _fulfill_access(
 
     if not gate.needs_artifact:
         # Status 5 (Not found) — nothing to reproduce; complete so Notice opens.
+        # No pack is generated, so KTD6 identity is not required here (R13
+        # only gates *pack* generation).
         await mark_attempt_success(
             conn,
             attempt_id,
@@ -674,6 +714,23 @@ async def _fulfill_access(
             matched=matched,
             match_count=match_count,
             reason="not_found_no_op",
+            request_type="access",
+        )
+
+    if not await _access_identity_verified(conn, request_id):
+        await mark_attempt_error(
+            conn,
+            attempt_id,
+            error_code="identity_not_verified",
+            error_message="access_identity_verification_required",
+            audit_payload={"disposition_status": gate.status},
+        )
+        return FulfillItemResult(
+            request_id=request_id,
+            outcome="rejected",
+            matched=matched,
+            match_count=match_count,
+            reason="identity_not_verified",
             request_type="access",
         )
 
@@ -856,6 +913,10 @@ async def _route_fulfill(
     request_type = str(meta.get("request_type") or "delete")
     state = str(meta.get("requestor_state") or "CA")
 
+    # ``combined`` + step=None (e.g. a direct fulfill_one call, not a queued
+    # claim) defaults to the delete/suppression leg below rather than the
+    # access leg — the batch path (_enqueue_ready_attempt / claim_next) is
+    # what drives both legs independently by passing an explicit step.
     if step == DATA_FULFILLMENT_STEP_REPRODUCTION or (
         step is None and request_type in ACCESS_TYPES
     ):
@@ -887,7 +948,13 @@ async def _route_fulfill(
             claim_by_id=claim_by_id,
         )
 
-    if request_type not in SUPPRESSION_TYPES and meta.get("intake_source") != "drop":
+    # combined's delete leg (R12/KD8): no identity required, same as plain
+    # delete/opt_out — only the access leg above is identity-gated.
+    if (
+        request_type not in SUPPRESSION_TYPES
+        and request_type != COMBINED_TYPE
+        and meta.get("intake_source") != "drop"
+    ):
         return FulfillItemResult(
             request_id=request_id,
             outcome="skipped",
@@ -967,26 +1034,35 @@ async def _enqueue_ready_attempt(
     request_type = str(meta.get("request_type") or "delete")
     process_id = await _resolve_bulk_process_id(conn)
 
-    if request_type in ACCESS_TYPES:
-        if await _has_blocking_attempt(
+    # ``combined`` enqueues both legs independently (AE4 / KD8): the access
+    # leg here is not identity-gated — identity is re-checked fresh (latest
+    # row wins) inside _fulfill_access at claim time, so an attempt enqueued
+    # here can still be correctly rejected later if identity regresses.
+    reproduction_id: int | None = None
+    if request_type in ACCESS_TYPES or request_type == COMBINED_TYPE:
+        if not await _has_blocking_attempt(
             conn,
             request_id,
             step=DATA_FULFILLMENT_STEP_REPRODUCTION,
             since=gate.kickoff_decided_at,
         ):
-            return None
-        if process_id == "unknown":
-            process_id = f"manual/{request_id}"
-        return await enqueue_fulfillment_attempt(
-            conn,
-            request_id=request_id,
-            step=DATA_FULFILLMENT_STEP_REPRODUCTION,
-            matching_result_id=matching_result_id,
-            bulk_process_id=process_id,
-        )
+            access_process_id = (
+                f"manual/{request_id}" if process_id == "unknown" else process_id
+            )
+            reproduction_id = await enqueue_fulfillment_attempt(
+                conn,
+                request_id=request_id,
+                step=DATA_FULFILLMENT_STEP_REPRODUCTION,
+                matching_result_id=matching_result_id,
+                bulk_process_id=access_process_id,
+            )
+        if request_type in ACCESS_TYPES:
+            return reproduction_id
 
-    if request_type not in SUPPRESSION_TYPES and meta.get("intake_source") != "drop":
-        return None
+    if request_type not in SUPPRESSION_TYPES and request_type != COMBINED_TYPE and (
+        meta.get("intake_source") != "drop"
+    ):
+        return reproduction_id
 
     if await _has_blocking_attempt(
         conn,
@@ -994,15 +1070,16 @@ async def _enqueue_ready_attempt(
         step=DATA_FULFILLMENT_STEP_SUPPRESSION,
         since=gate.kickoff_decided_at,
     ):
-        return None
+        return reproduction_id
 
-    return await enqueue_fulfillment_attempt(
+    suppression_id = await enqueue_fulfillment_attempt(
         conn,
         request_id=request_id,
         step=DATA_FULFILLMENT_STEP_SUPPRESSION,
         matching_result_id=matching_result_id,
         bulk_process_id=process_id,
     )
+    return suppression_id if suppression_id is not None else reproduction_id
 
 
 async def _process_claimed_attempt(

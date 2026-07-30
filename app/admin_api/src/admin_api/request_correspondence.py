@@ -11,6 +11,10 @@ from pydantic import BaseModel, Field
 
 from admin_api.drop_pipeline import _require_database
 from admin_api.roles import RolePrincipal, require_roles
+from admin_api.vertical_dispositions import (
+    collect_access_shareable_urls,
+    is_kd13_satisfied,
+)
 from habeas_privacy_core.adapters.gcs import write_object
 from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_LEGAL, ROLE_SUPER_ADMIN
 from habeas_privacy_core.db.pool import get_pool
@@ -64,6 +68,9 @@ class EmailTemplateUpsertBody(BaseModel):
 class RenderTemplateBody(BaseModel):
     slug: str
     context: dict[str, str] = Field(default_factory=dict)
+    # Present for request-bound sends (KTD8); absent for Settings preview,
+    # which stays ungated regardless of slug.
+    request_id: str | None = None
 
 
 class RenderTemplateResponse(BaseModel):
@@ -120,6 +127,33 @@ async def _ensure_request(conn: Any, request_id: UUID) -> None:
         raise HTTPException(status_code=404, detail="request not found")
 
 
+def _is_access_slug(slug: str) -> bool:
+    """True for the Access correspondence template (KTD8).
+
+    U6 owns the eventual request-type -> slug map; until it lands, treat any
+    slug mentioning "access" as the request-bound Access template.
+    """
+    return "access" in slug.lower()
+
+
+async def _identity_cleared(conn: Any, request_id: UUID) -> bool:
+    """Latest identity verification is ``verified`` with a non-empty comment (KTD6)."""
+    row = await conn.fetchrow(
+        """
+        SELECT status, notes
+          FROM request_identity_verifications
+         WHERE request_id = $1
+         ORDER BY verified_at DESC
+         LIMIT 1
+        """,
+        request_id,
+    )
+    if row is None:
+        return False
+    notes = row["notes"]
+    return str(row["status"]) == "verified" and bool(notes and notes.strip())
+
+
 @router.post(
     "/{request_id}/identity-verification",
     response_model=IdentityVerificationRecord,
@@ -131,6 +165,11 @@ async def post_identity_verification(
     principal: LegalCorrespondencePrincipal,
 ):
     _require_database()
+    if body.status == "verified" and not (body.notes and body.notes.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="notes are required to verify identity (KTD6)",
+        )
     try:
         rid = UUID(request_id)
     except ValueError as exc:
@@ -284,6 +323,7 @@ async def render_email_template(
     _principal: LegalCorrespondencePrincipal,
 ):
     _require_database()
+    context = dict(body.context)
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -294,12 +334,39 @@ async def render_email_template(
             """,
             body.slug,
         )
-    if row is None:
-        raise HTTPException(status_code=404, detail="template not found")
+        if row is None:
+            raise HTTPException(status_code=404, detail="template not found")
+
+        # Request-bound Access "start" (render with pack URLs) MUST clear
+        # identity+notes and KD13 first (R13, R15, KTD6, KTD8). Settings
+        # preview (no request_id) stays allowed for every slug.
+        if body.request_id and _is_access_slug(body.slug):
+            try:
+                rid = UUID(body.request_id)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400, detail="invalid request_id"
+                ) from exc
+            await _ensure_request(conn, rid)
+            if not await _identity_cleared(conn, rid):
+                raise HTTPException(
+                    status_code=409,
+                    detail="identity not verified with notes (KTD6)",
+                )
+            if not await is_kd13_satisfied(conn, str(rid)):
+                raise HTTPException(
+                    status_code=409,
+                    detail="access packs not ready for all live verticals (KD13)",
+                )
+            urls = await collect_access_shareable_urls(conn, str(rid))
+            if urls:
+                context["shareable_url"] = urls[0]
+                context["shareable_urls"] = ", ".join(urls)
+
     return RenderTemplateResponse(
         slug=str(row["slug"]),
-        subject=_render_placeholders(str(row["subject"]), body.context),
-        body=_render_placeholders(str(row["body"]), body.context),
+        subject=_render_placeholders(str(row["subject"]), context),
+        body=_render_placeholders(str(row["body"]), context),
     )
 
 
@@ -365,6 +432,19 @@ async def create_communication_attempt(
     pool = get_pool()
     async with pool.acquire() as conn:
         await _ensure_request(conn, rid)
+        # Delivery-confirm for Access MUST clear identity+notes and KD13, same
+        # bar as the request-bound render (R13, R15, KTD6, KTD8).
+        if body.purpose == "access_delivery":
+            if not await _identity_cleared(conn, rid):
+                raise HTTPException(
+                    status_code=409,
+                    detail="identity not verified with notes (KTD6)",
+                )
+            if not await is_kd13_satisfied(conn, str(rid)):
+                raise HTTPException(
+                    status_code=409,
+                    detail="access packs not ready for all live verticals (KD13)",
+                )
         row = await conn.fetchrow(
             """
             INSERT INTO communication_attempts (

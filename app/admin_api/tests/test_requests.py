@@ -12,7 +12,9 @@ from fastapi.testclient import TestClient
 from admin_api import roles
 from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER, ROLE_LEGAL
-from habeas_privacy_core.models.intake import clean_agent_batch_csv
+from habeas_privacy_core.exceptions import DropAccessTypeRejectedError
+from habeas_privacy_core.models.intake import CreateRequestInput, clean_agent_batch_csv
+from habeas_privacy_core.models.request import IntakeSource
 
 pytestmark_integration = pytest.mark.skipif(
     not os.getenv("DATABASE_URL"),
@@ -133,6 +135,46 @@ def test_agent_batch_upload_route(monkeypatch: pytest.MonkeyPatch):
     assert empty.status_code == 400
     assert forbidden.status_code == 403
     assert ROLE_LEGAL == "legal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_type", ["access", "combined", "Access", " ACCESS "])
+async def test_insert_request_rejects_drop_access_or_combined(bad_type: str):
+    """KTD10/R16: manual create / insert path cannot mint DROP+access|combined."""
+    from habeas_privacy_core.db.requests import insert_request
+
+    conn = AsyncMock()
+    with pytest.raises(DropAccessTypeRejectedError):
+        await insert_request(
+            conn,
+            CreateRequestInput(
+                intake_source=IntakeSource.DROP,
+                raw_record_id=1,
+                requestor_state="CA",
+                request_type=bad_type,
+            ),
+        )
+    conn.fetchval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_insert_request_allows_drop_delete():
+    """CA DROP -> delete happy path must remain unaffected by the reject guard."""
+    from habeas_privacy_core.db.requests import insert_request
+
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value="00000000-0000-0000-0000-000000000099")
+    request_id = await insert_request(
+        conn,
+        CreateRequestInput(
+            intake_source=IntakeSource.DROP,
+            raw_record_id=1,
+            requestor_state="CA",
+            request_type="delete",
+        ),
+    )
+    assert request_id == "00000000-0000-0000-0000-000000000099"
+    conn.fetchval.assert_awaited_once()
 
 
 @pytest.mark.asyncio

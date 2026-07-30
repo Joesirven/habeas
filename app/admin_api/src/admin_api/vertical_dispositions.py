@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
 
 from admin_api.roles import RolePrincipal, require_roles
+from habeas_privacy_core.adapters.gcs import signed_url_for_gcs_uri
 from habeas_privacy_core.audit.writer import write_audit
 from habeas_privacy_core.auth import (
     ROLE_ADMIN,
@@ -400,6 +401,76 @@ async def list_vertical_dispositions(
     )
 
 
+async def _successful_access_gcs_uris(conn: Any, request_id: str) -> list[str]:
+    """Deferred import — ``fulfillment_ops`` imports ``drop_pipeline``, which
+    imports this module, so importing at module scope would cycle."""
+    from admin_api.fulfillment_ops import list_successful_access_gcs_uris
+
+    return await list_successful_access_gcs_uris(conn, request_id)
+
+
+async def all_live_verticals_disposed(conn: Any, request_id: str) -> bool:
+    """True once every live vertical carries a disposition row (KD13 gate 1)."""
+    rows = await conn.fetch(
+        """
+        SELECT vertical
+          FROM request_vertical_dispositions
+         WHERE request_id = $1
+           AND vertical = ANY($2::text[])
+        """,
+        UUID(request_id),
+        list(LIVE_VERTICALS),
+    )
+    disposed = {str(row["vertical"]) for row in rows}
+    return all(vertical in disposed for vertical in LIVE_VERTICALS)
+
+
+async def access_packs_ready_for_notice(conn: Any, request_id: str) -> bool:
+    """Live-vertical pack bar for Access Notice start (KD13 gate 2).
+
+    Every live vertical must be disposed; any disposed 3/4 (Deleted / Opted
+    out) requires at least one successful access-pack ``gcs_uri``. Status 5
+    (Not found) needs no pack. One live vertical (Data) shares the
+    ``reproduction`` step today — see ``list_successful_access_gcs_uris``.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT vertical, status
+          FROM request_vertical_dispositions
+         WHERE request_id = $1
+           AND vertical = ANY($2::text[])
+        """,
+        UUID(request_id),
+        list(LIVE_VERTICALS),
+    )
+    by_vertical = {str(row["vertical"]): int(row["status"]) for row in rows}
+    if not all(vertical in by_vertical for vertical in LIVE_VERTICALS):
+        return False
+    needs_pack = any(status in STATUS_REQUIRING_DWIDS for status in by_vertical.values())
+    if not needs_pack:
+        return True
+    uris = await _successful_access_gcs_uris(conn, request_id)
+    return bool(uris)
+
+
+async def collect_access_shareable_urls(conn: Any, request_id: str) -> list[str]:
+    """Shareable HTTPS URLs for Access Notice template vars (``shareable_urls``, KTD8)."""
+    uris = await _successful_access_gcs_uris(conn, request_id)
+    urls: list[str] = []
+    for uri in uris:
+        signed = signed_url_for_gcs_uri(uri)
+        if signed:
+            urls.append(signed)
+    return urls
+
+
+async def is_kd13_satisfied(conn: Any, request_id: str) -> bool:
+    """All live verticals disposed and any 3/4 access packs ready (KD13 / R15)."""
+    if not await all_live_verticals_disposed(conn, request_id):
+        return False
+    return await access_packs_ready_for_notice(conn, request_id)
+
+
 @router.get("/{request_id}/dispositions", response_model=VerticalDispositionsResponse)
 async def get_vertical_dispositions(
     request_id: str,
@@ -497,9 +568,13 @@ __all__ = [
     "VerticalDisposition",
     "VerticalDispositionBody",
     "VerticalDispositionsResponse",
+    "all_live_verticals_disposed",
+    "access_packs_ready_for_notice",
     "assert_disposition_valid",
+    "collect_access_shareable_urls",
     "default_dwids_for_request",
     "fetch_vertical_disposition",
+    "is_kd13_satisfied",
     "is_live_vertical",
     "is_vertical_kickoff_locked",
     "list_vertical_dispositions",

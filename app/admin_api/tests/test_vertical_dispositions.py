@@ -42,12 +42,14 @@ class FakeConn:
         kickoff_approved: bool = False,
         matched_consumer_id: str | None = None,
         match_count: int | None = None,
+        fulfillment_attempts: list[dict[str, Any]] | None = None,
     ) -> None:
         self.rows = rows if rows is not None else []
         self.request_exists = request_exists
         self.kickoff_approved = kickoff_approved
         self.matched_consumer_id = matched_consumer_id
         self.match_count = match_count
+        self.fulfillment_attempts = fulfillment_attempts if fulfillment_attempts is not None else []
         self.upserts: list[dict[str, Any]] = []
         self.drop_syncs: list[int] = []
 
@@ -89,6 +91,8 @@ class FakeConn:
     async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
         if "FROM request_vertical_dispositions" in sql:
             return sorted(self.rows, key=lambda row: row["vertical"])
+        if "FROM data_fulfillment_attempts" in sql:
+            return list(self.fulfillment_attempts)
         return []
 
     async def execute(self, sql: str, *args: Any) -> str:
@@ -567,6 +571,105 @@ async def test_promote_dwid_default_skipped_for_status_5():
         client_dwids=None,
     )
     assert resolved is None
+
+
+# --- KD13 / KTD8: Access Notice pack-readiness helpers ----------------------
+
+
+def _disposition_row(status: int) -> dict[str, Any]:
+    return {
+        "request_id": REQUEST_ID,
+        "vertical": "data",
+        "status": status,
+        "selected_dwids": json.dumps(["dwid-1"] if status in (3, 4) else []),
+        "decided_by": "owner@example.com",
+        "actor_role": ROLE_DATA_OWNER,
+        "decided_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+    }
+
+
+@pytest.mark.asyncio
+async def test_all_live_verticals_disposed_false_without_rows():
+    conn = FakeConn()
+    assert await vd.all_live_verticals_disposed(conn, REQUEST_ID) is False
+
+
+@pytest.mark.asyncio
+async def test_all_live_verticals_disposed_true_once_data_decided():
+    conn = FakeConn(rows=[_disposition_row(5)])
+    assert await vd.all_live_verticals_disposed(conn, REQUEST_ID) is True
+
+
+@pytest.mark.asyncio
+async def test_access_packs_ready_status_5_needs_no_pack():
+    conn = FakeConn(rows=[_disposition_row(5)])
+    assert await vd.access_packs_ready_for_notice(conn, REQUEST_ID) is True
+
+
+@pytest.mark.asyncio
+async def test_access_packs_ready_status_3_blocks_without_gcs_uri():
+    conn = FakeConn(rows=[_disposition_row(3)])
+    assert await vd.access_packs_ready_for_notice(conn, REQUEST_ID) is False
+
+
+@pytest.mark.asyncio
+async def test_access_packs_ready_status_4_true_with_successful_pack():
+    conn = FakeConn(
+        rows=[_disposition_row(4)],
+        fulfillment_attempts=[
+            {"gcs_uri": "gs://bucket/bulk-run/p/request/r/", "status": "success"}
+        ],
+    )
+    assert await vd.access_packs_ready_for_notice(conn, REQUEST_ID) is True
+
+
+@pytest.mark.asyncio
+async def test_access_packs_ready_false_until_all_live_verticals_disposed():
+    conn = FakeConn(rows=[])
+    assert await vd.access_packs_ready_for_notice(conn, REQUEST_ID) is False
+
+
+@pytest.mark.asyncio
+async def test_collect_access_shareable_urls_dedupes_preserving_order():
+    conn = FakeConn(
+        fulfillment_attempts=[
+            {"gcs_uri": "gs://bucket/bulk-run/p/request/r/", "status": "success"},
+            {"gcs_uri": "gs://bucket/bulk-run/p/request/r/", "status": "success"},
+        ]
+    )
+    urls = await vd.collect_access_shareable_urls(conn, REQUEST_ID)
+    assert len(urls) == 1
+    assert "storage" in urls[0] or "gs" not in urls[0]
+
+
+@pytest.mark.asyncio
+async def test_collect_access_shareable_urls_empty_without_attempts():
+    conn = FakeConn()
+    assert await vd.collect_access_shareable_urls(conn, REQUEST_ID) == []
+
+
+@pytest.mark.asyncio
+async def test_is_kd13_satisfied_true_for_not_found():
+    conn = FakeConn(rows=[_disposition_row(5)])
+    assert await vd.is_kd13_satisfied(conn, REQUEST_ID) is True
+
+
+@pytest.mark.asyncio
+async def test_is_kd13_satisfied_false_without_pack():
+    conn = FakeConn(rows=[_disposition_row(3)])
+    assert await vd.is_kd13_satisfied(conn, REQUEST_ID) is False
+
+
+@pytest.mark.asyncio
+async def test_is_kd13_satisfied_true_with_pack_present():
+    conn = FakeConn(
+        rows=[_disposition_row(3)],
+        fulfillment_attempts=[
+            {"gcs_uri": "gs://bucket/bulk-run/p/request/r/", "status": "success"}
+        ],
+    )
+    assert await vd.is_kd13_satisfied(conn, REQUEST_ID) is True
 
 
 # --- Integration (requires DATABASE_URL) -------------------------------------
