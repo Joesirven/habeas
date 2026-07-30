@@ -19,6 +19,7 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
 - **Console** (super_admin): `/ops/drop-pipeline?tab=` mutation power surface (same tab set as Dashboard).
 - Browser never calls worker URLs — only admin-api aggregates.
 - Dashboard **Errors** / **Logs** share one explorer (`GET /ops/logs`); Errors locks severity to ERROR.
+- **Planned consolidation** (requirements-only): command-center Home + hybrid Inbox — `docs/plans/2026-07-30-005-feat-ops-command-center-ia-plan.md` (not shipped yet).
 
 ## Ops density (Prefect / Dagster feel)
 
