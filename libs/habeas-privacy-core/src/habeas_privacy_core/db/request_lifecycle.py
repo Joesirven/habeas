@@ -1,4 +1,9 @@
-"""Lifecycle facts off the immutable requests spine: closures and due overrides."""
+"""Lifecycle facts off the immutable requests spine: closures and due overrides.
+
+Call sites should prefer these fragments over inventing equivalent SQL.
+Open filters may inline the same ``NOT EXISTS (request_closures …)`` predicate;
+prefer ``REQUEST_IS_OPEN_SQL`` when building new queries.
+"""
 
 from __future__ import annotations
 

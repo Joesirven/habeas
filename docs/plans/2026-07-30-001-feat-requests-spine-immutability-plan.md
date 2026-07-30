@@ -219,8 +219,10 @@ Integration tests that need `DATABASE_URL` should pass T4.1 spine column assert.
 
 ## Definition of Done
 
-- [ ] U1–U3 complete; Product Contract R1–R8 satisfied
-- [ ] `requests` has no SLA/close columns; forbid trigger active
-- [ ] Close and deadline override only append fact tables
-- [ ] Verification commands above pass (or documented skip only for missing `DATABASE_URL` integration)
-- [ ] Plan `2026-07-27-001` KTD3 storage called out as superseded in this Goal Capsule (no requirement to edit that file unless a follow-up doc pass is requested)
+- [x] U1–U3 complete; Product Contract R1–R8 satisfied (landed `8beb05b` / `7f20674` on `master`; migration `20260730140001` applied on `dpra-dev-temp`)
+- [x] `requests` has no SLA/close columns; forbid trigger active
+- [x] Close and deadline override only append fact tables
+- [x] Verification commands above pass (or documented skip only for missing `DATABASE_URL` integration)
+- [x] Plan `2026-07-27-001` KTD3 storage called out as superseded in this Goal Capsule **and** annotated on that plan's KTD3 (doc pass 2026-07-30)
+
+**Follow-ups (non-blocking):** broader unit coverage for second-close / override insert / forbid-trigger UPDATE; prefer importing `REQUEST_IS_OPEN_SQL` at call sites that still inline the same predicate; redeploy `admin-web-dev` if UI from the co-landed pagination commit must match the live API.
