@@ -8,12 +8,54 @@ import { getLegalNeedsAttention, getNeedsAttention } from '@/lib/api'
 
 import { useQuery } from '@tanstack/react-query'
 import { Link, useRouterState } from '@tanstack/react-router'
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from 'react'
 
 const navClass =
   'text-mute transition-colors hover:text-ink [&.active]:text-ink [&.active]:underline [&.active]:decoration-ink/25 [&.active]:underline-offset-4'
 
+type NavChild = {
+  label: string
+  to: string
+  search?: Record<string, string>
+}
+
+type NavGroup = {
+  label: string
+  to: string
+  search?: Record<string, string>
+  children: NavChild[]
+}
+
+/** Super-admin DROP ops — one Ops menu; legal/admin keep Home · Requests · Inbox (KD2). */
+const OPS_GROUP: NavGroup = {
+  label: 'Ops',
+  to: '/ops/drop-pipeline',
+  children: [
+    { label: 'Pipeline', to: '/ops/drop-pipeline' },
+    { label: 'Workers', to: '/ops/workers' },
+    { label: 'Runs', to: '/ops/runs' },
+    { label: 'Connections', to: '/ops/connections' },
+    { label: 'Health', to: '/ops/health' },
+  ],
+}
+
 function pathMatches(pathname: string, to: string) {
   return pathname === to || pathname.startsWith(`${to}/`)
+}
+
+function groupIsActive(pathname: string, group: NavGroup) {
+  if (pathMatches(pathname, group.to)) return true
+  if (group.children.some((child) => pathMatches(pathname, child.to))) return true
+  // Ops umbrella: light up for any /ops/* surface (settings, trends, jobs, …).
+  if (group.label === 'Ops' && pathname.startsWith('/ops/')) return true
+  return false
 }
 
 function NavLink({
@@ -50,10 +92,118 @@ function NavLink({
   )
 }
 
+function NavDropdown({ group }: { group: NavGroup }) {
+  const menuId = useId()
+  const rootRef = useRef<HTMLDivElement>(null)
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [open, setOpen] = useState(false)
+  const pathname = useRouterState({ select: (state) => state.location.pathname })
+  const active = groupIsActive(pathname, group)
+
+  const clearCloseTimer = useCallback(() => {
+    if (closeTimerRef.current != null) {
+      clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = null
+    }
+  }, [])
+
+  const close = useCallback(() => {
+    clearCloseTimer()
+    setOpen(false)
+  }, [clearCloseTimer])
+
+  const openMenu = useCallback(() => {
+    clearCloseTimer()
+    setOpen(true)
+  }, [clearCloseTimer])
+
+  const scheduleClose = useCallback(() => {
+    clearCloseTimer()
+    closeTimerRef.current = setTimeout(() => setOpen(false), 120)
+  }, [clearCloseTimer])
+
+  useEffect(() => () => clearCloseTimer(), [clearCloseTimer])
+
+  useEffect(() => {
+    if (!open) return
+    function onPointerDown(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        close()
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [open, close])
+
+  function onKeyDown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      close()
+    }
+  }
+
+  return (
+    <div
+      ref={rootRef}
+      className="relative shrink-0"
+      onMouseEnter={openMenu}
+      onMouseLeave={scheduleClose}
+      onKeyDown={onKeyDown}
+    >
+      <div className="flex items-center gap-0.5">
+        <Link
+          to={group.to}
+          search={group.search}
+          activeOptions={{ exact: false, includeSearch: false }}
+          className={`${navClass}${active ? ' active' : ''}`}
+          onClick={() => close()}
+        >
+          {group.label}
+        </Link>
+        <button
+          type="button"
+          className="rounded px-1 py-0.5 text-mute hover:text-ink"
+          aria-expanded={open}
+          aria-controls={menuId}
+          aria-haspopup="menu"
+          aria-label={`${group.label} menu`}
+          onClick={() => setOpen((value) => !value)}
+        >
+          ▾
+        </button>
+      </div>
+
+      {open ? (
+        <div
+          id={menuId}
+          role="menu"
+          className="absolute right-0 top-full z-50 mt-1 min-w-[12rem] max-w-[min(16rem,calc(100vw-1.5rem))]"
+        >
+          <div className="overflow-hidden rounded-md border border-line bg-white py-1 shadow-md">
+            {group.children.map((child) => (
+              <Link
+                key={child.label}
+                to={child.to}
+                search={child.search}
+                role="menuitem"
+                className="block px-3 py-2 text-[0.8125rem] text-ink-soft transition-colors hover:bg-panel hover:text-ink"
+                onClick={() => close()}
+              >
+                {child.label}
+              </Link>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export function NavMenu() {
   const { role, isLoading } = useAuth()
+  const showOps = canAccessOpsSurfaces(role)
   const legalAdminNav = isLegalAdminPersona(role)
-  const homeLabel = canAccessOpsSurfaces(role)
+  const homeLabel = showOps
     ? 'Dashboard'
     : legalAdminNav
       ? 'Home'
@@ -84,6 +234,7 @@ export function NavMenu() {
       aria-busy={isLoading}
     >
       <NavLink to="/" label={homeLabel} exact />
+      {showOps ? <NavDropdown group={OPS_GROUP} /> : null}
       <NavLink
         to="/requests"
         label={legalAdminNav ? 'All requests' : 'Requests'}

@@ -23,6 +23,11 @@ NOTICE_REVIEW_ACTION = "notice.review"
 DEFAULT_MATCHING_REVIEW_TTL = timedelta(days=7)
 DEFAULT_NOTICE_REVIEW_TTL = timedelta(days=7)
 
+# Legal kickoff — per-vertical gate between disposition and fulfillment work.
+# The approved vertical lives in context_jsonb->>'vertical' (KTD4).
+FULFILLMENT_KICKOFF_ACTION = "fulfillment.kickoff"
+DEFAULT_FULFILLMENT_KICKOFF_TTL = timedelta(days=30)
+
 # Legal Inbox · Notice — after DROP fulfill, before weekly response upload.
 NOTICE_REVIEW_ACTION = "notice.review"
 
@@ -700,6 +705,216 @@ async def ensure_pending_notice_review(
         return None
 
 
+def normalize_kickoff_vertical(vertical: str) -> str:
+    """Canonical ``context_jsonb->>'vertical'`` value for a kickoff gate.
+
+    Writes and gate reads must agree on case and padding, or an approved kickoff
+    silently fails to unlock the vertical it was granted for. Empty is rejected:
+    a kickoff row without a vertical would be a gate nobody can scope (KTD4).
+    """
+    normalized = (vertical or "").strip().lower()
+    if not normalized:
+        raise ValueError("vertical is required for fulfillment.kickoff")
+    return normalized
+
+
+async def is_vertical_kickoff_approved(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    vertical: str,
+) -> bool:
+    """True when Legal kickoff is approved for this request + vertical (KTD4).
+
+    The vertical must be explicit in ``context_jsonb`` — a row without it, or one
+    carrying another vertical, never unlocks fulfillment here.
+    """
+    row = await conn.fetchval(
+        """
+        SELECT 1
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status = 'approved'
+           AND decided_at IS NOT NULL
+           AND context_jsonb->>'vertical' = $3
+         LIMIT 1
+        """,
+        UUID(request_id),
+        FULFILLMENT_KICKOFF_ACTION,
+        normalize_kickoff_vertical(vertical),
+    )
+    return row is not None
+
+
+async def latest_vertical_kickoff_decided_at(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    vertical: str,
+) -> datetime | None:
+    """Decision time of the newest approved kickoff for a vertical.
+
+    Fulfillment idempotency is measured from this timestamp: attempts that
+    succeeded before it belong to a superseded kickoff (reopen path, KTD5).
+    """
+    return await conn.fetchval(
+        """
+        SELECT MAX(decided_at)
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status = 'approved'
+           AND context_jsonb->>'vertical' = $3
+        """,
+        UUID(request_id),
+        FULFILLMENT_KICKOFF_ACTION,
+        normalize_kickoff_vertical(vertical),
+    )
+
+
+async def create_pending_fulfillment_kickoff(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    vertical: str,
+    context: dict[str, Any] | None = None,
+    expires_in: timedelta = DEFAULT_FULFILLMENT_KICKOFF_TTL,
+) -> dict[str, Any]:
+    """Insert a pending ``fulfillment.kickoff`` row scoped to one vertical.
+
+    ``context_jsonb.vertical`` is always written from the ``vertical`` argument —
+    a caller-supplied context can add detail (disposition status, dwid counts)
+    but can never widen or rewrite the vertical this gate covers.
+    """
+    vertical_norm = normalize_kickoff_vertical(vertical)
+    payload = dict(context or {})
+    payload["vertical"] = vertical_norm
+    requirement = await check_approval_required(conn, FULFILLMENT_KICKOFF_ACTION, payload)
+    if requirement is None:
+        rule = await fetch_active_rule(conn, FULFILLMENT_KICKOFF_ACTION)
+        if rule is None:
+            raise LookupError("fulfillment.kickoff approval rule is not configured")
+        raise ValueError("fulfillment.kickoff does not currently require approval")
+
+    expires_at = datetime.now(UTC) + expires_in
+    row = await conn.fetchrow(
+        """
+        INSERT INTO approval_requests (
+            request_id, action_type, rule_id, approver_role, status, context_jsonb, expires_at
+        ) VALUES ($1, $2, $3, $4, 'pending', $5::jsonb, $6)
+        RETURNING id, request_id, action_type, status, approver_role, context_jsonb,
+                  requested_at, expires_at
+        """,
+        UUID(request_id),
+        FULFILLMENT_KICKOFF_ACTION,
+        requirement.rule_id,
+        requirement.approver_role,
+        json.dumps(payload),
+        expires_at,
+    )
+    return dict(row)
+
+
+async def pending_vertical_kickoff_id(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    vertical: str,
+) -> int | None:
+    """Newest pending kickoff id for a vertical, if any."""
+    row = await conn.fetchval(
+        """
+        SELECT id
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status = 'pending'
+           AND context_jsonb->>'vertical' = $3
+         ORDER BY requested_at DESC
+         LIMIT 1
+        """,
+        UUID(request_id),
+        FULFILLMENT_KICKOFF_ACTION,
+        normalize_kickoff_vertical(vertical),
+    )
+    return int(row) if row is not None else None
+
+
+async def ensure_pending_fulfillment_kickoff(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    vertical: str,
+    context: dict[str, Any] | None = None,
+    expires_in: timedelta = DEFAULT_FULFILLMENT_KICKOFF_TTL,
+) -> dict[str, Any] | None:
+    """Open a pending kickoff for a vertical unless one is pending or approved.
+
+    Vertical-scoped: a kickoff on another vertical of the same request never
+    satisfies this gate (KTD4). Unlike ``ensure_pending_matching_review``, a
+    missing or disabled rule raises rather than logging and returning ``None`` —
+    the caller is a Legal action that must fail loudly instead of appearing to
+    start fulfillment.
+    """
+    vertical_norm = normalize_kickoff_vertical(vertical)
+    if await is_vertical_kickoff_approved(
+        conn, request_id=request_id, vertical=vertical_norm
+    ):
+        return None
+    pending = await pending_vertical_kickoff_id(
+        conn, request_id=request_id, vertical=vertical_norm
+    )
+    if pending is not None:
+        return None
+    return await create_pending_fulfillment_kickoff(
+        conn,
+        request_id=request_id,
+        vertical=vertical_norm,
+        context=context,
+        expires_in=expires_in,
+    )
+
+
+async def supersede_vertical_kickoffs(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    vertical: str,
+    decided_by: str,
+    decision_reason: str = "superseded_by_reopen",
+) -> list[int]:
+    """Close pending and approved kickoffs for a vertical (reopen path, KTD5).
+
+    Clearing the approved row reopens the disposition for edits and stops the
+    dispatcher from starting new work until Legal kicks off again. Only this
+    vertical is touched — a sibling vertical mid-fulfillment keeps its gate.
+    """
+    actor = decided_by.strip()
+    if not actor:
+        raise ValueError("decided_by is required to supersede a kickoff")
+    rows = await conn.fetch(
+        """
+        UPDATE approval_requests
+           SET status = 'rejected',
+               decided_by = $4,
+               decided_at = NOW(),
+               decision_reason = $5
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status IN ('pending', 'approved')
+           AND context_jsonb->>'vertical' = $3
+        RETURNING id
+        """,
+        UUID(request_id),
+        FULFILLMENT_KICKOFF_ACTION,
+        normalize_kickoff_vertical(vertical),
+        actor,
+        decision_reason,
+    )
+    return [int(row["id"]) for row in rows]
+
+
 def _serialize_assignment_row(row: Any) -> dict[str, Any]:
     context = row.get("context_jsonb") if hasattr(row, "get") else row["context_jsonb"]
     if isinstance(context, str):
@@ -1010,7 +1225,6 @@ async def release_approved(
 
 
 REQUEST_CLOSE_COMMAND = "request.close"
-_DROP_CLOSE_RESPONSE_CODES = frozenset({3, 4, 5})
 
 
 async def close_request(
@@ -1020,25 +1234,22 @@ async def close_request(
     closed_by: str,
     drop_response_status: int | None = None,
 ) -> dict[str, Any]:
-    """Close a request: append ``request_closures``, clear pending gates, set DROP status when needed.
+    """Close a request: append ``request_closures``, clear pending gates.
 
-    For DROP rows with unset ``response_status``, writes ``drop_response_status`` when
-    provided (3/4/5) or defaults to 5 (Not found). Non-DROP rows only need a closure row.
+    Does **not** invent DROP ``response_status``. That column stays in sync only via
+    the vertical disposition upsert path (disposition is source of record; U1 /
+    KTD3). ``drop_response_status`` is accepted for API compatibility but ignored —
+    leave DROP status unset when no disposition has written it.
     """
+    del drop_response_status  # API compat; never write DROP status from close.
     row = await conn.fetchrow(
         """
         SELECT r.id,
-               r.intake_source,
-               r.raw_record_id,
                rc.closed_at,
-               rc.closed_by,
-               drr.response_status AS drop_response_status
+               rc.closed_by
           FROM requests r
           LEFT JOIN request_closures rc
             ON rc.request_id = r.id
-          LEFT JOIN drop_raw_requests drr
-            ON drr.id = r.raw_record_id
-           AND r.intake_source = 'drop'
          WHERE r.id = $1
         """,
         UUID(request_id),
@@ -1053,28 +1264,6 @@ async def close_request(
             "closed_at": row["closed_at"].isoformat(),
             "closed_by": row.get("closed_by"),
         }
-
-    drop_status_set = False
-    if row["intake_source"] == "drop" and row["drop_response_status"] is None:
-        status = drop_response_status if drop_response_status is not None else 5
-        if status not in _DROP_CLOSE_RESPONSE_CODES:
-            raise ValueError(
-                "drop_response_status must be 3 (Deleted), 4 (Opted out), or 5 (Not found)"
-            )
-        result = await conn.execute(
-            """
-            UPDATE drop_raw_requests AS drr
-               SET response_status = $2
-              FROM requests AS r
-             WHERE r.id = $1
-               AND r.intake_source = 'drop'
-               AND r.raw_record_id = drr.id
-               AND drr.response_status IS NULL
-            """,
-            UUID(request_id),
-            status,
-        )
-        drop_status_set = isinstance(result, str) and result.endswith("1")
 
     closed_row = await conn.fetchrow(
         """
@@ -1123,7 +1312,7 @@ async def close_request(
         "already_closed": False,
         "closed_at": closed_row["closed_at"].isoformat(),
         "closed_by": closed_by,
-        "drop_response_status_set": drop_status_set,
+        "drop_response_status_set": False,
     }
 
 

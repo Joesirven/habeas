@@ -35,6 +35,20 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
 - Assign / escalate (U17): reuses `approval_requests` with `action_type=workflow.assignment`
   (no new migration) — `POST /ops/drop/workflow/assign`, `POST .../escalate`,
   `GET .../assignments`; targets `reviewer` | `legal` | `data_owner`; actor = IAP email
+- Per-vertical dispositions (U1): `request_vertical_dispositions` is the source of
+  record for the gates fulfillment reads — `GET /requests/{request_id}/dispositions`,
+  `PUT /requests/{request_id}/dispositions/{vertical}` (`status` 3/4/5, `dwids`,
+  `early_advance`). Live vertical is `data`; coming-soon verticals (Mailchimp, Lever,
+  Paylocity, Auth0, Cassandra) are catalog-only and rejected on write. Status 3/4
+  require a dwid selection (defaults to the matching result), status 5 requires none.
+  Matching promote upserts the `data` disposition and keeps
+  `drop_raw_requests.response_status` in sync. Selected dwids reach authorized
+  callers only — audit records counts.
+- Journey fulfillment gates (plan `2026-07-29-001`): do **not** enqueue
+  fulfillment solely from `matching.review` — require **Legal kickoff** per
+  approved vertical; Access packs/notice require identity status + **required
+  comment**; reject CA DROP typed as Access. See
+  [`.agent/modules/privacy-invariants.md`](../../.agent/modules/privacy-invariants.md).
 - Postgres LISTEN on approval events → forward to Server-Sent Events clients
 
 - Vendor adapter code in `adapters/` inside this app only.

@@ -14,6 +14,48 @@ from drop_ingestor.promote import run_promote
 
 
 @pytest.mark.asyncio
+async def test_promote_ca_drop_delete_happy_path_survives_reject_guard(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """KTD10/R16: promote's real insert_request call must not reject CA DROP delete.
+
+    Unlike the other promote tests, this exercises the real (unmocked)
+    insert_request — including its drop/access reject guard — to prove the
+    defensive check never fires for the hardcoded delete happy path.
+    """
+    monkeypatch.setenv("DROP_ALLOW_DEFAULT_REQUESTOR_STATE", "CA")
+    raw_rows = [
+        {
+            "id": 21,
+            "drop_record_id": "e21",
+            "list_type": "Email",
+            "source_csv_filename": "20260716_1_EMAIL.csv",
+            "raw_payload": {"state": "CA", "hash": "abc"},
+        }
+    ]
+
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=raw_rows)
+    # First fetchval is insert_request's INSERT...RETURNING id; second is the
+    # count_matching_attempts COUNT(*) that follows it.
+    conn.fetchval = AsyncMock(
+        side_effect=["cccccccc-cccc-cccc-cccc-cccccccccccc", 0]
+    )
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    with patch("drop_ingestor.promote.claim_next", AsyncMock(return_value=None)):
+        result = await run_promote(conn=conn, worker_id="drop-ingestor-test")
+
+    assert result.request_ids == ["cccccccc-cccc-cccc-cccc-cccccccccccc"]
+    insert_sql = [
+        str(call.args[0])
+        for call in conn.fetchval.await_args_list
+        if call.args and "INSERT INTO requests" in str(call.args[0])
+    ]
+    assert insert_sql
+
+
+@pytest.mark.asyncio
 async def test_t7_2_promote_inserts_raw_fk_per_list_type(
     monkeypatch: pytest.MonkeyPatch,
 ):

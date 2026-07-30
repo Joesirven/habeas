@@ -1,24 +1,34 @@
-"""Fulfillment dispatcher — status mapping, queue, GCS, no Tier-C HTTP."""
+"""Fulfillment dispatcher — kickoff gate, disposition-driven artifacts, queue, GCS.
+
+U2 (KTD7 / AE1): a data-owner ``matching.review`` approval must never start
+fulfillment. Work needs a disposition row for the live vertical plus an approved
+Legal ``fulfillment.kickoff`` for that vertical.
+"""
 
 from __future__ import annotations
 
 import ast
 import inspect
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
+from habeas_privacy_core.queue.constants import (
+    DATA_FULFILLMENT_STEP_REPRODUCTION,
+)
+from habeas_privacy_core.workflow.approval import FULFILLMENT_KICKOFF_ACTION
 from data_fulfillment_dispatcher.attempts import mark_attempt_in_flight
 from data_fulfillment_dispatcher.fulfill import (
     RESPONSE_STATUS_DELETED,
     RESPONSE_STATUS_NOT_FOUND,
     RESPONSE_STATUS_OPTED_OUT,
+    VERTICAL_DATA,
     FulfillDeps,
+    _route_fulfill,
     find_requests_ready_to_fulfill,
     fulfill_one,
-    response_status_for_match_count,
     run_fulfill,
 )
 from data_fulfillment_dispatcher.suppression import (
@@ -31,6 +41,15 @@ from data_fulfillment_dispatcher.suppression import (
 REQUEST_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "data_fulfillment_dispatcher"
+
+KICKOFF_AT = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+# Work finished under a kickoff that a reopen has since superseded (KTD5).
+SUPERSEDED_SUCCESS_AT = KICKOFF_AT - timedelta(days=1)
+
+
+def _squash(sql: str) -> str:
+    """Collapse SQL whitespace so structural assertions ignore formatting."""
+    return " ".join(str(sql).split())
 
 
 def _meta_row(**overrides: Any) -> dict[str, Any]:
@@ -58,11 +77,25 @@ def _match_row(
     }
 
 
-def _claim_row(attempt_id: int = 77) -> dict[str, Any]:
+def _gate_row(
+    *,
+    status: int = RESPONSE_STATUS_DELETED,
+    selected_dwids: list[str] | None = None,
+    kickoff_decided_at: datetime | None = KICKOFF_AT,
+) -> dict[str, Any]:
+    dwids = selected_dwids if selected_dwids is not None else ["1001"]
+    return {
+        "status": status,
+        "selected_dwids": dwids,
+        "kickoff_decided_at": kickoff_decided_at,
+    }
+
+
+def _claim_row(attempt_id: int = 77, step: str = "suppression") -> dict[str, Any]:
     return {
         "id": attempt_id,
         "request_id": REQUEST_ID,
-        "step": "suppression",
+        "step": step,
         "status": "claimed",
     }
 
@@ -82,22 +115,103 @@ def _memory_transport(store: dict[tuple[str, str], bytes] | None = None):
     return store, transport
 
 
-def _conn_for_suppression(
+def _identity_row(
+    *, status: str = "verified", notes: str | None = "confirmed via phone"
+) -> dict[str, Any]:
+    return {"status": status, "notes": notes}
+
+
+def _routing_conn(
     *,
-    match: dict[str, Any],
+    match: dict[str, Any] | None,
+    gate: dict[str, Any] | None,
     meta: dict[str, Any] | None = None,
-    status_update: str = "UPDATE 1",
+    identity: dict[str, Any] | None = None,
     attempt_id: int = 77,
+    step: str = "suppression",
+    blocking_attempt: bool = False,
+    prior_success_at: datetime | None = None,
+    status_update: str = "UPDATE 1",
 ) -> AsyncMock:
+    """Fake connection that routes by SQL fragment instead of call order.
+
+    ``prior_success_at`` models a completed attempt the way the real predicate
+    does — it only blocks when it landed at or after the kickoff passed as the
+    ``since`` bind, so a superseded kickoff lets rework through. ``identity``
+    models the latest ``request_identity_verifications`` row (None = no row).
+    """
+    meta_row = meta if meta is not None else _meta_row()
+
+    async def fetchrow(sql: str, *_args: Any) -> Any:
+        if "request_vertical_dispositions" in sql:
+            return gate
+        if "request_identity_verifications" in sql:
+            return identity
+        if "FROM matching_results" in sql:
+            return match
+        if "FROM requests" in sql:
+            return meta_row
+        if "data_fulfillment_attempts" in sql and "'claimed'" in sql:
+            return _claim_row(attempt_id, step=step)
+        return None
+
+    async def fetchval(sql: str, *args: Any) -> Any:
+        if "FROM data_fulfillment_attempts" in sql and "SELECT 1" in sql:
+            if blocking_attempt:
+                return 1
+            if prior_success_at is None:
+                return None
+            since = args[2] if len(args) > 2 else None
+            return 1 if since is None or prior_success_at >= since else None
+        if "drop_connector_attempts" in sql:
+            return 42
+        if "MAX(attempt_number)" in sql:
+            return 0
+        if "INSERT INTO data_fulfillment_attempts" in sql:
+            return attempt_id
+        return None
+
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(
-        side_effect=[meta or _meta_row(), match, _claim_row(attempt_id)]
-    )
-    conn.fetchval = AsyncMock(
-        side_effect=[42, 1, attempt_id]
-    )  # process_id, next#, attempt_id
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    conn.fetchval = AsyncMock(side_effect=fetchval)
     conn.execute = AsyncMock(return_value=status_update)
     return conn
+
+
+def _status_sync_calls(conn: AsyncMock) -> list[Any]:
+    return [c for c in conn.execute.await_args_list if "drop_raw_requests" in str(c.args[0])]
+
+
+def _enqueue_calls(conn: AsyncMock) -> list[Any]:
+    return [
+        c
+        for c in conn.fetchval.await_args_list
+        if "INSERT INTO data_fulfillment_attempts" in str(c.args[0])
+    ]
+
+
+def _blocking_checks(conn: AsyncMock) -> list[Any]:
+    return [
+        c
+        for c in conn.fetchval.await_args_list
+        if "FROM data_fulfillment_attempts" in str(c.args[0])
+        and "SELECT 1" in str(c.args[0])
+    ]
+
+
+def _approved_matching_review():
+    return patch(
+        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
+        new_callable=AsyncMock,
+        return_value=True,
+    )
+
+
+def _stub_notice_review():
+    return patch(
+        "data_fulfillment_dispatcher.fulfill.ensure_pending_notice_review",
+        new_callable=AsyncMock,
+    )
 
 
 @pytest.mark.asyncio
@@ -120,21 +234,48 @@ async def test_t9_1_skips_when_matching_review_not_approved():
 
 
 @pytest.mark.asyncio
-async def test_t9_2_match_sets_response_status_deleted():
-    conn = _conn_for_suppression(match=_match_row(match_count=1))
+async def test_ae1_matching_review_alone_does_not_fulfill():
+    """AE1: approved matching.review without a disposition starts nothing."""
+    conn = _routing_conn(match=_match_row(), gate=None)
+
+    with _approved_matching_review():
+        result = await fulfill_one(
+            conn, REQUEST_ID, deps=FulfillDeps(gcs_bucket="bucket")
+        )
+
+    assert result.outcome == "skipped"
+    assert result.reason == "vertical_disposition_missing"
+    assert _enqueue_calls(conn) == []
+    assert _status_sync_calls(conn) == []
+
+
+@pytest.mark.asyncio
+async def test_ae1_disposition_without_kickoff_does_not_fulfill():
+    """AE1: disposition alone is not a start signal — Legal must kick off (R11)."""
+    conn = _routing_conn(
+        match=_match_row(), gate=_gate_row(kickoff_decided_at=None)
+    )
     _store, transport = _memory_transport()
 
-    with (
-        patch(
-            "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
-            new_callable=AsyncMock,
-            return_value=True,
-        ),
-        patch(
-            "data_fulfillment_dispatcher.fulfill.ensure_pending_notice_review",
-            new_callable=AsyncMock,
-        ),
-    ):
+    with _approved_matching_review():
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=transport),
+        )
+
+    assert result.outcome == "skipped"
+    assert result.reason == "fulfillment.kickoff_not_approved"
+    assert _enqueue_calls(conn) == []
+    assert _status_sync_calls(conn) == []
+
+
+@pytest.mark.asyncio
+async def test_ae1_kickoff_plus_disposition_fulfills_status_3():
+    conn = _routing_conn(match=_match_row(), gate=_gate_row(status=3))
+    store, transport = _memory_transport()
+
+    with _approved_matching_review(), _stub_notice_review() as notice:
         result = await fulfill_one(
             conn,
             REQUEST_ID,
@@ -143,35 +284,165 @@ async def test_t9_2_match_sets_response_status_deleted():
 
     assert result.outcome == "fulfilled"
     assert result.response_status == RESPONSE_STATUS_DELETED
-    status_calls = [
-        c for c in conn.execute.await_args_list if "drop_raw_requests" in str(c.args[0])
-    ]
+    assert store[("bucket", "bulk-run/42/suppression/dwids.txt")] == b"1001"
+    status_calls = _status_sync_calls(conn)
     assert status_calls
     assert status_calls[0].args[2] == 3
+    notice.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_t9_3_no_match_sets_response_status_not_found():
-    conn = _conn_for_suppression(
-        match=_match_row(matched=False, match_count=0, consumer_id=None)
+async def test_status_4_uses_disposition_dwids_not_match_count():
+    """Disposition is the source of record — status and dwids both come from it."""
+    conn = _routing_conn(
+        match=_match_row(match_count=1, consumer_id="1001"),
+        gate=_gate_row(status=4, selected_dwids=["d1", "d2"]),
     )
+    store, transport = _memory_transport()
 
-    with (
-        patch(
-            "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
-            new_callable=AsyncMock,
-            return_value=True,
-        ),
-        patch(
-            "data_fulfillment_dispatcher.fulfill.ensure_pending_notice_review",
-            new_callable=AsyncMock,
-        ),
-    ):
-        result = await fulfill_one(conn, REQUEST_ID, deps=FulfillDeps(gcs_bucket=""))
+    with _approved_matching_review(), _stub_notice_review():
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=transport),
+        )
+
+    assert result.outcome == "fulfilled"
+    assert result.response_status == RESPONSE_STATUS_OPTED_OUT
+    assert parse_dwid_pipe(store[("bucket", "bulk-run/42/suppression/dwids.txt")]) == [
+        "d1",
+        "d2",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_status_5_kickoff_completes_without_pack():
+    """Status 5 is a no-op completion so Notice can open (KD9)."""
+    conn = _routing_conn(
+        match=_match_row(matched=False, match_count=0, consumer_id=None),
+        gate=_gate_row(status=5, selected_dwids=[]),
+    )
+    store, transport = _memory_transport()
+
+    with _approved_matching_review(), _stub_notice_review() as notice:
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=transport),
+        )
 
     assert result.outcome == "fulfilled"
     assert result.response_status == RESPONSE_STATUS_NOT_FOUND
-    assert result.reason == "not_found"
+    assert result.reason == "not_found_no_op"
+    assert result.gcs_uri is None
+    assert store == {}
+    notice.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_re_kickoff_does_not_duplicate_attempts():
+    """Kickoff is idempotent: an open or post-kickoff success attempt wins."""
+    conn = _routing_conn(
+        match=_match_row(), gate=_gate_row(status=3), blocking_attempt=True
+    )
+    _store, transport = _memory_transport()
+
+    with _approved_matching_review():
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=transport),
+        )
+
+    assert result.outcome == "skipped"
+    assert result.reason == "fulfillment_already_recorded"
+    assert _enqueue_calls(conn) == []
+
+
+@pytest.mark.asyncio
+async def test_idempotency_window_is_measured_from_current_kickoff():
+    """The blocking probe is bound to the newest kickoff, not to all history."""
+    conn = _routing_conn(match=_match_row(), gate=_gate_row(status=3))
+    _store, transport = _memory_transport()
+
+    with _approved_matching_review(), _stub_notice_review():
+        await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=transport),
+        )
+
+    checks = _blocking_checks(conn)
+    assert checks
+    sql, _request_id, step, since, open_statuses = checks[0].args
+    assert step == "suppression"
+    assert since == KICKOFF_AT
+    assert list(open_statuses) == ["pending", "claimed", "in_flight"]
+    assert "completed_at >= $3" in _squash(sql)
+
+
+@pytest.mark.asyncio
+async def test_success_under_current_kickoff_blocks_rework():
+    conn = _routing_conn(
+        match=_match_row(),
+        gate=_gate_row(status=3),
+        prior_success_at=KICKOFF_AT,
+    )
+    _store, transport = _memory_transport()
+
+    with _approved_matching_review():
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=transport),
+        )
+
+    assert result.outcome == "skipped"
+    assert result.reason == "fulfillment_already_recorded"
+    assert _enqueue_calls(conn) == []
+
+
+@pytest.mark.asyncio
+async def test_success_under_superseded_kickoff_allows_rework():
+    """Reopen path (KTD5): a re-kickoff must be able to redo the work."""
+    conn = _routing_conn(
+        match=_match_row(),
+        gate=_gate_row(status=3),
+        prior_success_at=SUPERSEDED_SUCCESS_AT,
+    )
+    store, transport = _memory_transport()
+
+    with _approved_matching_review(), _stub_notice_review():
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=transport),
+        )
+
+    assert result.outcome == "fulfilled"
+    assert result.response_status == RESPONSE_STATUS_DELETED
+    assert store[("bucket", "bulk-run/42/suppression/dwids.txt")] == b"1001"
+    assert len(_enqueue_calls(conn)) == 1
+
+
+@pytest.mark.asyncio
+async def test_status_sync_tolerates_status_already_written():
+    """The disposition write already set response_status — that is not an error."""
+    conn = _routing_conn(
+        match=_match_row(), gate=_gate_row(status=3), status_update="UPDATE 0"
+    )
+    _store, transport = _memory_transport()
+
+    with _approved_matching_review(), _stub_notice_review():
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=transport),
+        )
+
+    assert result.outcome == "fulfilled"
+    assert result.response_status == RESPONSE_STATUS_DELETED
+    assert "IS DISTINCT FROM" in str(_status_sync_calls(conn)[0].args[0])
 
 
 @pytest.mark.asyncio
@@ -202,58 +473,15 @@ async def test_t9_4_no_external_suppression_http():
 
 
 @pytest.mark.asyncio
-async def test_multi_match_sets_response_status_opted_out():
-    conn = _conn_for_suppression(match=_match_row(matched=True, match_count=3))
-    _store, transport = _memory_transport()
-
-    async def fake_resolver() -> list[str]:
-        return ["1", "2", "3"]
-
-    with (
-        patch(
-            "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
-            new_callable=AsyncMock,
-            return_value=True,
-        ),
-        patch(
-            "data_fulfillment_dispatcher.fulfill.ensure_pending_notice_review",
-            new_callable=AsyncMock,
-        ),
-    ):
-        result = await fulfill_one(
-            conn,
-            REQUEST_ID,
-            deps=FulfillDeps(
-                gcs_bucket="bucket",
-                gcs_transport=transport,
-                dwid_resolver=fake_resolver,
-            ),
-        )
-
-    assert result.outcome == "fulfilled"
-    assert result.response_status == RESPONSE_STATUS_OPTED_OUT
-
-
-def test_response_status_for_match_count_mapping():
-    assert response_status_for_match_count(0) == RESPONSE_STATUS_NOT_FOUND
-    assert response_status_for_match_count(1) == RESPONSE_STATUS_DELETED
-    assert response_status_for_match_count(2) == RESPONSE_STATUS_OPTED_OUT
-
-
-@pytest.mark.asyncio
-async def test_gcs_failure_leaves_response_status_unset():
-    conn = _conn_for_suppression(match=_match_row(match_count=1))
+async def test_gcs_failure_leaves_response_status_unsynced():
+    conn = _routing_conn(match=_match_row(), gate=_gate_row(status=3))
 
     async def boom_transport(_b: str, _p: str, data: bytes | None) -> bytes | None:
         if data is None:
             raise FileNotFoundError("missing")
         raise RuntimeError("gcs down")
 
-    with patch(
-        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
-        new_callable=AsyncMock,
-        return_value=True,
-    ):
+    with _approved_matching_review():
         result = await fulfill_one(
             conn,
             REQUEST_ID,
@@ -263,38 +491,47 @@ async def test_gcs_failure_leaves_response_status_unset():
     assert result.outcome == "rejected"
     assert result.reason == "gcs_write_failed"
     assert result.response_status is None
-    status_calls = [
-        c for c in conn.execute.await_args_list if "drop_raw_requests" in str(c.args[0])
-    ]
-    assert status_calls == []
+    assert _status_sync_calls(conn) == []
 
 
 @pytest.mark.asyncio
-async def test_gcs_bucket_unset_rejects_match_leaves_status_unset():
-    conn = _conn_for_suppression(match=_match_row(match_count=1))
+async def test_gcs_bucket_unset_rejects_artifact_status():
+    conn = _routing_conn(match=_match_row(), gate=_gate_row(status=3))
 
-    with patch(
-        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
-        new_callable=AsyncMock,
-        return_value=True,
-    ):
-        result = await fulfill_one(
-            conn, REQUEST_ID, deps=FulfillDeps(gcs_bucket="")
-        )
+    with _approved_matching_review():
+        result = await fulfill_one(conn, REQUEST_ID, deps=FulfillDeps(gcs_bucket=""))
 
     assert result.outcome == "rejected"
     assert result.reason == "gcs_bucket_unset"
     assert result.response_status is None
-    status_calls = [
-        c for c in conn.execute.await_args_list if "drop_raw_requests" in str(c.args[0])
-    ]
-    assert status_calls == []
+    assert _status_sync_calls(conn) == []
     error_calls = [
         c
         for c in conn.execute.await_args_list
         if "gcs_bucket_unset" in str(c.args) or "outcome_error" in str(c.args)
     ]
     assert error_calls
+
+
+@pytest.mark.asyncio
+async def test_empty_disposition_dwids_reject_artifact_status():
+    """A 3/4 disposition with no dwid selection must not silently write nothing."""
+    conn = _routing_conn(
+        match=_match_row(matched=False, match_count=0, consumer_id=None),
+        gate=_gate_row(status=3, selected_dwids=[]),
+    )
+    _store, transport = _memory_transport()
+
+    with _approved_matching_review():
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=transport),
+        )
+
+    assert result.outcome == "rejected"
+    assert result.reason == "no_dwids"
+    assert _status_sync_calls(conn) == []
 
 
 @pytest.mark.asyncio
@@ -365,21 +602,14 @@ async def test_access_export_writes_manifest():
 @pytest.mark.asyncio
 async def test_access_export_uses_configured_dataset_and_tables():
     """Dataset/tables from deps must reach the BigQuery SQL (dbt mart flip)."""
-    conn = AsyncMock()
-    conn.fetchrow = AsyncMock(
-        side_effect=[
-            _meta_row(request_type="access", intake_source="manual"),
-            _match_row(match_count=1, consumer_id="1001"),
-            {
-                "id": 88,
-                "request_id": REQUEST_ID,
-                "step": "reproduction",
-                "status": "claimed",
-            },
-        ]
+    conn = _routing_conn(
+        match=_match_row(match_count=1, consumer_id="1001"),
+        gate=_gate_row(status=3, selected_dwids=["1001"]),
+        meta=_meta_row(request_type="access", intake_source="manual"),
+        identity=_identity_row(),
+        attempt_id=88,
+        step="reproduction",
     )
-    conn.fetchval = AsyncMock(side_effect=["unknown", 1, 88])
-    conn.execute = AsyncMock(return_value="UPDATE 1")
 
     captured_sql: list[str] = []
 
@@ -391,11 +621,7 @@ async def test_access_export_uses_configured_dataset_and_tables():
 
     _store, transport = _memory_transport()
 
-    with patch(
-        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
-        new_callable=AsyncMock,
-        return_value=True,
-    ):
+    with _approved_matching_review():
         result = await fulfill_one(
             conn,
             REQUEST_ID,
@@ -415,6 +641,352 @@ async def test_access_export_uses_configured_dataset_and_tables():
     assert "`example-gcp-project.access_export.fct_ballots`" in captured_sql[1]
 
 
+@pytest.mark.asyncio
+async def test_access_without_kickoff_does_not_export():
+    conn = _routing_conn(
+        match=_match_row(match_count=1, consumer_id="1001"),
+        gate=_gate_row(status=3, selected_dwids=["1001"], kickoff_decided_at=None),
+        meta=_meta_row(request_type="access", intake_source="manual"),
+        attempt_id=88,
+        step="reproduction",
+    )
+
+    class ExplodingBQ:
+        def query(self, sql: str, job_config: Any = None) -> list[dict[str, Any]]:
+            raise AssertionError("access pack must not run without kickoff")
+
+    _store, transport = _memory_transport()
+
+    with _approved_matching_review():
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(
+                gcs_bucket="bucket",
+                gcs_transport=transport,
+                bq_client=ExplodingBQ(),
+            ),
+        )
+
+    assert result.outcome == "skipped"
+    assert result.reason == "fulfillment.kickoff_not_approved"
+    assert _enqueue_calls(conn) == []
+
+
+@pytest.mark.asyncio
+async def test_access_status_5_completes_without_pack():
+    conn = _routing_conn(
+        match=_match_row(matched=False, match_count=0, consumer_id=None),
+        gate=_gate_row(status=5, selected_dwids=[]),
+        meta=_meta_row(request_type="access", intake_source="manual"),
+        attempt_id=88,
+        step="reproduction",
+    )
+
+    class ExplodingBQ:
+        def query(self, sql: str, job_config: Any = None) -> list[dict[str, Any]]:
+            raise AssertionError("status 5 must not export a pack")
+
+    _store, transport = _memory_transport()
+
+    with _approved_matching_review():
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(
+                gcs_bucket="bucket",
+                gcs_transport=transport,
+                bq_client=ExplodingBQ(),
+            ),
+        )
+
+    assert result.outcome == "fulfilled"
+    assert result.reason == "not_found_no_op"
+    assert result.request_type == "access"
+
+
+@pytest.mark.asyncio
+async def test_ae3_access_pack_blocked_missing_notes():
+    """AE3: identity verified but empty notes still blocks the Access pack."""
+    conn = _routing_conn(
+        match=_match_row(match_count=1, consumer_id="1001"),
+        gate=_gate_row(status=3, selected_dwids=["1001"]),
+        meta=_meta_row(request_type="access", intake_source="manual"),
+        identity=_identity_row(status="verified", notes=""),
+        attempt_id=88,
+        step="reproduction",
+    )
+
+    class ExplodingBQ:
+        def query(self, sql: str, job_config: Any = None) -> list[dict[str, Any]]:
+            raise AssertionError("access pack must not run without identity notes")
+
+    _store, transport = _memory_transport()
+
+    with _approved_matching_review():
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(
+                gcs_bucket="bucket", gcs_transport=transport, bq_client=ExplodingBQ()
+            ),
+        )
+
+    assert result.outcome == "rejected"
+    assert result.reason == "identity_not_verified"
+    assert result.request_type == "access"
+
+
+@pytest.mark.asyncio
+async def test_ae3_access_pack_blocked_no_identity_row():
+    """AE3: no identity row at all blocks the Access pack."""
+    conn = _routing_conn(
+        match=_match_row(match_count=1, consumer_id="1001"),
+        gate=_gate_row(status=3, selected_dwids=["1001"]),
+        meta=_meta_row(request_type="access", intake_source="manual"),
+        identity=None,
+        attempt_id=88,
+        step="reproduction",
+    )
+    _store, transport = _memory_transport()
+
+    with _approved_matching_review():
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=transport),
+        )
+
+    assert result.outcome == "rejected"
+    assert result.reason == "identity_not_verified"
+
+
+@pytest.mark.asyncio
+async def test_ae3_notes_without_kickoff_still_blocked():
+    """AE3: verified notes alone do not substitute for Legal kickoff (R11)."""
+    conn = _routing_conn(
+        match=_match_row(match_count=1, consumer_id="1001"),
+        gate=_gate_row(
+            status=3, selected_dwids=["1001"], kickoff_decided_at=None
+        ),
+        meta=_meta_row(request_type="access", intake_source="manual"),
+        identity=_identity_row(),
+        attempt_id=88,
+        step="reproduction",
+    )
+
+    class ExplodingBQ:
+        def query(self, sql: str, job_config: Any = None) -> list[dict[str, Any]]:
+            raise AssertionError("must not run without kickoff")
+
+    _store, transport = _memory_transport()
+
+    with _approved_matching_review():
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(
+                gcs_bucket="bucket", gcs_transport=transport, bq_client=ExplodingBQ()
+            ),
+        )
+
+    assert result.outcome == "skipped"
+    assert result.reason == "fulfillment.kickoff_not_approved"
+
+
+@pytest.mark.asyncio
+async def test_ae3_verified_notes_and_kickoff_runs_pack():
+    """AE3 happy path: verified identity + notes + kickoff produces the pack."""
+    conn = _routing_conn(
+        match=_match_row(match_count=1, consumer_id="1001"),
+        gate=_gate_row(status=3, selected_dwids=["1001"]),
+        meta=_meta_row(request_type="access", intake_source="manual"),
+        identity=_identity_row(),
+        attempt_id=88,
+        step="reproduction",
+    )
+
+    class FakeBQ:
+        def query(self, sql: str, job_config: Any = None) -> list[dict[str, Any]]:
+            del job_config
+            if "person" in sql:
+                return [{"dwid": "1001", "state": "CA", "lastname": "X"}]
+            raise RuntimeError("404 Not found: table missing")
+
+    _store, transport = _memory_transport()
+
+    with _approved_matching_review():
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(
+                gcs_bucket="bucket", gcs_transport=transport, bq_client=FakeBQ()
+            ),
+        )
+
+    assert result.outcome == "fulfilled"
+    assert result.gcs_uri is not None
+
+
+@pytest.mark.asyncio
+async def test_later_failed_identity_reblocks_access_pack():
+    """Requirement: latest identity row wins — a later failed row re-blocks."""
+    conn = _routing_conn(
+        match=_match_row(match_count=1, consumer_id="1001"),
+        gate=_gate_row(status=3, selected_dwids=["1001"]),
+        meta=_meta_row(request_type="access", intake_source="manual"),
+        identity=_identity_row(status="failed", notes="did not match records"),
+        attempt_id=88,
+        step="reproduction",
+    )
+    _store, transport = _memory_transport()
+
+    with _approved_matching_review():
+        result = await fulfill_one(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=transport),
+        )
+
+    assert result.outcome == "rejected"
+    assert result.reason == "identity_not_verified"
+
+
+@pytest.mark.asyncio
+async def test_r12_drop_suppression_succeeds_without_identity():
+    """R12: CA DROP / delete suppression must not require identity verification."""
+    conn = _routing_conn(match=_match_row(), gate=_gate_row(status=3), identity=None)
+    store, transport = _memory_transport()
+
+    with _approved_matching_review(), _stub_notice_review():
+        result = await fulfill_one(
+            conn, REQUEST_ID, deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=transport)
+        )
+
+    assert result.outcome == "fulfilled"
+    assert result.response_status == RESPONSE_STATUS_DELETED
+    identity_calls = [
+        c
+        for c in conn.fetchrow.await_args_list
+        if "request_identity_verifications" in str(c.args[0])
+    ]
+    assert identity_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ae4_combined_delete_leg_fulfills_without_identity():
+    """AE4: combined delete leg runs on kickoff alone, no identity row needed."""
+    conn = _routing_conn(
+        match=_match_row(),
+        gate=_gate_row(status=3),
+        meta=_meta_row(request_type="combined", intake_source="manual"),
+        identity=None,
+    )
+    store, transport = _memory_transport()
+
+    with _approved_matching_review(), _stub_notice_review():
+        result = await fulfill_one(
+            conn, REQUEST_ID, deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=transport)
+        )
+
+    assert result.outcome == "fulfilled"
+    assert result.response_status == RESPONSE_STATUS_DELETED
+
+
+@pytest.mark.asyncio
+async def test_ae4_combined_access_leg_blocked_until_identity():
+    """AE4: combined access leg is identity-gated even though the delete leg is not."""
+    conn = _routing_conn(
+        match=_match_row(match_count=1, consumer_id="1001"),
+        gate=_gate_row(status=3, selected_dwids=["1001"]),
+        meta=_meta_row(request_type="combined", intake_source="manual"),
+        identity=None,
+        attempt_id=88,
+        step="reproduction",
+    )
+    _store, transport = _memory_transport()
+
+    with _approved_matching_review():
+        result = await _route_fulfill(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(gcs_bucket="bucket", gcs_transport=transport),
+            step=DATA_FULFILLMENT_STEP_REPRODUCTION,
+        )
+
+    assert result.outcome == "rejected"
+    assert result.reason == "identity_not_verified"
+
+
+@pytest.mark.asyncio
+async def test_ae4_combined_access_leg_fulfills_with_identity_and_kickoff():
+    """AE4: combined access leg proceeds once identity+notes+kickoff all clear."""
+    conn = _routing_conn(
+        match=_match_row(match_count=1, consumer_id="1001"),
+        gate=_gate_row(status=3, selected_dwids=["1001"]),
+        meta=_meta_row(request_type="combined", intake_source="manual"),
+        identity=_identity_row(),
+        attempt_id=88,
+        step="reproduction",
+    )
+
+    class FakeBQ:
+        def query(self, sql: str, job_config: Any = None) -> list[dict[str, Any]]:
+            del job_config
+            if "person" in sql:
+                return [{"dwid": "1001", "state": "CA", "lastname": "X"}]
+            raise RuntimeError("404 Not found: table missing")
+
+    _store, transport = _memory_transport()
+
+    with _approved_matching_review():
+        result = await _route_fulfill(
+            conn,
+            REQUEST_ID,
+            deps=FulfillDeps(
+                gcs_bucket="bucket", gcs_transport=transport, bq_client=FakeBQ()
+            ),
+            step=DATA_FULFILLMENT_STEP_REPRODUCTION,
+        )
+
+    assert result.outcome == "fulfilled"
+    assert result.gcs_uri is not None
+
+
+@pytest.mark.asyncio
+async def test_ready_list_includes_combined_request_type():
+    """Combined must be reachable in readiness for both legs (U2 left it out)."""
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    await find_requests_ready_to_fulfill(conn, limit=5)
+    sql = _squash(conn.fetch.await_args.args[0])
+
+    assert "'delete', 'opt_out', 'combined'" in sql
+    assert "IN ('access', 'combined')" in sql
+
+
+@pytest.mark.asyncio
+async def test_enqueue_ready_attempt_combined_enqueues_both_legs():
+    """Combined enqueues suppression and reproduction attempts independently."""
+    from data_fulfillment_dispatcher.fulfill import _enqueue_ready_attempt
+
+    conn = _routing_conn(
+        match=_match_row(),
+        gate=_gate_row(status=3),
+        meta=_meta_row(request_type="combined", intake_source="manual"),
+    )
+
+    with _approved_matching_review():
+        attempt_id = await _enqueue_ready_attempt(
+            conn, REQUEST_ID, deps=FulfillDeps(gcs_bucket="bucket")
+        )
+
+    inserts = _enqueue_calls(conn)
+    assert attempt_id is not None
+    assert {c.args[2] for c in inserts} == {"suppression", "reproduction"}
+
+
 def test_settings_access_export_tables_parsing():
     from data_fulfillment_dispatcher.config import DataFulfillmentDispatcherSettings
 
@@ -429,21 +1001,14 @@ def test_settings_access_export_tables_parsing():
 
 @pytest.mark.asyncio
 async def test_access_empty_pack_rejects_attempt():
-    conn = AsyncMock()
-    conn.fetchrow = AsyncMock(
-        side_effect=[
-            _meta_row(request_type="access", intake_source="manual"),
-            _match_row(match_count=1, consumer_id="1001"),
-            {
-                "id": 88,
-                "request_id": REQUEST_ID,
-                "step": "reproduction",
-                "status": "claimed",
-            },
-        ]
+    conn = _routing_conn(
+        match=_match_row(match_count=1, consumer_id="1001"),
+        gate=_gate_row(status=3, selected_dwids=["1001"]),
+        meta=_meta_row(request_type="access", intake_source="manual"),
+        identity=_identity_row(),
+        attempt_id=88,
+        step="reproduction",
     )
-    conn.fetchval = AsyncMock(side_effect=["unknown", 1, 88])
-    conn.execute = AsyncMock(return_value="UPDATE 1")
 
     class EmptyBQ:
         def query(self, sql: str, job_config: Any = None) -> list[dict[str, Any]]:
@@ -452,11 +1017,7 @@ async def test_access_empty_pack_rejects_attempt():
 
     _store, transport = _memory_transport()
 
-    with patch(
-        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
-        new_callable=AsyncMock,
-        return_value=True,
-    ):
+    with _approved_matching_review():
         result = await fulfill_one(
             conn,
             REQUEST_ID,
@@ -481,18 +1042,14 @@ def test_mark_attempt_in_flight_sets_submitted_at():
 
 @pytest.mark.asyncio
 async def test_fulfill_one_claims_attempt_by_id():
-    conn = _conn_for_suppression(match=_match_row(match_count=0, consumer_id=None))
+    conn = _routing_conn(
+        match=_match_row(matched=False, match_count=0, consumer_id=None),
+        gate=_gate_row(status=5, selected_dwids=[]),
+    )
 
     with (
-        patch(
-            "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
-            new_callable=AsyncMock,
-            return_value=True,
-        ),
-        patch(
-            "data_fulfillment_dispatcher.fulfill.ensure_pending_notice_review",
-            new_callable=AsyncMock,
-        ),
+        _approved_matching_review(),
+        _stub_notice_review(),
         patch(
             "data_fulfillment_dispatcher.fulfill.claim_fulfillment_attempt_by_id",
             new_callable=AsyncMock,
@@ -577,27 +1134,87 @@ async def test_run_fulfill_batch_uses_claim_next_loop():
 
 
 @pytest.mark.asyncio
-async def test_find_requests_ready_to_fulfill_sql():
+async def test_enqueue_ready_attempt_requires_kickoff():
+    """The batch path re-checks the gate before it queues work."""
+    from data_fulfillment_dispatcher.fulfill import _enqueue_ready_attempt
+
+    conn = _routing_conn(
+        match=_match_row(), gate=_gate_row(kickoff_decided_at=None)
+    )
+
+    with _approved_matching_review():
+        attempt_id = await _enqueue_ready_attempt(
+            conn, REQUEST_ID, deps=FulfillDeps(gcs_bucket="bucket")
+        )
+
+    assert attempt_id is None
+    assert _enqueue_calls(conn) == []
+
+
+@pytest.mark.asyncio
+async def test_find_requests_ready_to_fulfill_requires_kickoff_and_disposition():
     conn = AsyncMock()
     conn.fetch = AsyncMock(return_value=[{"id": REQUEST_ID}])
+
     assert await find_requests_ready_to_fulfill(conn, limit=5) == [REQUEST_ID]
-    sql = conn.fetch.await_args.args[0]
+
+    sql = _squash(conn.fetch.await_args.args[0])
+    args = conn.fetch.await_args.args
     assert "matching.review" in sql
-    assert "response_status IS NULL" in sql
     assert "matching_results" in sql
     assert "reproduction" in sql
+    # Disposition drives readiness now — a set response_status is not a gate.
+    assert "response_status IS NULL" not in sql
+    assert FULFILLMENT_KICKOFF_ACTION in args
+    assert VERTICAL_DATA in args
+
+
+@pytest.mark.asyncio
+async def test_ready_list_joins_kickoff_and_disposition_as_hard_gates():
+    """R11: both joins are inner, so matching.review alone lists nothing."""
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    await find_requests_ready_to_fulfill(conn, limit=5)
+    sql = _squash(conn.fetch.await_args.args[0])
+
+    assert "JOIN kickoff k ON k.request_id = r.id" in sql
+    assert "JOIN request_vertical_dispositions rvd" in sql
+    assert "LEFT JOIN kickoff" not in sql
+    assert "LEFT JOIN request_vertical_dispositions" not in sql
+    # Kickoff must be an approved, decided row scoped to the requested vertical.
+    assert "ar.action_type = $3" in sql
+    assert "ar.status = 'approved'" in sql
+    assert "ar.decided_at IS NOT NULL" in sql
+    assert "ar.context_jsonb->>'vertical' = $2" in sql
+    # Disposition supplies the status, scoped to the same vertical bind.
+    assert "rvd.request_id = r.id AND rvd.vertical = $2" in sql
+    assert "rvd.status IN (3, 4, 5)" in sql
+    assert "NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)" in sql or \
+        "request_closures" in sql
+    assert "r.closed_at IS NULL" not in sql
+    # Idempotency is measured from the newest kickoff decision, not all history.
+    assert sql.count("dfa.completed_at >= k.decided_at") == 2
+
+
+@pytest.mark.asyncio
+async def test_ready_list_binds_vertical_and_kickoff_action():
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    await find_requests_ready_to_fulfill(conn, limit=7)
+
+    limit, vertical, action = conn.fetch.await_args.args[1:]
+    assert limit == 7
+    assert vertical == VERTICAL_DATA
+    assert action == FULFILLMENT_KICKOFF_ACTION
 
 
 @pytest.mark.asyncio
 async def test_t9_1_rejected_when_no_matching_result():
-    conn = AsyncMock()
-    conn.fetchrow = AsyncMock(side_effect=[_meta_row(), None])
+    conn = _routing_conn(match=None, gate=_gate_row(status=3))
 
-    with patch(
-        "data_fulfillment_dispatcher.fulfill.is_matching_review_approved",
-        new_callable=AsyncMock,
-        return_value=True,
-    ):
+    with _approved_matching_review():
         result = await fulfill_one(conn, REQUEST_ID)
 
     assert result.outcome == "rejected"
@@ -606,9 +1223,8 @@ async def test_t9_1_rejected_when_no_matching_result():
 
 @pytest.mark.asyncio
 async def test_healthz():
-    from fastapi.testclient import TestClient
-
     from data_fulfillment_dispatcher.main import app
+    from fastapi.testclient import TestClient
 
     with TestClient(app) as client:
         response = client.get("/healthz")

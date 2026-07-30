@@ -37,6 +37,9 @@ _SENSITIVE_KEYS = frozenset(
         "raw_payload",
         "body",
         "message",
+        "dwids",
+        "selected_dwids",
+        "consumer_id",
     }
 )
 
@@ -74,13 +77,17 @@ def redact_value(key: str | None, value: Any) -> Any:
     """Scrub a single value, using key hints for structured data."""
     if value is None:
         return None
+    if key and key.lower() in _SENSITIVE_KEYS:
+        if isinstance(value, list):
+            return [_REDACTED for _ in value]
+        return _REDACTED
     if isinstance(value, dict):
         return redact_payload(value)
     if isinstance(value, list):
-        return [redact_value(None, item) for item in value]
+        # Keep the key hint so arrays under a sensitive key (e.g. dwids nested
+        # one level down, or list items matching OTP-shaped digits) still redact.
+        return [redact_value(key, item) for item in value]
     if isinstance(value, str):
-        if key and key.lower() in _SENSITIVE_KEYS:
-            return _REDACTED
         if key and _OTP_VALUE.fullmatch(value):
             return _REDACTED
         return _scrub_string(value)

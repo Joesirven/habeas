@@ -4,10 +4,15 @@ import { describe, expect, test } from 'bun:test'
 import {
   COARSE_STAGE_ORDER,
   NOTICE_APPROVAL,
+  WORKBENCH_STAGE_ORDER,
   actionReasonLabel,
+  deriveWorkbenchChromeFromOpsJourney,
   queueStatusLabel,
   stageLabel,
   stageReachLabel,
+  verticalLabel,
+  workbenchStageLabel,
+  workbenchStatusLabel,
 } from './legalJourneyLabels'
 
 describe('legalJourneyLabels', () => {
@@ -51,6 +56,12 @@ describe('legalJourneyLabels', () => {
     expect(actionReasonLabel('matching.review')).toBe(
       'Matching review pending',
     )
+    expect(actionReasonLabel('fulfillment.kickoff')).toBe(
+      'Fulfillment kickoff pending',
+    )
+    expect(actionReasonLabel('fulfillment.kickoff_not_approved')).toBe(
+      'Fulfillment kickoff not approved',
+    )
     expect(actionReasonLabel('access.delivery')).toBe(
       'Access delivery pending',
     )
@@ -80,6 +91,9 @@ describe('legalJourneyLabels', () => {
     expect(queueStatusLabel('matching.review', 'approved')).toBe(
       'Matching review approved',
     )
+    expect(queueStatusLabel('fulfillment.kickoff', 'approved')).toBe(
+      'Fulfillment kickoff approved',
+    )
   })
 
   test('NOTICE_APPROVAL exposes human copy without wire keys', () => {
@@ -104,5 +118,102 @@ describe('legalJourneyLabels', () => {
     ]) {
       expect(actionReasonLabel(reason)).not.toContain(reason)
     }
+  })
+
+  test('WORKBENCH_STAGE_ORDER matches KTD2 four-stage rail', () => {
+    expect(WORKBENCH_STAGE_ORDER).toEqual([
+      'ingest',
+      'matching',
+      'fulfillment',
+      'notice',
+    ])
+  })
+
+  test('workbenchStageLabel maps the four high-level stages', () => {
+    expect(workbenchStageLabel('ingest')).toBe('Ingest')
+    expect(workbenchStageLabel('matching')).toBe('Matching')
+    expect(workbenchStageLabel('fulfillment')).toBe('Fulfillment')
+    expect(workbenchStageLabel('notice')).toBe('Notice')
+    expect(workbenchStageLabel('custom_stage')).toBe('custom stage')
+  })
+
+  test('verticalLabel maps live + coming-soon catalog entries', () => {
+    expect(verticalLabel('data')).toBe('Data')
+    expect(verticalLabel('mailchimp')).toBe('Mailchimp')
+    expect(verticalLabel('lever')).toBe('Lever')
+    expect(verticalLabel('paylocity')).toBe('Paylocity')
+    expect(verticalLabel('auth0')).toBe('Auth0')
+    expect(verticalLabel('cassandra')).toBe('Cassandra')
+    expect(verticalLabel('unknown_vendor')).toBe('unknown vendor')
+  })
+
+  test('workbenchStatusLabel maps StageStatus values', () => {
+    expect(workbenchStatusLabel('not_started')).toBe('Not started')
+    expect(workbenchStatusLabel('in_progress')).toBe('In progress')
+    expect(workbenchStatusLabel('waiting')).toBe('Waiting')
+    expect(workbenchStatusLabel('complete')).toBe('Complete')
+    expect(workbenchStatusLabel('failed')).toBe('Failed')
+    expect(workbenchStatusLabel('skipped')).toBe('Skipped')
+  })
+
+  test('deriveWorkbenchChromeFromOpsJourney returns four stages, never KD29 six', () => {
+    const chrome = deriveWorkbenchChromeFromOpsJourney({
+      intake_source: 'drop',
+      current_stage: 'match',
+      request_type: 'delete',
+      stages: [
+        { stage: 'received', label: 'Received', status: 'complete' },
+        { stage: 'download', label: 'Download', status: 'complete' },
+        { stage: 'land', label: 'Land', status: 'complete' },
+        { stage: 'promote', label: 'Promote', status: 'complete' },
+        { stage: 'match', label: 'Match', status: 'in_progress' },
+        { stage: 'review', label: 'Review', status: 'not_started' },
+        { stage: 'fulfill', label: 'Fulfill', status: 'not_started' },
+        { stage: 'notice', label: 'Notice', status: 'not_started' },
+      ],
+    })
+    expect(chrome.stages.map((stage) => stage.stage)).toEqual([
+      'ingest',
+      'matching',
+      'fulfillment',
+      'notice',
+    ])
+    expect(chrome.stages).toHaveLength(4)
+    expect(chrome.current_stage).toBe('matching')
+    expect(chrome.substeps.filter((step) => step.parent === 'ingest').map((s) => s.key)).toEqual([
+      'received',
+      'download',
+      'land',
+      'promote',
+    ])
+    expect(chrome.substeps.some((step) => step.key === 'notice')).toBe(true)
+  })
+
+  test('deriveWorkbenchChromeFromOpsJourney conditions notice substeps on access vs drop', () => {
+    const access = deriveWorkbenchChromeFromOpsJourney({
+      intake_source: 'webform',
+      current_stage: 'fulfill',
+      request_type: 'access',
+      stages: [
+        { stage: 'received', label: 'Received', status: 'complete' },
+        { stage: 'match', label: 'Match', status: 'complete' },
+        { stage: 'fulfill', label: 'Fulfill', status: 'in_progress' },
+        { stage: 'delivery', label: 'Delivery', status: 'not_started' },
+      ],
+    })
+    expect(access.substeps.some((step) => step.key === 'delivery')).toBe(true)
+    expect(access.substeps.some((step) => step.key === 'notice')).toBe(false)
+
+    const drop = deriveWorkbenchChromeFromOpsJourney({
+      intake_source: 'drop',
+      current_stage: 'notice',
+      request_type: 'delete',
+      stages: [
+        { stage: 'notice', label: 'Notice', status: 'waiting' },
+        { stage: 'delivery', label: 'Delivery', status: 'not_started' },
+      ],
+    })
+    expect(drop.substeps.some((step) => step.key === 'notice')).toBe(true)
+    expect(drop.substeps.some((step) => step.key === 'delivery')).toBe(false)
   })
 })

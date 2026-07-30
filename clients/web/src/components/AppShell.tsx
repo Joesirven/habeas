@@ -176,15 +176,15 @@ function AppShellFrame({ children }: AppShellProps) {
 
   return (
     <div className="flex min-h-screen flex-col bg-paper">
-      <header className="sticky top-0 z-20 border-b border-line bg-white/95 backdrop-blur-sm">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-2.5 sm:px-6">
+      <header className="sticky top-0 z-40 overflow-visible border-b border-line bg-white/95 backdrop-blur-sm">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 overflow-visible px-4 py-2.5 sm:px-6">
           <div className="min-w-0">
             <p className="text-[0.65rem] font-medium uppercase tracking-[0.12em] text-mute">
               Habeas
             </p>
             <h1 className="text-base font-semibold tracking-tight text-ink">Data Privacy</h1>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="relative z-50 flex items-center gap-3 overflow-visible">
             {showPalette ? (
               <button
                 type="button"

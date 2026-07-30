@@ -4,6 +4,7 @@ import type { ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import { getDropWorkers, getHealthQueues, type DropWorkerRecord, type HealthQueueRecord } from '@/lib/api'
+import { RoleGate, isSuperAdmin } from '@/lib/auth'
 
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
@@ -66,17 +67,29 @@ function QueuesRollup({ queues }: { queues: HealthQueueRecord[] }) {
             <th>Claimed</th>
             <th>In flight</th>
             <th>Failed terminal</th>
+            <th>By status</th>
+            <th>Oldest pending (s)</th>
           </tr>
         </thead>
         <tbody>
           {queues.map((queue) => (
-            <tr key={`${queue.worker}-${queue.table}`}>
+            <tr key={`${queue.worker}-${queue.table ?? 'none'}`}>
               <td className="font-mono text-xs">{queue.worker}</td>
-              <td className="font-mono text-xs text-ink-soft">{queue.table}</td>
+              <td className="font-mono text-xs text-ink-soft">{queue.table ?? '—'}</td>
               <td className="tabular-nums">{queue.pending}</td>
               <td className="tabular-nums">{queue.claimed}</td>
               <td className="tabular-nums">{queue.in_flight}</td>
               <td className="tabular-nums">{queue.failed_terminal}</td>
+              <td className="max-w-[18rem] text-[0.65rem] text-ink-soft">
+                {queue.by_status.length === 0
+                  ? '—'
+                  : queue.by_status
+                      .map((row) => `${row.status}:${row.count}`)
+                      .join(' · ')}
+              </td>
+              <td className="tabular-nums text-ink-soft">
+                {queue.oldest_pending_age_seconds ?? '—'}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -86,6 +99,14 @@ function QueuesRollup({ queues }: { queues: HealthQueueRecord[] }) {
 }
 
 export function HealthLandingPage() {
+  return (
+    <RoleGate allow={isSuperAdmin}>
+      <HealthLandingBody />
+    </RoleGate>
+  )
+}
+
+function HealthLandingBody() {
   const workersQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-workers'],
     queryFn: getDropWorkers,
@@ -115,7 +136,8 @@ export function HealthLandingPage() {
           </h2>
         </div>
         <p className="max-w-sm border-l border-line pl-5 text-sm leading-relaxed text-ink-soft">
-          Worker readiness and queue depths across the DROP spine. Counts and ids only — no
+          Worker readiness and queue depths across the DROP spine — including reaper,
+          intake poller, and communication attempt tables. Counts and ids only — no
           personally identifiable information.
         </p>
       </header>

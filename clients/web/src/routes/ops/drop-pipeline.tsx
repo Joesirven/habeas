@@ -85,6 +85,8 @@ const WORKER_ORDER = [
   'matching',
   'data_fulfillment',
   'hash_index_refresh',
+  'reaper',
+  'intake_drop_poller',
 ] as const
 
 const PIPELINE_TAB_BAR: { key: PipelineTab; label: string }[] = [

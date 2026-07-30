@@ -73,7 +73,14 @@ async def find_ready_rows(
     *,
     limit: int = 5000,
 ) -> list[ReadyRow]:
-    """DROP rows ready for upload: notice approved, status set, Id not yet uploaded."""
+    """DROP rows ready for upload: fulfilled, notice approved, not yet uploaded.
+
+    A set ``response_status`` is not proof of fulfillment (U2 · KTD7): statuses
+    3 and 4 must have a suppression attempt that succeeded **with** a file, and
+    status 5 must have the no-op suppression completion. Without this, a status
+    written by promote or triage would upload a response the platform never
+    actually fulfilled.
+    """
     rows = await conn.fetch(
         """
         SELECT r.id::text AS request_id,
@@ -93,6 +100,17 @@ async def find_ready_rows(
                   WHERE ar.request_id = r.id
                     AND ar.action_type = $2
                     AND ar.status = 'approved'
+               )
+           AND EXISTS (
+                 SELECT 1
+                   FROM data_fulfillment_attempts dfa
+                  WHERE dfa.request_id = r.id
+                    AND dfa.step = 'suppression'
+                    AND dfa.status = 'success'
+                    AND (
+                          drr.response_status = 5
+                          OR dfa.gcs_uri IS NOT NULL
+                        )
                )
            AND NOT EXISTS (
                  SELECT 1
@@ -123,7 +141,13 @@ async def find_amend_rows(
     *,
     limit: int = 5000,
 ) -> list[ReadyRow]:
-    """Ids previously uploaded whose response_status differs from last ledger status."""
+    """Ids previously uploaded whose response_status differs from last ledger status.
+
+    Same fulfillment gate as ``find_ready_rows`` (U2 · KTD7): a post-upload
+    disposition edit must not amend-upload a new ``response_status`` to CPPA
+    without a fresh successful suppression attempt (with a file for statuses
+    3/4, or the no-op completion for status 5).
+    """
     rows = await conn.fetch(
         """
         WITH latest_upload AS (
@@ -148,6 +172,17 @@ async def find_amend_rows(
            AND drr.response_status IS NOT NULL
            AND drr.response_status <> lu.submitted_status
            AND drr.notice_review_status = 'approved'
+           AND EXISTS (
+                 SELECT 1
+                   FROM data_fulfillment_attempts dfa
+                  WHERE dfa.request_id = r.id
+                    AND dfa.step = 'suppression'
+                    AND dfa.status = 'success'
+                    AND (
+                          drr.response_status = 5
+                          OR dfa.gcs_uri IS NOT NULL
+                        )
+               )
          ORDER BY drr.source_csv_filename, r.received_at ASC
          LIMIT $1
         """,

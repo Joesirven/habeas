@@ -11,6 +11,8 @@ import { OpsRunsPage } from '@/routes/ops/runs'
 import { RunDetailPage } from '@/routes/ops/run-detail'
 import { WorkersPage, WorkersTrendsPage } from '@/routes/ops/workers'
 import { WorkersSettingsPage } from '@/routes/ops/workers/settings'
+import { ConnectionsPage } from '@/routes/ops/connections'
+import { ConnectTokenPage } from '@/routes/connect.$token'
 import { HealthConfigurationPage } from '@/routes/ops/health/configuration'
 import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
 import { HealthLandingPage } from '@/routes/ops/health/index'
@@ -571,6 +573,18 @@ const opsWorkersSettingsRoute = createRoute({
   component: WorkersSettingsPage,
 })
 
+const opsConnectionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/connections',
+  component: ConnectionsPage,
+})
+
+const connectTokenRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/connect/$token',
+  component: ConnectTokenPage,
+})
+
 const opsWorkersTrendsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/workers/trends',
@@ -675,6 +689,8 @@ const routeTree = rootRoute.addChildren([
   opsWorkersRoute,
   opsWorkersFailedRoute,
   opsWorkersSettingsRoute,
+  opsConnectionsRoute,
+  connectTokenRoute,
   opsWorkersTrendsRoute,
   opsWorkerDetailRoute,
   opsDeMonitorRoute,

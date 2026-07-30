@@ -88,6 +88,20 @@ def test_data_fulfillment_attempts_migration_exists():
     assert "migrate:down" in content
 
 
+def test_reject_drop_access_migration_exists():
+    """KTD10/R16: DB CHECK rejects intake_source=drop with request_type access/combined."""
+    migration = migrations_dir() / "20260730120001_core_reject_drop_access.sql"
+    assert migration.exists()
+    content = migration.read_text()
+    assert "requests_drop_reject_access_valid" in content
+    assert "intake_source = 'drop'" in content
+    assert "request_type IN ('access', 'combined')" in content
+    assert "NOT VALID" in content
+    assert "VALIDATE CONSTRAINT requests_drop_reject_access_valid" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+
+
 def test_request_closures_and_due_overrides_migration_exists():
     migration = (
         migrations_dir() / "20260730140001_core_request_closures_and_due_overrides.sql"
@@ -182,6 +196,40 @@ async def test_t4_2_manual_null_raw_record_id_allowed(migrated_pool):
             VALUES ('manual', NULL, 'CA')
             RETURNING id
             """
+        )
+        assert request_id is not None
+
+
+@integration
+async def test_reject_drop_access_check_rejects_access_and_combined(migrated_pool):
+    """KTD10/R16: CHECK rejects drop+access / drop+combined; drop+delete still works."""
+    async with migrated_pool.acquire() as conn:
+        raw_id = await conn.fetchval(
+            """
+            INSERT INTO drop_raw_requests (
+                drop_record_id, list_type, source_csv_filename
+            ) VALUES ('opaque-reject-1', 'Email', '20260716_broker_Email.csv')
+            RETURNING id
+            """
+        )
+        for bad_type in ("access", "combined"):
+            with pytest.raises(asyncpg.CheckViolationError):
+                await conn.execute(
+                    """
+                    INSERT INTO requests (intake_source, raw_record_id, requestor_state, request_type)
+                    VALUES ('drop', $1, 'CA', $2)
+                    """,
+                    raw_id,
+                    bad_type,
+                )
+
+        request_id = await conn.fetchval(
+            """
+            INSERT INTO requests (intake_source, raw_record_id, requestor_state, request_type)
+            VALUES ('drop', $1, 'CA', 'delete')
+            RETURNING id
+            """,
+            raw_id,
         )
         assert request_id is not None
 

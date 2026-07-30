@@ -15,7 +15,7 @@ import {
   type LegalOperator,
   type RequestRecord,
 } from '@/lib/api'
-import { canAccessLegalSurfaces, useMe } from '@/lib/auth'
+import { canAccessLegalSurfaces, canAccessOpsSurfaces, useMe } from '@/lib/auth'
 import type { LegalInboxFilter } from '@/router'
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -53,6 +53,7 @@ function operatorSublabel(operator: LegalOperator): string {
 function staticActions(
   navigate: ReturnType<typeof useNavigate>,
   showPeople: boolean,
+  showOps: boolean,
   onClose: () => void,
 ): PaletteItem[] {
   const finish = (fn: () => void) => () => {
@@ -92,19 +93,46 @@ function staticActions(
       label: 'Go to Docs',
       onSelect: finish(() => navigate({ to: '/docs' })),
     },
-    {
-      id: 'action-workers',
-      group: 'actions',
-      label: 'Go to Workers',
-      onSelect: finish(() => navigate({ to: '/ops/workers' })),
-    },
-    {
-      id: 'action-runs',
-      group: 'actions',
-      label: 'Go to Runs',
-      onSelect: finish(() => navigate({ to: '/ops/runs' })),
-    },
+  ]
 
+  if (showOps) {
+    items.push(
+      {
+        id: 'action-pipeline',
+        group: 'actions',
+        label: 'Go to Pipeline',
+        onSelect: finish(() =>
+          navigate({ to: '/ops/drop-pipeline', search: { tab: 'pipeline' } }),
+        ),
+      },
+      {
+        id: 'action-workers',
+        group: 'actions',
+        label: 'Go to Workers',
+        onSelect: finish(() => navigate({ to: '/ops/workers' })),
+      },
+      {
+        id: 'action-runs',
+        group: 'actions',
+        label: 'Go to Runs',
+        onSelect: finish(() => navigate({ to: '/ops/runs' })),
+      },
+      {
+        id: 'action-connections',
+        group: 'actions',
+        label: 'Go to Connections',
+        onSelect: finish(() => navigate({ to: '/ops/connections' })),
+      },
+      {
+        id: 'action-health',
+        group: 'actions',
+        label: 'Go to Health',
+        onSelect: finish(() => navigate({ to: '/ops/health' })),
+      },
+    )
+  }
+
+  items.push(
     {
       id: 'action-inbox-unassigned',
       group: 'actions',
@@ -161,7 +189,7 @@ function staticActions(
         document.dispatchEvent(new CustomEvent(OPEN_LEGAL_SETTINGS_EVENT))
       }),
     },
-  ]
+  )
 
   if (!showPeople) {
     return items.filter((item) => item.id !== 'action-settings')
@@ -179,6 +207,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useNavigate()
   const { role, me } = useMe()
   const showPeople = canAccessLegalSurfaces(role)
+  const showOps = canAccessOpsSurfaces(role)
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -262,7 +291,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
       }
     }
 
-    const actions = staticActions(navigate, showPeople, close).filter((item) => {
+    const actions = staticActions(navigate, showPeople, showOps, close).filter((item) => {
       if (!needle) return true
       return item.label.toLowerCase().includes(needle)
     })
@@ -276,6 +305,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     operatorsQuery.data,
     requestSearchEnabled,
     requestsQuery.data,
+    showOps,
     showPeople,
     trimmedQuery,
   ])

@@ -10,7 +10,6 @@ import {
 
 import { SkeletonLines } from '@/components/AppShell'
 import { AccessDeliveryEmailCard } from '@/components/fulfillment/AccessDeliveryEmail'
-import { RunTimeline } from '@/components/ops/RunTimeline'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -24,21 +23,28 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { isLegalAdminPersona, useMe } from '@/lib/auth'
 import {
-  COARSE_STAGE_ORDER,
   NOTICE_APPROVAL,
+  WORKBENCH_STAGE_ORDER,
   actionReasonLabel,
-  stageLabel,
-  type CoarseStageKey,
+  deriveWorkbenchChromeFromOpsJourney,
+  workbenchStageLabel,
+  workbenchStatusLabel,
+  type DerivedWorkbenchSubstep,
 } from '@/lib/legalJourneyLabels'
 import {
+  deleteRequestDocument,
+  downloadRequestDocument,
   dropResponseStatusLabel,
   getFulfillmentArtifact,
   getLatestIdentityVerification,
   getRequest,
   getRequestJourney,
+  getRequestJourneyWorkbench,
   getRequestTimeline,
   getNeedsAttention,
+  listRequestDocuments,
   patchAccessDeliveryStatus,
+  postFulfillmentKickoff,
   postIdentityVerification,
   postNoticeApprove,
   postRequestClose,
@@ -47,16 +53,19 @@ import {
   postDropMatchingResultPromote,
   postTriageBulkReject,
   postTriageSendToMatching,
+  uploadRequestDocument,
+  DROP_RESPONSE_STATUS_OPTIONS,
   type DropResponseStatusCode,
-  type JourneyStage,
+  type JourneyStageStatus,
   type MatchedPersonContact,
   type MatchingResultDetail,
   type NeedsAttentionItem,
+  type RequestDocumentRecord,
   type RequestJourneyResponse,
   type RequestRecord,
   type RequesterContact,
-  type RunTimelineStep,
   type TimelineEntry,
+  type WorkbenchVerticalRow,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
@@ -64,7 +73,6 @@ import {
   AccessHandoffPanel,
   MatchingReviewPanel,
   fetchMatchingDetailOptional,
-  journeyStageToTimelineStep,
 } from '@/components/requests/RequestTriageDialog'
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -183,54 +191,305 @@ function matchingStatusLabel(reviewStatus: string): string {
   return reviewStatus.replaceAll('_', ' ')
 }
 
-function mapTechnicalStageToCoarse(stage: string): CoarseStageKey {
-  const normalized = stage.trim().toLowerCase()
-  if (normalized === 'received' || normalized === 'triage') return 'receive'
-  if (normalized === 'match' || ['download', 'land', 'promote'].includes(normalized)) {
-    return 'matching'
+function substepDotClass(status: JourneyStageStatus): string {
+  switch (status) {
+    case 'complete':
+      return 'bg-habeas-mid'
+    case 'failed':
+      return 'bg-red-700/70'
+    case 'in_progress':
+      return 'bg-habeas-light animate-pulse'
+    case 'waiting':
+      return 'border border-habeas-mid bg-paper'
+    case 'skipped':
+      return 'bg-line-strong'
+    default:
+      return 'border border-line bg-paper'
   }
-  if (normalized === 'review') return 'data_owner_review'
-  if (normalized === 'fulfill' || normalized === 'fulfillment') return 'fulfillment'
-  if (normalized === 'notice' || normalized === 'delivery') return 'delivery_notice'
-  return 'legal_review'
 }
 
-function coarseStageRailSteps(
-  journeyStages: JourneyStage[],
-  currentStage: string,
-): RunTimelineStep[] {
-  const coarseStatuses = new Map<CoarseStageKey, RunTimelineStep['status']>()
-  for (const key of COARSE_STAGE_ORDER) {
-    coarseStatuses.set(key, 'pending')
-  }
-
-  for (const stage of journeyStages) {
-    const coarse = mapTechnicalStageToCoarse(stage.stage)
-    const status = journeyStageToTimelineStep(stage).status
-    const existing = coarseStatuses.get(coarse)
-    if (existing === 'completed' || existing === 'failed') continue
-    if (status === 'completed') coarseStatuses.set(coarse, 'completed')
-    else if (status === 'failed') coarseStatuses.set(coarse, 'failed')
-    else if (status === 'running' || status === 'waiting') coarseStatuses.set(coarse, 'running')
-  }
-
-  const currentCoarse = mapTechnicalStageToCoarse(currentStage)
-  const currentIdx = COARSE_STAGE_ORDER.indexOf(currentCoarse)
-  for (let index = 0; index < currentIdx; index += 1) {
-    const key = COARSE_STAGE_ORDER[index]!
-    if (coarseStatuses.get(key) === 'pending') coarseStatuses.set(key, 'completed')
-  }
-  if (coarseStatuses.get(currentCoarse) === 'pending') {
-    coarseStatuses.set(currentCoarse, 'running')
-  }
-
-  return COARSE_STAGE_ORDER.map((key) => ({
-    key,
-    label: stageLabel(key),
-    status: coarseStatuses.get(key) ?? 'pending',
-    timestamp: null,
-  }))
+/**
+ * Minimal vertical row for pipeline chrome — request or batch aggregate.
+ * Full WorkbenchVerticalRow satisfies this; batch helpers may pass a subset.
+ */
+export type PipelineClusterRow = {
+  vertical: string
+  label: string
+  live: boolean
+  matching_status: JourneyStageStatus
+  fulfillment_status: JourneyStageStatus | null
+  blocker: string | null
 }
+
+function stagePanelClass(status: JourneyStageStatus): string {
+  switch (status) {
+    case 'in_progress':
+    case 'waiting':
+      return 'border-amber-300 bg-amber-50'
+    case 'complete':
+      return 'border-emerald-200/80 bg-emerald-50/50'
+    case 'failed':
+      return 'border-red-300 bg-red-50'
+    default:
+      return 'border-line bg-canvas'
+  }
+}
+
+function stageLabelClass(status: JourneyStageStatus): string {
+  switch (status) {
+    case 'in_progress':
+    case 'waiting':
+      return 'font-medium text-amber-950'
+    case 'complete':
+      return 'text-emerald-800'
+    case 'failed':
+      return 'text-red-800'
+    default:
+      return 'text-mute'
+  }
+}
+
+function stageIsActive(status: JourneyStageStatus): boolean {
+  return status === 'in_progress' || status === 'waiting' || status === 'failed'
+}
+
+function JourneySubstepList({
+  items,
+  compact,
+}: {
+  items: Array<{
+    key: string
+    label: string
+    status: JourneyStageStatus
+    blocker?: string | null
+    muted?: boolean
+    statusLabel?: string
+  }>
+  compact: boolean
+}) {
+  if (items.length === 0) return null
+  return (
+    <ul className={cn('space-y-0.5', compact ? 'mt-1' : 'mt-1.5')}>
+      {items.map((item) => (
+        <li
+          key={item.key}
+          className={cn(
+            'flex items-center gap-1 truncate text-ink',
+            compact ? 'text-[0.55rem]' : 'text-[0.65rem]',
+            item.muted && 'opacity-50',
+          )}
+          title={
+            item.blocker
+              ? `${item.label}: ${workbenchStatusLabel(item.status)} — ${item.blocker}`
+              : `${item.label}: ${workbenchStatusLabel(item.status)}`
+          }
+        >
+          <span
+            className={cn('h-1.5 w-1.5 shrink-0 rounded-full', substepDotClass(item.status))}
+            aria-hidden="true"
+          />
+          <span className="min-w-0 flex-1 truncate">{item.label}</span>
+          {item.statusLabel ? (
+            <span className="shrink-0 text-mute">{item.statusLabel}</span>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/**
+ * Four-panel journey chrome (Ingest → Matching → Fulfillment → Notice).
+ * Click a stage panel to expand its substeps / vertical cluster underneath.
+ */
+export function ThinJourneyPipeline({
+  stages,
+  substeps,
+  matchingCluster,
+  fulfillmentCluster,
+  splitPosture,
+  density = 'comfortable',
+}: {
+  stages: Array<{ stage: string; label: string; status: JourneyStageStatus; blocker: string | null }>
+  substeps?: DerivedWorkbenchSubstep[]
+  matchingCluster?: PipelineClusterRow[]
+  fulfillmentCluster?: PipelineClusterRow[]
+  splitPosture?: boolean
+  density?: 'compact' | 'comfortable'
+}) {
+  const rail =
+    stages.length > 0
+      ? stages
+      : WORKBENCH_STAGE_ORDER.map((key) => ({
+          stage: key,
+          label: workbenchStageLabel(key),
+          status: 'not_started' as JourneyStageStatus,
+          blocker: null,
+        }))
+
+  const compact = density === 'compact'
+
+  const defaultExpanded =
+    rail.find((stage) => stageIsActive(stage.status))?.stage ??
+    rail.find((stage) => stage.status === 'complete')?.stage ??
+    null
+
+  const [expandedStage, setExpandedStage] = useState<string | null>(defaultExpanded)
+  const railKey = rail.map((stage) => `${stage.stage}:${stage.status}`).join('|')
+  useEffect(() => {
+    setExpandedStage(defaultExpanded)
+    // Re-sync when stage statuses change for this request (not on every parent render).
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- railKey captures status shifts
+  }, [railKey])
+
+  const contentForStage = (stageKey: string) => {
+    if (stageKey === 'matching' && matchingCluster && matchingCluster.length > 0) {
+      return matchingCluster.map((row) => ({
+        key: `m-${row.vertical}`,
+        label: row.label,
+        status: row.matching_status,
+        blocker: row.blocker,
+        muted: !row.live,
+        statusLabel: row.live ? workbenchStatusLabel(row.matching_status) : 'Soon',
+      }))
+    }
+    if (stageKey === 'fulfillment' && fulfillmentCluster && fulfillmentCluster.length > 0) {
+      return fulfillmentCluster.map((row) => {
+        const status = row.fulfillment_status ?? ('not_started' as JourneyStageStatus)
+        return {
+          key: `f-${row.vertical}`,
+          label: row.label,
+          status,
+          blocker: row.blocker,
+          muted: !row.live,
+          statusLabel: row.live ? workbenchStatusLabel(status) : 'Soon',
+        }
+      })
+    }
+    return (substeps?.filter((step) => step.parent === stageKey) ?? []).map((step) => ({
+      key: step.key,
+      label: step.label,
+      status: step.status,
+      blocker: step.blocker,
+    }))
+  }
+
+  const expanded = expandedStage != null ? rail.find((stage) => stage.stage === expandedStage) : null
+  const expandedItems = expandedStage != null ? contentForStage(expandedStage) : []
+
+  return (
+    <div
+      className={cn('space-y-1.5', compact ? 'py-0' : 'py-0.5')}
+      role="group"
+      aria-label="Request journey pipeline"
+    >
+      <div className="flex items-stretch gap-1" role="list" aria-label="High-level journey">
+        {rail.map((stage, index) => {
+          const isExpanded = expandedStage === stage.stage
+          return (
+            <div
+              key={stage.stage}
+              className="flex min-w-0 flex-1 items-stretch gap-1"
+              role="listitem"
+            >
+              <button
+                type="button"
+                className={cn(
+                  'min-w-0 flex-1 rounded-md border text-center transition-colors',
+                  compact ? 'px-1 py-1' : 'px-1.5 py-1.5',
+                  stagePanelClass(stage.status),
+                  isExpanded && 'ring-1 ring-habeas-navy/40',
+                )}
+                aria-expanded={isExpanded}
+                aria-controls={`journey-substeps-${stage.stage}`}
+                title={`${stage.label}: ${workbenchStatusLabel(stage.status)}${
+                  stage.blocker ? ` — ${stage.blocker}` : ''
+                }. Click to ${isExpanded ? 'hide' : 'show'} substeps.`}
+                onClick={() =>
+                  setExpandedStage((current) =>
+                    current === stage.stage ? null : stage.stage,
+                  )
+                }
+              >
+                <div className="mx-auto mb-1 flex justify-center">
+                  <span
+                    className={cn(
+                      'shrink-0 rounded-full ring-1 ring-inset ring-black/10',
+                      compact ? 'size-1.5' : 'size-2',
+                      substepDotClass(stage.status),
+                    )}
+                    aria-hidden="true"
+                  />
+                </div>
+                <p
+                  className={cn(
+                    'truncate leading-tight',
+                    compact ? 'text-[0.55rem]' : 'text-[0.6rem]',
+                    stageLabelClass(stage.status),
+                  )}
+                >
+                  {stage.label}
+                </p>
+              </button>
+              {index < rail.length - 1 ? (
+                <span
+                  className={cn(
+                    'flex shrink-0 items-center text-mute',
+                    compact ? 'text-[0.55rem]' : 'text-[0.6rem]',
+                  )}
+                  aria-hidden="true"
+                >
+                  →
+                </span>
+              ) : null}
+            </div>
+          )
+        })}
+      </div>
+
+      {splitPosture ? (
+        <p
+          className={cn(
+            'text-center text-mute',
+            compact ? 'text-[0.5rem]' : 'text-[0.6rem]',
+          )}
+        >
+          Matching + Fulfillment in progress
+        </p>
+      ) : null}
+
+      {expanded != null && expandedItems.length > 0 ? (
+        <div
+          id={`journey-substeps-${expanded.stage}`}
+          className={cn(
+            'rounded-md border px-2 py-1.5 text-left',
+            stagePanelClass(expanded.status),
+          )}
+        >
+          <p
+            className={cn(
+              'truncate leading-tight',
+              compact ? 'text-[0.55rem]' : 'text-[0.65rem]',
+              stageLabelClass(expanded.status),
+            )}
+          >
+            {expanded.label}
+            <span className="ml-1.5 font-normal text-mute">
+              · {workbenchStatusLabel(expanded.status)}
+            </span>
+          </p>
+          {expanded.blocker ? (
+            <p className={cn('mt-0.5 text-mute', compact ? 'text-[0.5rem]' : 'text-[0.6rem]')}>
+              {expanded.blocker}
+            </p>
+          ) : null}
+          <JourneySubstepList items={expandedItems} compact={compact} />
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 
 function isTriageContext(item: NeedsAttentionItem | undefined, journeyStage: string): boolean {
   if (!item) return journeyStage === 'triage'
@@ -347,18 +606,6 @@ function buildStageActions(opts: {
         },
       },
     )
-  }
-
-  if (!noticeContext) {
-    actions.push({
-      id: 'idv_verified',
-      label: 'Identity verified',
-      primary: actions.length === 0,
-      hint: 'Record identity verification on Fulfillment tab',
-      run: async () => {
-        await postIdentityVerification(requestId, { status: 'verified', method: 'manual' })
-      },
-    })
   }
 
   const incompleteWarning =
@@ -873,6 +1120,279 @@ function ActivityPanel({
   )
 }
 
+/** Legal kickoff (R11/KD6) + Access identity-comment gate (R13/KTD6). */
+export function FulfillmentGateControls({
+  requestId,
+  rows,
+  onInvalidate,
+}: {
+  requestId: string
+  rows: WorkbenchVerticalRow[]
+  onInvalidate: () => Promise<void>
+}) {
+  const [notes, setNotes] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  /** Optional Legal early-advance status at kickoff (R10 / KD6); null keeps disposition. */
+  const [statusOverride, setStatusOverride] = useState<DropResponseStatusCode | null>(null)
+
+  const needsIdentity = rows.some(
+    (row) => row.identity_required && row.identity_verified !== true,
+  )
+  const kickoffCandidates = rows.filter(
+    (row) => row.actionable && !row.kicked_off && row.disposition_status != null,
+  )
+
+  const identityMutation = useMutation({
+    mutationFn: () =>
+      postIdentityVerification(requestId, { status: 'verified', method: 'manual', notes }),
+    onSuccess: async () => {
+      setError(null)
+      setNotes('')
+      await onInvalidate()
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : 'Identity verification failed'),
+  })
+
+  const kickoffMutation = useMutation({
+    mutationFn: (vertical: string) =>
+      postFulfillmentKickoff(requestId, {
+        vertical,
+        ...(statusOverride != null ? { status: statusOverride } : {}),
+      }),
+    onSuccess: async () => {
+      setError(null)
+      setStatusOverride(null)
+      await onInvalidate()
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : 'Kickoff failed'),
+  })
+
+  if (!needsIdentity && kickoffCandidates.length === 0) return null
+
+  return (
+    <div className="space-y-3 rounded-lg border border-line/80 bg-panel/30 p-3">
+      <p className="taste-micro">Fulfillment gate</p>
+      {needsIdentity ? (
+        <div className="space-y-1.5">
+          <p className="text-[0.7rem] text-ink-soft">
+            Access pack/notice requires identity verification with a required comment (KTD6).
+          </p>
+          <textarea
+            className="min-h-[3rem] w-full rounded-lg border border-line bg-paper-raised px-3 py-2 text-xs text-ink"
+            value={notes}
+            onChange={(event) => setNotes(event.target.value)}
+            maxLength={2000}
+            placeholder="Verification method / comment (required)…"
+            aria-label="Identity verification comment"
+          />
+          <Button
+            type="button"
+            size="sm"
+            disabled={notes.trim().length === 0 || identityMutation.isPending}
+            onClick={() => identityMutation.mutate()}
+          >
+            {identityMutation.isPending ? 'Verifying…' : 'Mark identity verified'}
+          </Button>
+        </div>
+      ) : null}
+      {kickoffCandidates.length > 0 ? (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="taste-micro shrink-0" htmlFor="kickoff-status-override">
+              Status at kickoff
+            </label>
+            <select
+              id="kickoff-status-override"
+              className="rounded-md border border-line bg-paper-raised px-2 py-1 text-xs text-ink"
+              value={statusOverride ?? ''}
+              onChange={(event) => {
+                const raw = event.target.value
+                setStatusOverride(
+                  raw === '' ? null : (Number(raw) as DropResponseStatusCode),
+                )
+              }}
+              aria-label="Optional status override at kickoff"
+            >
+              <option value="">Keep current disposition</option>
+              {DROP_RESPONSE_STATUS_OPTIONS.map((option) => (
+                <option key={option.code} value={option.code}>
+                  {option.code} {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="taste-micro shrink-0">Kickoff</p>
+            {kickoffCandidates.map((row) => (
+              <Button
+                key={row.vertical}
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={
+                  (row.identity_required && row.identity_verified !== true) ||
+                  kickoffMutation.isPending
+                }
+                title={row.blocker ?? undefined}
+                onClick={() => kickoffMutation.mutate(row.vertical)}
+              >
+                {kickoffMutation.isPending && kickoffMutation.variables === row.vertical
+                  ? 'Starting…'
+                  : `Start fulfillment — ${row.label}`}
+              </Button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {error ? <p className="text-xs text-red-700">{error}</p> : null}
+    </div>
+  )
+}
+
+/** U7 attachments — list/upload/download/delete request documents (R20/KD12/KTD9). */
+function AttachmentsPanel({ requestId }: { requestId: string }) {
+  const queryClient = useQueryClient()
+  const { me, isAdmin, isSuperAdmin } = useMe()
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [downloadingId, setDownloadingId] = useState<string | null>(null)
+
+  const documentsQuery = useQuery({
+    queryKey: ['admin-api', 'requests', requestId, 'documents'],
+    queryFn: () => listRequestDocuments(requestId),
+  })
+
+  const uploadMutation = useMutation({
+    mutationFn: (file: File) => uploadRequestDocument(requestId, file),
+    onSuccess: async () => {
+      setError(null)
+      await queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'requests', requestId, 'documents'],
+      })
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : 'Upload failed'),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (documentId: string) => deleteRequestDocument(requestId, documentId),
+    onSuccess: async () => {
+      setError(null)
+      await queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'requests', requestId, 'documents'],
+      })
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : 'Delete failed'),
+  })
+
+  const handleDownload = async (doc: RequestDocumentRecord) => {
+    setDownloadingId(doc.id)
+    setError(null)
+    try {
+      const blob = await downloadRequestDocument(requestId, doc.id)
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = doc.filename
+      anchor.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Download failed')
+    } finally {
+      setDownloadingId(null)
+    }
+  }
+
+  const canDeleteDoc = (doc: RequestDocumentRecord) => {
+    if (isAdmin || isSuperAdmin) return true
+    const actor = me?.email?.trim().toLowerCase()
+    const owner = doc.uploaded_by?.trim().toLowerCase()
+    return Boolean(actor && owner && actor === owner)
+  }
+
+  const documents = documentsQuery.data ?? []
+
+  return (
+    <div className="space-y-3 border-t border-line pt-4 text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <p className="taste-micro">Attachments</p>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={uploadMutation.isPending}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          {uploadMutation.isPending ? 'Uploading…' : 'Upload file'}
+        </Button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          className="hidden"
+          onChange={(event) => {
+            const file = event.target.files?.[0]
+            event.target.value = ''
+            if (file) uploadMutation.mutate(file)
+          }}
+        />
+      </div>
+      {documentsQuery.isPending ? <SkeletonLines lines={2} /> : null}
+      {!documentsQuery.isPending && documents.length === 0 ? (
+        <p className="text-mute">No attachments yet.</p>
+      ) : null}
+      {documents.length > 0 ? (
+        <ul className="space-y-1.5">
+          {documents.map((doc) => (
+            <li
+              key={doc.id}
+              className="flex items-center justify-between gap-2 rounded-lg border border-line/80 bg-paper/70 px-3 py-2"
+            >
+              <div className="min-w-0">
+                <p className="truncate text-ink" title={doc.filename}>
+                  {doc.filename}
+                </p>
+                <p className="text-[0.65rem] text-mute">
+                  {doc.uploaded_by} · {formatTimestamp(doc.uploaded_at)}
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={downloadingId === doc.id}
+                  onClick={() => handleDownload(doc)}
+                >
+                  {downloadingId === doc.id ? 'Downloading…' : 'Download'}
+                </Button>
+                {canDeleteDoc(doc) ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={deleteMutation.isPending}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          `Delete attachment “${doc.filename}”? This cannot be undone.`,
+                        )
+                      ) {
+                        deleteMutation.mutate(doc.id)
+                      }
+                    }}
+                  >
+                    Delete
+                  </Button>
+                ) : null}
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {error ? <p className="text-red-700">{error}</p> : null}
+    </div>
+  )
+}
+
 export function RequestDetailBody({
   requestId,
   variant = 'overlay',
@@ -908,6 +1428,24 @@ export function RequestDetailBody({
     queryFn: () => getRequestJourney(requestId),
     refetchInterval: 15_000,
     placeholderData: (previous) => previous,
+  })
+
+  const workbenchQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', requestId, 'journey-workbench'],
+    queryFn: async () => {
+      try {
+        return await getRequestJourneyWorkbench(requestId)
+      } catch (error) {
+        // Deployed admin-api may not have U4 yet — fall back to ops journey derivation.
+        if (error instanceof Error && /Admin API 404/.test(error.message)) {
+          return null
+        }
+        throw error
+      }
+    },
+    refetchInterval: 15_000,
+    placeholderData: (previous) => previous,
+    retry: false,
   })
 
   const matchingQuery = useQuery({
@@ -990,9 +1528,19 @@ export function RequestDetailBody({
   const attentionItem = attentionQuery.data
   const intakeSource = journey?.intake_source ?? requestQuery.data?.intake_source ?? 'manual'
   const displayLabel = requestQuery.data?.display_label
-  const coarseSteps = journey
-    ? coarseStageRailSteps(journey.stages, journey.current_stage)
-    : []
+  const requestType = requestQuery.data?.request_type ?? null
+  const derivedChrome = journey
+    ? deriveWorkbenchChromeFromOpsJourney({
+        stages: journey.stages,
+        current_stage: journey.current_stage,
+        intake_source: intakeSource,
+        request_type: requestType,
+      })
+    : null
+  const workbench = workbenchQuery.data
+  const railStages = workbench?.stages ?? derivedChrome?.stages ?? []
+  const railSubsteps = workbench ? undefined : derivedChrome?.substeps
+  const splitPosture = workbench?.split_posture ?? derivedChrome?.split_posture ?? false
 
   const assignmentToLegal = isAssignmentToLegalContext(attentionItem)
   const canMatchingDisposition =
@@ -1051,41 +1599,45 @@ export function RequestDetailBody({
     )
   }
 
-  const currentCoarse =
-    coarseSteps.find((step) => step.status === 'running' || step.status === 'waiting') ??
-    coarseSteps.find((step) => step.status === 'failed') ??
-    coarseSteps[coarseSteps.length - 1]
+  const currentRail =
+    railStages.find((step) => step.status === 'in_progress' || step.status === 'waiting') ??
+    railStages.find((step) => step.status === 'failed') ??
+    railStages[railStages.length - 1]
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <RequestStageActionBar actions={stageActions} onInvalidate={invalidateAll} />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        {/* Compact stage strip — full rail only on the dedicated page */}
-        {variant === 'overlay' ? (
-          <div className="shrink-0 border-b border-line px-4 py-2">
-            <p className="text-[0.7rem] text-mute">
-              Stage{' '}
-              <span className="font-medium text-ink">
-                {currentCoarse?.label ?? stageLabel(journey.current_stage)}
-              </span>
-              {coarseSteps.length > 0 ? (
-                <span className="text-mute">
-                  {' '}
-                  · {coarseSteps.filter((step) => step.status === 'completed').length}/
-                  {coarseSteps.length} complete
-                </span>
-              ) : null}
-            </p>
-          </div>
-        ) : (
-          <div className="shrink-0 overflow-x-auto border-b border-line px-4 py-3">
-            <RunTimeline
-              steps={coarseSteps}
-              orientation="horizontal"
-              emptyMessage="No stage rail."
+        {/* Four-panel journey chrome — clusters/substeps live inside ThinJourneyPipeline */}
+        <div
+          className={cn(
+            'shrink-0 space-y-2 overflow-x-auto border-b border-line px-4',
+            variant === 'overlay' ? 'py-2' : 'py-3',
+          )}
+        >
+          {workbenchQuery.isPending && !workbench && !derivedChrome ? (
+            <p className="text-[0.7rem] text-mute">Loading stage rail…</p>
+          ) : railStages.length > 0 ? (
+            <ThinJourneyPipeline
+              stages={railStages}
+              substeps={
+                workbench
+                  ? derivedChrome?.substeps.filter(
+                      (step) => step.parent === 'ingest' || step.parent === 'notice',
+                    )
+                  : railSubsteps
+              }
+              matchingCluster={workbench?.matching_cluster}
+              fulfillmentCluster={workbench?.fulfillment_cluster}
+              splitPosture={splitPosture}
+              density={variant === 'overlay' ? 'compact' : 'comfortable'}
             />
-          </div>
-        )}
+          ) : (
+            <p className="text-[0.7rem] text-mute">
+              {currentRail?.label ? `Stage: ${currentRail.label}` : 'No stage rail.'}
+            </p>
+          )}
+        </div>
 
         <Tabs
           value={tab}
@@ -1123,9 +1675,17 @@ export function RequestDetailBody({
                 dropStatusIsRecommended={dropStatusIsRecommended}
                 dropPreMatch={dropPreMatch}
               />
+              <AttachmentsPanel requestId={requestId} />
             </TabsContent>
             <TabsContent value="fulfillment" className="mt-0 px-4 py-4">
               <div className="space-y-4">
+                {workbench && (isSuperAdmin || isAdmin || legalAdmin) ? (
+                  <FulfillmentGateControls
+                    requestId={requestId}
+                    rows={workbench.fulfillment_cluster}
+                    onInvalidate={invalidateAll}
+                  />
+                ) : null}
                 <AccessHandoffPanel
                   requestId={requestId}
                   artifact={artifactQuery.data}

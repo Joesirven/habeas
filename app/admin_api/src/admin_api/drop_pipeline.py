@@ -37,6 +37,7 @@ from admin_api.approvals import (
 )
 from admin_api.cloud_run_auth import auth_headers_for
 from admin_api.roles import RolePrincipal, require_roles, settings as role_settings
+from admin_api.vertical_dispositions import normalize_dwids
 from habeas_privacy_core.auth import (
     ROLE_ADMIN,
     ROLE_DATA_OWNER,
@@ -77,6 +78,7 @@ health_router = APIRouter(prefix="/ops/health", tags=["ops-health"])
 
 # Attempt tables keyed by WORKER_KEYS name for queue depth aggregation (U23).
 # Workers without a dedicated attempt table report empty queue depths.
+# Extra non-Cloud-Run keys (e.g. communication) appear on /ops/health/queues only.
 _WORKER_QUEUE_TABLES: dict[str, str | None] = {
     "drop_connector": "drop_connector_attempts",
     "drop_ingestor": "drop_ingest_attempts",
@@ -84,9 +86,23 @@ _WORKER_QUEUE_TABLES: dict[str, str | None] = {
     "matching": "matching_attempts",
     "data_fulfillment": "data_fulfillment_attempts",
     "hash_index_refresh": "hash_index_refresh_attempts",
+    "reaper": None,
+    "intake_drop_poller": None,
+    "communication": "communication_attempts",
 }
 
-_TERMINAL_FAIL_STATUSES = ("submit_error", "outcome_error", "timeout", "abandoned")
+# Timestamp used for oldest-pending age (attempt tables use attempted_at).
+_QUEUE_AGE_COLUMNS: dict[str, str] = {
+    "communication_attempts": "contacted_at",
+}
+
+_TERMINAL_FAIL_STATUSES = (
+    "submit_error",
+    "outcome_error",
+    "timeout",
+    "abandoned",
+    "failed",
+)
 _OPEN_ATTEMPT_STATUSES = ("pending", "claimed", "in_flight")
 
 # Approaching-SLA MVP (R8 / AE2): age-policy thresholds on open queue rows.
@@ -112,6 +128,8 @@ class DropPipelineSettings(CoreSettings):
     matching_url: str = "http://127.0.0.1:8084"
     data_fulfillment_url: str = "http://127.0.0.1:8085"
     hash_index_refresh_url: str = "http://127.0.0.1:8086"
+    reaper_url: str = "http://127.0.0.1:8087"
+    intake_drop_poller_url: str = "http://127.0.0.1:8088"
     # When true, mutating /ops/drop/* requires X-Goog-Authenticated-User-Email.
     # Local default false; enable with IAP in front of admin-api (see infra/README).
     require_iap_identity: bool = False
@@ -168,6 +186,8 @@ WORKER_KEYS = (
     ("matching", "matching_url"),
     ("data_fulfillment", "data_fulfillment_url"),
     ("hash_index_refresh", "hash_index_refresh_url"),
+    ("reaper", "reaper_url"),
+    ("intake_drop_poller", "intake_drop_poller_url"),
 )
 
 
@@ -224,12 +244,15 @@ class MatchingReviewDecisionBody(BaseModel):
     """Promote (approve) or decline (reject) a single matching.review gate.
 
     Optional ``response_status`` (CPPA DROP codes 3/4/5) sets the DROP result
-    when promoting — Inbox fulfill confirms the status result.
+    when promoting — Inbox fulfill confirms the status result. ``dwids`` is the
+    reviewer's selection for status 3/4; omit it to accept the matching-result
+    default (R8).
     """
 
     decided_by: str | None = None
     decision_reason: str | None = None
     response_status: int | None = Field(default=None, ge=3, le=5)
+    dwids: list[str] | None = None
 
 
 class AssignBody(BaseModel):
@@ -2112,6 +2135,58 @@ async def _resolve_matched_dwids(
     return dwids, normalized_state
 
 
+async def _dwids_for_promote(
+    conn: Any,
+    *,
+    request_id: str,
+    response_status: int | None,
+    client_dwids: list[str] | None,
+) -> list[str] | None:
+    """Reviewer dwid selection for a promote, defaulting to the matched set (R8).
+
+    Status 5 (Not found) carries no dwids. Status 3/4 without a client selection
+    falls back to the matching result — single match resolves from the stored
+    consumer id, multi match re-looks up the DROP hash. Resolution is
+    best-effort: promote must not fail because the hash mart is unreachable, so
+    an unresolved selection leaves the disposition for the reviewer to set.
+    """
+    selected = normalize_dwids(client_dwids)
+    if selected or response_status not in (3, 4):
+        return selected or None
+
+    match_count = await conn.fetchval(
+        """
+        SELECT match_count
+          FROM matching_results
+         WHERE request_id = $1::uuid
+         ORDER BY recorded_at DESC
+         LIMIT 1
+        """,
+        request_id,
+    )
+    if match_count is None:
+        return None
+    try:
+        dwids, _state = await _resolve_matched_dwids(
+            conn,
+            request_id=request_id,
+            match_count=int(match_count),
+            requestor_state=None,
+        )
+    except Exception as exc:
+        logger.warning(
+            "promote_dwid_resolution_failed",
+            extra={
+                "event": "promote_dwid_resolution_failed",
+                "request_id": request_id,
+                "match_count": int(match_count),
+                "error": redact_error_text(str(exc)),
+            },
+        )
+        return None
+    return normalize_dwids(dwids) or None
+
+
 async def enrich_matching_result_contacts(
     conn: Any,
     *,
@@ -2560,7 +2635,8 @@ async def drop_matching_result_promote(
     """Promote one request to fulfillment (approve matching.review).
 
     When ``response_status`` is set (3 Deleted / 4 Opted out / 5 Not found),
-    also write the DROP status result on ``drop_raw_requests``.
+    also record the Data vertical disposition (source of record) and write the
+    DROP status result on ``drop_raw_requests``.
     """
     _require_database()
     if body.response_status is not None and body.response_status not in (3, 4, 5):
@@ -2573,6 +2649,12 @@ async def drop_matching_result_promote(
     async with pool.acquire() as conn:
         try:
             actor_role = _role_for_actor_email(decided_by)
+            dwids = await _dwids_for_promote(
+                conn,
+                request_id=request_id,
+                response_status=body.response_status,
+                client_dwids=body.dwids,
+            )
             legal_team_emails = frozenset(await fetch_active_legal_team_emails(conn))
             actor_is_legal = is_legal_persona_for_promote_gate(
                 actor_role=actor_role,
@@ -2592,6 +2674,8 @@ async def drop_matching_result_promote(
                 decided_by=decided_by,
                 decision_reason=body.decision_reason,
                 response_status=body.response_status,
+                dwids=dwids,
+                actor_role=actor_role,
             )
             from admin_api.legal_sla import SLA_STAGE_FULFILLMENT, apply_request_due_at_for_stage
 
@@ -2862,7 +2946,12 @@ async def drop_workflow_delivery_status(
             )
         except ValueError as exc:
             detail = str(exc)
-            code = 404 if detail == "request not found" else 422
+            if detail == "request not found":
+                code = 404
+            elif "identity" in detail or "KD13" in detail:
+                code = 409
+            else:
+                code = 422
             raise HTTPException(status_code=code, detail=detail) from exc
     return result
 
@@ -2963,9 +3052,12 @@ async def collect_queue_depths(conn: Any) -> list[dict[str, Any]]:
             {"status": r["status"], "count": int(r["count"])} for r in status_rows
         ]
         counts = {item["status"]: item["count"] for item in by_status}
+        age_column = _QUEUE_AGE_COLUMNS.get(table, "attempted_at")
+        if age_column not in {"attempted_at", "contacted_at", "created_at"}:
+            age_column = "attempted_at"
         oldest = await conn.fetchval(
             f"""
-            SELECT EXTRACT(EPOCH FROM (NOW() - MIN(attempted_at)))::int
+            SELECT EXTRACT(EPOCH FROM (NOW() - MIN({age_column})))::int
               FROM {table}
              WHERE status = 'pending'
             """
@@ -2995,7 +3087,7 @@ async def collect_queue_depths(conn: Any) -> list[dict[str, Any]]:
 
 
 @router.get("/workers")
-async def drop_workers():
+async def drop_workers(_principal: SuperAdminPrincipal):
     """Worker readiness + queue depths (admin_api aggregate; browser never calls workers)."""
     _require_database()
     health = await collect_worker_health()
@@ -3039,7 +3131,7 @@ async def drop_workers():
 
 
 @health_router.get("/queues")
-async def health_queues():
+async def health_queues(_principal: SuperAdminPrincipal):
     """Global queue rollup across DROP attempt tables."""
     _require_database()
     pool = get_pool()
@@ -3062,7 +3154,7 @@ _RETRY_CONFIG_TABLES = (
 
 
 @health_router.get("/retry-config")
-async def get_retry_config():
+async def get_retry_config(_principal: SuperAdminPrincipal):
     """Current per-table max_attempts (defaults + ops_retry_config overrides)."""
     from habeas_privacy_core.queue.reap import ReapedTableConfig
 
@@ -3112,6 +3204,7 @@ async def get_retry_config():
 @health_router.patch("/retry-config")
 async def patch_retry_config(
     body: RetryConfigPatchBody,
+    _principal: SuperAdminPrincipal,
     actor: DropMutationActor,
 ):
     """Persist max_attempts override (≥4). Matching must stay ≥4 (A6)."""
@@ -3145,7 +3238,7 @@ async def patch_retry_config(
 
 
 @router.get("/stats/global")
-async def drop_stats_global():
+async def drop_stats_global(_principal: SuperAdminPrincipal):
     """Home dashboard DROP summary — ids/counts only."""
     _require_database()
     pool = get_pool()

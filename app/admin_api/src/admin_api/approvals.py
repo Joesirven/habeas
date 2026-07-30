@@ -8,6 +8,13 @@ from uuid import UUID
 
 import asyncpg
 
+from admin_api.vertical_dispositions import (
+    VERTICAL_DATA,
+    default_dwids_for_request,
+    is_identity_cleared,
+    is_kd13_satisfied,
+    upsert_vertical_disposition,
+)
 from habeas_privacy_core.db.requests import enqueue_matching
 from habeas_privacy_core.workflow.approval import (
     ASSIGNMENT_TARGETS,
@@ -330,6 +337,85 @@ async def _set_drop_response_status(
     return result.endswith("1") if isinstance(result, str) else bool(result)
 
 
+async def _record_data_vertical_disposition(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    response_status: int,
+    decided_by: str,
+    dwids: list[str] | None,
+    actor_role: str | None,
+) -> dict[str, Any]:
+    """Persist the promote decision as the Data vertical disposition (KTD3).
+
+    Status 3/4 default to the matching-result dwids when the caller omits a
+    selection. When no dwid is resolvable the review still promotes but the
+    disposition is left unrecorded (``recorded=false``) and callers must not
+    write ``response_status`` (KTD3 SoR sync). Fulfillment readiness reads the
+    disposition, so the vertical stays un-startable until a reviewer picks a
+    dwid. Returns counts only; dwids never enter logged payloads.
+    """
+    selected = list(dwids or [])
+    if not selected and response_status in (3, 4):
+        selected = await default_dwids_for_request(conn, request_id=request_id)
+    if not selected and response_status in (3, 4):
+        return {
+            "vertical": VERTICAL_DATA,
+            "status": response_status,
+            "recorded": False,
+            "reason": "no dwid resolved for status 3/4 — reviewer must select one",
+        }
+    disposition = await upsert_vertical_disposition(
+        conn,
+        request_id=request_id,
+        vertical=VERTICAL_DATA,
+        status=response_status,
+        dwids=selected,
+        decided_by=decided_by,
+        actor_role=actor_role,
+    )
+    return {
+        "vertical": disposition.vertical,
+        "status": disposition.status,
+        "recorded": True,
+        "selected_dwid_count": disposition.selected_dwid_count,
+        "actor_role": disposition.actor_role,
+    }
+
+
+async def _apply_promote_disposition_and_status(
+    conn: asyncpg.Connection,
+    *,
+    request_id: str,
+    response_status: int,
+    decided_by: str,
+    dwids: list[str] | None,
+    actor_role: str | None,
+) -> dict[str, Any]:
+    """Record disposition first; mirror DROP status only when recorded (KTD3)."""
+    disposition = await _record_data_vertical_disposition(
+        conn,
+        request_id=request_id,
+        response_status=response_status,
+        decided_by=decided_by,
+        dwids=dwids,
+        actor_role=actor_role,
+    )
+    set_ok = False
+    if disposition.get("recorded"):
+        set_ok = await _set_drop_response_status(
+            conn,
+            request_id=request_id,
+            response_status=response_status,
+            allow_codes=_MATCHING_PROMOTE_STATUS_CODES,
+        )
+    return {
+        "response_status": response_status,
+        "response_status_set": set_ok,
+        "disposition": disposition,
+    }
+
+
 async def promote_matching_review_for_request(
     conn: asyncpg.Connection,
     *,
@@ -337,12 +423,16 @@ async def promote_matching_review_for_request(
     decided_by: str,
     decision_reason: str | None = None,
     response_status: int | None = None,
+    dwids: list[str] | None = None,
+    actor_role: str | None = None,
 ) -> dict[str, Any]:
     """Ensure a pending matching.review gate, then approve (promote to fulfillment).
 
     Optional ``response_status`` (3/4/5) writes the CA DROP status result after
     approval — used by Inbox fulfill; omit to leave status unset for the
-    fulfillment dispatcher path.
+    fulfillment dispatcher path. When a status is given, the Data vertical
+    disposition is upserted as the durable source of record (KTD3) and
+    ``drop_raw_requests.response_status`` is kept in sync.
     """
     await ensure_pending_matching_review(conn, request_id=request_id)
     pending_id = await conn.fetchval(
@@ -366,14 +456,16 @@ async def promote_matching_review_for_request(
                 "approval_id": None,
             }
             if response_status is not None:
-                set_ok = await _set_drop_response_status(
-                    conn,
-                    request_id=request_id,
-                    response_status=response_status,
-                    allow_codes=_MATCHING_PROMOTE_STATUS_CODES,
+                payload.update(
+                    await _apply_promote_disposition_and_status(
+                        conn,
+                        request_id=request_id,
+                        response_status=response_status,
+                        decided_by=decided_by,
+                        dwids=dwids,
+                        actor_role=actor_role,
+                    )
                 )
-                payload["response_status"] = response_status
-                payload["response_status_set"] = set_ok
             return payload
         raise LookupError("no matching.review gate available to promote")
 
@@ -401,14 +493,16 @@ async def promote_matching_review_for_request(
         "approval_id": int(decided["id"]),
     }
     if response_status is not None:
-        set_ok = await _set_drop_response_status(
-            conn,
-            request_id=request_id,
-            response_status=response_status,
-            allow_codes=_MATCHING_PROMOTE_STATUS_CODES,
+        payload.update(
+            await _apply_promote_disposition_and_status(
+                conn,
+                request_id=request_id,
+                response_status=response_status,
+                decided_by=decided_by,
+                dwids=dwids,
+                actor_role=actor_role,
+            )
         )
-        payload["response_status"] = response_status
-        payload["response_status_set"] = set_ok
     return payload
 
 
@@ -771,6 +865,7 @@ async def approve_legal_notice_review(
 _ACCESS_DELIVERY_STATUSES = frozenset(
     {"pending", "recorded", "sent", "failed", "delivered", "recalled"}
 )
+_ACCESS_DELIVERY_CONFIRM = frozenset({"delivered", "failed", "recalled"})
 
 
 async def record_access_delivery_status(
@@ -791,6 +886,12 @@ async def record_access_delivery_status(
     )
     if exists is None:
         raise ValueError("request not found")
+    # Confirm statuses require identity + KD13 (same bar as Access render).
+    if status_norm in _ACCESS_DELIVERY_CONFIRM:
+        if not await is_identity_cleared(conn, request_id):
+            raise ValueError("identity not verified with notes (KTD6)")
+        if not await is_kd13_satisfied(conn, request_id):
+            raise ValueError("access packs not ready for all live verticals (KD13)")
     await conn.execute(
         """
         INSERT INTO communication_attempts (

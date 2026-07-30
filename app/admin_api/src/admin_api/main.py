@@ -20,8 +20,10 @@ from admin_api.approvals import (
     is_matching_review_approved,
     list_approvals,
 )
+from admin_api.drop_pipeline import MatchingReviewPrincipal
 from admin_api.drop_pipeline import health_router as ops_health_router
 from admin_api.drop_pipeline import router as drop_pipeline_router
+from admin_api.fulfillment_kickoff import router as fulfillment_kickoff_router
 from admin_api.fulfillment_ops import router as fulfillment_ops_router
 from admin_api.legal_portfolio import router as legal_portfolio_router
 from admin_api.legal_operators import router as legal_operators_router
@@ -31,6 +33,7 @@ from admin_api.request_correspondence import router as request_correspondence_ro
 from admin_api.runs import router as runs_router
 from admin_api.request_journey import router as request_journey_router
 from admin_api.roles import CurrentRolePrincipal, MeResponse, RolePrincipal, require_roles
+from admin_api.vertical_dispositions import router as vertical_dispositions_router
 from admin_api.worker_schedules import router as worker_schedules_router
 from habeas_privacy_core.audit import AuditMiddleware
 from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_DATA_OWNER, ROLE_LEGAL, ROLE_SUPER_ADMIN
@@ -152,6 +155,7 @@ app.add_middleware(AuditMiddleware)
 app.include_router(drop_pipeline_router)
 app.include_router(ops_health_router)
 app.include_router(fulfillment_ops_router)
+app.include_router(fulfillment_kickoff_router)
 app.include_router(legal_portfolio_router)
 app.include_router(legal_sla_router)
 app.include_router(legal_team_router)
@@ -159,6 +163,7 @@ app.include_router(legal_operators_router)
 app.include_router(request_correspondence_router)
 app.include_router(runs_router)
 app.include_router(request_journey_router)
+app.include_router(vertical_dispositions_router)
 app.include_router(worker_schedules_router)
 
 
@@ -456,6 +461,7 @@ async def requests_agent_batch(
 
 @app.get("/approvals", response_model=list[ApprovalRecord])
 async def approvals_list(
+    _principal: MatchingReviewPrincipal,
     action_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
@@ -474,7 +480,10 @@ async def approvals_list(
 
 
 @app.post("/approvals/matching-review", response_model=ApprovalRecord, status_code=201)
-async def approvals_create_matching_review(body: MatchingReviewCreateBody):
+async def approvals_create_matching_review(
+    body: MatchingReviewCreateBody,
+    _principal: MatchingReviewPrincipal,
+):
     """Create a pending matching.review approval gate for a request."""
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
@@ -502,7 +511,11 @@ async def approvals_create_matching_review(body: MatchingReviewCreateBody):
 
 
 @app.post("/approvals/{approval_id}/approve", response_model=ApprovalRecord)
-async def approvals_approve(approval_id: int, body: ApprovalDecisionBody):
+async def approvals_approve(
+    approval_id: int,
+    body: ApprovalDecisionBody,
+    _principal: MatchingReviewPrincipal,
+):
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
     pool = get_pool()
@@ -520,7 +533,11 @@ async def approvals_approve(approval_id: int, body: ApprovalDecisionBody):
 
 
 @app.post("/approvals/{approval_id}/reject", response_model=ApprovalRecord)
-async def approvals_reject(approval_id: int, body: ApprovalDecisionBody):
+async def approvals_reject(
+    approval_id: int,
+    body: ApprovalDecisionBody,
+    _principal: MatchingReviewPrincipal,
+):
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
     pool = get_pool()

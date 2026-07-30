@@ -54,6 +54,21 @@ def test_redact_payload_scrubs_known_patterns():
     assert "[REDACTED]" in redacted["ssn"]
 
 
+def test_redact_payload_scrubs_dwids_and_consumer_id():
+    payload = {
+        "dwids": ["1001", "1002"],
+        "consumer_id": 5551212,
+        "dispositions": [
+            {"vertical": "credit", "selected_dwids": ["2001", "2002"]},
+        ],
+    }
+    redacted = redact_payload(payload)
+    assert redacted["dwids"] == ["[REDACTED]", "[REDACTED]"]
+    assert redacted["consumer_id"] == "[REDACTED]"
+    assert redacted["dispositions"][0]["selected_dwids"] == ["[REDACTED]", "[REDACTED]"]
+    assert redacted["dispositions"][0]["vertical"] == "credit"
+
+
 def test_redact_error_text_strips_hashes_dwids_and_pii():
     raw_kv = "failed near dwid=12345 hash=YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY="
     cleaned_kv = redact_error_text(raw_kv)

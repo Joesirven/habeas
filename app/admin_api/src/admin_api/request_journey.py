@@ -6,15 +6,6 @@ import json
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
-from pydantic_settings import SettingsConfigDict
-
-from admin_api.approvals import (
-    match_type_for_count,
-    recommended_response_status_for_match_count,
-)
-from admin_api.roles import RolePrincipal, require_roles
 from habeas_privacy_core.audit.writer import write_audit
 from habeas_privacy_core.auth import (
     ROLE_ADMIN,
@@ -26,7 +17,12 @@ from habeas_privacy_core.auth import (
 )
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
+from habeas_privacy_core.queue.constants import (
+    DATA_FULFILLMENT_STEP_REPRODUCTION,
+    DATA_FULFILLMENT_STEP_SUPPRESSION,
+)
 from habeas_privacy_core.workflow.approval import (
+    FULFILLMENT_KICKOFF_ACTION,
     MATCHING_REVIEW_ACTION,
     NOTICE_REVIEW_ACTION,
     REQUEST_CLOSE_COMMAND,
@@ -35,6 +31,24 @@ from habeas_privacy_core.workflow.approval import (
     get_current_assignment,
     is_matching_review_approved,
     is_notice_review_approved,
+    is_vertical_kickoff_approved,
+    latest_vertical_kickoff_decided_at,
+)
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
+from pydantic_settings import SettingsConfigDict
+
+from admin_api.approvals import (
+    match_type_for_count,
+    recommended_response_status_for_match_count,
+)
+from admin_api.roles import RolePrincipal, require_roles
+from admin_api.vertical_dispositions import (
+    LIVE_VERTICALS,
+    VERTICAL_LABELS,
+    access_packs_ready_for_notice,
+    all_live_verticals_disposed,
+    list_vertical_dispositions,
 )
 
 NeedsAttentionItemKind = Literal[
@@ -89,6 +103,7 @@ STAGE_LABELS: dict[str, str] = {
 _TIMELINE_ACTION_LABELS: dict[str, str] = {
     NOTICE_REVIEW_ACTION: "Fulfillment notice",
     MATCHING_REVIEW_ACTION: "Matching review",
+    FULFILLMENT_KICKOFF_ACTION: "Fulfillment kickoff",
     "access.delivery": "Access delivery",
     WORKFLOW_ASSIGNMENT_ACTION: "Assignment",
 }
@@ -233,7 +248,11 @@ class RequestCommentBody(BaseModel):
 
 
 class RequestCloseBody(BaseModel):
-    """Unrestricted close (KD40) — optional note persists to correspondence."""
+    """Unrestricted close (KD40) — optional note persists to correspondence.
+
+    ``drop_response_status`` is accepted for API compatibility but ignored: DROP
+    status is written only via vertical disposition upsert (U1 / KTD3).
+    """
 
     note: str | None = Field(default=None, max_length=2000)
     drop_response_status: int | None = Field(default=None, ge=3, le=5)
@@ -267,6 +286,20 @@ def _iso(value: Any) -> str | None:
     if isinstance(value, str):
         return value
     return value.isoformat()
+
+
+async def _needs_attention_assignment(
+    conn: Any, request_id: str
+) -> NeedsAttentionAssignment | None:
+    """Current pending workflow.assignment for inbox detail assignee chrome."""
+    assignment_raw = await get_current_assignment(conn, request_id)
+    if assignment_raw is None:
+        return None
+    return NeedsAttentionAssignment(
+        target_role=assignment_raw.get("target_role"),
+        kind=assignment_raw.get("kind"),
+        assignee_identity=assignment_raw.get("assignee_identity"),
+    )
 
 
 def _attempt_stage_status(raw_status: str | None) -> StageStatus:
@@ -676,18 +709,35 @@ async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourney
     fulfill_attempted_at: str | None = None
     fulfill_completed_at: str | None = None
 
+    # R11 / KTD4: matching.review alone never starts fulfillment — Legal kickoff
+    # on a live vertical is required before the fulfill stage reads in_progress.
+    any_vertical_kicked_off = False
+    if review_approved:
+        for vertical in LIVE_VERTICALS:
+            if await is_vertical_kickoff_approved(
+                conn, request_id=request_id, vertical=vertical
+            ):
+                any_vertical_kicked_off = True
+                break
+
     if intake_source == "drop":
         if row["response_status"] is not None:
             fulfill_status = "complete"
             fulfill_completed_at = _iso(row["received_at"])
-        elif review_approved:
+        elif review_approved and any_vertical_kicked_off:
             fulfill_status = "in_progress"
-            fulfill_blocker = "awaiting fulfillment response"
+            fulfill_blocker = "awaiting fulfillment worker"
+        elif review_approved:
+            fulfill_status = "waiting"
+            fulfill_blocker = "Awaiting Legal kickoff"
         elif has_match_result:
             fulfill_status = "not_started"
-    elif review_approved:
+    elif review_approved and any_vertical_kicked_off:
         fulfill_status = "in_progress"
-        fulfill_blocker = "awaiting fulfillment"
+        fulfill_blocker = "awaiting fulfillment worker"
+    elif review_approved:
+        fulfill_status = "waiting"
+        fulfill_blocker = "Awaiting Legal kickoff"
 
     stages.append(
         JourneyStage(
@@ -778,6 +828,792 @@ async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourney
         bulk_process_id=bulk_process_id,
         response_status=int(response_status) if response_status is not None else None,
     )
+
+
+# --- Journey workbench (U4 · KTD2 / KTD3) ------------------------------------
+#
+# Detail chrome for legal/admin: a four-stage high-level rail (Ingest →
+# Matching → Fulfillment → Notice) with Matching and Fulfillment rendered as
+# separate per-vertical clusters. This is additive — the ops `/journey`
+# 6/8-stage fine rail above stays intact for the pipeline console; the
+# workbench is a *new* projection consumed by legal/admin detail UI only.
+
+WorkbenchStageKey = Literal["ingest", "matching", "fulfillment", "notice"]
+
+WORKBENCH_STAGES: tuple[WorkbenchStageKey, ...] = (
+    "ingest",
+    "matching",
+    "fulfillment",
+    "notice",
+)
+
+WORKBENCH_STAGE_LABELS: dict[str, str] = {
+    "ingest": "Ingest",
+    "matching": "Matching",
+    "fulfillment": "Fulfillment",
+    "notice": "Notice",
+}
+
+# Fulfillment attempt steps a vertical runs, keyed by request_type (KD8/KD9).
+# ``access`` and ``combined`` both need the reproduction (access pack) step;
+# ``combined`` additionally runs the delete-leg suppression step. Delete and
+# opt_out (and anything else, defensively) run suppression only.
+_ACCESS_REQUEST_TYPES = frozenset({"access"})
+_COMBINED_REQUEST_TYPE = "combined"
+
+# Rollup precedence, most attention-needed first. ``skipped`` normalizes to
+# ``complete`` before this list is consulted (fine-stage-only concept).
+_STATUS_ROLLUP_ORDER: tuple[StageStatus, ...] = (
+    "failed",
+    "waiting",
+    "in_progress",
+    "not_started",
+)
+
+
+def _rollup_status(statuses: list[StageStatus]) -> StageStatus:
+    """Worst-first rollup across member statuses (batch aggregate + stage rollup).
+
+    ``skipped`` is folded into ``complete`` — it only carries meaning at the
+    ops fine-stage level. Empty input defaults to ``not_started``.
+    """
+    if not statuses:
+        return "not_started"
+    normalized = {"complete" if s == "skipped" else s for s in statuses}
+    for candidate in _STATUS_ROLLUP_ORDER:
+        if candidate in normalized:
+            return candidate
+    return "complete"
+
+
+def _fulfillment_steps_for_request_type(request_type: str) -> tuple[str, ...]:
+    if request_type in _ACCESS_REQUEST_TYPES:
+        return (DATA_FULFILLMENT_STEP_REPRODUCTION,)
+    if request_type == _COMBINED_REQUEST_TYPE:
+        return (DATA_FULFILLMENT_STEP_SUPPRESSION, DATA_FULFILLMENT_STEP_REPRODUCTION)
+    return (DATA_FULFILLMENT_STEP_SUPPRESSION,)
+
+
+class WorkbenchStage(BaseModel):
+    stage: WorkbenchStageKey
+    label: str
+    status: StageStatus
+    blocker: str | None = None
+
+
+class WorkbenchStepAttempts(BaseModel):
+    """Attempt summary for one fulfillment step — drill-in tab source (R4)."""
+
+    step: str
+    status: StageStatus
+    attempt_count: int = 0
+    last_attempt_status: str | None = None
+    attempted_at: str | None = None
+    completed_at: str | None = None
+    error_code: str | None = None
+
+
+class WorkbenchVerticalRow(BaseModel):
+    """One vertical's posture inside the Matching or Fulfillment cluster (R2)."""
+
+    vertical: str
+    label: str
+    live: bool
+    actionable: bool
+    matching_status: StageStatus
+    disposition_status: int | None = None
+    selected_dwid_count: int | None = None
+    kicked_off: bool = False
+    identity_required: bool = False
+    identity_verified: bool | None = None
+    fulfillment_status: StageStatus | None = None
+    fulfillment_steps: list[WorkbenchStepAttempts] = Field(default_factory=list)
+    blocker: str | None = None
+
+
+class WorkbenchNoticeSummary(BaseModel):
+    status: StageStatus
+    ready: bool = False
+    blocker: str | None = None
+    response_status: int | None = None
+
+
+class RequestJourneyWorkbenchResponse(BaseModel):
+    """Four-stage detail chrome DTO for one request (legal/admin, KD2/KD3)."""
+
+    request_id: str
+    intake_source: str
+    request_type: str
+    stages: list[WorkbenchStage]
+    current_stage: WorkbenchStageKey
+    # KD4/R3 — both Matching and Fulfillment read in_progress simultaneously
+    # when any live vertical is still matching and any has started fulfillment.
+    split_posture: bool = False
+    matching_cluster: list[WorkbenchVerticalRow] = Field(default_factory=list)
+    fulfillment_cluster: list[WorkbenchVerticalRow] = Field(default_factory=list)
+    notice: WorkbenchNoticeSummary
+
+
+class WorkbenchVerticalBatchRow(BaseModel):
+    """Per-vertical rollup across a batch's member requests.
+
+    ``matching_status`` / ``fulfillment_status`` are the worst-first rollup
+    (``_rollup_status``) across every member request that carries this
+    vertical; ``member_status_counts`` breaks that down (status → count of
+    member requests at that status) so the UI can show "3 waiting · 1 in
+    progress" without a second request.
+    """
+
+    vertical: str
+    label: str
+    live: bool
+    actionable: bool
+    matching_status: StageStatus
+    fulfillment_status: StageStatus | None = None
+    member_status_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class BatchJourneyWorkbenchResponse(BaseModel):
+    """Aggregate four-stage chrome DTO for a DROP batch (KTD2 assumption).
+
+    Rollup rule: each high-level stage status is the worst-first rollup
+    (``_rollup_status``) across all member requests' per-request stage
+    status — i.e. the batch stage reads ``in_progress``/``waiting``/``failed``
+    whenever *any* member request is at that status, and only reads
+    ``complete`` once every member request has completed that stage.
+    ``current_stage`` is the earliest non-complete stage in rail order,
+    matching the single-request rule applied to the rolled-up statuses.
+    """
+
+    bulk_process_id: int
+    request_count: int
+    member_request_ids: list[str] = Field(default_factory=list)
+    stages: list[WorkbenchStage]
+    current_stage: WorkbenchStageKey
+    split_posture: bool = False
+    matching_cluster: list[WorkbenchVerticalBatchRow] = Field(default_factory=list)
+    fulfillment_cluster: list[WorkbenchVerticalBatchRow] = Field(default_factory=list)
+
+
+async def _fulfillment_step_summary(
+    conn: Any,
+    *,
+    request_id: str,
+    step: str,
+    since: Any = None,
+) -> WorkbenchStepAttempts:
+    rows = await conn.fetch(
+        """
+        SELECT status, attempted_at, completed_at, error_code
+          FROM data_fulfillment_attempts
+         WHERE request_id = $1
+           AND step = $2
+         ORDER BY attempted_at DESC
+        """,
+        UUID(request_id),
+        step,
+    )
+    if not rows:
+        return WorkbenchStepAttempts(step=step, status="not_started")
+
+    latest = rows[0]
+    relevant = (
+        [r for r in rows if since is None or (r["completed_at"] or r["attempted_at"]) >= since]
+        if since is not None
+        else rows
+    )
+    succeeded_since = any(r["status"] == "success" for r in relevant)
+    status: StageStatus
+    if succeeded_since:
+        status = "complete"
+    else:
+        status = _attempt_stage_status(latest["status"])
+    return WorkbenchStepAttempts(
+        step=step,
+        status=status,
+        attempt_count=len(rows),
+        last_attempt_status=str(latest["status"]),
+        attempted_at=_iso(latest["attempted_at"]),
+        completed_at=_iso(latest["completed_at"]),
+        error_code=latest["error_code"],
+    )
+
+
+async def _access_identity_verified(conn: Any, *, request_id: str) -> bool:
+    """Latest identity row must be verified with non-empty notes (KTD6 / R13)."""
+    row = await conn.fetchrow(
+        """
+        SELECT status, notes
+          FROM request_identity_verifications
+         WHERE request_id = $1
+         ORDER BY verified_at DESC
+         LIMIT 1
+        """,
+        UUID(request_id),
+    )
+    if row is None:
+        return False
+    notes = row["notes"]
+    return row["status"] == "verified" and bool(notes and str(notes).strip())
+
+
+async def _build_vertical_rows(
+    conn: Any,
+    *,
+    request_id: str,
+    intake_source: str,
+    request_type: str,
+    ops_by_stage: dict[str, JourneyStage],
+    response_status: int | None = None,
+) -> tuple[list[WorkbenchVerticalRow], list[WorkbenchVerticalRow]]:
+    """Matching cluster (live + coming-soon) and Fulfillment cluster (live only)."""
+    dispositions = await list_vertical_dispositions(conn, request_id=request_id)
+    disposed_by_vertical = {item.vertical: item for item in dispositions.dispositions}
+    identity_required = (
+        request_type in _ACCESS_REQUEST_TYPES or request_type == _COMBINED_REQUEST_TYPE
+    )
+    identity_verified = (
+        await _access_identity_verified(conn, request_id=request_id)
+        if identity_required
+        else None
+    )
+
+    matching_cluster: list[WorkbenchVerticalRow] = []
+    fulfillment_cluster: list[WorkbenchVerticalRow] = []
+
+    for vertical in LIVE_VERTICALS:
+        disposition = disposed_by_vertical.get(vertical)
+        label = VERTICAL_LABELS.get(vertical, vertical.title())
+        # Legacy DROP path often has ops review/fulfill complete + response_status
+        # without a request_vertical_dispositions row yet — keep the rail honest.
+        legacy_status = (
+            int(response_status)
+            if disposition is None
+            and intake_source == "drop"
+            and response_status is not None
+            else None
+        )
+
+        if disposition is not None:
+            matching_status: StageStatus = "complete"
+            matching_blocker = None
+        else:
+            review = ops_by_stage.get("review")
+            match = ops_by_stage.get("match")
+            if review is not None and review.status == "complete":
+                matching_status = "complete"
+                matching_blocker = None
+            elif legacy_status is not None:
+                matching_status = "complete"
+                matching_blocker = None
+            elif review is not None and review.status == "waiting":
+                matching_status = "waiting"
+                matching_blocker = review.blocker
+            elif match is not None and match.status == "failed":
+                matching_status = "failed"
+                matching_blocker = match.blocker
+            elif match is not None and match.status == "in_progress":
+                matching_status = "in_progress"
+                matching_blocker = None
+            elif match is not None and match.status == "complete":
+                matching_status = "waiting"
+                matching_blocker = (
+                    review.blocker if review is not None and review.blocker else
+                    "Pending Data Owner Review"
+                )
+            else:
+                matching_status = "not_started"
+                matching_blocker = None
+
+        matching_cluster.append(
+            WorkbenchVerticalRow(
+                vertical=vertical,
+                label=label,
+                live=True,
+                actionable=True,
+                matching_status=matching_status,
+                disposition_status=(
+                    disposition.status if disposition else legacy_status
+                ),
+                selected_dwid_count=(
+                    disposition.selected_dwid_count if disposition else None
+                ),
+                blocker=matching_blocker,
+            )
+        )
+
+        # Fulfillment cluster — only live verticals ever run fulfillment (KD3).
+        kicked_off = await is_vertical_kickoff_approved(
+            conn, request_id=request_id, vertical=vertical
+        )
+        fulfill_ops = ops_by_stage.get("fulfill")
+        if disposition is None:
+            fulfillment_steps: list[WorkbenchStepAttempts] = []
+            if fulfill_ops is not None and fulfill_ops.status == "complete":
+                # Pre-kickoff / pre-disposition DROP fulfillment already finished.
+                fulfillment_status = "complete"
+                fulfillment_blocker = None
+                kicked_off = True
+            elif fulfill_ops is not None and fulfill_ops.status in (
+                "in_progress",
+                "waiting",
+                "failed",
+            ):
+                fulfillment_status = fulfill_ops.status
+                fulfillment_blocker = fulfill_ops.blocker
+            elif matching_status == "complete":
+                fulfillment_status = "waiting"
+                fulfillment_blocker = "Awaiting Legal kickoff"
+            else:
+                fulfillment_status = "not_started"
+                fulfillment_blocker = "Awaiting matching disposition"
+        elif identity_required and not identity_verified:
+            fulfillment_status = "waiting"
+            fulfillment_blocker = "Awaiting identity verification"
+            fulfillment_steps = []
+        elif not kicked_off:
+            fulfillment_status = "waiting"
+            fulfillment_blocker = "Awaiting Legal kickoff"
+            fulfillment_steps = []
+        elif disposition.status == 5:
+            fulfillment_status = "complete"
+            fulfillment_blocker = None
+            fulfillment_steps = []
+        else:
+            steps = _fulfillment_steps_for_request_type(request_type)
+            since = await latest_vertical_kickoff_decided_at(
+                conn, request_id=request_id, vertical=vertical
+            )
+            fulfillment_steps = [
+                await _fulfillment_step_summary(
+                    conn, request_id=request_id, step=step, since=since
+                )
+                for step in steps
+            ]
+            fulfillment_status = _rollup_status([s.status for s in fulfillment_steps])
+            # Kickoff approved with no attempt yet must not fall back to
+            # not_started — that reads as "never started" in Activity / rail.
+            if fulfillment_status == "not_started":
+                fulfillment_status = "in_progress"
+                fulfillment_blocker = "Awaiting fulfillment worker"
+            else:
+                fulfillment_blocker = (
+                    "Fulfillment attempt failed"
+                    if fulfillment_status == "failed"
+                    else None
+                )
+
+        fulfillment_cluster.append(
+            WorkbenchVerticalRow(
+                vertical=vertical,
+                label=label,
+                live=True,
+                actionable=True,
+                matching_status=matching_status,
+                disposition_status=(
+                    disposition.status if disposition else legacy_status
+                ),
+                selected_dwid_count=(
+                    disposition.selected_dwid_count if disposition else None
+                ),
+                kicked_off=kicked_off,
+                identity_required=identity_required,
+                identity_verified=identity_verified,
+                fulfillment_status=fulfillment_status,
+                fulfillment_steps=fulfillment_steps,
+                blocker=fulfillment_blocker,
+            )
+        )
+
+    for entry in dispositions.coming_soon:
+        matching_cluster.append(
+            WorkbenchVerticalRow(
+                vertical=entry.vertical,
+                label=entry.label,
+                live=False,
+                actionable=False,
+                matching_status="not_started",
+                blocker="Coming soon",
+            )
+        )
+
+    return matching_cluster, fulfillment_cluster
+
+
+async def _build_notice_summary(
+    conn: Any,
+    *,
+    request_id: str,
+    intake_source: str,
+    request_type: str,
+    response_status: int | None,
+    ops_by_stage: dict[str, JourneyStage],
+    fulfillment_status: StageStatus,
+) -> WorkbenchNoticeSummary:
+    if intake_source == "drop":
+        notice = ops_by_stage.get("notice")
+        if notice is None:
+            return WorkbenchNoticeSummary(status="not_started", ready=False)
+        return WorkbenchNoticeSummary(
+            status=notice.status,
+            ready=notice.status != "not_started",
+            blocker=notice.blocker,
+            response_status=response_status,
+        )
+
+    if request_type in _ACCESS_REQUEST_TYPES or request_type == _COMBINED_REQUEST_TYPE:
+        disposed = await all_live_verticals_disposed(conn, request_id)
+        if not disposed:
+            return WorkbenchNoticeSummary(
+                status="not_started",
+                ready=False,
+                blocker="Awaiting live-vertical fulfillment",
+            )
+        packs_ready = await access_packs_ready_for_notice(conn, request_id)
+        if not packs_ready:
+            return WorkbenchNoticeSummary(
+                status="waiting",
+                ready=False,
+                blocker="Access packs not ready",
+            )
+        delivery = await conn.fetchrow(
+            """
+            SELECT status
+              FROM communication_attempts
+             WHERE request_id = $1
+               AND purpose = 'access_delivery'
+             ORDER BY contacted_at DESC
+             LIMIT 1
+            """,
+            UUID(request_id),
+        )
+        if delivery is None:
+            return WorkbenchNoticeSummary(status="in_progress", ready=True)
+        status = str(delivery["status"])
+        if status == "delivered":
+            return WorkbenchNoticeSummary(status="complete", ready=True)
+        if status == "failed":
+            return WorkbenchNoticeSummary(
+                status="waiting", ready=True, blocker="Delivery failed — retry"
+            )
+        return WorkbenchNoticeSummary(status="in_progress", ready=True)
+
+    # Delete / opt_out non-DROP — template + copy-paste notice lands in U6;
+    # report readiness honestly without inventing a delivery record.
+    if fulfillment_status == "complete":
+        return WorkbenchNoticeSummary(status="in_progress", ready=True)
+    return WorkbenchNoticeSummary(status="not_started", ready=False)
+
+
+async def build_request_journey_workbench(
+    conn: Any, *, request_id: str
+) -> RequestJourneyWorkbenchResponse:
+    """Four-stage detail chrome DTO — Matching/Fulfillment per-vertical clusters.
+
+    KTD2 stage mapping: Ingest ← ops ``received``/``download``/``land``/
+    ``promote``; Matching ← ops ``match``/``review`` + per-vertical
+    disposition; Fulfillment ← kickoff through fulfill attempts; Notice ←
+    DROP ``notice.review`` or Access delivery readiness (KD13).
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT r.id::text AS request_id,
+               r.intake_source,
+               r.request_type,
+               drr.response_status
+          FROM requests r
+          LEFT JOIN drop_raw_requests drr
+            ON drr.id = r.raw_record_id
+           AND r.intake_source = 'drop'
+         WHERE r.id = $1
+        """,
+        UUID(request_id),
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="request not found")
+
+    intake_source = str(row["intake_source"])
+    request_type = str(row["request_type"] or "delete")
+    response_status = row["response_status"]
+
+    ops_journey = await build_request_journey(conn, request_id=request_id)
+    ops_by_stage = {stage.stage: stage for stage in ops_journey.stages}
+
+    ingest_candidates = [
+        ops_by_stage[name]
+        for name in ("received", "download", "land", "promote")
+        if name in ops_by_stage
+    ]
+    ingest_status = _rollup_status([s.status for s in ingest_candidates])
+    ingest_blocker = next(
+        (s.blocker for s in ingest_candidates if s.blocker), None
+    )
+
+    matching_cluster, fulfillment_cluster = await _build_vertical_rows(
+        conn,
+        request_id=request_id,
+        intake_source=intake_source,
+        request_type=request_type,
+        ops_by_stage=ops_by_stage,
+        response_status=int(response_status) if response_status is not None else None,
+    )
+
+    matching_status = _rollup_status(
+        [row_.matching_status for row_ in matching_cluster if row_.live]
+    )
+    fulfillment_status = _rollup_status(
+        [
+            row_.fulfillment_status
+            for row_ in fulfillment_cluster
+            if row_.fulfillment_status is not None
+        ]
+    )
+
+    matching_incomplete = any(
+        row_.matching_status != "complete" for row_ in matching_cluster if row_.live
+    )
+    fulfillment_started = any(
+        row_.kicked_off
+        or (row_.fulfillment_status not in (None, "not_started"))
+        for row_ in fulfillment_cluster
+    )
+    split_posture = matching_incomplete and fulfillment_started
+    if split_posture:
+        matching_status = "in_progress"
+        fulfillment_status = "in_progress"
+
+    notice = await _build_notice_summary(
+        conn,
+        request_id=request_id,
+        intake_source=intake_source,
+        request_type=request_type,
+        response_status=int(response_status) if response_status is not None else None,
+        ops_by_stage=ops_by_stage,
+        fulfillment_status=fulfillment_status,
+    )
+
+    stages = [
+        WorkbenchStage(
+            stage="ingest",
+            label=WORKBENCH_STAGE_LABELS["ingest"],
+            status=ingest_status,
+            blocker=ingest_blocker,
+        ),
+        WorkbenchStage(
+            stage="matching",
+            label=WORKBENCH_STAGE_LABELS["matching"],
+            status=matching_status,
+            blocker=next(
+                (
+                    row_.blocker
+                    for row_ in matching_cluster
+                    if row_.live and row_.blocker
+                ),
+                None,
+            ),
+        ),
+        WorkbenchStage(
+            stage="fulfillment",
+            label=WORKBENCH_STAGE_LABELS["fulfillment"],
+            status=fulfillment_status,
+            blocker=next(
+                (row_.blocker for row_ in fulfillment_cluster if row_.blocker), None
+            ),
+        ),
+        WorkbenchStage(
+            stage="notice",
+            label=WORKBENCH_STAGE_LABELS["notice"],
+            status=notice.status,
+            blocker=notice.blocker,
+        ),
+    ]
+    current_stage = _compute_current_stage(stages)  # type: ignore[arg-type]
+
+    return RequestJourneyWorkbenchResponse(
+        request_id=request_id,
+        intake_source=intake_source,
+        request_type=request_type,
+        stages=stages,
+        current_stage=current_stage,  # type: ignore[arg-type]
+        split_posture=split_posture,
+        matching_cluster=matching_cluster,
+        fulfillment_cluster=fulfillment_cluster,
+        notice=notice,
+    )
+
+
+async def _member_request_ids_for_bulk_process_id(
+    conn: Any, *, bulk_process_id: int
+) -> list[str]:
+    """DROP batch membership from a download attempt id (KTD2 batch key).
+
+    Joins the download's ``gcs_uri`` to land/promote ingest rows to recover
+    every ``source_csv_filename`` in that batch, then resolves the requests
+    landed from those raw rows — the same attribution path
+    ``_bulk_process_id_for_raw`` uses in reverse.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT r.id::text AS request_id
+          FROM drop_connector_attempts c
+          JOIN drop_ingest_attempts i
+            ON i.gcs_uri = c.gcs_uri
+           AND i.step IN ('land', 'promote')
+           AND i.status != 'abandoned'
+           AND i.source_csv_filename IS NOT NULL
+          JOIN drop_raw_requests drr
+            ON drr.source_csv_filename = i.source_csv_filename
+          JOIN requests r
+            ON r.raw_record_id = drr.id
+           AND r.intake_source = 'drop'
+         WHERE c.id = $1
+           AND c.step = 'download'
+        """,
+        bulk_process_id,
+    )
+    return [str(r["request_id"]) for r in rows]
+
+
+async def build_batch_journey_workbench(
+    conn: Any, *, bulk_process_id: int
+) -> BatchJourneyWorkbenchResponse:
+    """Aggregate workbench DTO across one DROP batch's member requests.
+
+    See ``BatchJourneyWorkbenchResponse`` docstring for the exact rollup rule.
+    """
+    member_ids = await _member_request_ids_for_bulk_process_id(
+        conn, bulk_process_id=bulk_process_id
+    )
+    if not member_ids:
+        raise HTTPException(status_code=404, detail="batch not found")
+
+    members = [
+        await build_request_journey_workbench(conn, request_id=request_id)
+        for request_id in member_ids
+    ]
+
+    stage_statuses: dict[WorkbenchStageKey, list[StageStatus]] = {
+        key: [] for key in WORKBENCH_STAGES
+    }
+    for member in members:
+        for stage in member.stages:
+            stage_statuses[stage.stage].append(stage.status)
+
+    stages = [
+        WorkbenchStage(
+            stage=key,
+            label=WORKBENCH_STAGE_LABELS[key],
+            status=_rollup_status(stage_statuses[key]),
+        )
+        for key in WORKBENCH_STAGES
+    ]
+    current_stage = _compute_current_stage(stages)  # type: ignore[arg-type]
+    split_posture = any(member.split_posture for member in members)
+
+    def _aggregate_cluster(
+        get_cluster: Any,
+        *,
+        is_fulfillment: bool,
+    ) -> list[WorkbenchVerticalBatchRow]:
+        by_vertical: dict[str, list[WorkbenchVerticalRow]] = {}
+        for member in members:
+            for vrow in get_cluster(member):
+                by_vertical.setdefault(vrow.vertical, []).append(vrow)
+
+        aggregated: list[WorkbenchVerticalBatchRow] = []
+        for vertical, vrows in by_vertical.items():
+            matching_counts: dict[str, int] = {}
+            for vrow in vrows:
+                matching_counts[vrow.matching_status] = (
+                    matching_counts.get(vrow.matching_status, 0) + 1
+                )
+            fulfillment_statuses = (
+                [vrow.fulfillment_status for vrow in vrows if vrow.fulfillment_status is not None]
+                if is_fulfillment
+                else []
+            )
+            aggregated.append(
+                WorkbenchVerticalBatchRow(
+                    vertical=vertical,
+                    label=vrows[0].label,
+                    live=vrows[0].live,
+                    actionable=vrows[0].actionable,
+                    matching_status=_rollup_status(
+                        [vrow.matching_status for vrow in vrows]
+                    ),
+                    fulfillment_status=(
+                        _rollup_status(fulfillment_statuses)
+                        if is_fulfillment
+                        else None
+                    ),
+                    member_status_counts=matching_counts
+                    if not is_fulfillment
+                    else {
+                        status: fulfillment_statuses.count(status)
+                        for status in set(fulfillment_statuses)
+                    },
+                )
+            )
+        return aggregated
+
+    matching_cluster = _aggregate_cluster(
+        lambda member: member.matching_cluster, is_fulfillment=False
+    )
+    fulfillment_cluster = _aggregate_cluster(
+        lambda member: member.fulfillment_cluster, is_fulfillment=True
+    )
+
+    return BatchJourneyWorkbenchResponse(
+        bulk_process_id=bulk_process_id,
+        request_count=len(members),
+        member_request_ids=member_ids,
+        stages=stages,
+        current_stage=current_stage,  # type: ignore[arg-type]
+        split_posture=split_posture,
+        matching_cluster=matching_cluster,
+        fulfillment_cluster=fulfillment_cluster,
+    )
+
+
+@router.get(
+    "/{request_id}/journey-workbench",
+    response_model=RequestJourneyWorkbenchResponse,
+)
+async def request_journey_workbench(
+    request_id: str,
+    _viewer: RequestOpsViewer,
+) -> RequestJourneyWorkbenchResponse:
+    """Four-stage legal/admin detail chrome DTO (U4). Ops `/journey` is unchanged."""
+    _require_database()
+    try:
+        UUID(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid request_id") from exc
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        response = await build_request_journey_workbench(conn, request_id=request_id)
+    assert_no_pii_keys(response.model_dump())
+    return response
+
+
+@router.get(
+    "/batches/{bulk_process_id}/journey-workbench",
+    response_model=BatchJourneyWorkbenchResponse,
+)
+async def batch_journey_workbench(
+    bulk_process_id: int,
+    _viewer: RequestOpsViewer,
+) -> BatchJourneyWorkbenchResponse:
+    """Aggregate four-stage chrome DTO for a DROP batch (U4 · KTD2 assumption)."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        response = await build_batch_journey_workbench(
+            conn, bulk_process_id=bulk_process_id
+        )
+    assert_no_pii_keys(response.model_dump())
+    return response
 
 
 async def list_matching_needs_attention(
@@ -906,14 +1742,7 @@ async def list_matching_needs_attention(
         match_count = (
             int(row["match_count"]) if row["match_count"] is not None else None
         )
-        assignment_raw = await get_current_assignment(conn, row["request_id"])
-        assignment = None
-        if assignment_raw is not None:
-            assignment = NeedsAttentionAssignment(
-                target_role=assignment_raw.get("target_role"),
-                kind=assignment_raw.get("kind"),
-                assignee_identity=assignment_raw.get("assignee_identity"),
-            )
+        assignment = await _needs_attention_assignment(conn, row["request_id"])
         state = row["requestor_state"]
         state_acronym = str(state).strip().upper()[:2] if state else None
         bulk_process_id = (
@@ -1099,6 +1928,7 @@ async def list_notice_needs_attention(
                 raw_record_id=int(row["raw_record_id"]),
                 cache=bulk_by_csv,
             )
+        assignment = await _needs_attention_assignment(conn, row["request_id"])
         items.append(
             NeedsAttentionItem(
                 request_id=row["request_id"],
@@ -1123,6 +1953,7 @@ async def list_notice_needs_attention(
                     if row["response_status"] is not None
                     else None
                 ),
+                assignment=assignment,
                 bulk_process_id=bulk_process_id,
                 source_csv_filename=(
                     str(row["source_csv_filename"])
@@ -1170,6 +2001,7 @@ async def list_delivery_needs_attention(
     for row in rows:
         state = row["requestor_state"]
         state_acronym = str(state).strip().upper()[:2] if state else None
+        assignment = await _needs_attention_assignment(conn, row["request_id"])
         items.append(
             NeedsAttentionItem(
                 request_id=row["request_id"],
@@ -1181,6 +2013,7 @@ async def list_delivery_needs_attention(
                 requested_at=_iso(row["requested_at"]),
                 requestor_state=state_acronym,
                 review_status=str(row["review_status"] or "pending"),
+                assignment=assignment,
             )
         )
     return items
@@ -1498,7 +2331,10 @@ async def post_request_close(
     request: Request,
     viewer: LegalClosePrincipal,
 ) -> RequestCloseResponse:
-    """Close a request — appends request_closures, clears pending gates, sets DROP status when unset."""
+    """Close a request — appends request_closures and clears pending gates.
+
+    Does not invent DROP ``response_status``; disposition upsert remains SoR.
+    """
     _require_database()
     try:
         UUID(request_id)
@@ -1647,7 +2483,12 @@ async def build_request_timeline(conn: Any, *, request_id: str) -> RequestTimeli
         actor = row["decided_by"] or row.get("approver_role")
         action_label = _timeline_action_label(action, context=context)
         status_label = _timeline_status_label(status)
-        summary = f"{action_label} — {status_label}"
+        if action == FULFILLMENT_KICKOFF_ACTION and status == "approved":
+            summary = f"{action_label} approved — fulfillment worker may start"
+        elif action == FULFILLMENT_KICKOFF_ACTION and status == "pending":
+            summary = f"{action_label} pending — Legal has not started fulfillment yet"
+        else:
+            summary = f"{action_label} — {status_label}"
         at = _iso(row["decided_at"]) or _iso(row["requested_at"]) or ""
         entries.append(
             TimelineEntry(
@@ -1690,15 +2531,17 @@ async def build_request_timeline(conn: Any, *, request_id: str) -> RequestTimeli
                     or STAGE_LABELS.get(stage.stage)
                     or stage.stage.replace("_", " ")
                 )
+                status_bit = _timeline_status_label(stage.status)
+                if stage.blocker:
+                    stage_summary = f"Stage {stage_label}: {status_bit} — {stage.blocker}"
+                else:
+                    stage_summary = f"Stage {stage_label}: {status_bit}"
                 entries.append(
                     TimelineEntry(
                         at=ts,
                         kind="stage",
                         actor=None,
-                        summary=(
-                            f"Stage {stage_label}: "
-                            f"{_timeline_status_label(stage.status)}"
-                        ),
+                        summary=stage_summary,
                         meta={"stage": stage.stage, "status": stage.status},
                     )
                 )

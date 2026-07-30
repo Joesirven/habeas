@@ -555,7 +555,7 @@ export type DropWorkersPayload = {
 
 export type HealthQueueRecord = {
   worker: string
-  table: string
+  table: string | null
   by_status: { status: string; count: number }[]
   pending: number
   claimed: number
@@ -1439,6 +1439,125 @@ export function getRequestJourney(requestId: string) {
   )
 }
 
+// --- Journey workbench (U4 · KTD2 / KTD3) ---
+//
+// Four-stage legal/admin detail chrome (Ingest → Matching → Fulfillment →
+// Notice) with Matching/Fulfillment split into per-vertical clusters. This
+// is a separate DTO from `RequestJourneyResponse` above — the ops fine
+// journey stays untouched; the workbench is consumed by the new detail
+// chrome UI (U5) only.
+
+export type WorkbenchStageKey = 'ingest' | 'matching' | 'fulfillment' | 'notice'
+
+export type WorkbenchStage = {
+  stage: WorkbenchStageKey
+  label: string
+  status: JourneyStageStatus
+  blocker: string | null
+}
+
+export type WorkbenchStepAttempts = {
+  step: string
+  status: JourneyStageStatus
+  attempt_count: number
+  last_attempt_status: string | null
+  attempted_at: string | null
+  completed_at: string | null
+  error_code: string | null
+}
+
+export type WorkbenchVerticalRow = {
+  vertical: string
+  label: string
+  live: boolean
+  actionable: boolean
+  matching_status: JourneyStageStatus
+  disposition_status: number | null
+  selected_dwid_count: number | null
+  kicked_off: boolean
+  identity_required: boolean
+  identity_verified: boolean | null
+  fulfillment_status: JourneyStageStatus | null
+  fulfillment_steps: WorkbenchStepAttempts[]
+  blocker: string | null
+}
+
+export type WorkbenchNoticeSummary = {
+  status: JourneyStageStatus
+  ready: boolean
+  blocker: string | null
+  response_status: number | null
+}
+
+export type RequestJourneyWorkbenchResponse = {
+  request_id: string
+  intake_source: string
+  request_type: string
+  stages: WorkbenchStage[]
+  current_stage: WorkbenchStageKey
+  /** KD4/R3 — Matching and Fulfillment both read in_progress simultaneously. */
+  split_posture: boolean
+  matching_cluster: WorkbenchVerticalRow[]
+  fulfillment_cluster: WorkbenchVerticalRow[]
+  notice: WorkbenchNoticeSummary
+}
+
+export type WorkbenchVerticalBatchRow = {
+  vertical: string
+  label: string
+  live: boolean
+  actionable: boolean
+  matching_status: JourneyStageStatus
+  fulfillment_status: JourneyStageStatus | null
+  /** status → count of member requests at that status (worst-first rollup). */
+  member_status_counts: Record<string, number>
+}
+
+export type BatchJourneyWorkbenchResponse = {
+  bulk_process_id: number
+  request_count: number
+  member_request_ids: string[]
+  stages: WorkbenchStage[]
+  current_stage: WorkbenchStageKey
+  split_posture: boolean
+  matching_cluster: WorkbenchVerticalBatchRow[]
+  fulfillment_cluster: WorkbenchVerticalBatchRow[]
+}
+
+export function getRequestJourneyWorkbench(requestId: string) {
+  return fetchAdminApi<RequestJourneyWorkbenchResponse>(
+    `/ops/requests/${encodeURIComponent(requestId)}/journey-workbench`,
+  )
+}
+
+export function getBatchJourneyWorkbench(bulkProcessId: number) {
+  return fetchAdminApi<BatchJourneyWorkbenchResponse>(
+    `/ops/requests/batches/${encodeURIComponent(String(bulkProcessId))}/journey-workbench`,
+  )
+}
+
+export type FulfillmentKickoffResponse = {
+  request_id: string
+  vertical: string
+  kickoff_status: 'approved' | 'already_approved' | string
+  approval_id: number | null
+  disposition_updated: boolean
+}
+
+/** Legal starts fulfillment for one live vertical (R11 / KD6, U2 gate). */
+export function postFulfillmentKickoff(
+  requestId: string,
+  body: { vertical: string; status?: number; dwids?: string[]; decision_reason?: string },
+) {
+  return fetchAdminApi<FulfillmentKickoffResponse>(
+    `/requests/${encodeURIComponent(requestId)}/fulfillment/kickoff`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
 export function getNeedsAttention(
   limitOrParams?:
     | number
@@ -1786,4 +1905,261 @@ export type EmailTemplateRecord = {
 
 export function listEmailTemplates() {
   return fetchAdminApi<EmailTemplateRecord[]>('/requests/email-templates')
+}
+
+/** Request-type -> default slug (KD11 variables curated per role-visible fields). */
+export type EmailTemplateType = 'access' | 'delete' | 'opt_out' | 'combined' | 'general'
+
+export type EmailTemplateTypeInfo = {
+  type: EmailTemplateType
+  slug: string
+  variables: string[]
+}
+
+export function listEmailTemplateTypes() {
+  return fetchAdminApi<EmailTemplateTypeInfo[]>('/requests/email-templates/types')
+}
+
+export type EmailTemplateUpsertInput = {
+  subject: string
+  body: string
+  placeholder_schema?: string[]
+  active?: boolean
+}
+
+export function upsertEmailTemplate(slug: string, body: EmailTemplateUpsertInput) {
+  return fetchAdminApi<EmailTemplateRecord>(
+    `/requests/email-templates/${encodeURIComponent(slug)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ placeholder_schema: [], active: true, ...body }),
+    },
+  )
+}
+
+export type RenderedEmailTemplate = {
+  slug: string
+  subject: string
+  body: string
+}
+
+export function renderEmailTemplate(
+  slug: string,
+  context: Record<string, string> = {},
+  requestId?: string,
+) {
+  return fetchAdminApi<RenderedEmailTemplate>('/requests/email-templates/render', {
+    method: 'POST',
+    body: JSON.stringify({ slug, context, request_id: requestId ?? null }),
+  })
+}
+
+// --- U7: request document/attachment client helpers (R20/KD12/KTD9) --------
+// Roles: super_admin, admin, legal, data_owner may all upload/list/download.
+
+export type RequestDocumentRecord = {
+  id: string
+  request_id: string
+  filename: string
+  content_type: string
+  uploaded_by: string
+  uploaded_at: string
+}
+
+export function listRequestDocuments(requestId: string) {
+  return fetchAdminApi<RequestDocumentRecord[]>(
+    `/requests/${encodeURIComponent(requestId)}/documents`,
+  )
+}
+
+export async function uploadRequestDocument(requestId: string, file: File) {
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  const simulateRole = getStoredSimulateRole()
+  if (simulateRole) {
+    headers['X-Dev-Simulate-Role'] = simulateRole
+  }
+  const form = new FormData()
+  form.append('file', file)
+  const response = await fetch(
+    `${API_BASE}/requests/${encodeURIComponent(requestId)}/documents`,
+    { method: 'POST', headers, body: form },
+  )
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
+  }
+  return (await response.json()) as RequestDocumentRecord
+}
+
+/** Fetches the file as a Blob for direct download (caller drives the `<a>`/save-as flow). */
+export async function downloadRequestDocument(
+  requestId: string,
+  documentId: string,
+): Promise<Blob> {
+  const headers: Record<string, string> = {}
+  const simulateRole = getStoredSimulateRole()
+  if (simulateRole) {
+    headers['X-Dev-Simulate-Role'] = simulateRole
+  }
+  const response = await fetch(
+    `${API_BASE}/requests/${encodeURIComponent(requestId)}/documents/${encodeURIComponent(documentId)}/download`,
+    { headers },
+  )
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
+  }
+  return response.blob()
+}
+
+/** Hard-delete a request document (KTD9: uploader or admin/super_admin). */
+export async function deleteRequestDocument(
+  requestId: string,
+  documentId: string,
+): Promise<void> {
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  const simulateRole = getStoredSimulateRole()
+  if (simulateRole) {
+    headers['X-Dev-Simulate-Role'] = simulateRole
+  }
+  const response = await fetch(
+    `${API_BASE}/requests/${encodeURIComponent(requestId)}/documents/${encodeURIComponent(documentId)}`,
+    { method: 'DELETE', headers },
+  )
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
+  }
+}
+
+export type IntegrationSystemId =
+  | 'mailchimp'
+  | 'paylocity'
+  | 'lever'
+  | 'auth0'
+  | 'google_sheets'
+  | 'cassandra'
+
+export type ConnectionRecord = {
+  id: string
+  system: IntegrationSystemId
+  display_name: string
+  status:
+    | 'pending'
+    | 'invited'
+    | 'connected'
+    | 'failed'
+    | 'revoked'
+    | 'infra_pending'
+  owner_email: string | null
+  secret_resource_name: string | null
+  last_tested_at: string | null
+  last_test_ok: boolean | null
+  last_test_detail: string | null
+  created_by: string
+  created_at: string
+  updated_at: string
+  metadata: Record<string, unknown>
+}
+
+export type ConnectionInviteCreateResponse = {
+  invite_id: string
+  owner_email: string
+  expires_at: string
+  invite_url: string
+  raw_token: string
+}
+
+export type ConnectionSystemsPayload = {
+  systems: Array<{
+    system_id: IntegrationSystemId
+    display_label: string
+    invite_allowed: boolean
+    credential_fields: Array<{
+      id: string
+      label: string
+      input_type: 'password' | 'text' | 'url'
+      required: boolean
+      help: string | null
+    }>
+    trust_copy: string
+  }>
+}
+
+export type ConnectPreviewPayload = {
+  system: IntegrationSystemId
+  display_name: string
+  owner_email: string
+  fields: Array<{
+    id: string
+    label: string
+    input_type: 'password' | 'text' | 'url'
+    required: boolean
+    help: string | null
+  }>
+  trust_copy: string
+  expires_at: string
+}
+
+export type ConnectRedeemResponse = {
+  status: string
+  test_ok: boolean
+  detail: string | null
+}
+
+export function listConnections() {
+  return fetchAdminApi<{ connections: ConnectionRecord[] }>('/ops/connections')
+}
+
+export function createConnection(body: {
+  system: IntegrationSystemId
+  display_name: string
+  owner_email?: string | null
+}) {
+  return fetchAdminApi<ConnectionRecord>('/ops/connections', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function createConnectionInvite(
+  connectionId: string,
+  body?: { owner_email?: string },
+) {
+  return fetchAdminApi<ConnectionInviteCreateResponse>(
+    `/ops/connections/${encodeURIComponent(connectionId)}/invites`,
+    {
+      method: 'POST',
+      body: body ? JSON.stringify(body) : undefined,
+    },
+  )
+}
+
+export function revokeConnectionInvite(connectionId: string, inviteId: string) {
+  return fetchAdminApi<{ status: string }>(
+    `/ops/connections/${encodeURIComponent(connectionId)}/invites/${encodeURIComponent(inviteId)}/revoke`,
+    { method: 'POST' },
+  )
+}
+
+export function testConnection(connectionId: string) {
+  return fetchAdminApi<{ ok: boolean; detail: string | null }>(
+    `/ops/connections/${encodeURIComponent(connectionId)}/test`,
+    { method: 'POST' },
+  )
+}
+
+export function getConnectionSystems() {
+  return fetchAdminApi<ConnectionSystemsPayload>('/ops/connections/systems')
+}
+
+export function getConnectPreview(token: string) {
+  return fetchAdminApi<ConnectPreviewPayload>(`/connect/${encodeURIComponent(token)}`)
+}
+
+export function redeemConnect(token: string, credentials: Record<string, string>) {
+  return fetchAdminApi<ConnectRedeemResponse>(`/connect/${encodeURIComponent(token)}`, {
+    method: 'POST',
+    body: JSON.stringify({ credentials }),
+  })
 }

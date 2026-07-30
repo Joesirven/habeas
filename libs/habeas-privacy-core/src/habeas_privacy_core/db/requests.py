@@ -8,6 +8,7 @@ from uuid import UUID
 
 import asyncpg
 
+from habeas_privacy_core.exceptions import DropAccessTypeRejectedError
 from habeas_privacy_core.geo.state import (
     normalize_state_acronym,
     resolve_drop_requestor_state,
@@ -24,9 +25,23 @@ _REQUEST_SELECT = (
     "id, received_at, intake_source, raw_record_id, requestor_state, request_type"
 )
 
+# KTD10/R16: DROP is suppression-only intake — reject access/combined request
+# types before they ever reach the DB CHECK constraint.
+_DROP_REJECTED_REQUEST_TYPES = frozenset({"access", "combined"})
+
+
+def _reject_drop_access(intake_source: IntakeSource, request_type: str) -> None:
+    normalized = request_type.strip().lower()
+    if intake_source == IntakeSource.DROP and normalized in _DROP_REJECTED_REQUEST_TYPES:
+        raise DropAccessTypeRejectedError(
+            f"intake_source=drop cannot use request_type={request_type!r}; "
+            "DROP is suppression-only (delete)"
+        )
+
 
 async def insert_request(conn: asyncpg.Connection, payload: CreateRequestInput) -> str:
     """Insert a thin-spine request row (no matching enqueue)."""
+    _reject_drop_access(payload.intake_source, payload.request_type)
     requestor_state = normalize_state_acronym(payload.requestor_state)
     request_id = await conn.fetchval(
         """
