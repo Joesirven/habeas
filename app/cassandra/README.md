@@ -2,6 +2,10 @@
 
 **Data-vertical suppression pipe** — writes idempotent suppressions to on-prem restricted-dwid tables via `cassandra_attempts` (`step=suppression` only). No matching routes.
 
+## Live-write status — **dev-only** (2026-07-30)
+
+Successful smoke insert validated the live path on **DEV only** (NAT egress `203.0.113.10` → `broker-db-dev.example.internal:9041` / `person_db_dev.restricted_person_id_worker`). Synthetic test row `dwid=9000000000001` verified. Prod (`:9042` / `person_db.restricted_person_id`) stays documented but **not** live — keep `CASSANDRA_TRANSPORT=live` only on cassandra-dev; prod remains stub / do-not-write until explicit cutover. Smoke VM `dpra-cassandra-smoke` may still exist for ops testing.
+
 ## Insert contract
 
 - `source_of_restriction` = **`Habeas`**

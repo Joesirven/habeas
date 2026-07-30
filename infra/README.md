@@ -20,6 +20,8 @@
 
 ## Cassandra egress — Cloud NAT (2026-07-29)
 
+> **Status (2026-07-30):** Live writes **verified on DEV only** — NAT egress `203.0.113.10` → `broker-db-dev.example.internal:9041` / `person_db_dev.restricted_person_id_worker` (synthetic `dwid=9000000000001`). Prod `:9042` / `person_db.restricted_person_id` is documented but **not enabled**. Keep `CASSANDRA_TRANSPORT=live` only for cassandra-dev; prod stays stub / do-not-write until explicit cutover. Ops smoke VM `dpra-cassandra-smoke` may still exist.
+
 On-prem Cassandra (`person_db_dev.restricted_person_id_worker` / `person_db.restricted_person_id`) is reached over TLS with INF IP allowlisting — **not** Cloud VPN for the suppression cutover path. Static egress comes from Cloud NAT on a custom VPC; Cloud Run `cassandra` workers attach via Direct VPC egress.
 
 | Resource | ID |

@@ -7,6 +7,20 @@
 Data-vertical suppression pipe: writes idempotent suppressions to on-prem Cassandra
 restricted-dwid tables over TLS (Cloud NAT static egress — see `infra/README.md`).
 
+## Live-write status (2026-07-30) — **dev-only**
+
+Live suppression inserts are **validated on DEV only**. Do **not** enable prod live writes until an explicit cutover.
+
+| Fact | Detail |
+|------|--------|
+| Validated | 2026-07-30 from NAT egress **`203.0.113.10`** |
+| Target | `broker-db-dev.example.internal:9041` → `person_db_dev.restricted_person_id_worker` |
+| Insert shape | `dwid` + `date_of_restriction` + `insert_timestamp` + `source_of_restriction=Habeas` + `type_of_restriction=person` |
+| Smoke row | Synthetic `dwid=9000000000001` verified |
+| Prod | `broker-db-prod.example.internal:9042` / `person_db.restricted_person_id` is documented but **not enabled** for live writes |
+| Transport | Keep `CASSANDRA_TRANSPORT=live` **only** for cassandra-dev; prod stays `stub` / do-not-write until cutover |
+| Ops smoke VM | `dpra-cassandra-smoke` may still exist for ops testing |
+
 ## Settled insert contract (2026-07-30)
 
 MDR suppression owners confirmed:
