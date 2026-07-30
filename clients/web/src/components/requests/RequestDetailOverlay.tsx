@@ -10,7 +10,6 @@ import {
 
 import { SkeletonLines } from '@/components/AppShell'
 import { AccessDeliveryEmailCard } from '@/components/fulfillment/AccessDeliveryEmail'
-import { RunTimeline } from '@/components/ops/RunTimeline'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -24,12 +23,13 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { isLegalAdminPersona, useMe } from '@/lib/auth'
 import {
-  COARSE_STAGE_ORDER,
   NOTICE_APPROVAL,
+  WORKBENCH_STAGE_ORDER,
   actionReasonLabel,
-  stageLabel,
+  deriveWorkbenchChromeFromOpsJourney,
+  workbenchStageLabel,
   workbenchStatusLabel,
-  type CoarseStageKey,
+  type DerivedWorkbenchSubstep,
 } from '@/lib/legalJourneyLabels'
 import {
   downloadRequestDocument,
@@ -54,7 +54,6 @@ import {
   postTriageSendToMatching,
   uploadRequestDocument,
   type DropResponseStatusCode,
-  type JourneyStage,
   type JourneyStageStatus,
   type MatchedPersonContact,
   type MatchingResultDetail,
@@ -63,9 +62,7 @@ import {
   type RequestJourneyResponse,
   type RequestRecord,
   type RequesterContact,
-  type RunTimelineStep,
   type TimelineEntry,
-  type WorkbenchStage,
   type WorkbenchVerticalRow,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -74,7 +71,6 @@ import {
   AccessHandoffPanel,
   MatchingReviewPanel,
   fetchMatchingDetailOptional,
-  journeyStageToTimelineStep,
 } from '@/components/requests/RequestTriageDialog'
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -193,73 +189,219 @@ function matchingStatusLabel(reviewStatus: string): string {
   return reviewStatus.replaceAll('_', ' ')
 }
 
-function mapTechnicalStageToCoarse(stage: string): CoarseStageKey {
-  const normalized = stage.trim().toLowerCase()
-  if (normalized === 'received' || normalized === 'triage') return 'receive'
-  if (normalized === 'match' || ['download', 'land', 'promote'].includes(normalized)) {
-    return 'matching'
+function substepDotClass(status: JourneyStageStatus): string {
+  switch (status) {
+    case 'complete':
+      return 'bg-habeas-mid'
+    case 'failed':
+      return 'bg-red-700/70'
+    case 'in_progress':
+      return 'bg-habeas-light animate-pulse'
+    case 'waiting':
+      return 'border border-habeas-mid bg-paper'
+    case 'skipped':
+      return 'bg-line-strong'
+    default:
+      return 'border border-line bg-paper'
   }
-  if (normalized === 'review') return 'data_owner_review'
-  if (normalized === 'fulfill' || normalized === 'fulfillment') return 'fulfillment'
-  if (normalized === 'notice' || normalized === 'delivery') return 'delivery_notice'
-  return 'legal_review'
 }
 
-function coarseStageRailSteps(
-  journeyStages: JourneyStage[],
-  currentStage: string,
-): RunTimelineStep[] {
-  const coarseStatuses = new Map<CoarseStageKey, RunTimelineStep['status']>()
-  for (const key of COARSE_STAGE_ORDER) {
-    coarseStatuses.set(key, 'pending')
-  }
-
-  for (const stage of journeyStages) {
-    const coarse = mapTechnicalStageToCoarse(stage.stage)
-    const status = journeyStageToTimelineStep(stage).status
-    const existing = coarseStatuses.get(coarse)
-    if (existing === 'completed' || existing === 'failed') continue
-    if (status === 'completed') coarseStatuses.set(coarse, 'completed')
-    else if (status === 'failed') coarseStatuses.set(coarse, 'failed')
-    else if (status === 'running' || status === 'waiting') coarseStatuses.set(coarse, 'running')
-  }
-
-  const currentCoarse = mapTechnicalStageToCoarse(currentStage)
-  const currentIdx = COARSE_STAGE_ORDER.indexOf(currentCoarse)
-  for (let index = 0; index < currentIdx; index += 1) {
-    const key = COARSE_STAGE_ORDER[index]!
-    if (coarseStatuses.get(key) === 'pending') coarseStatuses.set(key, 'completed')
-  }
-  if (coarseStatuses.get(currentCoarse) === 'pending') {
-    coarseStatuses.set(currentCoarse, 'running')
-  }
-
-  return COARSE_STAGE_ORDER.map((key) => ({
-    key,
-    label: stageLabel(key),
-    status: coarseStatuses.get(key) ?? 'pending',
-    timestamp: null,
+/**
+ * Thin four-stage pipeline with type/source-conditioned substeps — inbox detail + full detail.
+ * Prefer workbench clusters when present; otherwise ops fine-stage substeps from derive helper.
+ */
+export function ThinJourneyPipeline({
+  stages,
+  substeps,
+  matchingCluster,
+  fulfillmentCluster,
+  splitPosture,
+  density = 'comfortable',
+}: {
+  stages: Array<{ stage: string; label: string; status: JourneyStageStatus; blocker: string | null }>
+  substeps?: DerivedWorkbenchSubstep[]
+  matchingCluster?: WorkbenchVerticalRow[]
+  fulfillmentCluster?: WorkbenchVerticalRow[]
+  splitPosture?: boolean
+  density?: 'compact' | 'comfortable'
+}) {
+  const rail = stages.length > 0 ? stages : WORKBENCH_STAGE_ORDER.map((key) => ({
+    stage: key,
+    label: workbenchStageLabel(key),
+    status: 'not_started' as JourneyStageStatus,
+    blocker: null,
   }))
-}
 
-const WORKBENCH_STATUS_TO_TIMELINE: Record<JourneyStageStatus, RunTimelineStep['status']> = {
-  not_started: 'pending',
-  skipped: 'skipped',
-  in_progress: 'running',
-  waiting: 'waiting',
-  complete: 'completed',
-  failed: 'failed',
-}
+  const compact = density === 'compact'
+  const hasVerticalClusters =
+    (matchingCluster?.length ?? 0) > 0 || (fulfillmentCluster?.length ?? 0) > 0
 
-/** KTD2 four-stage rail (Ingest → Matching → Fulfillment → Notice), U4 workbench DTO. */
-function workbenchRailSteps(stages: WorkbenchStage[]): RunTimelineStep[] {
-  return stages.map((stage) => ({
-    key: stage.stage,
-    label: stage.label,
-    status: WORKBENCH_STATUS_TO_TIMELINE[stage.status],
-    timestamp: null,
-    detail: stage.blocker ?? undefined,
-  }))
+  return (
+    <div
+      className={cn('space-y-1.5', compact ? 'py-0' : 'py-0.5')}
+      role="group"
+      aria-label="Request journey pipeline"
+    >
+      <div className="flex items-start gap-0">
+        {rail.map((stage, index) => {
+          const parentSubsteps =
+            substeps?.filter((step) => step.parent === stage.stage) ?? []
+          const isLast = index === rail.length - 1
+          return (
+            <div key={stage.stage} className="min-w-0 flex-1">
+              <div className="flex items-center">
+                {index > 0 ? (
+                  <span
+                    className={cn(
+                      'h-px flex-1',
+                      rail[index - 1]!.status === 'complete'
+                        ? 'bg-habeas-mid/50'
+                        : 'bg-line',
+                    )}
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <span className="flex-1" aria-hidden="true" />
+                )}
+                <span
+                  className={cn(
+                    'mx-0.5 shrink-0 rounded-full',
+                    compact ? 'h-2 w-2' : 'h-2.5 w-2.5',
+                    substepDotClass(stage.status),
+                  )}
+                  title={`${stage.label}: ${workbenchStatusLabel(stage.status)}${
+                    stage.blocker ? ` — ${stage.blocker}` : ''
+                  }`}
+                  aria-hidden="true"
+                />
+                {!isLast ? (
+                  <span
+                    className={cn(
+                      'h-px flex-1',
+                      stage.status === 'complete' ? 'bg-habeas-mid/50' : 'bg-line',
+                    )}
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <span className="flex-1" aria-hidden="true" />
+                )}
+              </div>
+              <p
+                className={cn(
+                  'mt-1 truncate text-center font-medium leading-tight',
+                  compact ? 'text-[0.55rem]' : 'text-[0.65rem]',
+                  stage.status === 'in_progress' || stage.status === 'waiting'
+                    ? 'text-habeas-navy'
+                    : stage.status === 'failed'
+                      ? 'text-red-800'
+                      : stage.status === 'complete'
+                        ? 'text-ink'
+                        : 'text-mute',
+                )}
+              >
+                {stage.label}
+              </p>
+              {parentSubsteps.length > 0 ? (
+                <ul className="mt-1 flex flex-wrap justify-center gap-0.5 px-0.5">
+                  {parentSubsteps.map((step) => (
+                    <li
+                      key={step.key}
+                      className={cn(
+                        'inline-flex max-w-full items-center gap-0.5 rounded border border-line/80 bg-paper px-1 py-px',
+                        compact ? 'text-[0.5rem]' : 'text-[0.55rem]',
+                      )}
+                      title={
+                        step.blocker
+                          ? `${step.label}: ${workbenchStatusLabel(step.status)} — ${step.blocker}`
+                          : `${step.label}: ${workbenchStatusLabel(step.status)}`
+                      }
+                    >
+                      <span
+                        className={cn('h-1.5 w-1.5 shrink-0 rounded-full', substepDotClass(step.status))}
+                        aria-hidden="true"
+                      />
+                      <span className="truncate text-ink-soft">{step.label}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          )
+        })}
+      </div>
+      {splitPosture ? (
+        <p className={cn('text-center text-mute', compact ? 'text-[0.5rem]' : 'text-[0.6rem]')}>
+          Matching + Fulfillment in progress
+        </p>
+      ) : null}
+      {hasVerticalClusters ? (
+        <div className={cn('flex flex-wrap gap-2', compact ? 'pt-0.5' : 'pt-1')}>
+          {matchingCluster && matchingCluster.length > 0 ? (
+            <div className="min-w-0 flex-1 space-y-0.5">
+              <p className={cn('text-mute', compact ? 'text-[0.5rem]' : 'taste-micro')}>Matching</p>
+              <ul className="space-y-0.5">
+                {matchingCluster.map((row) => (
+                  <li
+                    key={`m-${row.vertical}`}
+                    className={cn(
+                      'flex items-center gap-1.5 truncate text-ink',
+                      compact ? 'text-[0.55rem]' : 'text-[0.65rem]',
+                      !row.live && 'opacity-50',
+                    )}
+                    title={row.blocker ?? undefined}
+                  >
+                    <span
+                      className={cn(
+                        'h-1.5 w-1.5 shrink-0 rounded-full',
+                        substepDotClass(row.matching_status),
+                      )}
+                      aria-hidden="true"
+                    />
+                    <span className="truncate">{row.label}</span>
+                    <span className="shrink-0 text-mute">
+                      {row.live ? workbenchStatusLabel(row.matching_status) : 'Soon'}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {fulfillmentCluster && fulfillmentCluster.length > 0 ? (
+            <div className="min-w-0 flex-1 space-y-0.5">
+              <p className={cn('text-mute', compact ? 'text-[0.5rem]' : 'taste-micro')}>
+                Fulfillment
+              </p>
+              <ul className="space-y-0.5">
+                {fulfillmentCluster.map((row) => {
+                  const status = row.fulfillment_status ?? 'not_started'
+                  return (
+                    <li
+                      key={`f-${row.vertical}`}
+                      className={cn(
+                        'flex items-center gap-1.5 truncate text-ink',
+                        compact ? 'text-[0.55rem]' : 'text-[0.65rem]',
+                        !row.live && 'opacity-50',
+                      )}
+                      title={row.blocker ?? undefined}
+                    >
+                      <span
+                        className={cn('h-1.5 w-1.5 shrink-0 rounded-full', substepDotClass(status))}
+                        aria-hidden="true"
+                      />
+                      <span className="truncate">{row.label}</span>
+                      <span className="shrink-0 text-mute">
+                        {row.live ? workbenchStatusLabel(status) : 'Soon'}
+                      </span>
+                    </li>
+                  )
+                })}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 function verticalIndicatorClass(status: JourneyStageStatus): string {
@@ -1195,9 +1337,20 @@ export function RequestDetailBody({
 
   const workbenchQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', requestId, 'journey-workbench'],
-    queryFn: () => getRequestJourneyWorkbench(requestId),
+    queryFn: async () => {
+      try {
+        return await getRequestJourneyWorkbench(requestId)
+      } catch (error) {
+        // Deployed admin-api may not have U4 yet — fall back to ops journey derivation.
+        if (error instanceof Error && /Admin API 404/.test(error.message)) {
+          return null
+        }
+        throw error
+      }
+    },
     refetchInterval: 15_000,
     placeholderData: (previous) => previous,
+    retry: false,
   })
 
   const matchingQuery = useQuery({
@@ -1280,11 +1433,19 @@ export function RequestDetailBody({
   const attentionItem = attentionQuery.data
   const intakeSource = journey?.intake_source ?? requestQuery.data?.intake_source ?? 'manual'
   const displayLabel = requestQuery.data?.display_label
-  const coarseSteps = journey
-    ? coarseStageRailSteps(journey.stages, journey.current_stage)
-    : []
+  const requestType = requestQuery.data?.request_type ?? null
+  const derivedChrome = journey
+    ? deriveWorkbenchChromeFromOpsJourney({
+        stages: journey.stages,
+        current_stage: journey.current_stage,
+        intake_source: intakeSource,
+        request_type: requestType,
+      })
+    : null
   const workbench = workbenchQuery.data
-  const railSteps = workbench ? workbenchRailSteps(workbench.stages) : coarseSteps
+  const railStages = workbench?.stages ?? derivedChrome?.stages ?? []
+  const railSubsteps = workbench ? undefined : derivedChrome?.substeps
+  const splitPosture = workbench?.split_posture ?? derivedChrome?.split_posture ?? false
 
   const assignmentToLegal = isAssignmentToLegalContext(attentionItem)
   const canMatchingDisposition =
@@ -1343,58 +1504,62 @@ export function RequestDetailBody({
     )
   }
 
-  const currentCoarse =
-    coarseSteps.find((step) => step.status === 'running' || step.status === 'waiting') ??
-    coarseSteps.find((step) => step.status === 'failed') ??
-    coarseSteps[coarseSteps.length - 1]
+  const currentRail =
+    railStages.find((step) => step.status === 'in_progress' || step.status === 'waiting') ??
+    railStages.find((step) => step.status === 'failed') ??
+    railStages[railStages.length - 1]
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <RequestStageActionBar actions={stageActions} onInvalidate={invalidateAll} />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        {/* KTD2 four-stage rail (Ingest → Matching → Fulfillment → Notice) + vertical clusters (R1–R3) */}
+        {/* KTD2 four-stage rail (Ingest → Matching → Fulfillment → Notice) + substeps / vertical clusters */}
         <div
           className={cn(
             'shrink-0 space-y-2 overflow-x-auto border-b border-line px-4',
             variant === 'overlay' ? 'py-2' : 'py-3',
           )}
         >
-          <div className="flex items-center justify-between gap-2">
-            {workbenchQuery.isPending && !workbench ? (
-              <p className="text-[0.7rem] text-mute">Loading stage rail…</p>
-            ) : (
-              <RunTimeline
-                steps={railSteps}
-                orientation="horizontal"
-                emptyMessage={
-                  currentCoarse?.label
-                    ? `Stage: ${currentCoarse.label}`
-                    : 'No stage rail.'
+          {workbenchQuery.isPending && !workbench && !derivedChrome ? (
+            <p className="text-[0.7rem] text-mute">Loading stage rail…</p>
+          ) : railStages.length > 0 ? (
+            <>
+              <ThinJourneyPipeline
+                stages={railStages}
+                substeps={
+                  workbench
+                    ? derivedChrome?.substeps.filter(
+                        (step) => step.parent === 'ingest' || step.parent === 'notice',
+                      )
+                    : railSubsteps
                 }
+                splitPosture={splitPosture}
+                density={variant === 'overlay' ? 'compact' : 'comfortable'}
               />
-            )}
-            {workbench?.split_posture ? (
-              <Badge variant="wait" className="shrink-0 normal-case tracking-normal">
-                Matching + Fulfillment in progress
-              </Badge>
-            ) : null}
-          </div>
-          {workbench && (workbench.matching_cluster.length > 0 || workbench.fulfillment_cluster.length > 0) ? (
-            <div className="flex flex-wrap gap-3 pt-1">
-              <VerticalClusterList
-                title="Matching"
-                rows={workbench.matching_cluster}
-                statusOf={(row) => row.matching_status}
-                onSelect={() => setTab('matching')}
-              />
-              <VerticalClusterList
-                title="Fulfillment"
-                rows={workbench.fulfillment_cluster}
-                statusOf={(row) => row.fulfillment_status}
-                onSelect={() => setTab('fulfillment')}
-              />
-            </div>
-          ) : null}
+              {workbench &&
+              (workbench.matching_cluster.length > 0 ||
+                workbench.fulfillment_cluster.length > 0) ? (
+                <div className="flex flex-wrap gap-3 pt-1">
+                  <VerticalClusterList
+                    title="Matching"
+                    rows={workbench.matching_cluster}
+                    statusOf={(row) => row.matching_status}
+                    onSelect={() => setTab('matching')}
+                  />
+                  <VerticalClusterList
+                    title="Fulfillment"
+                    rows={workbench.fulfillment_cluster}
+                    statusOf={(row) => row.fulfillment_status}
+                    onSelect={() => setTab('fulfillment')}
+                  />
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <p className="text-[0.7rem] text-mute">
+              {currentRail?.label ? `Stage: ${currentRail.label}` : 'No stage rail.'}
+            </p>
+          )}
         </div>
 
         <Tabs

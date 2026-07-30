@@ -6,6 +6,7 @@ import {
   NOTICE_APPROVAL,
   WORKBENCH_STAGE_ORDER,
   actionReasonLabel,
+  deriveWorkbenchChromeFromOpsJourney,
   queueStatusLabel,
   stageLabel,
   stageReachLabel,
@@ -144,5 +145,66 @@ describe('legalJourneyLabels', () => {
     expect(workbenchStatusLabel('complete')).toBe('Complete')
     expect(workbenchStatusLabel('failed')).toBe('Failed')
     expect(workbenchStatusLabel('skipped')).toBe('Skipped')
+  })
+
+  test('deriveWorkbenchChromeFromOpsJourney returns four stages, never KD29 six', () => {
+    const chrome = deriveWorkbenchChromeFromOpsJourney({
+      intake_source: 'drop',
+      current_stage: 'match',
+      request_type: 'delete',
+      stages: [
+        { stage: 'received', label: 'Received', status: 'complete' },
+        { stage: 'download', label: 'Download', status: 'complete' },
+        { stage: 'land', label: 'Land', status: 'complete' },
+        { stage: 'promote', label: 'Promote', status: 'complete' },
+        { stage: 'match', label: 'Match', status: 'in_progress' },
+        { stage: 'review', label: 'Review', status: 'not_started' },
+        { stage: 'fulfill', label: 'Fulfill', status: 'not_started' },
+        { stage: 'notice', label: 'Notice', status: 'not_started' },
+      ],
+    })
+    expect(chrome.stages.map((stage) => stage.stage)).toEqual([
+      'ingest',
+      'matching',
+      'fulfillment',
+      'notice',
+    ])
+    expect(chrome.stages).toHaveLength(4)
+    expect(chrome.current_stage).toBe('matching')
+    expect(chrome.substeps.filter((step) => step.parent === 'ingest').map((s) => s.key)).toEqual([
+      'received',
+      'download',
+      'land',
+      'promote',
+    ])
+    expect(chrome.substeps.some((step) => step.key === 'notice')).toBe(true)
+  })
+
+  test('deriveWorkbenchChromeFromOpsJourney conditions notice substeps on access vs drop', () => {
+    const access = deriveWorkbenchChromeFromOpsJourney({
+      intake_source: 'webform',
+      current_stage: 'fulfill',
+      request_type: 'access',
+      stages: [
+        { stage: 'received', label: 'Received', status: 'complete' },
+        { stage: 'match', label: 'Match', status: 'complete' },
+        { stage: 'fulfill', label: 'Fulfill', status: 'in_progress' },
+        { stage: 'delivery', label: 'Delivery', status: 'not_started' },
+      ],
+    })
+    expect(access.substeps.some((step) => step.key === 'delivery')).toBe(true)
+    expect(access.substeps.some((step) => step.key === 'notice')).toBe(false)
+
+    const drop = deriveWorkbenchChromeFromOpsJourney({
+      intake_source: 'drop',
+      current_stage: 'notice',
+      request_type: 'delete',
+      stages: [
+        { stage: 'notice', label: 'Notice', status: 'waiting' },
+        { stage: 'delivery', label: 'Delivery', status: 'not_started' },
+      ],
+    })
+    expect(drop.substeps.some((step) => step.key === 'notice')).toBe(true)
+    expect(drop.substeps.some((step) => step.key === 'delivery')).toBe(false)
   })
 })

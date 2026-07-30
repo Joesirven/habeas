@@ -17,6 +17,7 @@ import {
 import {
   RequestDetailOverlay,
   RequesterContactSection,
+  ThinJourneyPipeline,
   useRequestDetailOverlay,
 } from '@/components/requests/RequestDetailOverlay'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -52,6 +53,7 @@ import {
   getRequest,
   getRequestComments,
   getRequestJourney,
+  getRequestJourneyWorkbench,
   getRequestTimeline,
   patchAccessDeliveryStatus,
   postDropMatchingResultDecline,
@@ -66,13 +68,16 @@ import {
   type DropResponseStatusCode,
   type IdentityVerificationRecord,
   type IntakeSource,
-  type JourneyStage,
   type MatchingResultDetail,
   type NeedsAttentionItem,
   type RequestRecord,
   type TimelineEntry,
 } from '@/lib/api'
-import { actionReasonLabel, NOTICE_APPROVAL } from '@/lib/legalJourneyLabels'
+import {
+  actionReasonLabel,
+  deriveWorkbenchChromeFromOpsJourney,
+  NOTICE_APPROVAL,
+} from '@/lib/legalJourneyLabels'
 import { cn } from '@/lib/utils'
 
 function recommendedStatusFromItem(
@@ -530,65 +535,6 @@ function inboxItemTitle(item: NeedsAttentionItem): string {
   if (isCommsItem(item)) return 'Communications'
   if (isFulfillmentLegalItem(item)) return 'Pre-fulfillment'
   return reasonLabel(item.reason)
-}
-
-function journeySegmentClass(status: JourneyStage['status']): string {
-  if (status === 'complete') return 'bg-emerald-600'
-  if (status === 'failed') return 'bg-red-600'
-  if (status === 'waiting' || status === 'in_progress') return 'bg-amber-500'
-  if (status === 'skipped') return 'bg-mute/50'
-  return 'bg-line'
-}
-
-function JourneyProgressBar({ stages }: { stages: JourneyStage[] }) {
-  if (stages.length === 0) return null
-  const activeIdx = stages.findIndex(
-    (stage) =>
-      stage.status === 'in_progress' ||
-      stage.status === 'waiting' ||
-      stage.status === 'failed',
-  )
-
-  return (
-    <div className="space-y-1.5" role="group" aria-label="Request journey">
-      <div className="flex h-2 w-full overflow-hidden rounded-full bg-canvas ring-1 ring-line">
-        {stages.map((stage) => (
-          <div
-            key={stage.stage}
-            className={cn(
-              'h-full min-w-[3px] flex-1',
-              journeySegmentClass(stage.status),
-            )}
-            title={`${stage.label}: ${stage.status.replaceAll('_', ' ')}${
-              stage.blocker ? ` — ${stage.blocker}` : ''
-            }`}
-          />
-        ))}
-      </div>
-      <div className="flex gap-0.5">
-        {stages.map((stage, index) => (
-          <span
-            key={stage.stage}
-            className={cn(
-              'min-w-0 flex-1 truncate text-center text-[0.55rem] leading-tight',
-              stage.status === 'complete'
-                ? 'font-medium text-emerald-800'
-                : index === activeIdx ||
-                    stage.status === 'in_progress' ||
-                    stage.status === 'waiting'
-                  ? 'font-medium text-amber-900'
-                  : stage.status === 'failed'
-                    ? 'font-medium text-red-700'
-                    : 'text-mute',
-            )}
-            title={stage.blocker ?? `${stage.label}: ${stage.status.replaceAll('_', ' ')}`}
-          >
-            {stage.label}
-          </span>
-        ))}
-      </div>
-    </div>
-  )
 }
 
 function emailInitials(email: string | null | undefined): string {
@@ -1605,6 +1551,23 @@ function InboxReviewPane({
     placeholderData: (previous) => previous,
   })
 
+  const workbenchQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', item.request_id, 'journey-workbench'],
+    queryFn: async () => {
+      try {
+        return await getRequestJourneyWorkbench(item.request_id)
+      } catch (error) {
+        if (error instanceof Error && /Admin API 404/.test(error.message)) {
+          return null
+        }
+        throw error
+      }
+    },
+    refetchInterval: 15_000,
+    placeholderData: (previous) => previous,
+    retry: false,
+  })
+
   const artifactQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', item.request_id],
     queryFn: () => getFulfillmentArtifact(item.request_id),
@@ -1790,6 +1753,21 @@ function InboxReviewPane({
         ? ('data' as const)
         : null
   const stages = journeyQuery.data?.stages ?? []
+  const derivedChrome = journeyQuery.data
+    ? deriveWorkbenchChromeFromOpsJourney({
+        stages: journeyQuery.data.stages,
+        current_stage: journeyQuery.data.current_stage,
+        intake_source: item.intake_source,
+        request_type: requestQuery.data?.request_type ?? null,
+      })
+    : null
+  const workbench = workbenchQuery.data
+  const pipelineStages = workbench?.stages ?? derivedChrome?.stages ?? []
+  const pipelineSubsteps = workbench
+    ? derivedChrome?.substeps.filter(
+        (step) => step.parent === 'ingest' || step.parent === 'notice',
+      )
+    : derivedChrome?.substeps
   const shareableUrl =
     artifactQuery.data?.shareable_url ?? artifactQuery.data?.fulfillment_artifact_uri ?? ''
   const outboundDraft = buildAccessDeliveryDraft({
@@ -2066,10 +2044,17 @@ function InboxReviewPane({
           ) : null}
         </div>
 
-        {/* Ops-only stage rail — legal gets stage in the meta line above */}
-        {!legalPersona && stages.length > 0 ? (
+        {/* Thin four-stage pipeline + type/source substeps (list rows stay strip-free — R1/AE5) */}
+        {pipelineStages.length > 0 ? (
           <div className="shrink-0 border-b border-line px-4 py-2">
-            <JourneyProgressBar stages={stages} />
+            <ThinJourneyPipeline
+              stages={pipelineStages}
+              substeps={pipelineSubsteps}
+              matchingCluster={workbench?.matching_cluster}
+              fulfillmentCluster={workbench?.fulfillment_cluster}
+              splitPosture={workbench?.split_posture ?? derivedChrome?.split_posture}
+              density="compact"
+            />
           </div>
         ) : null}
 

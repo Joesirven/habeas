@@ -134,3 +134,205 @@ export const NOTICE_APPROVAL = {
   empty: 'No fulfillment notices waiting.',
   beforeUpload: 'Fulfillment notice pending — weekly upload',
 } as const
+
+/** Ops fine-stage → KTD2 workbench parent (client fallback when workbench API is unavailable). */
+const OPS_TO_WORKBENCH: Record<string, WorkbenchStageKey> = {
+  received: 'ingest',
+  triage: 'ingest',
+  download: 'ingest',
+  land: 'ingest',
+  promote: 'ingest',
+  match: 'matching',
+  review: 'matching',
+  fulfill: 'fulfillment',
+  fulfillment: 'fulfillment',
+  notice: 'notice',
+  delivery: 'notice',
+}
+
+const STATUS_RANK: Record<string, number> = {
+  failed: 5,
+  in_progress: 4,
+  waiting: 3,
+  not_started: 2,
+  skipped: 1,
+  complete: 0,
+}
+
+export type WorkbenchStageStatus =
+  | 'not_started'
+  | 'skipped'
+  | 'in_progress'
+  | 'waiting'
+  | 'complete'
+  | 'failed'
+
+export type DerivedWorkbenchStage = {
+  stage: WorkbenchStageKey
+  label: string
+  status: WorkbenchStageStatus
+  blocker: string | null
+}
+
+export type DerivedWorkbenchSubstep = {
+  key: string
+  label: string
+  status: WorkbenchStageStatus
+  parent: WorkbenchStageKey
+  blocker: string | null
+}
+
+export type DerivedWorkbenchChrome = {
+  stages: DerivedWorkbenchStage[]
+  current_stage: WorkbenchStageKey
+  substeps: DerivedWorkbenchSubstep[]
+  split_posture: boolean
+}
+
+type OpsStageLike = {
+  stage: string
+  label: string
+  status: string
+  blocker?: string | null
+}
+
+function rollupWorkbenchStatus(statuses: WorkbenchStageStatus[]): WorkbenchStageStatus {
+  if (statuses.length === 0) return 'not_started'
+  let best: WorkbenchStageStatus = 'complete'
+  let bestRank = -1
+  for (const status of statuses) {
+    const rank = STATUS_RANK[status] ?? 0
+    if (rank > bestRank) {
+      best = status
+      bestRank = rank
+    }
+  }
+  return best
+}
+
+function asWorkbenchStatus(status: string): WorkbenchStageStatus {
+  const normalized = status.trim().toLowerCase()
+  if (normalized in STATUS_RANK) return normalized as WorkbenchStageStatus
+  return 'not_started'
+}
+
+/**
+ * Map ops fine journey → four-stage rail + type/source-conditioned substeps (KTD2).
+ * Used when `GET …/journey-workbench` is unavailable so detail never falls back to KD29 six keys.
+ */
+export function deriveWorkbenchChromeFromOpsJourney(opts: {
+  stages: OpsStageLike[]
+  current_stage: string
+  intake_source: string
+  request_type?: string | null
+}): DerivedWorkbenchChrome {
+  const byStage = new Map(opts.stages.map((stage) => [stage.stage, stage]))
+  const intake = opts.intake_source.trim().toLowerCase()
+  const requestType = (opts.request_type ?? '').trim().toLowerCase()
+  const isDrop = intake === 'drop'
+  const isAccess =
+    requestType === 'access' ||
+    requestType === 'access_request' ||
+    requestType === 'combined'
+
+  const ingestKeys = isDrop
+    ? ['received', 'download', 'land', 'promote']
+    : ['received', 'triage']
+  const matchingKeys = ['match', 'review']
+  const fulfillmentKeys = ['fulfill']
+  const noticeKeys = isDrop ? ['notice'] : isAccess ? ['delivery'] : []
+
+  const substepsFor = (keys: string[], parent: WorkbenchStageKey): DerivedWorkbenchSubstep[] =>
+    keys
+      .map((key) => byStage.get(key))
+      .filter((stage): stage is OpsStageLike => stage != null)
+      .map((stage) => ({
+        key: stage.stage,
+        label: stage.label,
+        status: asWorkbenchStatus(stage.status),
+        parent,
+        blocker: stage.blocker ?? null,
+      }))
+
+  const ingestSubsteps = substepsFor(ingestKeys, 'ingest')
+  const matchingSubsteps = substepsFor(matchingKeys, 'matching')
+  const fulfillmentSubsteps = substepsFor(fulfillmentKeys, 'fulfillment')
+  const noticeSubsteps = [...substepsFor(noticeKeys, 'notice')]
+
+  // Non-DROP delete/opt-out: surface a single notice placeholder when fulfill is done.
+  if (!isDrop && !isAccess && noticeSubsteps.length === 0) {
+    const fulfill = byStage.get('fulfill')
+    if (fulfill && asWorkbenchStatus(fulfill.status) === 'complete') {
+      noticeSubsteps.push({
+        key: 'template_notice',
+        label: 'Template notice',
+        status: 'in_progress',
+        parent: 'notice',
+        blocker: null,
+      })
+    }
+  }
+
+  const stages: DerivedWorkbenchStage[] = WORKBENCH_STAGE_ORDER.map((key) => {
+    const group =
+      key === 'ingest'
+        ? ingestSubsteps
+        : key === 'matching'
+          ? matchingSubsteps
+          : key === 'fulfillment'
+            ? fulfillmentSubsteps
+            : noticeSubsteps
+    const status = rollupWorkbenchStatus(group.map((step) => step.status))
+    const blocker = group.find((step) => step.blocker)?.blocker ?? null
+    return {
+      stage: key,
+      label: workbenchStageLabel(key),
+      status,
+      blocker,
+    }
+  })
+
+  // Advance completed prefixes from current ops stage (same idea as coarse rail).
+  const currentParent =
+    OPS_TO_WORKBENCH[opts.current_stage.trim().toLowerCase()] ?? 'ingest'
+  const currentIdx = WORKBENCH_STAGE_ORDER.indexOf(currentParent)
+  for (let index = 0; index < currentIdx; index += 1) {
+    const stage = stages[index]!
+    if (stage.status === 'not_started' || stage.status === 'skipped') {
+      stage.status = 'complete'
+    }
+  }
+  if (stages[currentIdx] && stages[currentIdx]!.status === 'not_started') {
+    stages[currentIdx]!.status = 'in_progress'
+  }
+
+  const matchingIncomplete = matchingSubsteps.some(
+    (step) => step.status !== 'complete' && step.status !== 'skipped',
+  )
+  const fulfillmentStarted = fulfillmentSubsteps.some(
+    (step) =>
+      step.status === 'in_progress' ||
+      step.status === 'waiting' ||
+      step.status === 'complete' ||
+      step.status === 'failed',
+  )
+  const split_posture = matchingIncomplete && fulfillmentStarted
+  if (split_posture) {
+    const matching = stages.find((stage) => stage.stage === 'matching')
+    const fulfillment = stages.find((stage) => stage.stage === 'fulfillment')
+    if (matching) matching.status = 'in_progress'
+    if (fulfillment) fulfillment.status = 'in_progress'
+  }
+
+  return {
+    stages,
+    current_stage: currentParent,
+    substeps: [
+      ...ingestSubsteps,
+      ...matchingSubsteps,
+      ...fulfillmentSubsteps,
+      ...noticeSubsteps,
+    ],
+    split_posture,
+  }
+}

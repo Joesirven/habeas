@@ -30,11 +30,14 @@ function NavLink({
   search?: Record<string, string | number | undefined>
 }) {
   const pathname = useRouterState({ select: (state) => state.location.pathname })
+  // TanStack Link also adds `.active` for prefix matches unless exact is set —
+  // without activeOptions, `/requests` stays selected on `/requests/needs-attention`.
   const active = exact ? pathname === to : pathMatches(pathname, to)
   return (
     <Link
       to={to}
       search={search}
+      activeOptions={{ exact, includeSearch: false }}
       className={`inline-flex items-center gap-1.5 ${navClass}${active ? ' active' : ''}`}
     >
       {label}
