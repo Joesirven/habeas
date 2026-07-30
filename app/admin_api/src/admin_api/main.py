@@ -40,7 +40,7 @@ from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
 from admin_api.requests_list import (
     CoarseStage,
-    RequestListItem,
+    RequestListPage,
     SourceBucket,
     StagePosture,
     search_requests,
@@ -222,16 +222,23 @@ async def live_events():
     return EventSourceResponse(event_generator())
 
 
-@app.get("/requests", response_model=list[RequestListItem])
+@app.get("/requests", response_model=RequestListPage)
 async def requests_list(
     viewer: RequestsListPrincipal,
-    limit: int = Query(default=50, ge=1, le=100),
+    # le=1000 mirrors needs-attention cap — All requests batch grouping/pagination
+    # needs headroom beyond one DROP ingest minute to show more than a single batch.
+    limit: int = Query(default=50, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
     intake_source: IntakeSource | None = None,
     source_bucket: SourceBucket | None = None,
     stage: CoarseStage | None = None,
     posture: StagePosture | None = None,
+    request_type: str | None = Query(default=None, max_length=40),
+    requestor_state: str | None = Query(default=None, min_length=2, max_length=2),
+    received_after: str | None = Query(default=None),
+    received_before: str | None = Query(default=None),
     q: str | None = Query(default=None, max_length=200),
-):
+) -> RequestListPage:
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
     include_display_labels = viewer.role in (ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL)
@@ -241,10 +248,15 @@ async def requests_list(
             return await search_requests(
                 conn,
                 limit=limit,
+                offset=offset,
                 intake_source=intake_source,
                 source_bucket=source_bucket,
                 stage=stage,
                 posture=posture,
+                request_type=request_type,
+                requestor_state=requestor_state,
+                received_after=received_after,
+                received_before=received_before,
                 q=q,
                 include_display_labels=include_display_labels,
             )

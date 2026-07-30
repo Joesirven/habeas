@@ -13,6 +13,8 @@ from admin_api.roles import RolePrincipal, require_roles
 from admin_api.worker_schedules import ca_drop_schedule_payload
 from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_LEGAL, ROLE_SUPER_ADMIN
 from habeas_privacy_core.db.pool import get_pool
+from habeas_privacy_core.db.request_lifecycle import EFFECTIVE_DUE_AT_SQL
+
 
 router = APIRouter(prefix="/legal", tags=["legal-portfolio"])
 
@@ -185,7 +187,7 @@ async def get_legal_portfolio(
               FROM requests r
              LEFT JOIN drop_raw_requests drr
                ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-             WHERE r.closed_at IS NULL
+             WHERE NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)
                AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
             """
         )
@@ -195,7 +197,7 @@ async def get_legal_portfolio(
               FROM requests r
              LEFT JOIN drop_raw_requests drr
                ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-             WHERE r.closed_at IS NULL
+             WHERE NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)
                AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
              GROUP BY request_type
              ORDER BY request_type
@@ -208,7 +210,7 @@ async def get_legal_portfolio(
                   FROM requests r
                   LEFT JOIN drop_raw_requests drr
                     ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-                 WHERE r.closed_at IS NULL
+                 WHERE NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)
                    AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
             ),
             latest_mr AS (
@@ -300,7 +302,7 @@ async def get_legal_portfolio(
                   FROM requests r
                   LEFT JOIN drop_raw_requests drr
                     ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-                 WHERE r.closed_at IS NULL
+                 WHERE NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)
                    AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
             ),
             staged AS (
@@ -378,7 +380,7 @@ async def get_legal_portfolio(
               FROM requests r
              LEFT JOIN drop_raw_requests drr
                ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-             WHERE r.closed_at IS NULL
+             WHERE NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)
                AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
         """
         batch_args: list[Any] = []
@@ -397,7 +399,7 @@ async def get_legal_portfolio(
               FROM requests r
              LEFT JOIN drop_raw_requests drr
                ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-             WHERE r.closed_at IS NULL
+             WHERE NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)
                AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
         """
         heatmap_args: list[Any] = []
@@ -416,7 +418,7 @@ async def get_legal_portfolio(
                   FROM requests r
                   LEFT JOIN drop_raw_requests drr
                     ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-                 WHERE r.closed_at IS NULL
+                 WHERE NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)
                AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
         """
         reach_args: list[Any] = []
@@ -488,28 +490,34 @@ async def get_legal_portfolio(
         """
         reach_rows = await conn.fetch(reach_sql, *reach_args)
 
-        deadline_sql = """
+        deadline_sql = f"""
             SELECT
               COUNT(*) FILTER (
-                WHERE r.due_at IS NOT NULL AND r.due_at < NOW()
+                WHERE due_at < NOW()
                   AND NOT EXISTS (
                     SELECT 1 FROM approval_requests ar
                      WHERE ar.request_id = r.id AND ar.status = 'pending'
                   )
               )::int AS overdue,
               COUNT(*) FILTER (
-                WHERE r.due_at IS NOT NULL
-                  AND r.due_at >= NOW()
-                  AND r.due_at < NOW() + INTERVAL '7 days'
+                WHERE due_at >= NOW()
+                  AND due_at < NOW() + INTERVAL '7 days'
               )::int AS due_7d,
               COUNT(*) FILTER (
-                WHERE r.due_at IS NOT NULL AND r.due_at >= NOW() + INTERVAL '7 days'
+                WHERE due_at >= NOW() + INTERVAL '7 days'
               )::int AS on_track,
               0::int AS closed_ytd
-              FROM requests r
+              FROM (
+                SELECT r.id,
+                       r.received_at,
+                       r.intake_source,
+                       r.raw_record_id,
+                       ({EFFECTIVE_DUE_AT_SQL}) AS due_at
+                  FROM requests r
+              ) r
              LEFT JOIN drop_raw_requests drr
                ON drr.id = r.raw_record_id AND r.intake_source = 'drop'
-             WHERE r.closed_at IS NULL
+             WHERE NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)
                AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
         """
         deadline_args: list[Any] = []
@@ -522,7 +530,7 @@ async def get_legal_portfolio(
         deadline_row = await conn.fetchrow(deadline_sql, *deadline_args)
 
         pulse_row = await conn.fetchrow(
-            """
+            f"""
             SELECT
               COUNT(*) FILTER (WHERE ar.status = 'pending')::int AS open_team,
               COUNT(*) FILTER (
@@ -530,7 +538,7 @@ async def get_legal_portfolio(
                   AND ar.requested_at < NOW() - INTERVAL '2 days'
               )::int AS sla_at_risk,
               COUNT(*) FILTER (
-                WHERE r.due_at IS NOT NULL AND r.due_at < NOW()
+                WHERE ({EFFECTIVE_DUE_AT_SQL}) < NOW()
               )::int AS overdue
               FROM approval_requests ar
               JOIN requests r ON r.id = ar.request_id

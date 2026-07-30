@@ -234,6 +234,9 @@ class NeedsAttentionItem(BaseModel):
 class NeedsAttentionResponse(BaseModel):
     items: list[NeedsAttentionItem] = Field(default_factory=list)
     kind: NeedsAttentionKind = "all"
+    total: int = 0
+    limit: int = 0
+    offset: int = 0
 
 
 class RequestCommentBody(BaseModel):
@@ -1573,7 +1576,7 @@ async def list_matching_needs_attention(
                AND r.intake_source = 'drop'
              WHERE COALESCE(lr.review_status, 'none') IN ('pending', 'none')
                AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
-               AND r.closed_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)
 
             UNION
 
@@ -1740,7 +1743,7 @@ async def list_assignment_needs_attention(
            AND ar.approver_role = 'legal'
            AND ar.context_jsonb->>'kind' = $2
            AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
-           AND r.closed_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)
          ORDER BY ar.requested_at ASC
          LIMIT $3
         """,
@@ -1824,7 +1827,7 @@ async def list_notice_needs_attention(
                ) ar ON TRUE
          WHERE drr.response_status IS NOT NULL
            AND drr.notice_review_status = 'pending'
-           AND r.closed_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)
          ORDER BY COALESCE(ar.requested_at, r.received_at) ASC NULLS LAST
          LIMIT $2
         """,
@@ -1904,7 +1907,7 @@ async def list_delivery_needs_attention(
           FROM latest l
           JOIN requests r ON r.id = l.request_id
          WHERE l.delivery_status IN ('pending', 'recorded', 'failed', 'sent')
-           AND r.closed_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)
          ORDER BY l.contacted_at ASC NULLS LAST
          LIMIT $1
         """,
@@ -1934,6 +1937,7 @@ async def list_needs_attention(
     conn: Any,
     *,
     limit: int,
+    offset: int = 0,
     kind: NeedsAttentionKind = "all",
     assignee: str | None = None,
 ) -> NeedsAttentionResponse:
@@ -1941,27 +1945,37 @@ async def list_needs_attention(
 
     Optional ``assignee`` (email) keeps only rows whose current assignment
     ``assignee_identity`` matches (case-insensitive) — My work · Tasks.
+
+    Candidates are collected then sliced by ``offset``/``limit`` in Python
+    (single kind or a union of kinds) — each sub-query fetches enough rows to
+    cover the requested page (at least ``offset + limit``, capped at 1000, the
+    existing per-kind safety ceiling) so page 2+ is never silently empty from
+    an earlier per-kind hard cap. ``total`` is exact up to that 1000-row
+    fetch ceiling per kind; queues deeper than that report a floor, not the
+    true count (matches the existing ``le=1000`` safety cap elsewhere).
     """
     if kind not in NEEDS_ATTENTION_KINDS:
         raise ValueError(f"invalid needs-attention kind: {kind!r}")
 
+    fetch_limit = min(1000, max(limit, offset + limit))
+
     items: list[NeedsAttentionItem] = []
     if kind in {"matching", "all"}:
-        items.extend(await list_matching_needs_attention(conn, limit=limit))
+        items.extend(await list_matching_needs_attention(conn, limit=fetch_limit))
     if kind in {"triage", "all"}:
         items.extend(
-            await list_assignment_needs_attention(conn, kind="triage", limit=limit)
+            await list_assignment_needs_attention(conn, kind="triage", limit=fetch_limit)
         )
     if kind in {"escalations", "all"}:
         items.extend(
             await list_assignment_needs_attention(
-                conn, kind="escalations", limit=limit
+                conn, kind="escalations", limit=fetch_limit
             )
         )
     if kind in {"notice", "all"}:
-        items.extend(await list_notice_needs_attention(conn, limit=limit))
+        items.extend(await list_notice_needs_attention(conn, limit=fetch_limit))
     if kind in {"delivery", "all"}:
-        items.extend(await list_delivery_needs_attention(conn, limit=limit))
+        items.extend(await list_delivery_needs_attention(conn, limit=fetch_limit))
 
     assignee_norm = assignee.strip().lower() if assignee and assignee.strip() else None
     if assignee_norm is not None:
@@ -1974,11 +1988,13 @@ async def list_needs_attention(
             == assignee_norm
         ]
 
-    # Stable sort + hard limit when unioning kinds.
+    # Stable sort across unioned kinds, then page.
     items.sort(key=lambda item: item.requested_at or item.received_at or "")
-    if len(items) > limit:
-        items = items[:limit]
-    return NeedsAttentionResponse(items=items, kind=kind)
+    total = len(items)
+    page_items = items[offset : offset + limit]
+    return NeedsAttentionResponse(
+        items=page_items, kind=kind, total=total, limit=limit, offset=offset
+    )
 
 
 async def _bulk_process_id_for_raw(
@@ -2142,6 +2158,7 @@ async def needs_attention(
     viewer: RequestOpsViewer,
     kind: NeedsAttentionKind = Query(default="all"),
     limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
     assignee: str | None = Query(
         default=None,
         description="Filter by assignment assignee_identity; use 'me' for the caller.",
@@ -2157,6 +2174,7 @@ async def needs_attention(
             response = await list_needs_attention(
                 conn,
                 limit=limit,
+                offset=offset,
                 kind=kind,
                 assignee=assignee_filter,
             )
@@ -2227,7 +2245,7 @@ async def post_request_close(
     request: Request,
     viewer: LegalClosePrincipal,
 ) -> RequestCloseResponse:
-    """Close a request — stamps closed_at, clears pending gates, sets DROP status when unset."""
+    """Close a request — appends request_closures, clears pending gates, sets DROP status when unset."""
     _require_database()
     try:
         UUID(request_id)

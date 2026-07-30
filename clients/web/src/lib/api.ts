@@ -161,12 +161,24 @@ export function postIdentityVerification(
   )
 }
 
+export type RequestListPage = {
+  items: RequestRecord[]
+  total: number
+  limit: number
+  offset: number
+}
+
 export function listRequests(options?: {
   intakeSource?: IntakeSource
   sourceBucket?: 'drop' | 'other'
   stage?: string
   posture?: 'in_queue' | 'in_progress' | 'complete'
+  requestType?: string
+  requestorState?: string
+  receivedAfter?: string
+  receivedBefore?: string
   limit?: number
+  offset?: number
   q?: string
 }) {
   const search = new URLSearchParams()
@@ -174,10 +186,15 @@ export function listRequests(options?: {
   if (options?.sourceBucket) search.set('source_bucket', options.sourceBucket)
   if (options?.stage) search.set('stage', options.stage)
   if (options?.posture) search.set('posture', options.posture)
+  if (options?.requestType) search.set('request_type', options.requestType)
+  if (options?.requestorState) search.set('requestor_state', options.requestorState)
+  if (options?.receivedAfter) search.set('received_after', options.receivedAfter)
+  if (options?.receivedBefore) search.set('received_before', options.receivedBefore)
   if (options?.limit != null) search.set('limit', String(options.limit))
+  if (options?.offset != null) search.set('offset', String(options.offset))
   if (options?.q?.trim()) search.set('q', options.q.trim())
   const query = search.toString()
-  return fetchAdminApi<RequestRecord[]>(`/requests${query ? `?${query}` : ''}`)
+  return fetchAdminApi<RequestListPage>(`/requests${query ? `?${query}` : ''}`)
 }
 
 export function createManualRequest(body: ManualRequestInput) {
@@ -1401,6 +1418,10 @@ export type NeedsAttentionItem = {
 export type NeedsAttentionResponse = {
   items: NeedsAttentionItem[]
   kind?: NeedsAttentionKind
+  /** Full filtered/union count for this kind (up to the server's safety cap) — use for pagination, not just items.length. */
+  total?: number
+  limit?: number
+  offset?: number
 }
 
 export type RequestComment = {
@@ -1540,7 +1561,12 @@ export function postFulfillmentKickoff(
 export function getNeedsAttention(
   limitOrParams?:
     | number
-    | { limit?: number; kind?: NeedsAttentionKind; assignee?: string },
+    | {
+        limit?: number
+        offset?: number
+        kind?: NeedsAttentionKind
+        assignee?: string
+      },
 ) {
   const params =
     typeof limitOrParams === 'number'
@@ -1548,6 +1574,7 @@ export function getNeedsAttention(
       : (limitOrParams ?? {})
   const search = new URLSearchParams()
   if (params.limit != null) search.set('limit', String(params.limit))
+  if (params.offset != null) search.set('offset', String(params.offset))
   if (params.kind) search.set('kind', params.kind)
   if (params.assignee) search.set('assignee', params.assignee)
   const query = search.toString()
@@ -1564,17 +1591,40 @@ export const LEGAL_INBOX_KINDS: NeedsAttentionItemKind[] = [
   'delivery',
 ]
 
-export async function getLegalNeedsAttention(limit = 1000): Promise<NeedsAttentionResponse> {
+/**
+ * Legal inbox — server paginates: one admin-api call per legal kind, each
+ * already offset/limited, merged and re-sorted client-side across the (small,
+ * bounded) per-kind pages. Replaces the old "fetch limit=1000 per kind, page
+ * client-side" pattern — legal no longer pulls 1000×4 rows to show one page.
+ */
+export async function getLegalNeedsAttention(params?: {
+  limit?: number
+  offset?: number
+  assignee?: string
+}): Promise<NeedsAttentionResponse> {
+  const limit = params?.limit ?? 30
+  const offset = params?.offset ?? 0
   const results = await Promise.all(
-    LEGAL_INBOX_KINDS.map((kind) => getNeedsAttention({ limit, kind })),
+    LEGAL_INBOX_KINDS.map((kind) =>
+      getNeedsAttention({
+        // Fetch enough of each kind's own ordering to cover this page after
+        // the cross-kind merge/re-sort below — bounded by the same 1000 cap
+        // admin-api enforces per kind.
+        limit: Math.min(1000, offset + limit),
+        kind,
+        assignee: params?.assignee,
+      }),
+    ),
   )
-  const items = results.flatMap((result) => result.items)
-  items.sort((a, b) =>
+  const merged = results.flatMap((result) => result.items)
+  merged.sort((a, b) =>
     (a.requested_at || a.received_at || '').localeCompare(
       b.requested_at || b.received_at || '',
     ),
   )
-  return { items, kind: 'all' }
+  const total = results.reduce((sum, result) => sum + (result.total ?? result.items.length), 0)
+  const items = merged.slice(offset, offset + limit)
+  return { items, kind: 'all', total, limit, offset }
 }
 
 export type LegalPortfolioWindowDays = '7' | '30' | '90' | 'ytd' | 'all'

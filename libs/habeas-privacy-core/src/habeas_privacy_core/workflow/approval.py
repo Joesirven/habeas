@@ -558,7 +558,9 @@ async def reconcile_ungated_matching_reviews(
                         )
                )
            AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
-           AND r.closed_at IS NULL
+           AND NOT EXISTS (
+                 SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id
+               )
          ORDER BY l.matching_result_id ASC
          LIMIT $2
         """,
@@ -1233,20 +1235,22 @@ async def close_request(
     closed_by: str,
     drop_response_status: int | None = None,
 ) -> dict[str, Any]:
-    """Close a request: stamp ``closed_at``, clear pending gates, set DROP status when needed.
+    """Close a request: append ``request_closures``, clear pending gates, set DROP status when needed.
 
     For DROP rows with unset ``response_status``, writes ``drop_response_status`` when
-    provided (3/4/5) or defaults to 5 (Not found). Non-DROP rows only need ``closed_at``.
+    provided (3/4/5) or defaults to 5 (Not found). Non-DROP rows only need a closure row.
     """
     row = await conn.fetchrow(
         """
         SELECT r.id,
                r.intake_source,
                r.raw_record_id,
-               r.closed_at,
-               r.closed_by,
+               rc.closed_at,
+               rc.closed_by,
                drr.response_status AS drop_response_status
           FROM requests r
+          LEFT JOIN request_closures rc
+            ON rc.request_id = r.id
           LEFT JOIN drop_raw_requests drr
             ON drr.id = r.raw_record_id
            AND r.intake_source = 'drop'
@@ -1289,18 +1293,31 @@ async def close_request(
 
     closed_row = await conn.fetchrow(
         """
-        UPDATE requests
-           SET closed_at = NOW(),
-               closed_by = $2
-         WHERE id = $1
-           AND closed_at IS NULL
+        INSERT INTO request_closures (request_id, closed_by)
+        VALUES ($1, $2)
+        ON CONFLICT (request_id) DO NOTHING
         RETURNING closed_at
         """,
         UUID(request_id),
         closed_by,
     )
     if closed_row is None:
-        raise RuntimeError("request close failed")
+        existing = await conn.fetchrow(
+            """
+            SELECT closed_at, closed_by
+              FROM request_closures
+             WHERE request_id = $1
+            """,
+            UUID(request_id),
+        )
+        if existing is None:
+            raise RuntimeError("request close failed")
+        return {
+            "request_id": request_id,
+            "already_closed": True,
+            "closed_at": existing["closed_at"].isoformat(),
+            "closed_by": existing.get("closed_by"),
+        }
 
     await conn.execute(
         """

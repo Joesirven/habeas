@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -108,6 +109,19 @@ async def calculate_due_at_from_received(received_at: datetime, conn) -> datetim
     )
 
 
+async def _has_due_override(conn, request_id: str) -> bool:
+    return bool(
+        await conn.fetchval(
+            """
+            SELECT EXISTS(
+                SELECT 1 FROM request_due_overrides WHERE request_id = $1::uuid
+            )
+            """,
+            request_id,
+        )
+    )
+
+
 async def apply_request_due_at_for_stage(
     conn,
     request_id: str,
@@ -115,10 +129,10 @@ async def apply_request_due_at_for_stage(
     stage: SlaStage,
     stage_entered_at: datetime | None = None,
 ) -> datetime | None:
-    """Set calculated due_at unless admin has overridden the request deadline."""
+    """Return calculated due_at unless an admin override exists (no spine write)."""
     row = await conn.fetchrow(
         """
-        SELECT received_at, due_at_override_at
+        SELECT received_at
           FROM requests
          WHERE id = $1::uuid
         """,
@@ -126,32 +140,21 @@ async def apply_request_due_at_for_stage(
     )
     if row is None:
         raise LookupError("request not found")
-    if row["due_at_override_at"] is not None:
+    if await _has_due_override(conn, request_id):
         return None
     received_at = row["received_at"]
     if received_at is None:
         return None
-    due = await calculate_due_at_for_stage(
+    return await calculate_due_at_for_stage(
         conn,
         received_at=received_at,
         stage=stage,
         stage_entered_at=stage_entered_at,
     )
-    await conn.execute(
-        """
-        UPDATE requests
-           SET due_at = $2
-         WHERE id = $1::uuid
-           AND due_at_override_at IS NULL
-        """,
-        request_id,
-        due,
-    )
-    return due
 
 
 async def apply_request_due_at_on_intake(conn, request_id: str) -> datetime | None:
-    """Lifecycle SLA from received_at on intake promote."""
+    """Lifecycle SLA from received_at on intake (derived; not persisted on requests)."""
     return await apply_request_due_at_for_stage(
         conn,
         request_id,
@@ -203,22 +206,26 @@ async def patch_request_deadline(
     due = body.due_at
     if due.tzinfo is None:
         due = due.replace(tzinfo=timezone.utc)
+    try:
+        UUID(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="request not found") from exc
     async with pool.acquire() as conn:
-        updated = await conn.fetchval(
+        exists = await conn.fetchval(
+            "SELECT 1 FROM requests WHERE id = $1::uuid",
+            request_id,
+        )
+        if not exists:
+            raise HTTPException(status_code=404, detail="request not found")
+        await conn.execute(
             """
-            UPDATE requests
-               SET due_at = $2,
-                   due_at_override_at = now(),
-                   due_at_override_by = $3
-             WHERE id = $1::uuid
-         RETURNING id
+            INSERT INTO request_due_overrides (request_id, due_at, overridden_by)
+            VALUES ($1::uuid, $2, $3)
             """,
             request_id,
             due,
             principal.email,
         )
-        if not updated:
-            raise HTTPException(status_code=404, detail="request not found")
         await write_audit(
             actor=principal.email,
             interface="admin-api",

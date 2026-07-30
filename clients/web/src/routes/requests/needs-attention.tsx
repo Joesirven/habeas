@@ -78,7 +78,10 @@ import {
   deriveWorkbenchChromeFromOpsJourney,
   NOTICE_APPROVAL,
 } from '@/lib/legalJourneyLabels'
-import { cn } from '@/lib/utils'
+import { cn, paginate } from '@/lib/utils'
+
+/** Left-pane queue page size — keeps the dense inbox list scannable without one giant scroll. */
+const INBOX_PAGE_SIZE = 30
 
 function recommendedStatusFromItem(
   item: NeedsAttentionItem,
@@ -616,6 +619,55 @@ function DuePill({
     >
       {label}
     </Badge>
+  )
+}
+
+function InboxPaginationBar({
+  start,
+  end,
+  total,
+  currentPage,
+  totalPages,
+  onPrev,
+  onNext,
+}: {
+  start: number
+  end: number
+  total: number
+  currentPage: number
+  totalPages: number
+  onPrev: () => void
+  onNext: () => void
+}) {
+  return (
+    <div className="flex shrink-0 items-center justify-between gap-2 border-t border-line px-3 py-1.5 text-[0.65rem] text-ink-soft">
+      <span className="tabular-nums">
+        {total === 0 ? 'No items' : `${start + 1}–${end} of ${total}`}
+      </span>
+      {totalPages > 1 ? (
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            className="rounded border border-line bg-white px-1.5 py-0.5 text-[0.65rem] font-medium text-ink-soft transition-colors hover:bg-panel/60 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={onPrev}
+            disabled={currentPage <= 1}
+          >
+            Prev
+          </button>
+          <span className="tabular-nums text-mute">
+            {currentPage}/{totalPages}
+          </span>
+          <button
+            type="button"
+            className="rounded border border-line bg-white px-1.5 py-0.5 text-[0.65rem] font-medium text-ink-soft transition-colors hover:bg-panel/60 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={onNext}
+            disabled={currentPage >= totalPages}
+          >
+            Next
+          </button>
+        </div>
+      ) : null}
+    </div>
   )
 }
 
@@ -2361,7 +2413,7 @@ function InboxReviewPane({
 
 
 
-type InboxStackKind = 'batch' | 'type'
+type InboxStackKind = 'batch' | 'type' | 'batch_type'
 
 type InboxRow =
   | {
@@ -2370,8 +2422,6 @@ type InboxRow =
       batchKey: string
       batchLabel: string
       items: NeedsAttentionItem[]
-      /** When type+batch: expand shows nested stacks/requests instead of a flat item list. */
-      childRows?: InboxRow[]
     }
   | { kind: 'request'; item: NeedsAttentionItem }
 
@@ -2380,66 +2430,115 @@ function findThreadRow(
   batchKey: string,
 ): Extract<InboxRow, { kind: 'thread' }> | null {
   for (const row of rows) {
-    if (row.kind !== 'thread') continue
-    if (row.batchKey === batchKey) return row
-    if (row.childRows) {
-      const nested = findThreadRow(row.childRows, batchKey)
-      if (nested) return nested
-    }
+    if (row.kind === 'thread' && row.batchKey === batchKey) return row
   }
   return null
 }
 
-function countStackRows(rows: InboxRow[], stackKind: InboxStackKind): number {
-  let count = 0
-  for (const row of rows) {
-    if (row.kind === 'thread' && row.stackKind === stackKind) count += 1
-    if (row.kind === 'thread' && row.childRows) {
-      count += countStackRows(row.childRows, stackKind)
-    }
-  }
-  return count
+function countThreadStacks(rows: InboxRow[]): number {
+  return rows.filter((row) => row.kind === 'thread').length
 }
 
 const UNKEYED_BATCH_KEY = 'u:none'
 const UNKEYED_BATCH_LABEL = 'No DROP batch'
 
-/** Stack by type and/or batch — same stacked-card pattern for both. */
+function itemBatchParts(item: NeedsAttentionItem): { key: string; label: string } {
+  const key = inboxBatchKey(item)
+  if (key != null) {
+    return { key, label: inboxBatchLabel(item) }
+  }
+  return { key: UNKEYED_BATCH_KEY, label: UNKEYED_BATCH_LABEL }
+}
+
+/**
+ * Batch × type cross-product: one stack per (batch, work-type) pair.
+ * Example: batch #1 × Notice, batch #1 × Delivery, batch #2 × Notice, …
+ */
+function buildBatchTypeCrossRows(items: NeedsAttentionItem[]): InboxRow[] {
+  type CrossGroup = {
+    batchKey: string
+    batchLabel: string
+    typeKey: InboxWorkType
+    typeLabel: string
+    items: NeedsAttentionItem[]
+  }
+  const groups = new Map<string, CrossGroup>()
+
+  for (const item of items) {
+    const batch = itemBatchParts(item)
+    const typeKey = inboxWorkType(item)
+    const compositeKey = `${batch.key}::${typeKey}`
+    const existing = groups.get(compositeKey)
+    if (existing) {
+      existing.items.push(item)
+    } else {
+      groups.set(compositeKey, {
+        batchKey: batch.key,
+        batchLabel: batch.label,
+        typeKey,
+        typeLabel: INBOX_WORK_TYPE_LABELS[typeKey],
+        items: [item],
+      })
+    }
+  }
+
+  const typeRank = new Map(
+    INBOX_WORK_TYPE_ORDER.map((key, index) => [key, index] as const),
+  )
+
+  const timed = [...groups.entries()].map(([compositeKey, group]) => {
+    const sorted = [...group.items].sort((a, b) =>
+      (a.requested_at ?? '').localeCompare(b.requested_at ?? ''),
+    )
+    return {
+      t: sorted[0]?.requested_at ?? '',
+      typeRank: typeRank.get(group.typeKey) ?? 99,
+      batchLabel: group.batchLabel,
+      row: {
+        kind: 'thread' as const,
+        stackKind: 'batch_type' as const,
+        batchKey: compositeKey,
+        batchLabel: `${group.batchLabel} · ${group.typeLabel}`,
+        items: sorted,
+      },
+    }
+  })
+
+  timed.sort((a, b) => {
+    const byTime = a.t.localeCompare(b.t)
+    if (byTime !== 0) return byTime
+    const byType = a.typeRank - b.typeRank
+    if (byType !== 0) return byType
+    return a.batchLabel.localeCompare(b.batchLabel)
+  })
+  return timed.map((entry) => entry.row)
+}
+
+/** Stack by batch, by type, or by batch×type when both toggles are on. */
 function buildGroupedInboxRows(
   items: NeedsAttentionItem[],
   options: { byBatch: boolean; byType: boolean },
 ): InboxRow[] {
-  if (!options.byType) {
-    return buildInboxRows(items, options.byBatch)
+  if (options.byBatch && options.byType) {
+    return buildBatchTypeCrossRows(items)
   }
-
-  const rows: InboxRow[] = []
-  for (const section of buildTypeSections(items)) {
-    const sorted = [...section.items].sort((a, b) =>
-      (a.requested_at ?? '').localeCompare(b.requested_at ?? ''),
-    )
-    // Always stack a work type when Type is on — including single-item types.
-    const childRows = options.byBatch
-      ? buildInboxRows(sorted, true).map((row) =>
-          row.kind === 'thread'
-            ? {
-                ...row,
-                batchKey: `${section.key}::${row.batchKey}`,
-              }
-            : row,
-        )
-      : undefined
-
-    rows.push({
-      kind: 'thread',
-      stackKind: 'type',
-      batchKey: `type:${section.key}`,
-      batchLabel: section.label,
-      items: sorted,
-      childRows,
-    })
+  if (options.byType) {
+    const rows: InboxRow[] = []
+    for (const section of buildTypeSections(items)) {
+      const sorted = [...section.items].sort((a, b) =>
+        (a.requested_at ?? '').localeCompare(b.requested_at ?? ''),
+      )
+      rows.push({
+        kind: 'thread',
+        stackKind: 'type',
+        batchKey: `type:${section.key}`,
+        batchLabel: section.label,
+        items: sorted,
+      })
+    }
+    return rows
   }
-  return rows
+  return buildInboxRows(items, options.byBatch)
 }
 
 function InboxGroupSwitch({
@@ -2636,9 +2735,11 @@ function ThreadReviewPane({
   }, null)
   const bucket = earliest ? dueBucket(earliest) : 'unknown'
   const exactMatchBatch =
-    stackKind === 'batch' && threadIsExactMatchBatch(items)
+    (stackKind === 'batch' || stackKind === 'batch_type') &&
+    threadIsExactMatchBatch(items)
   const showBulkMatchingActions = canReviewActions && exactMatchBatch
-  const groupNoun = stackKind === 'type' ? 'Type' : 'Batch'
+  const groupNoun =
+    stackKind === 'type' ? 'Type' : stackKind === 'batch_type' ? 'Batch · type' : 'Batch'
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -2687,7 +2788,13 @@ function ThreadReviewPane({
             ← Queue
           </button>
         ) : null}
-        <Micro>{stackKind === 'type' ? 'Type stack' : 'Batch thread'}</Micro>
+        <Micro>
+          {stackKind === 'type'
+            ? 'Type stack'
+            : stackKind === 'batch_type'
+              ? 'Batch · type stack'
+              : 'Batch thread'}
+        </Micro>
         <h2 className="text-sm font-medium text-ink">
           {exactMatchBatch
             ? `Exact 1:1 matches · ${items.length} requests`
@@ -2695,8 +2802,14 @@ function ThreadReviewPane({
         </h2>
         <dl className="flex flex-wrap gap-x-4 gap-y-1 text-[0.7rem] text-ink-soft">
           <div>
-            {groupNoun}{' '}
-            <span className={stackKind === 'type' ? 'text-ink' : 'font-mono text-ink'}>
+            Group{' '}
+            <span
+              className={
+                stackKind === 'type' || stackKind === 'batch_type'
+                  ? 'text-ink'
+                  : 'font-mono text-ink'
+              }
+            >
               {batchLabel}
             </span>
           </div>
@@ -2736,6 +2849,12 @@ function ThreadReviewPane({
             <>
               These requests share work type <span className="text-ink">{batchLabel}</span>.
               Expand the stack in the list to open a single request.
+            </>
+          ) : stackKind === 'batch_type' ? (
+            <>
+              These requests share batch and work type{' '}
+              <span className="text-ink">{batchLabel}</span>. Expand the stack in the list to
+              open a single request.
             </>
           ) : (
             <>
@@ -2823,6 +2942,7 @@ export function NeedsAttentionPage() {
   const groupByBatch = groupByBatchOverride ?? !legalPersona
   const [groupByType, setGroupByType] = useState(false)
   const groupingActive = groupByBatch || groupByType
+  const [page, setPage] = useState(1)
 
   useEffect(() => {
     // Collapsed stacks when grouping mode changes — avoids “stuck” expanded flat-looking lists.
@@ -2866,6 +2986,14 @@ export function NeedsAttentionPage() {
   const [mobilePane, setMobilePane] = useState<'queue' | 'detail'>('queue')
   const detailOverlay = useRequestDetailOverlay()
 
+  // Server-paginated as a growing prefix window: fetching offset=0 with a limit that
+  // scales with `page` means "Next" always triggers a real API refetch (queryKey
+  // includes page) while `items` still holds every row loaded so far — so tab
+  // counts, batch/type grouping, and "select all" keep working the way they always
+  // have (now meaning "all rows loaded", not the whole inbox). Capped at the same
+  // 1000-row admin-api safety limit as before, but most sessions never page that far.
+  const inboxFetchLimit = Math.min(1000, page * INBOX_PAGE_SIZE)
+
   const attentionQuery = useQuery({
     queryKey: [
       'admin-api',
@@ -2874,22 +3002,22 @@ export function NeedsAttentionPage() {
       'needs-attention',
       legalPersona ? 'legal' : dataOwnerPersona ? 'data-owner' : 'ops',
       search.assignee ?? null,
+      inboxFetchLimit,
     ],
-    // Max allowed by admin-api — Select all must cover every filter match loaded,
-    // not just the rows currently scrolled into the queue pane.
     queryFn: () => {
       if (search.assignee) {
         return getNeedsAttention({
-          limit: 1000,
+          limit: inboxFetchLimit,
+          offset: 0,
           kind: 'matching',
           assignee: search.assignee,
         })
       }
       return legalPersona
-        ? getLegalNeedsAttention(1000)
+        ? getLegalNeedsAttention({ limit: inboxFetchLimit, offset: 0 })
         : dataOwnerPersona
-          ? getNeedsAttention({ limit: 1000, kind: 'matching' })
-          : getNeedsAttention(1000)
+          ? getNeedsAttention({ limit: inboxFetchLimit, offset: 0, kind: 'matching' })
+          : getNeedsAttention({ limit: inboxFetchLimit, offset: 0 })
     },
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
@@ -3089,14 +3217,40 @@ export function NeedsAttentionPage() {
     [filteredItems, groupByBatch, groupByType, groupingActive],
   )
 
-  const batchStackCount = useMemo(
-    () => countStackRows(inboxRows, 'batch'),
-    [inboxRows],
-  )
-  const typeStackCount = useMemo(
-    () => countStackRows(inboxRows, 'type'),
-    [inboxRows],
-  )
+  const stackCount = useMemo(() => countThreadStacks(inboxRows), [inboxRows])
+
+  // Reset to page 1 whenever the filter/grouping/search context changes — otherwise a stale
+  // page number can land the user on an empty page after the list reshapes.
+  useEffect(() => {
+    setPage(1)
+  }, [
+    legalInboxFilter,
+    inboxKind,
+    matchFilter,
+    dueFilter,
+    groupByBatch,
+    groupByType,
+    bulkFilter,
+    search.assignee,
+  ])
+
+  const {
+    items: pagedInboxRows,
+    totalPages: inboxLocalTotalPages,
+    currentPage: inboxCurrentPage,
+    start: inboxPageStart,
+    end: inboxPageEnd,
+    total: inboxPageTotal,
+  } = paginate(inboxRows, page, INBOX_PAGE_SIZE)
+
+  // items.length can lag behind the server's real total while a bigger page's worth of
+  // rows is still loading (growing prefix window) — keep "Next" enabled in that case so
+  // paging forward triggers the fetch instead of looking like a dead end.
+  const rawInboxTotal = attentionQuery.data?.total ?? items.length
+  const moreRowsToLoad = items.length < Math.min(rawInboxTotal, 1000)
+  const inboxTotalPages = moreRowsToLoad
+    ? Math.max(inboxLocalTotalPages, inboxCurrentPage + 1)
+    : inboxLocalTotalPages
 
   useEffect(() => {
     if (inboxRows.length === 0) {
@@ -3338,8 +3492,8 @@ export function NeedsAttentionPage() {
   }
 
   function runBulk(action: 'fulfill' | 'decline', responseStatus?: DropResponseStatusCode) {
-    // Always act on the full filtered set when select-all is checked — not only
-    // what happens to be scrolled into the left pane viewport.
+    // Select-all acts on every row loaded so far (server-paginated growing window),
+    // not the whole server-side total — see the "(of N)" hint in the selection chip.
     const requestIds = allFilteredSelected ? [...filteredIds] : [...selectedIds]
     if (requestIds.length === 0) return
     bulkMutation.mutate({ action, requestIds, responseStatus })
@@ -3831,8 +3985,8 @@ export function NeedsAttentionPage() {
               {selectedCount > 0 ? (
                 <span className="taste-frost-chip tabular-nums text-[0.65rem]">
                   {allFilteredSelected
-                    ? `All ${filteredIds.length} in filter`
-                    : `${selectedInFilterCount} of ${filteredIds.length} in filter`}
+                    ? `All ${filteredIds.length} loaded${moreRowsToLoad ? ` (of ${rawInboxTotal})` : ''}`
+                    : `${selectedInFilterCount} of ${filteredIds.length} loaded`}
                   <button
                     type="button"
                     className="ml-1.5 text-mute hover:text-ink"
@@ -3844,13 +3998,14 @@ export function NeedsAttentionPage() {
                 </span>
               ) : (
                 <span className="text-[0.65rem] text-mute tabular-nums">
-                  #{filteredItems.length} in filter
-                  {items.length >= 1000 ? ' (capped at 1000)' : ''}
-                  {groupByBatch && batchStackCount > 0
-                    ? ` · ${batchStackCount} batch stacks`
-                    : ''}
-                  {groupByType && typeStackCount > 0
-                    ? ` · ${typeStackCount} type stacks`
+                  #{filteredItems.length} loaded
+                  {moreRowsToLoad ? ` (of ${rawInboxTotal} — page forward to load more)` : ''}
+                  {groupingActive && stackCount > 0
+                    ? groupByBatch && groupByType
+                      ? ` · ${stackCount} batch×type stacks`
+                      : groupByBatch
+                        ? ` · ${stackCount} batch stacks`
+                        : ` · ${stackCount} type stacks`
                     : ''}
                 </span>
               )}
@@ -3960,7 +4115,7 @@ export function NeedsAttentionPage() {
                   groupingActive ? 'space-y-1 bg-canvas/40 p-1.5' : 'divide-y divide-line',
                 )}
               >
-                {inboxRows.map((row) => {
+                {pagedInboxRows.map((row) => {
                   if (row.kind === 'thread') {
                     const ids = row.items.map((item) => item.request_id)
                     const selected = ids.every((id) => selectedIds.has(id))
@@ -3972,18 +4127,28 @@ export function NeedsAttentionPage() {
                     const expanded = expandedThreads.has(row.batchKey)
                     const earliest = row.items[0]!
                     const exactMatchBatch =
-                      row.stackKind === 'batch' && threadIsExactMatchBatch(row.items)
+                      (row.stackKind === 'batch' || row.stackKind === 'batch_type') &&
+                      threadIsExactMatchBatch(row.items)
                     const isTypeStack = row.stackKind === 'type'
-                    const stackBadge = isTypeStack ? 'Stacked type' : 'Stacked batch'
-                    const nestRows = row.childRows
+                    const isCrossStack = row.stackKind === 'batch_type'
+                    const stackKindLabel = isCrossStack
+                      ? 'batch·type'
+                      : isTypeStack
+                        ? 'type'
+                        : 'batch'
+                    const unbatched =
+                      row.batchKey === UNKEYED_BATCH_KEY ||
+                      row.batchKey.startsWith(`${UNKEYED_BATCH_KEY}::`)
                     return (
                       <li key={`thread-${row.batchKey}`} className="list-none">
                         <div
                           className={cn(
                             'relative flex items-stretch gap-0 rounded-md border-2 bg-paper shadow-[0_1px_0_rgba(15,35,70,0.06),0_3px_0_-1px_rgba(15,35,70,0.05),0_6px_0_-2px_rgba(15,35,70,0.04)] transition-colors',
-                            isTypeStack
-                              ? 'border-habeas-navy/30'
-                              : 'border-habeas-navy/40',
+                            isCrossStack
+                              ? 'border-habeas-navy/45'
+                              : isTypeStack
+                                ? 'border-habeas-navy/30'
+                                : 'border-habeas-navy/40',
                             active
                               ? 'border-habeas-navy/60 bg-habeas-navy/[0.07]'
                               : selected
@@ -3994,9 +4159,11 @@ export function NeedsAttentionPage() {
                           <span
                             className={cn(
                               'w-1 shrink-0 rounded-l-md',
-                              isTypeStack
-                                ? 'bg-habeas-navy/45'
-                                : 'bg-habeas-navy/70',
+                              isCrossStack
+                                ? 'bg-habeas-navy/80'
+                                : isTypeStack
+                                  ? 'bg-habeas-navy/45'
+                                  : 'bg-habeas-navy/70',
                             )}
                             aria-hidden
                           />
@@ -4012,7 +4179,7 @@ export function NeedsAttentionPage() {
                                 if (element) element.indeterminate = partial
                               }}
                               onChange={() => toggleThreadSelect(ids)}
-                              aria-label={`Select ${isTypeStack ? 'type' : 'batch'} stack ${row.batchLabel}`}
+                              aria-label={`Select ${stackKindLabel} stack ${row.batchLabel}`}
                             />
                           </label>
                           <button
@@ -4020,8 +4187,8 @@ export function NeedsAttentionPage() {
                             className="mt-1 shrink-0 self-start rounded px-1 py-2.5 text-[0.65rem] text-mute hover:bg-panel hover:text-ink"
                             aria-label={
                               expanded
-                                ? `Collapse ${isTypeStack ? 'type' : 'batch'} stack ${row.batchLabel}`
-                                : `Expand ${isTypeStack ? 'type' : 'batch'} stack ${row.batchLabel}`
+                                ? `Collapse ${stackKindLabel} stack ${row.batchLabel}`
+                                : `Expand ${stackKindLabel} stack ${row.batchLabel}`
                             }
                             onClick={() => toggleThreadExpand(row.batchKey)}
                           >
@@ -4038,16 +4205,12 @@ export function NeedsAttentionPage() {
                               setMobilePane('detail')
                             }}
                             className="flex min-w-0 flex-1 items-start gap-2.5 px-1 py-3 pr-2 text-left"
-                            aria-label={`${isTypeStack ? 'Type' : 'Batch'} stack ${row.batchLabel}, ${row.items.length} requests`}
+                            aria-label={`${stackKindLabel} stack ${row.batchLabel}, ${row.items.length} requests`}
                           >
                             <span
                               className="relative mt-0.5 flex h-7 w-8 shrink-0 items-center justify-center"
                               aria-hidden
-                              title={
-                                isTypeStack
-                                  ? 'Grouped type inbox item'
-                                  : 'Grouped bulk inbox item'
-                              }
+                              title="Grouped inbox stack"
                             >
                               <span className="absolute left-0 top-1 h-5 w-5 rounded-md border border-habeas-navy/20 bg-habeas-navy/[0.04]" />
                               <span className="absolute left-1 top-0.5 h-5 w-5 rounded-md border border-habeas-navy/30 bg-habeas-navy/[0.08]" />
@@ -4060,17 +4223,11 @@ export function NeedsAttentionPage() {
                                 <span
                                   className={cn(
                                     'text-[0.75rem] font-semibold text-ink',
-                                    isTypeStack ? null : 'font-mono',
+                                    isTypeStack || isCrossStack ? null : 'font-mono',
                                   )}
                                 >
                                   {row.batchLabel}
                                 </span>
-                                <Badge
-                                  variant="run"
-                                  className="normal-case tracking-normal"
-                                >
-                                  {stackBadge}
-                                </Badge>
                                 <span className="text-[0.7rem] text-mute">
                                   {exactMatchBatch ? 'Exact 1:1 · ' : ''}
                                   {row.items.length} requests
@@ -4084,316 +4241,78 @@ export function NeedsAttentionPage() {
                                   >
                                     single match
                                   </Badge>
-                                ) : isTypeStack ? (
-                                  <Badge
-                                    variant="default"
-                                    className="normal-case tracking-normal"
-                                  >
-                                    work type
-                                  </Badge>
-                                ) : row.batchKey === UNKEYED_BATCH_KEY ||
-                                  row.batchKey.endsWith(`::${UNKEYED_BATCH_KEY}`) ? (
+                                ) : unbatched ? (
                                   <Badge
                                     variant="default"
                                     className="normal-case tracking-normal"
                                   >
                                     unbatched
                                   </Badge>
-                                ) : (
-                                  <Badge
-                                    variant="default"
-                                    className="normal-case tracking-normal"
-                                  >
-                                    mixed results
-                                  </Badge>
-                                )}
+                                ) : null}
                                 <DuePill item={earliest} className="text-[0.6rem]" />
                               </div>
                             </div>
                           </button>
                         </div>
                         {expanded ? (
-                          <ul className="mx-1.5 mb-1.5 space-y-1 overflow-hidden rounded-md border border-habeas-navy/15 border-t-0 bg-canvas/50 py-1">
-                            {nestRows
-                              ? nestRows.map((child) => {
-                                  if (child.kind === 'thread') {
-                                    const childIds = child.items.map(
-                                      (item) => item.request_id,
-                                    )
-                                    const childSelected = childIds.every((id) =>
-                                      selectedIds.has(id),
-                                    )
-                                    const childPartial =
-                                      !childSelected &&
-                                      childIds.some((id) => selectedIds.has(id))
-                                    const childActive =
-                                      activeTarget?.kind === 'thread' &&
-                                      activeTarget.batchKey === child.batchKey
-                                    const childExpanded = expandedThreads.has(
-                                      child.batchKey,
-                                    )
-                                    const childExact =
-                                      child.stackKind === 'batch' &&
-                                      threadIsExactMatchBatch(child.items)
-                                    return (
-                                      <li key={child.batchKey} className="px-1">
-                                        <div
-                                          className={cn(
-                                            'flex items-stretch gap-0 rounded-md border border-habeas-navy/20 bg-paper',
-                                            childActive &&
-                                              'border-habeas-navy/40 bg-habeas-navy/[0.05]',
-                                          )}
-                                        >
-                                          <label
-                                            className="flex shrink-0 cursor-pointer items-center px-2.5"
-                                            onClick={(event) =>
-                                              event.stopPropagation()
-                                            }
-                                          >
-                                            <input
-                                              type="checkbox"
-                                              className="h-3.5 w-3.5 rounded border-line accent-habeas-navy"
-                                              checked={childSelected}
-                                              ref={(element) => {
-                                                if (element)
-                                                  element.indeterminate = childPartial
-                                              }}
-                                              onChange={() =>
-                                                toggleThreadSelect(childIds)
-                                              }
-                                              aria-label={`Select batch stack ${child.batchLabel}`}
-                                            />
-                                          </label>
-                                          <button
-                                            type="button"
-                                            className="shrink-0 px-1 text-[0.65rem] text-mute"
-                                            onClick={() =>
-                                              toggleThreadExpand(child.batchKey)
-                                            }
-                                          >
-                                            {childExpanded ? '▾' : '▸'}
-                                          </button>
-                                          <button
-                                            type="button"
-                                            className="flex min-w-0 flex-1 items-center gap-2 px-1 py-2 pr-2 text-left"
-                                            onClick={() => {
-                                              setActiveTarget({
-                                                kind: 'thread',
-                                                batchKey: child.batchKey,
-                                              })
-                                              setMobilePane('detail')
-                                            }}
-                                          >
-                                            <span className="relative flex h-5 w-6 shrink-0 items-center justify-center">
-                                              <span className="absolute left-0 top-0.5 h-3.5 w-3.5 rounded border border-habeas-navy/25 bg-habeas-navy/5" />
-                                              <span className="relative flex h-3.5 w-3.5 items-center justify-center rounded border border-habeas-navy/45 bg-paper text-[0.5rem] font-semibold tabular-nums text-habeas-navy">
-                                                {child.items.length > 99
-                                                  ? '99+'
-                                                  : child.items.length}
-                                              </span>
-                                            </span>
-                                            <span className="font-mono text-[0.7rem] font-medium text-ink">
-                                              {child.batchLabel}
-                                            </span>
-                                            <Badge
-                                              variant="run"
-                                              className="normal-case tracking-normal text-[0.55rem]"
-                                            >
-                                              Stacked batch
-                                            </Badge>
-                                            {childExact ? (
-                                              <span className="text-[0.6rem] text-mute">
-                                                Exact 1:1
-                                              </span>
-                                            ) : null}
-                                          </button>
-                                        </div>
-                                        {childExpanded ? (
-                                          <ul className="mt-0.5 border-l border-habeas-navy/15 ml-4">
-                                            {child.items.map((item) => {
-                                              const leafSelected = selectedIds.has(
-                                                item.request_id,
-                                              )
-                                              const leafActive =
-                                                activeTarget?.kind === 'request' &&
-                                                activeTarget.requestId ===
-                                                  item.request_id
-                                              return (
-                                                <li key={item.request_id}>
-                                                  <div
-                                                    className={cn(
-                                                      'flex items-stretch gap-0 pl-2 transition-colors',
-                                                      leafActive
-                                                        ? 'bg-habeas-navy/[0.07]'
-                                                        : leafSelected
-                                                          ? 'bg-habeas-navy/[0.03]'
-                                                          : 'hover:bg-panel/40',
-                                                    )}
-                                                  >
-                                                    <label
-                                                      className="flex shrink-0 cursor-pointer items-center px-2"
-                                                      onClick={(event) =>
-                                                        event.stopPropagation()
-                                                      }
-                                                    >
-                                                      <input
-                                                        type="checkbox"
-                                                        className="h-3.5 w-3.5 rounded border-line accent-habeas-navy"
-                                                        checked={leafSelected}
-                                                        onChange={() =>
-                                                          toggleId(item.request_id)
-                                                        }
-                                                        aria-label={`Select ${item.request_id}`}
-                                                      />
-                                                    </label>
-                                                    <button
-                                                      type="button"
-                                                      onClick={() => {
-                                                        setActiveTarget({
-                                                          kind: 'request',
-                                                          requestId: item.request_id,
-                                                        })
-                                                        setMobilePane('detail')
-                                                      }}
-                                                      className="flex min-w-0 flex-1 items-center gap-2 px-1 py-1.5 pr-3 text-left"
-                                                    >
-                                                      <span className="font-mono text-[0.65rem] text-ink">
-                                                        {item.request_id.slice(0, 8)}…
-                                                      </span>
-                                                      <span className="text-[0.6rem] text-mute">
-                                                        {item.requestor_state ?? '—'}
-                                                      </span>
-                                                    </button>
-                                                  </div>
-                                                </li>
-                                              )
-                                            })}
-                                          </ul>
-                                        ) : null}
-                                      </li>
-                                    )
-                                  }
-
-                                  const item = child.item
-                                  const childSelected = selectedIds.has(
-                                    item.request_id,
-                                  )
-                                  const childActive =
-                                    activeTarget?.kind === 'request' &&
-                                    activeTarget.requestId === item.request_id
-                                  return (
-                                    <li key={item.request_id}>
-                                      <div
-                                        className={cn(
-                                          'flex items-stretch gap-0 pl-4 transition-colors',
-                                          childActive
-                                            ? 'bg-habeas-navy/[0.07]'
-                                            : childSelected
-                                              ? 'bg-habeas-navy/[0.03]'
-                                              : 'hover:bg-panel/40',
-                                        )}
-                                      >
-                                        <label
-                                          className="flex shrink-0 cursor-pointer items-center px-3"
-                                          onClick={(event) =>
-                                            event.stopPropagation()
-                                          }
-                                        >
-                                          <input
-                                            type="checkbox"
-                                            className="h-3.5 w-3.5 rounded border-line accent-habeas-navy"
-                                            checked={childSelected}
-                                            onChange={() =>
-                                              toggleId(item.request_id)
-                                            }
-                                            aria-label={`Select ${item.request_id}`}
-                                          />
-                                        </label>
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setActiveTarget({
-                                              kind: 'request',
-                                              requestId: item.request_id,
-                                            })
-                                            setMobilePane('detail')
-                                          }}
-                                          className="flex min-w-0 flex-1 items-center gap-2 px-1 py-1.5 pr-3 text-left"
-                                        >
-                                          <span className="truncate text-[0.7rem] font-medium text-ink">
-                                            {inboxItemTitle(item)}
-                                          </span>
-                                          <span className="text-[0.6rem] text-mute">
-                                            {item.requestor_state ?? '—'}
-                                          </span>
-                                        </button>
-                                      </div>
-                                    </li>
-                                  )
-                                })
-                              : row.items.map((item) => {
-                                  const childSelected = selectedIds.has(
-                                    item.request_id,
-                                  )
-                                  const childActive =
-                                    activeTarget?.kind === 'request' &&
-                                    activeTarget.requestId === item.request_id
-                                  return (
-                                    <li key={item.request_id}>
-                                      <div
-                                        className={cn(
-                                          'flex items-stretch gap-0 pl-6 transition-colors',
-                                          childActive
-                                            ? 'bg-habeas-navy/[0.07]'
-                                            : childSelected
-                                              ? 'bg-habeas-navy/[0.03]'
-                                              : 'hover:bg-panel/40',
-                                        )}
-                                      >
-                                        <label
-                                          className="flex shrink-0 cursor-pointer items-center px-3"
-                                          onClick={(event) =>
-                                            event.stopPropagation()
-                                          }
-                                        >
-                                          <input
-                                            type="checkbox"
-                                            className="h-3.5 w-3.5 rounded border-line accent-habeas-navy"
-                                            checked={childSelected}
-                                            onChange={() =>
-                                              toggleId(item.request_id)
-                                            }
-                                            aria-label={`Select ${item.request_id}`}
-                                          />
-                                        </label>
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setActiveTarget({
-                                              kind: 'request',
-                                              requestId: item.request_id,
-                                            })
-                                            setMobilePane('detail')
-                                          }}
-                                          className="flex min-w-0 flex-1 items-center gap-2 px-1 py-1.5 pr-3 text-left"
-                                        >
-                                          <span className="font-mono text-[0.65rem] text-ink">
-                                            {item.request_id.slice(0, 8)}…
-                                          </span>
-                                          <span className="text-[0.6rem] text-mute">
-                                            {item.requestor_state ?? '—'}
-                                          </span>
-                                          {item.bulk_process_id != null ||
-                                          item.source_csv_filename ? (
-                                            <span className="ml-auto font-mono text-[0.6rem] text-mute">
-                                              {inboxBatchLabel(item)}
-                                            </span>
-                                          ) : null}
-                                        </button>
-                                      </div>
-                                    </li>
-                                  )
-                                })}
+                          <ul className="mx-1.5 mb-1.5 space-y-0 overflow-hidden rounded-md border border-habeas-navy/15 border-t-0 bg-canvas/50 py-1">
+                            {row.items.map((item) => {
+                              const childSelected = selectedIds.has(item.request_id)
+                              const childActive =
+                                activeTarget?.kind === 'request' &&
+                                activeTarget.requestId === item.request_id
+                              return (
+                                <li key={item.request_id}>
+                                  <div
+                                    className={cn(
+                                      'flex items-stretch gap-0 pl-6 transition-colors',
+                                      childActive
+                                        ? 'bg-habeas-navy/[0.07]'
+                                        : childSelected
+                                          ? 'bg-habeas-navy/[0.03]'
+                                          : 'hover:bg-panel/40',
+                                    )}
+                                  >
+                                    <label
+                                      className="flex shrink-0 cursor-pointer items-center px-3"
+                                      onClick={(event) => event.stopPropagation()}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        className="h-3.5 w-3.5 rounded border-line accent-habeas-navy"
+                                        checked={childSelected}
+                                        onChange={() => toggleId(item.request_id)}
+                                        aria-label={`Select ${item.request_id}`}
+                                      />
+                                    </label>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setActiveTarget({
+                                          kind: 'request',
+                                          requestId: item.request_id,
+                                        })
+                                        setMobilePane('detail')
+                                      }}
+                                      className="flex min-w-0 flex-1 items-center gap-2 px-1 py-1.5 pr-3 text-left"
+                                    >
+                                      <span className="truncate text-[0.7rem] font-medium text-ink">
+                                        {inboxItemTitle(item)}
+                                      </span>
+                                      <span className="text-[0.6rem] text-mute">
+                                        {item.requestor_state ?? '—'}
+                                      </span>
+                                      {item.bulk_process_id != null ||
+                                      item.source_csv_filename ? (
+                                        <span className="ml-auto font-mono text-[0.6rem] text-mute">
+                                          {inboxBatchLabel(item)}
+                                        </span>
+                                      ) : null}
+                                    </button>
+                                  </div>
+                                </li>
+                              )
+                            })}
                           </ul>
                         ) : null}
                       </li>
@@ -4495,6 +4414,18 @@ export function NeedsAttentionPage() {
               </ul>
             ) : null}
           </div>
+
+          {!loading && !attentionQuery.isError && filteredItems.length > 0 ? (
+            <InboxPaginationBar
+              start={inboxPageStart}
+              end={inboxPageEnd}
+              total={inboxPageTotal}
+              currentPage={inboxCurrentPage}
+              totalPages={inboxTotalPages}
+              onPrev={() => setPage(Math.max(1, inboxCurrentPage - 1))}
+              onNext={() => setPage(Math.min(inboxTotalPages, inboxCurrentPage + 1))}
+            />
+          ) : null}
         </div>
 
         <div

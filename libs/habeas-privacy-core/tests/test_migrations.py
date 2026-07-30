@@ -102,6 +102,21 @@ def test_reject_drop_access_migration_exists():
     assert "migrate:down" in content
 
 
+def test_request_closures_and_due_overrides_migration_exists():
+    migration = (
+        migrations_dir() / "20260730140001_core_request_closures_and_due_overrides.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+    assert "CREATE TABLE IF NOT EXISTS request_closures" in content
+    assert "CREATE TABLE IF NOT EXISTS request_due_overrides" in content
+    assert "core_forbid_requests_mutation" in content
+    assert "DROP COLUMN IF EXISTS due_at" in content
+    assert "DROP COLUMN IF EXISTS closed_at" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+
+
 @pytest.fixture
 async def migrated_pool():
     database_url = os.environ["DATABASE_URL"]

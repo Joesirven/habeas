@@ -71,12 +71,12 @@ export function NavMenu() {
     ],
     queryFn: () =>
       isLegalNav
-        ? getLegalNeedsAttention(200)
+        ? getLegalNeedsAttention({ limit: 200 })
         : getNeedsAttention({ limit: 200, kind: 'all' }),
     refetchInterval: 30_000,
     staleTime: 15_000,
   })
-  const inboxCount = inboxQuery.data?.items.length ?? null
+  const inboxCount = inboxQuery.data?.total ?? inboxQuery.data?.items.length ?? null
 
   return (
     <nav

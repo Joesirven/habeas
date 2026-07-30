@@ -18,6 +18,8 @@ Migration adds `NOTIFY privacy_events` on **approval_requests** (and related) fo
 
 Thin spine **retains** `requestor_state` (VARCHAR(2)) for matching and rematch (U20/U21). App insert/load paths write and read it; restore migration is coordinated separately if the column was dropped in an earlier spine alter.
 
+**Immutability (locked):** `requests` is insert-only after intake (`REVOKE UPDATE, DELETE` + `requests_forbid_mutation` / `core_forbid_requests_mutation`). Close facts live in append-only `request_closures` (open = no row). Admin deadline overrides live in append-only `request_due_overrides`; effective due is derived (`COALESCE(latest override, received_at + lifecycle_days)`). Do not add mutable operational columns to `requests`.
+
 ## Hash index refresh queue (U2)
 
 Postgres owns the DROP hash index refresh control plane: `hash_index_refresh_attempts` (single-flight per `state`) and append-only `hash_index_refresh_runs`. Enqueue helpers live in `habeas_privacy_core.db.hash_index_refresh`.

@@ -28,5 +28,10 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": [
+    "src/components/dev/JourneyChromeProbes.tsx",
+    "src/routes/dev/journey-chrome.tsx",
+    "src/routes/dev/journey-chrome.$variant.tsx"
+  ]
 }

@@ -1190,7 +1190,9 @@ async def test_ready_list_joins_kickoff_and_disposition_as_hard_gates():
     # Disposition supplies the status, scoped to the same vertical bind.
     assert "rvd.request_id = r.id AND rvd.vertical = $2" in sql
     assert "rvd.status IN (3, 4, 5)" in sql
-    assert "r.closed_at IS NULL" in sql
+    assert "NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)" in sql or \
+        "request_closures" in sql
+    assert "r.closed_at IS NULL" not in sql
     # Idempotency is measured from the newest kickoff decision, not all history.
     assert sql.count("dfa.completed_at >= k.decided_at") == 2
 

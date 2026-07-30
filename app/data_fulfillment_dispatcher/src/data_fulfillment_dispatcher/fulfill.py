@@ -171,7 +171,9 @@ async def find_requests_ready_to_fulfill(
           JOIN kickoff k ON k.request_id = r.id
           JOIN request_vertical_dispositions rvd
             ON rvd.request_id = r.id AND rvd.vertical = $2
-         WHERE r.closed_at IS NULL
+         WHERE NOT EXISTS (
+                   SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id
+               )
            AND rvd.status IN (3, 4, 5)
            AND EXISTS (
                  SELECT 1
