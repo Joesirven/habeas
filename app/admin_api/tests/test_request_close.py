@@ -30,10 +30,12 @@ def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_post_request_close_route(monkeypatch: pytest.MonkeyPatch) -> None:
     from admin_api import main as admin_main
+    from admin_api import request_journey
 
     roles.settings.admin_api_legals = "legal@example.com"
     roles.settings.require_iap_identity = True
     monkeypatch.setattr(admin_main.settings, "database_url", "postgres://local")
+    monkeypatch.setattr(request_journey.settings, "database_url", "postgres://local")
     monkeypatch.setattr(admin_main, "create_pool", AsyncMock())
     monkeypatch.setattr(admin_main, "close_pool", AsyncMock())
 
