@@ -26,6 +26,8 @@ const JOB_OPTIONS = [
   { value: 'matching', label: 'matching' },
   { value: 'data_fulfillment', label: 'data_fulfillment' },
   { value: 'hash_index_refresh', label: 'hash_index_refresh' },
+  { value: 'reaper', label: 'reaper' },
+  { value: 'intake_drop_poller', label: 'intake_drop_poller' },
 ] as const
 
 /** Workers that have unified /ops/runs history. */

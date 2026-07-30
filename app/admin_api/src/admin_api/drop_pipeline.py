@@ -78,6 +78,7 @@ health_router = APIRouter(prefix="/ops/health", tags=["ops-health"])
 
 # Attempt tables keyed by WORKER_KEYS name for queue depth aggregation (U23).
 # Workers without a dedicated attempt table report empty queue depths.
+# Extra non-Cloud-Run keys (e.g. communication) appear on /ops/health/queues only.
 _WORKER_QUEUE_TABLES: dict[str, str | None] = {
     "drop_connector": "drop_connector_attempts",
     "drop_ingestor": "drop_ingest_attempts",
@@ -85,9 +86,23 @@ _WORKER_QUEUE_TABLES: dict[str, str | None] = {
     "matching": "matching_attempts",
     "data_fulfillment": "data_fulfillment_attempts",
     "hash_index_refresh": "hash_index_refresh_attempts",
+    "reaper": None,
+    "intake_drop_poller": None,
+    "communication": "communication_attempts",
 }
 
-_TERMINAL_FAIL_STATUSES = ("submit_error", "outcome_error", "timeout", "abandoned")
+# Timestamp used for oldest-pending age (attempt tables use attempted_at).
+_QUEUE_AGE_COLUMNS: dict[str, str] = {
+    "communication_attempts": "contacted_at",
+}
+
+_TERMINAL_FAIL_STATUSES = (
+    "submit_error",
+    "outcome_error",
+    "timeout",
+    "abandoned",
+    "failed",
+)
 _OPEN_ATTEMPT_STATUSES = ("pending", "claimed", "in_flight")
 
 # Approaching-SLA MVP (R8 / AE2): age-policy thresholds on open queue rows.
@@ -113,6 +128,8 @@ class DropPipelineSettings(CoreSettings):
     matching_url: str = "http://127.0.0.1:8084"
     data_fulfillment_url: str = "http://127.0.0.1:8085"
     hash_index_refresh_url: str = "http://127.0.0.1:8086"
+    reaper_url: str = "http://127.0.0.1:8087"
+    intake_drop_poller_url: str = "http://127.0.0.1:8088"
     # When true, mutating /ops/drop/* requires X-Goog-Authenticated-User-Email.
     # Local default false; enable with IAP in front of admin-api (see infra/README).
     require_iap_identity: bool = False
@@ -169,6 +186,8 @@ WORKER_KEYS = (
     ("matching", "matching_url"),
     ("data_fulfillment", "data_fulfillment_url"),
     ("hash_index_refresh", "hash_index_refresh_url"),
+    ("reaper", "reaper_url"),
+    ("intake_drop_poller", "intake_drop_poller_url"),
 )
 
 
@@ -3028,9 +3047,12 @@ async def collect_queue_depths(conn: Any) -> list[dict[str, Any]]:
             {"status": r["status"], "count": int(r["count"])} for r in status_rows
         ]
         counts = {item["status"]: item["count"] for item in by_status}
+        age_column = _QUEUE_AGE_COLUMNS.get(table, "attempted_at")
+        if age_column not in {"attempted_at", "contacted_at", "created_at"}:
+            age_column = "attempted_at"
         oldest = await conn.fetchval(
             f"""
-            SELECT EXTRACT(EPOCH FROM (NOW() - MIN(attempted_at)))::int
+            SELECT EXTRACT(EPOCH FROM (NOW() - MIN({age_column})))::int
               FROM {table}
              WHERE status = 'pending'
             """

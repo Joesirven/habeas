@@ -555,7 +555,7 @@ export type DropWorkersPayload = {
 
 export type HealthQueueRecord = {
   worker: string
-  table: string
+  table: string | null
   by_status: { status: string; count: number }[]
   pending: number
   claimed: number

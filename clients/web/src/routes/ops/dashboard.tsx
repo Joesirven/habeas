@@ -25,6 +25,8 @@ const WORKER_ORDER = [
   'matching',
   'data_fulfillment',
   'hash_index_refresh',
+  'reaper',
+  'intake_drop_poller',
 ] as const
 
 function Micro({ children }: { children: ReactNode }) {
