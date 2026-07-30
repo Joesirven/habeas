@@ -32,6 +32,7 @@ import {
   type CoarseStageKey,
 } from '@/lib/legalJourneyLabels'
 import {
+  downloadRequestDocument,
   dropResponseStatusLabel,
   getFulfillmentArtifact,
   getLatestIdentityVerification,
@@ -40,6 +41,7 @@ import {
   getRequestJourneyWorkbench,
   getRequestTimeline,
   getNeedsAttention,
+  listRequestDocuments,
   patchAccessDeliveryStatus,
   postFulfillmentKickoff,
   postIdentityVerification,
@@ -50,12 +52,14 @@ import {
   postDropMatchingResultPromote,
   postTriageBulkReject,
   postTriageSendToMatching,
+  uploadRequestDocument,
   type DropResponseStatusCode,
   type JourneyStage,
   type JourneyStageStatus,
   type MatchedPersonContact,
   type MatchingResultDetail,
   type NeedsAttentionItem,
+  type RequestDocumentRecord,
   type RequestJourneyResponse,
   type RequestRecord,
   type RequesterContact,
@@ -1048,6 +1052,110 @@ function FulfillmentGateControls({
   )
 }
 
+/** U7 attachments — list/upload/download request documents (R20/KD12/KTD9). */
+function AttachmentsPanel({ requestId }: { requestId: string }) {
+  const queryClient = useQueryClient()
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [downloadingId, setDownloadingId] = useState<string | null>(null)
+
+  const documentsQuery = useQuery({
+    queryKey: ['admin-api', 'requests', requestId, 'documents'],
+    queryFn: () => listRequestDocuments(requestId),
+  })
+
+  const uploadMutation = useMutation({
+    mutationFn: (file: File) => uploadRequestDocument(requestId, file),
+    onSuccess: async () => {
+      setError(null)
+      await queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'requests', requestId, 'documents'],
+      })
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : 'Upload failed'),
+  })
+
+  const handleDownload = async (doc: RequestDocumentRecord) => {
+    setDownloadingId(doc.id)
+    setError(null)
+    try {
+      const blob = await downloadRequestDocument(requestId, doc.id)
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = doc.filename
+      anchor.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Download failed')
+    } finally {
+      setDownloadingId(null)
+    }
+  }
+
+  const documents = documentsQuery.data ?? []
+
+  return (
+    <div className="space-y-3 border-t border-line pt-4 text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <p className="taste-micro">Attachments</p>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={uploadMutation.isPending}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          {uploadMutation.isPending ? 'Uploading…' : 'Upload file'}
+        </Button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          className="hidden"
+          onChange={(event) => {
+            const file = event.target.files?.[0]
+            event.target.value = ''
+            if (file) uploadMutation.mutate(file)
+          }}
+        />
+      </div>
+      {documentsQuery.isPending ? <SkeletonLines lines={2} /> : null}
+      {!documentsQuery.isPending && documents.length === 0 ? (
+        <p className="text-mute">No attachments yet.</p>
+      ) : null}
+      {documents.length > 0 ? (
+        <ul className="space-y-1.5">
+          {documents.map((doc) => (
+            <li
+              key={doc.id}
+              className="flex items-center justify-between gap-2 rounded-lg border border-line/80 bg-paper/70 px-3 py-2"
+            >
+              <div className="min-w-0">
+                <p className="truncate text-ink" title={doc.filename}>
+                  {doc.filename}
+                </p>
+                <p className="text-[0.65rem] text-mute">
+                  {doc.uploaded_by} · {formatTimestamp(doc.uploaded_at)}
+                </p>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={downloadingId === doc.id}
+                onClick={() => handleDownload(doc)}
+              >
+                {downloadingId === doc.id ? 'Downloading…' : 'Download'}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {error ? <p className="text-red-700">{error}</p> : null}
+    </div>
+  )
+}
+
 export function RequestDetailBody({
   requestId,
   variant = 'overlay',
@@ -1325,6 +1433,7 @@ export function RequestDetailBody({
                 dropStatusIsRecommended={dropStatusIsRecommended}
                 dropPreMatch={dropPreMatch}
               />
+              <AttachmentsPanel requestId={requestId} />
             </TabsContent>
             <TabsContent value="fulfillment" className="mt-0 px-4 py-4">
               <div className="space-y-4">
