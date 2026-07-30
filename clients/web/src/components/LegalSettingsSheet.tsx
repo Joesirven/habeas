@@ -23,6 +23,7 @@ import {
   renderEmailTemplate,
   upsertEmailTemplate,
   type EmailTemplateType,
+  type EmailTemplateTypeInfo,
 } from '@/lib/api'
 import { canMutateLegalSettings, useMe } from '@/lib/auth'
 
@@ -34,6 +35,68 @@ const TEMPLATE_TYPE_LABELS: Record<EmailTemplateType, string> = {
   combined: 'Combined confirmation',
   general: 'General notice',
 }
+
+/** Mirrors server TEMPLATE_TYPE_SLUGS / TEMPLATE_VARIABLES so the editor
+ *  still mounts when `/email-templates/types` is unreachable (local/dev). */
+const FALLBACK_TEMPLATE_TYPES: EmailTemplateTypeInfo[] = [
+  {
+    type: 'access',
+    slug: 'access_delivery',
+    variables: [
+      'requestor_name',
+      'requestor_email',
+      'requestor_phone',
+      'requestor_state',
+      'request_type',
+      'shareable_url',
+      'shareable_urls',
+    ],
+  },
+  {
+    type: 'delete',
+    slug: 'delete_confirmation',
+    variables: [
+      'requestor_name',
+      'requestor_email',
+      'requestor_phone',
+      'requestor_state',
+      'request_type',
+    ],
+  },
+  {
+    type: 'opt_out',
+    slug: 'opt_out_confirmation',
+    variables: [
+      'requestor_name',
+      'requestor_email',
+      'requestor_phone',
+      'requestor_state',
+      'request_type',
+    ],
+  },
+  {
+    type: 'combined',
+    slug: 'combined_confirmation',
+    variables: [
+      'requestor_name',
+      'requestor_email',
+      'requestor_phone',
+      'requestor_state',
+      'request_type',
+    ],
+  },
+  {
+    type: 'general',
+    slug: 'general_notice',
+    variables: [
+      'requestor_name',
+      'requestor_email',
+      'requestor_phone',
+      'requestor_state',
+      'request_type',
+    ],
+  },
+]
 
 export const OPEN_LEGAL_SETTINGS_EVENT = 'open-legal-settings'
 
@@ -111,7 +174,12 @@ export function LegalSettingsSheet({ triggerVariant = 'banner' }: LegalSettingsS
     enabled: tab === 'templates',
   })
 
-  const selectedTypeInfo = templateTypesQuery.data?.find(
+  const templateTypes =
+    templateTypesQuery.data && templateTypesQuery.data.length > 0
+      ? templateTypesQuery.data
+      : FALLBACK_TEMPLATE_TYPES
+
+  const selectedTypeInfo = templateTypes.find(
     (info) => info.type === selectedTemplateType,
   )
 
@@ -134,16 +202,14 @@ export function LegalSettingsSheet({ triggerVariant = 'banner' }: LegalSettingsS
   })
 
   useEffect(() => {
-    const slug = templateTypesQuery.data?.find(
-      (info) => info.type === selectedTemplateType,
-    )?.slug
+    const slug = templateTypes.find((info) => info.type === selectedTemplateType)?.slug
     if (!slug) return
     const existing = templatesQuery.data?.find((template) => template.slug === slug)
     setDraftSubject(existing?.subject ?? '')
     setDraftBody(existing?.body ?? '')
     previewTemplateMutation.reset()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTemplateType, templateTypesQuery.data, templatesQuery.data])
+  }, [selectedTemplateType, templateTypes, templatesQuery.data])
 
   function insertTemplateVariable(variable: string) {
     const token = `{{${variable}}}`
@@ -304,7 +370,7 @@ export function LegalSettingsSheet({ triggerVariant = 'banner' }: LegalSettingsS
         {tab === 'templates' ? (
           <div className="space-y-3 text-sm">
             <div className="flex flex-wrap gap-2">
-              {(templateTypesQuery.data ?? []).map((info) => (
+              {templateTypes.map((info) => (
                 <button
                   key={info.type}
                   type="button"
@@ -319,7 +385,7 @@ export function LegalSettingsSheet({ triggerVariant = 'banner' }: LegalSettingsS
                 </button>
               ))}
             </div>
-            {templatesQuery.isPending || templateTypesQuery.isPending ? (
+            {templatesQuery.isPending && !templatesQuery.data ? (
               <p className="text-mute">Loading templates…</p>
             ) : selectedTypeInfo ? (
               <div className="space-y-2">
