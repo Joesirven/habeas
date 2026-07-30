@@ -21,6 +21,16 @@ import { isLegalAdminPersona, useMe } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 import type { RequestsSearch } from '@/router'
 
+/** Flat view — one server page of requests per screen. */
+const REQUESTS_PAGE_SIZE = 30
+/**
+ * Batch view — server still paginates *requests*, not batches (batches can span
+ * pages). A wider request window keeps most real intake batches on one screen;
+ * Prev/Next moves the underlying request window ("Requests 1–100 of T"), and
+ * batch rows are simply whatever lands inside that window.
+ */
+const BATCH_WINDOW_SIZE = 100
+
 const SOURCE_LABELS: Record<string, string> = {
   webform: 'Gravity Forms',
   drop: 'CA DROP',
@@ -50,7 +60,10 @@ type RequestBatch = {
   batchKey: string
   intakeSource: IntakeSource
   sourceLabel: string
+  /** Most recent `received_at` in the cluster — used for sort/display. */
   receivedAt: string
+  /** Earliest `received_at` in the cluster — used to build the drill-in window. */
+  receivedAtStart: string
   requests: RequestRecord[]
 }
 
@@ -60,10 +73,6 @@ function readViewMode(): ViewMode {
   } catch {
     return 'flat'
   }
-}
-
-function requestBatchKey(request: RequestRecord): string {
-  return `${request.intake_source}:${request.received_at.slice(0, 16)}`
 }
 
 function requestRowLabel(request: RequestRecord): string {
@@ -85,24 +94,23 @@ function formatRequestReceivedAt(iso: string): string {
   })
 }
 
-/** Minute window in UTC — must match `requestBatchKey` (ISO minute prefix), not local time. */
-function batchReceivedWindow(receivedAt: string): { received_after: string; received_before: string } {
-  const received = new Date(receivedAt)
-  if (Number.isNaN(received.getTime())) {
-    return { received_after: receivedAt, received_before: receivedAt }
+/**
+ * Drill-in window spanning the whole batch cluster (not just one minute) — computed from
+ * epoch ms so it's timezone-safe regardless of how `received_at` is formatted, with a small
+ * buffer on each edge to guard against clock/precision rounding at the cluster boundary.
+ */
+function batchReceivedWindow(
+  receivedAtStart: string,
+  receivedAtEnd: string,
+): { received_after: string; received_before: string } {
+  const startMs = new Date(receivedAtStart).getTime()
+  const endMs = new Date(receivedAtEnd).getTime()
+  if (Number.isNaN(startMs) || Number.isNaN(endMs)) {
+    return { received_after: receivedAtStart, received_before: receivedAtEnd }
   }
-  const startMs = Date.UTC(
-    received.getUTCFullYear(),
-    received.getUTCMonth(),
-    received.getUTCDate(),
-    received.getUTCHours(),
-    received.getUTCMinutes(),
-    0,
-    0,
-  )
   return {
-    received_after: new Date(startMs).toISOString(),
-    received_before: new Date(startMs + 60_000 - 1).toISOString(),
+    received_after: new Date(startMs - 1_000).toISOString(),
+    received_before: new Date(endMs + 1_000).toISOString(),
   }
 }
 
@@ -159,6 +167,59 @@ function StatTile({ label, value, hint }: { label: string; value: number | strin
         {value}
       </p>
       {hint ? <p className="mt-1 text-[0.65rem] text-mute">{hint}</p> : null}
+    </div>
+  )
+}
+
+function PaginationBar({
+  unitLabel,
+  start,
+  end,
+  total,
+  currentPage,
+  totalPages,
+  onPrev,
+  onNext,
+}: {
+  unitLabel: string
+  start: number
+  end: number
+  total: number
+  currentPage: number
+  totalPages: number
+  onPrev: () => void
+  onNext: () => void
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2 border-t border-line px-3 py-1.5 text-[0.65rem] text-ink-soft">
+      <span className="tabular-nums">
+        {total === 0
+          ? `No ${unitLabel}`
+          : `Showing ${start + 1}–${end} of ${total} ${unitLabel}`}
+      </span>
+      {totalPages > 1 ? (
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            className="taste-btn h-6 px-2 text-[0.65rem] disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={onPrev}
+            disabled={currentPage <= 1}
+          >
+            Previous
+          </button>
+          <span className="tabular-nums text-mute">
+            Page {currentPage} / {totalPages}
+          </span>
+          <button
+            type="button"
+            className="taste-btn h-6 px-2 text-[0.65rem] disabled:cursor-not-allowed disabled:opacity-40"
+            onClick={onNext}
+            disabled={currentPage >= totalPages}
+          >
+            Next
+          </button>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -634,24 +695,57 @@ function RequestsFilterBar({
   )
 }
 
+/**
+ * Requests arriving within this gap (same intake source) are treated as one intake batch —
+ * tolerant of a DROP ingest trickling in over a few minutes, instead of requiring every row
+ * share the exact same UTC minute (which fragmented a single real batch into many).
+ */
+const BATCH_GAP_MS = 3 * 60 * 1000
+
+/** Cluster by source + time-proximity — approximates real intake batches without a true batch id. */
 function groupRequestsByBatch(requests: RequestRecord[]): RequestBatch[] {
-  const batches = new Map<string, RequestBatch>()
+  const bySource = new Map<IntakeSource, RequestRecord[]>()
   for (const request of requests) {
-    const batchKey = requestBatchKey(request)
-    const existing = batches.get(batchKey)
-    if (existing) {
-      existing.requests.push(request)
-      continue
-    }
-    batches.set(batchKey, {
-      batchKey,
-      intakeSource: request.intake_source,
-      sourceLabel: SOURCE_LABELS[request.intake_source] ?? request.intake_source,
-      receivedAt: request.received_at,
-      requests: [request],
-    })
+    const list = bySource.get(request.intake_source)
+    if (list) list.push(request)
+    else bySource.set(request.intake_source, [request])
   }
-  return [...batches.values()].sort(
+
+  const batches: RequestBatch[] = []
+  for (const [intakeSource, sourceRequests] of bySource) {
+    const sorted = [...sourceRequests].sort(
+      (a, b) => new Date(a.received_at).getTime() - new Date(b.received_at).getTime(),
+    )
+    let cluster: RequestRecord[] = []
+    let clusterEndMs: number | null = null
+
+    const flush = () => {
+      if (cluster.length === 0) return
+      const earliest = cluster[0]!
+      const latest = cluster[cluster.length - 1]!
+      batches.push({
+        batchKey: `${intakeSource}:${earliest.received_at}`,
+        intakeSource,
+        sourceLabel: SOURCE_LABELS[intakeSource] ?? intakeSource,
+        receivedAt: latest.received_at,
+        receivedAtStart: earliest.received_at,
+        // Newest-first, matching the row order used everywhere else on this page.
+        requests: [...cluster].reverse(),
+      })
+      cluster = []
+    }
+
+    for (const request of sorted) {
+      const t = new Date(request.received_at).getTime()
+      const gap = clusterEndMs != null && !Number.isNaN(t) ? t - clusterEndMs : 0
+      if (gap > BATCH_GAP_MS) flush()
+      cluster.push(request)
+      if (!Number.isNaN(t)) clusterEndMs = t
+    }
+    flush()
+  }
+
+  return batches.sort(
     (left, right) => new Date(right.receivedAt).getTime() - new Date(left.receivedAt).getTime(),
   )
 }
@@ -795,6 +889,7 @@ export function RequestsPage() {
   const legalAdmin = isLegalAdminPersona(role)
   const [ephemeralSearch, setEphemeralSearch] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>(readViewMode)
+  const [page, setPage] = useState(1)
   const overlay = useRequestDetailOverlay()
 
   useEffect(() => {
@@ -806,6 +901,8 @@ export function RequestsPage() {
   }, [viewMode])
 
   const listStage = search.stage
+  const pageSize = viewMode === 'batch' ? BATCH_WINDOW_SIZE : REQUESTS_PAGE_SIZE
+  const offset = (page - 1) * pageSize
 
   const requestsQuery = useQuery({
     queryKey: [
@@ -815,7 +912,13 @@ export function RequestsPage() {
       search.source_bucket ?? '',
       listStage ?? '',
       search.posture ?? '',
+      search.request_type ?? '',
+      search.state ?? '',
+      search.received_after ?? '',
+      search.received_before ?? '',
       ephemeralSearch.trim(),
+      pageSize,
+      offset,
     ],
     queryFn: () =>
       listRequests({
@@ -823,9 +926,15 @@ export function RequestsPage() {
         sourceBucket: search.source_bucket,
         stage: listStage,
         posture: search.posture,
-        limit: 100,
+        requestType: search.request_type,
+        requestorState: search.state,
+        receivedAfter: search.received_after,
+        receivedBefore: search.received_before,
+        limit: pageSize,
+        offset,
         q: ephemeralSearch.trim().length >= 2 ? ephemeralSearch.trim() : undefined,
       }),
+    placeholderData: (previous) => previous,
     refetchInterval: 15_000,
   })
 
@@ -851,22 +960,78 @@ export function RequestsPage() {
     return map
   }, [attentionQuery.data?.items])
 
+  const requestItems = requestsQuery.data?.items ?? []
+
   const stateOptions = useMemo(() => {
     const set = new Set<string>()
-    for (const request of requestsQuery.data ?? []) {
+    for (const request of requestItems) {
       if (request.requestor_state) set.add(request.requestor_state.toUpperCase())
     }
     return [...set].sort()
-  }, [requestsQuery.data])
+  }, [requestItems])
 
+  // Source/bucket/type/state/received-window/q are already applied server-side —
+  // this only narrows the current page for filters the API doesn't support yet
+  // (attention, raw-record presence).
   const filtered = useMemo(() => {
-    const rows = requestsQuery.data ?? []
-    return rows.filter((request) =>
+    return requestItems.filter((request) =>
       matchesFilters(request, search, attentionByRequestId, ephemeralSearch),
     )
-  }, [requestsQuery.data, search, attentionByRequestId, ephemeralSearch])
+  }, [requestItems, search, attentionByRequestId, ephemeralSearch])
 
   const batches = useMemo(() => groupRequestsByBatch(filtered), [filtered])
+
+  const batchStats = useMemo(() => {
+    let largest = 0
+    let needingAttention = 0
+    for (const batch of batches) {
+      if (batch.requests.length > largest) largest = batch.requests.length
+      if (batch.requests.some((request) => attentionByRequestId.has(request.id))) {
+        needingAttention += 1
+      }
+    }
+    return {
+      batchCount: batches.length,
+      requestCount: filtered.length,
+      largest,
+      avg: batches.length > 0 ? Math.round(filtered.length / batches.length) : 0,
+      needingAttention,
+    }
+  }, [batches, filtered.length, attentionByRequestId])
+
+  // Reset to page 1 whenever filters, grouping, or search narrow/reshape the visible rows —
+  // otherwise a stale page number can land the user on an empty page.
+  useEffect(() => {
+    setPage(1)
+  }, [
+    search.source,
+    search.source_bucket,
+    search.request_type,
+    search.stage,
+    search.posture,
+    search.state,
+    search.attention,
+    search.due,
+    search.raw,
+    search.received_after,
+    search.received_before,
+    ephemeralSearch.trim(),
+    viewMode,
+  ])
+
+  const pageBatchRows = viewMode === 'batch' ? batches : []
+  const pageFlatRows = viewMode === 'flat' ? filtered : []
+
+  // Pagination is server-side on *requests* (both view modes) — batch rows are
+  // whatever the current request window groups into, not separately paginated.
+  const serverTotal = requestsQuery.data?.total ?? 0
+  const serverOffset = requestsQuery.data?.offset ?? offset
+  const totalPages = Math.max(1, Math.ceil(serverTotal / pageSize))
+  const currentPage = Math.min(Math.max(1, page), totalPages)
+  const pageStart = serverTotal === 0 ? 0 : serverOffset
+  const pageEnd =
+    serverTotal === 0 ? 0 : Math.min(serverOffset + requestItems.length, serverTotal)
+  const pageTotal = serverTotal
 
   function patchSearch(patch: Partial<RequestsSearch>) {
     void navigate({
@@ -898,7 +1063,10 @@ export function RequestsPage() {
   }
 
   function drillIntoBatch(batch: RequestBatch) {
-    const window = batchReceivedWindow(batch.receivedAt)
+    const window = batchReceivedWindow(batch.receivedAtStart, batch.receivedAt)
+    // A stale name/id search combined with the new source + date-window filters would
+    // otherwise filter the drilled-in list down to nothing.
+    setEphemeralSearch('')
     setViewMode('flat')
     void navigate({
       to: '/requests',
@@ -973,10 +1141,8 @@ export function RequestsPage() {
             {requestsQuery.isSuccess ? (
               <span className="taste-frost-chip tabular-nums text-[0.65rem]">
                 {filtered.length}
-                {filtered.length !== (requestsQuery.data?.length ?? 0)
-                  ? ` / ${requestsQuery.data?.length}`
-                  : ''}{' '}
-                shown
+                {filtered.length !== requestItems.length ? ` / ${requestItems.length}` : ''}{' '}
+                on this page · {serverTotal} total
               </span>
             ) : null}
           </div>
@@ -1031,7 +1197,29 @@ export function RequestsPage() {
         </div>
       </header>
 
-      {stats ? (
+      {viewMode === 'batch' ? (
+        requestsQuery.isPending ? (
+          <div className="grid gap-3 sm:grid-cols-4">
+            {Array.from({ length: 4 }, (_, index) => (
+              <div key={index} className="rounded-lg border border-line/80 bg-paper/60 px-4 py-3">
+                <Skeleton className="h-3 w-24" />
+                <Skeleton className="mt-3 h-7 w-12" />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-4">
+            <StatTile label="Batches" value={batchStats.batchCount} />
+            <StatTile label="Requests in view" value={batchStats.requestCount} />
+            <StatTile
+              label="Largest batch"
+              value={batchStats.largest}
+              hint={batchStats.avg > 0 ? `${batchStats.avg} avg` : undefined}
+            />
+            <StatTile label="Batches needing attention" value={batchStats.needingAttention} />
+          </div>
+        )
+      ) : stats ? (
         <div className="grid gap-3 sm:grid-cols-3">
           <StatTile label="Open DROP requests" value={stats.open_drop_requests} />
           <StatTile label="Matching review pending" value={stats.matching_review_pending} />
@@ -1088,6 +1276,7 @@ export function RequestsPage() {
             className="taste-link ml-auto text-[0.65rem]"
             onClick={() => {
               clearFilters()
+              setEphemeralSearch('')
               setViewMode('batch')
             }}
           >
@@ -1105,9 +1294,11 @@ export function RequestsPage() {
         )}
         {requestsQuery.isSuccess && filtered.length === 0 && (
           <p className="p-4 text-xs text-ink-soft">
-            {(requestsQuery.data?.length ?? 0) === 0
+            {serverTotal === 0
               ? 'No requests yet.'
-              : 'No requests match the current filters.'}
+              : requestItems.length === 0
+                ? 'No requests on this page — try Previous.'
+                : 'No requests match the current filters.'}
           </p>
         )}
         {requestsQuery.isSuccess && filtered.length > 0 && viewMode === 'flat' && (
@@ -1116,7 +1307,7 @@ export function RequestsPage() {
               {flatTableHeader}
               <tbody>
                 <RequestRows
-                  requests={filtered}
+                  requests={pageFlatRows}
                   attentionByRequestId={attentionByRequestId}
                   onOpen={openTriage}
                 />
@@ -1130,7 +1321,7 @@ export function RequestsPage() {
               {batchTableHeader}
               <tbody>
                 <BatchRows
-                  batches={batches}
+                  batches={pageBatchRows}
                   attentionByRequestId={attentionByRequestId}
                   onDrillIn={drillIntoBatch}
                 />
@@ -1138,6 +1329,18 @@ export function RequestsPage() {
             </table>
           </div>
         )}
+        {requestsQuery.isSuccess && requestItems.length > 0 ? (
+          <PaginationBar
+            unitLabel="requests"
+            start={pageStart}
+            end={pageEnd}
+            total={pageTotal}
+            currentPage={currentPage}
+            totalPages={totalPages}
+            onPrev={() => setPage(Math.max(1, currentPage - 1))}
+            onNext={() => setPage(Math.min(totalPages, currentPage + 1))}
+          />
+        ) : null}
       </div>
 
       <RequestDetailOverlay

@@ -212,7 +212,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     const needle = trimmedQuery.toLowerCase()
 
     if (requestSearchEnabled && requestsQuery.data) {
-      for (const request of requestsQuery.data) {
+      for (const request of requestsQuery.data.items) {
         result.push({
           id: `request-${request.id}`,
           group: 'requests',

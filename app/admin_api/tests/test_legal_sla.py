@@ -93,9 +93,32 @@ async def test_apply_request_due_at_on_intake_skips_override():
     conn.fetchrow = AsyncMock(
         return_value={
             "received_at": datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc),
-            "due_at_override_at": datetime.now(timezone.utc),
         }
     )
+    conn.fetchval = AsyncMock(return_value=True)
     result = await legal_sla.apply_request_due_at_on_intake(conn, "00000000-0000-0000-0000-000000000099")
     assert result is None
+    conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_apply_request_due_at_on_intake_returns_calculated_without_write():
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {"received_at": datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)},
+            {
+                "data_owner_review_days": 3,
+                "legal_pre_fulfillment_days": 2,
+                "fulfillment_days": 3,
+                "lifecycle_days": 6,
+                "updated_at": None,
+            },
+        ]
+    )
+    conn.fetchval = AsyncMock(return_value=False)
+    result = await legal_sla.apply_request_due_at_on_intake(
+        conn, "00000000-0000-0000-0000-000000000099"
+    )
+    assert result == datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
     conn.execute.assert_not_awaited()

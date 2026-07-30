@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -258,6 +259,132 @@ async def test_load_non_drop_contact_reads_cleaned_payload():
     assert contact is not None
     assert contact.email == "ada@example.com"
     assert contact.phone == "555-0100"
+
+
+@pytest.mark.asyncio
+async def test_list_requests_returns_paginated_envelope():
+    from admin_api import requests_list
+
+    captured: dict[str, Any] = {}
+
+    async def fake_fetch(sql: str, *args: Any):
+        captured["sql"] = sql
+        captured["args"] = args
+        return [
+            {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "received_at": datetime(2026, 7, 28, 12, 0, tzinfo=UTC),
+                "intake_source": "manual",
+                "raw_record_id": None,
+                "requestor_state": "CA",
+                "request_type": "delete",
+                "drop_open": None,
+                "display_label": None,
+                "total_count": 42,
+            }
+        ]
+
+    conn = AsyncMock()
+    conn.fetch = fake_fetch
+
+    page = await requests_list.search_requests(conn, limit=10, offset=20)
+
+    assert page.total == 42
+    assert page.limit == 10
+    assert page.offset == 20
+    assert len(page.items) == 1
+    assert "LIMIT $" in captured["sql"]
+    assert "OFFSET $" in captured["sql"]
+    # limit then offset are the trailing bind params.
+    assert captured["args"][-2:] == (10, 20)
+
+
+@pytest.mark.asyncio
+async def test_list_requests_pushes_new_filters_into_sql():
+    from admin_api import requests_list
+
+    captured: dict[str, Any] = {}
+
+    async def fake_fetch(sql: str, *args: Any):
+        captured["sql"] = sql
+        captured["args"] = args
+        return []
+
+    conn = AsyncMock()
+    conn.fetch = fake_fetch
+
+    await requests_list.search_requests(
+        conn,
+        limit=10,
+        offset=0,
+        request_type="access",
+        requestor_state="ca",
+        received_after="2026-01-01T00:00:00Z",
+        received_before="2026-02-01T00:00:00Z",
+    )
+
+    sql = captured["sql"]
+    assert "c.request_type = $" in sql
+    assert "UPPER(c.requestor_state) = $" in sql
+    assert "c.received_at >= $" in sql
+    assert "c.received_at <= $" in sql
+    assert "access" in captured["args"]
+    assert "CA" in captured["args"]
+
+
+@pytest.mark.asyncio
+async def test_list_requests_empty_page_past_offset_uses_count_fallback():
+    """total must stay accurate even when a stale offset lands past the last row."""
+    from admin_api import requests_list
+
+    async def fake_fetch(sql: str, *args: Any):
+        return []
+
+    conn = AsyncMock()
+    conn.fetch = fake_fetch
+    conn.fetchval = AsyncMock(return_value=5)
+
+    page = await requests_list.search_requests(conn, limit=10, offset=100)
+
+    assert page.total == 5
+    assert page.items == []
+    conn.fetchval.assert_awaited_once()
+
+
+def test_requests_route_returns_paginated_envelope(monkeypatch: pytest.MonkeyPatch):
+    from admin_api import main as admin_main
+    from admin_api.requests_list import RequestListPage
+
+    roles.settings.admin_api_super_admins = "ops@example.com"
+    monkeypatch.setattr(admin_main.settings, "database_url", "postgres://local")
+    monkeypatch.setattr(admin_main, "create_pool", AsyncMock())
+    monkeypatch.setattr(admin_main, "close_pool", AsyncMock())
+
+    async def fake_search_requests(conn: Any, **kwargs: Any) -> RequestListPage:
+        del conn
+        return RequestListPage(items=[], total=7, limit=kwargs["limit"], offset=kwargs["offset"])
+
+    class _Acquire:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            return None
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(admin_main, "get_pool", lambda: _Pool())
+    monkeypatch.setattr(admin_main, "search_requests", fake_search_requests)
+    headers = {IAP_EMAIL_HEADER: "ops@example.com"}
+
+    with TestClient(admin_main.app) as client:
+        response = client.get("/requests?limit=10&offset=20", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"items": [], "total": 7, "limit": 10, "offset": 20}
 
 
 @pytest.mark.asyncio

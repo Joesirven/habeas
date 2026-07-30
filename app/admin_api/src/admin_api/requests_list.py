@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any, Literal
 
 import asyncpg
@@ -39,7 +40,9 @@ WITH open_requests AS (
       LEFT JOIN drop_raw_requests drr
         ON drr.id = r.raw_record_id
        AND r.intake_source = 'drop'
-     WHERE r.closed_at IS NULL
+     WHERE NOT EXISTS (
+             SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id
+           )
        AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
 ),
 latest_mr AS (
@@ -128,6 +131,23 @@ class RequestListItem(BaseModel):
     drop_open: bool | None = None
 
 
+class RequestListPage(BaseModel):
+    """Paginated envelope — the query layer, not the client, owns limit/offset/total."""
+
+    items: list[RequestListItem]
+    total: int
+    limit: int
+    offset: int
+
+
+def _parse_iso_datetime(value: str, *, field: str) -> datetime:
+    try:
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        return datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(f"invalid {field}: {value!r}") from exc
+
+
 def _row_to_item(row: asyncpg.Record, *, include_display_labels: bool) -> RequestListItem:
     intake_source = IntakeSource(row["intake_source"])
     display_label = None
@@ -154,38 +174,70 @@ async def search_requests(
     conn: asyncpg.Connection,
     *,
     limit: int = 50,
+    offset: int = 0,
     intake_source: IntakeSource | None = None,
     source_bucket: SourceBucket | None = None,
     stage: CoarseStage | None = None,
     posture: StagePosture | None = None,
+    request_type: str | None = None,
+    requestor_state: str | None = None,
+    received_after: str | None = None,
+    received_before: str | None = None,
     q: str | None = None,
     include_display_labels: bool = False,
-) -> list[RequestListItem]:
-    """List requests with optional portfolio-aligned filters and name search."""
+) -> RequestListPage:
+    """List requests with optional portfolio-aligned filters and name search.
+
+    Paginates in SQL (``LIMIT``/``OFFSET``) — ``total`` reflects the full
+    filtered set, not just the returned page.
+    """
+    received_after_dt = (
+        _parse_iso_datetime(received_after, field="received_after")
+        if received_after
+        else None
+    )
+    received_before_dt = (
+        _parse_iso_datetime(received_before, field="received_before")
+        if received_before
+        else None
+    )
+
     if q is not None:
         needle = q.strip()
         if len(needle) < 2:
             raise ValueError("search query must be at least 2 characters")
-        return await _search_requests(
+        items, total = await _search_requests(
             conn,
             limit=limit,
+            offset=offset,
             intake_source=intake_source,
             source_bucket=source_bucket,
             stage=stage,
             posture=posture,
+            request_type=request_type,
+            requestor_state=requestor_state,
+            received_after=received_after_dt,
+            received_before=received_before_dt,
             needle=needle,
             include_display_labels=include_display_labels,
         )
+    else:
+        items, total = await _list_requests(
+            conn,
+            limit=limit,
+            offset=offset,
+            intake_source=intake_source,
+            source_bucket=source_bucket,
+            stage=stage,
+            posture=posture,
+            request_type=request_type,
+            requestor_state=requestor_state,
+            received_after=received_after_dt,
+            received_before=received_before_dt,
+            include_display_labels=include_display_labels,
+        )
 
-    return await _list_requests(
-        conn,
-        limit=limit,
-        intake_source=intake_source,
-        source_bucket=source_bucket,
-        stage=stage,
-        posture=posture,
-        include_display_labels=include_display_labels,
-    )
+    return RequestListPage(items=items, total=total, limit=limit, offset=offset)
 
 
 def _portfolio_filters(
@@ -194,6 +246,10 @@ def _portfolio_filters(
     source_bucket: SourceBucket | None,
     stage: CoarseStage | None,
     posture: StagePosture | None,
+    request_type: str | None,
+    requestor_state: str | None,
+    received_after: datetime | None,
+    received_before: datetime | None,
     start_index: int,
 ) -> tuple[str, list[Any]]:
     clauses: list[str] = []
@@ -216,21 +272,67 @@ def _portfolio_filters(
         clauses.append(f"c.posture = ${index}")
         params.append(posture)
         index += 1
+    if request_type is not None:
+        clauses.append(f"c.request_type = ${index}")
+        params.append(request_type)
+        index += 1
+    if requestor_state is not None:
+        clauses.append(f"UPPER(c.requestor_state) = ${index}")
+        params.append(requestor_state.strip().upper())
+        index += 1
+    if received_after is not None:
+        clauses.append(f"c.received_at >= ${index}")
+        params.append(received_after)
+        index += 1
+    if received_before is not None:
+        clauses.append(f"c.received_at <= ${index}")
+        params.append(received_before)
+        index += 1
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     return where, params
+
+
+async def _count_classified(
+    conn: asyncpg.Connection,
+    *,
+    where: str,
+    join_manual: str,
+    params: list[Any],
+) -> int:
+    """Fallback exact count — only queried when a page returns zero rows.
+
+    ``COUNT(*) OVER()`` (embedded in the row query) is cheaper for the common
+    case but yields 0 when ``offset`` lands past the last matching row.
+    """
+    total = await conn.fetchval(
+        f"""
+        {_CLASSIFIED_REQUESTS_CTE}
+        SELECT COUNT(*)
+          FROM classified c
+          {join_manual}
+         {where}
+        """,
+        *params,
+    )
+    return int(total or 0)
 
 
 async def _list_requests(
     conn: asyncpg.Connection,
     *,
     limit: int,
+    offset: int,
     intake_source: IntakeSource | None,
     source_bucket: SourceBucket | None,
     stage: CoarseStage | None,
     posture: StagePosture | None,
+    request_type: str | None,
+    requestor_state: str | None,
+    received_after: datetime | None,
+    received_before: datetime | None,
     include_display_labels: bool,
-) -> list[RequestListItem]:
+) -> tuple[list[RequestListItem], int]:
     label_select = (
         """
         , CASE
@@ -258,10 +360,17 @@ async def _list_requests(
         source_bucket=source_bucket,
         stage=stage,
         posture=posture,
+        request_type=request_type,
+        requestor_state=requestor_state,
+        received_after=received_after,
+        received_before=received_before,
         start_index=1,
     )
+    filter_params = list(params)
     params.append(limit)
     limit_param = len(params)
+    params.append(offset)
+    offset_param = len(params)
 
     rows = await conn.fetch(
         f"""
@@ -272,40 +381,63 @@ async def _list_requests(
                c.raw_record_id,
                c.requestor_state,
                c.request_type,
-               c.drop_open
+               c.drop_open,
+               COUNT(*) OVER() AS total_count
                {label_select}
           FROM classified c
           {join_manual}
          {where}
          ORDER BY c.received_at DESC
          LIMIT ${limit_param}
+         OFFSET ${offset_param}
         """,
         *params,
     )
-    return [_row_to_item(row, include_display_labels=include_display_labels) for row in rows]
+    if rows:
+        total = int(rows[0]["total_count"])
+    elif offset > 0:
+        total = await _count_classified(
+            conn, where=where, join_manual=join_manual, params=filter_params
+        )
+    else:
+        total = 0
+    items = [_row_to_item(row, include_display_labels=include_display_labels) for row in rows]
+    return items, total
 
 
 async def _search_requests(
     conn: asyncpg.Connection,
     *,
     limit: int,
+    offset: int,
     intake_source: IntakeSource | None,
     source_bucket: SourceBucket | None,
     stage: CoarseStage | None,
     posture: StagePosture | None,
+    request_type: str | None,
+    requestor_state: str | None,
+    received_after: datetime | None,
+    received_before: datetime | None,
     needle: str,
     include_display_labels: bool,
-) -> list[RequestListItem]:
+) -> tuple[list[RequestListItem], int]:
     pattern = f"%{needle}%"
-    where, params = _portfolio_filters(
+    where, filter_params = _portfolio_filters(
         intake_source=intake_source,
         source_bucket=source_bucket,
         stage=stage,
         posture=posture,
+        request_type=request_type,
+        requestor_state=requestor_state,
+        received_after=received_after,
+        received_before=received_before,
         start_index=2,
     )
-    params = [pattern, *params, limit]
+    filter_params = [pattern, *filter_params]
+    params = [*filter_params, limit]
     limit_param = len(params)
+    params.append(offset)
+    offset_param = len(params)
 
     label_select = (
         """
@@ -346,6 +478,12 @@ async def _search_requests(
     if where:
         search_where = f"{search_where} AND {where.removeprefix('WHERE ')}"
 
+    join_manual = """
+          LEFT JOIN manual_raw_requests mrr
+            ON mrr.id = c.raw_record_id
+           AND c.intake_source IN ('manual', 'csv', 'webform')
+        """
+
     rows = await conn.fetch(
         f"""
         {_CLASSIFIED_REQUESTS_CTE}
@@ -355,16 +493,25 @@ async def _search_requests(
                c.raw_record_id,
                c.requestor_state,
                c.request_type,
-               c.drop_open
+               c.drop_open,
+               COUNT(*) OVER() AS total_count
                {label_select}
           FROM classified c
-          LEFT JOIN manual_raw_requests mrr
-            ON mrr.id = c.raw_record_id
-           AND c.intake_source IN ('manual', 'csv', 'webform')
+          {join_manual}
          {search_where}
          ORDER BY c.received_at DESC
          LIMIT ${limit_param}
+         OFFSET ${offset_param}
         """,
         *params,
     )
-    return [_row_to_item(row, include_display_labels=include_display_labels) for row in rows]
+    if rows:
+        total = int(rows[0]["total_count"])
+    elif offset > 0:
+        total = await _count_classified(
+            conn, where=search_where, join_manual=join_manual, params=filter_params
+        )
+    else:
+        total = 0
+    items = [_row_to_item(row, include_display_labels=include_display_labels) for row in rows]
+    return items, total

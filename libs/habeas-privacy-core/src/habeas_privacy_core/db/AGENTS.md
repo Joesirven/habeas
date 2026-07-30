@@ -7,6 +7,9 @@ asyncpg connection pool and table helpers (`pool.py`, `requests.py`, `hash_index
 - Imported by apps and CLI — never import app code from here.
 - Thin `requests` spine retains `requestor_state` for matching/rematch (U20/U21);
   `insert_request` / `load_request_row` write and read it (normalized USPS).
+- `requests` is insert-only (`core_forbid_requests_mutation`). Close → `request_closures`;
+  deadline overrides → `request_due_overrides`; derive open/due via
+  `habeas_privacy_core.db.request_lifecycle` SQL fragments.
 - Postgres owns the hash index refresh queue (`enqueue_hash_index_refresh`, `claim_hash_index_refresh`).
 - Hash index refresh attempts are immutable/auditable: no DELETE; updates only via
   queue lifecycle transitions; tests free single-flight by abandoning non-terminal rows.

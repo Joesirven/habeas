@@ -116,6 +116,15 @@ def test_journey_routes_registered() -> None:
     needs_params = openapi_paths["/ops/requests/needs-attention"]["get"]["parameters"]
     assert any(param.get("name") == "kind" for param in needs_params)
     assert any(param.get("name") == "assignee" for param in needs_params)
+    assert any(param.get("name") == "offset" for param in needs_params)
+    assert any(param.get("name") == "limit" for param in needs_params)
+
+    requests_params = openapi_paths["/requests"]["get"]["parameters"]
+    assert any(param.get("name") == "offset" for param in requests_params)
+    assert any(param.get("name") == "request_type" for param in requests_params)
+    assert any(param.get("name") == "requestor_state" for param in requests_params)
+    assert any(param.get("name") == "received_after" for param in requests_params)
+    assert any(param.get("name") == "received_before" for param in requests_params)
 
 
 @pytest.mark.asyncio
@@ -262,6 +271,69 @@ async def test_list_needs_attention_kind_notice() -> None:
     assert [item.request_id for item in notice.items] == [notice_id]
 
 
+@pytest.mark.asyncio
+async def test_list_needs_attention_offset_second_page_not_empty() -> None:
+    """Regression: kind="all" page 2 used to be empty because each kind hard-capped
+    at `limit` before the union+offset — now each sub-query fetches offset+limit."""
+    from admin_api.request_journey import NeedsAttentionItem
+
+    matching_items = [
+        NeedsAttentionItem(
+            request_id=f"aaaaaaaa-0000-0000-0000-00000000000{i}",
+            reason=MATCHING_REVIEW_ACTION,
+            kind="matching",
+            current_stage="review",
+            intake_source="drop",
+            received_at=None,
+            requested_at=f"2026-07-{10 + i:02d}T00:00:00+00:00",
+        )
+        for i in range(3)
+    ]
+    conn = AsyncMock()
+    captured_limits: list[int] = []
+
+    async def fake_matching(conn: Any, *, limit: int):
+        del conn
+        captured_limits.append(limit)
+        return matching_items
+
+    with (
+        patch(
+            "admin_api.request_journey.list_matching_needs_attention",
+            side_effect=fake_matching,
+        ),
+        patch(
+            "admin_api.request_journey.list_assignment_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "admin_api.request_journey.list_notice_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "admin_api.request_journey.list_delivery_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        page1 = await request_journey.list_needs_attention(
+            conn, limit=2, offset=0, kind="all"
+        )
+        page2 = await request_journey.list_needs_attention(
+            conn, limit=2, offset=2, kind="all"
+        )
+
+    assert page1.total == 3
+    assert page2.total == 3
+    assert len(page1.items) == 2
+    assert len(page2.items) == 1
+    assert page2.items[0].request_id == matching_items[2].request_id
+    # Fetch size grows with offset+limit (capped at 1000) — not stuck at `limit`.
+    assert captured_limits[-1] >= 4
+
+
 def test_legal_can_read_needs_attention(monkeypatch: pytest.MonkeyPatch) -> None:
     roles.settings.require_iap_identity = True
     roles.settings.admin_api_legals = "legal@example.com"
@@ -271,11 +343,14 @@ def test_legal_can_read_needs_attention(monkeypatch: pytest.MonkeyPatch) -> None
         conn: Any,
         *,
         limit: int,
+        offset: int = 0,
         kind: str = "all",
         assignee: str | None = None,
     ):
-        del conn, limit, assignee
-        return request_journey.NeedsAttentionResponse(items=[], kind=kind)  # type: ignore[arg-type]
+        del conn, assignee
+        return request_journey.NeedsAttentionResponse(
+            items=[], kind=kind, total=0, limit=limit, offset=offset  # type: ignore[arg-type]
+        )
 
     class _Acquire:
         async def __aenter__(self):

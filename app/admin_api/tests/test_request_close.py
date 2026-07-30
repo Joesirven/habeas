@@ -141,3 +141,5 @@ async def test_close_request_sets_closed_at() -> None:
     assert result["already_closed"] is False
     assert result["closed_by"] == "legal@example.com"
     assert conn.execute.await_count == 1
+    insert_sql = conn.fetchrow.await_args_list[1].args[0]
+    assert "INSERT INTO request_closures" in insert_sql
