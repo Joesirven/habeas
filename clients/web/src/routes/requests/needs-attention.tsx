@@ -2631,11 +2631,6 @@ function inboxBatchLabel(item: NeedsAttentionItem): string {
   return name.replace(/\.csv$/i, '')
 }
 
-/** Short secondary line for detail — channel only; no batch CSV / id noise. */
-function compactMetaLine(item: NeedsAttentionItem): string {
-  return SOURCE_LABELS[item.intake_source] ?? item.intake_source
-}
-
 /**
  * When Batch is on: every row is a stack — keyed DROP batches (including size 1)
  * plus one leftover stack for items with no process/CSV key.
