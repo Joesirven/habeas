@@ -10,14 +10,22 @@ from uuid import uuid4
 
 import asyncpg
 import pytest
-from fastapi.testclient import TestClient
-
 from admin_api import request_journey, roles
 from admin_api.main import app
 from admin_api.request_journey import (
     JOURNEY_STAGES,
+    JourneyStage,
+    RequestJourneyResponse,
+    WorkbenchStage,
     assert_no_pii_keys,
+    build_batch_journey_workbench,
     build_request_journey,
+    build_request_journey_workbench,
+)
+from admin_api.vertical_dispositions import (
+    VerticalCatalogEntry,
+    VerticalDisposition,
+    VerticalDispositionsResponse,
 )
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
 from habeas_privacy_core.db.migrations import run_migrations
@@ -28,6 +36,7 @@ from habeas_privacy_core.workflow.approval import (
     clear_rule_cache,
     ensure_pending_matching_review,
 )
+from fastapi.testclient import TestClient
 
 pytestmark_integration = pytest.mark.skipif(
     not os.getenv("DATABASE_URL"),
@@ -120,7 +129,7 @@ def test_journey_routes_registered() -> None:
 
 @pytest.mark.asyncio
 async def test_list_needs_attention_kind_triage_and_escalations() -> None:
-    triage_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    triage_id = _WORKBENCH_REQUEST_ID
     escalate_id = "ffffffff-1111-2222-3333-444444444444"
     conn = AsyncMock()
 
@@ -181,7 +190,7 @@ async def test_list_needs_attention_assignee_filter() -> None:
     from admin_api.request_journey import NeedsAttentionAssignment, NeedsAttentionItem
 
     mine = NeedsAttentionItem(
-        request_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        request_id=_WORKBENCH_REQUEST_ID,
         reason="matching.review",
         kind="matching",
         current_stage="review",
@@ -950,3 +959,440 @@ async def test_build_request_timeline_merges_entries(monkeypatch: pytest.MonkeyP
     stage_entries = [entry for entry in result.entries if entry.kind == "stage"]
     assert stage_entries
     assert stage_entries[0].summary == "Stage Received: complete"
+
+
+# --- Journey workbench (U4 · KTD2 / KTD3) ------------------------------------
+
+_WORKBENCH_REQUEST_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+
+def test_workbench_routes_registered_alongside_ops_journey() -> None:
+    """New workbench endpoints ship without disturbing the ops fine journey."""
+    openapi_paths = app.openapi()["paths"]
+    assert "/ops/requests/{request_id}/journey" in openapi_paths
+    assert "/ops/requests/{request_id}/journey-workbench" in openapi_paths
+    assert "/ops/requests/batches/{bulk_process_id}/journey-workbench" in openapi_paths
+
+
+def test_rollup_status_worst_first_with_skipped_folded_to_complete() -> None:
+    assert request_journey._rollup_status([]) == "not_started"
+    assert request_journey._rollup_status(["complete", "skipped"]) == "complete"
+    assert (
+        request_journey._rollup_status(["complete", "in_progress", "waiting"])
+        == "waiting"
+    )
+    assert request_journey._rollup_status(["failed", "complete"]) == "failed"
+    assert request_journey._rollup_status(["not_started", "complete"]) == "not_started"
+
+
+def test_fulfillment_steps_for_request_type() -> None:
+    assert request_journey._fulfillment_steps_for_request_type("delete") == (
+        "suppression",
+    )
+    assert request_journey._fulfillment_steps_for_request_type("opt_out") == (
+        "suppression",
+    )
+    assert request_journey._fulfillment_steps_for_request_type("access") == (
+        "reproduction",
+    )
+    assert request_journey._fulfillment_steps_for_request_type("combined") == (
+        "suppression",
+        "reproduction",
+    )
+
+
+def _ops_journey(
+    stages: list[JourneyStage], *, intake_source: str = "manual"
+) -> RequestJourneyResponse:
+    return RequestJourneyResponse(
+        request_id=_WORKBENCH_REQUEST_ID,
+        intake_source=intake_source,
+        received_at="2026-07-29T12:00:00+00:00",
+        current_stage=stages[0].stage,
+        stages=stages,
+    )
+
+
+def _no_dispositions(live_verticals: list[str] | None = None) -> VerticalDispositionsResponse:
+    return VerticalDispositionsResponse(
+        request_id=_WORKBENCH_REQUEST_ID,
+        dispositions=[],
+        live_verticals=live_verticals or ["data"],
+        coming_soon=[],
+        matching_complete=False,
+    )
+
+
+class _MetaConn:
+    """Minimal fake — only answers the workbench request-meta lookup."""
+
+    def __init__(
+        self,
+        *,
+        intake_source: str,
+        request_type: str,
+        response_status: int | None = None,
+    ):
+        self._row = {
+            "request_id": _WORKBENCH_REQUEST_ID,
+            "intake_source": intake_source,
+            "request_type": request_type,
+            "response_status": response_status,
+        }
+
+    async def fetchrow(self, sql: str, *args: Any) -> Any:
+        del sql, args
+        return self._row
+
+
+@pytest.mark.asyncio
+async def test_workbench_mid_matching_reports_matching_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AE2 setup half — no disposition yet, match in progress → Matching current."""
+    ops = _ops_journey(
+        [
+            JourneyStage(stage="received", label="Received", status="complete"),
+            JourneyStage(stage="download", label="Download", status="skipped"),
+            JourneyStage(stage="land", label="Land", status="skipped"),
+            JourneyStage(stage="promote", label="Promote", status="skipped"),
+            JourneyStage(stage="match", label="Match", status="in_progress"),
+            JourneyStage(stage="review", label="Review", status="not_started"),
+            JourneyStage(stage="fulfill", label="Fulfill", status="not_started"),
+        ]
+    )
+    monkeypatch.setattr(request_journey, "build_request_journey", AsyncMock(return_value=ops))
+    monkeypatch.setattr(
+        request_journey,
+        "list_vertical_dispositions",
+        AsyncMock(return_value=_no_dispositions()),
+    )
+    monkeypatch.setattr(
+        request_journey, "is_vertical_kickoff_approved", AsyncMock(return_value=False)
+    )
+
+    conn = _MetaConn(intake_source="manual", request_type="delete")
+    result = await build_request_journey_workbench(conn, request_id=_WORKBENCH_REQUEST_ID)
+
+    by_stage = {stage.stage: stage for stage in result.stages}
+    assert by_stage["ingest"].status == "complete"
+    assert by_stage["matching"].status == "in_progress"
+    assert by_stage["fulfillment"].status == "not_started"
+    assert result.current_stage == "matching"
+    assert result.split_posture is False
+    assert result.matching_cluster[0].vertical == "data"
+    assert result.matching_cluster[0].matching_status == "in_progress"
+    assert_no_pii_keys(result.model_dump())
+
+
+@pytest.mark.asyncio
+async def test_workbench_split_posture_after_partial_kickoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AE2 — one live vertical kicked off into Fulfillment while a sibling is
+    still Matching must read both stages in_progress on the rail (KD4/R3).
+
+    Only ``data`` is live in production today; this simulates a near-term
+    second live vertical (catalog placeholder ``paylocity``) to exercise the
+    split-posture rule the rail must already honor once it ships.
+    """
+    monkeypatch.setattr(request_journey, "LIVE_VERTICALS", ("data", "paylocity"))
+    ops = _ops_journey(
+        [
+            JourneyStage(stage="received", label="Received", status="complete"),
+            JourneyStage(stage="download", label="Download", status="skipped"),
+            JourneyStage(stage="land", label="Land", status="skipped"),
+            JourneyStage(stage="promote", label="Promote", status="skipped"),
+            JourneyStage(stage="match", label="Match", status="not_started"),
+            JourneyStage(stage="review", label="Review", status="not_started"),
+            JourneyStage(stage="fulfill", label="Fulfill", status="not_started"),
+        ]
+    )
+    monkeypatch.setattr(request_journey, "build_request_journey", AsyncMock(return_value=ops))
+
+    data_disposition = VerticalDisposition(
+        request_id=_WORKBENCH_REQUEST_ID,
+        vertical="data",
+        label="Data",
+        live=True,
+        status=4,
+        selected_dwids=["dwid-1"],
+        selected_dwid_count=1,
+        decided_by="legal@example.com",
+        actor_role="legal",
+        decided_at="2026-07-29T12:00:00+00:00",
+    )
+    monkeypatch.setattr(
+        request_journey,
+        "list_vertical_dispositions",
+        AsyncMock(
+            return_value=VerticalDispositionsResponse(
+                request_id=_WORKBENCH_REQUEST_ID,
+                dispositions=[data_disposition],
+                live_verticals=["data", "paylocity"],
+                coming_soon=[],
+                matching_complete=False,
+            )
+        ),
+    )
+
+    async def fake_kickoff_approved(_conn: Any, *, request_id: str, vertical: str) -> bool:
+        del _conn, request_id
+        return vertical == "data"
+
+    monkeypatch.setattr(
+        request_journey, "is_vertical_kickoff_approved", fake_kickoff_approved
+    )
+    monkeypatch.setattr(
+        request_journey,
+        "latest_vertical_kickoff_decided_at",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        request_journey,
+        "_fulfillment_step_summary",
+        AsyncMock(
+            return_value=request_journey.WorkbenchStepAttempts(
+                step="suppression", status="in_progress", attempt_count=1
+            )
+        ),
+    )
+
+    conn = _MetaConn(intake_source="manual", request_type="delete")
+    result = await build_request_journey_workbench(conn, request_id=_WORKBENCH_REQUEST_ID)
+
+    by_stage = {stage.stage: stage for stage in result.stages}
+    assert result.split_posture is True
+    assert by_stage["matching"].status == "in_progress"
+    assert by_stage["fulfillment"].status == "in_progress"
+    rows_by_vertical = {row.vertical: row for row in result.fulfillment_cluster}
+    assert rows_by_vertical["data"].kicked_off is True
+    assert rows_by_vertical["data"].fulfillment_status == "in_progress"
+    assert rows_by_vertical["paylocity"].kicked_off is False
+    assert_no_pii_keys(result.model_dump())
+
+
+@pytest.mark.asyncio
+async def test_workbench_coming_soon_verticals_not_actionable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ops = _ops_journey(
+        [
+            JourneyStage(stage="received", label="Received", status="complete"),
+            JourneyStage(stage="download", label="Download", status="skipped"),
+            JourneyStage(stage="land", label="Land", status="skipped"),
+            JourneyStage(stage="promote", label="Promote", status="skipped"),
+            JourneyStage(stage="match", label="Match", status="not_started"),
+            JourneyStage(stage="review", label="Review", status="not_started"),
+            JourneyStage(stage="fulfill", label="Fulfill", status="not_started"),
+        ]
+    )
+    monkeypatch.setattr(request_journey, "build_request_journey", AsyncMock(return_value=ops))
+    monkeypatch.setattr(
+        request_journey,
+        "list_vertical_dispositions",
+        AsyncMock(
+            return_value=VerticalDispositionsResponse(
+                request_id=_WORKBENCH_REQUEST_ID,
+                dispositions=[],
+                live_verticals=["data"],
+                coming_soon=[
+                    VerticalCatalogEntry(vertical="mailchimp", label="Mailchimp"),
+                    VerticalCatalogEntry(vertical="lever", label="Lever"),
+                ],
+                matching_complete=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        request_journey, "is_vertical_kickoff_approved", AsyncMock(return_value=False)
+    )
+
+    conn = _MetaConn(intake_source="manual", request_type="delete")
+    result = await build_request_journey_workbench(conn, request_id=_WORKBENCH_REQUEST_ID)
+
+    coming_soon_rows = [row for row in result.matching_cluster if not row.live]
+    assert {row.vertical for row in coming_soon_rows} == {"mailchimp", "lever"}
+    assert all(row.actionable is False for row in coming_soon_rows)
+    assert all(row.blocker == "Coming soon" for row in coming_soon_rows)
+    # Coming-soon verticals never run fulfillment work (KD3).
+    assert all(row.live for row in result.fulfillment_cluster)
+    assert_no_pii_keys(result.model_dump())
+
+
+@pytest.mark.asyncio
+async def test_batch_workbench_aggregates_worst_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Batch aggregate: any member in_progress keeps the batch stage in_progress."""
+
+    def _member(*, matching_status: str, fulfillment_status: str, current_stage: str):
+        stages = [
+            WorkbenchStage(stage="ingest", label="Ingest", status="complete"),
+            WorkbenchStage(stage="matching", label="Matching", status=matching_status),
+            WorkbenchStage(
+                stage="fulfillment", label="Fulfillment", status=fulfillment_status
+            ),
+            WorkbenchStage(stage="notice", label="Notice", status="not_started"),
+        ]
+        return request_journey.RequestJourneyWorkbenchResponse(
+            request_id="req",
+            intake_source="manual",
+            request_type="delete",
+            stages=stages,
+            current_stage=current_stage,
+            split_posture=False,
+            matching_cluster=[
+                request_journey.WorkbenchVerticalRow(
+                    vertical="data",
+                    label="Data",
+                    live=True,
+                    actionable=True,
+                    matching_status=matching_status,
+                )
+            ],
+            fulfillment_cluster=[
+                request_journey.WorkbenchVerticalRow(
+                    vertical="data",
+                    label="Data",
+                    live=True,
+                    actionable=True,
+                    matching_status=matching_status,
+                    fulfillment_status=fulfillment_status,
+                )
+            ],
+            notice=request_journey.WorkbenchNoticeSummary(status="not_started"),
+        )
+
+    member_a = _member(
+        matching_status="complete", fulfillment_status="complete", current_stage="notice"
+    )
+    member_b = _member(
+        matching_status="in_progress",
+        fulfillment_status="not_started",
+        current_stage="matching",
+    )
+
+    monkeypatch.setattr(
+        request_journey,
+        "_member_request_ids_for_bulk_process_id",
+        AsyncMock(return_value=["req-a", "req-b"]),
+    )
+
+    async def fake_build(_conn: Any, *, request_id: str):
+        return member_a if request_id == "req-a" else member_b
+
+    monkeypatch.setattr(
+        request_journey, "build_request_journey_workbench", fake_build
+    )
+
+    result = await build_batch_journey_workbench(conn=object(), bulk_process_id=42)
+
+    assert result.bulk_process_id == 42
+    assert result.request_count == 2
+    assert result.member_request_ids == ["req-a", "req-b"]
+    by_stage = {stage.stage: stage for stage in result.stages}
+    assert by_stage["matching"].status == "in_progress"
+    assert by_stage["fulfillment"].status == "not_started"
+    assert result.current_stage == "matching"
+    vertical_row = next(
+        row for row in result.matching_cluster if row.vertical == "data"
+    )
+    assert vertical_row.matching_status == "in_progress"
+    assert vertical_row.member_status_counts == {"complete": 1, "in_progress": 1}
+    assert_no_pii_keys(result.model_dump())
+
+
+@pytest.mark.asyncio
+async def test_batch_workbench_no_members_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        request_journey,
+        "_member_request_ids_for_bulk_process_id",
+        AsyncMock(return_value=[]),
+    )
+    with pytest.raises(Exception) as exc:
+        await build_batch_journey_workbench(conn=object(), bulk_process_id=999)
+    assert getattr(exc.value, "status_code", None) == 404
+
+
+@pytest.mark.asyncio
+@pytestmark_integration
+async def test_workbench_integration_manual_delete_request(pool) -> None:
+    """End-to-end against the real schema: manual delete, no match yet."""
+    async with pool.acquire() as conn:
+        request_id = str(
+            await conn.fetchval(
+                """
+                INSERT INTO requests (intake_source, raw_record_id, request_type)
+                VALUES ('manual', NULL, 'delete')
+                RETURNING id
+                """
+            )
+        )
+        result = await build_request_journey_workbench(conn, request_id=request_id)
+
+    assert result.request_id == request_id
+    assert result.current_stage == "matching"
+    assert result.matching_cluster[0].vertical == "data"
+    assert result.matching_cluster[0].matching_status == "not_started"
+    assert any(not row.live for row in result.matching_cluster)
+    assert_no_pii_keys(result.model_dump())
+
+
+@pytest.mark.asyncio
+@pytestmark_integration
+async def test_workbench_integration_drop_kickoff_then_split(pool) -> None:
+    """DROP happy path: disposition + kickoff moves Fulfillment to in_progress (AE1)."""
+    from admin_api.fulfillment_kickoff import kickoff_vertical_fulfillment
+    from admin_api.vertical_dispositions import upsert_vertical_disposition
+
+    async with pool.acquire() as conn:
+        drop_raw_id = await conn.fetchval(
+            """
+            INSERT INTO drop_raw_requests (
+                source_csv_filename, drop_record_id, list_type
+            ) VALUES ($1, $2, 'Email')
+            RETURNING id
+            """,
+            f"workbench-{uuid4().hex[:8]}.csv",
+            f"drop-{uuid4().hex[:8]}",
+        )
+        request_id = str(
+            await conn.fetchval(
+                """
+                INSERT INTO requests (intake_source, raw_record_id)
+                VALUES ('drop', $1)
+                RETURNING id
+                """,
+                drop_raw_id,
+            )
+        )
+        await upsert_vertical_disposition(
+            conn,
+            request_id=request_id,
+            vertical="data",
+            status=4,
+            dwids=["dwid-1"],
+            decided_by="owner@example.com",
+        )
+        before = await build_request_journey_workbench(conn, request_id=request_id)
+        data_row_before = next(
+            row for row in before.fulfillment_cluster if row.vertical == "data"
+        )
+        assert data_row_before.kicked_off is False
+        assert data_row_before.fulfillment_status == "waiting"
+
+        await kickoff_vertical_fulfillment(
+            conn,
+            request_id=request_id,
+            vertical="data",
+            decided_by="legal@example.com",
+        )
+        after = await build_request_journey_workbench(conn, request_id=request_id)
+
+    data_row_after = next(
+        row for row in after.fulfillment_cluster if row.vertical == "data"
+    )
+    assert data_row_after.kicked_off is True
+    assert data_row_after.fulfillment_status in ("in_progress", "complete")
+    assert_no_pii_keys(after.model_dump())

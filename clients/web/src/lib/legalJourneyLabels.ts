@@ -70,6 +70,61 @@ export function queueStatusLabel(
   return pending
 }
 
+/** KTD2 workbench four-stage rail (Ingest → Matching → Fulfillment → Notice). */
+
+export const WORKBENCH_STAGE_ORDER = [
+  'ingest',
+  'matching',
+  'fulfillment',
+  'notice',
+] as const
+
+export type WorkbenchStageKey = (typeof WORKBENCH_STAGE_ORDER)[number]
+
+const WORKBENCH_STAGE_LABELS: Record<string, string> = {
+  ingest: 'Ingest',
+  matching: 'Matching',
+  fulfillment: 'Fulfillment',
+  notice: 'Notice',
+}
+
+export function workbenchStageLabel(stageKey: string): string {
+  const normalized = stageKey.trim().toLowerCase()
+  if (normalized in WORKBENCH_STAGE_LABELS) return WORKBENCH_STAGE_LABELS[normalized]!
+  return normalized.replaceAll('_', ' ')
+}
+
+/** Vertical catalog labels (live `data` + coming-soon stubs, KTD3). */
+const VERTICAL_LABELS: Record<string, string> = {
+  data: 'Data',
+  mailchimp: 'Mailchimp',
+  lever: 'Lever',
+  paylocity: 'Paylocity',
+  auth0: 'Auth0',
+  cassandra: 'Cassandra',
+}
+
+export function verticalLabel(vertical: string): string {
+  const normalized = vertical.trim().toLowerCase()
+  if (normalized in VERTICAL_LABELS) return VERTICAL_LABELS[normalized]!
+  return normalized.replaceAll('_', ' ')
+}
+
+const WORKBENCH_STATUS_LABELS: Record<string, string> = {
+  not_started: 'Not started',
+  skipped: 'Skipped',
+  waiting: 'Waiting',
+  in_progress: 'In progress',
+  complete: 'Complete',
+  failed: 'Failed',
+}
+
+export function workbenchStatusLabel(status: string): string {
+  const normalized = status.trim().toLowerCase()
+  if (normalized in WORKBENCH_STATUS_LABELS) return WORKBENCH_STATUS_LABELS[normalized]!
+  return normalized.replaceAll('_', ' ')
+}
+
 /** User-facing copy for Legal Notice gate before weekly DROP upload. */
 export const NOTICE_APPROVAL = {
   noun: 'Fulfillment notice pending',

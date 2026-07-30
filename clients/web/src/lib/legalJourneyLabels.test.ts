@@ -4,10 +4,14 @@ import { describe, expect, test } from 'bun:test'
 import {
   COARSE_STAGE_ORDER,
   NOTICE_APPROVAL,
+  WORKBENCH_STAGE_ORDER,
   actionReasonLabel,
   queueStatusLabel,
   stageLabel,
   stageReachLabel,
+  verticalLabel,
+  workbenchStageLabel,
+  workbenchStatusLabel,
 } from './legalJourneyLabels'
 
 describe('legalJourneyLabels', () => {
@@ -104,5 +108,41 @@ describe('legalJourneyLabels', () => {
     ]) {
       expect(actionReasonLabel(reason)).not.toContain(reason)
     }
+  })
+
+  test('WORKBENCH_STAGE_ORDER matches KTD2 four-stage rail', () => {
+    expect(WORKBENCH_STAGE_ORDER).toEqual([
+      'ingest',
+      'matching',
+      'fulfillment',
+      'notice',
+    ])
+  })
+
+  test('workbenchStageLabel maps the four high-level stages', () => {
+    expect(workbenchStageLabel('ingest')).toBe('Ingest')
+    expect(workbenchStageLabel('matching')).toBe('Matching')
+    expect(workbenchStageLabel('fulfillment')).toBe('Fulfillment')
+    expect(workbenchStageLabel('notice')).toBe('Notice')
+    expect(workbenchStageLabel('custom_stage')).toBe('custom stage')
+  })
+
+  test('verticalLabel maps live + coming-soon catalog entries', () => {
+    expect(verticalLabel('data')).toBe('Data')
+    expect(verticalLabel('mailchimp')).toBe('Mailchimp')
+    expect(verticalLabel('lever')).toBe('Lever')
+    expect(verticalLabel('paylocity')).toBe('Paylocity')
+    expect(verticalLabel('auth0')).toBe('Auth0')
+    expect(verticalLabel('cassandra')).toBe('Cassandra')
+    expect(verticalLabel('unknown_vendor')).toBe('unknown vendor')
+  })
+
+  test('workbenchStatusLabel maps StageStatus values', () => {
+    expect(workbenchStatusLabel('not_started')).toBe('Not started')
+    expect(workbenchStatusLabel('in_progress')).toBe('In progress')
+    expect(workbenchStatusLabel('waiting')).toBe('Waiting')
+    expect(workbenchStatusLabel('complete')).toBe('Complete')
+    expect(workbenchStatusLabel('failed')).toBe('Failed')
+    expect(workbenchStatusLabel('skipped')).toBe('Skipped')
   })
 })

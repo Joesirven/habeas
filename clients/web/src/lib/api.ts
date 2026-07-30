@@ -1418,6 +1418,103 @@ export function getRequestJourney(requestId: string) {
   )
 }
 
+// --- Journey workbench (U4 · KTD2 / KTD3) ---
+//
+// Four-stage legal/admin detail chrome (Ingest → Matching → Fulfillment →
+// Notice) with Matching/Fulfillment split into per-vertical clusters. This
+// is a separate DTO from `RequestJourneyResponse` above — the ops fine
+// journey stays untouched; the workbench is consumed by the new detail
+// chrome UI (U5) only.
+
+export type WorkbenchStageKey = 'ingest' | 'matching' | 'fulfillment' | 'notice'
+
+export type WorkbenchStage = {
+  stage: WorkbenchStageKey
+  label: string
+  status: JourneyStageStatus
+  blocker: string | null
+}
+
+export type WorkbenchStepAttempts = {
+  step: string
+  status: JourneyStageStatus
+  attempt_count: number
+  last_attempt_status: string | null
+  attempted_at: string | null
+  completed_at: string | null
+  error_code: string | null
+}
+
+export type WorkbenchVerticalRow = {
+  vertical: string
+  label: string
+  live: boolean
+  actionable: boolean
+  matching_status: JourneyStageStatus
+  disposition_status: number | null
+  selected_dwid_count: number | null
+  kicked_off: boolean
+  identity_required: boolean
+  identity_verified: boolean | null
+  fulfillment_status: JourneyStageStatus | null
+  fulfillment_steps: WorkbenchStepAttempts[]
+  blocker: string | null
+}
+
+export type WorkbenchNoticeSummary = {
+  status: JourneyStageStatus
+  ready: boolean
+  blocker: string | null
+  response_status: number | null
+}
+
+export type RequestJourneyWorkbenchResponse = {
+  request_id: string
+  intake_source: string
+  request_type: string
+  stages: WorkbenchStage[]
+  current_stage: WorkbenchStageKey
+  /** KD4/R3 — Matching and Fulfillment both read in_progress simultaneously. */
+  split_posture: boolean
+  matching_cluster: WorkbenchVerticalRow[]
+  fulfillment_cluster: WorkbenchVerticalRow[]
+  notice: WorkbenchNoticeSummary
+}
+
+export type WorkbenchVerticalBatchRow = {
+  vertical: string
+  label: string
+  live: boolean
+  actionable: boolean
+  matching_status: JourneyStageStatus
+  fulfillment_status: JourneyStageStatus | null
+  /** status → count of member requests at that status (worst-first rollup). */
+  member_status_counts: Record<string, number>
+}
+
+export type BatchJourneyWorkbenchResponse = {
+  bulk_process_id: number
+  request_count: number
+  member_request_ids: string[]
+  stages: WorkbenchStage[]
+  current_stage: WorkbenchStageKey
+  split_posture: boolean
+  matching_cluster: WorkbenchVerticalBatchRow[]
+  fulfillment_cluster: WorkbenchVerticalBatchRow[]
+}
+
+export function getRequestJourneyWorkbench(requestId: string) {
+  return fetchAdminApi<RequestJourneyWorkbenchResponse>(
+    `/ops/requests/${encodeURIComponent(requestId)}/journey-workbench`,
+  )
+}
+
+export function getBatchJourneyWorkbench(bulkProcessId: number) {
+  return fetchAdminApi<BatchJourneyWorkbenchResponse>(
+    `/ops/requests/batches/${encodeURIComponent(String(bulkProcessId))}/journey-workbench`,
+  )
+}
+
 export function getNeedsAttention(
   limitOrParams?:
     | number
