@@ -106,4 +106,6 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Per-app tests/ dirs share basenames (test_health.py); importlib avoids collisions.
+addopts = "--import-mode=importlib"
 testpaths = ["libs", "app", "clients/cli"]

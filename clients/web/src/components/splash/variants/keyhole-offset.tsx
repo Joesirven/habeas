@@ -40,11 +40,15 @@ function SlotSlideIn({
     <div
       className={`keyhole-stage keyhole-phase-${phase} ${className}`.trim()}
       role="status"
-      aria-label="Signing in to Data Privacy Platform"
+      aria-label="Signing in to Habeas Data Privacy Automation Platform"
     >
-      <p className="keyhole-sr-only">Habeas Data Privacy Platform</p>
       <div className="keyhole-lockup">
         <KeyholeSvg />
+        <p className="keyhole-title">
+          <span>Habeas</span>
+          <span>Data Privacy</span>
+          <span>Automation Platform</span>
+        </p>
       </div>
     </div>
   )

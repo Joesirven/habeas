@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 import { Skeleton, SkeletonLines } from '@/components/AppShell'
@@ -29,6 +29,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { actionToast } from '@/lib/action-toast'
 import { RoleGate, isSuperAdmin } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 import {
@@ -38,6 +39,7 @@ import {
   getDropWorkers,
   listDropBulkProcesses,
   listDropBulkProcessRuns,
+  listOpsLogs,
   listRuns,
   postDropDownload,
   postDropFulfill,
@@ -53,6 +55,9 @@ import {
   type BulkProcessesPayload,
   type DropPipelineStatus,
   type HashIndexRefreshStatus,
+  type OpsLogEntry,
+  type OpsLogSeverity,
+  type OpsTimeWindow,
   type WorkerHealthProbe,
 } from '@/lib/api'
 import { RetryConfigPanel } from '@/routes/ops/health/configuration'
@@ -93,6 +98,8 @@ const PIPELINE_TAB_BAR: { key: PipelineTab; label: string }[] = [
   { key: 'pipeline', label: 'Pipeline' },
   { key: 'hash_refresh', label: 'Hash refresh' },
   { key: 'history', label: 'History' },
+  { key: 'errors', label: 'Errors' },
+  { key: 'logs', label: 'Logs' },
   { key: 'configurations', label: 'Configurations' },
 ]
 
@@ -281,6 +288,9 @@ const ACTIONS = [
 ] as const
 
 type ActionKey = (typeof ACTIONS)[number]['key']
+
+const DROP_PIPELINE_RUN_TOAST_ID = 'drop-pipeline-run'
+const DROP_HASH_REFRESH_TOAST_ID = 'drop-hash-refresh'
 
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
@@ -783,6 +793,381 @@ function ProcessRunsHistoryPanel({
         </div>
       </div>
       {body}
+    </div>
+  )
+}
+
+const LOG_WINDOW_OPTIONS: { value: OpsTimeWindow; label: string }[] = [
+  { value: '8h', label: '8h' },
+  { value: '24h', label: '24h' },
+  { value: '1w', label: '1w' },
+  { value: '3m', label: '3m' },
+]
+
+const LOG_RESOURCE_OPTIONS: { value: string; label: string }[] = [
+  { value: '', label: 'All resources' },
+  { value: 'drop_connector', label: 'drop_connector' },
+  { value: 'drop_ingestor', label: 'drop_ingestor' },
+  { value: 'matching', label: 'matching' },
+  { value: 'hash_index_refresh', label: 'hash_index_refresh' },
+  { value: 'data_fulfillment', label: 'data_fulfillment' },
+  { value: 'admin-api', label: 'admin-api' },
+  { value: 'cli', label: 'cli' },
+]
+
+const LOG_SEVERITY_OPTIONS: OpsLogSeverity[] = ['ERROR', 'WARNING', 'INFO']
+
+function severityBadgeClass(severity: OpsLogSeverity): string {
+  if (severity === 'ERROR') return 'border-red-300/80 bg-red-50 text-red-800'
+  if (severity === 'WARNING') return 'border-amber-300/80 bg-amber-50 text-amber-900'
+  return 'border-line bg-paper text-ink-soft'
+}
+
+function formatLogTimestamp(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value || '—'
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
+function runLinkParts(runId: string | null): { job: string; attemptId: string } | null {
+  if (!runId || !runId.includes(':')) return null
+  const [job, attemptId] = runId.split(':', 2)
+  if (!job || !attemptId) return null
+  return { job, attemptId }
+}
+
+/**
+ * GCP Logs Explorer–style feed over worker attempt tables + admin_audit_log.
+ * Errors and Logs tabs share this panel; Errors locks severity to ERROR.
+ */
+function OpsLogExplorer({ mode }: { mode: 'errors' | 'logs' }) {
+  const [timeWindow, setTimeWindow] = useState<OpsTimeWindow>('1w')
+  const [resource, setResource] = useState('')
+  const [source, setSource] = useState<'' | 'attempt' | 'audit'>('')
+  const [severityFilter, setSeverityFilter] = useState<OpsLogSeverity[]>(
+    mode === 'errors' ? ['ERROR'] : ['ERROR', 'WARNING', 'INFO'],
+  )
+  const [queryDraft, setQueryDraft] = useState('')
+  const [query, setQuery] = useState('')
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+
+  useEffect(() => {
+    setSeverityFilter(mode === 'errors' ? ['ERROR'] : ['ERROR', 'WARNING', 'INFO'])
+  }, [mode])
+
+  const allSeveritiesSelected =
+    severityFilter.length === LOG_SEVERITY_OPTIONS.length &&
+    LOG_SEVERITY_OPTIONS.every((level) => severityFilter.includes(level))
+
+  const logsQuery = useQuery({
+    queryKey: [
+      'admin-api',
+      'ops',
+      'logs',
+      mode,
+      timeWindow,
+      resource || 'all',
+      source || 'all',
+      severityFilter.join(','),
+      query || '',
+    ],
+    queryFn: () =>
+      listOpsLogs({
+        window: timeWindow,
+        resource: resource || undefined,
+        source: source || undefined,
+        severity:
+          mode === 'errors'
+            ? 'ERROR'
+            : allSeveritiesSelected
+              ? undefined
+              : severityFilter,
+        q: query || undefined,
+        limit: 100,
+      }),
+    refetchInterval: 8_000,
+    placeholderData: (previous) => previous,
+  })
+
+  const entries: OpsLogEntry[] = logsQuery.data ?? []
+
+  function toggleSeverity(level: OpsLogSeverity) {
+    if (mode === 'errors') return
+    setSeverityFilter((current) => {
+      if (current.includes(level)) {
+        const next = current.filter((item) => item !== level)
+        return next.length > 0 ? next : current
+      }
+      return [...current, level]
+    })
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+            {mode === 'errors' ? 'Errors' : 'Logs'}
+          </p>
+          <p className="mt-0.5 text-xs text-ink-soft">
+            Project-wide feed from worker attempt tables and admin audit — same explorer,
+            {mode === 'errors' ? ' filtered to ERROR.' : ' all severities.'}
+          </p>
+        </div>
+        <span className="text-[0.65rem] tabular-nums text-mute">
+          {logsQuery.isFetching && !logsQuery.isPending ? 'Refreshing · ' : null}
+          {entries.length} entries
+        </span>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 rounded-md border border-line bg-paper/40 px-2.5 py-2">
+        <div className="flex items-center gap-0.5 rounded border border-line p-0.5">
+          {LOG_WINDOW_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={cn(
+                'rounded px-1.5 py-0.5 text-[0.65rem]',
+                timeWindow === option.value
+                  ? 'bg-ink text-paper'
+                  : 'text-ink-soft hover:bg-paper',
+              )}
+              onClick={() => setTimeWindow(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+
+        <CompactFilterSelect
+          label="Resource"
+          value={resource}
+          onChange={setResource}
+          options={LOG_RESOURCE_OPTIONS}
+        />
+
+        <CompactFilterSelect
+          label="Source"
+          value={source}
+          onChange={(value) => setSource(value as '' | 'attempt' | 'audit')}
+          options={[
+            { value: '', label: 'All sources' },
+            { value: 'attempt', label: 'Attempts' },
+            { value: 'audit', label: 'Audit' },
+          ]}
+        />
+
+        <div className="flex items-center gap-1">
+          {LOG_SEVERITY_OPTIONS.map((level) => {
+            const active = severityFilter.includes(level)
+            return (
+              <button
+                key={level}
+                type="button"
+                disabled={mode === 'errors'}
+                className={cn(
+                  'rounded border px-1.5 py-0.5 text-[0.6rem] font-medium uppercase tracking-wide',
+                  active ? severityBadgeClass(level) : 'border-line text-mute',
+                  mode === 'errors' && 'cursor-default opacity-90',
+                )}
+                onClick={() => toggleSeverity(level)}
+              >
+                {level}
+              </button>
+            )
+          })}
+        </div>
+
+        <form
+          className="ml-auto flex min-w-[12rem] flex-1 items-center gap-1 sm:max-w-xs"
+          onSubmit={(event) => {
+            event.preventDefault()
+            setQuery(queryDraft.trim())
+          }}
+        >
+          <input
+            type="search"
+            value={queryDraft}
+            onChange={(event) => setQueryDraft(event.target.value)}
+            placeholder="Filter text…"
+            className="h-7 w-full rounded border border-line bg-paper px-2 text-xs text-ink placeholder:text-mute"
+            aria-label="Filter log messages"
+          />
+          <Button type="submit" size="sm" variant="outline" className="h-7 px-2 text-[0.65rem]">
+            Apply
+          </Button>
+        </form>
+      </div>
+
+      <div className="overflow-hidden rounded-md border border-line">
+        {logsQuery.isError ? (
+          <p className="px-3 py-3 text-xs text-red-700">
+            Could not load ops logs from admin-api.
+          </p>
+        ) : logsQuery.isPending && !logsQuery.data ? (
+          <div className="p-3">
+            <SkeletonLines lines={5} />
+          </div>
+        ) : entries.length === 0 ? (
+          <p className="px-3 py-3 text-xs text-ink-soft">
+            {mode === 'errors'
+              ? 'No errors in the selected window.'
+              : 'No log entries in the selected window.'}
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="taste-table">
+              <thead>
+                <tr>
+                  <th className="w-[9.5rem]">Time</th>
+                  <th className="w-[5.5rem]">Severity</th>
+                  <th className="w-[8rem]">Resource</th>
+                  <th>Message</th>
+                  <th className="w-[5rem]">Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {entries.map((entry) => {
+                  const open = expandedId === entry.id
+                  const link = runLinkParts(entry.run_id)
+                  return (
+                    <Fragment key={entry.id}>
+                      <tr
+                        className={cn(
+                          'cursor-pointer',
+                          entry.severity === 'ERROR' && 'bg-red-50/30',
+                        )}
+                        onClick={() => setExpandedId(open ? null : entry.id)}
+                      >
+                        <td className="whitespace-nowrap tabular-nums text-[0.65rem] text-ink-soft">
+                          {formatLogTimestamp(entry.timestamp)}
+                        </td>
+                        <td>
+                          <span
+                            className={cn(
+                              'inline-block rounded border px-1 py-px text-[0.55rem] font-semibold uppercase tracking-wide',
+                              severityBadgeClass(entry.severity),
+                            )}
+                          >
+                            {entry.severity}
+                          </span>
+                        </td>
+                        <td className="font-mono text-[0.65rem]">{entry.resource}</td>
+                        <td className="max-w-[28rem] truncate text-xs" title={entry.message}>
+                          {entry.message}
+                        </td>
+                        <td className="text-[0.65rem] text-mute">{entry.source}</td>
+                      </tr>
+                      {open ? (
+                        <tr className="bg-paper/60">
+                          <td colSpan={5} className="px-3 py-2.5">
+                            <dl className="grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-3">
+                              <div>
+                                <dt className="text-[0.6rem] uppercase tracking-wide text-mute">
+                                  Id
+                                </dt>
+                                <dd className="font-mono text-[0.65rem]">{entry.id}</dd>
+                              </div>
+                              {entry.step ? (
+                                <div>
+                                  <dt className="text-[0.6rem] uppercase tracking-wide text-mute">
+                                    Step
+                                  </dt>
+                                  <dd className="font-mono text-[0.65rem]">{entry.step}</dd>
+                                </div>
+                              ) : null}
+                              {entry.status ? (
+                                <div>
+                                  <dt className="text-[0.6rem] uppercase tracking-wide text-mute">
+                                    {entry.source === 'audit' ? 'Command' : 'Status'}
+                                  </dt>
+                                  <dd className="font-mono text-[0.65rem]">{entry.status}</dd>
+                                </div>
+                              ) : null}
+                              {entry.error_code ? (
+                                <div>
+                                  <dt className="text-[0.6rem] uppercase tracking-wide text-mute">
+                                    Error code
+                                  </dt>
+                                  <dd className="font-mono text-[0.65rem]">{entry.error_code}</dd>
+                                </div>
+                              ) : null}
+                              {entry.actor ? (
+                                <div>
+                                  <dt className="text-[0.6rem] uppercase tracking-wide text-mute">
+                                    Actor
+                                  </dt>
+                                  <dd className="font-mono text-[0.65rem]">{entry.actor}</dd>
+                                </div>
+                              ) : null}
+                              {entry.result_status != null ? (
+                                <div>
+                                  <dt className="text-[0.6rem] uppercase tracking-wide text-mute">
+                                    HTTP
+                                  </dt>
+                                  <dd className="tabular-nums text-[0.65rem]">
+                                    {entry.result_status}
+                                  </dd>
+                                </div>
+                              ) : null}
+                              {entry.request_id ? (
+                                <div>
+                                  <dt className="text-[0.6rem] uppercase tracking-wide text-mute">
+                                    Request
+                                  </dt>
+                                  <dd>
+                                    <Link
+                                      to="/requests/$requestId"
+                                      params={{ requestId: entry.request_id }}
+                                      className="font-mono text-[0.65rem] text-habeas-mid underline decoration-habeas-mid/30 underline-offset-2"
+                                      onClick={(event) => event.stopPropagation()}
+                                    >
+                                      {entry.request_id}
+                                    </Link>
+                                  </dd>
+                                </div>
+                              ) : null}
+                              {link ? (
+                                <div>
+                                  <dt className="text-[0.6rem] uppercase tracking-wide text-mute">
+                                    Run
+                                  </dt>
+                                  <dd>
+                                    <Link
+                                      to="/ops/runs/$job/$attemptId"
+                                      params={{
+                                        job: link.job,
+                                        attemptId: link.attemptId,
+                                      }}
+                                      className="font-mono text-[0.65rem] text-habeas-mid underline decoration-habeas-mid/30 underline-offset-2"
+                                      onClick={(event) => event.stopPropagation()}
+                                    >
+                                      {entry.run_id}
+                                    </Link>
+                                  </dd>
+                                </div>
+                              ) : null}
+                            </dl>
+                            <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded border border-line bg-paper px-2 py-1.5 font-mono text-[0.65rem] text-ink-soft">
+                              {entry.message}
+                            </pre>
+                          </td>
+                        </tr>
+                      ) : null}
+                    </Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -2365,9 +2750,11 @@ function MetricHoverCard({
 function RunPipelineButton({
   disabled,
   onQueued,
+  focusResultPanel,
 }: {
   disabled?: boolean
   onQueued: (label: string, result: unknown) => void
+  focusResultPanel: () => void
 }) {
   const queryClient = useQueryClient()
   const [confirmOpen, setConfirmOpen] = useState(false)
@@ -2394,6 +2781,28 @@ function RunPipelineButton({
       setPhase(null)
     },
   })
+
+  function confirmRun() {
+    void actionToast.promise(runMutation.mutateAsync(), {
+      id: DROP_PIPELINE_RUN_TOAST_ID,
+      loading: 'Queuing CA DROP pipeline…',
+      success: () => ({
+        title: 'Pipeline queued',
+        description: 'Download, land, and promote were queued.',
+        action: {
+          label: 'View result',
+          onClick: focusResultPanel,
+        },
+      }),
+      error: () => ({
+        title: 'Pipeline queue failed',
+        action: {
+          label: 'Retry',
+          onClick: confirmRun,
+        },
+      }),
+    })
+  }
 
   return (
     <>
@@ -2472,13 +2881,6 @@ function RunPipelineButton({
               {phase}
             </p>
           ) : null}
-          {runMutation.isError ? (
-            <p className="text-xs text-red-700">
-              {runMutation.error instanceof Error
-                ? runMutation.error.message
-                : 'Pipeline queue failed'}
-            </p>
-          ) : null}
           <DialogFooter>
             <button
               type="button"
@@ -2492,7 +2894,7 @@ function RunPipelineButton({
               type="button"
               className="taste-btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs"
               disabled={runMutation.isPending}
-              onClick={() => runMutation.mutate()}
+              onClick={confirmRun}
             >
               <PlayPipelineIcon className="h-3.5 w-3.5" />
               {runMutation.isPending ? 'Queuing…' : 'Confirm & run'}
@@ -2711,7 +3113,8 @@ function HashIndexPanel({
   hashPending,
   hashWorkerDown,
   lastRun,
-  hashIndexMutation,
+  onHashRefresh,
+  hashRefreshPending,
   actionMutation,
 }: {
   data: DropPipelineStatus | undefined
@@ -2721,10 +3124,10 @@ function HashIndexPanel({
   hashPending: boolean
   hashWorkerDown: boolean
   lastRun: HashIndexRefreshStatus['last_run']
-  hashIndexMutation: {
-    isPending: boolean
-    mutate: (action: { kind: 'refresh-state'; state: string } | { kind: 'refresh-all' }) => void
-  }
+  onHashRefresh: (
+    action: { kind: 'refresh-state'; state: string } | { kind: 'refresh-all' },
+  ) => void
+  hashRefreshPending: boolean
   actionMutation: { isPending: boolean }
 }) {
   return (
@@ -2760,12 +3163,10 @@ function HashIndexPanel({
               disabled={
                 showSkeleton ||
                 hashPending ||
-                hashIndexMutation.isPending ||
+                hashRefreshPending ||
                 actionMutation.isPending
               }
-              onClick={() =>
-                hashIndexMutation.mutate({ kind: 'refresh-state', state: hashState })
-              }
+              onClick={() => onHashRefresh({ kind: 'refresh-state', state: hashState })}
             >
               Refresh state
             </button>
@@ -2775,10 +3176,10 @@ function HashIndexPanel({
               disabled={
                 showSkeleton ||
                 hashPending ||
-                hashIndexMutation.isPending ||
+                hashRefreshPending ||
                 actionMutation.isPending
               }
-              onClick={() => hashIndexMutation.mutate({ kind: 'refresh-all' })}
+              onClick={() => onHashRefresh({ kind: 'refresh-all' })}
             >
               Refresh all
             </button>
@@ -2894,6 +3295,25 @@ function DropPipelinePageInner() {
   const [hashState, setHashState] = useState('CA')
   const actionResultRef = useRef<HTMLDivElement>(null)
 
+  function focusActionResultPanel(targetTab: PipelineTab = 'pipeline') {
+    const focusPanel = () => {
+      const el = actionResultRef.current
+      if (!el) return
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      el.focus({ preventScroll: true })
+    }
+    if (tab !== targetTab) {
+      void navigate({
+        to: '/',
+        search: { tab: targetTab, process: processId, stage: focusedStage },
+      }).then(() => {
+        requestAnimationFrame(() => requestAnimationFrame(focusPanel))
+      })
+      return
+    }
+    requestAnimationFrame(focusPanel)
+  }
+
   function setTab(next: PipelineTab) {
     void navigate({
       to: '/',
@@ -2975,14 +3395,32 @@ function DropPipelinePageInner() {
         actionResultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
       })
     },
-    onSuccess: ({ data }) => {
+    onSuccess: ({ key, data }) => {
       setActionResult(JSON.stringify(data, null, 2))
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-processes'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'approvals'] })
+      const label = ACTIONS.find((item) => item.key === key)?.label ?? 'Action'
+      actionToast.success({
+        title: `${label} queued`,
+        description: 'Response is in the result panel.',
+        action: {
+          label: 'View result',
+          onClick: () => focusActionResultPanel('pipeline'),
+        },
+      })
     },
-    onError: (error) => {
+    onError: (error, key) => {
       setActionResult(error instanceof Error ? error.message : String(error))
+      const label = ACTIONS.find((item) => item.key === key)?.label ?? 'Action'
+      actionToast.error({
+        title: `${label} failed`,
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => actionMutation.mutate(key),
+        },
+      })
     },
   })
 
@@ -3013,6 +3451,30 @@ function DropPipelinePageInner() {
       setActionResult(error instanceof Error ? error.message : String(error))
     },
   })
+
+  function runHashRefresh(
+    action: { kind: 'refresh-state'; state: string } | { kind: 'refresh-all' },
+  ) {
+    void actionToast.promise(hashIndexMutation.mutateAsync(action), {
+      id: DROP_HASH_REFRESH_TOAST_ID,
+      loading: 'Queuing hash index refresh…',
+      success: () => ({
+        title: 'Hash refresh queued',
+        description: 'Enqueue and process steps completed.',
+        action: {
+          label: 'View result',
+          onClick: () => focusActionResultPanel('hash_refresh'),
+        },
+      }),
+      error: () => ({
+        title: 'Hash refresh failed',
+        action: {
+          label: 'Retry',
+          onClick: () => runHashRefresh(action),
+        },
+      }),
+    })
+  }
 
   const data: DropPipelineStatus | undefined = pipelineQuery.data
   const showSkeleton = pipelineQuery.isPending && !data
@@ -3066,6 +3528,7 @@ function DropPipelinePageInner() {
           ) : null}
           <RunPipelineButton
             disabled={showSkeleton}
+            focusResultPanel={() => focusActionResultPanel('pipeline')}
             onQueued={(label, result) => {
               setLastAction(label)
               setActionResult(JSON.stringify(result, null, 2))
@@ -3089,7 +3552,7 @@ function DropPipelinePageInner() {
       />
 
       {lastAction && actionResult && tab === 'pipeline' ? (
-        <div ref={actionResultRef}>
+        <div ref={actionResultRef} tabIndex={-1} className="outline-none">
           <ActionResultFrame
             lastAction={lastAction}
             actionResult={actionResult}
@@ -3129,6 +3592,10 @@ function DropPipelinePageInner() {
         />
       ) : null}
 
+      {tab === 'errors' ? <OpsLogExplorer mode="errors" /> : null}
+
+      {tab === 'logs' ? <OpsLogExplorer mode="logs" /> : null}
+
       {tab === 'hash_refresh' && (
         <HashIndexPanel
           data={data}
@@ -3138,7 +3605,8 @@ function DropPipelinePageInner() {
           hashPending={hashPending}
           hashWorkerDown={hashWorkerDown}
           lastRun={lastRun ?? null}
-          hashIndexMutation={hashIndexMutation}
+          onHashRefresh={runHashRefresh}
+          hashRefreshPending={hashIndexMutation.isPending}
           actionMutation={actionMutation}
         />
       )}
@@ -3154,7 +3622,7 @@ function DropPipelinePageInner() {
       )}
 
       {tab === 'hash_refresh' && lastAction && actionResult ? (
-        <div ref={actionResultRef}>
+        <div ref={actionResultRef} tabIndex={-1} className="outline-none">
           <ActionResultFrame
             lastAction={lastAction}
             actionResult={actionResult}

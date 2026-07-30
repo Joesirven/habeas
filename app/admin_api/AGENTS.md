@@ -9,6 +9,10 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
 - Routes: approvals, dashboard, admin rules, ops, `GET /live/events`
 - Unified Runs: `GET /ops/runs` — filters `job`, `status`, `request_id`, `process_id`
   (bulk download attempt id; ingest/matching via download `gcs_uri`), `window`/`since`
+- Ops logs: `GET /ops/logs` — project-level feed (worker attempt tables +
+  `admin_audit_log`); filters `severity`, `resource`, `source`, `q`, `window`/`since`
+  (Dashboard Errors = `severity=ERROR`; Logs = unfiltered). Planned Ops IA
+  consolidation: `docs/plans/2026-07-30-005-feat-ops-command-center-ia-plan.md`.
 - DROP ops: `GET /ops/drop/pipeline`, spine proxies, hash-index refresh enqueue /
   enqueue-all (USPS 50+DC) / process
 - Fleet visibility (U23): `GET /ops/drop/workers`, `GET /ops/health/queues` —

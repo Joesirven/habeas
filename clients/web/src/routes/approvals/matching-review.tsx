@@ -6,6 +6,7 @@ import {
   listMatchingReviewApprovals,
   type ApprovalRecord,
 } from '@/lib/api'
+import { actionToast } from '@/lib/action-toast'
 import { RoleGate, type UserRole } from '@/lib/auth'
 
 function canAccessMatchingReview(role: UserRole | undefined): boolean {
@@ -77,9 +78,23 @@ function MatchingReviewBody({ embedded = false }: MatchingReviewPageProps) {
   const approveMutation = useMutation({
     mutationFn: (approval: ApprovalRecord) =>
       approveMatchingReview(approval.id, { decided_by: 'web-admin@habeas.com' }),
-    onSuccess: () => {
+    onSuccess: (_data, approval) => {
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'approvals'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
+      actionToast.success({
+        title: 'Matching review approved',
+        description: `Request ${approval.request_id}`,
+      })
+    },
+    onError: (error, approval) => {
+      actionToast.error({
+        title: 'Could not approve',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => approveMutation.mutate(approval),
+        },
+      })
     },
   })
 

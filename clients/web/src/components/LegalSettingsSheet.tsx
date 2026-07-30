@@ -25,6 +25,7 @@ import {
   type EmailTemplateType,
   type EmailTemplateTypeInfo,
 } from '@/lib/api'
+import { actionToast } from '@/lib/action-toast'
 import { canMutateLegalSettings, useMe } from '@/lib/auth'
 
 /** R19/KD11 — request-type labels for the template type switcher. */
@@ -254,6 +255,23 @@ export function LegalSettingsSheet({ triggerVariant = 'banner' }: LegalSettingsS
     mutationFn: patchLegalSlaSettings,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'legal', 'settings', 'sla'] })
+      actionToast.success({
+        title: 'Deadline settings saved',
+        id: 'legal-sla-settings',
+      })
+    },
+    onError: (error, variables) => {
+      actionToast.error({
+        title: "Couldn't save deadline settings",
+        description: actionToast.safeErrorMessage(error),
+        id: 'legal-sla-settings',
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            slaMutation.mutate(variables)
+          },
+        },
+      })
     },
   })
 
@@ -262,6 +280,23 @@ export function LegalSettingsSheet({ triggerVariant = 'banner' }: LegalSettingsS
     onSuccess: () => {
       setTeamEmail('')
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'legal', 'team'] })
+      actionToast.success({
+        title: 'Team member added',
+        id: 'legal-team-add',
+      })
+    },
+    onError: (error, email) => {
+      actionToast.error({
+        title: "Couldn't add team member",
+        description: actionToast.safeErrorMessage(error),
+        id: 'legal-team-add',
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            addTeamMutation.mutate(email)
+          },
+        },
+      })
     },
   })
 
@@ -269,6 +304,23 @@ export function LegalSettingsSheet({ triggerVariant = 'banner' }: LegalSettingsS
     mutationFn: removeLegalTeamMember,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'legal', 'team'] })
+      actionToast.success({
+        title: 'Team member removed',
+        id: 'legal-team-remove',
+      })
+    },
+    onError: (error, email) => {
+      actionToast.error({
+        title: "Couldn't remove team member",
+        description: actionToast.safeErrorMessage(error),
+        id: 'legal-team-remove',
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            removeTeamMutation.mutate(email)
+          },
+        },
+      })
     },
   })
 
@@ -277,6 +329,23 @@ export function LegalSettingsSheet({ triggerVariant = 'banner' }: LegalSettingsS
     onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: ['admin-api', 'legal', 'settings', 'drop-schedule'],
+      })
+      actionToast.success({
+        title: 'DROP schedule updated',
+        id: 'legal-drop-schedule',
+      })
+    },
+    onError: (error, variables) => {
+      actionToast.error({
+        title: "Couldn't update DROP schedule",
+        description: actionToast.safeErrorMessage(error),
+        id: 'legal-drop-schedule',
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            dropScheduleMutation.mutate(variables)
+          },
+        },
       })
     },
   })

@@ -9,6 +9,7 @@ import {
   putRouteTriageCondition,
   type RouteTriageCondition,
 } from '@/lib/api'
+import { actionToast } from '@/lib/action-toast'
 
 const USPS_STATES = [
   'AL',
@@ -126,6 +127,23 @@ export function ConditionsEditor({
       setDirty(false)
       await queryClient.invalidateQueries({
         queryKey: ['admin-api', 'ops', 'drop', 'conditions', 'route-triage'],
+      })
+      actionToast.success({
+        title: 'Condition version saved',
+        id: 'legal-conditions-save',
+      })
+    },
+    onError: (error) => {
+      actionToast.error({
+        title: "Couldn't save condition",
+        description: actionToast.safeErrorMessage(error),
+        id: 'legal-conditions-save',
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            saveMutation.mutate()
+          },
+        },
       })
     },
   })
@@ -289,14 +307,6 @@ export function ConditionsEditor({
             Open Inbox · Triage
           </Link>
         </Button>
-        {saveMutation.isSuccess ? (
-          <span className="text-xs text-emerald-800">Version saved.</span>
-        ) : null}
-        {saveMutation.isError ? (
-          <span className="text-xs text-red-700">
-            {saveMutation.error instanceof Error ? saveMutation.error.message : 'Save failed'}
-          </span>
-        ) : null}
       </div>
     </div>
   )

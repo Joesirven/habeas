@@ -8,6 +8,7 @@ import {
   type AgentBatchUploadResult,
   type ManualRequestInput,
 } from '@/lib/api'
+import { actionToast } from '@/lib/action-toast'
 import { canAccessLegalSurfaces, useMe } from '@/lib/auth'
 
 const initialForm: ManualRequestInput = {
@@ -33,9 +34,27 @@ export function ManualRequestPage() {
 
   const createMutation = useMutation({
     mutationFn: createManualRequest,
-    onSuccess: async () => {
+    onSuccess: async (record) => {
       await queryClient.invalidateQueries({ queryKey: ['admin-api', 'requests'] })
+      actionToast.successAfterNavigate({
+        title: 'Request created',
+        description: `Request ${record.id}`,
+        action: {
+          label: 'View',
+          onClick: () => navigate({ to: '/requests' }),
+        },
+      })
       navigate({ to: '/requests' })
+    },
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Could not create request',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => createMutation.mutate(variables),
+        },
+      })
     },
   })
 
@@ -44,6 +63,25 @@ export function ManualRequestPage() {
     onSuccess: async (result) => {
       setUploadResult(result)
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+      actionToast.success({
+        title: 'Batch uploaded',
+        description: `${result.inserted_count} inserted · ${result.skipped_row_count} skipped`,
+        action: {
+          label: 'View triage',
+          onClick: () =>
+            navigate({ to: '/requests/needs-attention', search: { kind: 'triage' } }),
+        },
+      })
+    },
+    onError: (error, file) => {
+      actionToast.error({
+        title: 'Upload failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => uploadMutation.mutate(file),
+        },
+      })
     },
   })
 
@@ -88,9 +126,6 @@ export function ManualRequestPage() {
             />
             {uploadMutation.isPending ? (
               <p className="text-sm text-ink-soft">Cleaning and inserting…</p>
-            ) : null}
-            {uploadMutation.isError ? (
-              <p className="text-sm text-red-700">{String(uploadMutation.error)}</p>
             ) : null}
             {uploadResult ? (
               <dl className="grid grid-cols-2 gap-2 text-xs text-ink-soft sm:grid-cols-3">
@@ -186,10 +221,6 @@ export function ManualRequestPage() {
             />
           </label>
         </div>
-
-        {createMutation.isError ? (
-          <p className="text-sm text-red-700">{String(createMutation.error)}</p>
-        ) : null}
 
         <div className="flex flex-wrap gap-3 pt-1">
           <button

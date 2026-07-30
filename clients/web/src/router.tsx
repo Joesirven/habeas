@@ -28,6 +28,8 @@ export const PIPELINE_TABS = [
   'pipeline',
   'hash_refresh',
   'history',
+  'errors',
+  'logs',
   'configurations',
 ] as const
 
@@ -525,7 +527,6 @@ const docsRoute = createRoute({
   path: '/docs',
   component: DocsPage,
 })
-
 
 const requestDetailRoute = createRoute({
   getParentRoute: () => rootRoute,

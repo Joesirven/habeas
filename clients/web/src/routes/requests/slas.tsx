@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 
 import { Button } from '@/components/ui/button'
+import { actionToast } from '@/lib/action-toast'
 import { getLegalSlaSettings, patchLegalSlaSettings } from '@/lib/api'
 import { canAccessLegalSurfaces, canMutateLegalSettings, RouteShell, useMe } from '@/lib/auth'
 
@@ -26,6 +27,23 @@ function DeadlinesSlasForm() {
     mutationFn: patchLegalSlaSettings,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'legal', 'settings', 'sla'] })
+      actionToast.success({
+        title: 'Deadline settings saved',
+        id: 'legal-sla-settings',
+      })
+    },
+    onError: (error, variables) => {
+      actionToast.error({
+        title: "Couldn't save deadline settings",
+        description: actionToast.safeErrorMessage(error),
+        id: 'legal-sla-settings',
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            slaMutation.mutate(variables)
+          },
+        },
+      })
     },
   })
 

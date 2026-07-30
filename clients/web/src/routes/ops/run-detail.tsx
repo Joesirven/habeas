@@ -5,6 +5,7 @@ import { useState, type ReactNode } from 'react'
 import { SkeletonLines } from '@/components/AppShell'
 import { RunTimeline } from '@/components/ops/RunTimeline'
 import { Badge } from '@/components/ui/badge'
+import { actionToast } from '@/lib/action-toast'
 import { getRunDetail, type RunDetail, type RunEvent } from '@/lib/api'
 import { ForbiddenState, useMe } from '@/lib/auth'
 import { runsSearchForWorker, type PipelineSearch } from '@/router'
@@ -341,6 +342,12 @@ function OutputPanel({ detail, isSuperAdmin }: { detail: RunDetail; isSuperAdmin
   const hasError = Boolean(detail.error_message || detail.error_code)
   const rawJson = JSON.stringify(detail.raw ?? detail, null, 2)
 
+  const handleCopyJson = () => {
+    void navigator.clipboard.writeText(rawJson).then(() => {
+      actionToast.copied('Copied run JSON', handleCopyJson)
+    })
+  }
+
   return (
     <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-2">
@@ -378,7 +385,7 @@ function OutputPanel({ detail, isSuperAdmin }: { detail: RunDetail; isSuperAdmin
           <button
             type="button"
             className="taste-btn text-[0.65rem]"
-            onClick={() => void navigator.clipboard.writeText(rawJson)}
+            onClick={handleCopyJson}
           >
             Copy JSON
           </button>

@@ -2,11 +2,14 @@
 /* Real production bumper, not a CRT-lab bit — light stage, locked brand hex. */
 
 .keyhole-stage {
-  position: relative;
+  position: fixed;
+  inset: 0;
+  z-index: 50;
   display: grid;
   place-items: center;
-  min-height: 100%;
   width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
   background: var(--color-paper, #f8fafc);
   opacity: 1;
   transition: opacity 0.35s ease;
@@ -18,29 +21,42 @@
 
 .keyhole-lockup {
   position: relative;
-  display: grid;
-  place-items: center;
-  width: min(200px, 40vw);
-}
-
-.keyhole-sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.25rem;
+  width: min(22rem, 86vw);
 }
 
 .keyhole-svg {
   display: block;
-  width: 100%;
+  width: min(120px, 28vw);
   height: auto;
   overflow: visible;
   filter: drop-shadow(0 8px 20px rgb(46 76 246 / 0.25));
+}
+
+.keyhole-title {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  margin: 0;
+  max-width: 22rem;
+  font-family: var(--font-body, ui-sans-serif, system-ui, sans-serif);
+  font-size: clamp(1.25rem, 3.6vw, 1.75rem);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+  text-align: center;
+  color: var(--color-ink, #0f172a);
+  opacity: 0;
+  animation: keyhole-title-in 0.45s ease-out 0.55s forwards;
+}
+
+.keyhole-title span {
+  display: block;
 }
 
 .keyhole-square,
@@ -101,10 +117,22 @@
   }
 }
 
+@keyframes keyhole-title-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .keyhole-square,
   .keyhole-circle,
-  .keyhole-slot {
+  .keyhole-slot,
+  .keyhole-title {
     animation: none !important;
     opacity: 1;
     transform: none;

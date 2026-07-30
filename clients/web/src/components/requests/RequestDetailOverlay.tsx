@@ -31,6 +31,7 @@ import {
   workbenchStatusLabel,
   type DerivedWorkbenchSubstep,
 } from '@/lib/legalJourneyLabels'
+import { actionToast } from '@/lib/action-toast'
 import {
   deleteRequestDocument,
   downloadRequestDocument,
@@ -628,6 +629,70 @@ function buildStageActions(opts: {
   return actions
 }
 
+function stageActionSuccessTitle(action: StageAction): string {
+  switch (action.id) {
+    case 'triage_reject':
+      return 'Rejected as exempted'
+    case 'triage_match':
+      return 'Sent to matching'
+    case 'notice_approve':
+      return 'Fulfillment notice approved'
+    case 'delivery_delivered':
+      return 'Delivery confirmed'
+    case 'delivery_failed':
+      return 'Delivery marked failed'
+    case 'idv_verified':
+      return 'Identity verified'
+    case 'close':
+      return 'Request closed'
+    default:
+      return 'Action complete'
+  }
+}
+
+function stageActionErrorTitle(action: StageAction): string {
+  switch (action.id) {
+    case 'triage_reject':
+      return "Couldn't reject as exempted"
+    case 'triage_match':
+      return "Couldn't send to matching"
+    case 'notice_approve':
+      return "Couldn't approve fulfillment notice"
+    case 'delivery_delivered':
+      return "Couldn't confirm delivery"
+    case 'delivery_failed':
+      return "Couldn't mark delivery failed"
+    case 'idv_verified':
+      return "Couldn't record identity verification"
+    case 'close':
+      return "Couldn't close request"
+    default:
+      return "Couldn't complete action"
+  }
+}
+
+function deliverySuccessTitle(status: 'delivered' | 'failed' | 'recalled'): string {
+  switch (status) {
+    case 'delivered':
+      return 'Delivery confirmed'
+    case 'failed':
+      return 'Delivery marked failed'
+    case 'recalled':
+      return 'Delivery recalled'
+  }
+}
+
+function deliveryErrorTitle(status: 'delivered' | 'failed' | 'recalled'): string {
+  switch (status) {
+    case 'delivered':
+      return "Couldn't confirm delivery"
+    case 'failed':
+      return "Couldn't mark delivery failed"
+    case 'recalled':
+      return "Couldn't recall delivery"
+  }
+}
+
 function RequestStageActionBar({
   actions,
   onInvalidate,
@@ -636,29 +701,35 @@ function RequestStageActionBar({
   onInvalidate: () => Promise<void>
 }) {
   const [pendingId, setPendingId] = useState<string | null>(null)
-  const [failedActionId, setFailedActionId] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
   const [confirmAction, setConfirmAction] = useState<StageAction | null>(null)
 
   const runAction = useMutation({
     mutationFn: async (action: StageAction) => {
       setPendingId(action.id)
-      setFailedActionId(null)
       await action.run()
     },
-    onSuccess: async () => {
-      setError(null)
+    onSuccess: async (_data, action) => {
       setConfirmAction(null)
       setPendingId(null)
-      setFailedActionId(null)
+      actionToast.success({
+        title: stageActionSuccessTitle(action),
+        id: `request-stage-action-${action.id}`,
+      })
       await onInvalidate()
     },
     onError: (mutationError, action) => {
       setPendingId(null)
-      setFailedActionId(action.id)
-      setError(
-        mutationError instanceof Error ? mutationError.message : 'Action failed — retry needed',
-      )
+      actionToast.error({
+        title: stageActionErrorTitle(action),
+        description: actionToast.safeErrorMessage(mutationError),
+        id: `request-stage-action-${action.id}`,
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            runAction.mutate(action)
+          },
+        },
+      })
     },
   })
 
@@ -687,22 +758,6 @@ function RequestStageActionBar({
           </Button>
         ))}
       </div>
-      {error ? (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <p className="text-[0.65rem] text-red-700">{error}</p>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={runAction.isPending}
-            onClick={() => {
-              const last = actions.find((action) => action.id === failedActionId)
-              if (last) runAction.mutate(last)
-            }}
-          >
-            Retry
-          </Button>
-        </div>
-      ) : null}
       <ConfirmActionDialog
         open={confirmAction != null}
         onOpenChange={(next) => {
@@ -990,19 +1045,31 @@ function ActivityPanel({
   const queryClient = useQueryClient()
   const [filter, setFilter] = useState<ActivityFilter>('all')
   const [comment, setComment] = useState('')
-  const [error, setError] = useState<string | null>(null)
 
   const commentMutation = useMutation({
     mutationFn: () => postRequestComment(requestId, comment.trim()),
     onSuccess: async () => {
       setComment('')
-      setError(null)
+      actionToast.success({
+        title: 'Note posted',
+        id: `request-comment-${requestId}`,
+      })
       await queryClient.invalidateQueries({
         queryKey: ['admin-api', 'ops', 'requests', requestId, 'timeline'],
       })
     },
     onError: (err) => {
-      setError(err instanceof Error ? err.message : 'Comment failed')
+      actionToast.error({
+        title: "Couldn't post note",
+        description: actionToast.safeErrorMessage(err),
+        id: `request-comment-${requestId}`,
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            commentMutation.mutate()
+          },
+        },
+      })
     },
   })
 
@@ -1114,7 +1181,6 @@ function ActivityPanel({
         >
           {commentMutation.isPending ? 'Posting…' : 'Post note'}
         </Button>
-        {error ? <p className="text-xs text-red-700">{error}</p> : null}
       </div>
     </div>
   )
@@ -1408,8 +1474,6 @@ export function RequestDetailBody({
   const { isAdmin, isSuperAdmin, role } = useMe()
   const legalAdmin = isLegalAdminPersona(role)
   const [tab, setTab] = useState<RequestDetailTab>(defaultTab)
-  const [copyNote, setCopyNote] = useState<string | null>(null)
-  const [matchingActionError, setMatchingActionError] = useState<string | null>(null)
 
   useEffect(() => {
     setTab(defaultTab)
@@ -1488,8 +1552,25 @@ export function RequestDetailBody({
   const deliveryMutation = useMutation({
     mutationFn: (status: 'delivered' | 'failed' | 'recalled') =>
       patchAccessDeliveryStatus(requestId, { status }),
-    onSuccess: async () => {
+    onSuccess: async (_data, status) => {
+      actionToast.success({
+        title: deliverySuccessTitle(status),
+        id: `request-delivery-${requestId}`,
+      })
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+    },
+    onError: (mutationError, status) => {
+      actionToast.error({
+        title: deliveryErrorTitle(status),
+        description: actionToast.safeErrorMessage(mutationError),
+        id: `request-delivery-${requestId}`,
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            deliveryMutation.mutate(status)
+          },
+        },
+      })
     },
   })
 
@@ -1508,14 +1589,29 @@ export function RequestDetailBody({
       }
       return postDropMatchingResultDecline(requestId)
     },
-    onSuccess: async () => {
-      setMatchingActionError(null)
+    onSuccess: async (_data, variables) => {
+      actionToast.success({
+        title:
+          variables.action === 'promote' ? 'Matching approved' : 'Matching declined',
+        id: `request-matching-disposition-${requestId}`,
+      })
       await invalidateAll()
     },
-    onError: (mutationError) => {
-      setMatchingActionError(
-        mutationError instanceof Error ? mutationError.message : 'Matching action failed',
-      )
+    onError: (mutationError, variables) => {
+      actionToast.error({
+        title:
+          variables.action === 'promote'
+            ? "Couldn't approve matching"
+            : "Couldn't decline matching",
+        description: actionToast.safeErrorMessage(mutationError),
+        id: `request-matching-disposition-${requestId}`,
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            matchingDispositionMutation.mutate(variables)
+          },
+        },
+      })
     },
   })
 
@@ -1698,14 +1794,15 @@ export function RequestDetailBody({
                       artifactQuery.data?.shareable_url ??
                       artifactQuery.data?.fulfillment_artifact_uri
                     if (!url) return
-                    void navigator.clipboard.writeText(url).then(() => {
-                      setCopyNote('Copied URL')
-                      window.setTimeout(() => setCopyNote(null), 2000)
-                    })
+                    const copyUrl = () => {
+                      void navigator.clipboard.writeText(url).then(() => {
+                        actionToast.copied('Copied URL', copyUrl)
+                      })
+                    }
+                    copyUrl()
                   }}
                   onSetStatus={(status) => deliveryMutation.mutate(status)}
                 />
-                {copyNote ? <p className="taste-micro text-mute">{copyNote}</p> : null}
                 <div className="space-y-1">
                   <p className="taste-micro">Identity verification</p>
                   {identityQuery.data ? (
@@ -1750,7 +1847,7 @@ export function RequestDetailBody({
                 isError={matchingQuery.isError}
                 canReviewActions={canMatchingDisposition}
                 actionPending={matchingDispositionMutation.isPending}
-                actionError={matchingActionError}
+                actionError={null}
                 hideActions={!canMatchingDisposition}
                 layout="tabs"
                 compact

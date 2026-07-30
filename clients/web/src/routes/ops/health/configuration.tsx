@@ -3,6 +3,7 @@ import { Link } from '@tanstack/react-router'
 import { useState, type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
+import { actionToast } from '@/lib/action-toast'
 import { getRetryConfig, patchRetryConfig } from '@/lib/api'
 import { RoleGate, isSuperAdmin } from '@/lib/auth'
 
@@ -13,7 +14,6 @@ function Micro({ children }: { children: ReactNode }) {
 export function RetryConfigPanel() {
   const queryClient = useQueryClient()
   const [drafts, setDrafts] = useState<Record<string, number>>({})
-  const [message, setMessage] = useState<string | null>(null)
 
   const configQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'retry-config'],
@@ -25,11 +25,21 @@ export function RetryConfigPanel() {
   const saveMutation = useMutation({
     mutationFn: patchRetryConfig,
     onSuccess: async (payload) => {
-      setMessage(`Saved ${payload.table_name} → ${payload.max_attempts} (reaper next cycle)`)
+      actionToast.success({
+        title: 'Retry config saved',
+        description: `${payload.table_name} → ${payload.max_attempts} (reaper next cycle)`,
+      })
       await queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'retry-config'] })
     },
-    onError: (error) => {
-      setMessage(error instanceof Error ? error.message : String(error))
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Could not save retry config',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => saveMutation.mutate(variables),
+        },
+      })
     },
   })
 
@@ -116,8 +126,6 @@ export function RetryConfigPanel() {
             </table>
           </div>
         ) : null}
-
-        {message ? <p className="text-sm text-ink-soft">{message}</p> : null}
     </div>
   )
 }
@@ -148,6 +156,14 @@ function HealthConfigurationBody() {
           <h2 className="mt-3 max-w-md font-display text-[2.75rem] font-medium leading-[1.05] tracking-tight text-ink sm:text-[3.25rem]">
             Configuration
           </h2>
+          <p className="mt-3 text-sm text-ink-soft">
+            <Link
+              to="/ops/connections"
+              className="text-habeas-mid underline decoration-habeas-mid/30 underline-offset-2"
+            >
+              Connections
+            </Link>
+          </p>
         </div>
         <p className="max-w-sm border-l border-line pl-5 text-sm leading-relaxed text-ink-soft">
           Per-worker retry attempts via admin-api. Floor is {floor}. Reaper applies overrides on

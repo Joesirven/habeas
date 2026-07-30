@@ -131,6 +131,15 @@ def test_approval_migration_exists():
     assert "suppress.paylocity" in content
 
 
+def test_suppress_lever_rule_seed_migration_exists():
+    migration = migrations_dir() / "20260730160001_core_seed_suppress_lever_rule.sql"
+    assert migration.exists()
+    content = migration.read_text()
+    assert "suppress.lever" in content
+    assert "requires_approval" in content or "true" in content
+    assert "data_owner.hr" in content
+
+
 def test_intake_route_triage_seed_migration_exists():
     migration = migrations_dir() / "20260723000001_core_seed_intake_route_triage_rule.sql"
     assert migration.exists()

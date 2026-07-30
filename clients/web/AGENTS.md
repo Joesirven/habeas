@@ -15,9 +15,11 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
 ## Navigation (Ops IA — Request / Job / Run)
 
 - **Requests** → list (row opens **detail workbench** — no journey strip on rows), Needs attention, SLAs (shell), Conditions (Legal), Upload.
-- **Ops** (super_admin): Dashboard (Pipeline · Hash refresh · History · Configurations), Workers, Runs, Jobs (shell), Insights (`/ops/health`), Incidents (shell → failed Runs).
+- **Ops** (super_admin): Dashboard (Pipeline · Hash refresh · History · Errors · Logs · Configurations), Workers, Runs, Jobs (shell), Insights (`/ops/health`), Incidents (shell → failed Runs).
 - **Console** (super_admin): `/ops/drop-pipeline?tab=` mutation power surface (same tab set as Dashboard).
 - Browser never calls worker URLs — only admin-api aggregates.
+- Dashboard **Errors** / **Logs** share one explorer (`GET /ops/logs`); Errors locks severity to ERROR.
+- **Planned consolidation** (requirements-only): command-center Home + hybrid Inbox — `docs/plans/2026-07-30-005-feat-ops-command-center-ia-plan.md` (not shipped yet).
 
 ## Ops density (Prefect / Dagster feel)
 
@@ -35,7 +37,8 @@ General Amigo frost: [`.agent/modules/design-taste.md`](../../.agent/modules/des
 
 ## DROP pipeline
 
-- Top tabs: Pipeline · Hash refresh · History · Configurations (`tab=`). **Run Pipeline** (CA DROP) queues download → land → promote.
+- Top tabs: Pipeline · Hash refresh · History · Errors · Logs · Configurations (`tab=`). **Run Pipeline** (CA DROP) queues download → land → promote.
+- Errors / Logs: shared project log explorer (`GET /ops/logs`); Errors = ERROR severity only.
 - Stage tabs Download / Ingest / Matching / Review / Fulfillment live inside each bulk card (`stage=`); Land+Promote combined as Ingest — not top console tabs.
 - Bulk cards: compact collapsed row (Dur/Prog + tiny stage chips); Matching completion % from `matching_attempts` only (do not blend review); Review tab uses `stages.review`; **Matching results** when Review stage is selected.
 - Bulk-card state tiles → `/ops/runs?process=<id>&job=…&status=…&window=…` (`process` = download attempt id; API query `process_id`).
@@ -56,11 +59,16 @@ General Amigo frost: [`.agent/modules/design-taste.md`](../../.agent/modules/des
 - Non-super_admin: use ops-ia IAP front door, not the local proxy.
 - Super_admin can simulate effective role via banner `View as` → `X-Dev-Simulate-Role` (sessionStorage).
 
+## Action feedback
+
+**Universal pattern: action toast** via `actionToast` from `@/lib/action-toast` (Sonner under the hood). After mutations: title + description + one action chip (Retry / Undo / View / Dismiss). Global `Toaster` in `AppShell`. Do not add snackbars, page banners, or title-only toasts as defaults. Do not import `toast` from `sonner` in call sites. Full rules → [frontend-stack](../../.agent/modules/frontend-stack.md) · visual → [design-taste](../../.agent/modules/design-taste.md).
+
 ## Rules
 
 - Thin client — no business rules in browser; all authorization on admin-api.
 - Generate TypeScript types from admin-api OpenAPI.
 - Not Next.js.
-- No PII/hashes/dwids in UI payloads beyond existing ops id/count rules.
+- No PII/hashes/dwids in UI payloads beyond existing ops id/count rules (includes toast copy).
+- Mutation outcomes → `actionToast`.
 
 Full detail → [`.agent/modules/frontend-stack.md`](../../.agent/modules/frontend-stack.md).

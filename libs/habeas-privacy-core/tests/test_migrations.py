@@ -102,6 +102,55 @@ def test_reject_drop_access_migration_exists():
     assert "migrate:down" in content
 
 
+def test_vertical_external_attempt_tables_migration_exists():
+    migration = (
+        migrations_dir() / "20260730155001_vertical_external_attempt_tables.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+
+    for table in (
+        "mailchimp_attempts",
+        "paylocity_attempts",
+        "lever_attempts",
+        "auth0_attempts",
+        "google_sheets_attempts",
+        "vertical_hash_refresh_attempts",
+        "vertical_hash_refresh_runs",
+    ):
+        assert f"CREATE TABLE {table}" in content
+
+    for system in ("mailchimp", "paylocity", "lever", "auth0", "google_sheets"):
+        assert f"'{system}'" in content
+
+    assert "step IN ('matching', 'suppression')" in content
+
+    refresh_section = content.split("CREATE TABLE vertical_hash_refresh_attempts", 1)[1]
+    for system in ("mailchimp", "paylocity", "lever", "auth0", "google_sheets"):
+        assert f"'{system}'" in refresh_section
+    system_check = refresh_section.split("vertical_hash_refresh_attempts_system_valid", 1)[1].split(
+        ")", 1
+    )[0]
+    assert "cassandra" not in system_check
+    assert "ix_vertical_hash_refresh_attempts_single_flight" in content
+    assert "audit_payload" in content
+    assert "raw_request_payload" not in content
+    assert "core_forbid_terminal_attempt_mutation" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+
+
+def test_cassandra_attempts_migration_exists():
+    migration = migrations_dir() / "20260730150001_cassandra_create_cassandra_attempts.sql"
+    assert migration.exists()
+    content = migration.read_text()
+    assert "CREATE TABLE cassandra_attempts" in content
+    assert "step IN ('suppression')" in content
+    assert "core_forbid_terminal_attempt_mutation" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+
+
 def test_request_closures_and_due_overrides_migration_exists():
     migration = (
         migrations_dir() / "20260730140001_core_request_closures_and_due_overrides.sql"

@@ -368,3 +368,143 @@ def test_get_run_detail_forbidden_for_data_owner(mock_pool: MagicMock) -> None:
 
     assert response.status_code == 403
     mock_pool.fetchrow.assert_not_called()
+
+
+def test_list_ops_logs_merges_attempts_and_audit(mock_pool: MagicMock) -> None:
+    mock_pool.fetch = AsyncMock(
+        return_value=[
+            _Row(
+                source="attempt",
+                resource="matching",
+                attempt_id=42,
+                step="matching",
+                status="submit_error",
+                request_id=_REQUEST_ID,
+                occurred_at=_STARTED,
+                attempt_number=2,
+                error_code="VENDOR_TIMEOUT",
+                error_message="upstream timed out",
+                audit_id=None,
+                actor=None,
+                command=None,
+                result_status=None,
+                result_summary=None,
+                interface=None,
+            ),
+            _Row(
+                source="audit",
+                resource="admin-api",
+                attempt_id=None,
+                step=None,
+                status=None,
+                request_id=None,
+                occurred_at=_COMPLETED,
+                attempt_number=None,
+                error_code=None,
+                error_message=None,
+                audit_id=9,
+                actor="ops@example.com",
+                command="POST /ops/drop/download",
+                result_status=200,
+                result_summary="queued",
+                interface="admin-api",
+            ),
+            _Row(
+                source="attempt",
+                resource="drop_connector",
+                attempt_id=10,
+                step="download",
+                status="success",
+                request_id=None,
+                occurred_at=_STARTED,
+                attempt_number=1,
+                error_code=None,
+                error_message=None,
+                audit_id=None,
+                actor=None,
+                command=None,
+                result_status=None,
+                result_summary=None,
+                interface=None,
+            ),
+        ]
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/ops/logs?window=1w", headers=_SUPER_HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 3
+    assert body[0]["id"] == "attempt:matching:42"
+    assert body[0]["severity"] == "ERROR"
+    assert body[0]["run_id"] == "matching:42"
+    assert body[0]["error_code"] == "VENDOR_TIMEOUT"
+    assert body[1]["id"] == "audit:9"
+    assert body[1]["severity"] == "INFO"
+    assert body[1]["actor"] == "ops@example.com"
+    assert body[2]["severity"] == "INFO"
+    assert body[2]["message"].startswith("success")
+
+
+def test_list_ops_logs_severity_error_only(mock_pool: MagicMock) -> None:
+    mock_pool.fetch = AsyncMock(
+        return_value=[
+            _Row(
+                source="attempt",
+                resource="matching",
+                attempt_id=1,
+                step="matching",
+                status="outcome_error",
+                request_id=None,
+                occurred_at=_STARTED,
+                attempt_number=1,
+                error_code="X",
+                error_message="boom",
+                audit_id=None,
+                actor=None,
+                command=None,
+                result_status=None,
+                result_summary=None,
+                interface=None,
+            ),
+            _Row(
+                source="attempt",
+                resource="matching",
+                attempt_id=2,
+                step="matching",
+                status="success",
+                request_id=None,
+                occurred_at=_STARTED,
+                attempt_number=1,
+                error_code=None,
+                error_message=None,
+                audit_id=None,
+                actor=None,
+                command=None,
+                result_status=None,
+                result_summary=None,
+                interface=None,
+            ),
+        ]
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/logs?severity=ERROR&window=1w",
+            headers=_SUPER_HEADERS,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["severity"] == "ERROR"
+    assert body[0]["id"] == "attempt:matching:1"
+
+
+def test_list_ops_logs_rejects_invalid_severity(mock_pool: MagicMock) -> None:
+    with TestClient(app) as client:
+        response = client.get("/ops/logs?severity=CRITICAL", headers=_SUPER_HEADERS)
+
+    assert response.status_code == 400
+    mock_pool.fetch.assert_not_called()

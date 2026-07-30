@@ -32,6 +32,7 @@ from admin_api.connections_admin import router as connections_admin_router
 from admin_api.connections_redeem import router as connections_redeem_router
 from admin_api.legal_team import router as legal_team_router
 from admin_api.request_correspondence import router as request_correspondence_router
+from admin_api.runs import logs_router as ops_logs_router
 from admin_api.runs import router as runs_router
 from admin_api.request_journey import router as request_journey_router
 from admin_api.roles import CurrentRolePrincipal, MeResponse, RolePrincipal, require_roles
@@ -164,6 +165,7 @@ app.include_router(legal_team_router)
 app.include_router(legal_operators_router)
 app.include_router(request_correspondence_router)
 app.include_router(runs_router)
+app.include_router(ops_logs_router)
 app.include_router(request_journey_router)
 app.include_router(vertical_dispositions_router)
 app.include_router(worker_schedules_router)

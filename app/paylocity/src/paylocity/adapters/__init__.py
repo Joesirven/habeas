@@ -1,0 +1,1 @@
+"""Paylocity vendor adapters."""

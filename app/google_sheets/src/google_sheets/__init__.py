@@ -1,1 +1,1 @@
-"""google-sheets-worker — scaffold placeholder."""
+"""Google Sheets worker — matching, suppression, and hash refresh."""
