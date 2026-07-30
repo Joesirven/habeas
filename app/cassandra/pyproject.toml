@@ -4,8 +4,10 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "habeas-privacy-core",
+    "cassandra-driver>=3.29,<4",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
+    "pydantic-settings>=2.6",
 ]
 
 [tool.uv.sources]
@@ -16,4 +18,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cassandra"]
+packages = ["src/cassandra_worker"]

@@ -60,7 +60,7 @@ root_packages = [
     "lever",
     "auth0",
     "google_sheets",
-    "cassandra",
+    "cassandra_worker",
     "sla_monitor",
     "habeas_cli",
 ]
@@ -84,7 +84,7 @@ source_modules = [
     "lever",
     "auth0",
     "google_sheets",
-    "cassandra",
+    "cassandra_worker",
     "sla_monitor",
     "habeas_cli",
 ]

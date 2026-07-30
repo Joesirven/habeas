@@ -10,3 +10,6 @@ HASH_INDEX_REFRESH_STEP = "refresh"
 DATA_FULFILLMENT_ATTEMPTS_TABLE = "data_fulfillment_attempts"
 DATA_FULFILLMENT_STEP_SUPPRESSION = "suppression"
 DATA_FULFILLMENT_STEP_REPRODUCTION = "reproduction"
+
+CASSANDRA_ATTEMPTS_TABLE = "cassandra_attempts"
+STEP_SUPPRESSION = "suppression"

@@ -1,0 +1,1 @@
+"""Cassandra suppression worker package."""

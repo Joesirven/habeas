@@ -42,24 +42,33 @@ On-prem Cassandra (`restricted_person_id`) is reached over TLS with INF IP allow
 | Prod | `dpra-egress-prod` | `203.0.113.11` | attached |
 | Spare | `dpra-egress-spare` | `136.70.136.95` | reserved only — whitelist when attached |
 
-### Endpoint (INF — confirmed 2026-07-29)
+### Endpoint (INF — confirmed 2026-07-30)
+
+| Env | Host | Port | Keyspace | Table | Password secret |
+|-----|------|------|----------|-------|-----------------|
+| Dev | `broker-db.example.internal` | **9041** | `person_db_dev` | `restricted_person_id` | `cassandra-dprwrk-password-dev` |
+| Prod | `broker-db.example.internal` | **9042** | `person_db` | `restricted_person_id` | `cassandra-dprwrk-password-prod` |
 
 | Field | Value |
 |-------|-------|
-| Host | `broker-db.example.internal` (resolves to `38.100.36.166`) |
-| Port | `9042` (native CQL) |
-| TLS | Required (`SSL_CERTFILE` / verify with INF PEM, e.g. wildcard CA) |
-| Cluster | `PERSON_DB_PROD_CLUSTER` |
-| Server | Cassandra `3.11.4` · CQL `3.4.4` · native protocol v4 |
-| Auth | Username `dprwrk` + password (INF service account — password in Secret Manager only) |
+| TLS | Required — verify with INF PEM (`cassandra-ssl-ca-pem`) |
+| Auth user | `dprwrk` |
+| Server | Cassandra `3.11.4` · native protocol v4 |
+| Insert vocabulary | `source_of_restriction=Habeas`, `type_of_restriction=person` |
+| Columns written | `dwid`, `date_of_restriction`, `insert_timestamp`, `source_of_restriction`, `type_of_restriction` |
 
-Smoke-test shape (do **not** put passwords on the CLI in shared history; use `~/.cassandra/cqlshrc` or env from Secret Manager):
+Both ports report `cluster_name=PERSON_DB_PROD_CLUSTER` but are **separate rings** (dev 3-node / prod 12-node). Do not use the prod password on 9041 or vice versa.
+
+Smoke-test shape (do **not** put passwords on the CLI in shared history):
 
 ```bash
-SSL_CERTFILE=/path/to/inf-ca.pem cqlsh --ssl broker-db.example.internal -u dprwrk
+# Dev
+SSL_CERTFILE=/path/to/inf-ca.pem cqlsh --ssl broker-db.example.internal 9041 -u dprwrk
+# Prod
+SSL_CERTFILE=/path/to/inf-ca.pem cqlsh --ssl broker-db.example.internal 9042 -u dprwrk
 ```
 
-Credentials (Cassandra service account + SSL PEM) go in Secret Manager; never in git. Wire the `cassandra` Cloud Run service with Direct VPC egress to `dpra-run-dev` or `dpra-run-prod` when the worker ships. Driver must target Cassandra 3.11-compatible protocol (avoid assuming 5.x-only features).
+Credentials + SSL PEM: Secret Manager only — never in git. Wire Cloud Run `cassandra` with Direct VPC egress to `dpra-run-dev` / `dpra-run-prod`. Driver must use protocol v4 (Cassandra 3.11). Worker package import path is `cassandra_worker` (avoids shadowing `cassandra-driver`).
 
 ```bash
 # Inspect
