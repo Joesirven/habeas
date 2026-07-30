@@ -8,12 +8,27 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
-from admin_api import request_correspondence
+from admin_api import request_correspondence, roles
+from admin_api.main import app
 from admin_api.roles import RolePrincipal
-from habeas_privacy_core.auth.roles import ROLE_LEGAL
+from habeas_privacy_core.auth import IAP_EMAIL_HEADER
+from habeas_privacy_core.auth.roles import (
+    ROLE_ADMIN,
+    ROLE_DATA_OWNER,
+    ROLE_LEGAL,
+    ROLE_SUPER_ADMIN,
+)
 
 LEGAL = RolePrincipal(email="legal@example.com", role=ROLE_LEGAL, real_role=ROLE_LEGAL)
+DATA_OWNER = RolePrincipal(
+    email="owner@example.com", role=ROLE_DATA_OWNER, real_role=ROLE_DATA_OWNER
+)
+ADMIN = RolePrincipal(email="admin@example.com", role=ROLE_ADMIN, real_role=ROLE_ADMIN)
+SUPER_ADMIN = RolePrincipal(
+    email="super@example.com", role=ROLE_SUPER_ADMIN, real_role=ROLE_SUPER_ADMIN
+)
 
 REQUEST_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
@@ -372,3 +387,203 @@ async def test_communication_attempt_non_access_purpose_ungated(
         LEGAL,
     )
     assert result.purpose == "outbound_manual"
+
+
+# --- U6: template type map, variable allowlist, PUT hardening (R18/R19/KD11) -
+
+
+@pytest.mark.asyncio
+async def test_list_email_template_types_returns_type_slug_map():
+    result = await request_correspondence.list_email_template_types(LEGAL)
+    by_type = {item.type: item for item in result}
+    assert by_type["access"].slug == "access_delivery"
+    assert by_type["delete"].slug == "delete_confirmation"
+    assert "shareable_url" in by_type["access"].variables
+    assert "shareable_url" not in by_type["general"].variables
+
+
+@pytest.mark.asyncio
+async def test_upsert_email_template_rejects_unsupported_variable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(request_correspondence, "_require_database", lambda: None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await request_correspondence.upsert_email_template(
+            "access_delivery",
+            request_correspondence.EmailTemplateUpsertBody(
+                subject="Hi", body="Body", placeholder_schema=["ssn_hash"]
+            ),
+            SUPER_ADMIN,
+        )
+    assert exc_info.value.status_code == 400
+    assert "ssn_hash" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_upsert_email_template_accepts_allowlisted_variables(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "id": 1,
+            "slug": "access_delivery",
+            "subject": "Hi {{requestor_name}}",
+            "body": "URL: {{shareable_url}}",
+            "placeholder_schema": ["requestor_name", "shareable_url"],
+            "active": True,
+        }
+    )
+    _patch_pool(monkeypatch, conn)  # type: ignore[arg-type]
+
+    result = await request_correspondence.upsert_email_template(
+        "access_delivery",
+        request_correspondence.EmailTemplateUpsertBody(
+            subject="Hi {{requestor_name}}",
+            body="URL: {{shareable_url}}",
+            placeholder_schema=["requestor_name", "shareable_url"],
+        ),
+        SUPER_ADMIN,
+    )
+    assert result.slug == "access_delivery"
+    assert "shareable_url" in result.placeholder_schema
+
+
+def test_legal_cannot_put_email_template() -> None:
+    roles.settings.admin_api_legals = "legal@example.com"
+
+    with TestClient(app) as client:
+        response = client.put(
+            "/requests/email-templates/access_delivery",
+            headers={IAP_EMAIL_HEADER: "legal@example.com"},
+            json={"subject": "Hi", "body": "Body", "placeholder_schema": []},
+        )
+    assert response.status_code == 403
+
+
+# --- U7: document role expansion + download (R20/KD12/KTD9) -----------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_document_role_settings() -> None:
+    for attr in (
+        "admin_api_super_admins",
+        "admin_api_admins",
+        "admin_api_legals",
+        "admin_api_data_owners",
+    ):
+        setattr(roles.settings, attr, "")
+    roles.settings.require_iap_identity = False
+
+
+@pytest.mark.parametrize(
+    ("allowlist_attr", "role"),
+    [
+        ("admin_api_super_admins", ROLE_SUPER_ADMIN),
+        ("admin_api_admins", ROLE_ADMIN),
+        ("admin_api_legals", ROLE_LEGAL),
+        ("admin_api_data_owners", ROLE_DATA_OWNER),
+    ],
+)
+def test_documents_endpoint_allows_every_authenticated_role(
+    monkeypatch: pytest.MonkeyPatch, allowlist_attr: str, role: str
+) -> None:
+    """KTD9/KD12: data_owner joins legal/admin/super_admin on the documents API."""
+    setattr(roles.settings, allowlist_attr, "person@example.com")
+    monkeypatch.setattr(request_correspondence, "_require_database", lambda: None)
+
+    class FakePool:
+        def acquire(self):
+            conn = AsyncMock()
+            conn.fetch = AsyncMock(return_value=[])
+            return MagicMock(
+                __aenter__=AsyncMock(return_value=conn),
+                __aexit__=AsyncMock(return_value=None),
+            )
+
+    monkeypatch.setattr(request_correspondence, "get_pool", lambda: FakePool())
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/requests/{REQUEST_ID}/documents",
+            headers={IAP_EMAIL_HEADER: "person@example.com"},
+        )
+    assert response.status_code == 200, (role, response.text)
+    assert response.json() == []
+
+
+def test_documents_endpoint_rejects_unlisted_email_when_allowlists_configured() -> None:
+    roles.settings.admin_api_legals = "legal@example.com"
+    roles.settings.require_iap_identity = True
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/requests/{REQUEST_ID}/documents",
+            headers={IAP_EMAIL_HEADER: "stranger@example.com"},
+        )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_download_request_document_returns_bytes(monkeypatch: pytest.MonkeyPatch):
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "filename": "notice.pdf",
+            "content_type": "application/pdf",
+            "gcs_uri": "gs://privacy-fulfillment-dev/requests/x/documents/y/notice.pdf",
+        }
+    )
+    _patch_pool(monkeypatch, conn)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        request_correspondence, "read_object", AsyncMock(return_value=b"pdf-bytes")
+    )
+
+    response = await request_correspondence.download_request_document(
+        REQUEST_ID, "11111111-2222-3333-4444-555555555555", DATA_OWNER
+    )
+    assert response.body == b"pdf-bytes"
+    assert response.media_type == "application/pdf"
+    assert "notice.pdf" in response.headers["content-disposition"]
+
+
+@pytest.mark.asyncio
+async def test_download_request_document_404_when_row_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=None)
+    _patch_pool(monkeypatch, conn)  # type: ignore[arg-type]
+
+    with pytest.raises(HTTPException) as exc_info:
+        await request_correspondence.download_request_document(
+            REQUEST_ID, "11111111-2222-3333-4444-555555555555", DATA_OWNER
+        )
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_download_request_document_404_when_object_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "filename": "notice.pdf",
+            "content_type": "application/pdf",
+            "gcs_uri": "gs://privacy-fulfillment-dev/requests/x/documents/y/notice.pdf",
+        }
+    )
+    _patch_pool(monkeypatch, conn)  # type: ignore[arg-type]
+
+    async def _missing(*_args, **_kwargs):
+        raise FileNotFoundError("gone")
+
+    monkeypatch.setattr(request_correspondence, "read_object", _missing)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await request_correspondence.download_request_document(
+            REQUEST_ID, "11111111-2222-3333-4444-555555555555", DATA_OWNER
+        )
+    assert exc_info.value.status_code == 404

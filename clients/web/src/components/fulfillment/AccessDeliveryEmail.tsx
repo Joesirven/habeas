@@ -4,28 +4,12 @@ import { useQuery } from '@tanstack/react-query'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { fetchAdminApi, getFulfillmentArtifact, getRequest } from '@/lib/api'
+import { getFulfillmentArtifact, getRequest, renderEmailTemplate } from '@/lib/api'
 import { cn } from '@/lib/utils'
-
-type RenderedEmailTemplate = {
-  slug: string
-  subject: string
-  body: string
-}
 
 /** Stored templates may carry literal backslash-n sequences — normalize to real newlines. */
 function normalizeNewlines(value: string): string {
   return value.replace(/\\n/g, '\n')
-}
-
-function renderAccessDeliveryEmail(context: {
-  requestor_name: string
-  shareable_url: string
-}): Promise<RenderedEmailTemplate> {
-  return fetchAdminApi<RenderedEmailTemplate>('/requests/email-templates/render', {
-    method: 'POST',
-    body: JSON.stringify({ slug: 'access_delivery', context }),
-  })
 }
 
 function deliveryStatusVariant(status: string): 'ok' | 'fail' | 'wait' {
@@ -122,7 +106,7 @@ export function AccessDeliveryEmailCard({
       artifactUri,
     ],
     queryFn: () =>
-      renderAccessDeliveryEmail({
+      renderEmailTemplate('access_delivery', {
         requestor_name: requestorName,
         shareable_url: shareableUrl ?? '',
       }),

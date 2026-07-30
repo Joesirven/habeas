@@ -1515,6 +1515,28 @@ export function getBatchJourneyWorkbench(bulkProcessId: number) {
   )
 }
 
+export type FulfillmentKickoffResponse = {
+  request_id: string
+  vertical: string
+  kickoff_status: 'approved' | 'already_approved' | string
+  approval_id: number | null
+  disposition_updated: boolean
+}
+
+/** Legal starts fulfillment for one live vertical (R11 / KD6, U2 gate). */
+export function postFulfillmentKickoff(
+  requestId: string,
+  body: { vertical: string; status?: number; dwids?: string[]; decision_reason?: string },
+) {
+  return fetchAdminApi<FulfillmentKickoffResponse>(
+    `/requests/${encodeURIComponent(requestId)}/fulfillment/kickoff`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
 export function getNeedsAttention(
   limitOrParams?:
     | number
@@ -1833,4 +1855,109 @@ export type EmailTemplateRecord = {
 
 export function listEmailTemplates() {
   return fetchAdminApi<EmailTemplateRecord[]>('/requests/email-templates')
+}
+
+/** Request-type -> default slug (KD11 variables curated per role-visible fields). */
+export type EmailTemplateType = 'access' | 'delete' | 'opt_out' | 'combined' | 'general'
+
+export type EmailTemplateTypeInfo = {
+  type: EmailTemplateType
+  slug: string
+  variables: string[]
+}
+
+export function listEmailTemplateTypes() {
+  return fetchAdminApi<EmailTemplateTypeInfo[]>('/requests/email-templates/types')
+}
+
+export type EmailTemplateUpsertInput = {
+  subject: string
+  body: string
+  placeholder_schema?: string[]
+  active?: boolean
+}
+
+export function upsertEmailTemplate(slug: string, body: EmailTemplateUpsertInput) {
+  return fetchAdminApi<EmailTemplateRecord>(
+    `/requests/email-templates/${encodeURIComponent(slug)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({ placeholder_schema: [], active: true, ...body }),
+    },
+  )
+}
+
+export type RenderedEmailTemplate = {
+  slug: string
+  subject: string
+  body: string
+}
+
+export function renderEmailTemplate(
+  slug: string,
+  context: Record<string, string> = {},
+  requestId?: string,
+) {
+  return fetchAdminApi<RenderedEmailTemplate>('/requests/email-templates/render', {
+    method: 'POST',
+    body: JSON.stringify({ slug, context, request_id: requestId ?? null }),
+  })
+}
+
+// --- U7: request document/attachment client helpers (R20/KD12/KTD9) --------
+// Roles: super_admin, admin, legal, data_owner may all upload/list/download.
+
+export type RequestDocumentRecord = {
+  id: string
+  request_id: string
+  filename: string
+  content_type: string
+  uploaded_by: string
+  uploaded_at: string
+}
+
+export function listRequestDocuments(requestId: string) {
+  return fetchAdminApi<RequestDocumentRecord[]>(
+    `/requests/${encodeURIComponent(requestId)}/documents`,
+  )
+}
+
+export async function uploadRequestDocument(requestId: string, file: File) {
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  const simulateRole = getStoredSimulateRole()
+  if (simulateRole) {
+    headers['X-Dev-Simulate-Role'] = simulateRole
+  }
+  const form = new FormData()
+  form.append('file', file)
+  const response = await fetch(
+    `${API_BASE}/requests/${encodeURIComponent(requestId)}/documents`,
+    { method: 'POST', headers, body: form },
+  )
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
+  }
+  return (await response.json()) as RequestDocumentRecord
+}
+
+/** Fetches the file as a Blob for direct download (caller drives the `<a>`/save-as flow). */
+export async function downloadRequestDocument(
+  requestId: string,
+  documentId: string,
+): Promise<Blob> {
+  const headers: Record<string, string> = {}
+  const simulateRole = getStoredSimulateRole()
+  if (simulateRole) {
+    headers['X-Dev-Simulate-Role'] = simulateRole
+  }
+  const response = await fetch(
+    `${API_BASE}/requests/${encodeURIComponent(requestId)}/documents/${encodeURIComponent(documentId)}/download`,
+    { headers },
+  )
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
+  }
+  return response.blob()
 }

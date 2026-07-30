@@ -28,6 +28,7 @@ import {
   NOTICE_APPROVAL,
   actionReasonLabel,
   stageLabel,
+  workbenchStatusLabel,
   type CoarseStageKey,
 } from '@/lib/legalJourneyLabels'
 import {
@@ -36,9 +37,11 @@ import {
   getLatestIdentityVerification,
   getRequest,
   getRequestJourney,
+  getRequestJourneyWorkbench,
   getRequestTimeline,
   getNeedsAttention,
   patchAccessDeliveryStatus,
+  postFulfillmentKickoff,
   postIdentityVerification,
   postNoticeApprove,
   postRequestClose,
@@ -49,6 +52,7 @@ import {
   postTriageSendToMatching,
   type DropResponseStatusCode,
   type JourneyStage,
+  type JourneyStageStatus,
   type MatchedPersonContact,
   type MatchingResultDetail,
   type NeedsAttentionItem,
@@ -57,6 +61,8 @@ import {
   type RequesterContact,
   type RunTimelineStep,
   type TimelineEntry,
+  type WorkbenchStage,
+  type WorkbenchVerticalRow,
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
@@ -232,6 +238,91 @@ function coarseStageRailSteps(
   }))
 }
 
+const WORKBENCH_STATUS_TO_TIMELINE: Record<JourneyStageStatus, RunTimelineStep['status']> = {
+  not_started: 'pending',
+  skipped: 'skipped',
+  in_progress: 'running',
+  waiting: 'waiting',
+  complete: 'completed',
+  failed: 'failed',
+}
+
+/** KTD2 four-stage rail (Ingest → Matching → Fulfillment → Notice), U4 workbench DTO. */
+function workbenchRailSteps(stages: WorkbenchStage[]): RunTimelineStep[] {
+  return stages.map((stage) => ({
+    key: stage.stage,
+    label: stage.label,
+    status: WORKBENCH_STATUS_TO_TIMELINE[stage.status],
+    timestamp: null,
+    detail: stage.blocker ?? undefined,
+  }))
+}
+
+function verticalIndicatorClass(status: JourneyStageStatus): string {
+  switch (status) {
+    case 'complete':
+      return 'bg-habeas-mid'
+    case 'failed':
+      return 'bg-red-700/70'
+    case 'in_progress':
+      return 'bg-habeas-light animate-pulse ring-2 ring-habeas-mid/40'
+    case 'waiting':
+      return 'border-2 border-habeas-mid bg-paper'
+    case 'skipped':
+      return 'bg-line-strong'
+    default:
+      return 'border border-line-strong bg-paper'
+  }
+}
+
+/** Matching or Fulfillment cluster — per-vertical rows (R2). Click opens that cluster's tab. */
+function VerticalClusterList({
+  title,
+  rows,
+  statusOf,
+  onSelect,
+}: {
+  title: string
+  rows: WorkbenchVerticalRow[]
+  statusOf: (row: WorkbenchVerticalRow) => JourneyStageStatus | null
+  onSelect: () => void
+}) {
+  if (rows.length === 0) return null
+  return (
+    <div className="min-w-0 flex-1 space-y-1.5">
+      <p className="taste-micro">{title}</p>
+      <ul className="space-y-1">
+        {rows.map((row) => {
+          const status = statusOf(row) ?? 'not_started'
+          return (
+            <li key={row.vertical}>
+              <button
+                type="button"
+                disabled={!row.live}
+                onClick={onSelect}
+                className={cn(
+                  'flex w-full items-center gap-2 rounded-md border border-line/70 bg-paper px-2 py-1.5 text-left text-xs',
+                  row.live ? 'hover:border-ink/30' : 'opacity-50',
+                )}
+                title={row.blocker ?? undefined}
+              >
+                <span
+                  className={cn('h-2.5 w-2.5 shrink-0 rounded-full', verticalIndicatorClass(status))}
+                  aria-hidden="true"
+                />
+                <span className="min-w-0 flex-1 truncate text-ink">{row.label}</span>
+                <span className="shrink-0 text-[0.65rem] text-mute">
+                  {row.live ? workbenchStatusLabel(status) : 'Coming soon'}
+                </span>
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
 function isTriageContext(item: NeedsAttentionItem | undefined, journeyStage: string): boolean {
   if (!item) return journeyStage === 'triage'
   return (
@@ -347,18 +438,6 @@ function buildStageActions(opts: {
         },
       },
     )
-  }
-
-  if (!noticeContext) {
-    actions.push({
-      id: 'idv_verified',
-      label: 'Identity verified',
-      primary: actions.length === 0,
-      hint: 'Record identity verification on Fulfillment tab',
-      run: async () => {
-        await postIdentityVerification(requestId, { status: 'verified', method: 'manual' })
-      },
-    })
   }
 
   const incompleteWarning =
@@ -873,6 +952,102 @@ function ActivityPanel({
   )
 }
 
+/** Legal kickoff (R11/KD6) + Access identity-comment gate (R13/KTD6) on Fulfillment tab. */
+function FulfillmentGateControls({
+  requestId,
+  rows,
+  onInvalidate,
+}: {
+  requestId: string
+  rows: WorkbenchVerticalRow[]
+  onInvalidate: () => Promise<void>
+}) {
+  const [notes, setNotes] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  const needsIdentity = rows.some(
+    (row) => row.identity_required && row.identity_verified !== true,
+  )
+  const kickoffCandidates = rows.filter(
+    (row) => row.actionable && !row.kicked_off && row.disposition_status != null,
+  )
+
+  const identityMutation = useMutation({
+    mutationFn: () =>
+      postIdentityVerification(requestId, { status: 'verified', method: 'manual', notes }),
+    onSuccess: async () => {
+      setError(null)
+      setNotes('')
+      await onInvalidate()
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : 'Identity verification failed'),
+  })
+
+  const kickoffMutation = useMutation({
+    mutationFn: (vertical: string) => postFulfillmentKickoff(requestId, { vertical }),
+    onSuccess: async () => {
+      setError(null)
+      await onInvalidate()
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : 'Kickoff failed'),
+  })
+
+  if (!needsIdentity && kickoffCandidates.length === 0) return null
+
+  return (
+    <div className="space-y-3 rounded-lg border border-line/80 bg-panel/30 p-3">
+      <p className="taste-micro">Fulfillment gate</p>
+      {needsIdentity ? (
+        <div className="space-y-1.5">
+          <p className="text-[0.7rem] text-ink-soft">
+            Access pack/notice requires identity verification with a required comment (KTD6).
+          </p>
+          <textarea
+            className="min-h-[3rem] w-full rounded-lg border border-line bg-paper-raised px-3 py-2 text-xs text-ink"
+            value={notes}
+            onChange={(event) => setNotes(event.target.value)}
+            maxLength={2000}
+            placeholder="Verification method / comment (required)…"
+            aria-label="Identity verification comment"
+          />
+          <Button
+            type="button"
+            size="sm"
+            disabled={notes.trim().length === 0 || identityMutation.isPending}
+            onClick={() => identityMutation.mutate()}
+          >
+            {identityMutation.isPending ? 'Verifying…' : 'Mark identity verified'}
+          </Button>
+        </div>
+      ) : null}
+      {kickoffCandidates.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="taste-micro shrink-0">Kickoff</p>
+          {kickoffCandidates.map((row) => (
+            <Button
+              key={row.vertical}
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={
+                (row.identity_required && row.identity_verified !== true) ||
+                kickoffMutation.isPending
+              }
+              title={row.blocker ?? undefined}
+              onClick={() => kickoffMutation.mutate(row.vertical)}
+            >
+              {kickoffMutation.isPending && kickoffMutation.variables === row.vertical
+                ? 'Starting…'
+                : `Start fulfillment — ${row.label}`}
+            </Button>
+          ))}
+        </div>
+      ) : null}
+      {error ? <p className="text-xs text-red-700">{error}</p> : null}
+    </div>
+  )
+}
+
 export function RequestDetailBody({
   requestId,
   variant = 'overlay',
@@ -906,6 +1081,13 @@ export function RequestDetailBody({
   const journeyQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', requestId, 'journey'],
     queryFn: () => getRequestJourney(requestId),
+    refetchInterval: 15_000,
+    placeholderData: (previous) => previous,
+  })
+
+  const workbenchQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', requestId, 'journey-workbench'],
+    queryFn: () => getRequestJourneyWorkbench(requestId),
     refetchInterval: 15_000,
     placeholderData: (previous) => previous,
   })
@@ -993,6 +1175,8 @@ export function RequestDetailBody({
   const coarseSteps = journey
     ? coarseStageRailSteps(journey.stages, journey.current_stage)
     : []
+  const workbench = workbenchQuery.data
+  const railSteps = workbench ? workbenchRailSteps(workbench.stages) : coarseSteps
 
   const assignmentToLegal = isAssignmentToLegalContext(attentionItem)
   const canMatchingDisposition =
@@ -1060,32 +1244,50 @@ export function RequestDetailBody({
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <RequestStageActionBar actions={stageActions} onInvalidate={invalidateAll} />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        {/* Compact stage strip — full rail only on the dedicated page */}
-        {variant === 'overlay' ? (
-          <div className="shrink-0 border-b border-line px-4 py-2">
-            <p className="text-[0.7rem] text-mute">
-              Stage{' '}
-              <span className="font-medium text-ink">
-                {currentCoarse?.label ?? stageLabel(journey.current_stage)}
-              </span>
-              {coarseSteps.length > 0 ? (
-                <span className="text-mute">
-                  {' '}
-                  · {coarseSteps.filter((step) => step.status === 'completed').length}/
-                  {coarseSteps.length} complete
-                </span>
-              ) : null}
-            </p>
+        {/* KTD2 four-stage rail (Ingest → Matching → Fulfillment → Notice) + vertical clusters (R1–R3) */}
+        <div
+          className={cn(
+            'shrink-0 space-y-2 overflow-x-auto border-b border-line px-4',
+            variant === 'overlay' ? 'py-2' : 'py-3',
+          )}
+        >
+          <div className="flex items-center justify-between gap-2">
+            {workbenchQuery.isPending && !workbench ? (
+              <p className="text-[0.7rem] text-mute">Loading stage rail…</p>
+            ) : (
+              <RunTimeline
+                steps={railSteps}
+                orientation="horizontal"
+                emptyMessage={
+                  currentCoarse?.label
+                    ? `Stage: ${currentCoarse.label}`
+                    : 'No stage rail.'
+                }
+              />
+            )}
+            {workbench?.split_posture ? (
+              <Badge variant="wait" className="shrink-0 normal-case tracking-normal">
+                Matching + Fulfillment in progress
+              </Badge>
+            ) : null}
           </div>
-        ) : (
-          <div className="shrink-0 overflow-x-auto border-b border-line px-4 py-3">
-            <RunTimeline
-              steps={coarseSteps}
-              orientation="horizontal"
-              emptyMessage="No stage rail."
-            />
-          </div>
-        )}
+          {workbench && (workbench.matching_cluster.length > 0 || workbench.fulfillment_cluster.length > 0) ? (
+            <div className="flex flex-wrap gap-3 pt-1">
+              <VerticalClusterList
+                title="Matching"
+                rows={workbench.matching_cluster}
+                statusOf={(row) => row.matching_status}
+                onSelect={() => setTab('matching')}
+              />
+              <VerticalClusterList
+                title="Fulfillment"
+                rows={workbench.fulfillment_cluster}
+                statusOf={(row) => row.fulfillment_status}
+                onSelect={() => setTab('fulfillment')}
+              />
+            </div>
+          ) : null}
+        </div>
 
         <Tabs
           value={tab}
@@ -1126,6 +1328,13 @@ export function RequestDetailBody({
             </TabsContent>
             <TabsContent value="fulfillment" className="mt-0 px-4 py-4">
               <div className="space-y-4">
+                {workbench && (isSuperAdmin || isAdmin || legalAdmin) ? (
+                  <FulfillmentGateControls
+                    requestId={requestId}
+                    rows={workbench.fulfillment_cluster}
+                    onInvalidate={invalidateAll}
+                  />
+                ) : null}
                 <AccessHandoffPanel
                   requestId={requestId}
                   artifact={artifactQuery.data}

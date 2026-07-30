@@ -6,7 +6,7 @@ import re
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from admin_api.drop_pipeline import _require_database
@@ -15,8 +15,13 @@ from admin_api.vertical_dispositions import (
     collect_access_shareable_urls,
     is_kd13_satisfied,
 )
-from habeas_privacy_core.adapters.gcs import write_object
-from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_LEGAL, ROLE_SUPER_ADMIN
+from habeas_privacy_core.adapters.gcs import read_object, write_object
+from habeas_privacy_core.auth import (
+    ROLE_ADMIN,
+    ROLE_DATA_OWNER,
+    ROLE_LEGAL,
+    ROLE_SUPER_ADMIN,
+)
 from habeas_privacy_core.db.pool import get_pool
 
 router = APIRouter(prefix="/requests", tags=["request-correspondence"])
@@ -29,8 +34,50 @@ TemplateAdminPrincipal = Annotated[
     RolePrincipal,
     Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN)),
 ]
+# R20/KD12/KTD9 — documents are general attachments open to any authenticated
+# app role that can open the request (adds data_owner vs. legal-only above).
+DocumentPrincipal = Annotated[
+    RolePrincipal,
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL, ROLE_DATA_OWNER)),
+]
 
 _PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
+
+# R19/KD11: request-type -> default correspondence template slug.
+TEMPLATE_TYPE_SLUGS: dict[str, str] = {
+    "access": "access_delivery",
+    "delete": "delete_confirmation",
+    "opt_out": "opt_out_confirmation",
+    "combined": "combined_confirmation",
+    "general": "general_notice",
+}
+_SLUG_TO_TEMPLATE_TYPE = {slug: name for name, slug in TEMPLATE_TYPE_SLUGS.items()}
+
+# KD11: variables = fields already visible on request detail for that role
+# (contact/PII legal can see) — never hashes, DWIDs, or ops-only ids.
+_COMMON_TEMPLATE_VARIABLES = [
+    "requestor_name",
+    "requestor_email",
+    "requestor_phone",
+    "requestor_state",
+    "request_type",
+]
+TEMPLATE_VARIABLES: dict[str, list[str]] = {
+    "access": [*_COMMON_TEMPLATE_VARIABLES, "shareable_url", "shareable_urls"],
+    "delete": list(_COMMON_TEMPLATE_VARIABLES),
+    "opt_out": list(_COMMON_TEMPLATE_VARIABLES),
+    "combined": list(_COMMON_TEMPLATE_VARIABLES),
+    "general": list(_COMMON_TEMPLATE_VARIABLES),
+}
+_ALL_TEMPLATE_VARIABLES = sorted({v for values in TEMPLATE_VARIABLES.values() for v in values})
+
+
+def _allowed_variables_for_slug(slug: str) -> list[str]:
+    """Allowlist for a slug's mapped type, or the union for unmapped/custom slugs."""
+    template_type = _SLUG_TO_TEMPLATE_TYPE.get(slug)
+    if template_type is not None:
+        return TEMPLATE_VARIABLES[template_type]
+    return _ALL_TEMPLATE_VARIABLES
 
 
 class IdentityVerificationBody(BaseModel):
@@ -63,6 +110,14 @@ class EmailTemplateUpsertBody(BaseModel):
     body: str = Field(min_length=1)
     placeholder_schema: list[str] = Field(default_factory=list)
     active: bool = True
+
+
+class EmailTemplateTypeInfo(BaseModel):
+    """Request-type -> default slug + KD11 variable allowlist, for the Settings editor."""
+
+    type: str
+    slug: str
+    variables: list[str]
 
 
 class RenderTemplateBody(BaseModel):
@@ -128,12 +183,8 @@ async def _ensure_request(conn: Any, request_id: UUID) -> None:
 
 
 def _is_access_slug(slug: str) -> bool:
-    """True for the Access correspondence template (KTD8).
-
-    U6 owns the eventual request-type -> slug map; until it lands, treat any
-    slug mentioning "access" as the request-bound Access template.
-    """
-    return "access" in slug.lower()
+    """True for the Access correspondence template (KTD8), via the type map."""
+    return _SLUG_TO_TEMPLATE_TYPE.get(slug) == "access"
 
 
 async def _identity_cleared(conn: Any, request_id: UUID) -> bool:
@@ -275,6 +326,19 @@ async def list_email_templates(_principal: LegalCorrespondencePrincipal):
     return out
 
 
+@router.get("/email-templates/types", response_model=list[EmailTemplateTypeInfo])
+async def list_email_template_types(_principal: LegalCorrespondencePrincipal):
+    """Type -> slug map + KD11 variable allowlist (legal reads, admin edits)."""
+    return [
+        EmailTemplateTypeInfo(
+            type=template_type,
+            slug=slug,
+            variables=TEMPLATE_VARIABLES[template_type],
+        )
+        for template_type, slug in TEMPLATE_TYPE_SLUGS.items()
+    ]
+
+
 @router.put("/email-templates/{slug}", response_model=EmailTemplateRecord)
 async def upsert_email_template(
     slug: str,
@@ -283,6 +347,14 @@ async def upsert_email_template(
 ):
     _require_database()
     import json
+
+    allowed_variables = set(_allowed_variables_for_slug(slug))
+    unsupported = sorted(set(body.placeholder_schema) - allowed_variables)
+    if unsupported:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported template variables (KD11): {', '.join(unsupported)}",
+        )
 
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -474,6 +546,11 @@ async def create_communication_attempt(
     )
 
 
+# --- U7: document/attachment endpoints (upload/list/download) ---------------
+# Role expansion (R20/KD12/KTD9): data_owner + legal/admin/super_admin, i.e.
+# any authenticated app role that can open the request.
+
+
 @router.post(
     "/{request_id}/documents",
     response_model=RequestDocumentRecord,
@@ -481,7 +558,7 @@ async def create_communication_attempt(
 )
 async def upload_request_document(
     request_id: str,
-    principal: LegalCorrespondencePrincipal,
+    principal: DocumentPrincipal,
     file: UploadFile = File(...),
 ):
     _require_database()
@@ -532,7 +609,7 @@ async def upload_request_document(
 @router.get("/{request_id}/documents", response_model=list[RequestDocumentRecord])
 async def list_request_documents(
     request_id: str,
-    _principal: LegalCorrespondencePrincipal,
+    _principal: DocumentPrincipal,
 ):
     _require_database()
     try:
@@ -562,3 +639,54 @@ async def list_request_documents(
         )
         for row in rows
     ]
+
+
+def _split_gcs_uri(gcs_uri: str) -> tuple[str, str]:
+    if not gcs_uri.startswith("gs://"):
+        raise HTTPException(status_code=500, detail="malformed document storage uri")
+    without_scheme = gcs_uri[5:]
+    bucket, _, path = without_scheme.partition("/")
+    if not bucket or not path:
+        raise HTTPException(status_code=500, detail="malformed document storage uri")
+    return bucket, path
+
+
+@router.get("/{request_id}/documents/{document_id}/download")
+async def download_request_document(
+    request_id: str,
+    document_id: str,
+    _principal: DocumentPrincipal,
+):
+    _require_database()
+    try:
+        rid = UUID(request_id)
+        doc_id = UUID(document_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid id") from exc
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT filename, content_type, gcs_uri
+              FROM request_documents
+             WHERE id = $1 AND request_id = $2
+            """,
+            doc_id,
+            rid,
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="document not found")
+
+    bucket, path = _split_gcs_uri(str(row["gcs_uri"]))
+    try:
+        raw = await read_object(bucket, path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="document not found") from exc
+
+    filename = str(row["filename"])
+    return Response(
+        content=raw,
+        media_type=str(row["content_type"]),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

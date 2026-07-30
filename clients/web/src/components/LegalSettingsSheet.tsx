@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { ConditionsEditor } from '@/components/legal/ConditionsEditor'
 import { Button } from '@/components/ui/button'
@@ -17,10 +17,23 @@ import {
   getLegalSlaSettings,
   getLegalTeam,
   listEmailTemplates,
+  listEmailTemplateTypes,
   patchLegalSlaSettings,
   removeLegalTeamMember,
+  renderEmailTemplate,
+  upsertEmailTemplate,
+  type EmailTemplateType,
 } from '@/lib/api'
 import { canMutateLegalSettings, useMe } from '@/lib/auth'
+
+/** R19/KD11 — request-type labels for the template type switcher. */
+const TEMPLATE_TYPE_LABELS: Record<EmailTemplateType, string> = {
+  access: 'Access delivery',
+  delete: 'Delete confirmation',
+  opt_out: 'Opt-out confirmation',
+  combined: 'Combined confirmation',
+  general: 'General notice',
+}
 
 export const OPEN_LEGAL_SETTINGS_EVENT = 'open-legal-settings'
 
@@ -71,6 +84,12 @@ export function LegalSettingsSheet({ triggerVariant = 'banner' }: LegalSettingsS
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<SettingsTab>('conditions')
   const [teamEmail, setTeamEmail] = useState('')
+  const [selectedTemplateType, setSelectedTemplateType] = useState<EmailTemplateType>('access')
+  const [draftSubject, setDraftSubject] = useState('')
+  const [draftBody, setDraftBody] = useState('')
+  const [activeTemplateField, setActiveTemplateField] = useState<'subject' | 'body'>('body')
+  const subjectInputRef = useRef<HTMLInputElement | null>(null)
+  const bodyTextareaRef = useRef<HTMLTextAreaElement | null>(null)
 
   useEffect(() => {
     function onOpenSettings() {
@@ -85,6 +104,67 @@ export function LegalSettingsSheet({ triggerVariant = 'banner' }: LegalSettingsS
     queryFn: listEmailTemplates,
     enabled: tab === 'templates',
   })
+
+  const templateTypesQuery = useQuery({
+    queryKey: ['admin-api', 'requests', 'email-templates', 'types'],
+    queryFn: listEmailTemplateTypes,
+    enabled: tab === 'templates',
+  })
+
+  const selectedTypeInfo = templateTypesQuery.data?.find(
+    (info) => info.type === selectedTemplateType,
+  )
+
+  const upsertTemplateMutation = useMutation({
+    mutationFn: ({ slug, subject, body }: { slug: string; subject: string; body: string }) =>
+      upsertEmailTemplate(slug, {
+        subject,
+        body,
+        placeholder_schema: selectedTypeInfo?.variables ?? [],
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'requests', 'email-templates'],
+      })
+    },
+  })
+
+  const previewTemplateMutation = useMutation({
+    mutationFn: (slug: string) => renderEmailTemplate(slug),
+  })
+
+  useEffect(() => {
+    const slug = templateTypesQuery.data?.find(
+      (info) => info.type === selectedTemplateType,
+    )?.slug
+    if (!slug) return
+    const existing = templatesQuery.data?.find((template) => template.slug === slug)
+    setDraftSubject(existing?.subject ?? '')
+    setDraftBody(existing?.body ?? '')
+    previewTemplateMutation.reset()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTemplateType, templateTypesQuery.data, templatesQuery.data])
+
+  function insertTemplateVariable(variable: string) {
+    const token = `{{${variable}}}`
+    if (activeTemplateField === 'subject') {
+      const el = subjectInputRef.current
+      const pos = el?.selectionStart ?? draftSubject.length
+      setDraftSubject(draftSubject.slice(0, pos) + token + draftSubject.slice(pos))
+      requestAnimationFrame(() => {
+        el?.focus()
+        el?.setSelectionRange(pos + token.length, pos + token.length)
+      })
+    } else {
+      const el = bodyTextareaRef.current
+      const pos = el?.selectionStart ?? draftBody.length
+      setDraftBody(draftBody.slice(0, pos) + token + draftBody.slice(pos))
+      requestAnimationFrame(() => {
+        el?.focus()
+        el?.setSelectionRange(pos + token.length, pos + token.length)
+      })
+    }
+  }
 
   const slaQuery = useQuery({
     queryKey: ['admin-api', 'legal', 'settings', 'sla'],
@@ -222,14 +302,119 @@ export function LegalSettingsSheet({ triggerVariant = 'banner' }: LegalSettingsS
           </div>
         ) : null}
         {tab === 'templates' ? (
-          <div className="space-y-2 text-sm text-ink-soft">
-            {templatesQuery.isPending ? <p>Loading templates…</p> : null}
-            {(templatesQuery.data ?? []).map((template) => (
-              <p key={template.id}>
-                <span className="font-medium text-ink">{template.slug}</span>
-                {template.subject ? ` — ${template.subject}` : ''}
-              </p>
-            ))}
+          <div className="space-y-3 text-sm">
+            <div className="flex flex-wrap gap-2">
+              {(templateTypesQuery.data ?? []).map((info) => (
+                <button
+                  key={info.type}
+                  type="button"
+                  className={
+                    selectedTemplateType === info.type
+                      ? 'taste-btn-primary text-xs'
+                      : 'taste-btn text-xs'
+                  }
+                  onClick={() => setSelectedTemplateType(info.type)}
+                >
+                  {TEMPLATE_TYPE_LABELS[info.type] ?? info.type}
+                </button>
+              ))}
+            </div>
+            {templatesQuery.isPending || templateTypesQuery.isPending ? (
+              <p className="text-mute">Loading templates…</p>
+            ) : selectedTypeInfo ? (
+              <div className="space-y-2">
+                <p className="text-xs text-mute">
+                  Slug <span className="font-mono">{selectedTypeInfo.slug}</span>
+                </p>
+                <div>
+                  <p className="mb-1 text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+                    Variables (fields visible on request detail — KD11)
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {selectedTypeInfo.variables.map((variable) => (
+                      <button
+                        key={variable}
+                        type="button"
+                        disabled={!canWrite}
+                        title={`Insert into ${activeTemplateField}`}
+                        className="rounded border border-line bg-paper px-1.5 py-0.5 font-mono text-[0.65rem] text-ink-soft transition hover:border-habeas-navy/40 disabled:cursor-not-allowed disabled:opacity-50"
+                        onClick={() => insertTemplateVariable(variable)}
+                      >
+                        {`{{${variable}}}`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <label className="block text-xs text-ink-soft">
+                  Subject
+                  <input
+                    ref={subjectInputRef}
+                    type="text"
+                    className="mt-1 w-full rounded border border-line bg-paper px-2 py-1 text-sm disabled:opacity-60"
+                    value={draftSubject}
+                    disabled={!canWrite}
+                    onFocus={() => setActiveTemplateField('subject')}
+                    onChange={(event) => setDraftSubject(event.target.value)}
+                  />
+                </label>
+                <label className="block text-xs text-ink-soft">
+                  Body
+                  <textarea
+                    ref={bodyTextareaRef}
+                    rows={8}
+                    className="mt-1 w-full rounded border border-line bg-paper px-2 py-1 text-sm disabled:opacity-60"
+                    value={draftBody}
+                    disabled={!canWrite}
+                    onFocus={() => setActiveTemplateField('body')}
+                    onChange={(event) => setDraftBody(event.target.value)}
+                  />
+                </label>
+                <div className="flex items-center gap-2">
+                  {canWrite ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={upsertTemplateMutation.isPending || !draftSubject || !draftBody}
+                      onClick={() =>
+                        upsertTemplateMutation.mutate({
+                          slug: selectedTypeInfo.slug,
+                          subject: draftSubject,
+                          body: draftBody,
+                        })
+                      }
+                    >
+                      {upsertTemplateMutation.isPending ? 'Saving…' : 'Save template'}
+                    </Button>
+                  ) : null}
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={previewTemplateMutation.isPending}
+                    onClick={() => previewTemplateMutation.mutate(selectedTypeInfo.slug)}
+                  >
+                    Preview
+                  </Button>
+                </div>
+                {upsertTemplateMutation.isError ? (
+                  <p className="text-xs text-red-700">
+                    {upsertTemplateMutation.error instanceof Error
+                      ? upsertTemplateMutation.error.message
+                      : 'Save failed.'}
+                  </p>
+                ) : null}
+                {previewTemplateMutation.data ? (
+                  <div className="rounded-md border border-line bg-white px-2.5 py-2 text-xs">
+                    <p className="font-medium text-ink">{previewTemplateMutation.data.subject}</p>
+                    <p className="mt-1 whitespace-pre-wrap text-ink-soft">
+                      {previewTemplateMutation.data.body}
+                    </p>
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <p className="text-mute">No template types configured.</p>
+            )}
           </div>
         ) : null}
         {tab === 'drop_schedule' ? (
