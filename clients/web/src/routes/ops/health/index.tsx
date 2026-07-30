@@ -4,6 +4,7 @@ import type { ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import { getDropWorkers, getHealthQueues, type DropWorkerRecord, type HealthQueueRecord } from '@/lib/api'
+import { RoleGate, isSuperAdmin } from '@/lib/auth'
 
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
@@ -98,6 +99,14 @@ function QueuesRollup({ queues }: { queues: HealthQueueRecord[] }) {
 }
 
 export function HealthLandingPage() {
+  return (
+    <RoleGate allow={isSuperAdmin}>
+      <HealthLandingBody />
+    </RoleGate>
+  )
+}
+
+function HealthLandingBody() {
   const workersQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-workers'],
     queryFn: getDropWorkers,

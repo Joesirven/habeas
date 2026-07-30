@@ -44,6 +44,11 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
   Matching promote upserts the `data` disposition and keeps
   `drop_raw_requests.response_status` in sync. Selected dwids reach authorized
   callers only — audit records counts.
+- Journey fulfillment gates (plan `2026-07-29-001`): do **not** enqueue
+  fulfillment solely from `matching.review` — require **Legal kickoff** per
+  approved vertical; Access packs/notice require identity status + **required
+  comment**; reject CA DROP typed as Access. See
+  [`.agent/modules/privacy-invariants.md`](../../.agent/modules/privacy-invariants.md).
 - Postgres LISTEN on approval events → forward to Server-Sent Events clients
 
 - Vendor adapter code in `adapters/` inside this app only.

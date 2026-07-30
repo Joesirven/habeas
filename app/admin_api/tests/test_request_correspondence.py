@@ -587,3 +587,65 @@ async def test_download_request_document_404_when_object_missing(
             REQUEST_ID, "11111111-2222-3333-4444-555555555555", DATA_OWNER
         )
     assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_request_document_by_uploader(monkeypatch: pytest.MonkeyPatch):
+    """KTD9: uploader may delete their own document."""
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={"uploaded_by": DATA_OWNER.email})
+    conn.execute = AsyncMock()
+    _patch_pool(monkeypatch, conn)  # type: ignore[arg-type]
+
+    response = await request_correspondence.delete_request_document(
+        REQUEST_ID, "11111111-2222-3333-4444-555555555555", DATA_OWNER
+    )
+    assert response.status_code == 204
+    conn.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_delete_request_document_by_admin(monkeypatch: pytest.MonkeyPatch):
+    """KTD9: admin may delete any document."""
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={"uploaded_by": "other@example.com"})
+    conn.execute = AsyncMock()
+    _patch_pool(monkeypatch, conn)  # type: ignore[arg-type]
+
+    response = await request_correspondence.delete_request_document(
+        REQUEST_ID, "11111111-2222-3333-4444-555555555555", ADMIN
+    )
+    assert response.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_delete_request_document_rejects_non_uploader_non_admin(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """KTD9 edge: legal who did not upload cannot delete."""
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={"uploaded_by": "owner@example.com"})
+    conn.execute = AsyncMock()
+    _patch_pool(monkeypatch, conn)  # type: ignore[arg-type]
+
+    with pytest.raises(HTTPException) as exc_info:
+        await request_correspondence.delete_request_document(
+            REQUEST_ID, "11111111-2222-3333-4444-555555555555", LEGAL
+        )
+    assert exc_info.value.status_code == 403
+    conn.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delete_request_document_404_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=None)
+    _patch_pool(monkeypatch, conn)  # type: ignore[arg-type]
+
+    with pytest.raises(HTTPException) as exc_info:
+        await request_correspondence.delete_request_document(
+            REQUEST_ID, "11111111-2222-3333-4444-555555555555", ADMIN
+        )
+    assert exc_info.value.status_code == 404

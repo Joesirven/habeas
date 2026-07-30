@@ -1225,7 +1225,6 @@ async def release_approved(
 
 
 REQUEST_CLOSE_COMMAND = "request.close"
-_DROP_CLOSE_RESPONSE_CODES = frozenset({3, 4, 5})
 
 
 async def close_request(
@@ -1235,25 +1234,22 @@ async def close_request(
     closed_by: str,
     drop_response_status: int | None = None,
 ) -> dict[str, Any]:
-    """Close a request: append ``request_closures``, clear pending gates, set DROP status when needed.
+    """Close a request: append ``request_closures``, clear pending gates.
 
-    For DROP rows with unset ``response_status``, writes ``drop_response_status`` when
-    provided (3/4/5) or defaults to 5 (Not found). Non-DROP rows only need a closure row.
+    Does **not** invent DROP ``response_status``. That column stays in sync only via
+    the vertical disposition upsert path (disposition is source of record; U1 /
+    KTD3). ``drop_response_status`` is accepted for API compatibility but ignored —
+    leave DROP status unset when no disposition has written it.
     """
+    del drop_response_status  # API compat; never write DROP status from close.
     row = await conn.fetchrow(
         """
         SELECT r.id,
-               r.intake_source,
-               r.raw_record_id,
                rc.closed_at,
-               rc.closed_by,
-               drr.response_status AS drop_response_status
+               rc.closed_by
           FROM requests r
           LEFT JOIN request_closures rc
             ON rc.request_id = r.id
-          LEFT JOIN drop_raw_requests drr
-            ON drr.id = r.raw_record_id
-           AND r.intake_source = 'drop'
          WHERE r.id = $1
         """,
         UUID(request_id),
@@ -1268,28 +1264,6 @@ async def close_request(
             "closed_at": row["closed_at"].isoformat(),
             "closed_by": row.get("closed_by"),
         }
-
-    drop_status_set = False
-    if row["intake_source"] == "drop" and row["drop_response_status"] is None:
-        status = drop_response_status if drop_response_status is not None else 5
-        if status not in _DROP_CLOSE_RESPONSE_CODES:
-            raise ValueError(
-                "drop_response_status must be 3 (Deleted), 4 (Opted out), or 5 (Not found)"
-            )
-        result = await conn.execute(
-            """
-            UPDATE drop_raw_requests AS drr
-               SET response_status = $2
-              FROM requests AS r
-             WHERE r.id = $1
-               AND r.intake_source = 'drop'
-               AND r.raw_record_id = drr.id
-               AND drr.response_status IS NULL
-            """,
-            UUID(request_id),
-            status,
-        )
-        drop_status_set = isinstance(result, str) and result.endswith("1")
 
     closed_row = await conn.fetchrow(
         """
@@ -1338,7 +1312,7 @@ async def close_request(
         "already_closed": False,
         "closed_at": closed_row["closed_at"].isoformat(),
         "closed_by": closed_by,
-        "drop_response_status_set": drop_status_set,
+        "drop_response_status_set": False,
     }
 
 

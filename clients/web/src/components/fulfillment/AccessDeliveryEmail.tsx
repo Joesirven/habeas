@@ -94,6 +94,8 @@ export function AccessDeliveryEmailCard({
   const artifactUri = artifactQuery.data?.fulfillment_artifact_uri ?? null
   const requestorName = requestQuery.data?.display_label?.trim() || 'there'
 
+  // Request-bound render (KTD8): pass request_id so identity + KD13 gates and
+  // server shareable_url(s) collection apply. Settings preview omits request_id.
   const templateQuery = useQuery({
     queryKey: [
       'admin-api',
@@ -106,11 +108,15 @@ export function AccessDeliveryEmailCard({
       artifactUri,
     ],
     queryFn: () =>
-      renderEmailTemplate('access_delivery', {
-        requestor_name: requestorName,
-        shareable_url: shareableUrl ?? '',
-      }),
-    enabled: isAccess === true && Boolean(shareableUrl) && Boolean(artifactUri),
+      renderEmailTemplate(
+        'access_delivery',
+        {
+          requestor_name: requestorName,
+          ...(shareableUrl ? { shareable_url: shareableUrl } : {}),
+        },
+        requestId,
+      ),
+    enabled: isAccess === true,
     retry: false,
     staleTime: Infinity,
     refetchOnWindowFocus: false,
@@ -148,22 +154,26 @@ export function AccessDeliveryEmailCard({
       })
   }
 
+  const renderErrorMessage =
+    templateQuery.error instanceof Error ? templateQuery.error.message : ''
+  const gateBlocked =
+    /identity not verified|access packs not ready|409/i.test(renderErrorMessage)
+
   let body: ReactNode
-  if (artifactQuery.isPending) {
-    body = <p className="text-ink-soft">Loading fulfillment artifact…</p>
-  } else if (artifactQuery.isError || !shareableUrl) {
+  if (templateQuery.isPending) {
+    body = <p className="text-ink-soft">Rendering email template…</p>
+  } else if (gateBlocked) {
     body = (
       <p className="text-mute">
-        No export artifact yet — run fulfillment to generate the access pack.
+        Access notice is not ready yet — verify identity with notes and ensure
+        access packs are ready for all live verticals, then try again.
       </p>
     )
-  } else if (templateQuery.isPending) {
-    body = <p className="text-ink-soft">Rendering email template…</p>
   } else if (templateQuery.isError || !rendered) {
     body = (
       <p className="text-mute">
-        Couldn't render the access delivery template — copy the shareable URL
-        from the handoff panel instead.
+        Couldn't render the access delivery template — check the template in
+        Settings, or copy the shareable URL from the handoff panel.
       </p>
     )
   } else {

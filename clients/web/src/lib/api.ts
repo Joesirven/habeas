@@ -2011,3 +2011,155 @@ export async function downloadRequestDocument(
   }
   return response.blob()
 }
+
+/** Hard-delete a request document (KTD9: uploader or admin/super_admin). */
+export async function deleteRequestDocument(
+  requestId: string,
+  documentId: string,
+): Promise<void> {
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  const simulateRole = getStoredSimulateRole()
+  if (simulateRole) {
+    headers['X-Dev-Simulate-Role'] = simulateRole
+  }
+  const response = await fetch(
+    `${API_BASE}/requests/${encodeURIComponent(requestId)}/documents/${encodeURIComponent(documentId)}`,
+    { method: 'DELETE', headers },
+  )
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
+  }
+}
+
+export type IntegrationSystemId =
+  | 'mailchimp'
+  | 'paylocity'
+  | 'lever'
+  | 'auth0'
+  | 'google_sheets'
+  | 'cassandra'
+
+export type ConnectionRecord = {
+  id: string
+  system: IntegrationSystemId
+  display_name: string
+  status:
+    | 'pending'
+    | 'invited'
+    | 'connected'
+    | 'failed'
+    | 'revoked'
+    | 'infra_pending'
+  owner_email: string | null
+  secret_resource_name: string | null
+  last_tested_at: string | null
+  last_test_ok: boolean | null
+  last_test_detail: string | null
+  created_by: string
+  created_at: string
+  updated_at: string
+  metadata: Record<string, unknown>
+}
+
+export type ConnectionInviteCreateResponse = {
+  invite_id: string
+  owner_email: string
+  expires_at: string
+  invite_url: string
+  raw_token: string
+}
+
+export type ConnectionSystemsPayload = {
+  systems: Array<{
+    system_id: IntegrationSystemId
+    display_label: string
+    invite_allowed: boolean
+    credential_fields: Array<{
+      id: string
+      label: string
+      input_type: 'password' | 'text' | 'url'
+      required: boolean
+      help: string | null
+    }>
+    trust_copy: string
+  }>
+}
+
+export type ConnectPreviewPayload = {
+  system: IntegrationSystemId
+  display_name: string
+  owner_email: string
+  fields: Array<{
+    id: string
+    label: string
+    input_type: 'password' | 'text' | 'url'
+    required: boolean
+    help: string | null
+  }>
+  trust_copy: string
+  expires_at: string
+}
+
+export type ConnectRedeemResponse = {
+  status: string
+  test_ok: boolean
+  detail: string | null
+}
+
+export function listConnections() {
+  return fetchAdminApi<{ connections: ConnectionRecord[] }>('/ops/connections')
+}
+
+export function createConnection(body: {
+  system: IntegrationSystemId
+  display_name: string
+  owner_email?: string | null
+}) {
+  return fetchAdminApi<ConnectionRecord>('/ops/connections', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function createConnectionInvite(
+  connectionId: string,
+  body?: { owner_email?: string },
+) {
+  return fetchAdminApi<ConnectionInviteCreateResponse>(
+    `/ops/connections/${encodeURIComponent(connectionId)}/invites`,
+    {
+      method: 'POST',
+      body: body ? JSON.stringify(body) : undefined,
+    },
+  )
+}
+
+export function revokeConnectionInvite(connectionId: string, inviteId: string) {
+  return fetchAdminApi<{ status: string }>(
+    `/ops/connections/${encodeURIComponent(connectionId)}/invites/${encodeURIComponent(inviteId)}/revoke`,
+    { method: 'POST' },
+  )
+}
+
+export function testConnection(connectionId: string) {
+  return fetchAdminApi<{ ok: boolean; detail: string | null }>(
+    `/ops/connections/${encodeURIComponent(connectionId)}/test`,
+    { method: 'POST' },
+  )
+}
+
+export function getConnectionSystems() {
+  return fetchAdminApi<ConnectionSystemsPayload>('/ops/connections/systems')
+}
+
+export function getConnectPreview(token: string) {
+  return fetchAdminApi<ConnectPreviewPayload>(`/connect/${encodeURIComponent(token)}`)
+}
+
+export function redeemConnect(token: string, credentials: Record<string, string>) {
+  return fetchAdminApi<ConnectRedeemResponse>(`/connect/${encodeURIComponent(token)}`, {
+    method: 'POST',
+    body: JSON.stringify({ credentials }),
+  })
+}

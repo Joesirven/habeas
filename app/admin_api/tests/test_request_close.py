@@ -123,11 +123,8 @@ async def test_close_request_sets_closed_at() -> None:
         side_effect=[
             {
                 "id": "00000000-0000-0000-0000-000000000001",
-                "intake_source": "webform",
-                "raw_record_id": None,
                 "closed_at": None,
                 "closed_by": None,
-                "drop_response_status": None,
             },
             {"closed_at": datetime(2026, 7, 28, 15, 0, tzinfo=UTC)},
         ]
@@ -142,6 +139,40 @@ async def test_close_request_sets_closed_at() -> None:
 
     assert result["already_closed"] is False
     assert result["closed_by"] == "legal@example.com"
+    assert result["drop_response_status_set"] is False
     assert conn.execute.await_count == 1
     insert_sql = conn.fetchrow.await_args_list[1].args[0]
     assert "INSERT INTO request_closures" in insert_sql
+
+
+@pytest.mark.asyncio
+async def test_close_request_does_not_invent_drop_response_status() -> None:
+    """U1/KTD3: close must not write DROP response_status without a disposition."""
+    from habeas_privacy_core.workflow.approval import close_request
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            {
+                "id": "00000000-0000-0000-0000-0000000000aa",
+                "closed_at": None,
+                "closed_by": None,
+            },
+            {"closed_at": datetime(2026, 7, 30, 12, 0, tzinfo=UTC)},
+        ]
+    )
+    conn.execute = AsyncMock(return_value="UPDATE 0")
+
+    result = await close_request(
+        conn,
+        request_id="00000000-0000-0000-0000-0000000000aa",
+        closed_by="legal@example.com",
+        drop_response_status=5,
+    )
+
+    assert result["already_closed"] is False
+    assert result["drop_response_status_set"] is False
+    for call in conn.execute.await_args_list:
+        assert "drop_raw_requests" not in call.args[0]
+    for call in conn.fetchrow.await_args_list:
+        assert "drop_raw_requests" not in call.args[0]

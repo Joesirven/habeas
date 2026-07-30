@@ -10,12 +10,12 @@ import {
 } from '@/components/fulfillment/AccessDeliveryEmail'
 import {
   AccessHandoffPanel,
-  buildAccessDeliveryDraft,
   DropResponseStatusPicker,
   MatchingReviewPanel,
 } from '@/components/requests/RequestTriageDialog'
 import {
   RequestDetailOverlay,
+  FulfillmentGateControls,
   RequesterContactSection,
   ThinJourneyPipeline,
   useRequestDetailOverlay,
@@ -25,11 +25,6 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   ConfirmActionDialog,
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
 } from '@/components/ui/dialog'
 import {
   DropdownMenu,
@@ -50,6 +45,7 @@ import {
   getLegalNeedsAttention,
   getLegalOperators,
   getNeedsAttention,
+  getBatchJourneyWorkbench,
   getRequest,
   getRequestComments,
   getRequestJourney,
@@ -72,6 +68,7 @@ import {
   type NeedsAttentionItem,
   type RequestRecord,
   type TimelineEntry,
+  type WorkbenchVerticalBatchRow,
 } from '@/lib/api'
 import {
   actionReasonLabel,
@@ -127,7 +124,7 @@ function legalFilterEmptyMessage(filter: LegalInboxFilter | null): string {
     case 'assignment_to_legal':
       return 'No assignment-to-legal items from data owners right now.'
     case 'fulfillment':
-      return 'No pre-fulfillment work — identity verification and kickoff live on the Fulfillment tab.'
+      return 'No pre-fulfillment work — start fulfillment kickoff below when dispositions are ready.'
     case 'notice':
       return NOTICE_APPROVAL.empty
     case 'delivery':
@@ -1059,7 +1056,7 @@ function buildLegalComposerOptions(
     options.push({
       id: 'assignment_review',
       label: 'Record legal review note',
-      hint: 'Log review context — open Fulfillment tab for pre-fulfillment actions',
+      hint: 'Log review context — kickoff lives in the next-step card when dispositions are ready',
       requiresBody: true,
       run: async (body) => {
         if (!body.trim()) throw new Error('Reply is required for review notes')
@@ -1572,7 +1569,6 @@ function InboxReviewPane({
     | 'notice_approve'
     | null
   >(null)
-  const [draftOpen, setDraftOpen] = useState(false)
   const isAccessRequest = useIsAccessRequest(item.request_id)
 
   const showTriage = isTriageItem(item)
@@ -1751,9 +1747,43 @@ function InboxReviewPane({
         target_role: 'reviewer',
       })
     },
-    onSuccess: async () => {
+    onSuccess: async (_data, target) => {
       setAssignError(null)
-      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+      // Optimistic: notice/delivery lanes historically omitted assignment on
+      // refresh — patch the inbox cache so Assignee updates immediately.
+      queryClient.setQueriesData(
+        { queryKey: ['admin-api', 'ops', 'requests', 'needs-attention'] },
+        (previous: { items?: NeedsAttentionItem[] } | undefined) => {
+          if (!previous?.items) return previous
+          return {
+            ...previous,
+            items: previous.items.map((row) => {
+              if (row.request_id !== item.request_id) return row
+              if (target.kind === 'group') {
+                return {
+                  ...row,
+                  assignment: {
+                    kind: 'escalate',
+                    target_role: target.group === 'legal' ? 'legal' : 'data_owner',
+                    assignee_identity: null,
+                  },
+                }
+              }
+              return {
+                ...row,
+                assignment: {
+                  kind: 'assign',
+                  target_role: 'reviewer',
+                  assignee_identity: target.email,
+                },
+              }
+            }),
+          }
+        },
+      )
+      await queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'ops', 'requests', 'needs-attention'],
+      })
     },
     onError: (error) => {
       setAssignError(error instanceof Error ? error.message : 'Assign failed')
@@ -1822,10 +1852,6 @@ function InboxReviewPane({
     : derivedChrome?.substeps
   const shareableUrl =
     artifactQuery.data?.shareable_url ?? artifactQuery.data?.fulfillment_artifact_uri ?? ''
-  const outboundDraft = buildAccessDeliveryDraft({
-    requestId: item.request_id,
-    shareableUrl: shareableUrl || '[shareable URL will appear here after fulfillment]',
-  })
   const showHandoffTab = showDelivery || showComms
   const showResolveMatching = showMatching || showAssignmentToLegal
   const dropPill = dropStatusPill(item, matchingQuery.data)
@@ -1858,7 +1884,26 @@ function InboxReviewPane({
           ? 'Confirm the match disposition, or send to legal if you need help.'
           : showAssignmentToLegal
             ? 'Review matching context, then continue pre-fulfillment work.'
-            : null
+            : legalPersona && isFulfillmentLegalItem(item)
+              ? 'Matching approve alone does not start the worker — kick off fulfillment for each disposed vertical.'
+              : null
+
+  const kickoffRows = workbench?.fulfillment_cluster ?? []
+  const showLegalKickoff =
+    legalPersona &&
+    canReviewActions &&
+    kickoffRows.some(
+      (row) =>
+        row.actionable &&
+        !row.kicked_off &&
+        row.disposition_status != null,
+    )
+  const showLegalIdentityGate =
+    legalPersona &&
+    canReviewActions &&
+    kickoffRows.some(
+      (row) => row.identity_required && row.identity_verified !== true,
+    )
 
   function copyShareableUrl() {
     if (!shareableUrl) return
@@ -1968,10 +2013,16 @@ function InboxReviewPane({
                 <h2 className="text-sm font-semibold text-ink">{inboxItemTitle(item)}</h2>
                 <DuePill item={item} />
               </div>
-              <p className="text-[0.65rem] text-mute">
-                {compactMetaLine(item)}
-                {currentStageLabel ? ` · ${currentStageLabel}` : null}
+              <p className="font-mono text-[0.65rem] text-ink-soft">
+                {item.request_id}
+                <span className="font-sans text-mute">
+                  {' '}
+                  · {SOURCE_LABELS[item.intake_source] ?? item.intake_source}
+                </span>
               </p>
+              {currentStageLabel ? (
+                <p className="text-[0.65rem] text-mute">{currentStageLabel}</p>
+              ) : null}
             </div>
             <AssigneeAvatarPicker
               currentEmail={assignee}
@@ -1989,6 +2040,17 @@ function InboxReviewPane({
             <div className="rounded-md border border-habeas-navy/20 bg-habeas-navy/[0.03] px-3 py-2">
               {nextStepHint ? (
                 <p className="text-[0.7rem] leading-snug text-ink-soft">{nextStepHint}</p>
+              ) : null}
+              {showLegalKickoff || showLegalIdentityGate ? (
+                <div className={cn(nextStepHint && 'mt-1.5')}>
+                  <FulfillmentGateControls
+                    requestId={item.request_id}
+                    rows={kickoffRows}
+                    onInvalidate={async () => {
+                      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+                    }}
+                  />
+                </div>
               ) : null}
               <div className={cn('flex flex-wrap items-center gap-2', nextStepHint && 'mt-1.5')}>
                 {showNotice && canReviewActions ? (
@@ -2065,14 +2127,6 @@ function InboxReviewPane({
                         Copy URL
                       </Button>
                     ) : null}
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setDraftOpen(true)}
-                    >
-                      Draft email
-                    </Button>
                   </>
                 ) : null}
                 <button
@@ -2244,8 +2298,8 @@ function InboxReviewPane({
                 />
                 {legalPersona && showAssignmentToLegal ? (
                   <p className="mt-2 text-[0.7rem] text-ink-soft">
-                    Matching is read-only in Inbox — use request detail Fulfillment tab for
-                    pre-fulfillment actions. No confirm / not a match / multi-person here.
+                    Matching is read-only here — use Start fulfillment in the next-step card
+                    (or request detail Fulfillment tab) after disposition is recorded.
                   </p>
                 ) : null}
               </TabsContent>
@@ -2277,7 +2331,7 @@ function InboxReviewPane({
                 <p className="font-medium text-ink">Requester communications</p>
                 <p className="mt-1">
                   Outbound drafts, sent attempts, and inbound replies will thread here. Use
-                  Draft outbound on Delivery items for access URL emails today.
+                  the Access delivery email tab (render API) for access URL emails today.
                 </p>
               </TabsContent>
             ) : null}
@@ -2354,59 +2408,6 @@ function InboxReviewPane({
             </TabsContent>
           </div>
         </Tabs>
-
-        <Dialog open={draftOpen} onOpenChange={setDraftOpen}>
-          <DialogContent className="max-w-lg">
-            <DialogHeader>
-              <DialogTitle>Draft access delivery</DialogTitle>
-              <DialogDescription>
-                Template for external email — copy subject and body, then send outside the
-                platform.
-              </DialogDescription>
-            </DialogHeader>
-            <div className="space-y-3 text-xs">
-              <div>
-                <p className="taste-micro">Subject</p>
-                <p className="mt-1 rounded-md border border-line bg-paper px-2 py-1.5 text-ink">
-                  {outboundDraft.subject}
-                </p>
-              </div>
-              <div>
-                <p className="taste-micro">Body</p>
-                <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap rounded-md border border-line bg-paper px-2 py-1.5 font-sans text-[0.75rem] text-ink">
-                  {outboundDraft.body}
-                </pre>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  size="sm"
-                  type="button"
-                  onClick={() => {
-                    void navigator.clipboard.writeText(outboundDraft.body).then(() => {
-                      setCopyNote('Copied draft body')
-                      window.setTimeout(() => setCopyNote(null), 2000)
-                    })
-                  }}
-                >
-                  Copy body
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  type="button"
-                  onClick={() => {
-                    void navigator.clipboard.writeText(outboundDraft.subject).then(() => {
-                      setCopyNote('Copied subject')
-                      window.setTimeout(() => setCopyNote(null), 2000)
-                    })
-                  }}
-                >
-                  Copy subject
-                </Button>
-              </div>
-            </div>
-          </DialogContent>
-        </Dialog>
       </div>
   )
 }
@@ -2700,6 +2701,30 @@ function buildInboxRows(
   return timed.map((entry) => entry.row)
 }
 
+/** Shared download-attempt id when every member has the same bulk_process_id. */
+function sharedBulkProcessId(items: NeedsAttentionItem[]): number | null {
+  if (items.length === 0) return null
+  const first = items[0]?.bulk_process_id
+  if (first == null) return null
+  return items.every((item) => item.bulk_process_id === first) ? first : null
+}
+
+function batchClusterAsPipelineRows(rows: WorkbenchVerticalBatchRow[]) {
+  return rows.map((row) => {
+    const countParts = Object.entries(row.member_status_counts)
+      .filter(([, n]) => n > 0)
+      .map(([status, n]) => `${n} ${status}`)
+    return {
+      vertical: row.vertical,
+      label: row.label,
+      live: row.live,
+      matching_status: row.matching_status,
+      fulfillment_status: row.fulfillment_status,
+      blocker: countParts.length > 0 ? countParts.join(', ') : null,
+    }
+  })
+}
+
 function ThreadReviewPane({
   batchLabel,
   items,
@@ -2710,6 +2735,7 @@ function ThreadReviewPane({
   actionPending,
   actionError,
   onBackToQueue,
+  onOpenDetail,
 }: {
   batchLabel: string
   items: NeedsAttentionItem[]
@@ -2720,6 +2746,7 @@ function ThreadReviewPane({
   actionPending: boolean
   actionError: string | null
   onBackToQueue?: () => void
+  onOpenDetail?: (item: NeedsAttentionItem, trigger: HTMLElement) => void
 }) {
   const [confirm, setConfirm] = useState<'fulfill' | 'decline' | null>(null)
   // Exact 1:1 thread → Deleted (3) by default.
@@ -2740,6 +2767,71 @@ function ThreadReviewPane({
   const showBulkMatchingActions = canReviewActions && exactMatchBatch
   const groupNoun =
     stackKind === 'type' ? 'Type' : stackKind === 'batch_type' ? 'Batch · type' : 'Batch'
+
+  const bulkId =
+    stackKind === 'batch' || stackKind === 'batch_type'
+      ? sharedBulkProcessId(items)
+      : null
+
+  const batchWorkbenchQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', 'batches', bulkId, 'journey-workbench'],
+    queryFn: async () => {
+      try {
+        return await getBatchJourneyWorkbench(bulkId!)
+      } catch (error) {
+        // Soft-fail missing workbench (same as InboxReviewPane individual path).
+        if (error instanceof Error && /Admin API 404/.test(error.message)) {
+          return null
+        }
+        throw error
+      }
+    },
+    enabled: bulkId != null,
+    refetchInterval: 15_000,
+    placeholderData: (previous) => previous,
+    retry: false,
+  })
+
+  // No shared bulk_process_id (type stacks / unkeyed CSV stacks): do NOT invent a
+  // fake batch aggregate. Derive four-stage chrome from the first member's ops
+  // journey only — member list remains the source of truth for the group.
+  const firstMember = items[0] ?? null
+  const fallbackJourneyQuery = useQuery({
+    queryKey: [
+      'admin-api',
+      'ops',
+      'requests',
+      firstMember?.request_id,
+      'journey',
+      'thread-fallback',
+    ],
+    queryFn: () => getRequestJourney(firstMember!.request_id),
+    enabled: bulkId == null && firstMember != null,
+    refetchInterval: 15_000,
+    placeholderData: (previous) => previous,
+  })
+
+  const derivedChrome = fallbackJourneyQuery.data
+    ? deriveWorkbenchChromeFromOpsJourney({
+        stages: fallbackJourneyQuery.data.stages,
+        current_stage: fallbackJourneyQuery.data.current_stage,
+        intake_source: firstMember!.intake_source,
+        request_type: null,
+      })
+    : null
+
+  const batchWorkbench = batchWorkbenchQuery.data
+  const pipelineStages = batchWorkbench?.stages ?? derivedChrome?.stages ?? []
+  const pipelineSubsteps =
+    bulkId != null
+      ? undefined
+      : derivedChrome?.substeps
+  const matchingCluster = batchWorkbench
+    ? batchClusterAsPipelineRows(batchWorkbench.matching_cluster)
+    : undefined
+  const fulfillmentCluster = batchWorkbench
+    ? batchClusterAsPipelineRows(batchWorkbench.fulfillment_cluster)
+    : undefined
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -2837,45 +2929,84 @@ function ThreadReviewPane({
         </dl>
       </div>
 
+      {/* Same four-stage chrome as individual Inbox detail (KD2) — batch aggregate when keyed. */}
+      {pipelineStages.length > 0 ? (
+        <div className="shrink-0 border-b border-line px-4 py-2">
+          <ThinJourneyPipeline
+            stages={pipelineStages}
+            substeps={pipelineSubsteps}
+            matchingCluster={matchingCluster}
+            fulfillmentCluster={fulfillmentCluster}
+            splitPosture={
+              batchWorkbench?.split_posture ?? derivedChrome?.split_posture
+            }
+            density="compact"
+          />
+          {bulkId == null && derivedChrome ? (
+            <p className="mt-1 text-center text-[0.55rem] text-mute">
+              Journey shown for first member — not a batch aggregate
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
         <p className="text-xs text-ink-soft">
           {exactMatchBatch ? (
             <>
               These requests each matched exactly one DWID in DROP batch{' '}
               <span className="font-mono">{batchLabel}</span>. Fulfill the whole thread at
-              once, or expand the thread in the list to open a single request.
+              once, or open a single request below.
             </>
           ) : stackKind === 'type' ? (
             <>
               These requests share work type <span className="text-ink">{batchLabel}</span>.
-              Expand the stack in the list to open a single request.
+              Open a member below for full detail.
             </>
           ) : stackKind === 'batch_type' ? (
             <>
               These requests share batch and work type{' '}
-              <span className="text-ink">{batchLabel}</span>. Expand the stack in the list to
-              open a single request.
+              <span className="text-ink">{batchLabel}</span>. Open a member below for full
+              detail.
             </>
           ) : (
             <>
               These requests share DROP batch{' '}
-              <span className="font-mono">{batchLabel}</span>. Expand the thread in the list
-              to open a single request.
+              <span className="font-mono">{batchLabel}</span>. Open a member below for full
+              detail.
             </>
           )}
         </p>
         <ul className="max-h-56 divide-y divide-line overflow-y-auto rounded-lg border border-line">
           {items.map((entry) => (
-            <li
-              key={entry.request_id}
-              className="flex items-center justify-between gap-2 px-3 py-2 text-[0.7rem]"
-            >
-              <span className="font-mono text-ink">{entry.request_id.slice(0, 8)}…</span>
-              <span className="text-mute">
-                {entry.requestor_state ?? '—'}
-                {entry.match_type ? ` · ${matchTypeLabel(entry.match_type)}` : ''}
-                {entry.matched_via ? ` · ${entry.matched_via}` : ''}
-              </span>
+            <li key={entry.request_id} className="text-[0.7rem]">
+              {onOpenDetail ? (
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left hover:bg-canvas"
+                  onClick={(event) => onOpenDetail(entry, event.currentTarget)}
+                >
+                  <span className="font-mono text-ink">
+                    {entry.request_id.slice(0, 8)}…
+                  </span>
+                  <span className="text-mute">
+                    {entry.requestor_state ?? '—'}
+                    {entry.match_type ? ` · ${matchTypeLabel(entry.match_type)}` : ''}
+                    {entry.matched_via ? ` · ${entry.matched_via}` : ''}
+                  </span>
+                </button>
+              ) : (
+                <div className="flex items-center justify-between gap-2 px-3 py-2">
+                  <span className="font-mono text-ink">
+                    {entry.request_id.slice(0, 8)}…
+                  </span>
+                  <span className="text-mute">
+                    {entry.requestor_state ?? '—'}
+                    {entry.match_type ? ` · ${matchTypeLabel(entry.match_type)}` : ''}
+                    {entry.matched_via ? ` · ${entry.matched_via}` : ''}
+                  </span>
+                </div>
+              )}
             </li>
           ))}
         </ul>
@@ -4443,6 +4574,13 @@ export function NeedsAttentionPage() {
               actionPending={bulkMutation.isPending}
               actionError={threadActionError}
               onBackToQueue={() => setMobilePane('queue')}
+              onOpenDetail={(item, trigger) => {
+                detailOverlay.openOverlay(
+                  item.request_id,
+                  trigger,
+                  inboxItemToSeedRequest(item),
+                )
+              }}
               onPromoteAll={(responseStatus) => {
                 setThreadActionError(null)
                 bulkMutation.mutate({

@@ -32,6 +32,7 @@ import {
   type DerivedWorkbenchSubstep,
 } from '@/lib/legalJourneyLabels'
 import {
+  deleteRequestDocument,
   downloadRequestDocument,
   dropResponseStatusLabel,
   getFulfillmentArtifact,
@@ -53,6 +54,7 @@ import {
   postTriageBulkReject,
   postTriageSendToMatching,
   uploadRequestDocument,
+  DROP_RESPONSE_STATUS_OPTIONS,
   type DropResponseStatusCode,
   type JourneyStageStatus,
   type MatchedPersonContact,
@@ -207,8 +209,98 @@ function substepDotClass(status: JourneyStageStatus): string {
 }
 
 /**
- * Thin four-stage pipeline with type/source-conditioned substeps — inbox detail + full detail.
- * Prefer workbench clusters when present; otherwise ops fine-stage substeps from derive helper.
+ * Minimal vertical row for pipeline chrome — request or batch aggregate.
+ * Full WorkbenchVerticalRow satisfies this; batch helpers may pass a subset.
+ */
+export type PipelineClusterRow = {
+  vertical: string
+  label: string
+  live: boolean
+  matching_status: JourneyStageStatus
+  fulfillment_status: JourneyStageStatus | null
+  blocker: string | null
+}
+
+function stagePanelClass(status: JourneyStageStatus): string {
+  switch (status) {
+    case 'in_progress':
+    case 'waiting':
+      return 'border-amber-300 bg-amber-50'
+    case 'complete':
+      return 'border-emerald-200/80 bg-emerald-50/50'
+    case 'failed':
+      return 'border-red-300 bg-red-50'
+    default:
+      return 'border-line bg-canvas'
+  }
+}
+
+function stageLabelClass(status: JourneyStageStatus): string {
+  switch (status) {
+    case 'in_progress':
+    case 'waiting':
+      return 'font-medium text-amber-950'
+    case 'complete':
+      return 'text-emerald-800'
+    case 'failed':
+      return 'text-red-800'
+    default:
+      return 'text-mute'
+  }
+}
+
+function stageIsActive(status: JourneyStageStatus): boolean {
+  return status === 'in_progress' || status === 'waiting' || status === 'failed'
+}
+
+function JourneySubstepList({
+  items,
+  compact,
+}: {
+  items: Array<{
+    key: string
+    label: string
+    status: JourneyStageStatus
+    blocker?: string | null
+    muted?: boolean
+    statusLabel?: string
+  }>
+  compact: boolean
+}) {
+  if (items.length === 0) return null
+  return (
+    <ul className={cn('space-y-0.5', compact ? 'mt-1' : 'mt-1.5')}>
+      {items.map((item) => (
+        <li
+          key={item.key}
+          className={cn(
+            'flex items-center gap-1 truncate text-ink',
+            compact ? 'text-[0.55rem]' : 'text-[0.65rem]',
+            item.muted && 'opacity-50',
+          )}
+          title={
+            item.blocker
+              ? `${item.label}: ${workbenchStatusLabel(item.status)} — ${item.blocker}`
+              : `${item.label}: ${workbenchStatusLabel(item.status)}`
+          }
+        >
+          <span
+            className={cn('h-1.5 w-1.5 shrink-0 rounded-full', substepDotClass(item.status))}
+            aria-hidden="true"
+          />
+          <span className="min-w-0 flex-1 truncate">{item.label}</span>
+          {item.statusLabel ? (
+            <span className="shrink-0 text-mute">{item.statusLabel}</span>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/**
+ * Four-panel journey chrome (Ingest → Matching → Fulfillment → Notice).
+ * Click a stage panel to expand its substeps / vertical cluster underneath.
  */
 export function ThinJourneyPipeline({
   stages,
@@ -220,21 +312,70 @@ export function ThinJourneyPipeline({
 }: {
   stages: Array<{ stage: string; label: string; status: JourneyStageStatus; blocker: string | null }>
   substeps?: DerivedWorkbenchSubstep[]
-  matchingCluster?: WorkbenchVerticalRow[]
-  fulfillmentCluster?: WorkbenchVerticalRow[]
+  matchingCluster?: PipelineClusterRow[]
+  fulfillmentCluster?: PipelineClusterRow[]
   splitPosture?: boolean
   density?: 'compact' | 'comfortable'
 }) {
-  const rail = stages.length > 0 ? stages : WORKBENCH_STAGE_ORDER.map((key) => ({
-    stage: key,
-    label: workbenchStageLabel(key),
-    status: 'not_started' as JourneyStageStatus,
-    blocker: null,
-  }))
+  const rail =
+    stages.length > 0
+      ? stages
+      : WORKBENCH_STAGE_ORDER.map((key) => ({
+          stage: key,
+          label: workbenchStageLabel(key),
+          status: 'not_started' as JourneyStageStatus,
+          blocker: null,
+        }))
 
   const compact = density === 'compact'
-  const hasVerticalClusters =
-    (matchingCluster?.length ?? 0) > 0 || (fulfillmentCluster?.length ?? 0) > 0
+
+  const defaultExpanded =
+    rail.find((stage) => stageIsActive(stage.status))?.stage ??
+    rail.find((stage) => stage.status === 'complete')?.stage ??
+    null
+
+  const [expandedStage, setExpandedStage] = useState<string | null>(defaultExpanded)
+  const railKey = rail.map((stage) => `${stage.stage}:${stage.status}`).join('|')
+  useEffect(() => {
+    setExpandedStage(defaultExpanded)
+    // Re-sync when stage statuses change for this request (not on every parent render).
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- railKey captures status shifts
+  }, [railKey])
+
+  const contentForStage = (stageKey: string) => {
+    if (stageKey === 'matching' && matchingCluster && matchingCluster.length > 0) {
+      return matchingCluster.map((row) => ({
+        key: `m-${row.vertical}`,
+        label: row.label,
+        status: row.matching_status,
+        blocker: row.blocker,
+        muted: !row.live,
+        statusLabel: row.live ? workbenchStatusLabel(row.matching_status) : 'Soon',
+      }))
+    }
+    if (stageKey === 'fulfillment' && fulfillmentCluster && fulfillmentCluster.length > 0) {
+      return fulfillmentCluster.map((row) => {
+        const status = row.fulfillment_status ?? ('not_started' as JourneyStageStatus)
+        return {
+          key: `f-${row.vertical}`,
+          label: row.label,
+          status,
+          blocker: row.blocker,
+          muted: !row.live,
+          statusLabel: row.live ? workbenchStatusLabel(status) : 'Soon',
+        }
+      })
+    }
+    return (substeps?.filter((step) => step.parent === stageKey) ?? []).map((step) => ({
+      key: step.key,
+      label: step.label,
+      status: step.status,
+      blocker: step.blocker,
+    }))
+  }
+
+  const expanded = expandedStage != null ? rail.find((stage) => stage.stage === expandedStage) : null
+  const expandedItems = expandedStage != null ? contentForStage(expandedStage) : []
 
   return (
     <div
@@ -242,232 +383,113 @@ export function ThinJourneyPipeline({
       role="group"
       aria-label="Request journey pipeline"
     >
-      <div className="flex items-start gap-0">
+      <div className="flex items-stretch gap-1" role="list" aria-label="High-level journey">
         {rail.map((stage, index) => {
-          const parentSubsteps =
-            substeps?.filter((step) => step.parent === stage.stage) ?? []
-          const isLast = index === rail.length - 1
+          const isExpanded = expandedStage === stage.stage
           return (
-            <div key={stage.stage} className="min-w-0 flex-1">
-              <div className="flex items-center">
-                {index > 0 ? (
+            <div
+              key={stage.stage}
+              className="flex min-w-0 flex-1 items-stretch gap-1"
+              role="listitem"
+            >
+              <button
+                type="button"
+                className={cn(
+                  'min-w-0 flex-1 rounded-md border text-center transition-colors',
+                  compact ? 'px-1 py-1' : 'px-1.5 py-1.5',
+                  stagePanelClass(stage.status),
+                  isExpanded && 'ring-1 ring-habeas-navy/40',
+                )}
+                aria-expanded={isExpanded}
+                aria-controls={`journey-substeps-${stage.stage}`}
+                title={`${stage.label}: ${workbenchStatusLabel(stage.status)}${
+                  stage.blocker ? ` — ${stage.blocker}` : ''
+                }. Click to ${isExpanded ? 'hide' : 'show'} substeps.`}
+                onClick={() =>
+                  setExpandedStage((current) =>
+                    current === stage.stage ? null : stage.stage,
+                  )
+                }
+              >
+                <div className="mx-auto mb-1 flex justify-center">
                   <span
                     className={cn(
-                      'h-px flex-1',
-                      rail[index - 1]!.status === 'complete'
-                        ? 'bg-habeas-mid/50'
-                        : 'bg-line',
+                      'shrink-0 rounded-full ring-1 ring-inset ring-black/10',
+                      compact ? 'size-1.5' : 'size-2',
+                      substepDotClass(stage.status),
                     )}
                     aria-hidden="true"
                   />
-                ) : (
-                  <span className="flex-1" aria-hidden="true" />
-                )}
+                </div>
+                <p
+                  className={cn(
+                    'truncate leading-tight',
+                    compact ? 'text-[0.55rem]' : 'text-[0.6rem]',
+                    stageLabelClass(stage.status),
+                  )}
+                >
+                  {stage.label}
+                </p>
+              </button>
+              {index < rail.length - 1 ? (
                 <span
                   className={cn(
-                    'mx-0.5 shrink-0 rounded-full',
-                    compact ? 'h-2 w-2' : 'h-2.5 w-2.5',
-                    substepDotClass(stage.status),
+                    'flex shrink-0 items-center text-mute',
+                    compact ? 'text-[0.55rem]' : 'text-[0.6rem]',
                   )}
-                  title={`${stage.label}: ${workbenchStatusLabel(stage.status)}${
-                    stage.blocker ? ` — ${stage.blocker}` : ''
-                  }`}
                   aria-hidden="true"
-                />
-                {!isLast ? (
-                  <span
-                    className={cn(
-                      'h-px flex-1',
-                      stage.status === 'complete' ? 'bg-habeas-mid/50' : 'bg-line',
-                    )}
-                    aria-hidden="true"
-                  />
-                ) : (
-                  <span className="flex-1" aria-hidden="true" />
-                )}
-              </div>
-              <p
-                className={cn(
-                  'mt-1 truncate text-center font-medium leading-tight',
-                  compact ? 'text-[0.55rem]' : 'text-[0.65rem]',
-                  stage.status === 'in_progress' || stage.status === 'waiting'
-                    ? 'text-habeas-navy'
-                    : stage.status === 'failed'
-                      ? 'text-red-800'
-                      : stage.status === 'complete'
-                        ? 'text-ink'
-                        : 'text-mute',
-                )}
-              >
-                {stage.label}
-              </p>
-              {parentSubsteps.length > 0 ? (
-                <ul className="mt-1 flex flex-wrap justify-center gap-0.5 px-0.5">
-                  {parentSubsteps.map((step) => (
-                    <li
-                      key={step.key}
-                      className={cn(
-                        'inline-flex max-w-full items-center gap-0.5 rounded border border-line/80 bg-paper px-1 py-px',
-                        compact ? 'text-[0.5rem]' : 'text-[0.55rem]',
-                      )}
-                      title={
-                        step.blocker
-                          ? `${step.label}: ${workbenchStatusLabel(step.status)} — ${step.blocker}`
-                          : `${step.label}: ${workbenchStatusLabel(step.status)}`
-                      }
-                    >
-                      <span
-                        className={cn('h-1.5 w-1.5 shrink-0 rounded-full', substepDotClass(step.status))}
-                        aria-hidden="true"
-                      />
-                      <span className="truncate text-ink-soft">{step.label}</span>
-                    </li>
-                  ))}
-                </ul>
+                >
+                  →
+                </span>
               ) : null}
             </div>
           )
         })}
       </div>
+
       {splitPosture ? (
-        <p className={cn('text-center text-mute', compact ? 'text-[0.5rem]' : 'text-[0.6rem]')}>
+        <p
+          className={cn(
+            'text-center text-mute',
+            compact ? 'text-[0.5rem]' : 'text-[0.6rem]',
+          )}
+        >
           Matching + Fulfillment in progress
         </p>
       ) : null}
-      {hasVerticalClusters ? (
-        <div className={cn('flex flex-wrap gap-2', compact ? 'pt-0.5' : 'pt-1')}>
-          {matchingCluster && matchingCluster.length > 0 ? (
-            <div className="min-w-0 flex-1 space-y-0.5">
-              <p className={cn('text-mute', compact ? 'text-[0.5rem]' : 'taste-micro')}>Matching</p>
-              <ul className="space-y-0.5">
-                {matchingCluster.map((row) => (
-                  <li
-                    key={`m-${row.vertical}`}
-                    className={cn(
-                      'flex items-center gap-1.5 truncate text-ink',
-                      compact ? 'text-[0.55rem]' : 'text-[0.65rem]',
-                      !row.live && 'opacity-50',
-                    )}
-                    title={row.blocker ?? undefined}
-                  >
-                    <span
-                      className={cn(
-                        'h-1.5 w-1.5 shrink-0 rounded-full',
-                        substepDotClass(row.matching_status),
-                      )}
-                      aria-hidden="true"
-                    />
-                    <span className="truncate">{row.label}</span>
-                    <span className="shrink-0 text-mute">
-                      {row.live ? workbenchStatusLabel(row.matching_status) : 'Soon'}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
+
+      {expanded != null && expandedItems.length > 0 ? (
+        <div
+          id={`journey-substeps-${expanded.stage}`}
+          className={cn(
+            'rounded-md border px-2 py-1.5 text-left',
+            stagePanelClass(expanded.status),
+          )}
+        >
+          <p
+            className={cn(
+              'truncate leading-tight',
+              compact ? 'text-[0.55rem]' : 'text-[0.65rem]',
+              stageLabelClass(expanded.status),
+            )}
+          >
+            {expanded.label}
+            <span className="ml-1.5 font-normal text-mute">
+              · {workbenchStatusLabel(expanded.status)}
+            </span>
+          </p>
+          {expanded.blocker ? (
+            <p className={cn('mt-0.5 text-mute', compact ? 'text-[0.5rem]' : 'text-[0.6rem]')}>
+              {expanded.blocker}
+            </p>
           ) : null}
-          {fulfillmentCluster && fulfillmentCluster.length > 0 ? (
-            <div className="min-w-0 flex-1 space-y-0.5">
-              <p className={cn('text-mute', compact ? 'text-[0.5rem]' : 'taste-micro')}>
-                Fulfillment
-              </p>
-              <ul className="space-y-0.5">
-                {fulfillmentCluster.map((row) => {
-                  const status = row.fulfillment_status ?? 'not_started'
-                  return (
-                    <li
-                      key={`f-${row.vertical}`}
-                      className={cn(
-                        'flex items-center gap-1.5 truncate text-ink',
-                        compact ? 'text-[0.55rem]' : 'text-[0.65rem]',
-                        !row.live && 'opacity-50',
-                      )}
-                      title={row.blocker ?? undefined}
-                    >
-                      <span
-                        className={cn('h-1.5 w-1.5 shrink-0 rounded-full', substepDotClass(status))}
-                        aria-hidden="true"
-                      />
-                      <span className="truncate">{row.label}</span>
-                      <span className="shrink-0 text-mute">
-                        {row.live ? workbenchStatusLabel(status) : 'Soon'}
-                      </span>
-                    </li>
-                  )
-                })}
-              </ul>
-            </div>
-          ) : null}
+          <JourneySubstepList items={expandedItems} compact={compact} />
         </div>
       ) : null}
     </div>
   )
 }
 
-function verticalIndicatorClass(status: JourneyStageStatus): string {
-  switch (status) {
-    case 'complete':
-      return 'bg-habeas-mid'
-    case 'failed':
-      return 'bg-red-700/70'
-    case 'in_progress':
-      return 'bg-habeas-light animate-pulse ring-2 ring-habeas-mid/40'
-    case 'waiting':
-      return 'border-2 border-habeas-mid bg-paper'
-    case 'skipped':
-      return 'bg-line-strong'
-    default:
-      return 'border border-line-strong bg-paper'
-  }
-}
-
-/** Matching or Fulfillment cluster — per-vertical rows (R2). Click opens that cluster's tab. */
-function VerticalClusterList({
-  title,
-  rows,
-  statusOf,
-  onSelect,
-}: {
-  title: string
-  rows: WorkbenchVerticalRow[]
-  statusOf: (row: WorkbenchVerticalRow) => JourneyStageStatus | null
-  onSelect: () => void
-}) {
-  if (rows.length === 0) return null
-  return (
-    <div className="min-w-0 flex-1 space-y-1.5">
-      <p className="taste-micro">{title}</p>
-      <ul className="space-y-1">
-        {rows.map((row) => {
-          const status = statusOf(row) ?? 'not_started'
-          return (
-            <li key={row.vertical}>
-              <button
-                type="button"
-                disabled={!row.live}
-                onClick={onSelect}
-                className={cn(
-                  'flex w-full items-center gap-2 rounded-md border border-line/70 bg-paper px-2 py-1.5 text-left text-xs',
-                  row.live ? 'hover:border-ink/30' : 'opacity-50',
-                )}
-                title={row.blocker ?? undefined}
-              >
-                <span
-                  className={cn('h-2.5 w-2.5 shrink-0 rounded-full', verticalIndicatorClass(status))}
-                  aria-hidden="true"
-                />
-                <span className="min-w-0 flex-1 truncate text-ink">{row.label}</span>
-                <span className="shrink-0 text-[0.65rem] text-mute">
-                  {row.live ? workbenchStatusLabel(status) : 'Coming soon'}
-                </span>
-              </button>
-            </li>
-          )
-        })}
-      </ul>
-    </div>
-  )
-}
 
 function isTriageContext(item: NeedsAttentionItem | undefined, journeyStage: string): boolean {
   if (!item) return journeyStage === 'triage'
@@ -1098,8 +1120,8 @@ function ActivityPanel({
   )
 }
 
-/** Legal kickoff (R11/KD6) + Access identity-comment gate (R13/KTD6) on Fulfillment tab. */
-function FulfillmentGateControls({
+/** Legal kickoff (R11/KD6) + Access identity-comment gate (R13/KTD6). */
+export function FulfillmentGateControls({
   requestId,
   rows,
   onInvalidate,
@@ -1110,6 +1132,8 @@ function FulfillmentGateControls({
 }) {
   const [notes, setNotes] = useState('')
   const [error, setError] = useState<string | null>(null)
+  /** Optional Legal early-advance status at kickoff (R10 / KD6); null keeps disposition. */
+  const [statusOverride, setStatusOverride] = useState<DropResponseStatusCode | null>(null)
 
   const needsIdentity = rows.some(
     (row) => row.identity_required && row.identity_verified !== true,
@@ -1130,9 +1154,14 @@ function FulfillmentGateControls({
   })
 
   const kickoffMutation = useMutation({
-    mutationFn: (vertical: string) => postFulfillmentKickoff(requestId, { vertical }),
+    mutationFn: (vertical: string) =>
+      postFulfillmentKickoff(requestId, {
+        vertical,
+        ...(statusOverride != null ? { status: statusOverride } : {}),
+      }),
     onSuccess: async () => {
       setError(null)
+      setStatusOverride(null)
       await onInvalidate()
     },
     onError: (err) => setError(err instanceof Error ? err.message : 'Kickoff failed'),
@@ -1167,26 +1196,52 @@ function FulfillmentGateControls({
         </div>
       ) : null}
       {kickoffCandidates.length > 0 ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <p className="taste-micro shrink-0">Kickoff</p>
-          {kickoffCandidates.map((row) => (
-            <Button
-              key={row.vertical}
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={
-                (row.identity_required && row.identity_verified !== true) ||
-                kickoffMutation.isPending
-              }
-              title={row.blocker ?? undefined}
-              onClick={() => kickoffMutation.mutate(row.vertical)}
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="taste-micro shrink-0" htmlFor="kickoff-status-override">
+              Status at kickoff
+            </label>
+            <select
+              id="kickoff-status-override"
+              className="rounded-md border border-line bg-paper-raised px-2 py-1 text-xs text-ink"
+              value={statusOverride ?? ''}
+              onChange={(event) => {
+                const raw = event.target.value
+                setStatusOverride(
+                  raw === '' ? null : (Number(raw) as DropResponseStatusCode),
+                )
+              }}
+              aria-label="Optional status override at kickoff"
             >
-              {kickoffMutation.isPending && kickoffMutation.variables === row.vertical
-                ? 'Starting…'
-                : `Start fulfillment — ${row.label}`}
-            </Button>
-          ))}
+              <option value="">Keep current disposition</option>
+              {DROP_RESPONSE_STATUS_OPTIONS.map((option) => (
+                <option key={option.code} value={option.code}>
+                  {option.code} {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="taste-micro shrink-0">Kickoff</p>
+            {kickoffCandidates.map((row) => (
+              <Button
+                key={row.vertical}
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={
+                  (row.identity_required && row.identity_verified !== true) ||
+                  kickoffMutation.isPending
+                }
+                title={row.blocker ?? undefined}
+                onClick={() => kickoffMutation.mutate(row.vertical)}
+              >
+                {kickoffMutation.isPending && kickoffMutation.variables === row.vertical
+                  ? 'Starting…'
+                  : `Start fulfillment — ${row.label}`}
+              </Button>
+            ))}
+          </div>
         </div>
       ) : null}
       {error ? <p className="text-xs text-red-700">{error}</p> : null}
@@ -1194,9 +1249,10 @@ function FulfillmentGateControls({
   )
 }
 
-/** U7 attachments — list/upload/download request documents (R20/KD12/KTD9). */
+/** U7 attachments — list/upload/download/delete request documents (R20/KD12/KTD9). */
 function AttachmentsPanel({ requestId }: { requestId: string }) {
   const queryClient = useQueryClient()
+  const { me, isAdmin, isSuperAdmin } = useMe()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [error, setError] = useState<string | null>(null)
   const [downloadingId, setDownloadingId] = useState<string | null>(null)
@@ -1217,6 +1273,17 @@ function AttachmentsPanel({ requestId }: { requestId: string }) {
     onError: (err) => setError(err instanceof Error ? err.message : 'Upload failed'),
   })
 
+  const deleteMutation = useMutation({
+    mutationFn: (documentId: string) => deleteRequestDocument(requestId, documentId),
+    onSuccess: async () => {
+      setError(null)
+      await queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'requests', requestId, 'documents'],
+      })
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : 'Delete failed'),
+  })
+
   const handleDownload = async (doc: RequestDocumentRecord) => {
     setDownloadingId(doc.id)
     setError(null)
@@ -1233,6 +1300,13 @@ function AttachmentsPanel({ requestId }: { requestId: string }) {
     } finally {
       setDownloadingId(null)
     }
+  }
+
+  const canDeleteDoc = (doc: RequestDocumentRecord) => {
+    if (isAdmin || isSuperAdmin) return true
+    const actor = me?.email?.trim().toLowerCase()
+    const owner = doc.uploaded_by?.trim().toLowerCase()
+    return Boolean(actor && owner && actor === owner)
   }
 
   const documents = documentsQuery.data ?? []
@@ -1280,15 +1354,36 @@ function AttachmentsPanel({ requestId }: { requestId: string }) {
                   {doc.uploaded_by} · {formatTimestamp(doc.uploaded_at)}
                 </p>
               </div>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={downloadingId === doc.id}
-                onClick={() => handleDownload(doc)}
-              >
-                {downloadingId === doc.id ? 'Downloading…' : 'Download'}
-              </Button>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={downloadingId === doc.id}
+                  onClick={() => handleDownload(doc)}
+                >
+                  {downloadingId === doc.id ? 'Downloading…' : 'Download'}
+                </Button>
+                {canDeleteDoc(doc) ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={deleteMutation.isPending}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          `Delete attachment “${doc.filename}”? This cannot be undone.`,
+                        )
+                      ) {
+                        deleteMutation.mutate(doc.id)
+                      }
+                    }}
+                  >
+                    Delete
+                  </Button>
+                ) : null}
+              </div>
             </li>
           ))}
         </ul>
@@ -1513,7 +1608,7 @@ export function RequestDetailBody({
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <RequestStageActionBar actions={stageActions} onInvalidate={invalidateAll} />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        {/* KTD2 four-stage rail (Ingest → Matching → Fulfillment → Notice) + substeps / vertical clusters */}
+        {/* Four-panel journey chrome — clusters/substeps live inside ThinJourneyPipeline */}
         <div
           className={cn(
             'shrink-0 space-y-2 overflow-x-auto border-b border-line px-4',
@@ -1523,38 +1618,20 @@ export function RequestDetailBody({
           {workbenchQuery.isPending && !workbench && !derivedChrome ? (
             <p className="text-[0.7rem] text-mute">Loading stage rail…</p>
           ) : railStages.length > 0 ? (
-            <>
-              <ThinJourneyPipeline
-                stages={railStages}
-                substeps={
-                  workbench
-                    ? derivedChrome?.substeps.filter(
-                        (step) => step.parent === 'ingest' || step.parent === 'notice',
-                      )
-                    : railSubsteps
-                }
-                splitPosture={splitPosture}
-                density={variant === 'overlay' ? 'compact' : 'comfortable'}
-              />
-              {workbench &&
-              (workbench.matching_cluster.length > 0 ||
-                workbench.fulfillment_cluster.length > 0) ? (
-                <div className="flex flex-wrap gap-3 pt-1">
-                  <VerticalClusterList
-                    title="Matching"
-                    rows={workbench.matching_cluster}
-                    statusOf={(row) => row.matching_status}
-                    onSelect={() => setTab('matching')}
-                  />
-                  <VerticalClusterList
-                    title="Fulfillment"
-                    rows={workbench.fulfillment_cluster}
-                    statusOf={(row) => row.fulfillment_status}
-                    onSelect={() => setTab('fulfillment')}
-                  />
-                </div>
-              ) : null}
-            </>
+            <ThinJourneyPipeline
+              stages={railStages}
+              substeps={
+                workbench
+                  ? derivedChrome?.substeps.filter(
+                      (step) => step.parent === 'ingest' || step.parent === 'notice',
+                    )
+                  : railSubsteps
+              }
+              matchingCluster={workbench?.matching_cluster}
+              fulfillmentCluster={workbench?.fulfillment_cluster}
+              splitPosture={splitPosture}
+              density={variant === 'overlay' ? 'compact' : 'comfortable'}
+            />
           ) : (
             <p className="text-[0.7rem] text-mute">
               {currentRail?.label ? `Stage: ${currentRail.label}` : 'No stage rail.'}

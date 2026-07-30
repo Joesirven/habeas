@@ -6,6 +6,11 @@ import {
   listMatchingReviewApprovals,
   type ApprovalRecord,
 } from '@/lib/api'
+import { RoleGate, type UserRole } from '@/lib/auth'
+
+function canAccessMatchingReview(role: UserRole | undefined): boolean {
+  return role === 'super_admin' || role === 'admin' || role === 'data_owner'
+}
 
 function MatchingReviewTableSkeleton({ rows = 5 }: { rows?: number }) {
   return (
@@ -54,6 +59,14 @@ type MatchingReviewPageProps = {
 }
 
 export function MatchingReviewPage({ embedded = false }: MatchingReviewPageProps) {
+  return (
+    <RoleGate allow={canAccessMatchingReview}>
+      <MatchingReviewBody embedded={embedded} />
+    </RoleGate>
+  )
+}
+
+function MatchingReviewBody({ embedded = false }: MatchingReviewPageProps) {
   const queryClient = useQueryClient()
   const approvalsQuery = useQuery({
     queryKey: ['admin-api', 'approvals', 'matching.review'],

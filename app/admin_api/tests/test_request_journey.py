@@ -767,7 +767,10 @@ async def test_journey_later_match_implies_pipeline_stages_complete(pool) -> Non
 
 @pytest.mark.asyncio
 @pytestmark_integration
-async def test_journey_fulfill_in_progress_when_review_approved_no_response(pool) -> None:
+async def test_journey_fulfill_waiting_kickoff_when_review_approved_no_response(
+    pool,
+) -> None:
+    """R11: matching.review approve alone leaves fulfill waiting on Legal kickoff."""
     from admin_api.approvals import (
         create_matching_review_approval,
         decide_approval,
@@ -806,10 +809,74 @@ async def test_journey_fulfill_in_progress_when_review_approved_no_response(pool
         journey = await build_request_journey(conn, request_id=request_id)
 
     fulfill = next(stage for stage in journey.stages if stage.stage == "fulfill")
-    assert fulfill.status == "in_progress"
-    assert fulfill.status != "not_started"
+    assert fulfill.status == "waiting"
+    assert fulfill.blocker == "Awaiting Legal kickoff"
     notice = next(stage for stage in journey.stages if stage.stage == "notice")
     assert notice.status == "not_started"
+    assert journey.current_stage == "fulfill"
+    assert_no_pii_keys(journey.model_dump())
+
+
+@pytest.mark.asyncio
+@pytestmark_integration
+async def test_journey_fulfill_in_progress_after_kickoff(pool) -> None:
+    """After disposition + Legal kickoff, ops fulfill stage reads in_progress."""
+    from admin_api.approvals import (
+        create_matching_review_approval,
+        decide_approval,
+    )
+    from admin_api.fulfillment_kickoff import kickoff_vertical_fulfillment
+    from admin_api.vertical_dispositions import upsert_vertical_disposition
+
+    async with pool.acquire() as conn:
+        drop_raw_id = await conn.fetchval(
+            """
+            INSERT INTO drop_raw_requests (
+                source_csv_filename, drop_record_id, list_type
+            ) VALUES ($1, $2, 'Email')
+            RETURNING id
+            """,
+            f"journey-kickoff-{uuid4().hex[:8]}.csv",
+            f"drop-{uuid4().hex[:8]}",
+        )
+        request_id = str(
+            await conn.fetchval(
+                """
+                INSERT INTO requests (intake_source, raw_record_id)
+                VALUES ('drop', $1)
+                RETURNING id
+                """,
+                drop_raw_id,
+            )
+        )
+        await _insert_matching_result(conn, request_id=request_id, match_count=1)
+        created = await create_matching_review_approval(conn, request_id=request_id)
+        await decide_approval(
+            conn,
+            approval_id=int(created["id"]),
+            status="approved",
+            decided_by="owner@example.com",
+            decision_reason="match verified",
+        )
+        await upsert_vertical_disposition(
+            conn,
+            request_id=request_id,
+            vertical="data",
+            status=4,
+            dwids=["dwid-1"],
+            decided_by="owner@example.com",
+        )
+        await kickoff_vertical_fulfillment(
+            conn,
+            request_id=request_id,
+            vertical="data",
+            decided_by="legal@example.com",
+        )
+        journey = await build_request_journey(conn, request_id=request_id)
+
+    fulfill = next(stage for stage in journey.stages if stage.stage == "fulfill")
+    assert fulfill.status == "in_progress"
+    assert fulfill.blocker == "awaiting fulfillment worker"
     assert journey.current_stage == "fulfill"
     assert_no_pii_keys(journey.model_dump())
 
@@ -1161,6 +1228,52 @@ async def test_workbench_mid_matching_reports_matching_current(
 
 
 @pytest.mark.asyncio
+async def test_workbench_legacy_drop_review_fulfill_complete_without_disposition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DROP rows fulfilled before vertical dispositions must not show Matching/Fulfillment as not_started while Notice waits."""
+    ops = _ops_journey(
+        [
+            JourneyStage(stage="received", label="Received", status="complete"),
+            JourneyStage(stage="download", label="Download", status="complete"),
+            JourneyStage(stage="land", label="Land", status="complete"),
+            JourneyStage(stage="promote", label="Promote", status="complete"),
+            JourneyStage(stage="match", label="Match", status="complete"),
+            JourneyStage(stage="review", label="Review", status="complete"),
+            JourneyStage(stage="fulfill", label="Fulfill", status="complete"),
+            JourneyStage(
+                stage="notice",
+                label="Notice",
+                status="waiting",
+                blocker="Fulfillment notice pending",
+            ),
+        ]
+    )
+    monkeypatch.setattr(request_journey, "build_request_journey", AsyncMock(return_value=ops))
+    monkeypatch.setattr(
+        request_journey,
+        "list_vertical_dispositions",
+        AsyncMock(return_value=_no_dispositions()),
+    )
+    monkeypatch.setattr(
+        request_journey, "is_vertical_kickoff_approved", AsyncMock(return_value=False)
+    )
+
+    conn = _MetaConn(intake_source="drop", request_type="delete", response_status=3)
+    result = await build_request_journey_workbench(conn, request_id=_WORKBENCH_REQUEST_ID)
+
+    by_stage = {stage.stage: stage for stage in result.stages}
+    assert by_stage["matching"].status == "complete"
+    assert by_stage["fulfillment"].status == "complete"
+    assert by_stage["notice"].status == "waiting"
+    assert result.current_stage == "notice"
+    assert result.matching_cluster[0].matching_status == "complete"
+    assert result.matching_cluster[0].disposition_status == 3
+    assert result.fulfillment_cluster[0].fulfillment_status == "complete"
+    assert_no_pii_keys(result.model_dump())
+
+
+@pytest.mark.asyncio
 async def test_workbench_split_posture_after_partial_kickoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1244,6 +1357,81 @@ async def test_workbench_split_posture_after_partial_kickoff(
     assert rows_by_vertical["data"].kicked_off is True
     assert rows_by_vertical["data"].fulfillment_status == "in_progress"
     assert rows_by_vertical["paylocity"].kicked_off is False
+    assert_no_pii_keys(result.model_dump())
+
+
+@pytest.mark.asyncio
+async def test_workbench_kicked_off_without_attempts_reads_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kickoff with no worker attempt must not roll up to not_started."""
+    ops = _ops_journey(
+        [
+            JourneyStage(stage="received", label="Received", status="complete"),
+            JourneyStage(stage="download", label="Download", status="skipped"),
+            JourneyStage(stage="land", label="Land", status="skipped"),
+            JourneyStage(stage="promote", label="Promote", status="skipped"),
+            JourneyStage(stage="match", label="Match", status="complete"),
+            JourneyStage(stage="review", label="Review", status="complete"),
+            JourneyStage(stage="fulfill", label="Fulfill", status="waiting"),
+        ]
+    )
+    monkeypatch.setattr(request_journey, "build_request_journey", AsyncMock(return_value=ops))
+    monkeypatch.setattr(
+        request_journey,
+        "list_vertical_dispositions",
+        AsyncMock(
+            return_value=VerticalDispositionsResponse(
+                request_id=_WORKBENCH_REQUEST_ID,
+                dispositions=[
+                    VerticalDisposition(
+                        request_id=_WORKBENCH_REQUEST_ID,
+                        vertical="data",
+                        label="Data",
+                        live=True,
+                        status=4,
+                        selected_dwids=["dwid-1"],
+                        selected_dwid_count=1,
+                        decided_by="legal@example.com",
+                        actor_role="legal",
+                        decided_at="2026-07-29T12:00:00+00:00",
+                    )
+                ],
+                live_verticals=["data"],
+                coming_soon=[],
+                matching_complete=True,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        request_journey,
+        "is_vertical_kickoff_approved",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        request_journey,
+        "latest_vertical_kickoff_decided_at",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        request_journey,
+        "_fulfillment_step_summary",
+        AsyncMock(
+            return_value=request_journey.WorkbenchStepAttempts(
+                step="suppression", status="not_started", attempt_count=0
+            )
+        ),
+    )
+
+    conn = _MetaConn(intake_source="drop", request_type="delete")
+    result = await build_request_journey_workbench(conn, request_id=_WORKBENCH_REQUEST_ID)
+
+    data_row = next(row for row in result.fulfillment_cluster if row.vertical == "data")
+    assert data_row.kicked_off is True
+    assert data_row.fulfillment_status == "in_progress"
+    assert data_row.blocker == "Awaiting fulfillment worker"
+    by_stage = {stage.stage: stage for stage in result.stages}
+    assert by_stage["fulfillment"].status == "in_progress"
     assert_no_pii_keys(result.model_dump())
 
 

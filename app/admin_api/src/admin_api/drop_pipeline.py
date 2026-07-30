@@ -2946,7 +2946,12 @@ async def drop_workflow_delivery_status(
             )
         except ValueError as exc:
             detail = str(exc)
-            code = 404 if detail == "request not found" else 422
+            if detail == "request not found":
+                code = 404
+            elif "identity" in detail or "KD13" in detail:
+                code = 409
+            else:
+                code = 422
             raise HTTPException(status_code=code, detail=detail) from exc
     return result
 
@@ -3082,7 +3087,7 @@ async def collect_queue_depths(conn: Any) -> list[dict[str, Any]]:
 
 
 @router.get("/workers")
-async def drop_workers():
+async def drop_workers(_principal: SuperAdminPrincipal):
     """Worker readiness + queue depths (admin_api aggregate; browser never calls workers)."""
     _require_database()
     health = await collect_worker_health()
@@ -3126,7 +3131,7 @@ async def drop_workers():
 
 
 @health_router.get("/queues")
-async def health_queues():
+async def health_queues(_principal: SuperAdminPrincipal):
     """Global queue rollup across DROP attempt tables."""
     _require_database()
     pool = get_pool()
@@ -3149,7 +3154,7 @@ _RETRY_CONFIG_TABLES = (
 
 
 @health_router.get("/retry-config")
-async def get_retry_config():
+async def get_retry_config(_principal: SuperAdminPrincipal):
     """Current per-table max_attempts (defaults + ops_retry_config overrides)."""
     from habeas_privacy_core.queue.reap import ReapedTableConfig
 
@@ -3199,6 +3204,7 @@ async def get_retry_config():
 @health_router.patch("/retry-config")
 async def patch_retry_config(
     body: RetryConfigPatchBody,
+    _principal: SuperAdminPrincipal,
     actor: DropMutationActor,
 ):
     """Persist max_attempts override (≥4). Matching must stay ≥4 (A6)."""
@@ -3232,7 +3238,7 @@ async def patch_retry_config(
 
 
 @router.get("/stats/global")
-async def drop_stats_global():
+async def drop_stats_global(_principal: SuperAdminPrincipal):
     """Home dashboard DROP summary — ids/counts only."""
     _require_database()
     pool = get_pool()

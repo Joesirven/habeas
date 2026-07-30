@@ -4,12 +4,21 @@ import type { ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import { getDropWorkers, getHealthQueues } from '@/lib/api'
+import { RoleGate, isSuperAdmin } from '@/lib/auth'
 
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
 }
 
 export function HealthEscalationsPage() {
+  return (
+    <RoleGate allow={isSuperAdmin}>
+      <HealthEscalationsBody />
+    </RoleGate>
+  )
+}
+
+function HealthEscalationsBody() {
   const workersQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-workers'],
     queryFn: getDropWorkers,

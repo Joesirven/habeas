@@ -20,6 +20,7 @@ from admin_api.approvals import (
     is_matching_review_approved,
     list_approvals,
 )
+from admin_api.drop_pipeline import MatchingReviewPrincipal
 from admin_api.drop_pipeline import health_router as ops_health_router
 from admin_api.drop_pipeline import router as drop_pipeline_router
 from admin_api.fulfillment_kickoff import router as fulfillment_kickoff_router
@@ -460,6 +461,7 @@ async def requests_agent_batch(
 
 @app.get("/approvals", response_model=list[ApprovalRecord])
 async def approvals_list(
+    _principal: MatchingReviewPrincipal,
     action_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
@@ -478,7 +480,10 @@ async def approvals_list(
 
 
 @app.post("/approvals/matching-review", response_model=ApprovalRecord, status_code=201)
-async def approvals_create_matching_review(body: MatchingReviewCreateBody):
+async def approvals_create_matching_review(
+    body: MatchingReviewCreateBody,
+    _principal: MatchingReviewPrincipal,
+):
     """Create a pending matching.review approval gate for a request."""
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
@@ -506,7 +511,11 @@ async def approvals_create_matching_review(body: MatchingReviewCreateBody):
 
 
 @app.post("/approvals/{approval_id}/approve", response_model=ApprovalRecord)
-async def approvals_approve(approval_id: int, body: ApprovalDecisionBody):
+async def approvals_approve(
+    approval_id: int,
+    body: ApprovalDecisionBody,
+    _principal: MatchingReviewPrincipal,
+):
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
     pool = get_pool()
@@ -524,7 +533,11 @@ async def approvals_approve(approval_id: int, body: ApprovalDecisionBody):
 
 
 @app.post("/approvals/{approval_id}/reject", response_model=ApprovalRecord)
-async def approvals_reject(approval_id: int, body: ApprovalDecisionBody):
+async def approvals_reject(
+    approval_id: int,
+    body: ApprovalDecisionBody,
+    _principal: MatchingReviewPrincipal,
+):
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
     pool = get_pool()

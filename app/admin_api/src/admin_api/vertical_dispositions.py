@@ -471,6 +471,25 @@ async def is_kd13_satisfied(conn: Any, request_id: str) -> bool:
     return await access_packs_ready_for_notice(conn, request_id)
 
 
+async def is_identity_cleared(conn: Any, request_id: str | UUID) -> bool:
+    """Latest identity verification is ``verified`` with a non-empty comment (KTD6)."""
+    rid = UUID(str(request_id)) if not isinstance(request_id, UUID) else request_id
+    row = await conn.fetchrow(
+        """
+        SELECT status, notes
+          FROM request_identity_verifications
+         WHERE request_id = $1
+         ORDER BY verified_at DESC
+         LIMIT 1
+        """,
+        rid,
+    )
+    if row is None:
+        return False
+    notes = row["notes"]
+    return str(row["status"]) == "verified" and bool(notes and notes.strip())
+
+
 @router.get("/{request_id}/dispositions", response_model=VerticalDispositionsResponse)
 async def get_vertical_dispositions(
     request_id: str,
@@ -574,6 +593,7 @@ __all__ = [
     "collect_access_shareable_urls",
     "default_dwids_for_request",
     "fetch_vertical_disposition",
+    "is_identity_cleared",
     "is_kd13_satisfied",
     "is_live_vertical",
     "is_vertical_kickoff_locked",

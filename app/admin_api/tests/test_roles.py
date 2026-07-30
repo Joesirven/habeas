@@ -334,3 +334,56 @@ def test_require_roles_rejects_insufficient_role() -> None:
         response = client.get("/probe", headers=headers)
 
     assert response.status_code == 403
+
+
+def test_approvals_routes_require_matching_review_roles() -> None:
+    """Legacy /approvals* share MatchingReviewPrincipal (super_admin/admin/data_owner)."""
+    roles.settings.admin_api_legals = "legal@example.com"
+    roles.settings.admin_api_data_owners = "owner@example.com"
+    roles.settings.admin_api_admins = "admin@example.com"
+    legal_headers = {IAP_EMAIL_HEADER: "legal@example.com"}
+    owner_headers = {IAP_EMAIL_HEADER: "owner@example.com"}
+    admin_headers = {IAP_EMAIL_HEADER: "admin@example.com"}
+    decision = {"decided_by": "tester@habeas.com"}
+
+    with TestClient(app) as client:
+        assert client.get("/approvals", headers=legal_headers).status_code == 403
+        assert (
+            client.post(
+                "/approvals/matching-review",
+                headers=legal_headers,
+                json={"request_id": "00000000-0000-0000-0000-000000000001"},
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                "/approvals/1/approve", headers=legal_headers, json=decision
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                "/approvals/1/reject", headers=legal_headers, json=decision
+            ).status_code
+            == 403
+        )
+
+        # Allowed roles pass the role gate (may 503/404 without DB — not 403).
+        for headers in (owner_headers, admin_headers):
+            listed = client.get("/approvals", headers=headers)
+            assert listed.status_code != 403
+            created = client.post(
+                "/approvals/matching-review",
+                headers=headers,
+                json={"request_id": "00000000-0000-0000-0000-000000000001"},
+            )
+            assert created.status_code != 403
+            approved = client.post(
+                "/approvals/1/approve", headers=headers, json=decision
+            )
+            assert approved.status_code != 403
+            rejected = client.post(
+                "/approvals/1/reject", headers=headers, json=decision
+            )
+            assert rejected.status_code != 403

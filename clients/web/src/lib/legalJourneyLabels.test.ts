@@ -56,6 +56,12 @@ describe('legalJourneyLabels', () => {
     expect(actionReasonLabel('matching.review')).toBe(
       'Matching review pending',
     )
+    expect(actionReasonLabel('fulfillment.kickoff')).toBe(
+      'Fulfillment kickoff pending',
+    )
+    expect(actionReasonLabel('fulfillment.kickoff_not_approved')).toBe(
+      'Fulfillment kickoff not approved',
+    )
     expect(actionReasonLabel('access.delivery')).toBe(
       'Access delivery pending',
     )
@@ -84,6 +90,9 @@ describe('legalJourneyLabels', () => {
     )
     expect(queueStatusLabel('matching.review', 'approved')).toBe(
       'Matching review approved',
+    )
+    expect(queueStatusLabel('fulfillment.kickoff', 'approved')).toBe(
+      'Fulfillment kickoff approved',
     )
   })
 

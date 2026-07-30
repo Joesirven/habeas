@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from admin_api.drop_pipeline import _require_database
 from admin_api.roles import RolePrincipal, require_roles
+from admin_api.vertical_dispositions import is_identity_cleared, is_kd13_satisfied
 from habeas_privacy_core.adapters.gcs import signed_url_for_gcs_uri, write_object
 from habeas_privacy_core.auth import (
     ROLE_DATA_OWNER,
@@ -21,6 +22,9 @@ from data_fulfillment_dispatcher.access_interim import (
     provision_interim_prefix,
     render_vertica_script,
 )
+
+# Confirm statuses require identity + KD13 (same bar as request-bound Access render).
+_CONFIRM_DELIVERY = frozenset({"delivered", "failed", "recalled"})
 
 router = APIRouter(prefix="/ops/fulfillment", tags=["fulfillment-ops"])
 
@@ -216,6 +220,20 @@ async def patch_access_delivery_status(
         )
         if ready is None:
             raise HTTPException(status_code=409, detail="access artifacts not ready")
+
+        # Delivery confirm MUST clear identity+notes and KD13, same bar as
+        # request-bound Access template render (R13, R15, KTD6, KTD8).
+        if body.status in _CONFIRM_DELIVERY:
+            if not await is_identity_cleared(conn, rid):
+                raise HTTPException(
+                    status_code=409,
+                    detail="identity not verified with notes (KTD6)",
+                )
+            if not await is_kd13_satisfied(conn, str(rid)):
+                raise HTTPException(
+                    status_code=409,
+                    detail="access packs not ready for all live verticals (KD13)",
+                )
 
         actor = principal.email or "legal"
         await conn.execute(

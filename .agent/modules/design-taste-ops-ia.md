@@ -20,18 +20,26 @@
 - Legal / data-owner persona: Home / My work (not pipeline Dashboard); hide Workers; Triage bulk Reject `2` / Send to matching; Escalations resolve via fulfill path + comments; DO approve uses recommended `3`/`4`/`5`. DO **Tasks** = `assignee=me` (My work Assigned card → `?kind=pending_tasks`).
 - Legal **Conditions** (`/requests/conditions`): version `intake.route_triage` via allowlist (`requestor_state_not_in`) or explicit Triage list (`state_in`); save closes active rule and inserts replacement.
 - Legal **Notice**: fulfilled DROP rows (`response_status` set + `notice_review_status=pending`); bulk/detail **Approve notice**. **Delivery**: `communication_attempts` purpose `access_delivery` awaiting status; Legal **Mark delivered / failed / recalled** via `PATCH …/workflow/delivery/{id}/status` (shareable URL when access packs land).
-- Queue rows: human title first, then source · lane · id, blocker/due — not id-first mono soup.
-- Detail pane: title + meta strip, compact journey chips, focused Matching / Delivery / Notice body, comments footer.
+- Queue rows: human title first, then source · lane · id, blocker/due — not id-first mono soup. **No journey strip on list rows** — chrome lives on opened detail only.
+- Detail pane (opened request): title + meta strip, **four-panel journey workbench** (Ingest · Matching · Fulfillment · Notice), focused Matching / Delivery / Notice body, comments footer. Product contract: `docs/plans/2026-07-29-001-feat-request-journey-workbench-plan.md`.
+- **Batch selection** in the review pane shows the **same workbench with aggregate** Matching/Fulfillment vertical posture (not a thin chip strip).
 - Delivery: shareable URL, Copy URL, **Draft outbound** (template with URL in body), delivery status.
 - Under Matching: result-type chips (single / multi / not-found) — orthogonal to kind.
 - Exact 1:1 matches from one DROP batch → expandable thread + bulk fulfill.
-- Inbox **Fulfill** confirms CA DROP `response_status` (3 Deleted · 4 Opted out · 5 Not found) before approving `matching.review` — keep naming distinct from ingest **Promote-to-raw**.
+- Inbox **Fulfill** / data-owner disposition confirms CA DROP `response_status` (3 Deleted · 4 Opted out · 5 Not found) before approving `matching.review` — keep naming distinct from ingest **Promote-to-raw**. **Legal kickoff** (not matching approve alone) starts Fulfillment; **Access** requires identity status + required comment before pack/notice.
 - Checkbox list + bulk Fulfill/Decline; Select all covers every loaded row matching the active filters (not only the scrolled viewport); assign / comments in the right pane.
+
+### Request journey workbench (detail-only)
+
+- High-level rail on **opened batch detail** and **individual request detail** only: **Ingest → Matching → Fulfillment → Notice**. Never on Inbox/All-requests list rows.
+- Matching and Fulfillment are **separate per-vertical clusters** (indicator, progress, short status). Coming-soon verticals greyed, non-actionable. Split in-progress when any vertical is still Matching and any has started Fulfillment.
+- Substeps vary by request type / intake (CA DROP vs Access vs combined vs delete/opt-out).
+- Do not reintroduce six-label coarse rails (receive → … → delivery) as the primary detail chrome — those nest under the four stages.
 
 ### Request detail / drawer
 
-- Meta strip (source, received, stage, blocker).
-- Tabs: History | Matching | Delivery.
+- Meta strip (source, received, stage, blocker) + four-stage journey workbench (above).
+- Tabs: History | Matching | Delivery (Fulfillment default for legal/admin pre-fulfillment).
 - Delivery tab: same handoff + draft outbound template as Inbox.
 - Matching must tolerate missing/legacy attempt payloads — never crash on empty audit JSON.
 
@@ -61,3 +69,5 @@
 
 - Reintroduce Amigo frost, editorial heroes, or glass chips on ops routes.
 - Duplicate Matching review as a top-level nav item.
+- Put the four-stage journey strip on Inbox / list rows (detail and batch-selection workbench only).
+- Auto-start Fulfillment from matching approve alone — Legal kickoff (and Access identity-comment when applicable) gate start.

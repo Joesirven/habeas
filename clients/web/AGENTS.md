@@ -14,7 +14,7 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
 
 ## Navigation (Ops IA — Request / Job / Run)
 
-- **Requests** → list (row opens journey), Needs attention, SLAs (shell), Conditions (Legal), Upload.
+- **Requests** → list (row opens **detail workbench** — no journey strip on rows), Needs attention, SLAs (shell), Conditions (Legal), Upload.
 - **Ops** (super_admin): Dashboard (Pipeline · Hash refresh · History · Configurations), Workers, Runs, Jobs (shell), Insights (`/ops/health`), Incidents (shell → failed Runs).
 - **Console** (super_admin): `/ops/drop-pipeline?tab=` mutation power surface (same tab set as Dashboard).
 - Browser never calls worker URLs — only admin-api aggregates.
@@ -26,7 +26,7 @@ Keep Habeas Amigo/`taste-*` tokens (navy, frost chips, matte panels). On **Runs,
 - Table-first / rail-first composition — not landing-page heroes.
 - Compact rows (`text-xs`, tight `py`), status tabs/filters, URL search params.
 - Search-param merges: use `'key' in patch` (not `!== undefined`) so All/clear can pass `undefined` — see frontend-stack.
-- Horizontal stage rail for request journey; dense run list like Dagster Runs.
+- Request journey: **four-stage detail-only rail** (Ingest → Matching → Fulfillment → Notice) with per-vertical Matching/Fulfillment clusters; batch selection = aggregate workbench. Dense run list like Dagster Runs.
 - One volume strip/chart on ops dashboard (Prefect overview) — not four equal marketing KPI tiles as the whole page.
 - Do **not** invent a second design system or copy Prefect dark/purple chrome.
 
@@ -41,7 +41,7 @@ General Amigo frost: [`.agent/modules/design-taste.md`](../../.agent/modules/des
 - Bulk-card state tiles → `/ops/runs?process=<id>&job=…&status=…&window=…` (`process` = download attempt id; API query `process_id`).
 - Individual view: status toggles (Open & failed / Queued / Failed / Abandoned / Finished / All) on the same filter row as Intake/Window.
 - Hash-index: **Refresh state** / **Refresh all** enqueue then process in one action (USPS 50+DC); rematch-on-refresh for every successful state.
-- Matching review / fulfill-decline live in Inbox (`?bulk=`). Bulk card runs support pagination, re-run, assign, detail dialog.
+- Matching review / fulfill-decline live in Inbox (`?bulk=`). Bulk card runs support pagination, re-run, assign, detail dialog. Journey workbench chrome + Legal kickoff / Access identity gates: [`.agent/modules/design-taste-ops-ia.md`](../../.agent/modules/design-taste-ops-ia.md).
 
 ## Local admin-api proxy
 

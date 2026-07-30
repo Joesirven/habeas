@@ -13,6 +13,7 @@ from admin_api.drop_pipeline import _require_database
 from admin_api.roles import RolePrincipal, require_roles
 from admin_api.vertical_dispositions import (
     collect_access_shareable_urls,
+    is_identity_cleared,
     is_kd13_satisfied,
 )
 from habeas_privacy_core.adapters.gcs import read_object, write_object
@@ -189,20 +190,7 @@ def _is_access_slug(slug: str) -> bool:
 
 async def _identity_cleared(conn: Any, request_id: UUID) -> bool:
     """Latest identity verification is ``verified`` with a non-empty comment (KTD6)."""
-    row = await conn.fetchrow(
-        """
-        SELECT status, notes
-          FROM request_identity_verifications
-         WHERE request_id = $1
-         ORDER BY verified_at DESC
-         LIMIT 1
-        """,
-        request_id,
-    )
-    if row is None:
-        return False
-    notes = row["notes"]
-    return str(row["status"]) == "verified" and bool(notes and notes.strip())
+    return await is_identity_cleared(conn, request_id)
 
 
 @router.post(
@@ -546,9 +534,11 @@ async def create_communication_attempt(
     )
 
 
-# --- U7: document/attachment endpoints (upload/list/download) ---------------
+# --- U7: document/attachment endpoints (upload/list/download/delete) --------
 # Role expansion (R20/KD12/KTD9): data_owner + legal/admin/super_admin, i.e.
 # any authenticated app role that can open the request.
+# Size/type limits: currently only empty-file rejection (KTD9 — document if absent).
+# Delete (KTD9): uploader email OR admin/super_admin. Audit stays metadata-only.
 
 
 @router.post(
@@ -690,3 +680,57 @@ async def download_request_document(
         media_type=str(row["content_type"]),
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+def _may_delete_document(*, principal: RolePrincipal, uploaded_by: str) -> bool:
+    """KTD9: uploader or admin/super_admin may delete."""
+    if principal.role in (ROLE_ADMIN, ROLE_SUPER_ADMIN):
+        return True
+    actor = (principal.email or "").strip().lower()
+    owner = (uploaded_by or "").strip().lower()
+    return bool(actor) and actor == owner
+
+
+@router.delete(
+    "/{request_id}/documents/{document_id}",
+    status_code=204,
+)
+async def delete_request_document(
+    request_id: str,
+    document_id: str,
+    principal: DocumentPrincipal,
+):
+    """Hard-delete a request document row (KTD9). GCS object may remain orphaned."""
+    _require_database()
+    try:
+        rid = UUID(request_id)
+        doc_id = UUID(document_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid id") from exc
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT uploaded_by
+              FROM request_documents
+             WHERE id = $1 AND request_id = $2
+            """,
+            doc_id,
+            rid,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="document not found")
+        if not _may_delete_document(
+            principal=principal, uploaded_by=str(row["uploaded_by"])
+        ):
+            raise HTTPException(status_code=403, detail="delete not permitted")
+        await conn.execute(
+            """
+            DELETE FROM request_documents
+             WHERE id = $1 AND request_id = $2
+            """,
+            doc_id,
+            rid,
+        )
+    return Response(status_code=204)

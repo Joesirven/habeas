@@ -7,14 +7,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
-import {
-  ConfirmActionDialog,
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
+import { ConfirmActionDialog } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   DROP_RESPONSE_STATUS_OPTIONS,
@@ -399,29 +392,7 @@ function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
   )
 }
 
-/** Outbound email draft for access delivery — operator pastes into external mailer. */
-export function buildAccessDeliveryDraft(opts: {
-  requestId: string
-  shareableUrl: string
-}): { subject: string; body: string } {
-  const short = opts.requestId.slice(0, 8)
-  return {
-    subject: `Your Habeas privacy access package (${short}…)`,
-    body: [
-      'Hello,',
-      '',
-      'Your data privacy access package is ready. Use this link to download it (the link expires for security):',
-      '',
-      opts.shareableUrl,
-      '',
-      'If you did not request this, contact privacy support and do not open the link.',
-      '',
-      '—',
-      'Habeas Data Privacy',
-      '',
-    ].join('\n'),
-  }
-}
+/** Outbound Access delivery uses the render API (`AccessDeliveryEmailCard`) — no hardcoded draft. */
 
 export function AccessHandoffPanel({
   requestId,
@@ -442,9 +413,6 @@ export function AccessHandoffPanel({
   onSetStatus: (status: 'delivered' | 'failed' | 'recalled') => void
   busy: boolean
 }) {
-  const [draftOpen, setDraftOpen] = useState(false)
-  const [draftNote, setDraftNote] = useState<string | null>(null)
-
   if (isPending) {
     return <p className="py-3 text-xs text-ink-soft">Loading fulfillment artifact…</p>
   }
@@ -486,10 +454,6 @@ export function AccessHandoffPanel({
   )
 
   if (isError || (!hasShareableUrl && !hasArtifactUri)) {
-    const placeholderDraft = buildAccessDeliveryDraft({
-      requestId,
-      shareableUrl: '[shareable URL will appear here after fulfillment]',
-    })
     return (
       <div className="space-y-2 py-2 text-xs text-ink-soft">
         {processStrip}
@@ -499,22 +463,9 @@ export function AccessHandoffPanel({
           <span className="font-mono text-ink">{requestId.slice(0, 8)}…</span>.
         </p>
         <p className="text-mute">
-          Access packs appear here after fulfillment. You can preview the outbound template now.
+          Access packs appear here after fulfillment. Use the Access delivery email
+          card (render API) once the pack and identity gates are ready.
         </p>
-        <Button
-          size="sm"
-          variant="outline"
-          type="button"
-          onClick={() => {
-            void navigator.clipboard.writeText(placeholderDraft.body).then(() => {
-              setDraftNote('Copied draft body (placeholder URL)')
-              window.setTimeout(() => setDraftNote(null), 2500)
-            })
-          }}
-        >
-          Draft outbound
-        </Button>
-        {draftNote ? <span className="text-mute">{draftNote}</span> : null}
       </div>
     )
   }
@@ -522,15 +473,15 @@ export function AccessHandoffPanel({
   // Guard above: shareable URL and/or internal artifact URI is present.
   const readyArtifact = artifact as FulfillmentArtifact
   const url = readyArtifact.shareable_url ?? readyArtifact.fulfillment_artifact_uri ?? ''
-  const draft = buildAccessDeliveryDraft({ requestId, shareableUrl: url })
 
   return (
     <div className="space-y-2 py-1 text-xs">
       {processStrip}
       {nextStep}
       <p className="text-ink-soft">
-        Copy the shareable URL or draft an outbound message, then paste into your external
-        mailer. Mark delivered when sent — the platform does not email requesters.
+        Copy the shareable URL, or use the Access delivery email card to render the
+        template and paste into your external mailer. Mark delivered when sent — the
+        platform does not email requesters.
       </p>
       <div className="rounded-md border border-line bg-paper/50 px-2.5 py-1.5">
         <p className="taste-micro">Shareable URL</p>
@@ -548,9 +499,6 @@ export function AccessHandoffPanel({
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" type="button" onClick={onCopyUrl} disabled={!url}>
           Copy URL
-        </Button>
-        <Button size="sm" variant="outline" type="button" onClick={() => setDraftOpen(true)}>
-          Draft outbound
         </Button>
         {readyArtifact.kind === 'access' && canMutate ? (
           <>
@@ -584,59 +532,6 @@ export function AccessHandoffPanel({
           </>
         ) : null}
       </div>
-
-      <Dialog open={draftOpen} onOpenChange={setDraftOpen}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Draft access delivery</DialogTitle>
-            <DialogDescription>
-              Template for external email — copy subject and body, then send outside the platform.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3 text-xs">
-            <div>
-              <p className="taste-micro">Subject</p>
-              <p className="mt-1 rounded-md border border-line bg-paper px-2 py-1.5 text-ink">
-                {draft.subject}
-              </p>
-            </div>
-            <div>
-              <p className="taste-micro">Body</p>
-              <pre className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap rounded-md border border-line bg-paper px-2 py-1.5 font-sans text-[0.75rem] text-ink">
-                {draft.body}
-              </pre>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                size="sm"
-                type="button"
-                onClick={() => {
-                  void navigator.clipboard.writeText(draft.body).then(() => {
-                    setDraftNote('Copied body')
-                    window.setTimeout(() => setDraftNote(null), 2000)
-                  })
-                }}
-              >
-                Copy body
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                type="button"
-                onClick={() => {
-                  void navigator.clipboard.writeText(draft.subject).then(() => {
-                    setDraftNote('Copied subject')
-                    window.setTimeout(() => setDraftNote(null), 2000)
-                  })
-                }}
-              >
-                Copy subject
-              </Button>
-              {draftNote ? <span className="text-mute">{draftNote}</span> : null}
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }

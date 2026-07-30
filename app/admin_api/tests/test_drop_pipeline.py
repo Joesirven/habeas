@@ -669,6 +669,10 @@ def test_retry_config_get_and_patch_floor(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
     monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
 
     with TestClient(app) as client:
         got = client.get("/ops/health/retry-config")
@@ -710,6 +714,10 @@ def test_drop_stats_global(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
     monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
     monkeypatch.setattr(drop_pipeline, "collect_worker_health", fake_health)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
 
     with TestClient(app) as client:
         response = client.get("/ops/drop/stats/global")
@@ -783,6 +791,10 @@ def test_drop_workers_and_health_queues(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
     monkeypatch.setattr(drop_pipeline, "collect_worker_health", fake_health)
     monkeypatch.setattr(drop_pipeline, "collect_queue_depths", fake_depths)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
 
     with TestClient(app) as client:
         workers = client.get("/ops/drop/workers")
@@ -2411,3 +2423,72 @@ async def test_collect_process_run_groups_download_stage():
     assert len(groups) == 1
     assert groups[0]["label"].startswith("drop · ")
     assert groups[0]["runs"][0]["run_id"] == "drop_connector:12"
+
+
+def test_ops_health_and_workers_require_super_admin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Health/workers reads match other ops surfaces — super_admin only."""
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(
+        drop_pipeline,
+        "collect_worker_health",
+        AsyncMock(return_value={}),
+    )
+
+    class _Acquire:
+        async def __aenter__(self):
+            conn = MagicMock()
+            conn.fetch = AsyncMock(return_value=[])
+            conn.fetchval = AsyncMock(return_value=0)
+            conn.execute = AsyncMock()
+            return conn
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(
+        drop_pipeline, "collect_queue_depths", AsyncMock(return_value=[])
+    )
+
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "admin@example.com")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "legal@example.com")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "owner@example.com")
+
+    ops = {IAP_EMAIL_HEADER: "ops@example.com"}
+    denied = [
+        {IAP_EMAIL_HEADER: "admin@example.com"},
+        {IAP_EMAIL_HEADER: "legal@example.com"},
+        {IAP_EMAIL_HEADER: "owner@example.com"},
+    ]
+    paths = (
+        "/ops/drop/workers",
+        "/ops/health/queues",
+        "/ops/health/retry-config",
+        "/ops/drop/stats/global",
+    )
+
+    with TestClient(app) as client:
+        for path in paths:
+            assert client.get(path, headers=ops).status_code == 200
+            for headers in denied:
+                assert client.get(path, headers=headers).status_code == 403
+
+        patch_denied = client.patch(
+            "/ops/health/retry-config",
+            headers={IAP_EMAIL_HEADER: "admin@example.com"},
+            json={"table_name": "matching_attempts", "max_attempts": 6},
+        )
+        assert patch_denied.status_code == 403
+        patch_ok = client.patch(
+            "/ops/health/retry-config",
+            headers=ops,
+            json={"table_name": "matching_attempts", "max_attempts": 6},
+        )
+        assert patch_ok.status_code == 200

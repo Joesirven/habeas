@@ -22,6 +22,7 @@ from habeas_privacy_core.queue.constants import (
     DATA_FULFILLMENT_STEP_SUPPRESSION,
 )
 from habeas_privacy_core.workflow.approval import (
+    FULFILLMENT_KICKOFF_ACTION,
     MATCHING_REVIEW_ACTION,
     NOTICE_REVIEW_ACTION,
     REQUEST_CLOSE_COMMAND,
@@ -102,6 +103,7 @@ STAGE_LABELS: dict[str, str] = {
 _TIMELINE_ACTION_LABELS: dict[str, str] = {
     NOTICE_REVIEW_ACTION: "Fulfillment notice",
     MATCHING_REVIEW_ACTION: "Matching review",
+    FULFILLMENT_KICKOFF_ACTION: "Fulfillment kickoff",
     "access.delivery": "Access delivery",
     WORKFLOW_ASSIGNMENT_ACTION: "Assignment",
 }
@@ -246,7 +248,11 @@ class RequestCommentBody(BaseModel):
 
 
 class RequestCloseBody(BaseModel):
-    """Unrestricted close (KD40) — optional note persists to correspondence."""
+    """Unrestricted close (KD40) — optional note persists to correspondence.
+
+    ``drop_response_status`` is accepted for API compatibility but ignored: DROP
+    status is written only via vertical disposition upsert (U1 / KTD3).
+    """
 
     note: str | None = Field(default=None, max_length=2000)
     drop_response_status: int | None = Field(default=None, ge=3, le=5)
@@ -280,6 +286,20 @@ def _iso(value: Any) -> str | None:
     if isinstance(value, str):
         return value
     return value.isoformat()
+
+
+async def _needs_attention_assignment(
+    conn: Any, request_id: str
+) -> NeedsAttentionAssignment | None:
+    """Current pending workflow.assignment for inbox detail assignee chrome."""
+    assignment_raw = await get_current_assignment(conn, request_id)
+    if assignment_raw is None:
+        return None
+    return NeedsAttentionAssignment(
+        target_role=assignment_raw.get("target_role"),
+        kind=assignment_raw.get("kind"),
+        assignee_identity=assignment_raw.get("assignee_identity"),
+    )
 
 
 def _attempt_stage_status(raw_status: str | None) -> StageStatus:
@@ -689,18 +709,35 @@ async def build_request_journey(conn: Any, *, request_id: str) -> RequestJourney
     fulfill_attempted_at: str | None = None
     fulfill_completed_at: str | None = None
 
+    # R11 / KTD4: matching.review alone never starts fulfillment — Legal kickoff
+    # on a live vertical is required before the fulfill stage reads in_progress.
+    any_vertical_kicked_off = False
+    if review_approved:
+        for vertical in LIVE_VERTICALS:
+            if await is_vertical_kickoff_approved(
+                conn, request_id=request_id, vertical=vertical
+            ):
+                any_vertical_kicked_off = True
+                break
+
     if intake_source == "drop":
         if row["response_status"] is not None:
             fulfill_status = "complete"
             fulfill_completed_at = _iso(row["received_at"])
-        elif review_approved:
+        elif review_approved and any_vertical_kicked_off:
             fulfill_status = "in_progress"
-            fulfill_blocker = "awaiting fulfillment response"
+            fulfill_blocker = "awaiting fulfillment worker"
+        elif review_approved:
+            fulfill_status = "waiting"
+            fulfill_blocker = "Awaiting Legal kickoff"
         elif has_match_result:
             fulfill_status = "not_started"
-    elif review_approved:
+    elif review_approved and any_vertical_kicked_off:
         fulfill_status = "in_progress"
-        fulfill_blocker = "awaiting fulfillment"
+        fulfill_blocker = "awaiting fulfillment worker"
+    elif review_approved:
+        fulfill_status = "waiting"
+        fulfill_blocker = "Awaiting Legal kickoff"
 
     stages.append(
         JourneyStage(
@@ -1027,6 +1064,7 @@ async def _build_vertical_rows(
     intake_source: str,
     request_type: str,
     ops_by_stage: dict[str, JourneyStage],
+    response_status: int | None = None,
 ) -> tuple[list[WorkbenchVerticalRow], list[WorkbenchVerticalRow]]:
     """Matching cluster (live + coming-soon) and Fulfillment cluster (live only)."""
     dispositions = await list_vertical_dispositions(conn, request_id=request_id)
@@ -1046,6 +1084,15 @@ async def _build_vertical_rows(
     for vertical in LIVE_VERTICALS:
         disposition = disposed_by_vertical.get(vertical)
         label = VERTICAL_LABELS.get(vertical, vertical.title())
+        # Legacy DROP path often has ops review/fulfill complete + response_status
+        # without a request_vertical_dispositions row yet — keep the rail honest.
+        legacy_status = (
+            int(response_status)
+            if disposition is None
+            and intake_source == "drop"
+            and response_status is not None
+            else None
+        )
 
         if disposition is not None:
             matching_status: StageStatus = "complete"
@@ -1053,7 +1100,13 @@ async def _build_vertical_rows(
         else:
             review = ops_by_stage.get("review")
             match = ops_by_stage.get("match")
-            if review is not None and review.status == "waiting":
+            if review is not None and review.status == "complete":
+                matching_status = "complete"
+                matching_blocker = None
+            elif legacy_status is not None:
+                matching_status = "complete"
+                matching_blocker = None
+            elif review is not None and review.status == "waiting":
                 matching_status = "waiting"
                 matching_blocker = review.blocker
             elif match is not None and match.status == "failed":
@@ -1062,6 +1115,12 @@ async def _build_vertical_rows(
             elif match is not None and match.status == "in_progress":
                 matching_status = "in_progress"
                 matching_blocker = None
+            elif match is not None and match.status == "complete":
+                matching_status = "waiting"
+                matching_blocker = (
+                    review.blocker if review is not None and review.blocker else
+                    "Pending Data Owner Review"
+                )
             else:
                 matching_status = "not_started"
                 matching_blocker = None
@@ -1073,7 +1132,9 @@ async def _build_vertical_rows(
                 live=True,
                 actionable=True,
                 matching_status=matching_status,
-                disposition_status=disposition.status if disposition else None,
+                disposition_status=(
+                    disposition.status if disposition else legacy_status
+                ),
                 selected_dwid_count=(
                     disposition.selected_dwid_count if disposition else None
                 ),
@@ -1085,10 +1146,27 @@ async def _build_vertical_rows(
         kicked_off = await is_vertical_kickoff_approved(
             conn, request_id=request_id, vertical=vertical
         )
+        fulfill_ops = ops_by_stage.get("fulfill")
         if disposition is None:
-            fulfillment_status: StageStatus = "not_started"
-            fulfillment_blocker = "Awaiting matching disposition"
             fulfillment_steps: list[WorkbenchStepAttempts] = []
+            if fulfill_ops is not None and fulfill_ops.status == "complete":
+                # Pre-kickoff / pre-disposition DROP fulfillment already finished.
+                fulfillment_status = "complete"
+                fulfillment_blocker = None
+                kicked_off = True
+            elif fulfill_ops is not None and fulfill_ops.status in (
+                "in_progress",
+                "waiting",
+                "failed",
+            ):
+                fulfillment_status = fulfill_ops.status
+                fulfillment_blocker = fulfill_ops.blocker
+            elif matching_status == "complete":
+                fulfillment_status = "waiting"
+                fulfillment_blocker = "Awaiting Legal kickoff"
+            else:
+                fulfillment_status = "not_started"
+                fulfillment_blocker = "Awaiting matching disposition"
         elif identity_required and not identity_verified:
             fulfillment_status = "waiting"
             fulfillment_blocker = "Awaiting identity verification"
@@ -1113,9 +1191,17 @@ async def _build_vertical_rows(
                 for step in steps
             ]
             fulfillment_status = _rollup_status([s.status for s in fulfillment_steps])
-            fulfillment_blocker = (
-                "Fulfillment attempt failed" if fulfillment_status == "failed" else None
-            )
+            # Kickoff approved with no attempt yet must not fall back to
+            # not_started — that reads as "never started" in Activity / rail.
+            if fulfillment_status == "not_started":
+                fulfillment_status = "in_progress"
+                fulfillment_blocker = "Awaiting fulfillment worker"
+            else:
+                fulfillment_blocker = (
+                    "Fulfillment attempt failed"
+                    if fulfillment_status == "failed"
+                    else None
+                )
 
         fulfillment_cluster.append(
             WorkbenchVerticalRow(
@@ -1124,7 +1210,9 @@ async def _build_vertical_rows(
                 live=True,
                 actionable=True,
                 matching_status=matching_status,
-                disposition_status=disposition.status if disposition else None,
+                disposition_status=(
+                    disposition.status if disposition else legacy_status
+                ),
                 selected_dwid_count=(
                     disposition.selected_dwid_count if disposition else None
                 ),
@@ -1267,6 +1355,7 @@ async def build_request_journey_workbench(
         intake_source=intake_source,
         request_type=request_type,
         ops_by_stage=ops_by_stage,
+        response_status=int(response_status) if response_status is not None else None,
     )
 
     matching_status = _rollup_status(
@@ -1653,14 +1742,7 @@ async def list_matching_needs_attention(
         match_count = (
             int(row["match_count"]) if row["match_count"] is not None else None
         )
-        assignment_raw = await get_current_assignment(conn, row["request_id"])
-        assignment = None
-        if assignment_raw is not None:
-            assignment = NeedsAttentionAssignment(
-                target_role=assignment_raw.get("target_role"),
-                kind=assignment_raw.get("kind"),
-                assignee_identity=assignment_raw.get("assignee_identity"),
-            )
+        assignment = await _needs_attention_assignment(conn, row["request_id"])
         state = row["requestor_state"]
         state_acronym = str(state).strip().upper()[:2] if state else None
         bulk_process_id = (
@@ -1846,6 +1928,7 @@ async def list_notice_needs_attention(
                 raw_record_id=int(row["raw_record_id"]),
                 cache=bulk_by_csv,
             )
+        assignment = await _needs_attention_assignment(conn, row["request_id"])
         items.append(
             NeedsAttentionItem(
                 request_id=row["request_id"],
@@ -1870,6 +1953,7 @@ async def list_notice_needs_attention(
                     if row["response_status"] is not None
                     else None
                 ),
+                assignment=assignment,
                 bulk_process_id=bulk_process_id,
                 source_csv_filename=(
                     str(row["source_csv_filename"])
@@ -1917,6 +2001,7 @@ async def list_delivery_needs_attention(
     for row in rows:
         state = row["requestor_state"]
         state_acronym = str(state).strip().upper()[:2] if state else None
+        assignment = await _needs_attention_assignment(conn, row["request_id"])
         items.append(
             NeedsAttentionItem(
                 request_id=row["request_id"],
@@ -1928,6 +2013,7 @@ async def list_delivery_needs_attention(
                 requested_at=_iso(row["requested_at"]),
                 requestor_state=state_acronym,
                 review_status=str(row["review_status"] or "pending"),
+                assignment=assignment,
             )
         )
     return items
@@ -2245,7 +2331,10 @@ async def post_request_close(
     request: Request,
     viewer: LegalClosePrincipal,
 ) -> RequestCloseResponse:
-    """Close a request — appends request_closures, clears pending gates, sets DROP status when unset."""
+    """Close a request — appends request_closures and clears pending gates.
+
+    Does not invent DROP ``response_status``; disposition upsert remains SoR.
+    """
     _require_database()
     try:
         UUID(request_id)
@@ -2394,7 +2483,12 @@ async def build_request_timeline(conn: Any, *, request_id: str) -> RequestTimeli
         actor = row["decided_by"] or row.get("approver_role")
         action_label = _timeline_action_label(action, context=context)
         status_label = _timeline_status_label(status)
-        summary = f"{action_label} — {status_label}"
+        if action == FULFILLMENT_KICKOFF_ACTION and status == "approved":
+            summary = f"{action_label} approved — fulfillment worker may start"
+        elif action == FULFILLMENT_KICKOFF_ACTION and status == "pending":
+            summary = f"{action_label} pending — Legal has not started fulfillment yet"
+        else:
+            summary = f"{action_label} — {status_label}"
         at = _iso(row["decided_at"]) or _iso(row["requested_at"]) or ""
         entries.append(
             TimelineEntry(
@@ -2437,15 +2531,17 @@ async def build_request_timeline(conn: Any, *, request_id: str) -> RequestTimeli
                     or STAGE_LABELS.get(stage.stage)
                     or stage.stage.replace("_", " ")
                 )
+                status_bit = _timeline_status_label(stage.status)
+                if stage.blocker:
+                    stage_summary = f"Stage {stage_label}: {status_bit} — {stage.blocker}"
+                else:
+                    stage_summary = f"Stage {stage_label}: {status_bit}"
                 entries.append(
                     TimelineEntry(
                         at=ts,
                         kind="stage",
                         actor=None,
-                        summary=(
-                            f"Stage {stage_label}: "
-                            f"{_timeline_status_label(stage.status)}"
-                        ),
+                        summary=stage_summary,
                         meta={"stage": stage.stage, "status": stage.status},
                     )
                 )

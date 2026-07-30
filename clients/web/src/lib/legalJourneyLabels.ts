@@ -39,6 +39,8 @@ export function stageReachLabel(stageKey: string): string {
 const ACTION_REASON_LABELS: Record<string, string> = {
   'notice.review': 'Fulfillment notice pending',
   'matching.review': 'Matching review pending',
+  'fulfillment.kickoff': 'Fulfillment kickoff pending',
+  'fulfillment.kickoff_not_approved': 'Fulfillment kickoff not approved',
   'access.delivery': 'Access delivery pending',
   'delivery.confirm': 'Delivery confirmation pending',
   'workflow.assignment': 'Assignment pending',

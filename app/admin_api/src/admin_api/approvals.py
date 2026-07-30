@@ -11,6 +11,8 @@ import asyncpg
 from admin_api.vertical_dispositions import (
     VERTICAL_DATA,
     default_dwids_for_request,
+    is_identity_cleared,
+    is_kd13_satisfied,
     upsert_vertical_disposition,
 )
 from habeas_privacy_core.db.requests import enqueue_matching
@@ -863,6 +865,7 @@ async def approve_legal_notice_review(
 _ACCESS_DELIVERY_STATUSES = frozenset(
     {"pending", "recorded", "sent", "failed", "delivered", "recalled"}
 )
+_ACCESS_DELIVERY_CONFIRM = frozenset({"delivered", "failed", "recalled"})
 
 
 async def record_access_delivery_status(
@@ -883,6 +886,12 @@ async def record_access_delivery_status(
     )
     if exists is None:
         raise ValueError("request not found")
+    # Confirm statuses require identity + KD13 (same bar as Access render).
+    if status_norm in _ACCESS_DELIVERY_CONFIRM:
+        if not await is_identity_cleared(conn, request_id):
+            raise ValueError("identity not verified with notes (KTD6)")
+        if not await is_kd13_satisfied(conn, request_id):
+            raise ValueError("access packs not ready for all live verticals (KD13)")
     await conn.execute(
         """
         INSERT INTO communication_attempts (
