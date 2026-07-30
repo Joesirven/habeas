@@ -6,6 +6,6 @@ Hash in worker → BigQuery hashed raw → [`transform/external_hash`](../../tra
 
 Source spreadsheets may remain plaintext in Google Drive (domain-wide delegation reads rows as-is). On the Habeas side, the extract worker must standardize and hash identifiers in memory and persist only hashed values to BigQuery and opaque row ids to Postgres — plaintext email, phone, name, or other PII must never land in BQ or Postgres from this pipeline.
 
-Cloud Run FastAPI app. Depends on [`habeas-privacy-core`](../../libs/habeas-privacy-core/).
+Cloud Run FastAPI app — health + step routes with stub adapter (`adapters/stub.py`); live Sheets transport not wired yet. Depends on [`habeas-privacy-core`](../../libs/habeas-privacy-core/).
 
 **Agent rules:** [`AGENTS.md`](AGENTS.md) · **Parent:** [`app/AGENTS.md`](../AGENTS.md)

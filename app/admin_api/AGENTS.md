@@ -13,6 +13,10 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
   `admin_audit_log`); filters `severity`, `resource`, `source`, `q`, `window`/`since`
   (Dashboard Errors = `severity=ERROR`; Logs = unfiltered). Planned Ops IA
   consolidation: `docs/plans/2026-07-30-005-feat-ops-command-center-ia-plan.md`.
+- Integration connections: `GET/POST /ops/connections`, invites, test, revoke
+  (`connections_admin`); public redeem `GET/POST /connect/{token}`
+  (`connections_redeem`) — secrets to Secret Manager only; no secret material in
+  responses or audit. Plan: `docs/plans/2026-07-30-003-feat-connections-onboarding-plan.md`.
 - DROP ops: `GET /ops/drop/pipeline`, spine proxies, hash-index refresh enqueue /
   enqueue-all (USPS 50+DC) / process
 - Fleet visibility (U23): `GET /ops/drop/workers`, `GET /ops/health/queues` —

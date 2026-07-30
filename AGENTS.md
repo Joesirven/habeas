@@ -20,10 +20,11 @@ Code repo for **Habeas Data Privacy Request Automation**. Design authority (arch
 |------|------|
 | [`libs/habeas-privacy-core/`](libs/habeas-privacy-core/) | Shared library — models, queue, audit, adapter bases (not deployed alone) |
 | [`transform/drop_hash/`](transform/drop_hash/) | dbt + UDF DROP hash index — prod home; serving marts `email_hash` / `phone_hash` / `ndz_hash` in `example-gcp-project.drop_hash_index` (not `analytics/`) |
+| [`transform/external_hash/`](transform/external_hash/) | dbt marts for external vertical hash indexes (Mailchimp, etc.) — hashed raw only |
 | [`app/`](app/) | All Cloud Run FastAPI apps — control plane + automation |
 | [`app/matching/`](app/matching/) | Matching worker + chunk drain; Job `matching-drain-*` (5 tasks) started via `/ensure-drain` |
 | [`app/admin_api/`](app/admin_api/) | Main control-plane app — mutations, dashboard, live events |
-| [`clients/web/`](clients/web/) | Admin web app — Vite, React, TypeScript, Bun; Drop ops Pipeline + Health |
+| [`clients/web/`](clients/web/) | Admin web app — Vite, React, TypeScript, Bun; Ops Dashboard (Pipeline / Errors / Logs / Health) + connections onboarding |
 | [`clients/cli/habeas-cli/`](clients/cli/habeas-cli/) | Habeas command-line — hybrid read/write |
 | [`db/migrations/`](db/migrations/) | Unified database migrations (dbmate) |
 | [`infra/`](infra/) | Cloud Build, Terraform, Docker |

@@ -15,10 +15,11 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
 ## Navigation (Ops IA — Request / Job / Run)
 
 - **Requests** → list (row opens **detail workbench** — no journey strip on rows), Needs attention, SLAs (shell), Conditions (Legal), Upload.
-- **Ops** (super_admin): Dashboard (Pipeline · Hash refresh · History · Errors · Logs · Configurations), Workers, Runs, Jobs (shell), Insights (`/ops/health`), Incidents (shell → failed Runs).
+- **Ops** (super_admin): Dashboard (Pipeline · Hash refresh · History · Errors · Logs · Configurations), Workers, Runs, Jobs (shell), Insights (`/ops/health`), Incidents (shell → failed Runs), Connections (`/ops/connections`).
 - **Console** (super_admin): `/ops/drop-pipeline?tab=` mutation power surface (same tab set as Dashboard).
 - Browser never calls worker URLs — only admin-api aggregates.
 - Dashboard **Errors** / **Logs** share one explorer (`GET /ops/logs`); Errors locks severity to ERROR.
+- Connections onboarding: Ops list/invite/test + public redeem route `/connect/$token` (no IAP; one-time invite).
 - **Planned consolidation** (requirements-only): command-center Home + hybrid Inbox — `docs/plans/2026-07-30-005-feat-ops-command-center-ia-plan.md` (not shipped yet).
 
 ## Ops density (Prefect / Dagster feel)

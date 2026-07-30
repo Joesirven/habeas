@@ -9,6 +9,7 @@
 - Append-only attempt tables — no update or delete on workflow history rows.
 - `admin_audit_log`: revoke update/delete from application database role.
 - Three audit layers (per knowledge base): attempt tables, admin audit log, PostgreSQL audit extension.
+- Integration connection secrets live in Secret Manager only — never echo tokens, API keys, or passwords in API responses, logs, or audit payloads (invite URLs may include a one-time redeem token once).
 
 ## Fulfillment gates (request journey)
 
