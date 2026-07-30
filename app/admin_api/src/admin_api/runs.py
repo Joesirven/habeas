@@ -441,3 +441,337 @@ async def get_run(
     if detail is None:
         raise HTTPException(status_code=404, detail="run not found")
     return detail
+
+
+# --- Project-level ops logs (GCP Logs Explorer–style over attempt + audit tables) ---
+
+logs_router = APIRouter(prefix="/ops/logs", tags=["logs"])
+
+_LOG_SEVERITIES = frozenset({"ERROR", "WARNING", "INFO"})
+_LOG_SOURCES = frozenset({"attempt", "audit"})
+_LOG_RESOURCES = frozenset(
+    {
+        "drop_connector",
+        "drop_ingestor",
+        "matching",
+        "hash_index_refresh",
+        "data_fulfillment",
+        "admin-api",
+        "cli",
+    }
+)
+
+_ATTEMPT_LOG_UNION = """
+SELECT 'drop_connector'::text AS resource,
+       id AS attempt_id,
+       step,
+       status,
+       NULL::uuid AS request_id,
+       attempted_at,
+       attempt_number,
+       error_code,
+       error_message
+  FROM drop_connector_attempts
+UNION ALL
+SELECT 'drop_ingestor',
+       id,
+       step,
+       status,
+       NULL::uuid,
+       attempted_at,
+       attempt_number,
+       error_code,
+       error_message
+  FROM drop_ingest_attempts
+UNION ALL
+SELECT 'matching',
+       id,
+       step,
+       status,
+       request_id,
+       attempted_at,
+       attempt_number,
+       error_code,
+       error_message
+  FROM matching_attempts
+UNION ALL
+SELECT 'hash_index_refresh',
+       id,
+       step,
+       status,
+       NULL::uuid,
+       attempted_at,
+       1 AS attempt_number,
+       error_code,
+       error_message
+  FROM hash_index_refresh_attempts
+UNION ALL
+SELECT 'data_fulfillment',
+       id,
+       step,
+       status,
+       request_id,
+       attempted_at,
+       attempt_number,
+       error_code,
+       error_message
+  FROM data_fulfillment_attempts
+"""
+
+
+class OpsLogEntry(BaseModel):
+    """One row in the unified ops log feed (attempt or admin audit)."""
+
+    id: str
+    timestamp: datetime
+    severity: Literal["ERROR", "WARNING", "INFO"]
+    resource: str
+    source: Literal["attempt", "audit"]
+    message: str
+    status: str | None = None
+    step: str | None = None
+    request_id: str | None = None
+    run_id: str | None = None
+    actor: str | None = None
+    result_status: int | None = None
+    error_code: str | None = None
+
+
+def _attempt_severity(status: str) -> Literal["ERROR", "WARNING", "INFO"]:
+    normalized = status.lower()
+    if normalized in _FAILED_STATUSES or "error" in normalized or "fail" in normalized:
+        return "ERROR"
+    if normalized in {"pending", "claimed", "in_flight", "success"}:
+        return "INFO"
+    return "WARNING"
+
+
+def _audit_severity(result_status: int | None) -> Literal["ERROR", "WARNING", "INFO"]:
+    if result_status is None:
+        return "INFO"
+    if result_status >= 500:
+        return "ERROR"
+    if result_status >= 400:
+        return "WARNING"
+    return "INFO"
+
+
+def _attempt_log_message(
+    *,
+    status: str,
+    step: str,
+    attempt_number: int,
+    error_code: str | None,
+    error_message: str | None,
+) -> str:
+    if error_message:
+        return redact_error_text(error_message)
+    parts = [status.replace("_", " "), step, f"attempt {attempt_number}"]
+    if error_code:
+        parts.append(f"code {error_code}")
+    return " · ".join(parts)
+
+
+def _audit_log_message(*, command: str, result_summary: str | None) -> str:
+    if result_summary:
+        return redact_error_text(result_summary, max_len=500)
+    return command
+
+
+def _parse_severity_filter(raw: str | None) -> set[str] | None:
+    if raw is None or not raw.strip():
+        return None
+    values = {part.strip().upper() for part in raw.split(",") if part.strip()}
+    invalid = values - _LOG_SEVERITIES
+    if invalid:
+        raise HTTPException(status_code=400, detail="invalid severity")
+    return values
+
+
+async def fetch_ops_logs(
+    conn: Any,
+    *,
+    severity: set[str] | None,
+    resource: str | None,
+    source: str | None,
+    q: str | None,
+    since: datetime | None,
+    limit: int,
+    offset: int,
+) -> list[OpsLogEntry]:
+    """Merge worker attempt rows and admin_audit_log into one time-ordered feed."""
+    attempt_clauses: list[str] = []
+    audit_clauses: list[str] = []
+    params: list[Any] = []
+    idx = 1
+
+    if since is not None:
+        attempt_clauses.append(f"attempted_at >= ${idx}")
+        audit_clauses.append(f"occurred_at >= ${idx}")
+        params.append(since)
+        idx += 1
+
+    if resource is not None:
+        attempt_clauses.append(f"resource = ${idx}")
+        audit_clauses.append(f"interface = ${idx}")
+        params.append(resource)
+        idx += 1
+
+    attempt_where = f"WHERE {' AND '.join(attempt_clauses)}" if attempt_clauses else ""
+    audit_where = f"WHERE {' AND '.join(audit_clauses)}" if audit_clauses else ""
+
+    # Fetch a wider window then filter severity/source/q in Python so severity
+    # derived from status/HTTP codes stays consistent with the API mapping.
+    fetch_limit = min(max(limit + offset, limit) * 3, 600)
+    sql = f"""
+        SELECT 'attempt'::text AS source,
+               resource,
+               attempt_id,
+               step,
+               status,
+               request_id,
+               attempted_at AS occurred_at,
+               attempt_number,
+               error_code,
+               error_message,
+               NULL::bigint AS audit_id,
+               NULL::text AS actor,
+               NULL::text AS command,
+               NULL::int AS result_status,
+               NULL::text AS result_summary,
+               NULL::text AS interface
+          FROM ({_ATTEMPT_LOG_UNION}) AS attempts
+         {attempt_where}
+        UNION ALL
+        SELECT 'audit',
+               interface,
+               NULL::bigint,
+               NULL::text,
+               NULL::text,
+               NULL::uuid,
+               occurred_at,
+               NULL::int,
+               NULL::text,
+               NULL::text,
+               id,
+               actor,
+               command,
+               result_status,
+               result_summary,
+               interface
+          FROM admin_audit_log
+         {audit_where}
+         ORDER BY occurred_at DESC
+         LIMIT ${idx}
+    """
+    params.append(fetch_limit)
+    rows = await conn.fetch(sql, *params)
+
+    entries: list[OpsLogEntry] = []
+    needle = q.strip().lower() if q and q.strip() else None
+    for row in rows:
+        row_source = str(row["source"])
+        if source is not None and row_source != source:
+            continue
+        if row_source == "attempt":
+            status = str(row["status"])
+            sev = _attempt_severity(status)
+            if severity is not None and sev not in severity:
+                continue
+            job = str(row["resource"])
+            attempt_id = int(row["attempt_id"])
+            step = str(row["step"])
+            message = _attempt_log_message(
+                status=status,
+                step=step,
+                attempt_number=int(row["attempt_number"]),
+                error_code=row["error_code"],
+                error_message=row["error_message"],
+            )
+            if needle is not None and needle not in message.lower() and needle not in job.lower():
+                continue
+            request_id = row["request_id"]
+            entries.append(
+                OpsLogEntry(
+                    id=f"attempt:{job}:{attempt_id}",
+                    timestamp=row["occurred_at"],
+                    severity=sev,
+                    resource=job,
+                    source="attempt",
+                    message=message,
+                    status=status,
+                    step=step,
+                    request_id=str(request_id) if request_id is not None else None,
+                    # Only jobs with GET /ops/runs/{run_id} detail support.
+                    run_id=_run_id(job, attempt_id) if job in RUN_JOBS else None,
+                    error_code=row["error_code"],
+                )
+            )
+        else:
+            result_status = row["result_status"]
+            sev = _audit_severity(int(result_status) if result_status is not None else None)
+            if severity is not None and sev not in severity:
+                continue
+            command = str(row["command"] or "")
+            message = _audit_log_message(
+                command=command,
+                result_summary=row["result_summary"],
+            )
+            resource_name = str(row["interface"] or row["resource"] or "admin-api")
+            actor = row["actor"]
+            hay = f"{message} {command} {resource_name} {actor or ''}".lower()
+            if needle is not None and needle not in hay:
+                continue
+            audit_id = int(row["audit_id"])
+            entries.append(
+                OpsLogEntry(
+                    id=f"audit:{audit_id}",
+                    timestamp=row["occurred_at"],
+                    severity=sev,
+                    resource=resource_name,
+                    source="audit",
+                    message=message,
+                    status=command,
+                    actor=str(actor) if actor is not None else None,
+                    result_status=int(result_status) if result_status is not None else None,
+                )
+            )
+
+    return entries[offset : offset + limit]
+
+
+@logs_router.get("", response_model=list[OpsLogEntry])
+async def list_ops_logs(
+    _principal: SuperAdminPrincipal,
+    severity: str | None = Query(
+        default=None,
+        description="Comma-separated: ERROR, WARNING, INFO",
+    ),
+    resource: str | None = Query(default=None),
+    source: Literal["attempt", "audit"] | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    since: datetime | None = Query(default=None),
+    window: Literal["8h", "24h", "1w", "3m"] | None = Query(default="1w"),
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[OpsLogEntry]:
+    _require_database()
+    severity_set = _parse_severity_filter(severity)
+    if resource is not None and resource not in _LOG_RESOURCES:
+        raise HTTPException(status_code=400, detail="invalid resource")
+    if source is not None and source not in _LOG_SOURCES:
+        raise HTTPException(status_code=400, detail="invalid source")
+
+    effective_since = _resolve_since(since=since, window=window)
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        return await fetch_ops_logs(
+            conn,
+            severity=severity_set,
+            resource=resource,
+            source=source,
+            q=q,
+            since=effective_since,
+            limit=limit,
+            offset=offset,
+        )

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
+import { actionToast } from '@/lib/action-toast'
 import {
   getWorkerSchedules,
   patchWorkerSchedule,
@@ -29,7 +30,6 @@ export function ScheduleConfigPanel() {
       { enabled: boolean; interval: number; time_utc: string }
     >
   >({})
-  const [message, setMessage] = useState<string | null>(null)
 
   const schedulesQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'worker-schedules'],
@@ -41,18 +41,26 @@ export function ScheduleConfigPanel() {
   const saveMutation = useMutation({
     mutationFn: patchWorkerSchedule,
     onSuccess: async (payload) => {
-      setMessage(
-        `Saved ${payload.schedule.job_key} (${payload.mode}${
+      actionToast.success({
+        title: 'Schedule saved',
+        description: `${payload.schedule.job_key} (${payload.mode}${
           payload.schedule.scheduler_reachable ? '' : ', local defaults'
         })`,
-      )
+      })
       await queryClient.invalidateQueries({
         queryKey: ['admin-api', 'ops', 'worker-schedules'],
       })
       await queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
     },
-    onError: (error) => {
-      setMessage(error instanceof Error ? error.message : String(error))
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Could not save schedule',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => saveMutation.mutate(variables),
+        },
+      })
     },
   })
 
@@ -198,8 +206,6 @@ export function ScheduleConfigPanel() {
           </table>
         </div>
       ) : null}
-
-      {message ? <p className="text-sm text-ink-soft">{message}</p> : null}
     </div>
   )
 }

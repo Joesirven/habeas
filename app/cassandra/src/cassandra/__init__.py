@@ -1,1 +1,1 @@
-"""cassandra-worker — scaffold placeholder."""
+"""Cassandra suppression worker package."""

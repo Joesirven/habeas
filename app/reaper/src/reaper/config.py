@@ -12,4 +12,14 @@ DEFAULT_REAPED_TABLES: list[ReapedTableConfig] = [
         table="hash_index_refresh_attempts",
         supports_attempt_retry=False,
     ),
+    ReapedTableConfig(table="mailchimp_attempts"),
+    ReapedTableConfig(table="paylocity_attempts"),
+    ReapedTableConfig(table="lever_attempts"),
+    ReapedTableConfig(table="auth0_attempts"),
+    ReapedTableConfig(table="google_sheets_attempts"),
+    ReapedTableConfig(table="cassandra_attempts"),
+    ReapedTableConfig(
+        table="vertical_hash_refresh_attempts",
+        supports_attempt_retry=False,
+    ),
 ]

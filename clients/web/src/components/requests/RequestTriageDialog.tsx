@@ -28,6 +28,7 @@ import {
   type MatchedPersonContact,
   type RunTimelineStep,
 } from '@/lib/api'
+import { actionToast } from '@/lib/action-toast'
 import { actionReasonLabel } from '@/lib/legalJourneyLabels'
 import { cn } from '@/lib/utils'
 
@@ -443,7 +444,6 @@ export function AccessHandoffPanel({
   busy: boolean
 }) {
   const [draftOpen, setDraftOpen] = useState(false)
-  const [draftNote, setDraftNote] = useState<string | null>(null)
 
   if (isPending) {
     return <p className="py-3 text-xs text-ink-soft">Loading fulfillment artifact…</p>
@@ -506,15 +506,16 @@ export function AccessHandoffPanel({
           variant="outline"
           type="button"
           onClick={() => {
+            const copyBody = () => {
+              void navigator.clipboard.writeText(placeholderDraft.body)
+            }
             void navigator.clipboard.writeText(placeholderDraft.body).then(() => {
-              setDraftNote('Copied draft body (placeholder URL)')
-              window.setTimeout(() => setDraftNote(null), 2500)
+              actionToast.copied('Copied body', copyBody)
             })
           }}
         >
           Draft outbound
         </Button>
-        {draftNote ? <span className="text-mute">{draftNote}</span> : null}
       </div>
     )
   }
@@ -611,9 +612,11 @@ export function AccessHandoffPanel({
                 size="sm"
                 type="button"
                 onClick={() => {
+                  const copyBody = () => {
+                    void navigator.clipboard.writeText(draft.body)
+                  }
                   void navigator.clipboard.writeText(draft.body).then(() => {
-                    setDraftNote('Copied body')
-                    window.setTimeout(() => setDraftNote(null), 2000)
+                    actionToast.copied('Copied body', copyBody)
                   })
                 }}
               >
@@ -624,15 +627,16 @@ export function AccessHandoffPanel({
                 variant="outline"
                 type="button"
                 onClick={() => {
+                  const copySubject = () => {
+                    void navigator.clipboard.writeText(draft.subject)
+                  }
                   void navigator.clipboard.writeText(draft.subject).then(() => {
-                    setDraftNote('Copied subject')
-                    window.setTimeout(() => setDraftNote(null), 2000)
+                    actionToast.copied('Copied subject', copySubject)
                   })
                 }}
               >
                 Copy subject
               </Button>
-              {draftNote ? <span className="text-mute">{draftNote}</span> : null}
             </div>
           </div>
         </DialogContent>

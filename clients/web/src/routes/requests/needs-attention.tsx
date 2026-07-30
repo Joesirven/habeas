@@ -72,6 +72,7 @@ import {
   type RequestRecord,
   type TimelineEntry,
 } from '@/lib/api'
+import { actionToast } from '@/lib/action-toast'
 import { actionReasonLabel, NOTICE_APPROVAL } from '@/lib/legalJourneyLabels'
 import { cn, paginate } from '@/lib/utils'
 
@@ -1183,10 +1184,6 @@ export function LegalInboxComposer({
   const [statusId, setStatusId] = useState(() => options[0]?.id ?? '')
   const [body, setBody] = useState('')
   const [error, setError] = useState<string | null>(null)
-  const [retryPayload, setRetryPayload] = useState<{
-    statusId: string
-    body: string
-  } | null>(null)
 
   useEffect(() => {
     if (!options.some((option) => option.id === statusId)) {
@@ -1212,15 +1209,29 @@ export function LegalInboxComposer({
     },
     onSuccess: async () => {
       setError(null)
-      setRetryPayload(null)
       setBody('')
+      actionToast.success({ title: 'Status updated' })
       await onSuccess()
     },
     onError: (mutationError, variables) => {
-      setError(
-        mutationError instanceof Error ? mutationError.message : 'Status update failed',
-      )
-      setRetryPayload(variables)
+      const message =
+        mutationError instanceof Error ? mutationError.message : ''
+      if (
+        message === 'Select a status transition' ||
+        message === 'Reply is required for this status'
+      ) {
+        setError(message)
+        return
+      }
+      setError(null)
+      actionToast.error({
+        title: 'Status update failed',
+        description: actionToast.safeErrorMessage(mutationError),
+        action: {
+          label: 'Retry',
+          onClick: () => sendMutation.mutate(variables),
+        },
+      })
     },
   })
 
@@ -1270,16 +1281,6 @@ export function LegalInboxComposer({
         >
           {sendMutation.isPending ? 'Sending…' : 'Send and advance'}
         </Button>
-        {retryPayload && error ? (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={sendMutation.isPending}
-            onClick={() => sendMutation.mutate(retryPayload)}
-          >
-            Retry
-          </Button>
-        ) : null}
       </div>
       {error ? <p className="text-[0.65rem] text-red-700">{error}</p> : null}
     </div>
@@ -1341,7 +1342,6 @@ function InboxActivityPanel({
   const queryClient = useQueryClient()
   const [filter, setFilter] = useState<InboxActivityFilter>('all')
   const [comment, setComment] = useState('')
-  const [error, setError] = useState<string | null>(null)
 
   const timelineQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', requestId, 'timeline'],
@@ -1354,7 +1354,7 @@ function InboxActivityPanel({
     mutationFn: () => postRequestComment(requestId, comment.trim()),
     onSuccess: async () => {
       setComment('')
-      setError(null)
+      actionToast.success({ title: 'Note posted' })
       await Promise.all([
         queryClient.invalidateQueries({
           queryKey: ['admin-api', 'ops', 'requests', requestId, 'timeline'],
@@ -1365,7 +1365,14 @@ function InboxActivityPanel({
       ])
     },
     onError: (err) => {
-      setError(err instanceof Error ? err.message : 'Comment failed')
+      actionToast.error({
+        title: 'Note failed',
+        description: actionToast.safeErrorMessage(err),
+        action: {
+          label: 'Retry',
+          onClick: () => commentMutation.mutate(),
+        },
+      })
     },
   })
 
@@ -1487,7 +1494,6 @@ function InboxActivityPanel({
           >
             {commentMutation.isPending ? 'Posting…' : 'Post note'}
           </Button>
-          {error ? <p className="text-[0.65rem] text-red-700">{error}</p> : null}
         </div>
       ) : null}
     </div>
@@ -1612,11 +1618,7 @@ function InboxReviewPane({
 }) {
   const queryClient = useQueryClient()
   const { me } = useMe()
-  const [actionError, setActionError] = useState<string | null>(null)
   const [commentDraft, setCommentDraft] = useState('')
-  const [assignError, setAssignError] = useState<string | null>(null)
-  const [commentError, setCommentError] = useState<string | null>(null)
-  const [copyNote, setCopyNote] = useState<string | null>(null)
   const [confirmAction, setConfirmAction] = useState<
     | 'fulfill'
     | 'decline'
@@ -1695,23 +1697,37 @@ function InboxReviewPane({
         response_status: responseStatus,
       }),
     onSuccess: async () => {
-      setActionError(null)
       setConfirmAction(null)
+      actionToast.success({ title: 'Request fulfilled' })
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
-    onError: (error) => {
-      setActionError(error instanceof Error ? error.message : 'Fulfill failed')
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Fulfill failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => promoteMutation.mutate(variables),
+        },
+      })
     },
   })
 
   const declineMutation = useMutation({
     mutationFn: () => postDropMatchingResultDecline(item.request_id),
     onSuccess: async () => {
-      setActionError(null)
+      actionToast.success({ title: 'Matching review declined' })
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
     onError: (error) => {
-      setActionError(error instanceof Error ? error.message : 'Decline failed')
+      actionToast.error({
+        title: 'Decline failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => declineMutation.mutate(),
+        },
+      })
     },
   })
 
@@ -1722,12 +1738,19 @@ function InboxReviewPane({
         target_role: 'legal',
       }),
     onSuccess: async () => {
-      setActionError(null)
       setConfirmAction(null)
+      actionToast.success({ title: 'Assigned to legal' })
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
     onError: (error) => {
-      setActionError(error instanceof Error ? error.message : 'Escalate failed')
+      actionToast.error({
+        title: 'Assign to legal failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => escalateMutation.mutate(),
+        },
+      })
     },
   })
 
@@ -1738,12 +1761,19 @@ function InboxReviewPane({
         response_status: 2,
       }),
     onSuccess: async () => {
-      setActionError(null)
       setConfirmAction(null)
+      actionToast.success({ title: 'Rejected as exempted' })
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
     onError: (error) => {
-      setActionError(error instanceof Error ? error.message : 'Triage reject failed')
+      actionToast.error({
+        title: 'Triage reject failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => triageRejectMutation.mutate(),
+        },
+      })
     },
   })
 
@@ -1751,26 +1781,38 @@ function InboxReviewPane({
     mutationFn: () =>
       postTriageSendToMatching({ request_ids: [item.request_id] }),
     onSuccess: async () => {
-      setActionError(null)
       setConfirmAction(null)
+      actionToast.success({ title: 'Sent to matching' })
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
     onError: (error) => {
-      setActionError(error instanceof Error ? error.message : 'Send to matching failed')
+      actionToast.error({
+        title: 'Send to matching failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => triageMatchMutation.mutate(),
+        },
+      })
     },
   })
 
   const noticeApproveMutation = useMutation({
     mutationFn: () => postNoticeApprove({ request_ids: [item.request_id] }),
     onSuccess: async () => {
-      setActionError(null)
       setConfirmAction(null)
+      actionToast.success({ title: NOTICE_APPROVAL.action })
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
     onError: (error) => {
-      setActionError(
-        error instanceof Error ? error.message : 'Notice approve failed',
-      )
+      actionToast.error({
+        title: 'Notice approve failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => noticeApproveMutation.mutate(),
+        },
+      })
     },
   })
 
@@ -1789,25 +1831,39 @@ function InboxReviewPane({
       })
     },
     onSuccess: async () => {
-      setAssignError(null)
+      actionToast.success({ title: 'Assignment updated' })
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
-    onError: (error) => {
-      setAssignError(error instanceof Error ? error.message : 'Assign failed')
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Assign failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => assignMutation.mutate(variables),
+        },
+      })
     },
   })
 
   const commentMutation = useMutation({
     mutationFn: (body: string) => postRequestComment(item.request_id, body),
     onSuccess: async () => {
-      setCommentError(null)
       setCommentDraft('')
+      actionToast.success({ title: 'Comment posted' })
       await queryClient.invalidateQueries({
         queryKey: ['admin-api', 'ops', 'requests', item.request_id, 'comments'],
       })
     },
-    onError: (error) => {
-      setCommentError(error instanceof Error ? error.message : 'Comment failed')
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Comment failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => commentMutation.mutate(variables),
+        },
+      })
     },
   })
 
@@ -1815,6 +1871,7 @@ function InboxReviewPane({
     mutationFn: (status: 'delivered' | 'failed' | 'recalled') =>
       patchAccessDeliveryStatus(item.request_id, { status }),
     onSuccess: async () => {
+      actionToast.success({ title: 'Delivery status updated' })
       await Promise.all([
         queryClient.invalidateQueries({
           queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', item.request_id],
@@ -1823,6 +1880,16 @@ function InboxReviewPane({
           queryKey: ['admin-api', 'ops', 'requests', 'needs-attention'],
         }),
       ])
+    },
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Delivery update failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => deliveryMutation.mutate(variables),
+        },
+      })
     },
   })
 
@@ -1884,10 +1951,12 @@ function InboxReviewPane({
 
   function copyShareableUrl() {
     if (!shareableUrl) return
-    void navigator.clipboard.writeText(shareableUrl).then(() => {
-      setCopyNote('Copied URL')
-      window.setTimeout(() => setCopyNote(null), 2000)
-    })
+    const copyAgain = () => {
+      void navigator.clipboard.writeText(shareableUrl).then(() => {
+        actionToast.copied('Copied URL', copyAgain)
+      })
+    }
+    copyAgain()
   }
 
   return (
@@ -2001,7 +2070,7 @@ function InboxReviewPane({
               candidates={assigneeCandidates}
               disabled={!canReviewActions}
               pending={assignMutation.isPending}
-              error={assignError}
+              error={null}
               onAssign={(target) => assignMutation.mutate(target)}
             />
           </div>
@@ -2108,12 +2177,6 @@ function InboxReviewPane({
                   See more details
                 </button>
               </div>
-              {copyNote ? (
-                <p className="mt-1.5 text-[0.65rem] text-mute">{copyNote}</p>
-              ) : null}
-              {actionError ? (
-                <p className="mt-1.5 text-[0.65rem] text-red-700">{actionError}</p>
-              ) : null}
             </div>
           ) : null}
         </div>
@@ -2248,7 +2311,7 @@ function InboxReviewPane({
                   isError={matchingQuery.isError}
                   canReviewActions={canReviewActions && !legalPersona}
                   actionPending={actionPending}
-                  actionError={actionError}
+                  actionError={null}
                   onPromote={(responseStatus) =>
                     promoteMutation.mutate(responseStatus)
                   }
@@ -2363,9 +2426,6 @@ function InboxReviewPane({
                   </Button>
                 </div>
               ) : null}
-              {commentError ? (
-                <p className="text-[0.65rem] text-red-700">{commentError}</p>
-              ) : null}
             </TabsContent>
           </div>
         </Tabs>
@@ -2397,10 +2457,12 @@ function InboxReviewPane({
                   size="sm"
                   type="button"
                   onClick={() => {
-                    void navigator.clipboard.writeText(outboundDraft.body).then(() => {
-                      setCopyNote('Copied draft body')
-                      window.setTimeout(() => setCopyNote(null), 2000)
-                    })
+                    const copyBody = () => {
+                      void navigator.clipboard.writeText(outboundDraft.body).then(() => {
+                        actionToast.copied('Copied draft body', copyBody)
+                      })
+                    }
+                    copyBody()
                   }}
                 >
                   Copy body
@@ -2410,10 +2472,12 @@ function InboxReviewPane({
                   variant="outline"
                   type="button"
                   onClick={() => {
-                    void navigator.clipboard.writeText(outboundDraft.subject).then(() => {
-                      setCopyNote('Copied subject')
-                      window.setTimeout(() => setCopyNote(null), 2000)
-                    })
+                    const copySubject = () => {
+                      void navigator.clipboard.writeText(outboundDraft.subject).then(() => {
+                        actionToast.copied('Copied subject', copySubject)
+                      })
+                    }
+                    copySubject()
                   }}
                 >
                   Copy subject
@@ -2723,7 +2787,6 @@ function ThreadReviewPane({
   onPromoteAll,
   onDeclineAll,
   actionPending,
-  actionError,
   onBackToQueue,
 }: {
   batchLabel: string
@@ -2733,7 +2796,6 @@ function ThreadReviewPane({
   onPromoteAll: (responseStatus: DropResponseStatusCode) => void
   onDeclineAll: () => void
   actionPending: boolean
-  actionError: string | null
   onBackToQueue?: () => void
 }) {
   const [confirm, setConfirm] = useState<'fulfill' | 'decline' | null>(null)
@@ -2911,9 +2973,6 @@ function ThreadReviewPane({
             </Button>
           </div>
         ) : null}
-        {actionError ? (
-          <p className="text-[0.65rem] text-red-700">{actionError}</p>
-        ) : null}
       </div>
     </div>
   )
@@ -2984,10 +3043,8 @@ export function NeedsAttentionPage() {
     else if (dataOwnerPersona) setInboxKind('matching')
   }, [bulkFilter, dataOwnerPersona, legalPersona, search.assignee, search.filter, search.kind])
 
-  const [bulkError, setBulkError] = useState<string | null>(null)
   const [bulkAssignee, setBulkAssignee] = useState('')
   const [bulkAssignTarget, setBulkAssignTarget] = useState<AssignTarget | null>(null)
-  const [threadActionError, setThreadActionError] = useState<string | null>(null)
   const [bulkConfirm, setBulkConfirm] = useState<
     | 'fulfill'
     | 'decline'
@@ -3340,32 +3397,42 @@ export function NeedsAttentionPage() {
       )
       const failed = failedResults.length
       const succeeded = results.length - failed
-      const sample =
-        failedResults[0]?.reason instanceof Error
-          ? failedResults[0].reason.message
-          : failedResults[0]
-            ? String(failedResults[0].reason)
-            : null
-      return { succeeded, failed, action, sample }
+      return { succeeded, failed, action }
     },
-    onSuccess: async (result) => {
+    onSuccess: async (result, variables) => {
       const verb = result.action === 'fulfill' ? 'fulfilled' : 'declined'
-      const message =
-        result.failed > 0
-          ? `${result.succeeded} ${verb}, ${result.failed} failed${
-              result.sample ? ` — ${result.sample}` : ''
-            }`
-          : null
-      setBulkError(message)
-      setThreadActionError(message)
+      if (result.failed > 0) {
+        actionToast.warning({
+          title:
+            result.action === 'fulfill'
+              ? 'Bulk fulfill partially completed'
+              : 'Bulk decline partially completed',
+          description: `${result.succeeded} ${verb}, ${result.failed} failed`,
+          action: {
+            label: 'Retry',
+            onClick: () => bulkMutation.mutate(variables),
+          },
+        })
+      } else {
+        actionToast.success({
+          title:
+            result.action === 'fulfill' ? 'Requests fulfilled' : 'Requests declined',
+          description: `${result.succeeded} ${verb}`,
+        })
+      }
       setSelectedIds(new Set())
       setBulkConfirm(null)
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
-    onError: (error) => {
-      const message = error instanceof Error ? error.message : 'Bulk action failed'
-      setBulkError(message)
-      setThreadActionError(message)
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Bulk action failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => bulkMutation.mutate(variables),
+        },
+      })
       setBulkConfirm(null)
     },
   })
@@ -3390,16 +3457,26 @@ export function NeedsAttentionPage() {
         target_role: 'reviewer',
       })
     },
-    onSuccess: async () => {
-      setBulkError(null)
+    onSuccess: async (_result, variables) => {
+      actionToast.success({
+        title: 'Requests assigned',
+        description: `${variables.requestIds.length} updated`,
+      })
       setBulkAssignee('')
       setBulkAssignTarget(null)
       setSelectedIds(new Set())
       setBulkConfirm(null)
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
-    onError: (error) => {
-      setBulkError(error instanceof Error ? error.message : 'Bulk assign failed')
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Bulk assign failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => bulkAssignMutation.mutate(variables),
+        },
+      })
       setBulkConfirm(null)
     },
   })
@@ -3408,15 +3485,30 @@ export function NeedsAttentionPage() {
     mutationFn: (requestIds: string[]) =>
       postTriageBulkReject({ request_ids: requestIds, response_status: 2 }),
     onSuccess: async (result) => {
-      setBulkError(
-        result.count === 0 ? 'No triage rows rejected' : null,
-      )
+      if (result.count === 0) {
+        actionToast.warning({
+          title: 'No rows rejected',
+          description: 'None of the selected items were in triage.',
+        })
+      } else {
+        actionToast.success({
+          title: 'Rejected as exempted',
+          description: `${result.count} updated`,
+        })
+      }
       setSelectedIds(new Set())
       setBulkConfirm(null)
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
-    onError: (error) => {
-      setBulkError(error instanceof Error ? error.message : 'Bulk reject failed')
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Bulk reject failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => bulkTriageRejectMutation.mutate(variables),
+        },
+      })
       setBulkConfirm(null)
     },
   })
@@ -3424,16 +3516,24 @@ export function NeedsAttentionPage() {
   const bulkTriageMatchMutation = useMutation({
     mutationFn: (requestIds: string[]) =>
       postTriageSendToMatching({ request_ids: requestIds }),
-    onSuccess: async () => {
-      setBulkError(null)
+    onSuccess: async (result) => {
+      actionToast.success({
+        title: 'Sent to matching',
+        description: `${result.count} updated`,
+      })
       setSelectedIds(new Set())
       setBulkConfirm(null)
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
-    onError: (error) => {
-      setBulkError(
-        error instanceof Error ? error.message : 'Send to matching failed',
-      )
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Send to matching failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => bulkTriageMatchMutation.mutate(variables),
+        },
+      })
       setBulkConfirm(null)
     },
   })
@@ -3442,17 +3542,30 @@ export function NeedsAttentionPage() {
     mutationFn: (requestIds: string[]) =>
       postNoticeApprove({ request_ids: requestIds }),
     onSuccess: async (result) => {
-      setBulkError(
-        result.count === 0 ? 'No notice rows approved' : null,
-      )
+      if (result.count === 0) {
+        actionToast.warning({
+          title: 'No rows approved',
+          description: 'None of the selected items were pending notice approval.',
+        })
+      } else {
+        actionToast.success({
+          title: NOTICE_APPROVAL.action,
+          description: `${result.count} updated`,
+        })
+      }
       setSelectedIds(new Set())
       setBulkConfirm(null)
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
-    onError: (error) => {
-      setBulkError(
-        error instanceof Error ? error.message : 'Notice approve failed',
-      )
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Notice approve failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => bulkNoticeApproveMutation.mutate(variables),
+        },
+      })
       setBulkConfirm(null)
     },
   })
@@ -4086,12 +4199,6 @@ export function NeedsAttentionPage() {
             </div>
           ) : null}
 
-          {bulkError ? (
-            <p className="border-b border-line px-3 py-2 text-[0.7rem] text-red-700">
-              {bulkError}
-            </p>
-          ) : null}
-
           <div className="min-h-0 flex-1 overflow-y-auto">
             {loading ? (
               <div className="p-4">
@@ -4456,10 +4563,8 @@ export function NeedsAttentionPage() {
               stackKind={activeThread.stackKind}
               canReviewActions={canReviewActions}
               actionPending={bulkMutation.isPending}
-              actionError={threadActionError}
               onBackToQueue={() => setMobilePane('queue')}
               onPromoteAll={(responseStatus) => {
-                setThreadActionError(null)
                 bulkMutation.mutate({
                   action: 'fulfill',
                   requestIds: activeThread.items.map((item) => item.request_id),
@@ -4467,7 +4572,6 @@ export function NeedsAttentionPage() {
                 })
               }}
               onDeclineAll={() => {
-                setThreadActionError(null)
                 bulkMutation.mutate({
                   action: 'decline',
                   requestIds: activeThread.items.map((item) => item.request_id),

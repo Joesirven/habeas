@@ -77,6 +77,19 @@ def test_redact_error_text_strips_hashes_dwids_and_pii():
     assert "[redacted]" in cleaned_email
 
 
+def test_connect_redeem_paths_skipped_by_audit():
+    from habeas_privacy_core.audit.middleware import _should_audit
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(
+        {"type": "http", "method": "POST", "path": "/connect/secret-invite-token", "headers": []},
+        receive,
+    )
+    assert not _should_audit(request, sensitive_get_paths=(), skip_paths=set())
+
+
 def test_actor_and_interface_helpers():
     class _Headers(dict):
         def get(self, key, default=None):

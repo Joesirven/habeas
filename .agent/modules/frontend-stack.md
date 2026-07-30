@@ -33,11 +33,29 @@ Visual design: load [`design-taste.md`](design-taste.md). For DROP Ops IA (Runs 
 - Deployed SPA may set `VITE_ADMIN_API_URL` to admin-api; `fetch` uses `credentials: 'include'` for IAP cookies. Cross-origin IAP is best-effort — use CLI for reliable mutations.
 - Never call worker Cloud Run URLs from the browser.
 
+## Action feedback (universal)
+
+**Canonical pattern: action toast** — shadcn/Sonner toast with title, short description, and a primary action chip (Undo / Retry / View / Open run / Dismiss). Mounted once via `Toaster` in `AppShell`. Call sites import `actionToast` from `clients/web/src/lib/action-toast.ts` — do **not** import `toast` from `sonner` directly.
+
+| Scenario | Helper | Action chip (typical) |
+|----------|--------|------------------------|
+| Success | `actionToast.success` | View / Open / Dismiss |
+| Error | `actionToast.error` | Retry |
+| Warning | `actionToast.warning` | Keep / Undo / Dismiss |
+| Info | `actionToast.info` | Details / Dismiss |
+| Async / promise | `actionToast.promise` | Open run / Retry |
+| Clipboard | `actionToast.copied` | Copy again |
+
+**Do not** invent alternate feedback chrome for ordinary mutations: no page banners, inline status strips, bottom snackbars, or title-only toasts as the product default.
+
+Privacy: toast copy must not include personally identifiable information, hashes, or DWID values — use `actionToast.safeErrorMessage` for API errors; ids/counts only where already allowed in ops UI.
+
 ## Rules
 
 - Thin client — no business rules in browser; all authorization on admin-api.
 - Not Next.js — single-page app on Cloud Run (`admin-web-*`) behind Identity-Aware Proxy.
 - Mutations never bypass admin-api.
+- After a user-triggered mutation settles, give feedback with an **action toast** (see above) — not silent success and not a one-off alert pattern.
 
 ## Search-param merge (filter clear)
 

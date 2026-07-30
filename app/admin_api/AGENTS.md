@@ -9,6 +9,9 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
 - Routes: approvals, dashboard, admin rules, ops, `GET /live/events`
 - Unified Runs: `GET /ops/runs` — filters `job`, `status`, `request_id`, `process_id`
   (bulk download attempt id; ingest/matching via download `gcs_uri`), `window`/`since`
+- Ops logs: `GET /ops/logs` — project-level feed (worker attempt tables +
+  `admin_audit_log`); filters `severity`, `resource`, `source`, `q`, `window`/`since`
+  (Dashboard Errors = `severity=ERROR`; Logs = unfiltered)
 - DROP ops: `GET /ops/drop/pipeline`, spine proxies, hash-index refresh enqueue /
   enqueue-all (USPS 50+DC) / process
 - Fleet visibility (U23): `GET /ops/drop/workers`, `GET /ops/health/queues` —
@@ -35,6 +38,11 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
 - Assign / escalate (U17): reuses `approval_requests` with `action_type=workflow.assignment`
   (no new migration) — `POST /ops/drop/workflow/assign`, `POST .../escalate`,
   `GET .../assignments`; targets `reviewer` | `legal` | `data_owner`; actor = IAP email
+- Journey fulfillment gates (plan `2026-07-29-001`): do **not** enqueue
+  fulfillment solely from `matching.review` — require **Legal kickoff** per
+  approved vertical; Access packs/notice require identity status + **required
+  comment**; reject CA DROP typed as Access. See
+  [`.agent/modules/privacy-invariants.md`](../../.agent/modules/privacy-invariants.md).
 - Postgres LISTEN on approval events → forward to Server-Sent Events clients
 
 - Vendor adapter code in `adapters/` inside this app only.

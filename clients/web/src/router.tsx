@@ -11,6 +11,8 @@ import { OpsRunsPage } from '@/routes/ops/runs'
 import { RunDetailPage } from '@/routes/ops/run-detail'
 import { WorkersPage, WorkersTrendsPage } from '@/routes/ops/workers'
 import { WorkersSettingsPage } from '@/routes/ops/workers/settings'
+import { ConnectionsPage } from '@/routes/ops/connections'
+import { ConnectTokenPage } from '@/routes/connect.$token'
 import { HealthConfigurationPage } from '@/routes/ops/health/configuration'
 import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
 import { HealthLandingPage } from '@/routes/ops/health/index'
@@ -26,6 +28,8 @@ export const PIPELINE_TABS = [
   'pipeline',
   'hash_refresh',
   'history',
+  'errors',
+  'logs',
   'configurations',
 ] as const
 
@@ -524,7 +528,6 @@ const docsRoute = createRoute({
   component: DocsPage,
 })
 
-
 const requestDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests/$requestId',
@@ -569,6 +572,18 @@ const opsWorkersSettingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/workers/settings',
   component: WorkersSettingsPage,
+})
+
+const opsConnectionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/connections',
+  component: ConnectionsPage,
+})
+
+const connectTokenRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/connect/$token',
+  component: ConnectTokenPage,
 })
 
 const opsWorkersTrendsRoute = createRoute({
@@ -675,6 +690,8 @@ const routeTree = rootRoute.addChildren([
   opsWorkersRoute,
   opsWorkersFailedRoute,
   opsWorkersSettingsRoute,
+  opsConnectionsRoute,
+  connectTokenRoute,
   opsWorkersTrendsRoute,
   opsWorkerDetailRoute,
   opsDeMonitorRoute,

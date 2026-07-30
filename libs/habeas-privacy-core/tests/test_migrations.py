@@ -88,6 +88,51 @@ def test_data_fulfillment_attempts_migration_exists():
     assert "migrate:down" in content
 
 
+def test_vertical_external_attempt_tables_migration_exists():
+    migration = (
+        migrations_dir() / "20260730150001_vertical_external_attempt_tables.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+
+    for table in (
+        "mailchimp_attempts",
+        "paylocity_attempts",
+        "lever_attempts",
+        "auth0_attempts",
+        "google_sheets_attempts",
+        "cassandra_attempts",
+        "vertical_hash_refresh_attempts",
+        "vertical_hash_refresh_runs",
+    ):
+        assert f"CREATE TABLE {table}" in content
+
+    for system in ("mailchimp", "paylocity", "lever", "auth0", "google_sheets"):
+        assert f"'{system}'" in content
+
+    assert "step IN ('matching', 'suppression')" in content
+
+    cassandra_section = content.split("CREATE TABLE cassandra_attempts", 1)[1].split(
+        "CREATE TABLE vertical_hash_refresh_attempts", 1
+    )[0]
+    assert "step IN ('suppression')" in cassandra_section
+    assert "'matching'" not in cassandra_section
+
+    refresh_section = content.split("CREATE TABLE vertical_hash_refresh_attempts", 1)[1]
+    for system in ("mailchimp", "paylocity", "lever", "auth0", "google_sheets"):
+        assert f"'{system}'" in refresh_section
+    system_check = refresh_section.split("vertical_hash_refresh_attempts_system_valid", 1)[1].split(
+        ")", 1
+    )[0]
+    assert "cassandra" not in system_check
+    assert "ix_vertical_hash_refresh_attempts_single_flight" in content
+    assert "audit_payload" in content
+    assert "raw_request_payload" not in content
+    assert "core_forbid_terminal_attempt_mutation" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+
+
 def test_request_closures_and_due_overrides_migration_exists():
     migration = (
         migrations_dir() / "20260730140001_core_request_closures_and_due_overrides.sql"
@@ -216,3 +261,15 @@ async def test_t4_3_drop_raw_requests_required_columns(migrated_pool):
                 ) VALUES ('bad-list', 'MAID', '20260716_broker_MAID.csv')
                 """
             )
+
+
+def test_integration_connections_migration_exists():
+    migration = (
+        migrations_dir() / "20260730170001_core_integration_connections.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+    assert "CREATE TABLE integration_connections" in content
+    assert "CREATE TABLE connection_invites" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content

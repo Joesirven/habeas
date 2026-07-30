@@ -53,6 +53,7 @@ function operatorSublabel(operator: LegalOperator): string {
 function staticActions(
   navigate: ReturnType<typeof useNavigate>,
   showPeople: boolean,
+  showSuperAdminOps: boolean,
   onClose: () => void,
 ): PaletteItem[] {
   const finish = (fn: () => void) => () => {
@@ -104,6 +105,16 @@ function staticActions(
       label: 'Go to Runs',
       onSelect: finish(() => navigate({ to: '/ops/runs' })),
     },
+    ...(showSuperAdminOps
+      ? [
+          {
+            id: 'action-connections',
+            group: 'actions' as const,
+            label: 'Go to Connections',
+            onSelect: finish(() => navigate({ to: '/ops/connections' })),
+          },
+        ]
+      : []),
 
     {
       id: 'action-inbox-unassigned',
@@ -177,7 +188,7 @@ type CommandPaletteProps = {
 
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useNavigate()
-  const { role, me } = useMe()
+  const { role, me, isSuperAdmin } = useMe()
   const showPeople = canAccessLegalSurfaces(role)
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
@@ -262,7 +273,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
       }
     }
 
-    const actions = staticActions(navigate, showPeople, close).filter((item) => {
+    const actions = staticActions(navigate, showPeople, isSuperAdmin, close).filter((item) => {
       if (!needle) return true
       return item.label.toLowerCase().includes(needle)
     })
@@ -277,6 +288,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     requestSearchEnabled,
     requestsQuery.data,
     showPeople,
+    isSuperAdmin,
     trimmedQuery,
   ])
 

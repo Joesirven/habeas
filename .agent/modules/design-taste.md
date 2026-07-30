@@ -32,11 +32,16 @@
 7. Radius: `md` (6–8px). Shadows: one soft level max, or none.
 8. Typography: system / Inter-style sans only (`font-body`). Display serif optional for brand wordmark only.
 
+## Action feedback
+
+Universal post-action feedback is the **action toast** (Sonner via shadcn): title + one supporting line + one primary action chip. Top-right, Habeas navy action button, soft border tint by tone (success / error / warning / info). Dense and calm — no celebratory motion, no multi-toast stacks for one click when a single toast can carry the outcome.
+
 ## Do
 
 - Use Habeas navy for primary actions and active states.
 - Keep density high on Requests / Inbox / Workers / Runs.
-- Fail soft: empty states and API errors never crash the page.
+- Fail soft: empty states and API errors never crash the page; surface failures with an action toast that offers Retry when retry is safe.
+- Prefer action toasts over inline banners or page flashes for mutation outcomes.
 
 ## Don’t
 
@@ -44,3 +49,4 @@
 - Frosted glass overlays, warm-gray glass chips, multi-layer shadows.
 - Large serif heroes, stage-pill marketing rails, bubbly tab buttons.
 - Emulate Prefect dark theme or Dagster purple skin.
+- Ship a second product-default feedback pattern (snackbar, page banner, title-only toast) alongside action toasts.

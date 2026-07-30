@@ -17,6 +17,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { Toaster } from '@/components/ui/sonner'
 import {
   getStoredSimulateRole,
   setStoredSimulateRole,
@@ -169,7 +170,6 @@ function AppShellFrame({ children }: AppShellProps) {
           markPostAuthSplashSeen()
           setShowPostAuthSplash(false)
         }}
-        className="min-h-screen"
       />
     )
   }
@@ -209,6 +209,8 @@ function AppShellFrame({ children }: AppShellProps) {
       {showPalette ? (
         <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
       ) : null}
+
+      <Toaster />
 
       <footer className="mt-auto border-t border-line bg-white">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3 sm:px-6">

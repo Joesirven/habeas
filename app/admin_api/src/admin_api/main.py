@@ -26,8 +26,11 @@ from admin_api.fulfillment_ops import router as fulfillment_ops_router
 from admin_api.legal_portfolio import router as legal_portfolio_router
 from admin_api.legal_operators import router as legal_operators_router
 from admin_api.legal_sla import apply_request_due_at_on_intake, router as legal_sla_router
+from admin_api.connections_admin import router as connections_admin_router
+from admin_api.connections_redeem import router as connections_redeem_router
 from admin_api.legal_team import router as legal_team_router
 from admin_api.request_correspondence import router as request_correspondence_router
+from admin_api.runs import logs_router as ops_logs_router
 from admin_api.runs import router as runs_router
 from admin_api.request_journey import router as request_journey_router
 from admin_api.roles import CurrentRolePrincipal, MeResponse, RolePrincipal, require_roles
@@ -158,8 +161,11 @@ app.include_router(legal_team_router)
 app.include_router(legal_operators_router)
 app.include_router(request_correspondence_router)
 app.include_router(runs_router)
+app.include_router(ops_logs_router)
 app.include_router(request_journey_router)
 app.include_router(worker_schedules_router)
+app.include_router(connections_admin_router)
+app.include_router(connections_redeem_router)
 
 
 def _approval_record(row: dict[str, Any]) -> ApprovalRecord:

@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
+import { type ReactElement, type ReactNode } from 'react'
 
 import { useQuery } from '@tanstack/react-query'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { actionToast } from '@/lib/action-toast'
 import { fetchAdminApi, getFulfillmentArtifact, getRequest } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
@@ -132,15 +133,6 @@ export function AccessDeliveryEmailCard({
     refetchOnWindowFocus: false,
   })
 
-  const [copied, setCopied] = useState(false)
-  const copyTimer = useRef<number | null>(null)
-  useEffect(
-    () => () => {
-      if (copyTimer.current != null) window.clearTimeout(copyTimer.current)
-    },
-    [],
-  )
-
   if (isAccess !== true) return null
 
   const deliveryStatus = artifactQuery.data?.access_delivery_status ?? null
@@ -155,9 +147,7 @@ export function AccessDeliveryEmailCard({
     void navigator.clipboard
       .writeText(emailText)
       .then(() => {
-        setCopied(true)
-        if (copyTimer.current != null) window.clearTimeout(copyTimer.current)
-        copyTimer.current = window.setTimeout(() => setCopied(false), 1600)
+        actionToast.copied('Copied delivery email', handleCopy)
       })
       .catch(() => {
         // Clipboard unavailable (permissions / insecure context) — fail soft.
@@ -198,20 +188,9 @@ export function AccessDeliveryEmailCard({
           className="w-full resize-y whitespace-pre-wrap rounded-md border border-line bg-paper/50 px-2.5 py-2 text-xs leading-relaxed text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid"
         />
         <div className="flex items-center gap-2">
-          <span className="relative inline-flex">
-            <Button size="sm" type="button" onClick={handleCopy}>
-              Copy email
-            </Button>
-            <span
-              aria-live="polite"
-              className={cn(
-                'pointer-events-none absolute -top-7 left-1/2 -translate-x-1/2 rounded-md bg-ink px-2 py-0.5 text-[0.65rem] text-white shadow-sm transition-opacity duration-300',
-                copied ? 'opacity-100' : 'opacity-0',
-              )}
-            >
-              Copied
-            </span>
-          </span>
+          <Button size="sm" type="button" onClick={handleCopy}>
+            Copy email
+          </Button>
         </div>
       </>
     )

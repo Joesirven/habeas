@@ -22,9 +22,14 @@ function WorkersSettingsBody() {
             Super admin only. Edit Cloud Scheduler run cadences and per-worker retry limits.
           </p>
         </div>
-        <Link to="/ops/workers" className="taste-btn text-xs">
-          ← Overview
-        </Link>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link to="/ops/workers" className="taste-btn text-xs">
+            ← Overview
+          </Link>
+          <Link to="/ops/connections" className="taste-btn text-xs">
+            Connections
+          </Link>
+        </div>
       </header>
 
       <ScheduleConfigPanel />

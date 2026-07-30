@@ -92,6 +92,16 @@ uv run --package admin-api uvicorn admin_api.main:app --reload --app-dir app/adm
 
 ---
 
+## Action feedback
+
+After you click a mutating control (save, queue, assign, decline, sync, and similar), the UI confirms the outcome with an **action toast**: a short message in the top-right corner, one supporting line, and one button such as **Retry**, **Undo**, **View**, or **Dismiss**.
+
+That is the product standard for success, error, warning, info, and in-flight (loading → done) feedback. Designers and engineers should not introduce a different default (full-page banner, bottom snackbar, or silent success) for ordinary actions.
+
+Toast text must not include personal data — same privacy rules as the rest of the ops UI.
+
+---
+
 ## Scripts
 
 | Command | Purpose |
