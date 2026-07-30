@@ -1790,7 +1790,6 @@ function InboxReviewPane({
       })
     },
     onSuccess: async (_data, target) => {
-      setAssignError(null)
       actionToast.success({ title: 'Assignment updated' })
       // Optimistic: notice/delivery lanes historically omitted assignment on
       // refresh — patch the inbox cache so Assignee updates immediately.
