@@ -28,14 +28,41 @@ def test_build_request_payload_no_raw_dwid():
     assert payload["source_of_restriction"] == DEFAULT_SOURCE_OF_RESTRICTION
     assert payload["type_of_restriction"] == DEFAULT_TYPE_OF_RESTRICTION
     assert payload["keyspace"] == "person_db_dev"
-    assert payload["table"] == "restricted_person_id"
+    assert payload["table"] == "restricted_person_id_worker"
     assert "dwid" in payload["column_set"]
 
 
 def test_stub_suppress_includes_settled_vocabulary():
-    result = suppress_restricted_person_id("42", keyspace="person_db_dev")
+    result = suppress_restricted_person_id("9876543210", keyspace="person_db_dev")
     assert result["inserted"] is True
     assert result["source_of_restriction"] == "Habeas"
     assert result["type_of_restriction"] == "person"
     assert result["request_payload"]["source_of_restriction"] == "Habeas"
-    assert "42" not in str(result["request_payload"])
+    assert result["request_payload"]["dwid_fingerprint"] == "bigint:len=10"
+    assert "9876543210" not in str(result["request_payload"])
+
+
+def test_stub_uses_dev_table_default():
+    result = suppress_restricted_person_id("99", keyspace="person_db_dev")
+    assert result["table"] == "restricted_person_id_worker"
+    assert result["request_payload"]["table"] == "restricted_person_id_worker"
+
+
+def test_config_from_env_table_defaults(monkeypatch, tmp_path):
+    from cassandra_worker.adapters.restricted_person_id_adapter import config_from_env
+
+    ca = tmp_path / "ca.pem"
+    ca.write_text("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+    monkeypatch.setenv("CASSANDRA_PASSWORD", "x")
+    monkeypatch.setenv("CASSANDRA_SSL_CA", str(ca))
+    monkeypatch.delenv("CASSANDRA_TABLE", raising=False)
+
+    monkeypatch.setenv("CASSANDRA_PORT", "9041")
+    assert config_from_env().table == "restricted_person_id_worker"
+
+    monkeypatch.setenv("CASSANDRA_PORT", "9042")
+    assert config_from_env().table == "restricted_person_id"
+
+    monkeypatch.setenv("CASSANDRA_PORT", "9041")
+    monkeypatch.setenv("CASSANDRA_TABLE", "custom_table")
+    assert config_from_env().table == "custom_table"

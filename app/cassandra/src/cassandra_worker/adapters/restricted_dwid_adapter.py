@@ -1,6 +1,7 @@
-"""Live / payload builder for Cassandra ``restricted_person_id`` suppression.
+"""Live / payload builder for Cassandra restricted-dwid suppression.
 
 Vendor vocabulary stays in this adapter only (ACL). Never log raw DWIDs or PII.
+Table: ``CASSANDRA_TABLE`` or port-based default (`restricted_person_id_worker` on 9041, `restricted_person_id` on 9042).
 """
 
 from __future__ import annotations
@@ -18,7 +19,10 @@ logger = logging.getLogger(__name__)
 # Settled with MDR suppression owners (2026-07-30).
 DEFAULT_SOURCE_OF_RESTRICTION = "Habeas"
 DEFAULT_TYPE_OF_RESTRICTION = "person"
-TABLE_NAME = "restricted_person_id"
+DEFAULT_TABLE_DEV = "restricted_person_id_worker"
+DEFAULT_TABLE_PROD = "restricted_person_id"
+# Backward-compatible alias (dev worker default).
+TABLE_NAME = DEFAULT_TABLE_DEV
 
 # Env defaults — override per Cloud Run service.
 DEFAULT_HOST = "broker-db.example.internal"
@@ -35,12 +39,13 @@ class CassandraEnvConfig:
     username: str
     password: str
     ssl_ca_path: str
+    table: str = DEFAULT_TABLE_DEV
     source_of_restriction: str = DEFAULT_SOURCE_OF_RESTRICTION
     type_of_restriction: str = DEFAULT_TYPE_OF_RESTRICTION
 
     @property
     def qualified_table(self) -> str:
-        return f"{self.keyspace}.{TABLE_NAME}"
+        return f"{self.keyspace}.{self.table}"
 
     @property
     def insert_cql(self) -> str:
@@ -56,14 +61,18 @@ INSERT INTO {self.qualified_table} (
 
 
 def config_from_env() -> CassandraEnvConfig:
-    """Build config from process environment / Secret Manager mounts.
+    """Load connection settings from environment.
 
-    Expected secrets (mounted as files or env):
+    Shared:
+      CASSANDRA_HOST (default broker-db.example.internal)
+      CASSANDRA_USER (default dprwrk)
       CASSANDRA_PASSWORD or CASSANDRA_PASSWORD_FILE
       CASSANDRA_SSL_CA (path to PEM)
     Env-specific:
       CASSANDRA_PORT — 9041 (dev) or 9042 (prod)
       CASSANDRA_KEYSPACE — person_db_dev (dev) or person_db (prod)
+      CASSANDRA_TABLE — restricted_person_id_worker (dev default when port=9041)
+                       or restricted_person_id (prod default when port!=9041)
     """
     password_file = os.environ.get("CASSANDRA_PASSWORD_FILE")
     if password_file:
@@ -79,6 +88,8 @@ def config_from_env() -> CassandraEnvConfig:
 
     port = int(os.environ.get("CASSANDRA_PORT", "9041"))
     keyspace = os.environ.get("CASSANDRA_KEYSPACE", "person_db_dev").strip()
+    default_table = DEFAULT_TABLE_DEV if port == 9041 else DEFAULT_TABLE_PROD
+    table = (os.environ.get("CASSANDRA_TABLE") or default_table).strip()
     return CassandraEnvConfig(
         host=os.environ.get("CASSANDRA_HOST", DEFAULT_HOST).strip(),
         port=port,
@@ -86,6 +97,7 @@ def config_from_env() -> CassandraEnvConfig:
         username=os.environ.get("CASSANDRA_USER", DEFAULT_USER).strip(),
         password=password,
         ssl_ca_path=ssl_ca,
+        table=table,
         source_of_restriction=os.environ.get(
             "CASSANDRA_SOURCE_OF_RESTRICTION", DEFAULT_SOURCE_OF_RESTRICTION
         ).strip(),
@@ -107,6 +119,7 @@ def build_request_payload(
     dwid: int,
     *,
     keyspace: str,
+    table: str = DEFAULT_TABLE_DEV,
     source: str = DEFAULT_SOURCE_OF_RESTRICTION,
     restriction_type: str = DEFAULT_TYPE_OF_RESTRICTION,
     date_of_restriction: str | None = None,
@@ -117,7 +130,7 @@ def build_request_payload(
     day = date_of_restriction or ts.date().isoformat()
     return {
         "keyspace": keyspace,
-        "table": TABLE_NAME,
+        "table": table,
         "column_set": [
             "dwid",
             "date_of_restriction",
@@ -138,7 +151,7 @@ def suppress_restricted_person_id_live(
     *,
     config: CassandraEnvConfig | None = None,
 ) -> dict[str, Any]:
-    """Idempotent INSERT into env keyspace ``restricted_person_id`` (minimal columns)."""
+    """Idempotent INSERT into env keyspace table (minimal columns)."""
     # Import driver here so package name cassandra_worker does not shadow it at module load
     # for stub-only tests.
     from cassandra.auth import PlainTextAuthProvider
@@ -152,6 +165,7 @@ def suppress_restricted_person_id_live(
     payload = build_request_payload(
         dwid,
         keyspace=cfg.keyspace,
+        table=cfg.table,
         source=cfg.source_of_restriction,
         restriction_type=cfg.type_of_restriction,
         date_of_restriction=day,
@@ -202,7 +216,7 @@ def suppress_restricted_person_id_live(
     )
     return {
         "adapter": "restricted_person_id",
-        "table": TABLE_NAME,
+        "table": cfg.table,
         "keyspace": cfg.keyspace,
         "method": "restricted_person_id",
         "inserted": True,

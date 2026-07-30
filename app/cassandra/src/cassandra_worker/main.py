@@ -41,6 +41,7 @@ class Settings(CoreSettings):
     # stub (default) | live — live requires CASSANDRA_* secrets and NAT egress
     cassandra_transport: str = "stub"
     cassandra_keyspace: str = "person_db_dev"
+    cassandra_table: str = "restricted_person_id_worker"
 
 
 settings = Settings()
@@ -98,7 +99,11 @@ def _run_suppress(dwid: str) -> dict[str, Any]:
         )
 
         return suppress_restricted_person_id_live(dwid)
-    return suppress_restricted_person_id(dwid, keyspace=settings.cassandra_keyspace)
+    return suppress_restricted_person_id(
+        dwid,
+        keyspace=settings.cassandra_keyspace,
+        table=settings.cassandra_table,
+    )
 
 
 async def _complete_suppression(

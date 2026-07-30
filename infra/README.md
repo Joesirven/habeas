@@ -20,7 +20,7 @@
 
 ## Cassandra egress — Cloud NAT (2026-07-29)
 
-On-prem Cassandra (`restricted_person_id`) is reached over TLS with INF IP allowlisting — **not** Cloud VPN for the suppression cutover path. Static egress comes from Cloud NAT on a custom VPC; Cloud Run `cassandra` workers attach via Direct VPC egress.
+On-prem Cassandra (`person_db_dev.restricted_person_id_worker` / `person_db.restricted_person_id`) is reached over TLS with INF IP allowlisting — **not** Cloud VPN for the suppression cutover path. Static egress comes from Cloud NAT on a custom VPC; Cloud Run `cassandra` workers attach via Direct VPC egress.
 
 | Resource | ID |
 |----------|----|
@@ -46,7 +46,7 @@ On-prem Cassandra (`restricted_person_id`) is reached over TLS with INF IP allow
 
 | Env | Host | Port | Keyspace | Table | Password secret |
 |-----|------|------|----------|-------|-----------------|
-| Dev | `broker-db.example.internal` | **9041** | `person_db_dev` | `restricted_person_id` | `cassandra-dprwrk-password-dev` |
+| Dev | `broker-db.example.internal` | **9041** | `person_db_dev` | `restricted_person_id_worker` | `cassandra-dprwrk-password-dev` |
 | Prod | `broker-db.example.internal` | **9042** | `person_db` | `restricted_person_id` | `cassandra-dprwrk-password-prod` |
 
 | Field | Value |
