@@ -1287,7 +1287,6 @@ export function RequestDetailBody({
                 isError={matchingQuery.isError}
                 canReviewActions={canMatchingDisposition}
                 actionPending={matchingDispositionMutation.isPending}
-                actionError={null}
                 hideActions={!canMatchingDisposition}
                 layout="tabs"
                 compact

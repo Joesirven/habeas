@@ -5,7 +5,6 @@ import { useState } from 'react'
 import {
   createManualRequest,
   postAgentBatchUpload,
-  type AgentBatchUploadResult,
   type ManualRequestInput,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
@@ -30,7 +29,6 @@ export function ManualRequestPage() {
   const { role } = useMe()
   const showUpload = canAccessLegalSurfaces(role)
   const [form, setForm] = useState<ManualRequestInput>(initialForm)
-  const [uploadResult, setUploadResult] = useState<AgentBatchUploadResult | null>(null)
 
   const createMutation = useMutation({
     mutationFn: createManualRequest,
@@ -61,7 +59,6 @@ export function ManualRequestPage() {
   const uploadMutation = useMutation({
     mutationFn: postAgentBatchUpload,
     onSuccess: async (result) => {
-      setUploadResult(result)
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
       actionToast.success({
         title: 'Batch uploaded',
@@ -126,26 +123,6 @@ export function ManualRequestPage() {
             />
             {uploadMutation.isPending ? (
               <p className="text-sm text-ink-soft">Cleaning and inserting…</p>
-            ) : null}
-            {uploadResult ? (
-              <dl className="grid grid-cols-2 gap-2 text-xs text-ink-soft sm:grid-cols-3">
-                <div>
-                  <dt className="uppercase tracking-wide text-mute">Inserted</dt>
-                  <dd className="tabular-nums text-ink">{uploadResult.inserted_count}</dd>
-                </div>
-                <div>
-                  <dt className="uppercase tracking-wide text-mute">Skipped</dt>
-                  <dd className="tabular-nums text-ink">{uploadResult.skipped_row_count}</dd>
-                </div>
-                <div>
-                  <dt className="uppercase tracking-wide text-mute">Email splits</dt>
-                  <dd className="tabular-nums text-ink">{uploadResult.email_split_count}</dd>
-                </div>
-                <div className="col-span-2 sm:col-span-3">
-                  <dt className="uppercase tracking-wide text-mute">Batch</dt>
-                  <dd className="font-mono text-[0.65rem] text-ink">{uploadResult.batch_id}</dd>
-                </div>
-              </dl>
             ) : null}
           </div>
         </div>

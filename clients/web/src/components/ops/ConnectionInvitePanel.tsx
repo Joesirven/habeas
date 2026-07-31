@@ -58,10 +58,7 @@ export function ConnectionInvitePanel({
     try {
       const response = await createConnectionInvite(connectionId)
       setInvite(response)
-      actionToast.success({
-        title: 'Invite link created',
-        description: 'Share it with the connection owner.',
-      })
+      // Invite URL panel is the working surface — no success toast (avoids dual chrome).
     } catch (err) {
       actionToast.error({
         title: 'Could not create invite',

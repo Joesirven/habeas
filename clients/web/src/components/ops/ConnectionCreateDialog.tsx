@@ -125,10 +125,7 @@ export function ConnectionCreateDialog({
   async function mintInvite(connectionId: string) {
     const inviteResponse = await createConnectionInvite(connectionId)
     setInvite(inviteResponse)
-    actionToast.success({
-      title: 'Connection created',
-      description: 'Invite link is ready to share.',
-    })
+    // Success UI is the dialog success phase (invite URL) — no toast (avoids dual chrome).
   }
 
   async function submitCreate() {
@@ -171,12 +168,8 @@ export function ConnectionCreateDialog({
             },
           })
         }
-      } else {
-        actionToast.success({
-          title: 'Connection created',
-          description: 'Infrastructure handoff — no owner invite.',
-        })
       }
+      // Cassandra / infra: dialog success phase is the sole outcome UI (no toast).
 
       setPhase('success')
     } catch (err) {

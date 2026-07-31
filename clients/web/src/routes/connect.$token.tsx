@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useParams } from '@tanstack/react-router'
-import { useMemo, useState, type ReactNode } from 'react'
+import { useMemo, useRef, useState, type ReactNode } from 'react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -118,12 +118,14 @@ function ConnectForm({
   const [credentials, setCredentials] = useState<Record<string, string>>(() =>
     Object.fromEntries(preview.fields.map((field) => [field.id, ''])),
   )
+  const credentialsRef = useRef(credentials)
+  credentialsRef.current = credentials
   const [clientError, setClientError] = useState<string | null>(null)
 
   const redeemMutation = useMutation({
     mutationFn: (payload: Record<string, string>) => redeemConnect(token, payload),
     onMutate: () => setClientError(null),
-    onSuccess: (data, variables) => {
+    onSuccess: (data) => {
       if (data.test_ok) {
         actionToast.success({
           title: 'Connected',
@@ -139,11 +141,11 @@ function ConnectForm({
         ),
         action: {
           label: 'Retry',
-          onClick: () => redeemMutation.mutate(variables),
+          onClick: () => redeemMutation.mutate(credentialsRef.current),
         },
       })
     },
-    onError: (error, variables) => {
+    onError: (error) => {
       actionToast.error({
         title: 'Could not save credentials',
         description: actionToast.safeErrorMessage(
@@ -152,7 +154,7 @@ function ConnectForm({
         ),
         action: {
           label: 'Retry',
-          onClick: () => redeemMutation.mutate(variables),
+          onClick: () => redeemMutation.mutate(credentialsRef.current),
         },
       })
     },

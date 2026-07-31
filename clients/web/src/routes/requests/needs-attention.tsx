@@ -2311,7 +2311,6 @@ function InboxReviewPane({
                   isError={matchingQuery.isError}
                   canReviewActions={canReviewActions && !legalPersona}
                   actionPending={actionPending}
-                  actionError={null}
                   onPromote={(responseStatus) =>
                     promoteMutation.mutate(responseStatus)
                   }

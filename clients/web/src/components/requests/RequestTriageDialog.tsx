@@ -766,7 +766,6 @@ export function MatchingReviewPanel({
   isError,
   canReviewActions,
   actionPending,
-  actionError,
   onPromote,
   onDecline,
   compact = false,
@@ -779,7 +778,6 @@ export function MatchingReviewPanel({
   isError: boolean
   canReviewActions: boolean
   actionPending: boolean
-  actionError: string | null
   onPromote: (responseStatus: DropResponseStatusCode) => void
   onDecline: () => void
   /** Denser layout for inbox review pane. */
@@ -833,10 +831,6 @@ export function MatchingReviewPanel({
         {actionPending && confirm === 'decline' ? 'Declining…' : 'Decline'}
       </Button>
     </div>
-  ) : null
-
-  const actionErrorLine = actionError ? (
-    <p className="text-[0.65rem] text-red-700">{actionError}</p>
   ) : null
 
   const tabsBody =
@@ -938,7 +932,6 @@ export function MatchingReviewPanel({
             ]}
           />
           {reviewActions}
-          {actionErrorLine}
         </TabsContent>
         <TabsContent value="attempts" className="mt-2 space-y-1.5">
           {attempts.length === 0 ? (
@@ -1119,7 +1112,6 @@ export function MatchingReviewPanel({
               </div>
             </dl>
             {reviewActions}
-            {actionErrorLine}
           </StatusAccordion>
 
           <StatusAccordion
