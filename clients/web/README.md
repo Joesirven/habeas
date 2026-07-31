@@ -98,6 +98,8 @@ After you click a mutating control (save, queue, assign, decline, sync, and simi
 
 That is the product standard for success, error, warning, info, and in-flight (loading → done) feedback. Designers and engineers should not introduce a different default (full-page banner, bottom snackbar, or silent success) for ordinary actions.
 
+**Implementation:** import `actionToast` from `@/lib/action-toast` (`src/lib/action-toast.ts`). Global `Toaster` mounts in `AppShell`. Do not import `toast` from `sonner` in call sites — see [`AGENTS.md`](AGENTS.md) and [frontend-stack](../../.agent/modules/frontend-stack.md).
+
 Toast text must not include personal data — same privacy rules as the rest of the ops UI.
 
 ---

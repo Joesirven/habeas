@@ -18,6 +18,7 @@ import {
   type ConnectionSystemsPayload,
   type IntegrationSystemId,
 } from '@/lib/api'
+import { actionToast } from '@/lib/action-toast'
 
 type ConnectionSystemOption = ConnectionSystemsPayload['systems'][number]
 
@@ -123,6 +124,12 @@ export function ConnectionCreateDialog({
     onOpenChange(next)
   }
 
+  async function mintInvite(connectionId: string) {
+    const inviteResponse = await createConnectionInvite(connectionId)
+    setInvite(inviteResponse)
+    // Success UI is the dialog success phase (invite URL) — no toast (avoids dual chrome).
+  }
+
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault()
     const trimmedName = displayName.trim()
@@ -149,9 +156,23 @@ export function ConnectionCreateDialog({
       setCreatedConnection(connection)
 
       if (inviteAllowed && trimmedOwner) {
-        const inviteResponse = await createConnectionInvite(connection.id)
-        setInvite(inviteResponse)
+        try {
+          await mintInvite(connection.id)
+        } catch (inviteErr) {
+          actionToast.error({
+            title: 'Could not create invite',
+            description: actionToast.safeErrorMessage(
+              inviteErr,
+              'Connection was saved, but the invite link could not be created.',
+            ),
+            action: {
+              label: 'Retry',
+              onClick: () => void mintInvite(connection.id),
+            },
+          })
+        }
       }
+      // Cassandra / infra: dialog success phase is the sole outcome UI (no toast).
 
       setPhase('success')
     } catch (err) {
