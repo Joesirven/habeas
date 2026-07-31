@@ -474,8 +474,8 @@ async def get_systems_catalog(_principal: SuperAdminPrincipal):
 @router.post("/{connection_id}/invites", response_model=InviteResponse, status_code=201)
 async def create_invite(
     connection_id: UUID,
-    body: InviteCreateBody,
     principal: SuperAdminPrincipal,
+    body: InviteCreateBody = InviteCreateBody(),
 ):
     _require_database()
     pool = get_pool()

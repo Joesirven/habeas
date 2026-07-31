@@ -58,7 +58,11 @@ export function ConnectionInvitePanel({
     setMinting(true)
     setError(null)
     try {
-      const response = await createConnectionInvite(connectionId)
+      const trimmedOwner = ownerEmail?.trim()
+      const response = await createConnectionInvite(
+        connectionId,
+        trimmedOwner ? { owner_email: trimmedOwner } : {},
+      )
       setInvite(response)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create invite')

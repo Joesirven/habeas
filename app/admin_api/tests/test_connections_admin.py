@@ -208,8 +208,8 @@ async def test_create_invite_rejects_cassandra(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(HTTPException) as exc_info:
         await connections_admin.create_invite(
             connection_id,
-            connections_admin.InviteCreateBody(),
             principal,
+            connections_admin.InviteCreateBody(),
         )
 
     assert exc_info.value.status_code == 400

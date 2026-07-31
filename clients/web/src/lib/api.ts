@@ -2203,11 +2203,13 @@ export function createConnectionInvite(
   connectionId: string,
   body?: { owner_email?: string },
 ) {
+  // Always send JSON `{}` — FastAPI requires a body for InviteCreateBody;
+  // omitting it yields 422 "Field required" / loc ["body"].
   return fetchAdminApi<ConnectionInviteCreateResponse>(
     `/ops/connections/${encodeURIComponent(connectionId)}/invites`,
     {
       method: 'POST',
-      body: body ? JSON.stringify(body) : undefined,
+      body: JSON.stringify(body ?? {}),
     },
   )
 }

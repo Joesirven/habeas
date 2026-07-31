@@ -124,8 +124,12 @@ export function ConnectionCreateDialog({
     onOpenChange(next)
   }
 
-  async function mintInvite(connectionId: string) {
-    const inviteResponse = await createConnectionInvite(connectionId)
+  async function mintInvite(connectionId: string, owner?: string) {
+    const trimmed = (owner ?? ownerEmail).trim()
+    const inviteResponse = await createConnectionInvite(
+      connectionId,
+      trimmed ? { owner_email: trimmed } : {},
+    )
     setInvite(inviteResponse)
     // Success UI is the dialog success phase (invite URL) — no toast (avoids dual chrome).
   }
@@ -157,7 +161,7 @@ export function ConnectionCreateDialog({
 
       if (inviteAllowed && trimmedOwner) {
         try {
-          await mintInvite(connection.id)
+          await mintInvite(connection.id, trimmedOwner)
         } catch (inviteErr) {
           actionToast.error({
             title: 'Could not create invite',
@@ -167,7 +171,24 @@ export function ConnectionCreateDialog({
             ),
             action: {
               label: 'Retry',
-              onClick: () => void mintInvite(connection.id),
+              onClick: () => {
+                void mintInvite(connection.id, trimmedOwner)
+                  .then(() => {
+                    actionToast.success({
+                      title: 'Invite link ready',
+                      description: 'Copy it from the connection dialog.',
+                    })
+                  })
+                  .catch((retryErr) => {
+                    actionToast.error({
+                      title: 'Could not create invite',
+                      description: actionToast.safeErrorMessage(
+                        retryErr,
+                        'Invite link could not be created. Open the connection row and try again.',
+                      ),
+                    })
+                  })
+              },
             },
           })
         }
@@ -175,6 +196,7 @@ export function ConnectionCreateDialog({
       // Cassandra / infra: dialog success phase is the sole outcome UI (no toast).
 
       setPhase('success')
+      onCreated?.(connection)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create connection')
     } finally {
