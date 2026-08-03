@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -13,6 +14,8 @@ __all__ = [
     "CredentialField",
     "CredentialInputType",
     "get_system",
+    "google_sheets_share_service_account_email",
+    "google_sheets_spreadsheet_url_help",
     "list_systems",
     "validate_credentials",
 ]
@@ -40,6 +43,42 @@ class ConnectionSystem:
     invite_allowed: bool
     credential_fields: tuple[CredentialField, ...]
     trust_copy: str
+
+
+# Share target for Google Sheets invites — same identity admin-api uses for Sheets API
+# reads (Cloud Run runtime / GCS signing SA). Prefer explicit env, then signing SA.
+_GOOGLE_SHEETS_SHARE_EMAIL_ENV: Final[str] = "GOOGLE_SHEETS_SHARE_SERVICE_ACCOUNT"
+_GCS_SIGNING_SERVICE_ACCOUNT_ENV: Final[str] = "GCS_SIGNING_SERVICE_ACCOUNT"
+_DEFAULT_GOOGLE_SHEETS_SHARE_SA: Final[str] = (
+    "95660886550-compute@developer.gserviceaccount.com"
+)
+
+
+def google_sheets_share_service_account_email() -> str:
+    """Service account email owners must grant Editor on the spreadsheet."""
+    for key in (_GOOGLE_SHEETS_SHARE_EMAIL_ENV, _GCS_SIGNING_SERVICE_ACCOUNT_ENV):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return _DEFAULT_GOOGLE_SHEETS_SHARE_SA
+
+
+def google_sheets_spreadsheet_url_help(*, service_account_email: str | None = None) -> str:
+    """Owner-facing how-to with the concrete Habeas SA email and Editor requirement."""
+    email = (service_account_email or google_sheets_share_service_account_email()).strip()
+    return (
+        "1. Open the Google Sheet Habeas should use.\n"
+        "2. Copy the browser URL (must look like "
+        "https://docs.google.com/spreadsheets/d/…/edit).\n"
+        "3. Click Share (top right).\n"
+        f"4. Paste this Habeas service account email exactly:\n   {email}\n"
+        "5. Set permission to Editor (required so Habeas can update or remove rows "
+        "for suppression later).\n"
+        "6. Uncheck Notify people → Share / Send.\n"
+        "7. Paste the spreadsheet URL here.\n"
+        "Do not use Publish to web /pubhtml links. Do not paste a JSON key file "
+        "or your Google password."
+    )
 
 
 _SAAS_TRUST_INTRO: Final[str] = (
@@ -262,25 +301,16 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                 label="Spreadsheet URL",
                 input_type=CredentialInputType.URL,
                 required=True,
-                help=(
-                    "1. Open the Google Sheet Habeas should use.\n"
-                    "2. Copy the browser URL (must look like "
-                    "https://docs.google.com/spreadsheets/d/…/edit).\n"
-                    "3. Click Share (top right).\n"
-                    "4. Paste the Habeas service account email from your invite page.\n"
-                    "5. Choose Viewer (read-only) or Editor (if Habeas must update rows).\n"
-                    "6. Uncheck Notify people → Share / Send.\n"
-                    "7. Paste the spreadsheet URL here.\n"
-                    "Do not use Publish to web /pubhtml links. Do not paste a JSON key file "
-                    "or your Google password."
-                ),
+                # Filled by google_sheets_spreadsheet_url_help() at invite/catalog response time.
+                help=None,
             ),
         ),
         trust_copy=_saas_trust_copy(
             extra=(
-                "Google Sheets: share the file with Habeas’s service account email, then "
-                "paste the editable spreadsheet URL. We never ask for your Google password "
-                "or a credentials JSON."
+                "Google Sheets: share the file as Editor with the Habeas service account "
+                "email shown in the credential steps, then paste the editable spreadsheet URL. "
+                "Editor access is required so Habeas can update or remove rows for "
+                "suppression later. We never ask for your Google password or a credentials JSON."
             ),
         ),
     ),
@@ -304,17 +334,44 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
 SYSTEM_IDS: Final[frozenset[str]] = frozenset(_SYSTEMS)
 
 
+def _with_owner_facing_help(system: ConnectionSystem) -> ConnectionSystem:
+    """Return a copy with Google Sheets how-to resolved (concrete SA + Editor)."""
+    if system.system_id != "google_sheets":
+        return system
+    fields: list[CredentialField] = []
+    for field in system.credential_fields:
+        if field.id == "spreadsheet_url":
+            fields.append(
+                CredentialField(
+                    id=field.id,
+                    label=field.label,
+                    input_type=field.input_type,
+                    required=field.required,
+                    help=google_sheets_spreadsheet_url_help(),
+                )
+            )
+        else:
+            fields.append(field)
+    return ConnectionSystem(
+        system_id=system.system_id,
+        display_label=system.display_label,
+        invite_allowed=system.invite_allowed,
+        credential_fields=tuple(fields),
+        trust_copy=system.trust_copy,
+    )
+
+
 def get_system(system_id: str) -> ConnectionSystem:
-    """Return the catalog entry for a system id."""
+    """Return the catalog entry for a system id (owner-facing help resolved)."""
     try:
-        return _SYSTEMS[system_id]
+        return _with_owner_facing_help(_SYSTEMS[system_id])
     except KeyError as exc:
         raise ValueError(f"unknown connection system: {system_id}") from exc
 
 
 def list_systems() -> list[ConnectionSystem]:
     """Return all connection systems in stable catalog order."""
-    return [_SYSTEMS[system_id] for system_id in _SYSTEM_ORDER]
+    return [_with_owner_facing_help(_SYSTEMS[system_id]) for system_id in _SYSTEM_ORDER]
 
 
 _SYSTEM_ORDER: Final[tuple[str, ...]] = (

@@ -70,8 +70,22 @@ class TestFieldSchemas:
         assert field.id == "spreadsheet_url"
         assert field.input_type is CredentialInputType.URL
         assert field.help is not None
-        assert "service account" in field.help.lower()
+        assert "95660886550-compute@developer.gserviceaccount.com" in field.help
+        assert "Editor" in field.help
+        assert "suppression" in field.help.lower()
+        assert "from your invite page" not in field.help.lower()
         assert "json" in field.help.lower()
+        assert "Viewer" not in field.help
+
+    def test_google_sheets_help_respects_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv(
+            "GOOGLE_SHEETS_SHARE_SERVICE_ACCOUNT",
+            "sheets-share@example.iam.gserviceaccount.com",
+        )
+        field = get_system("google_sheets").credential_fields[0]
+        assert field.help is not None
+        assert "sheets-share@example.iam.gserviceaccount.com" in field.help
+        assert "Editor" in field.help
 
     def test_trust_copy_mentions_secret_manager(self) -> None:
         mailchimp = get_system("mailchimp")

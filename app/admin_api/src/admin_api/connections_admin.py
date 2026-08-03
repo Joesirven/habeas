@@ -295,10 +295,15 @@ def _hardcoded_systems_catalog() -> SystemsCatalogResponse:
                         label="Spreadsheet URL",
                         input_type="url",
                         required=True,
+                        help=(
+                            "Share as Editor with "
+                            "95660886550-compute@developer.gserviceaccount.com, "
+                            "then paste the spreadsheet URL."
+                        ),
                     ),
                 ],
                 trust_copy=(
-                    "Share the spreadsheet with the Habeas service account email. "
+                    "Share the spreadsheet as Editor with the Habeas service account email. "
                     "No JSON key paste is required."
                 ),
             ),
