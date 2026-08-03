@@ -90,17 +90,21 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                 input_type=CredentialInputType.PASSWORD,
                 required=True,
                 help=(
-                    "Mailchimp profile icon → Profile → Extras → API keys → Create A Key. "
-                    "Copy the key immediately (shown once). Needs Manager or Admin access. "
-                    "The key ends with your data center suffix (e.g. -us19)."
+                    "1. Sign in to Mailchimp (Manager or Admin role).\n"
+                    "2. Click your profile icon (top right) → Profile.\n"
+                    "3. Open Extras → API keys.\n"
+                    "4. Click Create A Key and name it “Habeas privacy automation”.\n"
+                    "5. Click Generate Key, then Copy Key to Clipboard (shown only once).\n"
+                    "6. Paste that full key here. It should end with your data center "
+                    "(example: …-us19).\n"
+                    "Do not paste your Mailchimp login password or an OAuth/Marketplace token."
                 ),
             ),
         ),
         trust_copy=_saas_trust_copy(
             extra=(
-                "Use a dedicated Mailchimp API key for Habeas — not your login password. "
-                "OAuth is for multi-user Marketplace apps; an account API key is correct for "
-                "this single-account automation."
+                "Mailchimp: use a dedicated account API key for Habeas — not your login "
+                "password and not an OAuth Marketplace app."
             ),
         ),
     ),
@@ -115,8 +119,11 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                 input_type=CredentialInputType.TEXT,
                 required=True,
                 help=(
-                    "From your integration app in the Paylocity Developer Portal "
-                    "(partner.paylocity.com) — Sandbox or Production tab."
+                    "1. Sign in at partner.paylocity.com (HR/IT integration access).\n"
+                    "2. Open the integration app used for Habeas.\n"
+                    "3. Choose the Sandbox or Production tab for the environment you need.\n"
+                    "4. Copy the Client ID from that app’s details page.\n"
+                    "Do not paste your personal Paylocity login."
                 ),
             ),
             CredentialField(
@@ -125,8 +132,11 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                 input_type=CredentialInputType.PASSWORD,
                 required=True,
                 help=(
-                    "Client secret for the same Developer Portal app. Shown once; "
-                    "rotate via the portal (Paylocity expects annual rotation)."
+                    "1. On the same Paylocity Developer Portal app page as Client ID.\n"
+                    "2. Copy the Client secret when it is shown (create, Production "
+                    "provision, or rotate).\n"
+                    "3. Save it immediately — you usually cannot view the same value again.\n"
+                    "Paylocity expects secrets to be rotated about once a year."
                 ),
             ),
             CredentialField(
@@ -135,8 +145,9 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                 input_type=CredentialInputType.TEXT,
                 required=True,
                 help=(
-                    "Paylocity company ID (max 9 characters) from the Developer Portal "
-                    "Clients card — used on company API paths, not in the token request."
+                    "1. On the same Developer Portal app page, open the Clients card.\n"
+                    "2. Copy the company ID for that environment (max 9 characters).\n"
+                    "This is the company identifier for API paths — not your personal employee ID."
                 ),
             ),
             CredentialField(
@@ -144,14 +155,18 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                 label="Environment",
                 input_type=CredentialInputType.TEXT,
                 required=True,
-                help="Enter sandbox or production (API hosts differ by environment).",
+                help=(
+                    "1. Type exactly: sandbox  or  production\n"
+                    "2. Use sandbox while testing; production only with Production credentials.\n"
+                    "3. Sandbox and production values are different — do not mix them."
+                ),
             ),
         ),
         trust_copy=_saas_trust_copy(
             extra=(
-                "Paylocity uses OAuth client credentials from the Developer Portal. "
-                "HR or IT usually provisions the app before you can paste values here. "
-                "Use company-scoped integration credentials — never a personal login."
+                "Paylocity: credentials come from the Developer Portal integration app "
+                "(partner.paylocity.com). HR or IT usually creates the app. Never use a "
+                "personal Web Pay login."
             ),
         ),
     ),
@@ -166,16 +181,22 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                 input_type=CredentialInputType.PASSWORD,
                 required=True,
                 help=(
-                    "Lever Super Admin → Settings → Integrations and API → "
-                    "API Credentials (create a dedicated key scoped to needed endpoints)."
+                    "1. Sign in to Lever as a Super Admin (only Super Admins can create keys).\n"
+                    "2. Go to Settings → Integrations and API → API Credentials.\n"
+                    "3. Under Lever API credentials, click Generate New Key "
+                    "(not the Postings API key at the top).\n"
+                    "4. Name it “Habeas privacy automation” and set the endpoint permissions "
+                    "you need (permissions cannot be changed later).\n"
+                    "5. Click Generate key → Copy Key immediately (shown only once) → Done.\n"
+                    "6. Paste that key here.\n"
+                    "Do not paste your Lever password or the Postings API key."
                 ),
             ),
         ),
         trust_copy=_saas_trust_copy(
             extra=(
-                "Lever API credentials can only be created by a Lever Super Admin. "
-                "Use a dedicated key for Habeas privacy automation — not a personal login. "
-                "Endpoint scopes are set when the key is created and cannot be changed later."
+                "Lever: only a Super Admin can create API credentials. Use a dedicated "
+                "Habeas key — not your login password and not the Postings API key."
             ),
         ),
     ),
@@ -190,8 +211,11 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                 input_type=CredentialInputType.TEXT,
                 required=True,
                 help=(
-                    "Auth0 Dashboard → Settings → Domain (hostname only, e.g. "
-                    "your-org.us.auth0.com — do not include https://)."
+                    "1. Sign in at manage.auth0.com for the tenant that holds your users.\n"
+                    "2. Open Applications → Applications → any app → Settings.\n"
+                    "3. Copy Domain (hostname only).\n"
+                    "Example: your-tenant.us.auth0.com\n"
+                    "Do not include https:// or /api/v2/."
                 ),
             ),
             CredentialField(
@@ -200,8 +224,12 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                 input_type=CredentialInputType.TEXT,
                 required=True,
                 help=(
-                    "Applications → Applications → create a Machine-to-Machine app "
-                    "authorized for the Auth0 Management API → Client ID."
+                    "1. Applications → Applications → Create Application.\n"
+                    "2. Name it “Habeas privacy automation”.\n"
+                    "3. Choose Machine to Machine Applications → Create.\n"
+                    "4. Authorize Auth0 Management API.\n"
+                    "5. Enable scopes read:users and update:users → Authorize.\n"
+                    "6. Open the app → Settings → copy Client ID."
                 ),
             ),
             CredentialField(
@@ -209,14 +237,18 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                 label="Client secret",
                 input_type=CredentialInputType.PASSWORD,
                 required=True,
-                help="Same M2M application → Settings → Client Secret.",
+                help=(
+                    "1. Same Machine-to-Machine app → Settings.\n"
+                    "2. Click Reveal Client Secret.\n"
+                    "3. Copy Client Secret and paste it here.\n"
+                    "Do not paste your Auth0 login password or an Audience URL — we derive audience."
+                ),
             ),
         ),
         trust_copy=_saas_trust_copy(
             extra=(
-                "Authorize the M2M app for the Auth0 Management API with minimum scopes "
-                "read:users (matching) and update:users (suppression / block). Audience is "
-                "derived as https://{domain}/api/v2/ — you do not paste it here."
+                "Auth0: create a Machine-to-Machine app for the Management API with "
+                "read:users and update:users. Paste Domain, Client ID, and Client Secret only."
             ),
         ),
     ),
@@ -231,18 +263,24 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                 input_type=CredentialInputType.URL,
                 required=True,
                 help=(
-                    "Paste https://docs.google.com/spreadsheets/d/…/edit. In the sheet, "
-                    "click Share, add the Habeas service account email from your invite "
-                    "(Editor if Habeas must write; Viewer for read-only). Uncheck Notify "
-                    "people. Do not paste a JSON key file."
+                    "1. Open the Google Sheet Habeas should use.\n"
+                    "2. Copy the browser URL (must look like "
+                    "https://docs.google.com/spreadsheets/d/…/edit).\n"
+                    "3. Click Share (top right).\n"
+                    "4. Paste the Habeas service account email from your invite page.\n"
+                    "5. Choose Viewer (read-only) or Editor (if Habeas must update rows).\n"
+                    "6. Uncheck Notify people → Share / Send.\n"
+                    "7. Paste the spreadsheet URL here.\n"
+                    "Do not use Publish to web /pubhtml links. Do not paste a JSON key file "
+                    "or your Google password."
                 ),
             ),
         ),
         trust_copy=_saas_trust_copy(
             extra=(
-                "Habeas accesses this sheet with a Google service account — share the "
-                "file directly with that email. We never ask for your Google password or "
-                "a downloaded credentials JSON. Published /pubhtml links are not supported."
+                "Google Sheets: share the file with Habeas’s service account email, then "
+                "paste the editable spreadsheet URL. We never ask for your Google password "
+                "or a credentials JSON."
             ),
         ),
     ),
@@ -252,13 +290,13 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
         invite_allowed=False,
         credential_fields=(),
         trust_copy=(
-            "Cassandra connectivity is provisioned by Habeas Infrastructure (INF), "
-            "not through an owner invite link.\n\n"
-            "TLS certificates, service account credentials, and egress allowlisting are "
-            "handled out of band. When you create this connection, ops marks it "
-            "infra_pending until INF confirms the path is live.\n\n"
-            "No secrets are collected on this page. Habeas still stores runtime "
-            "credentials only in Google Cloud Secret Manager once INF completes setup."
+            "You do not paste credentials for Cassandra.\n\n"
+            "Habeas Infrastructure (INF) provisions TLS, service accounts, and network "
+            "egress. Ops marks the connection infra_pending until INF confirms the path "
+            "is live.\n\n"
+            "As a data owner, use the privacy app for request review only — not this form "
+            "for secrets. Runtime credentials stay in Google Cloud Secret Manager after "
+            "INF setup."
         ),
     ),
 }

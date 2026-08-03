@@ -164,6 +164,35 @@ function TrustSection({ trustCopy }: { trustCopy: string }) {
   )
 }
 
+function FieldHelp({ help }: { help: string }) {
+  const lines = help
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const steps = lines.filter((line) => /^\d+\.\s/.test(line))
+  const notes = lines.filter((line) => !/^\d+\.\s/.test(line))
+
+  return (
+    <div className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs leading-relaxed text-[#64748B]">
+      <p className="mb-2 font-medium text-[#0F172A]">How to find this</p>
+      {steps.length > 0 ? (
+        <ol className="list-decimal space-y-1.5 pl-4">
+          {steps.map((step) => (
+            <li key={step}>{step.replace(/^\d+\.\s*/, '')}</li>
+          ))}
+        </ol>
+      ) : null}
+      {notes.length > 0 ? (
+        <div className={`${steps.length > 0 ? 'mt-2 border-t border-[#E2E8F0] pt-2' : ''} space-y-1`}>
+          {notes.map((note) => (
+            <p key={note}>{note}</p>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function CredentialInput({
   field,
   value,
@@ -179,11 +208,12 @@ function CredentialInput({
     field.input_type === 'password' ? 'password' : field.input_type === 'url' ? 'url' : 'text'
 
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-2">
       <label htmlFor={field.id} className="block text-sm font-medium text-[#0F172A]">
         {field.label}
         {field.required ? <span className="font-normal text-[#64748B]"> · required</span> : null}
       </label>
+      {field.help ? <FieldHelp help={field.help} /> : null}
       <input
         id={field.id}
         name={field.id}
@@ -195,14 +225,6 @@ function CredentialInput({
         onChange={(event) => onChange(event.target.value)}
         className={FIELD_CLASS}
       />
-      {field.help ? (
-        <details className="text-xs text-[#64748B]">
-          <summary className="cursor-pointer text-habeas-mid hover:text-habeas-navy">
-            Where do I find this?
-          </summary>
-          <p className="mt-1.5 leading-relaxed">{field.help}</p>
-        </details>
-      ) : null}
     </div>
   )
 }
