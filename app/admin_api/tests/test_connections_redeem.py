@@ -19,7 +19,14 @@ CONNECTION_ID = UUID("11111111-2222-3333-4444-555555555555")
 INVITE_ID = UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 RAW_TOKEN = "test-invite-token"
 TOKEN_HASH = hash_token(RAW_TOKEN)
-NOW = datetime(2026, 7, 30, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+# Anchored at import time for parametrize defaults; still relative to wall clock.
+NOW = _now()
 
 
 def _invite_row(
@@ -33,7 +40,7 @@ def _invite_row(
         "invite_id": INVITE_ID,
         "connection_id": CONNECTION_ID,
         "invite_owner_email": "owner@example.com",
-        "expires_at": expires_at or (NOW + timedelta(hours=24)),
+        "expires_at": expires_at or (_now() + timedelta(hours=24)),
         "consumed_at": consumed_at,
         "revoked_at": revoked_at,
         "system": system,
@@ -224,6 +231,8 @@ def test_redeem_failed_test_marks_connection_failed(
         "test_ok": False,
         "detail": "missing_credentials",
     }
+    # Failed tests must leave the invite usable for retry.
+    assert conn.fetchval.await_count == 0
 
 
 @pytest.mark.skipif(

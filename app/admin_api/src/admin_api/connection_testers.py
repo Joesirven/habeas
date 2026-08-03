@@ -1,18 +1,31 @@
-"""Stub connection testers for integration onboarding.
+"""Connection testers for integration onboarding.
 
-Live vendor HTTP checks can replace the stub path per system later; callers
-should keep using ``test_connection`` as the single entry point.
+Per-system live HTTP checks live under ``connection_tests/``; callers should
+keep using ``test_connection`` as the single entry point.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 
+import httpx
+
+from admin_api.connection_tests import auth0, google_sheets, lever, mailchimp, paylocity
+from habeas_privacy_core.connections.models import sanitize_test_detail
 from habeas_privacy_core.connections.systems import get_system, validate_credentials
 
 logger = logging.getLogger(__name__)
 
-_SAAS_SYSTEMS = frozenset({"mailchimp", "paylocity", "lever", "auth0", "google_sheets"})
+_SystemTester = Callable[[dict[str, str]], Awaitable[tuple[bool, str]]]
+
+_SYSTEM_TESTERS: dict[str, _SystemTester] = {
+    "mailchimp": mailchimp.test_mailchimp,
+    "paylocity": paylocity.test_paylocity,
+    "lever": lever.test_lever,
+    "auth0": auth0.test_auth0,
+    "google_sheets": google_sheets.test_google_sheets,
+}
 
 
 async def test_connection(system: str, credentials: dict[str, str]) -> tuple[bool, str]:
@@ -33,7 +46,8 @@ async def test_connection(system: str, credentials: dict[str, str]) -> tuple[boo
         logger.info("connection_test_finished system=%s ok=false detail=infra_only", system)
         return False, "infra_only"
 
-    if system not in _SAAS_SYSTEMS:
+    tester = _SYSTEM_TESTERS.get(system)
+    if tester is None:
         logger.info("connection_test_finished system=%s ok=false detail=unknown_system", system)
         return False, "unknown_system"
 
@@ -46,10 +60,23 @@ async def test_connection(system: str, credentials: dict[str, str]) -> tuple[boo
         )
         return False, "missing_credentials"
 
-    # Future: dispatch to per-system live HTTP testers (e.g. Mailchimp ping).
-    _ = validated
-    logger.info("connection_test_finished system=%s ok=true detail=stub_ok", system)
-    return True, "stub_ok"
+    try:
+        ok, detail = await tester(validated)
+    except httpx.RequestError:
+        logger.info("connection_test_finished system=%s ok=false detail=unreachable", system)
+        return False, "unreachable"
+    except Exception:
+        logger.info("connection_test_finished system=%s ok=false detail=unknown_error", system)
+        return False, "unknown_error"
+
+    safe_detail = sanitize_test_detail(detail) or "unknown_error"
+    logger.info(
+        "connection_test_finished system=%s ok=%s detail=%s",
+        system,
+        ok,
+        safe_detail,
+    )
+    return ok, safe_detail
 
 
 # Not a pytest test — public API for connection onboarding routes.

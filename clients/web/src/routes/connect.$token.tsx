@@ -1,15 +1,19 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useParams } from '@tanstack/react-router'
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 
 import { Button } from '@/components/ui/button'
 import {
+  connectRedeemSystemLabel,
+  connectTestFailureMessage,
+  connectTestSuccessDescription,
   getConnectPreview,
   getMe,
   redeemConnect,
   type ConnectPreviewPayload,
   type MePayload,
 } from '@/lib/api'
+import { actionToast } from '@/lib/action-toast'
 
 type CredentialField = ConnectPreviewPayload['fields'][number]
 
@@ -21,14 +25,6 @@ const SAFE_API_ERROR_DETAILS: Record<string, string> = {
   'invite not found': 'This invite link is invalid or has expired.',
   'this connection cannot be redeemed via invite':
     'This connection cannot be completed through an invite link. Contact Habeas.',
-}
-
-/** Allowlisted connection-test codes from admin-api (`last_test_detail` contract). */
-const SAFE_TEST_DETAIL_MESSAGES: Record<string, string> = {
-  missing_credentials: 'Connection test could not run. Check the fields and try again.',
-  unknown_system: 'Connection test failed. Ask your Habeas contact to send a new invite.',
-  infra_only:
-    'This system is provisioned by Habeas Infrastructure, not through this form.',
 }
 
 function safeApiDetail(detail: string, fallback: string): string {
@@ -66,12 +62,34 @@ function friendlyApiError(error: unknown, fallback: string): string {
   return fallback
 }
 
-function formatTestFailureDetail(detail: string | null | undefined): string {
-  const code = detail?.trim().toLowerCase()
-  if (code && SAFE_TEST_DETAIL_MESSAGES[code]) {
-    return SAFE_TEST_DETAIL_MESSAGES[code]
-  }
-  return 'Connection test failed. Ask your Habeas contact to send a new invite.'
+function RedeemPendingOverlay({ systemLabel }: { systemLabel: string }) {
+  const [phase, setPhase] = useState<'saving' | 'testing'>('saving')
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setPhase('testing'), 1800)
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  const message =
+    phase === 'saving'
+      ? 'Saving credentials securely…'
+      : `Testing ${systemLabel} connection…`
+
+  return (
+    <div
+      className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-lg bg-white/90 px-6 text-center backdrop-blur-[2px]"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label={message}
+    >
+      <span
+        className="mb-3 inline-block size-8 animate-spin rounded-full border-2 border-habeas-navy/20 border-t-habeas-navy"
+        aria-hidden
+      />
+      <p className="text-sm font-medium text-[#0F172A]">{message}</p>
+    </div>
+  )
 }
 
 function formatExpiresAt(iso: string): string {
@@ -292,10 +310,34 @@ function ConnectForm({
     Object.fromEntries(preview.fields.map((field) => [field.id, ''])),
   )
   const [clientError, setClientError] = useState<string | null>(null)
+  const systemLabel = connectRedeemSystemLabel(preview)
 
   const redeemMutation = useMutation({
     mutationFn: (payload: Record<string, string>) => redeemConnect(token, payload),
     onMutate: () => setClientError(null),
+    onSuccess: (data) => {
+      if (data.test_ok) {
+        actionToast.success({
+          title: 'Connection test passed',
+          description: connectTestSuccessDescription(data.detail, preview.display_name),
+        })
+        return
+      }
+      const message = connectTestFailureMessage(data.detail)
+      actionToast.error({
+        title: 'Connection test failed',
+        description: message,
+      })
+    },
+    onError: (error) => {
+      actionToast.error({
+        title: 'Could not connect',
+        description: friendlyApiError(
+          error,
+          'Could not save credentials. Check the fields and try again.',
+        ),
+      })
+    },
   })
 
   const submitError =
@@ -311,7 +353,7 @@ function ConnectForm({
     redeemMutation.isSuccess && redeemMutation.data && !redeemMutation.data.test_ok
 
   const testFailureMessage = testFailed
-    ? formatTestFailureDetail(redeemMutation.data?.detail)
+    ? connectTestFailureMessage(redeemMutation.data?.detail)
     : null
 
   const inviteeFirst = firstNameFromEmail(preview.owner_email)
@@ -330,8 +372,11 @@ function ConnectForm({
               <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </div>
-          <h1 className="text-xl font-medium text-[#0F172A]">Connected</h1>
-          <p className="text-sm text-[#475569]">Thanks, {signedInFirst}. You can close this page.</p>
+          <h1 className="text-xl font-medium text-[#0F172A]">Connection test passed</h1>
+          <p className="text-sm text-[#475569]">
+            Thanks, {signedInFirst}. We saved your credentials and verified the{' '}
+            {systemLabel} connection successfully. You can close this page.
+          </p>
         </div>
       </ConnectCard>
     )
@@ -462,7 +507,9 @@ function ConnectForm({
       ) : null}
 
       {step === 'credentials' ? (
-        <div className="space-y-5">
+        <div className="relative space-y-5">
+          {redeemMutation.isPending ? <RedeemPendingOverlay systemLabel={systemLabel} /> : null}
+
           <header className="space-y-2 border-b border-[#E2E8F0] pb-5">
             <p className="text-xs font-medium uppercase tracking-wide text-habeas-navy">
               Step 3 · Credentials
@@ -497,9 +544,12 @@ function ConnectForm({
                 </p>
               ) : null}
               {testFailed ? (
-                <p className="text-sm text-red-700" role="alert">
-                  {testFailureMessage}
-                </p>
+                <div className="space-y-1" role="alert">
+                  <p className="text-sm text-red-700">{testFailureMessage}</p>
+                  <p className="text-xs text-[#475569]">
+                    This invite is still valid. Correct the values and try again.
+                  </p>
+                </div>
               ) : null}
 
               <div className="flex flex-col gap-2 sm:flex-row">
@@ -517,7 +567,7 @@ function ConnectForm({
                   disabled={redeemMutation.isPending}
                   className="h-10 flex-1 bg-habeas-navy text-sm hover:bg-habeas-navy/90"
                 >
-                  {redeemMutation.isPending ? 'Connecting…' : 'Connect securely'}
+                  Connect securely
                 </Button>
               </div>
             </form>

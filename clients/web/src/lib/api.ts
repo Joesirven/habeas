@@ -2184,6 +2184,84 @@ export type ConnectRedeemResponse = {
   detail: string | null
 }
 
+/** Allowlisted redeem/test detail codes — never echo vendor bodies in UI. */
+export type ConnectTestDetailCode =
+  | 'stub_ok'
+  | 'ok'
+  | 'mailchimp_ok'
+  | 'paylocity_ok'
+  | 'lever_ok'
+  | 'auth0_ok'
+  | 'google_sheets_ok'
+  | 'auth_failed'
+  | 'unreachable'
+  | 'invalid_credentials'
+  | 'invalid_config'
+  | 'missing_credentials'
+  | 'unknown_system'
+  | 'infra_only'
+  | 'unknown_error'
+  | 'failed'
+
+const CONNECT_SYSTEM_LABELS: Record<IntegrationSystemId, string> = {
+  mailchimp: 'Mailchimp',
+  paylocity: 'Paylocity',
+  lever: 'Lever',
+  auth0: 'Auth0',
+  google_sheets: 'Google Sheets',
+  cassandra: 'Cassandra',
+}
+
+const CONNECT_TEST_SUCCESS_DESCRIPTIONS: Record<string, string> = {
+  mailchimp_ok: 'Mailchimp API credentials were verified successfully.',
+  paylocity_ok: 'Paylocity API credentials were verified successfully.',
+  lever_ok: 'Lever API credentials were verified successfully.',
+  auth0_ok: 'Auth0 credentials were verified successfully.',
+  google_sheets_ok: 'Google Sheets connection was verified successfully.',
+  stub_ok: 'Connection test completed successfully.',
+  ok: 'Connection test completed successfully.',
+}
+
+const CONNECT_TEST_FAILURE_MESSAGES: Record<string, string> = {
+  auth_failed: 'Authentication failed. Check the credentials and try again.',
+  unreachable: 'Could not reach the service. Try again in a few minutes.',
+  invalid_credentials: 'The credentials could not be verified. Check the values and try again.',
+  invalid_config: 'The connection settings look incorrect. Check the fields and try again.',
+  missing_credentials: 'Connection test could not run. Check the fields and try again.',
+  unknown_system: 'Connection test failed. Ask your Habeas contact to send a new invite.',
+  infra_only: 'This system is provisioned by Habeas Infrastructure, not through this form.',
+  unknown_error: 'Connection test failed. Check the values and try again.',
+  failed: 'Connection test failed. Check the values and try again.',
+}
+
+/** Human label for loading/success copy — prefers system id, falls back to display name. */
+export function connectRedeemSystemLabel(
+  preview: Pick<ConnectPreviewPayload, 'system' | 'display_name'>,
+): string {
+  return CONNECT_SYSTEM_LABELS[preview.system] ?? preview.display_name
+}
+
+/** Owner-safe success toast description from allowlisted redeem `detail`. */
+export function connectTestSuccessDescription(
+  detail: string | null | undefined,
+  displayName: string,
+): string {
+  const code = detail?.trim().toLowerCase()
+  if (code && CONNECT_TEST_SUCCESS_DESCRIPTIONS[code]) {
+    return CONNECT_TEST_SUCCESS_DESCRIPTIONS[code]
+  }
+  return `Your ${displayName} connection test completed successfully.`
+}
+
+/** Owner-safe failure message from allowlisted redeem/test `detail`. */
+export function connectTestFailureMessage(detail: string | null | undefined): string {
+  const code = detail?.trim().toLowerCase()
+  if (code && CONNECT_TEST_FAILURE_MESSAGES[code]) {
+    return CONNECT_TEST_FAILURE_MESSAGES[code]
+  }
+  return 'Connection test failed. Ask your Habeas contact to send a new invite.'
+}
+
 export function listConnections() {
   return fetchAdminApi<{ connections: ConnectionRecord[] }>('/ops/connections')
 }

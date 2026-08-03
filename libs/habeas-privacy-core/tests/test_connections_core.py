@@ -8,7 +8,10 @@ from datetime import UTC, datetime, timedelta
 import asyncpg
 import pytest
 
-from habeas_privacy_core.connections.models import sanitize_test_detail
+from habeas_privacy_core.connections.models import (
+    ALLOWED_TEST_DETAIL_CODES,
+    sanitize_test_detail,
+)
 from habeas_privacy_core.connections.secrets import InMemorySecretWriter, get_secret_writer
 from habeas_privacy_core.connections.token import (
     INVITE_TTL_HOURS,
@@ -56,12 +59,47 @@ def test_generate_invite_token_roundtrip_hash():
 def test_sanitize_test_detail_allowlists_codes():
     assert sanitize_test_detail("stub_ok") == "stub_ok"
     assert sanitize_test_detail(" STUB_OK ") == "stub_ok"
+    assert sanitize_test_detail("ok") == "ok"
     assert sanitize_test_detail(None) is None
     assert sanitize_test_detail("") is None
 
 
+def test_sanitize_test_detail_allowlists_live_success_codes():
+    for code in (
+        "mailchimp_ok",
+        "paylocity_ok",
+        "lever_ok",
+        "auth0_ok",
+        "google_sheets_ok",
+    ):
+        assert code in ALLOWED_TEST_DETAIL_CODES
+        assert sanitize_test_detail(code) == code
+        assert sanitize_test_detail(code.upper()) == code
+
+
+def test_sanitize_test_detail_allowlists_failure_codes():
+    for code in (
+        "auth_failed",
+        "unreachable",
+        "invalid_credentials",
+        "invalid_config",
+        "unknown_system",
+        "infra_only",
+        "missing_credentials",
+        "failed",
+        "unknown_error",
+    ):
+        assert code in ALLOWED_TEST_DETAIL_CODES
+        assert sanitize_test_detail(code) == code
+
+
 def test_sanitize_test_detail_rejects_vendor_payloads():
     assert sanitize_test_detail("HTTP 401: invalid api_key=secret123") == "unknown_error"
+    assert (
+        sanitize_test_detail('{"title":"Invalid API Key","status":401,"detail":"Bad key"}')
+        == "unknown_error"
+    )
+    assert sanitize_test_detail("mailchimp_ok but with extra vendor text") == "unknown_error"
 
 
 def test_invite_ttl_constant():

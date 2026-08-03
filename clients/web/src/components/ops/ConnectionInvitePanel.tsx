@@ -7,6 +7,7 @@ import {
   type ConnectionInviteCreateResponse,
   type IntegrationSystemId,
 } from '@/lib/api'
+import { actionToast } from '@/lib/action-toast'
 
 const fieldClass =
   'w-full rounded-md border border-line bg-paper px-2.5 py-1.5 text-sm text-ink'
@@ -65,7 +66,7 @@ export function ConnectionInvitePanel({
       )
       setInvite(response)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not create invite')
+      setError(actionToast.safeErrorMessage(err, 'Could not create invite'))
     } finally {
       setMinting(false)
     }
@@ -79,7 +80,7 @@ export function ConnectionInvitePanel({
       await revokeConnectionInvite(connectionId, invite.invite_id)
       setInvite(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not revoke invite')
+      setError(actionToast.safeErrorMessage(err, 'Could not revoke invite'))
     } finally {
       setRevoking(false)
     }

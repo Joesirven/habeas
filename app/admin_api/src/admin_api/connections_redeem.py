@@ -287,19 +287,21 @@ async def redeem_connection(token: str, body: RedeemBody) -> RedeemResponse:
             safe_detail,
         )
 
-        consumed = await conn.fetchval(
-            """
-            UPDATE connection_invites
-               SET consumed_at = NOW()
-             WHERE id = $1
-               AND consumed_at IS NULL
-               AND revoked_at IS NULL
-         RETURNING id
-            """,
-            row["invite_id"],
-        )
-        if consumed is None:
-            raise HTTPException(status_code=404, detail="invite not found")
+        if test_ok:
+            consumed = await conn.fetchval(
+                """
+                UPDATE connection_invites
+                   SET consumed_at = NOW()
+                 WHERE id = $1
+                   AND consumed_at IS NULL
+                   AND revoked_at IS NULL
+             RETURNING id
+                """,
+                row["invite_id"],
+            )
+            if consumed is None:
+                raise HTTPException(status_code=404, detail="invite not found")
+        # Failed tests leave the invite usable so the owner can correct credentials.
 
     logger.info(
         "connection invite redeemed connection_id=%s system=%s status=%s test_ok=%s",

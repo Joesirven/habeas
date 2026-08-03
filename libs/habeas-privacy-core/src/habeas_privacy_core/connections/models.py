@@ -19,13 +19,24 @@ __all__ = [
 
 ALLOWED_TEST_DETAIL_CODES: Final[frozenset[str]] = frozenset(
     {
+        # success
         "stub_ok",
+        "ok",
+        "mailchimp_ok",
+        "paylocity_ok",
+        "lever_ok",
+        "auth0_ok",
+        "google_sheets_ok",
+        # failure
         "unknown_system",
         "infra_only",
         "missing_credentials",
-        "ok",
         "failed",
         "unknown_error",
+        "auth_failed",
+        "unreachable",
+        "invalid_credentials",
+        "invalid_config",
     }
 )
 

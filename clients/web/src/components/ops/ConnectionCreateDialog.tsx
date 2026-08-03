@@ -217,7 +217,7 @@ export function ConnectionCreateDialog({
       setPhase('success')
       onCreated?.(connection)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not create connection')
+      setError(actionToast.safeErrorMessage(err, 'Could not create connection'))
     } finally {
       setSubmitting(false)
     }
