@@ -971,6 +971,7 @@ async def test_get_matching_result_detail_shape(monkeypatch: pytest.MonkeyPatch)
                 attempted_at=recorded,
                 completed_at=recorded,
                 error_code=None,
+                error_message="lookup failed email=jane@example.com consumer_id=5551212",
                 audit_payload={"match_count": 4, "lookup_state": "CA"},
             )
         ]
@@ -1004,6 +1005,9 @@ async def test_get_matching_result_detail_shape(monkeypatch: pytest.MonkeyPatch)
     assert detail["requestor_state"] == "TX"
     assert detail["attempt_id"] == 99
     assert detail["attempts"][0]["audit_payload"]["lookup_state"] == "CA"
+    assert detail["attempts"][0]["error_message"] is not None
+    assert "jane@example.com" not in detail["attempts"][0]["error_message"]
+    assert "5551212" not in detail["attempts"][0]["error_message"]
     assert detail["assignment"]["target_role"] == "legal"
     assert "consumer_id" not in detail
     assert "email" not in detail["attempts"][0]["audit_payload"]
@@ -1043,6 +1047,7 @@ async def test_get_matching_result_detail_tolerates_list_audit_payload(
                 attempted_at=recorded,
                 completed_at=recorded,
                 error_code=None,
+                error_message=None,
                 audit_payload=["legacy", "list"],
             )
         ]
@@ -1089,6 +1094,7 @@ async def test_enrich_matching_result_contacts_single_uses_consumer_id(
                 "state": "CA",
                 "first_initial": "J",
                 "last_initial": "D",
+                "last_name": "Doe",
                 "dob": "1990-01-15",
                 "email": "jane@example.com",
                 "phones": [{"type": "cell", "number": "5551234567"}],
@@ -1103,7 +1109,52 @@ async def test_enrich_matching_result_contacts_single_uses_consumer_id(
     )
     assert payload["matched_contacts_status"] == "ok"
     assert payload["matched_contacts"][0]["first_initial"] == "J"
+    assert payload["matched_contacts"][0]["last_name"] == "Doe"
+    assert "first_name" not in payload["matched_contacts"][0]
     assert payload["matched_contacts"][0]["email"] == "jane@example.com"
+
+
+def test_fetch_person_contacts_from_bq_includes_stripped_last_name():
+    """BQ lastname becomes last_name; full first name is never returned."""
+
+    class _FakeClient:
+        def query(self, _sql: str, job_config: Any = None) -> list[dict[str, Any]]:
+            return [
+                {
+                    "dwid": "1001",
+                    "state": "ca",
+                    "firstname": "Jane",
+                    "lastname": "  Doe  ",
+                    "birthdate": "1990-01-15",
+                    "emailaddress": "jane@example.com",
+                    "likely_cell_phone": None,
+                    "likely_land_phone": None,
+                },
+                {
+                    "dwid": "1002",
+                    "state": "CA",
+                    "firstname": "Alex",
+                    "lastname": "   ",
+                    "birthdate": None,
+                    "emailaddress": None,
+                    "likely_cell_phone": "5551112222",
+                    "likely_land_phone": None,
+                },
+            ]
+
+    contacts = drop_pipeline._fetch_person_contacts_from_bq(
+        dwids=["1001", "1002"],
+        lookup_state="CA",
+        client=_FakeClient(),
+    )
+    assert contacts[0]["last_name"] == "Doe"
+    assert contacts[0]["first_initial"] == "J"
+    assert contacts[0]["last_initial"] == "D"
+    assert "firstname" not in contacts[0]
+    assert "first_name" not in contacts[0]
+    assert contacts[1]["last_name"] is None
+    assert contacts[1]["first_initial"] == "A"
+    assert contacts[1]["phones"] == [{"type": "cell", "number": "5551112222"}]
 
 
 @pytest.mark.asyncio
@@ -1144,6 +1195,7 @@ async def test_enrich_matching_result_contacts_multi_relooks_up_hash(
                 "state": kwargs["lookup_state"],
                 "first_initial": "A",
                 "last_initial": "B",
+                "last_name": "Baker",
                 "dob": None,
                 "email": None,
                 "phones": [],
@@ -1160,6 +1212,8 @@ async def test_enrich_matching_result_contacts_multi_relooks_up_hash(
     assert payload["matched_contacts_status"] == "ok"
     assert len(payload["matched_contacts"]) == 2
     assert {c["dwid"] for c in payload["matched_contacts"]} == {"2001", "2002"}
+    assert all(c["last_name"] == "Baker" for c in payload["matched_contacts"])
+    assert all("first_name" not in c for c in payload["matched_contacts"])
 
 
 def test_matching_results_list_route(monkeypatch: pytest.MonkeyPatch):

@@ -74,6 +74,7 @@ import {
   AccessHandoffPanel,
   MatchingReviewPanel,
   fetchMatchingDetailOptional,
+  formatMatchedContactsSummary,
 } from '@/components/requests/RequestTriageDialog'
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -780,13 +781,6 @@ function RequestStageActionBar({
   )
 }
 
-function matchedContactDisplayName(contact: MatchedPersonContact): string | null {
-  const first = contact.first_initial?.trim()
-  const last = contact.last_initial?.trim()
-  if (first || last) return [first, last].filter(Boolean).join('')
-  return null
-}
-
 function phoneSummaryFromMatched(contact: MatchedPersonContact): string | null {
   if (!contact.phones?.length) return null
   return contact.phones.map((phone) => `${phone.type}: ${phone.number}`).join(' · ')
@@ -843,16 +837,13 @@ export function RequesterContactSection({
         </div>
       )
     }
-    const initials = matchedContactDisplayName(primaryMatched!)
-    if (initials) rows.push({ label: 'Initials', value: initials })
-    if (primaryMatched?.state) rows.push({ label: 'State', value: primaryMatched.state })
+    const personSummary = formatMatchedContactsSummary(matched)
+    if (personSummary && personSummary !== '—') {
+      rows.push({ label: 'Matched', value: personSummary })
+    }
     if (primaryMatched?.email) rows.push({ label: 'Email', value: primaryMatched.email })
     const phones = phoneSummaryFromMatched(primaryMatched!)
     if (phones) rows.push({ label: 'Phone', value: phones })
-    if (primaryMatched?.dob) rows.push({ label: 'DOB', value: primaryMatched.dob })
-    if (matched.length > 1) {
-      rows.push({ label: 'Persons', value: `${matched.length} matched` })
-    }
   } else {
     const name = requestContact?.name?.trim() || displayLabel?.trim() || null
     const email = requestContact?.email?.trim() || null
@@ -885,10 +876,9 @@ export function RequesterContactSection({
             <dd
               className={cn(
                 'mt-0.5 text-ink',
-                row.label === 'Email' || row.label === 'Phone' || row.label === 'Initials'
+                row.label === 'Email' || row.label === 'Phone' || row.label === 'Matched'
                   ? 'break-all'
                   : 'truncate',
-                row.label === 'Initials' || row.label === 'State' ? 'font-mono' : null,
               )}
               title={row.value}
             >
@@ -1578,13 +1568,20 @@ export function RequestDetailBody({
     mutationFn: async ({
       action,
       responseStatus,
+      dwids,
     }: {
       action: 'promote' | 'decline'
       responseStatus?: DropResponseStatusCode
+      dwids?: string[]
     }) => {
       if (action === 'promote') {
         return postDropMatchingResultPromote(requestId, {
           response_status: responseStatus,
+          ...(responseStatus === 5
+            ? { dwids: [] }
+            : responseStatus === 3 || responseStatus === 4
+              ? { dwids: dwids ?? [] }
+              : {}),
         })
       }
       return postDropMatchingResultDecline(requestId)
@@ -1850,10 +1847,11 @@ export function RequestDetailBody({
                 hideActions={!canMatchingDisposition}
                 layout="tabs"
                 compact
-                onPromote={(responseStatus) =>
+                onPromote={(responseStatus, dwids) =>
                   matchingDispositionMutation.mutate({
                     action: 'promote',
                     responseStatus,
+                    dwids,
                   })
                 }
                 onDecline={() => matchingDispositionMutation.mutate({ action: 'decline' })}

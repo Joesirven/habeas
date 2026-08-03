@@ -314,6 +314,7 @@ export type MatchingAttemptRow = {
   attempted_at: string | null
   completed_at: string | null
   error_code: string | null
+  error_message?: string | null
   audit_payload: Record<string, unknown>
 }
 
@@ -365,6 +366,7 @@ export type MatchedPersonContact = {
   state: string
   first_initial: string | null
   last_initial: string | null
+  last_name?: string | null
   dob: string | null
   email: string | null
   phones: MatchedPersonPhone[]
@@ -964,7 +966,11 @@ export function dropResponseStatusLabel(code: number | null | undefined): string
 
 export function postDropMatchingResultPromote(
   requestId: string,
-  body?: { decision_reason?: string; response_status?: DropResponseStatusCode },
+  body?: {
+    decision_reason?: string
+    response_status?: DropResponseStatusCode
+    dwids?: string[]
+  },
 ) {
   return fetchAdminApi<{
     status: string
@@ -980,6 +986,7 @@ export function postDropMatchingResultPromote(
       ...(body?.response_status != null
         ? { response_status: body.response_status }
         : {}),
+      ...(body?.dwids != null ? { dwids: body.dwids } : {}),
     }),
   })
 }

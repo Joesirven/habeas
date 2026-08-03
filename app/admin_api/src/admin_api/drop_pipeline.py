@@ -2064,12 +2064,19 @@ def _fetch_person_contacts_from_bq(
         dob = str(birthdate).strip() if birthdate is not None and str(birthdate).strip() else None
         email_raw = row.get("emailaddress")
         email = str(email_raw).strip() if email_raw is not None and str(email_raw).strip() else None
+        lastname_raw = row.get("lastname")
+        last_name = (
+            str(lastname_raw).strip()
+            if lastname_raw is not None and str(lastname_raw).strip()
+            else None
+        )
         contacts.append(
             {
                 "dwid": str(row["dwid"]),
                 "state": str(row["state"]).strip().upper(),
                 "first_initial": _initial_from_name(row.get("firstname")),
                 "last_initial": _initial_from_name(row.get("lastname")),
+                "last_name": last_name,
                 "dob": dob,
                 "email": email,
                 "phones": phones,
@@ -2459,6 +2466,7 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
                attempted_at,
                completed_at,
                error_code,
+               error_message,
                audit_payload
           FROM matching_attempts
          WHERE request_id = $1::uuid
@@ -2478,6 +2486,9 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
             if a["completed_at"] is not None
             else None,
             "error_code": a["error_code"],
+            "error_message": (
+                redact_error_text(a["error_message"]) if a["error_message"] else None
+            ),
             # Allowlisted JSONB already — never add hash/dwid fields here.
             "audit_payload": _coerce_audit_payload(a["audit_payload"]),
         }
