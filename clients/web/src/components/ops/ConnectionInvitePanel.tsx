@@ -8,6 +8,7 @@ import {
   type IntegrationSystemId,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
+import { absoluteInviteUrl } from '@/lib/utils'
 
 const fieldClass =
   'w-full rounded-md border border-line bg-paper px-2.5 py-1.5 text-sm text-ink'
@@ -88,15 +89,17 @@ export function ConnectionInvitePanel({
 
   function copyInviteUrl() {
     if (!invite?.invite_url) return
-    void navigator.clipboard.writeText(invite.invite_url).then(() => {
+    void navigator.clipboard.writeText(absoluteInviteUrl(invite.invite_url)).then(() => {
       setCopyNote('Copied link')
       window.setTimeout(() => setCopyNote(null), 2000)
     })
   }
 
+  const shareUrl = invite?.invite_url ? absoluteInviteUrl(invite.invite_url) : null
+
   const mailtoHref =
-    invite?.invite_url != null
-      ? buildInviteMailto(invite.invite_url, invite.owner_email ?? ownerEmail)
+    shareUrl != null
+      ? buildInviteMailto(shareUrl, invite?.owner_email ?? ownerEmail)
       : null
 
   if (!inviteAllowed) {
@@ -144,7 +147,7 @@ export function ConnectionInvitePanel({
             type="text"
             readOnly
             className={`${fieldClass} font-mono text-xs`}
-            value={invite.invite_url}
+            value={shareUrl ?? ''}
             aria-label="Invite URL"
           />
           <div className="flex flex-wrap gap-2">
