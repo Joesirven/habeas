@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useParams } from '@tanstack/react-router'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -13,6 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Toaster } from '@/components/ui/sonner'
 import {
   connectRedeemSystemLabel,
   connectTestFailureMessage,
@@ -287,6 +288,7 @@ function CredentialInput({
 
 function ConnectShell({ children }: { children: ReactNode }) {
   // z-[60] above AppShell sticky header (z-40) and role switcher so they cannot cover the logo.
+  // Dialogs use z-[70]+ so confirm/success feedback stays above this shell.
   return (
     <div className="fixed inset-0 z-[60] flex flex-col overflow-y-auto bg-[#F8FAFC]">
       <header className="shrink-0 bg-habeas-navy px-4 py-6 sm:px-6 sm:py-7">
@@ -301,6 +303,8 @@ function ConnectShell({ children }: { children: ReactNode }) {
           Secure integration onboarding
         </footer>
       </div>
+      {/* Connect shell covers AppShell toaster — mount one above the shell. */}
+      <Toaster style={{ zIndex: 80 } as CSSProperties} />
     </div>
   )
 }
@@ -345,6 +349,7 @@ function ConnectForm({
     },
     onMutate: () => setClientError(null),
     onSuccess: (data) => {
+      setConfirmTestOpen(false)
       if (data.test_ok) {
         setSuccessOpen(true)
         return
@@ -356,6 +361,7 @@ function ConnectForm({
       })
     },
     onError: (error) => {
+      setConfirmTestOpen(false)
       actionToast.error({
         title: 'Could not connect',
         description: friendlyApiError(
@@ -414,7 +420,7 @@ function ConnectForm({
   }
 
   function runCredentialTest() {
-    setConfirmTestOpen(false)
+    // Keep the confirm dialog open with "Working…" until the mutation settles.
     redeemMutation.mutate(credentials)
   }
 
@@ -683,7 +689,10 @@ function ConnectForm({
 
         <ConfirmActionDialog
           open={confirmTestOpen}
-          onOpenChange={setConfirmTestOpen}
+          onOpenChange={(open) => {
+            if (redeemMutation.isPending) return
+            setConfirmTestOpen(open)
+          }}
           title={`Test ${systemLabel} connection?`}
           description="We’ll save your keys in Google’s secure vault, then verify Habeas can authenticate. Values are never shown back in this app."
           confirmLabel="Yes, test now"

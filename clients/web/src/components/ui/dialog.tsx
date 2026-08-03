@@ -18,7 +18,7 @@ export const DialogOverlay = React.forwardRef<
   <DialogPrimitive.Overlay
     ref={ref}
     className={cn(
-      'fixed inset-0 z-50 bg-ink/40 backdrop-blur-[2px]',
+      'fixed inset-0 z-[70] bg-ink/40 backdrop-blur-[2px]',
       className,
     )}
     {...props}
@@ -35,7 +35,7 @@ export const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        'fixed left-1/2 top-1/2 z-50 flex w-full max-w-lg -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-xl border border-[var(--glass-border)] bg-paper-raised p-6 shadow-lg',
+        'fixed left-1/2 top-1/2 z-[70] flex w-full max-w-lg -translate-x-1/2 -translate-y-1/2 flex-col gap-4 rounded-xl border border-[var(--glass-border)] bg-paper-raised p-6 shadow-lg',
         className,
       )}
       {...props}
