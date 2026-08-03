@@ -15,6 +15,15 @@ describe('safeErrorMessage', () => {
     expect(safeErrorMessage(err)).toBe(SAFE_API_ERROR_DETAILS['invite not found'])
   })
 
+  test('Sheets provision failure → friendly string', () => {
+    const err = new Error(
+      'Admin API 502: {"detail":"failed to provision google sheets service account"}',
+    )
+    expect(safeErrorMessage(err)).toBe(
+      SAFE_API_ERROR_DETAILS['failed to provision google sheets service account'],
+    )
+  })
+
   test('Admin API validation-array detail → generic', () => {
     const err = new Error(
       'Admin API 422: {"detail":[{"loc":["body","api_key"],"msg":"field required"}]}',

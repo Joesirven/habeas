@@ -45,7 +45,7 @@ async def test_google_sheets_format_validated_ok_without_google_client() -> None
 
     assert ok is True
     assert detail == "google_sheets_ok"
-    mock_fetch.assert_called_once_with(_SPREADSHEET_ID)
+    mock_fetch.assert_called_once_with(_SPREADSHEET_ID, impersonate_email=None)
 
 
 @pytest.mark.asyncio

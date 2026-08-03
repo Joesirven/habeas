@@ -216,11 +216,46 @@ async def get_connect_info(token: str) -> ConnectInfoResponse:
         row = _ensure_valid_invite(await _fetch_invite(conn, token_hash))
 
     system = get_system(row["system"])
+    fields = [_field_response(field) for field in system.credential_fields]
+    if row["system"] == "google_sheets":
+        try:
+            from habeas_privacy_core.connections.systems import (
+                google_sheets_spreadsheet_url_help,
+            )
+        except ImportError:  # pragma: no cover
+            google_sheets_spreadsheet_url_help = None  # type: ignore[assignment]
+        meta = row.get("metadata") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except json.JSONDecodeError:
+                meta = {}
+        sa_email = None
+        if isinstance(meta, dict):
+            raw = meta.get("service_account_email")
+            if isinstance(raw, str) and raw.strip():
+                sa_email = raw.strip()
+        if google_sheets_spreadsheet_url_help is not None:
+            fields = [
+                CredentialFieldResponse(
+                    id=field.id,
+                    label=field.label,
+                    input_type=field.input_type,
+                    required=field.required,
+                    help=(
+                        google_sheets_spreadsheet_url_help(service_account_email=sa_email)
+                        if field.id == "spreadsheet_url"
+                        else field.help
+                    ),
+                )
+                for field in fields
+            ]
+
     return ConnectInfoResponse(
         system=system.system_id,
         display_name=row["display_name"],
         owner_email=row["invite_owner_email"],
-        fields=[_field_response(field) for field in system.credential_fields],
+        fields=fields,
         trust_copy=system.trust_copy,
         expires_at=row["expires_at"],
     )
@@ -268,7 +303,23 @@ async def redeem_connection(token: str, body: RedeemBody) -> RedeemResponse:
             row["invite_owner_email"],
         )
 
-        test_ok, detail = await test_connection(row["system"], cleaned)
+        share_sa = None
+        meta = row.get("metadata") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except json.JSONDecodeError:
+                meta = {}
+        if isinstance(meta, dict):
+            raw_sa = meta.get("service_account_email")
+            if isinstance(raw_sa, str) and raw_sa.strip():
+                share_sa = raw_sa.strip()
+
+        test_ok, detail = await test_connection(
+            row["system"],
+            cleaned,
+            impersonate_service_account=share_sa,
+        )
         safe_detail = sanitize_test_detail(detail)
         final_status = "connected" if test_ok else "failed"
         await conn.execute(

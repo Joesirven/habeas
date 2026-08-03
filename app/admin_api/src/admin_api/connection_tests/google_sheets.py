@@ -38,7 +38,11 @@ def _extract_spreadsheet_id(url: str) -> str | None:
     return spreadsheet_id
 
 
-def _fetch_spreadsheet_metadata(spreadsheet_id: str) -> tuple[bool, str] | None:
+def _fetch_spreadsheet_metadata(
+    spreadsheet_id: str,
+    *,
+    impersonate_email: str | None = None,
+) -> tuple[bool, str] | None:
     """Attempt a live metadata fetch when Google client libraries and ADC are available.
 
     Returns ``(ok, detail)`` when the API call runs, or ``None`` when libraries or ADC
@@ -46,13 +50,22 @@ def _fetch_spreadsheet_metadata(spreadsheet_id: str) -> tuple[bool, str] | None:
     """
     try:
         import google.auth
+        from google.auth import impersonated_credentials
         from googleapiclient.discovery import build
         from googleapiclient.errors import HttpError
     except ImportError:
         return None
 
     try:
-        credentials, _ = google.auth.default(scopes=[_SHEETS_SCOPE])
+        source_credentials, _ = google.auth.default(scopes=[_SHEETS_SCOPE])
+        credentials = source_credentials
+        if impersonate_email:
+            credentials = impersonated_credentials.Credentials(
+                source_credentials=source_credentials,
+                target_principal=impersonate_email.strip(),
+                target_scopes=[_SHEETS_SCOPE],
+                lifetime=300,
+            )
     except Exception:
         logger.info(
             "connection_test_google_sheets system=%s metadata=skipped reason=no_adc",
@@ -79,12 +92,19 @@ def _fetch_spreadsheet_metadata(spreadsheet_id: str) -> tuple[bool, str] | None:
     return True, "google_sheets_ok"
 
 
-async def test_google_sheets(credentials: dict[str, str]) -> tuple[bool, str]:
+async def test_google_sheets(
+    credentials: dict[str, str],
+    *,
+    impersonate_email: str | None = None,
+) -> tuple[bool, str]:
     spreadsheet_id = _extract_spreadsheet_id(credentials["spreadsheet_url"])
     if spreadsheet_id is None:
         return False, "invalid_config"
 
-    api_result = _fetch_spreadsheet_metadata(spreadsheet_id)
+    api_result = _fetch_spreadsheet_metadata(
+        spreadsheet_id,
+        impersonate_email=impersonate_email,
+    )
     if api_result is None:
         return True, "google_sheets_ok"
 

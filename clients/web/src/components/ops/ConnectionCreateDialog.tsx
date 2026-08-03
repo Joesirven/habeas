@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import {
+  ConfirmActionDialog,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -86,6 +87,10 @@ export function ConnectionCreateDialog({
   const [ownerEmail, setOwnerEmail] = useState('')
   const [phase, setPhase] = useState<DialogPhase>('form')
   const [submitting, setSubmitting] = useState(false)
+  const [confirmSheetsOpen, setConfirmSheetsOpen] = useState(false)
+  const [provisionPhase, setProvisionPhase] = useState<'idle' | 'account' | 'connection' | 'invite'>(
+    'idle',
+  )
   const [error, setError] = useState<string | null>(null)
   const [createdConnection, setCreatedConnection] = useState<ConnectionRecord | null>(null)
   const [invite, setInvite] = useState<ConnectionInviteCreateResponse | null>(null)
@@ -93,6 +98,7 @@ export function ConnectionCreateDialog({
 
   const selectedSystem = systems.find((entry) => entry.system_id === system)
   const isCassandra = system === 'cassandra'
+  const isGoogleSheets = system === 'google_sheets'
   const inviteAllowed = selectedSystem?.invite_allowed ?? !isCassandra
 
   function resetForm() {
@@ -101,6 +107,8 @@ export function ConnectionCreateDialog({
     setOwnerEmail('')
     setPhase('form')
     setSubmitting(false)
+    setConfirmSheetsOpen(false)
+    setProvisionPhase('idle')
     setError(null)
     setCreatedConnection(null)
     setInvite(null)
@@ -159,30 +167,55 @@ export function ConnectionCreateDialog({
     // Success UI is the dialog success phase (invite URL) — no toast (avoids dual chrome).
   }
 
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault()
+  function validateForm(): { name: string; owner: string } | null {
     const trimmedName = displayName.trim()
     if (!trimmedName) {
       setError('Display name is required.')
-      return
+      return null
     }
-
     const trimmedOwner = ownerEmail.trim()
     if (inviteAllowed && !trimmedOwner) {
       setError('Owner email is required for invite-based systems.')
-      return
+      return null
     }
+    setError(null)
+    return { name: trimmedName, owner: trimmedOwner }
+  }
 
+  async function runCreate(trimmedName: string, trimmedOwner: string) {
     setSubmitting(true)
     setError(null)
-
     try {
+      if (isGoogleSheets) {
+        setProvisionPhase('account')
+        actionToast.info({
+          title: 'Creating Sheets service account',
+          description: 'Provisioning a dedicated Google identity for this connection…',
+        })
+      } else {
+        setProvisionPhase('connection')
+      }
+
       const connection = await createConnection({
         system,
         display_name: trimmedName,
         owner_email: inviteAllowed ? trimmedOwner : null,
       })
       setCreatedConnection(connection)
+      setProvisionPhase(inviteAllowed && trimmedOwner ? 'invite' : 'idle')
+
+      if (isGoogleSheets) {
+        const sa =
+          typeof connection.metadata?.service_account_email === 'string'
+            ? connection.metadata.service_account_email
+            : null
+        actionToast.success({
+          title: 'Sheets service account ready',
+          description: sa
+            ? `Share target: ${sa}`
+            : 'Dedicated service account created for this connection.',
+        })
+      }
 
       if (inviteAllowed && trimmedOwner) {
         try {
@@ -218,15 +251,40 @@ export function ConnectionCreateDialog({
           })
         }
       }
-      // Cassandra / infra: dialog success phase is the sole outcome UI (no toast).
 
+      setConfirmSheetsOpen(false)
       setPhase('success')
       onCreated?.(connection)
     } catch (err) {
-      setError(actionToast.safeErrorMessage(err, 'Could not create connection'))
+      setConfirmSheetsOpen(false)
+      const message = actionToast.safeErrorMessage(err, 'Could not create connection')
+      setError(message)
+      actionToast.error({
+        title: isGoogleSheets ? 'Could not create Sheets connection' : 'Could not create connection',
+        description: message,
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            if (isGoogleSheets) setConfirmSheetsOpen(true)
+            else void runCreate(trimmedName, trimmedOwner)
+          },
+        },
+      })
     } finally {
       setSubmitting(false)
+      setProvisionPhase('idle')
     }
+  }
+
+  function handleSubmit(event: React.FormEvent) {
+    event.preventDefault()
+    const valid = validateForm()
+    if (!valid) return
+    if (isGoogleSheets) {
+      setConfirmSheetsOpen(true)
+      return
+    }
+    void runCreate(valid.name, valid.owner)
   }
 
   function copyInviteUrl() {
@@ -255,169 +313,244 @@ export function ConnectionCreateDialog({
       : null
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-w-lg" onOpenAutoFocus={(event) => event.preventDefault()}>
-        {phase === 'form' ? (
-          <form className="space-y-4" onSubmit={(event) => void handleSubmit(event)}>
-            <DialogHeader>
-              <DialogTitle>New connection</DialogTitle>
-              <DialogDescription>
-                Register an integration connection. SaaS systems use a one-time owner invite;
-                Cassandra is provisioned by Infrastructure.
-              </DialogDescription>
-            </DialogHeader>
+    <>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
+        <DialogContent className="max-w-lg" onOpenAutoFocus={(event) => event.preventDefault()}>
+          {phase === 'form' ? (
+            <form className="space-y-4" onSubmit={(event) => void handleSubmit(event)}>
+              <DialogHeader>
+                <DialogTitle>New connection</DialogTitle>
+                <DialogDescription>
+                  Register an integration connection. SaaS systems use a one-time owner invite;
+                  Cassandra is provisioned by Infrastructure.
+                </DialogDescription>
+              </DialogHeader>
 
-            <div className="space-y-3">
-              <label className="flex flex-col gap-1">
-                <span className="text-xs font-medium text-ink-soft">System</span>
-                <select
-                  className={`${fieldClass} text-xs`}
-                  value={system}
-                  onChange={(event) => {
-                    const next = event.target.value as IntegrationSystemId
-                    setSystem(next)
-                    if (next === 'cassandra') setOwnerEmail('')
-                  }}
-                >
-                  {systems.map((entry) => (
-                    <option key={entry.system_id} value={entry.system_id}>
-                      {entry.display_label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="flex flex-col gap-1">
-                <span className="text-xs font-medium text-ink-soft">Display name</span>
-                <input
-                  type="text"
-                  className={fieldClass}
-                  placeholder="Production Mailchimp"
-                  value={displayName}
-                  onChange={(event) => setDisplayName(event.target.value)}
-                  autoComplete="off"
-                />
-              </label>
-
-              {inviteAllowed ? (
+              <div className="space-y-3">
                 <label className="flex flex-col gap-1">
-                  <span className="text-xs font-medium text-ink-soft">Owner email</span>
+                  <span className="text-xs font-medium text-ink-soft">System</span>
                   <select
                     className={`${fieldClass} text-xs`}
-                    value={ownerEmail}
-                    onChange={(event) => setOwnerEmail(event.target.value)}
-                    disabled={owners.length === 0}
+                    value={system}
+                    onChange={(event) => {
+                      const next = event.target.value as IntegrationSystemId
+                      setSystem(next)
+                      if (next === 'cassandra') setOwnerEmail('')
+                    }}
                   >
-                    <option value="">
-                      {owners.length === 0 ? 'No allowlisted owners' : 'Select an owner…'}
-                    </option>
-                    {owners.map((owner) => (
-                      <option key={owner.email} value={owner.email}>
-                        {owner.email} ({owner.role.replaceAll('_', ' ')})
+                    {systems.map((entry) => (
+                      <option key={entry.system_id} value={entry.system_id}>
+                        {entry.display_label}
                       </option>
                     ))}
                   </select>
-                  <span className="text-xs text-mute">
-                    Only Habeas operators already on a role allowlist (super admin, admin, legal,
-                    or data owner).
-                  </span>
-                  {ownersError ? (
-                    <span className="text-xs text-red-700">{ownersError}</span>
-                  ) : null}
                 </label>
-              ) : (
-                <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
-                  Cassandra connectivity is handled by Habeas Infrastructure (INF). No owner
-                  invite is sent — ops marks the connection{' '}
-                  <span className="font-medium text-ink">infra_pending</span> until INF confirms
-                  TLS, service accounts, and egress are live. Credentials are stored only in
-                  Google Cloud Secret Manager once setup completes.
-                </div>
-              )}
-            </div>
 
-            {error ? (
-              <p className="rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-xs text-red-800">
-                {error}
-              </p>
-            ) : null}
+                <label className="flex flex-col gap-1">
+                  <span className="text-xs font-medium text-ink-soft">Display name</span>
+                  <input
+                    type="text"
+                    className={fieldClass}
+                    placeholder="Production Mailchimp"
+                    value={displayName}
+                    onChange={(event) => setDisplayName(event.target.value)}
+                    autoComplete="off"
+                  />
+                </label>
 
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                disabled={submitting}
-                onClick={() => handleOpenChange(false)}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" disabled={submitting}>
-                {submitting ? 'Creating…' : isCassandra ? 'Create connection' : 'Create & invite'}
-              </Button>
-            </DialogFooter>
-          </form>
-        ) : (
-          <div className="space-y-4">
-            <DialogHeader>
-              <DialogTitle>Connection created</DialogTitle>
-              <DialogDescription>
-                {isCassandra
-                  ? 'Infrastructure handoff — no owner invite.'
-                  : 'Share the invite link with the owner. It is shown only once.'}
-              </DialogDescription>
-            </DialogHeader>
+                {inviteAllowed ? (
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs font-medium text-ink-soft">Owner email</span>
+                    <select
+                      className={`${fieldClass} text-xs`}
+                      value={ownerEmail}
+                      onChange={(event) => setOwnerEmail(event.target.value)}
+                      disabled={owners.length === 0}
+                    >
+                      <option value="">
+                        {owners.length === 0 ? 'No allowlisted owners' : 'Select an owner…'}
+                      </option>
+                      {owners.map((owner) => (
+                        <option key={owner.email} value={owner.email}>
+                          {owner.email} ({owner.role.replaceAll('_', ' ')})
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-xs text-mute">
+                      Only Habeas operators already on a role allowlist (super admin, admin, legal,
+                      or data owner).
+                    </span>
+                    {ownersError ? (
+                      <span className="text-xs text-red-700">{ownersError}</span>
+                    ) : null}
+                  </label>
+                ) : (
+                  <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
+                    Cassandra connectivity is handled by Habeas Infrastructure (INF). No owner
+                    invite is sent — ops marks the connection{' '}
+                    <span className="font-medium text-ink">infra_pending</span> until INF confirms
+                    TLS, service accounts, and egress are live. Credentials are stored only in
+                    Google Cloud Secret Manager once setup completes.
+                  </div>
+                )}
 
-            {isCassandra ? (
-              <div className="space-y-2 rounded-md border border-line bg-canvas p-3 text-xs text-ink-soft">
-                <p>
-                  <span className="font-medium text-ink">{createdConnection?.display_name}</span>{' '}
-                  is registered as Cassandra with status{' '}
-                  <span className="font-medium text-ink">infra_pending</span>.
-                </p>
-                <p>
-                  Open an INF ticket for TLS certificates, service account credentials, and egress
-                  allowlisting. Habeas does not collect secrets on this path.
-                </p>
+                {isGoogleSheets ? (
+                  <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
+                    Creating this connection provisions a{' '}
+                    <span className="font-medium text-ink">dedicated Google service account</span>{' '}
+                    for sheet sharing. You’ll confirm before anything is created.
+                  </div>
+                ) : null}
               </div>
-            ) : invite ? (
-              <div className="space-y-2 rounded-md border border-line bg-canvas p-3">
-                <p className="text-xs text-ink-soft">
-                  Send to <span className="font-mono text-ink">{invite.owner_email}</span>. Link
-                  expires in 72 hours, works once, and stores credentials in Secret Manager only.
+
+              {submitting && !isGoogleSheets ? (
+                <div
+                  className="flex items-center gap-3 rounded-md border border-line bg-canvas px-3 py-3"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <span
+                    className="inline-block size-5 shrink-0 animate-spin rounded-full border-2 border-habeas-navy/20 border-t-habeas-navy"
+                    aria-hidden
+                  />
+                  <div className="min-w-0 text-xs">
+                    <p className="font-medium text-ink">
+                      {provisionPhase === 'invite'
+                        ? 'Creating invite link…'
+                        : 'Creating connection…'}
+                    </p>
+                    <p className="text-ink-soft">Keep this tab open.</p>
+                  </div>
+                </div>
+              ) : null}
+
+              {error ? (
+                <p className="rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-xs text-red-800">
+                  {error}
                 </p>
-                <input
-                  type="text"
-                  readOnly
-                  className={`${fieldClass} font-mono text-xs`}
-                  value={shareUrl ?? ''}
-                  aria-label="Invite URL"
-                />
-                <div className="flex flex-wrap gap-2">
-                  <Button type="button" size="sm" onClick={copyInviteUrl}>
-                    Copy link
-                  </Button>
-                  {mailtoHref ? (
-                    <Button type="button" size="sm" variant="outline" asChild>
-                      <a href={mailtoHref}>Email owner</a>
+              ) : null}
+
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={submitting}
+                  onClick={() => handleOpenChange(false)}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={submitting}>
+                  {submitting
+                    ? 'Creating…'
+                    : isCassandra || isGoogleSheets
+                      ? 'Create connection'
+                      : 'Create & invite'}
+                </Button>
+              </DialogFooter>
+            </form>
+          ) : (
+            <div className="space-y-4">
+              <DialogHeader>
+                <DialogTitle>Connection created</DialogTitle>
+                <DialogDescription>
+                  {isCassandra
+                    ? 'Infrastructure handoff — no owner invite.'
+                    : isGoogleSheets
+                      ? 'Dedicated service account is ready. Share the invite link with the owner.'
+                      : 'Share the invite link with the owner. It is shown only once.'}
+                </DialogDescription>
+              </DialogHeader>
+
+              {isGoogleSheets &&
+              typeof createdConnection?.metadata?.service_account_email === 'string' ? (
+                <div className="space-y-1 rounded-md border border-line bg-canvas p-3 text-xs text-ink-soft">
+                  <p className="font-medium text-ink">Share this service account as Editor</p>
+                  <p className="break-all font-mono text-ink">
+                    {createdConnection.metadata.service_account_email}
+                  </p>
+                  <p>The owner will see this same address in the invite steps.</p>
+                </div>
+              ) : null}
+
+              {isCassandra ? (
+                <div className="space-y-2 rounded-md border border-line bg-canvas p-3 text-xs text-ink-soft">
+                  <p>
+                    <span className="font-medium text-ink">{createdConnection?.display_name}</span>{' '}
+                    is registered as Cassandra with status{' '}
+                    <span className="font-medium text-ink">infra_pending</span>.
+                  </p>
+                  <p>
+                    Open an INF ticket for TLS certificates, service account credentials, and egress
+                    allowlisting. Habeas does not collect secrets on this path.
+                  </p>
+                </div>
+              ) : invite ? (
+                <div className="space-y-2 rounded-md border border-line bg-canvas p-3">
+                  <p className="text-xs text-ink-soft">
+                    Send to <span className="font-mono text-ink">{invite.owner_email}</span>. Link
+                    expires in 72 hours, works once, and stores credentials in Secret Manager only.
+                  </p>
+                  <input
+                    type="text"
+                    readOnly
+                    className={`${fieldClass} font-mono text-xs`}
+                    value={shareUrl ?? ''}
+                    aria-label="Invite URL"
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" size="sm" onClick={copyInviteUrl}>
+                      Copy link
                     </Button>
-                  ) : null}
+                    {mailtoHref ? (
+                      <Button type="button" size="sm" variant="outline" asChild>
+                        <a href={mailtoHref}>Email owner</a>
+                      </Button>
+                    ) : null}
+                  </div>
+                  {copyNote ? <p className="text-xs text-mute">{copyNote}</p> : null}
                 </div>
-                {copyNote ? <p className="text-xs text-mute">{copyNote}</p> : null}
-              </div>
-            ) : (
-              <p className="text-xs text-ink-soft">
-                Connection saved. Use the invite panel on the connection row to mint a link later.
-              </p>
-            )}
+              ) : (
+                <p className="text-xs text-ink-soft">
+                  Connection saved. Use the invite panel on the connection row to mint a link later.
+                </p>
+              )}
 
-            <DialogFooter>
-              <Button type="button" onClick={handleDone}>
-                Done
-              </Button>
-            </DialogFooter>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
+              <DialogFooter>
+                <Button type="button" onClick={handleDone}>
+                  Done
+                </Button>
+              </DialogFooter>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmActionDialog
+        open={confirmSheetsOpen}
+        onOpenChange={(next) => {
+          if (submitting) return
+          setConfirmSheetsOpen(next)
+        }}
+        title="Create Google Sheets connection?"
+        description="We’ll create a dedicated Google service account for this connection, then mint the owner invite. The owner must share the spreadsheet with that account as Editor."
+        confirmLabel="Yes, create connection"
+        cancelLabel="Cancel"
+        confirming={submitting}
+        confirmingTitle={
+          provisionPhase === 'invite'
+            ? 'Creating invite link…'
+            : 'Creating dedicated service account…'
+        }
+        confirmingDescription="Provisioning Google identity and saving the connection. Keep this tab open."
+        onConfirm={() => {
+          const valid = validateForm()
+          if (!valid) {
+            setConfirmSheetsOpen(false)
+            return
+          }
+          void runCreate(valid.name, valid.owner)
+        }}
+      />
+    </>
   )
 }

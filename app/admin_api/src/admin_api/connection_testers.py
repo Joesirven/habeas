@@ -28,7 +28,12 @@ _SYSTEM_TESTERS: dict[str, _SystemTester] = {
 }
 
 
-async def test_connection(system: str, credentials: dict[str, str]) -> tuple[bool, str]:
+async def test_connection(
+    system: str,
+    credentials: dict[str, str],
+    *,
+    impersonate_service_account: str | None = None,
+) -> tuple[bool, str]:
     """Run a connection test for *system* using owner-submitted *credentials*.
 
     Returns ``(ok, detail)`` where *detail* is an allowlisted short code only.
@@ -61,7 +66,13 @@ async def test_connection(system: str, credentials: dict[str, str]) -> tuple[boo
         return False, "missing_credentials"
 
     try:
-        ok, detail = await tester(validated)
+        if system == "google_sheets":
+            ok, detail = await google_sheets.test_google_sheets(
+                validated,
+                impersonate_email=impersonate_service_account,
+            )
+        else:
+            ok, detail = await tester(validated)
     except httpx.RequestError:
         logger.info("connection_test_finished system=%s ok=false detail=unreachable", system)
         return False, "unreachable"

@@ -134,6 +134,41 @@ async def update_connection_status(
     return _row_to_connection(row) if row else None
 
 
+async def update_connection_metadata(
+    conn: asyncpg.Connection,
+    connection_id: UUID | str,
+    metadata: dict[str, Any],
+) -> Connection | None:
+    """Replace connection metadata JSON (non-secret only)."""
+    row = await conn.fetchrow(
+        f"""
+        UPDATE integration_connections
+           SET metadata = $2::jsonb,
+               updated_at = NOW()
+         WHERE id = $1
+        RETURNING {_CONNECTION_SELECT}
+        """,
+        _as_uuid(connection_id),
+        json.dumps(metadata),
+    )
+    return _row_to_connection(row) if row else None
+
+
+async def delete_connection(
+    conn: asyncpg.Connection,
+    connection_id: UUID | str,
+) -> bool:
+    """Delete a connection row (used to roll back failed Sheets SA provision)."""
+    result = await conn.execute(
+        """
+        DELETE FROM integration_connections
+         WHERE id = $1
+        """,
+        _as_uuid(connection_id),
+    )
+    return result.endswith("1")
+
+
 async def create_invite(
     conn: asyncpg.Connection,
     *,
