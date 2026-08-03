@@ -2085,16 +2085,66 @@ def _fetch_person_contacts_from_bq(
     return contacts
 
 
+_CONTACTS_ERROR_MESSAGES: dict[str, str] = {
+    "no_dwids": "No matched person identifiers could be resolved for this request.",
+    "no_lookup_state": (
+        "Requestor state is missing; person lookup requires a two-letter state."
+    ),
+    "invalid_state": "Requestor state is invalid or not in the served allowlist.",
+    "bq_not_configured": "BigQuery is not configured in this environment.",
+    "bq_query_failed": "BigQuery person lookup failed.",
+}
+
+
+def _contacts_error(code: str) -> dict[str, str]:
+    """Build a fixed {code, message} contacts error (no exception text)."""
+    return {"code": code, "message": _CONTACTS_ERROR_MESSAGES[code]}
+
+
+def _is_bq_not_configured(exc: BaseException) -> bool:
+    """True when BigQuery client/library/credentials are unavailable."""
+    if isinstance(exc, ImportError):
+        return True
+    type_name = type(exc).__name__
+    module = type(exc).__module__ or ""
+    if type_name in ("DefaultCredentialsError", "RefreshError"):
+        return True
+    if "DefaultCredentials" in type_name or "DefaultCredentials" in module:
+        return True
+    if isinstance(exc, RuntimeError):
+        msg = str(exc)
+        if "google-cloud-bigquery is not installed" in msg:
+            return True
+        if "google.cloud.bigquery" in msg:
+            return True
+    cause = exc.__cause__
+    if cause is not None and cause is not exc and _is_bq_not_configured(cause):
+        return True
+    return False
+
+
+def _contacts_enrichment_error_from_exc(exc: BaseException) -> dict[str, str]:
+    """Map exceptions → {code, message}. Never put str(exc) in the return."""
+    if _is_bq_not_configured(exc):
+        return _contacts_error("bq_not_configured")
+    return _contacts_error("bq_query_failed")
+
+
 async def _resolve_matched_dwids(
     conn: Any,
     *,
     request_id: str,
     match_count: int,
     requestor_state: str | None,
-) -> tuple[list[str], str | None]:
-    """Resolve DWIDs for review enrichment (single: DB consumer_id; multi: BQ re-lookup)."""
+) -> tuple[list[str], str | None, str | None]:
+    """Resolve DWIDs for review enrichment (single: DB consumer_id; multi: BQ re-lookup).
+
+    Returns ``(dwids, lookup_state, resolve_error_code)``. Soft empty cases set
+    ``resolve_error_code`` to ``no_lookup_state``, ``invalid_state``, or
+    ``no_dwids``; BigQuery failures raise for the enrich classifier.
+    """
     if match_count <= 0:
-        return [], requestor_state
+        return [], requestor_state, None
 
     row = await conn.fetchrow(
         """
@@ -2111,35 +2161,38 @@ async def _resolve_matched_dwids(
         request_id,
     )
     if row is None:
-        return [], requestor_state
+        return [], requestor_state, "no_dwids"
 
     lookup_state = requestor_state or (
         str(row["requestor_state"]).strip().upper() if row["requestor_state"] else None
     )
-    if match_count == 1 and row["consumer_id"]:
-        return [str(row["consumer_id"])], lookup_state
-
-    if row["intake_source"] != IntakeSource.DROP.value or row["raw_record_id"] is None:
-        return [], lookup_state
     if not lookup_state:
-        return [], lookup_state
+        return [], None, "no_lookup_state"
 
     try:
         normalized_state = normalize_state_acronym(lookup_state)
     except InvalidStateAcronymError:
-        return [], lookup_state
+        return [], lookup_state, "invalid_state"
+
+    if match_count == 1 and row["consumer_id"]:
+        return [str(row["consumer_id"])], normalized_state, None
+
+    if row["intake_source"] != IntakeSource.DROP.value or row["raw_record_id"] is None:
+        return [], normalized_state, "no_dwids"
 
     payload = await request_resolver(conn, IntakeSource.DROP, int(row["raw_record_id"]))
     hash_value, _via = _primary_hash_for_list_type(payload.list_type, payload.hash_fields)
     if not hash_value:
-        return [], normalized_state
+        return [], normalized_state, "no_dwids"
 
     dwids = _lookup_dwids_by_hash(
         list_type=payload.list_type,
         hash_value=hash_value,
         lookup_state=normalized_state,
     )
-    return dwids, normalized_state
+    if not dwids:
+        return [], normalized_state, "no_dwids"
+    return dwids, normalized_state, None
 
 
 async def _dwids_for_promote(
@@ -2174,7 +2227,7 @@ async def _dwids_for_promote(
     if match_count is None:
         return None
     try:
-        dwids, _state = await _resolve_matched_dwids(
+        dwids, _state, _resolve_error = await _resolve_matched_dwids(
             conn,
             request_id=request_id,
             match_count=int(match_count),
@@ -2204,25 +2257,52 @@ async def enrich_matching_result_contacts(
     """Attach matched_contacts for matching review (PII — never logged or audited)."""
     match_count = int(detail.get("match_count") or 0)
     if match_count <= 0:
-        return {"matched_contacts": [], "matched_contacts_status": "none"}
+        return {
+            "matched_contacts": [],
+            "matched_contacts_status": "none",
+            "matched_contacts_error": None,
+        }
 
-    dwids, lookup_state = await _resolve_matched_dwids(
-        conn,
-        request_id=request_id,
-        match_count=match_count,
-        requestor_state=detail.get("requestor_state"),
-    )
-    if not dwids or not lookup_state:
-        return {"matched_contacts": [], "matched_contacts_status": "unavailable"}
+    try:
+        dwids, lookup_state, resolve_code = await _resolve_matched_dwids(
+            conn,
+            request_id=request_id,
+            match_count=match_count,
+            requestor_state=detail.get("requestor_state"),
+        )
+    except Exception as exc:
+        return {
+            "matched_contacts": [],
+            "matched_contacts_status": "unavailable",
+            "matched_contacts_error": _contacts_enrichment_error_from_exc(exc),
+        }
 
-    contacts = await asyncio.to_thread(
-        _fetch_person_contacts_from_bq,
-        dwids=dwids,
-        lookup_state=lookup_state,
-        client=bq_client,
-    )
-    return {"matched_contacts": contacts, "matched_contacts_status": "ok"}
+    if resolve_code:
+        return {
+            "matched_contacts": [],
+            "matched_contacts_status": "unavailable",
+            "matched_contacts_error": _contacts_error(resolve_code),
+        }
 
+    try:
+        contacts = await asyncio.to_thread(
+            _fetch_person_contacts_from_bq,
+            dwids=dwids,
+            lookup_state=lookup_state or "",
+            client=bq_client,
+        )
+    except Exception as exc:
+        return {
+            "matched_contacts": [],
+            "matched_contacts_status": "unavailable",
+            "matched_contacts_error": _contacts_enrichment_error_from_exc(exc),
+        }
+
+    return {
+        "matched_contacts": contacts,
+        "matched_contacts_status": "ok",
+        "matched_contacts_error": None,
+    }
 
 def _serialize_matching_result_row(row: Any) -> dict[str, Any]:
     """Ids/counts/status/state acronym only — never consumer_id or PII."""
@@ -2505,19 +2585,23 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
                 )
             )
         except Exception as exc:
+            err = _contacts_enrichment_error_from_exc(exc)
             logger.warning(
                 "matching_contacts_enrichment_failed",
                 extra={
                     "event": "matching_contacts_enrichment_failed",
                     "request_id": request_id,
                     "error_type": type(exc).__name__,
+                    "error_code": err["code"],
                 },
             )
             detail["matched_contacts"] = []
             detail["matched_contacts_status"] = "unavailable"
+            detail["matched_contacts_error"] = err
     else:
         detail["matched_contacts"] = []
         detail["matched_contacts_status"] = "none"
+        detail["matched_contacts_error"] = None
     return detail
 
 

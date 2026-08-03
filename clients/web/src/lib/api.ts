@@ -372,6 +372,11 @@ export type MatchedPersonContact = {
   phones: MatchedPersonPhone[]
 }
 
+export type MatchedContactsError = {
+  code: string
+  message: string
+}
+
 export type MatchingResultDetail = MatchingResultRow & {
   attempt_id: number | null
   decided_by: string | null
@@ -381,6 +386,7 @@ export type MatchingResultDetail = MatchingResultRow & {
   assignment?: WorkflowAssignmentSummary | null
   matched_contacts?: MatchedPersonContact[]
   matched_contacts_status?: 'ok' | 'none' | 'unavailable' | string
+  matched_contacts_error?: MatchedContactsError | null
 }
 
 export type BulkApproveMatchingResultsInput = {

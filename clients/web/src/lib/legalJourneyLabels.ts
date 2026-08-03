@@ -152,6 +152,12 @@ const OPS_TO_WORKBENCH: Record<string, WorkbenchStageKey> = {
   delivery: 'notice',
 }
 
+/** Map an ops fine-stage key (`meta.stage`) to the four-stage workbench parent. */
+export function opsStageToWorkbench(opsStage: string): WorkbenchStageKey | null {
+  const key = opsStage.trim().toLowerCase()
+  return OPS_TO_WORKBENCH[key] ?? null
+}
+
 const STATUS_RANK: Record<string, number> = {
   failed: 5,
   in_progress: 4,

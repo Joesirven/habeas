@@ -476,7 +476,7 @@ function attemptRowBadge(attempt: MatchingAttemptRow): {
   return { label: attempt.error_code ?? attempt.status, tone: 'wait' }
 }
 
-function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
+export function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
   const [open, setOpen] = useState(false)
   const audit = coerceAuditObject(attempt.audit_payload)
   const badge = attemptRowBadge(attempt)
@@ -815,6 +815,41 @@ function MatchedContactDetails({ contact }: { contact: MatchedPersonContact }) {
   )
 }
 
+/** Emphasized fail callout when matched person contact enrichment is unavailable. */
+export function MatchedContactsUnavailableCallout({
+  matching,
+}: {
+  matching?: MatchingResultDetail
+}) {
+  const err = matching?.matched_contacts_error
+  const message = err?.message?.trim() || null
+  const code = err?.code?.trim() || null
+
+  return (
+    <div
+      role="alert"
+      className="space-y-1 rounded-md border border-red-300 bg-red-50 px-2.5 py-2 text-[0.7rem]"
+    >
+      <div className="flex flex-wrap items-center gap-1.5">
+        <p className="font-medium text-red-800">Matched person details unavailable</p>
+        {code ? (
+          <span className="rounded border border-red-300/80 bg-red-50 px-1 py-px font-mono text-[0.6rem] tabular-nums text-red-700">
+            {code}
+          </span>
+        ) : null}
+      </div>
+      <p className="text-red-700">
+        {message ??
+          'Person contact lookup failed, or BigQuery is not connected in this environment. Matched DWID details cannot be loaded.'}
+      </p>
+      <p className="text-[0.65rem] text-red-800/80">
+        Check requestor state, matching DWIDs, and BigQuery configuration — then reload this
+        request.
+      </p>
+    </div>
+  )
+}
+
 function MatchedContactsPanel({
   matching,
   contacts: contactsProp,
@@ -837,13 +872,8 @@ function MatchedContactsPanel({
   if (!selectable && matchCount <= 0) return null
   if (contacts.length === 0 && matchCount <= 0) return null
 
-  if (!selectable && status === 'unavailable') {
-    return (
-      <p className="text-[0.7rem] text-mute">
-        Matched person details are unavailable (BigQuery lookup failed or is not configured
-        locally).
-      </p>
-    )
+  if (status === 'unavailable' && contacts.length === 0) {
+    return <MatchedContactsUnavailableCallout matching={matching} />
   }
 
   if (contacts.length === 0) {
