@@ -93,9 +93,9 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                     "1. Sign in to Mailchimp (Manager or Admin role).\n"
                     "2. Click your profile icon (top right) → Profile.\n"
                     "3. Open Extras → API keys.\n"
-                    "4. Click Create A Key and name it “Habeas privacy automation”.\n"
+                    "4. Click Create A Key and name it “Habeas Privacy Automation”.\n"
                     "5. Click Generate Key, then Copy Key to Clipboard (shown only once).\n"
-                    "6. Paste that full key here. It should end with your data center "
+                    "6. Paste the full key here. It should end with your data center "
                     "(example: …-us19).\n"
                     "Do not paste your Mailchimp login password or an OAuth/Marketplace token."
                 ),

@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useParams } from '@tanstack/react-router'
-import { useMemo, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -117,7 +117,7 @@ type WizardStep = 'confirm' | 'instructions' | 'credentials'
 function WizardProgress({ step }: { step: WizardStep }) {
   const steps: { id: WizardStep; label: string }[] = [
     { id: 'confirm', label: 'Confirm' },
-    { id: 'instructions', label: 'Instructions' },
+    { id: 'instructions', label: 'Privacy' },
     { id: 'credentials', label: 'Credentials' },
   ]
   const activeIndex = steps.findIndex((entry) => entry.id === step)
@@ -159,103 +159,33 @@ function HabeasConnectLogo() {
   )
 }
 
-const HELP_CARD =
-  'rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs leading-relaxed text-[#334155]'
-const HELP_SUMMARY =
-  'cursor-pointer list-none text-xs font-medium text-habeas-navy marker:content-none [&::-webkit-details-marker]:hidden'
-const HELP_SUBTITLE = 'text-xs font-semibold text-[#0F172A]'
-const HELP_LIST = 'space-y-1.5 text-xs leading-relaxed text-[#334155]'
-
-const TRUST_SECTIONS = [
-  {
-    title: 'Why this form',
-    bullets: ['Used only for privacy-request automation'],
-  },
-  {
-    title: 'How we store secrets',
-    bullets: [
-      'Credentials go to Secret Manager — not email, chat, or our app database',
-    ],
-  },
-  {
-    title: 'What to use',
-    bullets: [
-      'Use a dedicated integration key or app — not your personal login password',
-    ],
-  },
-  {
-    title: 'This link',
-    bullets: ['Works once and expires in 72 hours'],
-  },
-] as const
-
-function TrustSection({ trustCopy }: { trustCopy: string }) {
-  const extraParagraphs = useMemo(() => {
-    const parts = trustCopy
-      .split(/\n\n+/)
-      .map((part) => part.trim())
-      .filter(Boolean)
-    const covered = [
-      'habeas uses this connection only',
-      'submitted values are written directly',
-      'please create or use integration credentials',
-      'this invite link expires after 72 hours',
-      'you do not paste credentials for cassandra',
-    ]
-    return parts.filter((paragraph) => {
-      const lower = paragraph.toLowerCase()
-      return !covered.some((needle) => lower.startsWith(needle))
-    })
-  }, [trustCopy])
-
+function PrivacySecuritySection({ expiresAt }: { expiresAt: string }) {
   return (
-    <section className="space-y-2" aria-labelledby="connect-trust-heading">
-      <h2 id="connect-trust-heading" className="text-sm font-medium text-[#0F172A]">
-        Before you continue
+    <section className="space-y-4 text-sm leading-relaxed text-[#334155]" aria-labelledby="connect-privacy-heading">
+      <h2 id="connect-privacy-heading" className="sr-only">
+        Privacy and security
       </h2>
-
-      <details className={HELP_CARD}>
-        <summary className={HELP_SUMMARY}>
-          <span className="inline-flex items-center gap-1.5">
-            Privacy & security overview
-            <span className="font-normal text-[#475569]">(tap to expand)</span>
-          </span>
-        </summary>
-        <div className="mt-3 space-y-3 border-t border-[#E2E8F0] pt-3">
-          {TRUST_SECTIONS.map((section) => (
-            <div key={section.title} className="space-y-1.5">
-              <h3 className={HELP_SUBTITLE}>{section.title}</h3>
-              <ul className={HELP_LIST}>
-                {section.bullets.map((item) => (
-                  <li key={item} className="flex gap-2">
-                    <span
-                      className="mt-1.5 size-1 shrink-0 rounded-full bg-habeas-navy"
-                      aria-hidden
-                    />
-                    <span>{item}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
-          {extraParagraphs.length > 0 ? (
-            <div className="space-y-1.5 border-t border-[#E2E8F0] pt-3">
-              <h3 className={HELP_SUBTITLE}>For this system</h3>
-              <ul className={HELP_LIST}>
-                {extraParagraphs.map((paragraph) => (
-                  <li key={paragraph.slice(0, 48)} className="flex gap-2">
-                    <span
-                      className="mt-1.5 size-1 shrink-0 rounded-full bg-habeas-navy"
-                      aria-hidden
-                    />
-                    <span>{paragraph}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-        </div>
-      </details>
+      <p>
+        This form is secure. Credentials you paste here go straight into{' '}
+        <span className="font-medium text-[#0F172A]">Google Cloud Secret Manager</span>. They are
+        not stored in the Data Privacy app database, and other people who use the site cannot open
+        or copy them.
+      </p>
+      <p>
+        This invite link expires{' '}
+        <span className="font-medium text-[#0F172A]">{formatExpiresIn(expiresAt)}</span> (
+        <time dateTime={expiresAt}>{formatExpiresAt(expiresAt)}</time>) and works once.
+      </p>
+      <p>
+        When Habeas looks people up in your system, identifiers are hashed for matching. Traffic
+        is encrypted in transit. Matching runs automatically — site operators do not browse your
+        records or credentials, and results are not shown freely for casual review.
+      </p>
+      <p>
+        Especially for HR and people systems: this connection is only for privacy-request
+        fulfillment you already authorized — not general HR reporting, and not shared access for
+        other Habeas users.
+      </p>
     </section>
   )
 }
@@ -269,42 +199,18 @@ function FieldHelp({ help }: { help: string }) {
   const notes = lines.filter((line) => !/^\d+\.\s/.test(line))
 
   return (
-    <details className={HELP_CARD}>
-      <summary className={HELP_SUMMARY}>
-        <span className="inline-flex items-center gap-1.5">
-          How to find this
-          <span className="font-normal text-[#475569]">(tap to expand)</span>
-        </span>
-      </summary>
-      <div className="mt-3 space-y-3 border-t border-[#E2E8F0] pt-3">
-        {steps.length > 0 ? (
-          <div className="space-y-1.5">
-            <h3 className={HELP_SUBTITLE}>Steps</h3>
-            <ol className={`list-decimal pl-4 ${HELP_LIST}`}>
-              {steps.map((step) => (
-                <li key={step}>{step.replace(/^\d+\.\s*/, '')}</li>
-              ))}
-            </ol>
-          </div>
-        ) : null}
-        {notes.length > 0 ? (
-          <div className="space-y-1.5">
-            <h3 className={HELP_SUBTITLE}>Important</h3>
-            <ul className={HELP_LIST}>
-              {notes.map((note) => (
-                <li key={note} className="flex gap-2">
-                  <span
-                    className="mt-1.5 size-1 shrink-0 rounded-full bg-habeas-navy"
-                    aria-hidden
-                  />
-                  <span>{note}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-      </div>
-    </details>
+    <div className="space-y-2 text-sm leading-relaxed text-[#475569]">
+      {steps.length > 0 ? (
+        <ol className="list-decimal space-y-1.5 pl-4 text-[#334155]">
+          {steps.map((step) => (
+            <li key={step}>{step.replace(/^\d+\.\s*/, '')}</li>
+          ))}
+        </ol>
+      ) : null}
+      {notes.map((note) => (
+        <p key={note}>{note}</p>
+      ))}
+    </div>
   )
 }
 
@@ -523,17 +429,17 @@ function ConnectForm({
         <div className="space-y-5">
           <header className="space-y-2 border-b border-[#E2E8F0] pb-5">
             <p className="text-xs font-medium uppercase tracking-wide text-habeas-navy">
-              Step 2 · Instructions
+              Step 2 · Privacy & security
             </p>
             <h1 className="text-xl font-medium tracking-tight text-[#0F172A]">
-              {preview.display_name}
+              How we handle what you share
             </h1>
             <p className="text-sm text-[#475569]">
-              Read these notes, then continue to enter credentials.
+              A short overview before you enter credentials for {preview.display_name}.
             </p>
           </header>
 
-          <TrustSection trustCopy={preview.trust_copy} />
+          <PrivacySecuritySection expiresAt={preview.expires_at} />
 
           <div className="flex flex-col gap-2 sm:flex-row">
             <Button
@@ -562,10 +468,10 @@ function ConnectForm({
               Step 3 · Credentials
             </p>
             <h1 className="text-xl font-medium tracking-tight text-[#0F172A]">
-              Enter what Habeas needs
+              {preview.display_name}
             </h1>
             <p className="text-sm text-[#475569]">
-              Expand “How to find this” under each field if you need the click path.
+              Follow the steps below, then paste each value into the matching field.
             </p>
           </header>
 
