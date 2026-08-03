@@ -19,6 +19,15 @@ export function absoluteInviteUrl(inviteUrl: string): string {
   return `${window.location.origin}${path}`
 }
 
+/** Best-effort first name from an IAP / Google account email local-part. */
+export function firstNameFromEmail(email: string | null | undefined): string {
+  const local = email?.split('@')[0]?.trim() ?? ''
+  if (!local) return 'there'
+  const token = local.split(/[._+-]/)[0] ?? local
+  if (!token) return 'there'
+  return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase()
+}
+
 /** Client-side pagination slice — shared math for Inbox / All requests row lists. */
 export function paginate<T>(items: T[], page: number, pageSize: number) {
   const total = items.length

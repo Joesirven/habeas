@@ -14,6 +14,7 @@ import {
   type MePayload,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
+import { firstNameFromEmail } from '@/lib/utils'
 
 type CredentialField = ConnectPreviewPayload['fields'][number]
 
@@ -116,14 +117,6 @@ function formatExpiresIn(iso: string): string {
     return `in about ${hours} hour${hours === 1 ? '' : 's'}`
   }
   return `in about ${Math.max(1, minutes)} minute${minutes === 1 ? '' : 's'}`
-}
-
-function firstNameFromEmail(email: string): string {
-  const local = email.split('@')[0]?.trim() ?? ''
-  if (!local) return 'there'
-  const token = local.split(/[._+-]/)[0] ?? local
-  if (!token) return 'there'
-  return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase()
 }
 
 function emailsMatch(a: string, b: string): boolean {

@@ -8,7 +8,8 @@ import {
   type IntegrationSystemId,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
-import { absoluteInviteUrl } from '@/lib/utils'
+import { useAuth } from '@/lib/auth'
+import { absoluteInviteUrl, firstNameFromEmail } from '@/lib/utils'
 
 const fieldClass =
   'w-full rounded-md border border-line bg-paper px-2.5 py-1.5 text-sm text-ink'
@@ -23,11 +24,13 @@ export type ConnectionInvitePanelProps = {
 function buildInviteMailto(
   inviteUrl: string,
   ownerEmail: string | undefined,
+  fromFirstName: string,
 ): string {
+  const ownerFirst = firstNameFromEmail(ownerEmail)
   const subject = encodeURIComponent('Habeas connection setup')
   const body = encodeURIComponent(
     [
-      'Hi,',
+      `Hi, ${ownerFirst},`,
       '',
       'Please use this secure link to submit integration credentials for Habeas privacy automation:',
       '',
@@ -36,7 +39,8 @@ function buildInviteMailto(
       'This link expires in 72 hours and works only once.',
       'Do not share credentials by email or chat — use the link only.',
       '',
-      'Thank you',
+      'Thank you,',
+      fromFirstName,
     ].join('\n'),
   )
   const to = ownerEmail?.trim() ? encodeURIComponent(ownerEmail.trim()) : ''
@@ -49,6 +53,7 @@ export function ConnectionInvitePanel({
   ownerEmail,
   onDone,
 }: ConnectionInvitePanelProps) {
+  const { me } = useAuth()
   const inviteAllowed = system !== 'cassandra'
   const [invite, setInvite] = useState<ConnectionInviteCreateResponse | null>(null)
   const [minting, setMinting] = useState(false)
@@ -99,7 +104,11 @@ export function ConnectionInvitePanel({
 
   const mailtoHref =
     shareUrl != null
-      ? buildInviteMailto(shareUrl, invite?.owner_email ?? ownerEmail)
+      ? buildInviteMailto(
+          shareUrl,
+          invite?.owner_email ?? ownerEmail,
+          firstNameFromEmail(me?.email),
+        )
       : null
 
   if (!inviteAllowed) {

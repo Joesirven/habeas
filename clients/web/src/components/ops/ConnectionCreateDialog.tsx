@@ -21,7 +21,8 @@ import {
   type IntegrationSystemId,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
-import { absoluteInviteUrl } from '@/lib/utils'
+import { useAuth } from '@/lib/auth'
+import { absoluteInviteUrl, firstNameFromEmail } from '@/lib/utils'
 
 type ConnectionSystemOption = ConnectionSystemsPayload['systems'][number]
 
@@ -49,11 +50,13 @@ function buildInviteMailto(
   inviteUrl: string,
   displayName: string,
   ownerEmail: string,
+  fromFirstName: string,
 ): string {
+  const ownerFirst = firstNameFromEmail(ownerEmail)
   const subject = encodeURIComponent(`Habeas connection setup — ${displayName}`)
   const body = encodeURIComponent(
     [
-      'Hi,',
+      `Hi, ${ownerFirst},`,
       '',
       `Please use this secure link to submit integration credentials for "${displayName}":`,
       '',
@@ -62,7 +65,8 @@ function buildInviteMailto(
       'This link expires in 72 hours and works only once.',
       'Do not share credentials by email or chat — use the link only.',
       '',
-      'Thank you',
+      'Thank you,',
+      fromFirstName,
     ].join('\n'),
   )
   return `mailto:${encodeURIComponent(ownerEmail)}?subject=${subject}&body=${body}`
@@ -73,6 +77,7 @@ export function ConnectionCreateDialog({
   onOpenChange,
   onCreated,
 }: ConnectionCreateDialogProps) {
+  const { me } = useAuth()
   const [systems, setSystems] = useState<ConnectionSystemOption[]>(FALLBACK_SYSTEMS)
   const [owners, setOwners] = useState<ConnectionOwnerCandidate[]>([])
   const [ownersError, setOwnersError] = useState<string | null>(null)
@@ -245,6 +250,7 @@ export function ConnectionCreateDialog({
           shareUrl,
           createdConnection?.display_name ?? displayName,
           invite.owner_email,
+          firstNameFromEmail(me?.email),
         )
       : null
 
