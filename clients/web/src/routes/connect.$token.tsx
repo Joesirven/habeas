@@ -106,11 +106,34 @@ function HabeasConnectLogo() {
   )
 }
 
-const TRUST_BULLETS = [
-  'Used only for privacy-request automation',
-  'Credentials go to Secret Manager — not email, chat, or our app database',
-  'Use a dedicated integration key or app — not your personal login password',
-  'This link works once and expires in 72 hours',
+const HELP_CARD =
+  'rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs leading-relaxed text-[#64748B]'
+const HELP_SUMMARY =
+  'cursor-pointer list-none text-xs font-medium text-habeas-navy marker:content-none [&::-webkit-details-marker]:hidden'
+const HELP_SUBTITLE = 'text-xs font-medium text-[#0F172A]'
+const HELP_LIST = 'space-y-1.5 text-xs leading-relaxed text-[#64748B]'
+
+const TRUST_SECTIONS = [
+  {
+    title: 'Why this form',
+    bullets: ['Used only for privacy-request automation'],
+  },
+  {
+    title: 'How we store secrets',
+    bullets: [
+      'Credentials go to Secret Manager — not email, chat, or our app database',
+    ],
+  },
+  {
+    title: 'What to use',
+    bullets: [
+      'Use a dedicated integration key or app — not your personal login password',
+    ],
+  },
+  {
+    title: 'This link',
+    bullets: ['Works once and expires in 72 hours'],
+  },
 ] as const
 
 function TrustSection({ trustCopy }: { trustCopy: string }) {
@@ -119,12 +142,12 @@ function TrustSection({ trustCopy }: { trustCopy: string }) {
       .split(/\n\n+/)
       .map((part) => part.trim())
       .filter(Boolean)
-    // Drop paragraphs already covered by the short bullets.
     const covered = [
       'habeas uses this connection only',
       'submitted values are written directly',
       'please create or use integration credentials',
       'this invite link expires after 72 hours',
+      'you do not paste credentials for cassandra',
     ]
     return parts.filter((paragraph) => {
       const lower = paragraph.toLowerCase()
@@ -133,33 +156,53 @@ function TrustSection({ trustCopy }: { trustCopy: string }) {
   }, [trustCopy])
 
   return (
-    <section className="space-y-3" aria-labelledby="connect-trust-heading">
+    <section className="space-y-2" aria-labelledby="connect-trust-heading">
       <h2 id="connect-trust-heading" className="text-sm font-medium text-[#0F172A]">
         Before you continue
       </h2>
-      <ul className="space-y-2.5 text-sm leading-snug text-[#64748B]">
-        {TRUST_BULLETS.map((item) => (
-          <li key={item} className="flex gap-2.5">
-            <span
-              className="mt-1.5 size-1.5 shrink-0 rounded-full bg-habeas-navy"
-              aria-hidden
-            />
-            <span>{item}</span>
-          </li>
-        ))}
-      </ul>
-      {extraParagraphs.length > 0 ? (
-        <details className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2">
-          <summary className="cursor-pointer text-xs font-medium text-habeas-navy">
-            System-specific notes
-          </summary>
-          <div className="mt-2 space-y-2 text-xs leading-relaxed text-[#64748B]">
-            {extraParagraphs.map((paragraph) => (
-              <p key={paragraph.slice(0, 48)}>{paragraph}</p>
-            ))}
-          </div>
-        </details>
-      ) : null}
+
+      <details className={HELP_CARD}>
+        <summary className={HELP_SUMMARY}>
+          <span className="inline-flex items-center gap-1.5">
+            Privacy & security overview
+            <span className="font-normal text-[#64748B]">(tap to expand)</span>
+          </span>
+        </summary>
+        <div className="mt-3 space-y-3 border-t border-[#E2E8F0] pt-3">
+          {TRUST_SECTIONS.map((section) => (
+            <div key={section.title} className="space-y-1.5">
+              <h3 className={HELP_SUBTITLE}>{section.title}</h3>
+              <ul className={HELP_LIST}>
+                {section.bullets.map((item) => (
+                  <li key={item} className="flex gap-2">
+                    <span
+                      className="mt-1.5 size-1 shrink-0 rounded-full bg-habeas-navy"
+                      aria-hidden
+                    />
+                    <span>{item}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+          {extraParagraphs.length > 0 ? (
+            <div className="space-y-1.5 border-t border-[#E2E8F0] pt-3">
+              <h3 className={HELP_SUBTITLE}>For this system</h3>
+              <ul className={HELP_LIST}>
+                {extraParagraphs.map((paragraph) => (
+                  <li key={paragraph.slice(0, 48)} className="flex gap-2">
+                    <span
+                      className="mt-1.5 size-1 shrink-0 rounded-full bg-habeas-navy"
+                      aria-hidden
+                    />
+                    <span>{paragraph}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      </details>
     </section>
   )
 }
@@ -173,23 +216,42 @@ function FieldHelp({ help }: { help: string }) {
   const notes = lines.filter((line) => !/^\d+\.\s/.test(line))
 
   return (
-    <div className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs leading-relaxed text-[#64748B]">
-      <p className="mb-2 font-medium text-[#0F172A]">How to find this</p>
-      {steps.length > 0 ? (
-        <ol className="list-decimal space-y-1.5 pl-4">
-          {steps.map((step) => (
-            <li key={step}>{step.replace(/^\d+\.\s*/, '')}</li>
-          ))}
-        </ol>
-      ) : null}
-      {notes.length > 0 ? (
-        <div className={`${steps.length > 0 ? 'mt-2 border-t border-[#E2E8F0] pt-2' : ''} space-y-1`}>
-          {notes.map((note) => (
-            <p key={note}>{note}</p>
-          ))}
-        </div>
-      ) : null}
-    </div>
+    <details className={HELP_CARD}>
+      <summary className={HELP_SUMMARY}>
+        <span className="inline-flex items-center gap-1.5">
+          How to find this
+          <span className="font-normal text-[#64748B]">(tap to expand)</span>
+        </span>
+      </summary>
+      <div className="mt-3 space-y-3 border-t border-[#E2E8F0] pt-3">
+        {steps.length > 0 ? (
+          <div className="space-y-1.5">
+            <h3 className={HELP_SUBTITLE}>Steps</h3>
+            <ol className={`list-decimal pl-4 ${HELP_LIST}`}>
+              {steps.map((step) => (
+                <li key={step}>{step.replace(/^\d+\.\s*/, '')}</li>
+              ))}
+            </ol>
+          </div>
+        ) : null}
+        {notes.length > 0 ? (
+          <div className="space-y-1.5">
+            <h3 className={HELP_SUBTITLE}>Important</h3>
+            <ul className={HELP_LIST}>
+              {notes.map((note) => (
+                <li key={note} className="flex gap-2">
+                  <span
+                    className="mt-1.5 size-1 shrink-0 rounded-full bg-habeas-navy"
+                    aria-hidden
+                  />
+                  <span>{note}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </div>
+    </details>
   )
 }
 
