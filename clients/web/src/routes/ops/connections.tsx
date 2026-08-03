@@ -208,6 +208,12 @@ function ConnectionsBody() {
               lastTestDetail={selected.last_test_detail}
               lastTestedAt={selected.last_tested_at}
               onDone={() => setSelected(null)}
+              onDeleted={() => {
+                setSelected(null)
+                void queryClient.invalidateQueries({
+                  queryKey: ['admin-api', 'ops', 'connections'],
+                })
+              }}
               onUpdated={() => {
                 void queryClient
                   .invalidateQueries({ queryKey: ['admin-api', 'ops', 'connections'] })

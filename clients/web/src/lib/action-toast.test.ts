@@ -24,6 +24,11 @@ describe('safeErrorMessage', () => {
     )
   })
 
+  test('connection delete failure → friendly string', () => {
+    const err = new Error('Admin API 500: {"detail":"failed to delete connection"}')
+    expect(safeErrorMessage(err)).toBe(SAFE_API_ERROR_DETAILS['failed to delete connection'])
+  })
+
   test('Admin API validation-array detail → generic', () => {
     const err = new Error(
       'Admin API 422: {"detail":[{"loc":["body","api_key"],"msg":"field required"}]}',

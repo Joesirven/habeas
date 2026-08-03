@@ -37,6 +37,7 @@ export const SAFE_API_ERROR_DETAILS: Record<string, string> = {
   'failed to create connection': 'Could not create the connection. Try again.',
   'failed to provision google sheets service account':
     'Could not create the dedicated Google Sheets service account. Try again, or contact Habeas ops.',
+  'failed to delete connection': 'Could not delete the connection. Try again.',
   unauthorized: 'You are not allowed to do that.',
   forbidden: 'You are not allowed to do that.',
   missing_credentials: 'Connection test could not run. Credentials are missing or unreadable.',

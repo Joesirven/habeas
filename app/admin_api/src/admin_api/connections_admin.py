@@ -836,6 +836,30 @@ async def revoke_invite(
     return {"status": "ok", "invite_id": str(invite_id)}
 
 
+@router.delete("/{connection_id}")
+async def delete_connection(
+    connection_id: UUID,
+    _principal: SuperAdminPrincipal,
+):
+    """Hard-delete a connection; invite rows cascade. GSM secrets are not deleted in v0."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await _fetch_connection(conn, connection_id)
+        if connections_db is not None:
+            deleted = await connections_db.delete_connection(conn, connection_id)
+            if not deleted:
+                raise HTTPException(status_code=404, detail="connection not found")
+        else:
+            result = await conn.execute(
+                "DELETE FROM integration_connections WHERE id = $1",
+                connection_id,
+            )
+            if result == "DELETE 0":
+                raise HTTPException(status_code=404, detail="connection not found")
+    return {"status": "ok", "connection_id": str(connection_id)}
+
+
 @router.post("/{connection_id}/test", response_model=ConnectionTestResponse)
 async def test_connection(connection_id: UUID, _principal: SuperAdminPrincipal):
     _require_database()

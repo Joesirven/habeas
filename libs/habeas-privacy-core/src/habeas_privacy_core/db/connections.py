@@ -158,7 +158,12 @@ async def delete_connection(
     conn: asyncpg.Connection,
     connection_id: UUID | str,
 ) -> bool:
-    """Delete a connection row (used to roll back failed Sheets SA provision)."""
+    """Hard-delete a connection row.
+
+    Cascades ``connection_invites`` via FK ``ON DELETE CASCADE``. Used for
+    ops super_admin delete and to roll back a failed Sheets SA provision.
+    Does not delete Secret Manager secrets (v0 leaves them orphaned).
+    """
     result = await conn.execute(
         """
         DELETE FROM integration_connections

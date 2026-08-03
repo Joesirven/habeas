@@ -428,6 +428,100 @@ async def test_create_invite_rejects_cassandra(monkeypatch: pytest.MonkeyPatch) 
     assert exc_info.value.status_code == 400
 
 
+@pytest.mark.asyncio
+async def test_delete_connection_hard_deletes_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_id = uuid4()
+    connection = Connection(
+        id=str(connection_id),
+        system="mailchimp",
+        display_name="Marketing list",
+        status="connected",
+        owner_email="owner@example.com",
+        secret_resource_name=f"dpra/connections/mailchimp/{connection_id}",
+        last_tested_at=None,
+        last_test_ok=True,
+        last_test_detail="ok",
+        created_by="ops@example.com",
+        created_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+        metadata={},
+    )
+    deleted_ids: list[str] = []
+
+    async def _get_connection(*_args, **_kwargs):
+        return connection
+
+    async def _delete_connection(_conn, cid):
+        deleted_ids.append(str(cid))
+        return True
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
+    monkeypatch.setattr(connections_admin.connections_db, "delete_connection", _delete_connection)
+
+    result = await connections_admin.delete_connection(connection_id, principal)
+
+    assert result == {"status": "ok", "connection_id": str(connection_id)}
+    assert deleted_ids == [str(connection_id)]
+
+
+@pytest.mark.asyncio
+async def test_delete_connection_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_id = uuid4()
+
+    async def _get_connection(*_args, **_kwargs):
+        return None
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await connections_admin.delete_connection(connection_id, principal)
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "connection not found"
+
+
+def test_delete_connection_forbidden_for_non_super_admin() -> None:
+    connection_id = uuid4()
+    with TestClient(app) as client:
+        response = client.delete(
+            f"/ops/connections/{connection_id}",
+            headers=_admin_headers(),
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "insufficient role"
+
+
 @pytest.mark.skipif(
     not os.getenv("DATABASE_URL"),
     reason="DATABASE_URL required for connections integration tests",

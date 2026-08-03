@@ -2299,6 +2299,13 @@ export function revokeConnectionInvite(connectionId: string, inviteId: string) {
   )
 }
 
+export function deleteConnection(connectionId: string) {
+  return fetchAdminApi<{ status: string; connection_id: string }>(
+    `/ops/connections/${encodeURIComponent(connectionId)}`,
+    { method: 'DELETE' },
+  )
+}
+
 export function testConnection(connectionId: string) {
   return fetchAdminApi<{ ok: boolean; detail: string | null }>(
     `/ops/connections/${encodeURIComponent(connectionId)}/test`,

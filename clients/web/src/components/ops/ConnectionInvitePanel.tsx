@@ -7,6 +7,7 @@ import {
   connectTestFailureMessage,
   connectTestSuccessDescription,
   createConnectionInvite,
+  deleteConnection,
   revokeConnectionInvite,
   testConnection,
   type ConnectionInviteCreateResponse,
@@ -31,6 +32,7 @@ export type ConnectionInvitePanelProps = {
   lastTestedAt?: string | null
   onDone?: () => void
   onUpdated?: () => void
+  onDeleted?: () => void
 }
 
 function buildInviteMailto(
@@ -84,6 +86,7 @@ export function ConnectionInvitePanel({
   lastTestedAt,
   onDone,
   onUpdated,
+  onDeleted,
 }: ConnectionInvitePanelProps) {
   const { me } = useAuth()
   const inviteAllowed = system !== 'cassandra'
@@ -92,7 +95,9 @@ export function ConnectionInvitePanel({
   const [minting, setMinting] = useState(false)
   const [revoking, setRevoking] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const [confirmTestOpen, setConfirmTestOpen] = useState(false)
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [localLastTestOk, setLocalLastTestOk] = useState(lastTestOk)
   const [localLastTestDetail, setLocalLastTestDetail] = useState(lastTestDetail)
@@ -164,6 +169,35 @@ export function ConnectionInvitePanel({
     }
   }
 
+  async function handleDelete() {
+    setDeleting(true)
+    setError(null)
+    try {
+      await deleteConnection(connectionId)
+      setConfirmDeleteOpen(false)
+      actionToast.success({
+        title: 'Connection deleted',
+        description: 'Active invites for this connection are no longer valid.',
+      })
+      onDeleted?.()
+    } catch (err) {
+      const message = actionToast.safeErrorMessage(err, 'Could not delete connection')
+      setError(message)
+      actionToast.error({
+        title: 'Could not delete connection',
+        description: message,
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            void handleDelete()
+          },
+        },
+      })
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   async function runRetest() {
     setTesting(true)
     setError(null)
@@ -229,6 +263,29 @@ export function ConnectionInvitePanel({
         )
       : null
 
+  const busy = minting || revoking || testing || deleting
+
+  const deleteConfirmDialog = (
+    <ConfirmActionDialog
+      open={confirmDeleteOpen}
+      onOpenChange={(open) => {
+        if (deleting) return
+        setConfirmDeleteOpen(open)
+      }}
+      title="Delete this connection?"
+      description="This permanently removes the connection. Active invite links become invalid immediately. Stored credentials in Secret Manager are not deleted in this version."
+      confirmLabel="Delete connection"
+      cancelLabel="Cancel"
+      tone="destructive"
+      confirming={deleting}
+      confirmingTitle="Deleting…"
+      confirmingDescription="Removing the connection."
+      onConfirm={() => {
+        void handleDelete()
+      }}
+    />
+  )
+
   if (!inviteAllowed) {
     return (
       <div className="space-y-3 text-sm">
@@ -239,13 +296,31 @@ export function ConnectionInvitePanel({
           service accounts, and egress are live. Credentials are stored only in Google Cloud Secret
           Manager once setup completes.
         </div>
-        {onDone ? (
-          <div className="flex justify-end pt-1">
+        {error ? (
+          <p
+            className="rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-xs text-red-800"
+            role="alert"
+          >
+            {error}
+          </p>
+        ) : null}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+          <Button
+            type="button"
+            size="sm"
+            variant="destructive"
+            disabled={busy}
+            onClick={() => setConfirmDeleteOpen(true)}
+          >
+            Delete connection
+          </Button>
+          {onDone ? (
             <Button type="button" size="sm" variant="outline" onClick={onDone}>
               Done
             </Button>
-          </div>
-        ) : null}
+          ) : null}
+        </div>
+        {deleteConfirmDialog}
       </div>
     )
   }
@@ -288,7 +363,10 @@ export function ConnectionInvitePanel({
       )}
 
       {error ? (
-        <p className="rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-xs text-red-800" role="alert">
+        <p
+          className="rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-xs text-red-800"
+          role="alert"
+        >
           {error}
         </p>
       ) : null}
@@ -320,7 +398,7 @@ export function ConnectionInvitePanel({
               type="button"
               size="sm"
               variant="outline"
-              disabled={revoking || testing}
+              disabled={busy}
               onClick={() => void handleRevoke()}
             >
               {revoking ? 'Revoking…' : 'Revoke invite'}
@@ -328,12 +406,7 @@ export function ConnectionInvitePanel({
           </div>
         </div>
       ) : (
-        <Button
-          type="button"
-          size="sm"
-          disabled={minting || testing}
-          onClick={() => void handleMint()}
-        >
+        <Button type="button" size="sm" disabled={busy} onClick={() => void handleMint()}>
           {minting ? 'Creating link…' : 'Create invite link'}
         </Button>
       )}
@@ -344,7 +417,7 @@ export function ConnectionInvitePanel({
             type="button"
             size="sm"
             variant="outline"
-            disabled={testing || minting || revoking}
+            disabled={busy}
             onClick={() => setConfirmTestOpen(true)}
           >
             {testing ? 'Testing…' : 'Test connection'}
@@ -352,13 +425,22 @@ export function ConnectionInvitePanel({
         </div>
       ) : null}
 
-      {onDone ? (
-        <div className="flex justify-end pt-1">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
+        <Button
+          type="button"
+          size="sm"
+          variant="destructive"
+          disabled={busy}
+          onClick={() => setConfirmDeleteOpen(true)}
+        >
+          Delete connection
+        </Button>
+        {onDone ? (
           <Button type="button" size="sm" variant="outline" onClick={onDone}>
             Done
           </Button>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
 
       <ConfirmActionDialog
         open={confirmTestOpen}
@@ -375,6 +457,7 @@ export function ConnectionInvitePanel({
           void runRetest()
         }}
       />
+      {deleteConfirmDialog}
     </div>
   )
 }

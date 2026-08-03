@@ -13,11 +13,14 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
   `admin_audit_log`); filters `severity`, `resource`, `source`, `q`, `window`/`since`
   (Dashboard Errors = `severity=ERROR`; Logs = unfiltered). Planned Ops IA
   consolidation: `docs/plans/2026-07-30-005-feat-ops-command-center-ia-plan.md`.
-- Integration connections (shipped): `GET/POST /ops/connections`, invites, test, revoke
+- Integration connections (shipped): `GET/POST/DELETE /ops/connections`, invites, test, revoke
   (`connections_admin`); redeem `GET/POST /connect/{token}` (`connections_redeem`).
   Live `test_connection` per system; allowlisted `detail` only; secrets to Secret Manager
   (`dpra/connections/{system}/{connection_id}`); failed redeem does not burn invite.
   Owner emails must be allowlisted (`owner-candidates`). Cassandra invites rejected.
+  `DELETE /ops/connections/{id}` (super_admin): hard-deletes the row; `connection_invites`
+  cascade via FK. v0 does **not** delete GSM secrets (or per-connection Sheets SAs) —
+  those may remain orphaned until a later cleanup path.
   Plan: `docs/plans/2026-07-30-003-feat-connections-onboarding-plan.md`.
   Connecting a system does **not** by itself enable matching/hash workers for that vertical.
 - DROP ops: `GET /ops/drop/pipeline`, spine proxies, hash-index refresh enqueue /
