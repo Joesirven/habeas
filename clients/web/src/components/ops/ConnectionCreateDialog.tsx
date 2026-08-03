@@ -19,6 +19,7 @@ import {
   type IntegrationSystemId,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
+import { absoluteInviteUrl } from '@/lib/utils'
 
 type ConnectionSystemOption = ConnectionSystemsPayload['systems'][number]
 
@@ -206,7 +207,7 @@ export function ConnectionCreateDialog({
 
   function copyInviteUrl() {
     if (!invite?.invite_url) return
-    void navigator.clipboard.writeText(invite.invite_url).then(() => {
+    void navigator.clipboard.writeText(absoluteInviteUrl(invite.invite_url)).then(() => {
       setCopyNote('Copied link')
       window.setTimeout(() => setCopyNote(null), 2000)
     })
@@ -217,9 +218,15 @@ export function ConnectionCreateDialog({
     handleOpenChange(false)
   }
 
+  const shareUrl = invite?.invite_url ? absoluteInviteUrl(invite.invite_url) : null
+
   const mailtoHref =
-    invite?.invite_url && invite.owner_email
-      ? buildInviteMailto(invite.invite_url, createdConnection?.display_name ?? displayName, invite.owner_email)
+    shareUrl && invite?.owner_email
+      ? buildInviteMailto(
+          shareUrl,
+          createdConnection?.display_name ?? displayName,
+          invite.owner_email,
+        )
       : null
 
   return (
@@ -346,7 +353,7 @@ export function ConnectionCreateDialog({
                   type="text"
                   readOnly
                   className={`${fieldClass} font-mono text-xs`}
-                  value={invite.invite_url}
+                  value={shareUrl ?? ''}
                   aria-label="Invite URL"
                 />
                 <div className="flex flex-wrap gap-2">
