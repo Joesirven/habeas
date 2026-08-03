@@ -138,9 +138,20 @@ export function ConfirmActionDialog({
         </DialogHeader>
         {children}
         {confirming ? (
-          <p className="text-xs text-ink-soft" role="status" aria-live="polite">
-            Working — do not close this tab…
-          </p>
+          <div
+            className="flex items-center gap-3 rounded-md border border-line bg-canvas px-3 py-3"
+            role="status"
+            aria-live="polite"
+          >
+            <span
+              className="inline-block size-5 shrink-0 animate-spin rounded-full border-2 border-habeas-navy/20 border-t-habeas-navy"
+              aria-hidden
+            />
+            <div className="min-w-0 text-xs">
+              <p className="font-medium text-ink">Testing connection…</p>
+              <p className="text-ink-soft">Saving keys securely, then verifying with the provider. Keep this tab open.</p>
+            </div>
+          </div>
         ) : null}
         <DialogFooter>
           <button
@@ -161,7 +172,7 @@ export function ConfirmActionDialog({
             disabled={confirming || confirmDisabled}
             onClick={onConfirm}
           >
-            {confirming ? 'Working…' : confirmLabel}
+            {confirming ? 'Testing…' : confirmLabel}
           </button>
         </DialogFooter>
       </DialogContent>

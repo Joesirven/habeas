@@ -13,6 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Spinner } from '@/components/ui/spinner'
 import { Toaster } from '@/components/ui/sonner'
 import {
   connectRedeemSystemLabel,
@@ -78,28 +79,38 @@ function RedeemPendingOverlay({ systemLabel }: { systemLabel: string }) {
   const [phase, setPhase] = useState<'saving' | 'testing'>('saving')
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setPhase('testing'), 1800)
+    const timer = window.setTimeout(() => setPhase('testing'), 1200)
     return () => window.clearTimeout(timer)
   }, [])
 
-  const message =
+  const title = phase === 'saving' ? 'Saving credentials…' : `Testing ${systemLabel}…`
+  const detail =
     phase === 'saving'
-      ? 'Saving credentials securely…'
-      : `Testing ${systemLabel} connection…`
+      ? 'Writing your keys to Google’s secure vault.'
+      : `Checking that Habeas can authenticate with ${systemLabel}.`
 
   return (
     <div
-      className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-lg bg-white/90 px-6 text-center backdrop-blur-[2px]"
+      className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-lg bg-white/95 px-6 text-center backdrop-blur-[2px]"
       role="status"
       aria-live="polite"
       aria-busy="true"
-      aria-label={message}
+      aria-label={title}
     >
-      <span
-        className="mb-3 inline-block size-8 animate-spin rounded-full border-2 border-habeas-navy/20 border-t-habeas-navy"
-        aria-hidden
-      />
-      <p className="text-sm font-medium text-[#0F172A]">{message}</p>
+      <div className="w-full max-w-sm rounded-lg border border-[#E2E8F0] bg-white p-5 shadow-sm">
+        <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-full bg-habeas-navy/10">
+          <Spinner className="size-5" />
+        </div>
+        <p className="text-sm font-medium text-[#0F172A]">{title}</p>
+        <p className="mt-1 text-xs text-[#475569]">{detail}</p>
+        <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-[#E2E8F0]">
+          <div
+            className={`h-full rounded-full bg-habeas-navy transition-all duration-700 ${
+              phase === 'saving' ? 'w-1/2' : 'w-full'
+            }`}
+          />
+        </div>
+      </div>
     </div>
   )
 }
@@ -613,14 +624,46 @@ function ConnectForm({
           <div className="space-y-2 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-3 text-sm">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-medium text-[#0F172A]">{preview.display_name}</span>
-              <Badge variant={testPassed ? 'ok' : testFailed ? 'fail' : 'wait'}>
-                {testPassed ? 'Passed' : testFailed ? 'Failed' : 'Ready to test'}
+              <Badge
+                variant={
+                  redeemMutation.isPending
+                    ? 'run'
+                    : testPassed
+                      ? 'ok'
+                      : testFailed
+                        ? 'fail'
+                        : 'wait'
+                }
+              >
+                {redeemMutation.isPending
+                  ? 'Testing…'
+                  : testPassed
+                    ? 'Passed'
+                    : testFailed
+                      ? 'Failed'
+                      : 'Ready to test'}
               </Badge>
             </div>
             <p className="text-xs text-[#475569]">
               Fields provided: {filledSummary.length > 0 ? filledSummary.join(', ') : 'none yet'}
             </p>
           </div>
+
+          {redeemMutation.isPending ? (
+            <div
+              className="flex items-start gap-3 rounded-md border border-sky-200 bg-sky-50 px-3.5 py-3"
+              role="status"
+              aria-live="polite"
+            >
+              <Spinner className="mt-0.5 size-4 text-sky-700" />
+              <div className="min-w-0 text-sm">
+                <p className="font-medium text-sky-950">Testing your connection</p>
+                <p className="mt-0.5 text-xs text-sky-900/80">
+                  Saving keys, then verifying with {systemLabel}. This usually takes a few seconds.
+                </p>
+              </div>
+            </div>
+          ) : null}
 
           {testPassed ? (
             <div
@@ -680,7 +723,7 @@ function ConnectForm({
                 disabled={redeemMutation.isPending}
                 onClick={() => setConfirmTestOpen(true)}
               >
-                {testFailed ? 'Test again' : 'Test connection'}
+                {testFailed ? 'Test again' : redeemMutation.isPending ? 'Testing…' : 'Test connection'}
               </Button>
             ) : null}
           </div>
