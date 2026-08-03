@@ -4,9 +4,14 @@ date: 2026-07-30
 type: feat
 topic: connections-onboarding
 artifact_contract: ce-unified-plan/v1
-artifact_readiness: implementation-ready
+artifact_readiness: shipped
 product_contract_source: ce-plan-bootstrap
 execution: code
+status_note: >
+  Shipped on master (dev) 2026-08: live per-system testers, owner wizard
+  Confirm→Privacy→Credentials→Test, absolute invite URLs, ops retest + action
+  toasts, invite not burned on failed test. Connecting ≠ enabling vertical matching.
+  KB: SirvenOS External-Integrations § Connections onboarding.
 ---
 
 ## Goal Capsule
@@ -124,3 +129,11 @@ cd clients/web && bun test # or vitest if present for new files
 - AE1–AE6 evidenced
 - No secrets in git/logs/UI after submit
 - Reviewers + 5 QCQA personas completed
+
+## Ship notes (2026-08-03)
+
+- Live testers replace stubs for Mailchimp / Paylocity / Lever / Auth0 / Sheets.
+- Owner UI: four-step wizard; failed redeem keeps invite; allowlisted `detail` codes only.
+- Ops: Connections detail supports invite mint/revoke and **Test connection** with confirm + toasts.
+- Absolute invite URLs when sharing; `/connect/*` skips post-auth splash.
+- **Out of band:** owner Slack/Jira outreach copy is session-only — do not store outreach templates in KB.

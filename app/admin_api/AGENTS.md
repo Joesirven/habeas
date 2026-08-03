@@ -13,10 +13,13 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
   `admin_audit_log`); filters `severity`, `resource`, `source`, `q`, `window`/`since`
   (Dashboard Errors = `severity=ERROR`; Logs = unfiltered). Planned Ops IA
   consolidation: `docs/plans/2026-07-30-005-feat-ops-command-center-ia-plan.md`.
-- Integration connections: `GET/POST /ops/connections`, invites, test, revoke
-  (`connections_admin`); public redeem `GET/POST /connect/{token}`
-  (`connections_redeem`) — secrets to Secret Manager only; no secret material in
-  responses or audit. Plan: `docs/plans/2026-07-30-003-feat-connections-onboarding-plan.md`.
+- Integration connections (shipped): `GET/POST /ops/connections`, invites, test, revoke
+  (`connections_admin`); redeem `GET/POST /connect/{token}` (`connections_redeem`).
+  Live `test_connection` per system; allowlisted `detail` only; secrets to Secret Manager
+  (`dpra/connections/{system}/{connection_id}`); failed redeem does not burn invite.
+  Owner emails must be allowlisted (`owner-candidates`). Cassandra invites rejected.
+  Plan: `docs/plans/2026-07-30-003-feat-connections-onboarding-plan.md`.
+  Connecting a system does **not** by itself enable matching/hash workers for that vertical.
 - DROP ops: `GET /ops/drop/pipeline`, spine proxies, hash-index refresh enqueue /
   enqueue-all (USPS 50+DC) / process
 - Fleet visibility (U23): `GET /ops/drop/workers`, `GET /ops/health/queues` —
