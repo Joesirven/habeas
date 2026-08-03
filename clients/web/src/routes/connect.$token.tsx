@@ -5,8 +5,10 @@ import { useMemo, useState, type ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   getConnectPreview,
+  getMe,
   redeemConnect,
   type ConnectPreviewPayload,
+  type MePayload,
 } from '@/lib/api'
 
 type CredentialField = ConnectPreviewPayload['fields'][number]
@@ -79,6 +81,68 @@ function formatExpiresAt(iso: string): string {
     dateStyle: 'medium',
     timeStyle: 'short',
   })
+}
+
+function formatExpiresIn(iso: string): string {
+  const ends = new Date(iso).getTime()
+  if (Number.isNaN(ends)) return formatExpiresAt(iso)
+  const ms = ends - Date.now()
+  if (ms <= 0) return 'already expired'
+  const hours = Math.floor(ms / (1000 * 60 * 60))
+  const minutes = Math.floor((ms % (1000 * 60 * 60)) / (1000 * 60))
+  if (hours >= 48) {
+    const days = Math.floor(hours / 24)
+    return `in about ${days} day${days === 1 ? '' : 's'}`
+  }
+  if (hours >= 1) {
+    return `in about ${hours} hour${hours === 1 ? '' : 's'}`
+  }
+  return `in about ${Math.max(1, minutes)} minute${minutes === 1 ? '' : 's'}`
+}
+
+function firstNameFromEmail(email: string): string {
+  const local = email.split('@')[0]?.trim() ?? ''
+  if (!local) return 'there'
+  const token = local.split(/[._+-]/)[0] ?? local
+  if (!token) return 'there'
+  return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase()
+}
+
+function emailsMatch(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase()
+}
+
+type WizardStep = 'confirm' | 'instructions' | 'credentials'
+
+function WizardProgress({ step }: { step: WizardStep }) {
+  const steps: { id: WizardStep; label: string }[] = [
+    { id: 'confirm', label: 'Confirm' },
+    { id: 'instructions', label: 'Instructions' },
+    { id: 'credentials', label: 'Credentials' },
+  ]
+  const activeIndex = steps.findIndex((entry) => entry.id === step)
+  return (
+    <ol className="mb-6 flex gap-2" aria-label="Setup steps">
+      {steps.map((entry, index) => {
+        const active = index === activeIndex
+        const done = index < activeIndex
+        return (
+          <li
+            key={entry.id}
+            className={`flex-1 rounded-md border px-2 py-1.5 text-center text-[11px] font-medium ${
+              active
+                ? 'border-habeas-navy bg-habeas-navy text-white'
+                : done
+                  ? 'border-habeas-navy/30 bg-habeas-navy/5 text-habeas-navy'
+                  : 'border-[#E2E8F0] bg-[#F8FAFC] text-[#475569]'
+            }`}
+          >
+            {index + 1}. {entry.label}
+          </li>
+        )
+      })}
+    </ol>
+  )
 }
 
 /** Original silver logo — sits on a dark navy band for contrast. */
@@ -311,10 +375,13 @@ function ConnectCard({ children }: { children: ReactNode }) {
 function ConnectForm({
   preview,
   token,
+  me,
 }: {
   preview: ConnectPreviewPayload
   token: string
+  me: MePayload
 }) {
+  const [step, setStep] = useState<WizardStep>('confirm')
   const [credentials, setCredentials] = useState<Record<string, string>>(() =>
     Object.fromEntries(preview.fields.map((field) => [field.id, ''])),
   )
@@ -341,6 +408,10 @@ function ConnectForm({
     ? formatTestFailureDetail(redeemMutation.data?.detail)
     : null
 
+  const inviteeFirst = firstNameFromEmail(preview.owner_email)
+  const signedInFirst = firstNameFromEmail(me.email)
+  const isInvitee = emailsMatch(me.email, preview.owner_email)
+
   if (redeemMutation.isSuccess && redeemMutation.data.test_ok) {
     return (
       <ConnectCard>
@@ -354,7 +425,7 @@ function ConnectForm({
             </svg>
           </div>
           <h1 className="text-xl font-medium text-[#0F172A]">Connected</h1>
-          <p className="text-sm text-[#475569]">You can close this page.</p>
+          <p className="text-sm text-[#475569]">Thanks, {signedInFirst}. You can close this page.</p>
         </div>
       </ConnectCard>
     )
@@ -377,34 +448,132 @@ function ConnectForm({
 
   return (
     <ConnectCard>
-      <div className="space-y-8">
-        <header className="space-y-1 border-b border-[#E2E8F0] pb-5">
-          <p className="text-xs font-medium uppercase tracking-wide text-habeas-navy">
-            Secure connection
-          </p>
-          <h1 className="text-xl font-medium tracking-tight text-[#0F172A]">
-            {preview.display_name}
-          </h1>
-          <p className="text-sm text-[#475569]">
-            Invited: <span className="text-[#0F172A]">{preview.owner_email}</span>
-          </p>
-          <p className="pt-1 text-xs text-[#475569]">
-            Expires{' '}
-            <time dateTime={preview.expires_at}>{formatExpiresAt(preview.expires_at)}</time>
-          </p>
-        </header>
+      <WizardProgress step={step} />
 
-        <TrustSection trustCopy={preview.trust_copy} />
+      {step === 'confirm' ? (
+        <div className="space-y-5">
+          <header className="space-y-2 border-b border-[#E2E8F0] pb-5">
+            <p className="text-xs font-medium uppercase tracking-wide text-habeas-navy">
+              Step 1 · Confirm who you are
+            </p>
+            <h1 className="text-xl font-medium tracking-tight text-[#0F172A]">
+              Hi, {signedInFirst}
+            </h1>
+            <p className="text-sm leading-relaxed text-[#334155]">
+              You are signed in as{' '}
+              <span className="font-medium text-[#0F172A]">{me.email}</span>.
+            </p>
+          </header>
 
-        {preview.fields.length === 0 ? (
-          <p className="text-sm text-[#475569]">
-            No credentials are collected on this page. Contact Habeas if you expected a form.
-          </p>
-        ) : (
-          <section className="space-y-4" aria-labelledby="connect-fields-heading">
-            <h2 id="connect-fields-heading" className="text-sm font-medium text-[#0F172A]">
-              Enter credentials
-            </h2>
+          <div className="space-y-3 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-3 text-xs leading-relaxed text-[#334155]">
+            <h2 className="text-xs font-semibold text-[#0F172A]">This invite</h2>
+            <ul className="space-y-1.5">
+              <li className="flex gap-2">
+                <span className="mt-1.5 size-1 shrink-0 rounded-full bg-habeas-navy" aria-hidden />
+                <span>
+                  Connection: <span className="font-medium text-[#0F172A]">{preview.display_name}</span>
+                </span>
+              </li>
+              <li className="flex gap-2">
+                <span className="mt-1.5 size-1 shrink-0 rounded-full bg-habeas-navy" aria-hidden />
+                <span>
+                  Prepared for:{' '}
+                  <span className="font-medium text-[#0F172A]">{preview.owner_email}</span>
+                  {inviteeFirst !== 'there' ? ` (${inviteeFirst})` : null}
+                </span>
+              </li>
+              <li className="flex gap-2">
+                <span className="mt-1.5 size-1 shrink-0 rounded-full bg-habeas-navy" aria-hidden />
+                <span>
+                  Expires {formatExpiresIn(preview.expires_at)} (
+                  <time dateTime={preview.expires_at}>{formatExpiresAt(preview.expires_at)}</time>)
+                </span>
+              </li>
+            </ul>
+          </div>
+
+          {isInvitee ? (
+            <div className="space-y-3">
+              <p className="text-sm text-[#334155]">
+                Confirm you are <span className="font-medium text-[#0F172A]">{inviteeFirst}</span>{' '}
+                ({preview.owner_email}) to continue setting up this connection.
+              </p>
+              <Button
+                type="button"
+                className="h-10 w-full bg-habeas-navy text-sm hover:bg-habeas-navy/90"
+                onClick={() => setStep('instructions')}
+              >
+                Yes — continue as {inviteeFirst}
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-xs text-amber-950">
+              <p className="font-semibold">Wrong Google account</p>
+              <p>
+                This invite is for <span className="font-medium">{preview.owner_email}</span>, but
+                you signed in as <span className="font-medium">{me.email}</span>.
+              </p>
+              <p>Sign out, then open this link again while signed in as the invited owner.</p>
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {step === 'instructions' ? (
+        <div className="space-y-5">
+          <header className="space-y-2 border-b border-[#E2E8F0] pb-5">
+            <p className="text-xs font-medium uppercase tracking-wide text-habeas-navy">
+              Step 2 · Instructions
+            </p>
+            <h1 className="text-xl font-medium tracking-tight text-[#0F172A]">
+              {preview.display_name}
+            </h1>
+            <p className="text-sm text-[#475569]">
+              Read these notes, then continue to enter credentials.
+            </p>
+          </header>
+
+          <TrustSection trustCopy={preview.trust_copy} />
+
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10 flex-1 text-sm"
+              onClick={() => setStep('confirm')}
+            >
+              Back
+            </Button>
+            <Button
+              type="button"
+              className="h-10 flex-1 bg-habeas-navy text-sm hover:bg-habeas-navy/90"
+              onClick={() => setStep('credentials')}
+            >
+              Continue to credentials
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {step === 'credentials' ? (
+        <div className="space-y-5">
+          <header className="space-y-2 border-b border-[#E2E8F0] pb-5">
+            <p className="text-xs font-medium uppercase tracking-wide text-habeas-navy">
+              Step 3 · Credentials
+            </p>
+            <h1 className="text-xl font-medium tracking-tight text-[#0F172A]">
+              Enter what Habeas needs
+            </h1>
+            <p className="text-sm text-[#475569]">
+              Expand “How to find this” under each field if you need the click path.
+            </p>
+          </header>
+
+          {preview.fields.length === 0 ? (
+            <p className="text-sm text-[#475569]">
+              No credentials are collected on this page. Contact Habeas if you expected a form.
+            </p>
+          ) : (
             <form className="space-y-5" onSubmit={handleSubmit} noValidate>
               {preview.fields.map((field) => (
                 <CredentialInput
@@ -427,17 +596,28 @@ function ConnectForm({
                 </p>
               ) : null}
 
-              <Button
-                type="submit"
-                disabled={redeemMutation.isPending}
-                className="h-10 w-full bg-habeas-navy text-sm hover:bg-habeas-navy/90"
-              >
-                {redeemMutation.isPending ? 'Connecting…' : 'Connect securely'}
-              </Button>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-10 flex-1 text-sm"
+                  disabled={redeemMutation.isPending}
+                  onClick={() => setStep('instructions')}
+                >
+                  Back
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={redeemMutation.isPending}
+                  className="h-10 flex-1 bg-habeas-navy text-sm hover:bg-habeas-navy/90"
+                >
+                  {redeemMutation.isPending ? 'Connecting…' : 'Connect securely'}
+                </Button>
+              </div>
             </form>
-          </section>
-        )}
-      </div>
+          )}
+        </div>
+      ) : null}
     </ConnectCard>
   )
 }
@@ -451,9 +631,15 @@ export function ConnectTokenPage() {
     retry: false,
   })
 
+  const meQuery = useQuery({
+    queryKey: ['admin-api', 'me', 'connect'],
+    queryFn: getMe,
+    retry: false,
+  })
+
   return (
     <ConnectShell>
-      {previewQuery.isPending ? (
+      {previewQuery.isPending || meQuery.isPending ? (
         <ConnectCard>
           <div className="space-y-3" role="status" aria-label="Loading connection invite">
             <div className="h-4 w-2/3 animate-pulse rounded bg-[#E2E8F0]" />
@@ -473,8 +659,17 @@ export function ConnectTokenPage() {
             </p>
           </div>
         </ConnectCard>
+      ) : meQuery.isError || !meQuery.data ? (
+        <ConnectCard>
+          <div className="space-y-3 text-center">
+            <h1 className="text-lg font-medium text-[#0F172A]">Sign in required</h1>
+            <p className="text-sm text-[#475569]">
+              Sign in with your Habeas Google account, then reload this invite link.
+            </p>
+          </div>
+        </ConnectCard>
       ) : previewQuery.data ? (
-        <ConnectForm preview={previewQuery.data} token={token} />
+        <ConnectForm preview={previewQuery.data} token={token} me={meQuery.data} />
       ) : null}
     </ConnectShell>
   )

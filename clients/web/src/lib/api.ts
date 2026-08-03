@@ -2232,6 +2232,17 @@ export function getConnectionSystems() {
   return fetchAdminApi<ConnectionSystemsPayload>('/ops/connections/systems')
 }
 
+export type ConnectionOwnerCandidate = {
+  email: string
+  role: string
+}
+
+export function listConnectionOwnerCandidates() {
+  return fetchAdminApi<{ owners: ConnectionOwnerCandidate[] }>(
+    '/ops/connections/owner-candidates',
+  )
+}
+
 export function getConnectPreview(token: string) {
   return fetchAdminApi<ConnectPreviewPayload>(`/connect/${encodeURIComponent(token)}`)
 }

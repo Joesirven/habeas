@@ -14,8 +14,9 @@ from pydantic import BaseModel, EmailStr, Field
 from pydantic_settings import SettingsConfigDict
 
 from admin_api.drop_pipeline import _require_database
-from admin_api.roles import RolePrincipal, require_roles
+from admin_api.roles import RolePrincipal, require_roles, settings as role_settings
 from habeas_privacy_core.auth import ROLE_SUPER_ADMIN
+from habeas_privacy_core.auth.roles import parse_email_allowlist
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.connections.models import sanitize_test_detail
 from habeas_privacy_core.connections.token import (
@@ -114,6 +115,50 @@ class SystemCatalogEntry(BaseModel):
 
 class SystemsCatalogResponse(BaseModel):
     systems: list[SystemCatalogEntry]
+
+
+class OwnerCandidate(BaseModel):
+    email: str
+    role: str
+
+
+class OwnerCandidatesResponse(BaseModel):
+    owners: list[OwnerCandidate]
+
+
+def _owner_allowlist_candidates() -> list[OwnerCandidate]:
+    """Union of role allowlists (app identity after IAP) — first-match role label."""
+    buckets: list[tuple[str, frozenset[str]]] = [
+        ("super_admin", parse_email_allowlist(role_settings.admin_api_super_admins)),
+        ("admin", parse_email_allowlist(role_settings.admin_api_admins)),
+        ("legal", parse_email_allowlist(role_settings.admin_api_legals)),
+        ("data_owner", parse_email_allowlist(role_settings.admin_api_data_owners)),
+    ]
+    seen: set[str] = set()
+    owners: list[OwnerCandidate] = []
+    for role, emails in buckets:
+        for email in sorted(emails):
+            normalized = email.strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            owners.append(OwnerCandidate(email=normalized, role=role))
+    return sorted(owners, key=lambda item: item.email)
+
+
+def _require_allowlisted_owner(owner_email: str | None) -> str | None:
+    if owner_email is None:
+        return None
+    normalized = owner_email.strip().lower()
+    if not normalized:
+        return None
+    allowed = {item.email for item in _owner_allowlist_candidates()}
+    if normalized not in allowed:
+        raise HTTPException(
+            status_code=422,
+            detail="owner_email must be an allowlisted Habeas operator",
+        )
+    return normalized
 
 
 def _connection_from_row(row: Any) -> ConnectionResponse:
@@ -409,7 +454,11 @@ async def create_connection(body: ConnectionCreateBody, principal: SuperAdminPri
     display_name = body.display_name.strip()
     if not display_name:
         raise HTTPException(status_code=422, detail="display_name required")
-    owner_email = body.owner_email.strip().lower() if body.owner_email else None
+    owner_email = _require_allowlisted_owner(
+        body.owner_email.strip().lower() if body.owner_email else None
+    )
+    if system != _CASSANDRA_SYSTEM and not owner_email:
+        raise HTTPException(status_code=422, detail="owner_email required")
     status = "infra_pending" if system == _CASSANDRA_SYSTEM else "pending"
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -471,6 +520,12 @@ async def get_systems_catalog(_principal: SuperAdminPrincipal):
     return _load_systems_catalog()
 
 
+@router.get("/owner-candidates", response_model=OwnerCandidatesResponse)
+async def list_owner_candidates(_principal: SuperAdminPrincipal):
+    """Emails on any ADMIN_API_* role allowlist (post-IAP app identity)."""
+    return OwnerCandidatesResponse(owners=_owner_allowlist_candidates())
+
+
 @router.post("/{connection_id}/invites", response_model=InviteResponse, status_code=201)
 async def create_invite(
     connection_id: UUID,
@@ -483,10 +538,10 @@ async def create_invite(
         connection = await _fetch_connection(conn, connection_id)
         if connection.system == _CASSANDRA_SYSTEM or connection.status == "infra_pending":
             raise HTTPException(status_code=400, detail="invites not allowed for cassandra")
-        owner_email = (
+        owner_email = _require_allowlisted_owner(
             body.owner_email.strip().lower()
             if body.owner_email
-            else (connection.owner_email or "").strip().lower()
+            else (connection.owner_email or "").strip().lower() or None
         )
         if not owner_email:
             raise HTTPException(status_code=422, detail="owner_email required")

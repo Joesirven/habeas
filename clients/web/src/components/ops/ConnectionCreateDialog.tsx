@@ -13,7 +13,9 @@ import {
   createConnection,
   createConnectionInvite,
   getConnectionSystems,
+  listConnectionOwnerCandidates,
   type ConnectionInviteCreateResponse,
+  type ConnectionOwnerCandidate,
   type ConnectionRecord,
   type ConnectionSystemsPayload,
   type IntegrationSystemId,
@@ -71,6 +73,8 @@ export function ConnectionCreateDialog({
   onCreated,
 }: ConnectionCreateDialogProps) {
   const [systems, setSystems] = useState<ConnectionSystemOption[]>(FALLBACK_SYSTEMS)
+  const [owners, setOwners] = useState<ConnectionOwnerCandidate[]>([])
+  const [ownersError, setOwnersError] = useState<string | null>(null)
   const [system, setSystem] = useState<IntegrationSystemId>('mailchimp')
   const [displayName, setDisplayName] = useState('')
   const [ownerEmail, setOwnerEmail] = useState('')
@@ -95,6 +99,7 @@ export function ConnectionCreateDialog({
     setCreatedConnection(null)
     setInvite(null)
     setCopyNote(null)
+    setOwnersError(null)
   }
 
   useEffect(() => {
@@ -112,6 +117,20 @@ export function ConnectionCreateDialog({
       })
       .catch(() => {
         if (!cancelled) setSystems(FALLBACK_SYSTEMS)
+      })
+
+    void listConnectionOwnerCandidates()
+      .then((payload) => {
+        if (!cancelled) {
+          setOwners(payload.owners)
+          setOwnersError(null)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setOwners([])
+          setOwnersError('Could not load allowlisted owners.')
+        }
       })
 
     return () => {
@@ -270,17 +289,28 @@ export function ConnectionCreateDialog({
               {inviteAllowed ? (
                 <label className="flex flex-col gap-1">
                   <span className="text-xs font-medium text-ink-soft">Owner email</span>
-                  <input
-                    type="email"
-                    className={fieldClass}
-                    placeholder="owner@example.com"
+                  <select
+                    className={`${fieldClass} text-xs`}
                     value={ownerEmail}
                     onChange={(event) => setOwnerEmail(event.target.value)}
-                    autoComplete="off"
-                  />
+                    disabled={owners.length === 0}
+                  >
+                    <option value="">
+                      {owners.length === 0 ? 'No allowlisted owners' : 'Select an owner…'}
+                    </option>
+                    {owners.map((owner) => (
+                      <option key={owner.email} value={owner.email}>
+                        {owner.email} ({owner.role.replaceAll('_', ' ')})
+                      </option>
+                    ))}
+                  </select>
                   <span className="text-xs text-mute">
-                    We will mint a single-use invite link for this owner after creation.
+                    Only Habeas operators already on a role allowlist (super admin, admin, legal,
+                    or data owner).
                   </span>
+                  {ownersError ? (
+                    <span className="text-xs text-red-700">{ownersError}</span>
+                  ) : null}
                 </label>
               ) : (
                 <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">

@@ -109,6 +109,59 @@ def test_invite_url_absolute_when_base_configured() -> None:
     assert connections_admin._invite_url(raw) == "https://ops.example.com/connect/abc123token"
 
 
+def test_owner_candidates_union_of_role_allowlists() -> None:
+    roles.settings.admin_api_super_admins = "ops@example.com"
+    roles.settings.admin_api_admins = "admin@example.com,ops@example.com"
+    roles.settings.admin_api_legals = "legal@example.com"
+    roles.settings.admin_api_data_owners = "owner@example.com"
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/connections/owner-candidates",
+            headers={IAP_EMAIL_HEADER: "ops@example.com"},
+        )
+
+    assert response.status_code == 200
+    owners = response.json()["owners"]
+    emails = [entry["email"] for entry in owners]
+    assert emails == [
+        "admin@example.com",
+        "legal@example.com",
+        "ops@example.com",
+        "owner@example.com",
+    ]
+    by_email = {entry["email"]: entry["role"] for entry in owners}
+    assert by_email["ops@example.com"] == "super_admin"
+    assert by_email["admin@example.com"] == "admin"
+    assert by_email["legal@example.com"] == "legal"
+    assert by_email["owner@example.com"] == "data_owner"
+
+
+def test_owner_candidates_forbidden_for_non_super_admin() -> None:
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/connections/owner-candidates",
+            headers=_admin_headers(),
+        )
+
+    assert response.status_code == 403
+
+
+def test_require_allowlisted_owner_rejects_unknown() -> None:
+    roles.settings.admin_api_data_owners = "owner@example.com"
+    with pytest.raises(HTTPException) as exc_info:
+        connections_admin._require_allowlisted_owner("stranger@example.com")
+    assert exc_info.value.status_code == 422
+
+
+def test_require_allowlisted_owner_accepts_known() -> None:
+    roles.settings.admin_api_admins = "admin@example.com"
+    assert (
+        connections_admin._require_allowlisted_owner("Admin@Example.com")
+        == "admin@example.com"
+    )
+
+
 @pytest.mark.asyncio
 async def test_create_connection_sets_infra_pending_for_cassandra(
     monkeypatch: pytest.MonkeyPatch,
@@ -220,10 +273,12 @@ async def test_create_invite_rejects_cassandra(monkeypatch: pytest.MonkeyPatch) 
     reason="DATABASE_URL required for connections integration tests",
 )
 def test_create_connection_integration() -> None:
+    roles.settings.admin_api_super_admins = "ops@example.com"
+    roles.settings.admin_api_data_owners = "owner@example.com"
     with TestClient(app) as client:
         response = client.post(
             "/ops/connections",
-            headers=_super_admin_headers(),
+            headers={IAP_EMAIL_HEADER: "ops@example.com"},
             json={
                 "system": "mailchimp",
                 "display_name": "Marketing list",
@@ -243,10 +298,12 @@ def test_create_connection_integration() -> None:
     reason="DATABASE_URL required for connections integration tests",
 )
 def test_create_invite_integration() -> None:
+    roles.settings.admin_api_super_admins = "ops@example.com"
+    roles.settings.admin_api_data_owners = "owner@example.com"
     with TestClient(app) as client:
         create_response = client.post(
             "/ops/connections",
-            headers=_super_admin_headers(),
+            headers={IAP_EMAIL_HEADER: "ops@example.com"},
             json={
                 "system": "mailchimp",
                 "display_name": "Invite flow",
@@ -258,7 +315,7 @@ def test_create_invite_integration() -> None:
 
         invite_response = client.post(
             f"/ops/connections/{connection_id}/invites",
-            headers=_super_admin_headers(),
+            headers={IAP_EMAIL_HEADER: "ops@example.com"},
             json={},
         )
 
