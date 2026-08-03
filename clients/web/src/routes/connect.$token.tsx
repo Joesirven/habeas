@@ -81,17 +81,86 @@ function formatExpiresAt(iso: string): string {
   })
 }
 
-function TrustCopy({ text }: { text: string }) {
-  const paragraphs = useMemo(
-    () => text.split(/\n\n+/).map((part) => part.trim()).filter(Boolean),
-    [text],
-  )
+/** Silver raster logo is invisible on light canvas — mask it with Habeas navy. */
+function HabeasConnectLogo() {
   return (
-    <div className="space-y-3 text-sm leading-relaxed text-[#64748B]">
-      {paragraphs.map((paragraph, index) => (
-        <p key={index}>{paragraph}</p>
-      ))}
+    <div className="flex flex-col items-center gap-3">
+      <div
+        role="img"
+        aria-label="Habeas"
+        className="h-11 w-[10.5rem] bg-habeas-navy sm:h-12 sm:w-48"
+        style={{
+          WebkitMask: "url('/habeas-logo.png') center / contain no-repeat",
+          mask: "url('/habeas-logo.png') center / contain no-repeat",
+        }}
+      />
+      <div className="text-center">
+        <p className="font-display text-lg font-medium tracking-tight text-habeas-navy">
+          Habeas
+        </p>
+        <p className="mt-0.5 text-[11px] font-medium uppercase tracking-[0.16em] text-[#64748B]">
+          Data Privacy
+        </p>
+      </div>
     </div>
+  )
+}
+
+const TRUST_BULLETS = [
+  'Used only for privacy-request automation',
+  'Credentials go to Secret Manager — not email, chat, or our app database',
+  'Use a dedicated integration key or app — not your personal login password',
+  'This link works once and expires in 72 hours',
+] as const
+
+function TrustSection({ trustCopy }: { trustCopy: string }) {
+  const extraParagraphs = useMemo(() => {
+    const parts = trustCopy
+      .split(/\n\n+/)
+      .map((part) => part.trim())
+      .filter(Boolean)
+    // Drop paragraphs already covered by the short bullets.
+    const covered = [
+      'habeas uses this connection only',
+      'submitted values are written directly',
+      'please create or use integration credentials',
+      'this invite link expires after 72 hours',
+    ]
+    return parts.filter((paragraph) => {
+      const lower = paragraph.toLowerCase()
+      return !covered.some((needle) => lower.startsWith(needle))
+    })
+  }, [trustCopy])
+
+  return (
+    <section className="space-y-3" aria-labelledby="connect-trust-heading">
+      <h2 id="connect-trust-heading" className="text-sm font-medium text-[#0F172A]">
+        Before you continue
+      </h2>
+      <ul className="space-y-2.5 text-sm leading-snug text-[#64748B]">
+        {TRUST_BULLETS.map((item) => (
+          <li key={item} className="flex gap-2.5">
+            <span
+              className="mt-1.5 size-1.5 shrink-0 rounded-full bg-habeas-navy"
+              aria-hidden
+            />
+            <span>{item}</span>
+          </li>
+        ))}
+      </ul>
+      {extraParagraphs.length > 0 ? (
+        <details className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2">
+          <summary className="cursor-pointer text-xs font-medium text-habeas-navy">
+            System-specific notes
+          </summary>
+          <div className="mt-2 space-y-2 text-xs leading-relaxed text-[#64748B]">
+            {extraParagraphs.map((paragraph) => (
+              <p key={paragraph.slice(0, 48)}>{paragraph}</p>
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </section>
   )
 }
 
@@ -113,7 +182,7 @@ function CredentialInput({
     <div className="space-y-1.5">
       <label htmlFor={field.id} className="block text-sm font-medium text-[#0F172A]">
         {field.label}
-        {field.required ? <span className="text-[#64748B]"> · required</span> : null}
+        {field.required ? <span className="font-normal text-[#64748B]"> · required</span> : null}
       </label>
       <input
         id={field.id}
@@ -126,7 +195,14 @@ function CredentialInput({
         onChange={(event) => onChange(event.target.value)}
         className={FIELD_CLASS}
       />
-      {field.help ? <p className="text-xs text-[#64748B]">{field.help}</p> : null}
+      {field.help ? (
+        <details className="text-xs text-[#64748B]">
+          <summary className="cursor-pointer text-habeas-mid hover:text-habeas-navy">
+            Where do I find this?
+          </summary>
+          <p className="mt-1.5 leading-relaxed">{field.help}</p>
+        </details>
+      ) : null}
     </div>
   )
 }
@@ -135,18 +211,8 @@ function ConnectShell({ children }: { children: ReactNode }) {
   return (
     <div className="fixed inset-0 z-30 overflow-y-auto bg-[#F8FAFC]">
       <div className="mx-auto flex min-h-full max-w-lg flex-col px-4 py-10 sm:px-6 sm:py-14">
-        <header className="mb-8 text-center">
-          <img
-            src="/habeas-logo.png"
-            alt="Habeas"
-            width={160}
-            height={69}
-            className="mx-auto h-10 w-auto"
-            draggable={false}
-          />
-          <p className="mt-4 text-xs font-medium uppercase tracking-[0.14em] text-[#64748B]">
-            Data Privacy Platform
-          </p>
+        <header className="mb-8">
+          <HabeasConnectLogo />
         </header>
         <main className="flex-1">{children}</main>
         <footer className="mt-10 text-center text-xs text-[#64748B]">
@@ -234,8 +300,8 @@ function ConnectForm({
 
   return (
     <ConnectCard>
-      <div className="space-y-6">
-        <header className="space-y-2">
+      <div className="space-y-8">
+        <header className="space-y-1 border-b border-[#E2E8F0] pb-5">
           <p className="text-xs font-medium uppercase tracking-wide text-habeas-navy">
             Secure connection
           </p>
@@ -243,52 +309,56 @@ function ConnectForm({
             {preview.display_name}
           </h1>
           <p className="text-sm text-[#64748B]">
-            For <span className="text-[#0F172A]">{preview.owner_email}</span>
+            Invited: <span className="text-[#0F172A]">{preview.owner_email}</span>
+          </p>
+          <p className="pt-1 text-xs text-[#64748B]">
+            Expires{' '}
+            <time dateTime={preview.expires_at}>{formatExpiresAt(preview.expires_at)}</time>
           </p>
         </header>
 
-        <TrustCopy text={preview.trust_copy} />
-
-        <p className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs text-[#64748B]">
-          This link expires{' '}
-          <time dateTime={preview.expires_at}>{formatExpiresAt(preview.expires_at)}</time>.
-        </p>
+        <TrustSection trustCopy={preview.trust_copy} />
 
         {preview.fields.length === 0 ? (
           <p className="text-sm text-[#64748B]">
             No credentials are collected on this page. Contact Habeas if you expected a form.
           </p>
         ) : (
-          <form className="space-y-4" onSubmit={handleSubmit} noValidate>
-            {preview.fields.map((field) => (
-              <CredentialInput
-                key={field.id}
-                field={field}
-                value={credentials[field.id] ?? ''}
-                onChange={(value) => updateField(field.id, value)}
+          <section className="space-y-4" aria-labelledby="connect-fields-heading">
+            <h2 id="connect-fields-heading" className="text-sm font-medium text-[#0F172A]">
+              Enter credentials
+            </h2>
+            <form className="space-y-5" onSubmit={handleSubmit} noValidate>
+              {preview.fields.map((field) => (
+                <CredentialInput
+                  key={field.id}
+                  field={field}
+                  value={credentials[field.id] ?? ''}
+                  onChange={(value) => updateField(field.id, value)}
+                  disabled={redeemMutation.isPending}
+                />
+              ))}
+
+              {submitError ? (
+                <p className="text-sm text-red-700" role="alert">
+                  {submitError}
+                </p>
+              ) : null}
+              {testFailed ? (
+                <p className="text-sm text-red-700" role="alert">
+                  {testFailureMessage}
+                </p>
+              ) : null}
+
+              <Button
+                type="submit"
                 disabled={redeemMutation.isPending}
-              />
-            ))}
-
-            {submitError ? (
-              <p className="text-sm text-red-700" role="alert">
-                {submitError}
-              </p>
-            ) : null}
-            {testFailed ? (
-              <p className="text-sm text-red-700" role="alert">
-                {testFailureMessage}
-              </p>
-            ) : null}
-
-            <Button
-              type="submit"
-              disabled={redeemMutation.isPending}
-              className="h-10 w-full bg-habeas-navy text-sm hover:bg-habeas-navy/90"
-            >
-              {redeemMutation.isPending ? 'Connecting…' : 'Connect securely'}
-            </Button>
-          </form>
+                className="h-10 w-full bg-habeas-navy text-sm hover:bg-habeas-navy/90"
+              >
+                {redeemMutation.isPending ? 'Connecting…' : 'Connect securely'}
+              </Button>
+            </form>
+          </section>
         )}
       </div>
     </ConnectCard>
