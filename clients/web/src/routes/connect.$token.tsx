@@ -3,6 +3,16 @@ import { useParams } from '@tanstack/react-router'
 import { useEffect, useState, type ReactNode } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import {
+  ConfirmActionDialog,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import {
   connectRedeemSystemLabel,
   connectTestFailureMessage,
@@ -123,13 +133,14 @@ function emailsMatch(a: string, b: string): boolean {
   return a.trim().toLowerCase() === b.trim().toLowerCase()
 }
 
-type WizardStep = 'confirm' | 'instructions' | 'credentials'
+type WizardStep = 'confirm' | 'instructions' | 'credentials' | 'test'
 
 function WizardProgress({ step }: { step: WizardStep }) {
   const steps: { id: WizardStep; label: string }[] = [
     { id: 'confirm', label: 'Confirm' },
     { id: 'instructions', label: 'Privacy' },
     { id: 'credentials', label: 'Credentials' },
+    { id: 'test', label: 'Test' },
   ]
   const activeIndex = steps.findIndex((entry) => entry.id === step)
   return (
@@ -171,32 +182,45 @@ function HabeasConnectLogo() {
 }
 
 function PrivacySecuritySection({ expiresAt }: { expiresAt: string }) {
+  const tiles: { title: string; body: string }[] = [
+    {
+      title: 'Your keys stay locked away',
+      body: 'They go into Google’s secure vault — not our app database, and not visible to other people on this site.',
+    },
+    {
+      title: 'All data is protected and encrypted',
+      body: 'Your data is protected and encrypted at all times — in transit and at rest.',
+    },
+    {
+      title: 'Only you see your results',
+      body: 'Other data owners, IT, and Habeas staff building this tool cannot browse your system’s results. Access is by permission only.',
+    },
+    {
+      title: 'This link expires and works once',
+      body: `Expires ${formatExpiresIn(expiresAt)}. After you connect successfully, it cannot be used again.`,
+    },
+    {
+      title: 'We’ll ask for updated keys every 6 months',
+      body: 'A regular key refresh keeps authentication current and helps protect against stale or compromised credentials.',
+    },
+  ]
+
   return (
-    <section className="space-y-4 text-sm leading-relaxed text-[#334155]" aria-labelledby="connect-privacy-heading">
+    <section className="space-y-3 text-sm text-[#334155]" aria-labelledby="connect-privacy-heading">
       <h2 id="connect-privacy-heading" className="sr-only">
         Privacy and security
       </h2>
-      <p>
-        This form is secure. Credentials you paste here go straight into{' '}
-        <span className="font-medium text-[#0F172A]">Google Cloud Secret Manager</span>. They are
-        not stored in the Data Privacy app database, and other people who use the site cannot open
-        or copy them.
-      </p>
-      <p>
-        This invite link expires{' '}
-        <span className="font-medium text-[#0F172A]">{formatExpiresIn(expiresAt)}</span> (
-        <time dateTime={expiresAt}>{formatExpiresAt(expiresAt)}</time>) and works once.
-      </p>
-      <p>
-        When Habeas looks people up in your system, identifiers are hashed for matching. Traffic
-        is encrypted in transit. Matching runs automatically — site operators do not browse your
-        records or credentials, and results are not shown freely for casual review.
-      </p>
-      <p>
-        Especially for HR and people systems: this connection is only for privacy-request
-        fulfillment you already authorized — not general HR reporting, and not shared access for
-        other Habeas users.
-      </p>
+      <ul className="space-y-3">
+        {tiles.map((item) => (
+          <li
+            key={item.title}
+            className="rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-3"
+          >
+            <p className="font-medium text-[#0F172A]">{item.title}</p>
+            <p className="mt-1 leading-snug text-[#475569]">{item.body}</p>
+          </li>
+        ))}
+      </ul>
     </section>
   )
 }
@@ -293,33 +317,42 @@ function ConnectForm({
   preview,
   token,
   me,
+  demoMode = false,
+  initialStep = 'confirm',
 }: {
   preview: ConnectPreviewPayload
   token: string
   me: MePayload
+  demoMode?: boolean
+  initialStep?: WizardStep
 }) {
-  const [step, setStep] = useState<WizardStep>('confirm')
+  const [step, setStep] = useState<WizardStep>(initialStep)
   const [credentials, setCredentials] = useState<Record<string, string>>(() =>
     Object.fromEntries(preview.fields.map((field) => [field.id, ''])),
   )
   const [clientError, setClientError] = useState<string | null>(null)
+  const [confirmTestOpen, setConfirmTestOpen] = useState(false)
+  const [successOpen, setSuccessOpen] = useState(false)
   const systemLabel = connectRedeemSystemLabel(preview)
 
   const redeemMutation = useMutation({
-    mutationFn: (payload: Record<string, string>) => redeemConnect(token, payload),
+    mutationFn: async (payload: Record<string, string>) => {
+      if (demoMode) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1600))
+        return { status: 'connected', test_ok: true as const, detail: 'mailchimp_ok' }
+      }
+      return redeemConnect(token, payload)
+    },
     onMutate: () => setClientError(null),
     onSuccess: (data) => {
       if (data.test_ok) {
-        actionToast.success({
-          title: 'Connection test passed',
-          description: connectTestSuccessDescription(data.detail, preview.display_name),
-        })
+        setSuccessOpen(true)
         return
       }
-      const message = connectTestFailureMessage(data.detail)
       actionToast.error({
         title: 'Connection test failed',
-        description: message,
+        description: connectTestFailureMessage(data.detail),
+        action: { label: 'Dismiss', onClick: () => undefined },
       })
     },
     onError: (error) => {
@@ -329,6 +362,7 @@ function ConnectForm({
           error,
           'Could not save credentials. Check the fields and try again.',
         ),
+        action: { label: 'Dismiss', onClick: () => undefined },
       })
     },
   })
@@ -345,6 +379,9 @@ function ConnectForm({
   const testFailed =
     redeemMutation.isSuccess && redeemMutation.data && !redeemMutation.data.test_ok
 
+  const testPassed =
+    redeemMutation.isSuccess && redeemMutation.data?.test_ok === true
+
   const testFailureMessage = testFailed
     ? connectTestFailureMessage(redeemMutation.data?.detail)
     : null
@@ -353,48 +390,45 @@ function ConnectForm({
   const signedInFirst = firstNameFromEmail(me.email)
   const isInvitee = emailsMatch(me.email, preview.owner_email)
 
-  if (redeemMutation.isSuccess && redeemMutation.data.test_ok) {
-    return (
-      <ConnectCard>
-        <div className="space-y-3 text-center">
-          <div
-            className="mx-auto flex size-12 items-center justify-center rounded-full bg-habeas-navy/10 text-habeas-navy"
-            aria-hidden
-          >
-            <svg viewBox="0 0 24 24" className="size-6" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </div>
-          <h1 className="text-xl font-medium text-[#0F172A]">Connection test passed</h1>
-          <p className="text-sm text-[#475569]">
-            Thanks, {signedInFirst}. We saved your credentials and verified the{' '}
-            {systemLabel} connection successfully. You can close this page.
-          </p>
-        </div>
-      </ConnectCard>
-    )
-  }
-
   function updateField(fieldId: string, value: string) {
     setCredentials((current) => ({ ...current, [fieldId]: value }))
   }
 
-  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault()
+  function validateCredentials(): boolean {
     for (const field of preview.fields) {
       if (field.required && !credentials[field.id]?.trim()) {
         setClientError(`Enter ${field.label.toLowerCase()}.`)
-        return
+        return false
       }
     }
+    setClientError(null)
+    return true
+  }
+
+  function handleCredentialsContinue(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!validateCredentials()) return
+    redeemMutation.reset()
+    setSuccessOpen(false)
+    setStep('test')
+  }
+
+  function runCredentialTest() {
+    setConfirmTestOpen(false)
     redeemMutation.mutate(credentials)
   }
 
+  const filledSummary = preview.fields
+    .filter((field) => credentials[field.id]?.trim())
+    .map((field) => field.label)
+
   return (
     <ConnectCard>
-      <WizardProgress step={step} />
+      <div className="relative">
+        {redeemMutation.isPending ? <RedeemPendingOverlay systemLabel={systemLabel} /> : null}
+        <WizardProgress step={step} />
 
-      {step === 'confirm' ? (
+        {step === 'confirm' ? (
         <div className="space-y-5">
           <header className="space-y-2 border-b border-[#E2E8F0] pb-5">
             <p className="text-xs font-medium uppercase tracking-wide text-habeas-navy">
@@ -500,9 +534,7 @@ function ConnectForm({
       ) : null}
 
       {step === 'credentials' ? (
-        <div className="relative space-y-5">
-          {redeemMutation.isPending ? <RedeemPendingOverlay systemLabel={systemLabel} /> : null}
-
+        <div className="space-y-5">
           <header className="space-y-2 border-b border-[#E2E8F0] pb-5">
             <p className="text-xs font-medium uppercase tracking-wide text-habeas-navy">
               Step 3 · Credentials
@@ -520,7 +552,7 @@ function ConnectForm({
               No credentials are collected on this page. Contact Habeas if you expected a form.
             </p>
           ) : (
-            <form className="space-y-5" onSubmit={handleSubmit} noValidate>
+            <form className="space-y-5" onSubmit={handleCredentialsContinue} noValidate>
               {preview.fields.map((field) => (
                 <CredentialInput
                   key={field.id}
@@ -536,55 +568,246 @@ function ConnectForm({
                   {submitError}
                 </p>
               ) : null}
-              {testFailed ? (
-                <div className="space-y-1" role="alert">
-                  <p className="text-sm text-red-700">{testFailureMessage}</p>
-                  <p className="text-xs text-[#475569]">
-                    This invite is still valid. Correct the values and try again.
-                  </p>
-                </div>
-              ) : null}
 
               <div className="flex flex-col gap-2 sm:flex-row">
                 <Button
                   type="button"
                   variant="outline"
                   className="h-10 flex-1 text-sm"
-                  disabled={redeemMutation.isPending}
                   onClick={() => setStep('instructions')}
                 >
                   Back
                 </Button>
                 <Button
                   type="submit"
-                  disabled={redeemMutation.isPending}
                   className="h-10 flex-1 bg-habeas-navy text-sm hover:bg-habeas-navy/90"
                 >
-                  Connect securely
+                  Continue to test
                 </Button>
               </div>
             </form>
           )}
         </div>
       ) : null}
+
+      {step === 'test' ? (
+        <div className="space-y-5">
+          <header className="space-y-2 border-b border-[#E2E8F0] pb-5">
+            <p className="text-xs font-medium uppercase tracking-wide text-habeas-navy">
+              Step 4 · Test connection
+            </p>
+            <h1 className="text-xl font-medium tracking-tight text-[#0F172A]">
+              Make sure your keys work
+            </h1>
+            <p className="text-sm text-[#475569]">
+              We’ll save them securely, then check that Habeas can reach {systemLabel}.
+            </p>
+          </header>
+
+          <div className="space-y-2 rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-3 text-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium text-[#0F172A]">{preview.display_name}</span>
+              <Badge variant={testPassed ? 'ok' : testFailed ? 'fail' : 'wait'}>
+                {testPassed ? 'Passed' : testFailed ? 'Failed' : 'Ready to test'}
+              </Badge>
+            </div>
+            <p className="text-xs text-[#475569]">
+              Fields provided: {filledSummary.length > 0 ? filledSummary.join(', ') : 'none yet'}
+            </p>
+          </div>
+
+          {testPassed ? (
+            <div
+              className="space-y-2 rounded-md border border-emerald-200 bg-emerald-50 px-3.5 py-3"
+              role="status"
+            >
+              <p className="font-medium text-emerald-900">Connection confirmed</p>
+              <p className="text-sm text-emerald-900/80">
+                {connectTestSuccessDescription(
+                  redeemMutation.data?.detail,
+                  preview.display_name,
+                )}
+              </p>
+              <p className="text-xs text-emerald-900/70">
+                Thanks, {signedInFirst}. You can close this page.
+              </p>
+            </div>
+          ) : null}
+
+          {testFailed ? (
+            <div
+              className="space-y-2 rounded-md border border-red-200 bg-red-50 px-3.5 py-3"
+              role="alert"
+            >
+              <p className="font-medium text-red-900">Connection test failed</p>
+              <p className="text-sm text-red-800">{testFailureMessage}</p>
+              <p className="text-xs text-red-800/80">
+                This invite is still valid. Go back, fix the values, and test again.
+              </p>
+            </div>
+          ) : null}
+
+          {submitError && !testPassed ? (
+            <p className="text-sm text-red-700" role="alert">
+              {submitError}
+            </p>
+          ) : null}
+
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10 flex-1 text-sm"
+              disabled={redeemMutation.isPending || testPassed}
+              onClick={() => {
+                redeemMutation.reset()
+                setSuccessOpen(false)
+                setStep('credentials')
+              }}
+            >
+              Back
+            </Button>
+            {!testPassed ? (
+              <Button
+                type="button"
+                className="h-10 flex-1 bg-habeas-navy text-sm hover:bg-habeas-navy/90"
+                disabled={redeemMutation.isPending}
+                onClick={() => setConfirmTestOpen(true)}
+              >
+                {testFailed ? 'Test again' : 'Test connection'}
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+        <ConfirmActionDialog
+          open={confirmTestOpen}
+          onOpenChange={setConfirmTestOpen}
+          title={`Test ${systemLabel} connection?`}
+          description="We’ll save your keys in Google’s secure vault, then verify Habeas can authenticate. Values are never shown back in this app."
+          confirmLabel="Yes, test now"
+          cancelLabel="Cancel"
+          confirming={redeemMutation.isPending}
+          onConfirm={runCredentialTest}
+        />
+
+        <Dialog open={successOpen} onOpenChange={setSuccessOpen}>
+          <DialogContent className="max-w-md" onOpenAutoFocus={(event) => event.preventDefault()}>
+            <DialogHeader>
+              <DialogTitle>Credentials confirmed</DialogTitle>
+              <DialogDescription>
+                {connectTestSuccessDescription(
+                  redeemMutation.data?.detail,
+                  preview.display_name,
+                )}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+              <Badge variant="ok" className="mb-2">
+                Passed
+              </Badge>
+              <p>
+                Thanks, {signedInFirst}. Your {systemLabel} connection is ready.
+              </p>
+            </div>
+            <DialogFooter>
+              <Button
+                type="button"
+                className="bg-habeas-navy hover:bg-habeas-navy/90"
+                onClick={() => setSuccessOpen(false)}
+              >
+                Done
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      </div>
     </ConnectCard>
   )
 }
 
 export function ConnectTokenPage() {
   const { token } = useParams({ from: '/connect/$token' })
+  const isPrivacyPreview = import.meta.env.DEV && token === 'privacy-preview'
+  const isWizardPreview = import.meta.env.DEV && token === 'wizard-preview'
+  const skipApi = isPrivacyPreview || isWizardPreview
 
   const previewQuery = useQuery({
     queryKey: ['admin-api', 'connect', token],
     queryFn: () => getConnectPreview(token),
     retry: false,
+    enabled: !skipApi,
   })
 
   const meQuery = useQuery({
     queryKey: ['admin-api', 'me', 'connect'],
     queryFn: getMe,
     retry: false,
+    enabled: !skipApi,
   })
+
+  // Local UI review only — skip API so Privacy / Credentials / Test can be opened without a live invite.
+  if (isPrivacyPreview) {
+    const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString()
+    return (
+      <ConnectShell>
+        <ConnectCard>
+          <div className="space-y-5">
+            <WizardProgress step="instructions" />
+            <header className="space-y-2 border-b border-[#E2E8F0] pb-5">
+              <p className="text-xs font-medium uppercase tracking-wide text-habeas-navy">
+                Step 2 · Privacy & security
+              </p>
+              <h1 className="text-xl font-medium tracking-tight text-[#0F172A]">
+                How we handle what you share
+              </h1>
+              <p className="text-sm text-[#475569]">
+                A short overview before you enter credentials for Production Mailchimp.
+              </p>
+            </header>
+            <PrivacySecuritySection expiresAt={expiresAt} />
+          </div>
+        </ConnectCard>
+      </ConnectShell>
+    )
+  }
+
+  if (isWizardPreview) {
+    const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString()
+    const demoPreview: ConnectPreviewPayload = {
+      system: 'mailchimp',
+      display_name: 'Production Mailchimp',
+      owner_email: 'dev-owner-1@example.com',
+      fields: [
+        {
+          id: 'api_key',
+          label: 'API key',
+          input_type: 'password',
+          required: true,
+          help: '1. In Mailchimp, open your profile → Extras → API keys.\n2. Create a key for Habeas privacy automation.\n3. Paste it below.',
+        },
+      ],
+      trust_copy: '',
+      expires_at: expiresAt,
+    }
+    const demoMe: MePayload = {
+      email: 'dev-owner-1@example.com',
+      role: 'data_owner',
+      real_role: 'data_owner',
+    }
+    return (
+      <ConnectShell>
+        <ConnectForm
+          preview={demoPreview}
+          token={token}
+          me={demoMe}
+          demoMode
+          initialStep="credentials"
+        />
+      </ConnectShell>
+    )
+  }
 
   return (
     <ConnectShell>
