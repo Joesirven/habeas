@@ -1709,9 +1709,17 @@ function InboxReviewPane({
         response_status: responseStatus,
         ...promoteDwidsForStatus(responseStatus, dwids),
       }),
-    onSuccess: async () => {
+    onSuccess: async (data) => {
       setConfirmAction(null)
-      actionToast.success({ title: 'Request fulfilled' })
+      if (data.disposition?.recorded === false) {
+        actionToast.warning({
+          title: 'Matching approved — disposition incomplete',
+          description:
+            'No person id recorded for status 3/4. Select matched people and set disposition again before fulfillment kickoff.',
+        })
+      } else {
+        actionToast.success({ title: 'Request fulfilled' })
+      }
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
     onError: (error, variables) => {

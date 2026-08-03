@@ -2091,43 +2091,144 @@ _CONTACTS_ERROR_MESSAGES: dict[str, str] = {
         "Requestor state is missing; person lookup requires a two-letter state."
     ),
     "invalid_state": "Requestor state is invalid or not in the served allowlist.",
+    "no_matching_result": "No matching result row was found for this request.",
+    "no_consumer_id": "Single-match result has no stored consumer id.",
+    "non_drop_intake": "Person re-lookup requires DROP intake with a raw record id.",
+    "missing_hash": "No primary hash was available to resolve matched persons.",
     "bq_not_configured": "BigQuery is not configured in this environment.",
+    "bq_library_missing": "BigQuery client library is not available in this environment.",
+    "bq_credentials": "BigQuery credentials are unavailable in this environment.",
+    "bq_permission_denied": "BigQuery denied access for person or hash lookup.",
     "bq_query_failed": "BigQuery person lookup failed.",
+    "enrichment_failed": "Matched person enrichment failed unexpectedly.",
 }
 
+_CONTACTS_ERROR_HINTS: dict[str, str] = {
+    "no_dwids": "Confirm hash index coverage for this state, then rematch or reload.",
+    "no_lookup_state": "Set or correct requestor state (two-letter), then reload.",
+    "invalid_state": "Use a served USPS state acronym, then reload.",
+    "no_matching_result": "Re-run matching or refresh the request detail.",
+    "no_consumer_id": (
+        "Inspect matching attempt audit; rematch if the match did not persist a "
+        "consumer id."
+    ),
+    "non_drop_intake": "Confirm intake source and raw record linkage.",
+    "missing_hash": "Confirm DROP list type and hash fields on the raw record.",
+    "bq_not_configured": "Verify BQ client, credentials, and env for this deployment.",
+    "bq_library_missing": "Install/deploy google-cloud-bigquery with admin-api.",
+    "bq_credentials": (
+        "Fix ADC / runtime service account; do not paste key material into tickets."
+    ),
+    "bq_permission_denied": (
+        "Grant the runtime SA read on hash index + MDR person/phones datasets."
+    ),
+    "bq_query_failed": (
+        "Check admin-api logs for matching_contacts_enrichment_failed (type + "
+        "code only)."
+    ),
+    "enrichment_failed": (
+        "Retry; if persistent, check logs by request id (no PII in log fields)."
+    ),
+}
 
-def _contacts_error(code: str) -> dict[str, str]:
-    """Build a fixed {code, message} contacts error (no exception text)."""
-    return {"code": code, "message": _CONTACTS_ERROR_MESSAGES[code]}
+_BQ_LIBRARY_MISSING_MESSAGE = "google-cloud-bigquery is not installed"
+_BQ_PERMISSION_TYPE_NAMES = ("Forbidden", "PermissionDenied", "Unauthorized")
+_BQ_CAUSE_CHAIN_DEPTH_CAP = 4
 
 
-def _is_bq_not_configured(exc: BaseException) -> bool:
-    """True when BigQuery client/library/credentials are unavailable."""
-    if isinstance(exc, ImportError):
-        return True
+def _contacts_error(
+    code: str, *, stage: str, exc_type: str | None = None
+) -> dict[str, Any]:
+    """Build a fixed contacts error (no exception text ever on the wire)."""
+    out: dict[str, Any] = {
+        "code": code,
+        "message": _CONTACTS_ERROR_MESSAGES[code],
+        "stage": stage,
+        "hint": _CONTACTS_ERROR_HINTS[code],
+    }
+    if exc_type:
+        out["exc_type"] = exc_type
+    return out
+
+
+def _classify_bq_exception(
+    exc: BaseException | None,
+    *,
+    _depth: int = 0,
+    _seen: set[int] | None = None,
+) -> tuple[str, str] | None:
+    """Walk exc + cause/context chain for a known BigQuery failure signature.
+
+    Depth-capped and cycle-guarded. Returns ``(code, exc_type_name)`` for the
+    leaf exception that matched, or ``None`` when nothing in the chain is a
+    recognized library/credentials/permission signature.
+    """
+    if exc is None or _depth > _BQ_CAUSE_CHAIN_DEPTH_CAP:
+        return None
+    seen = _seen if _seen is not None else set()
+    if id(exc) in seen:
+        return None
+    seen.add(id(exc))
+
     type_name = type(exc).__name__
     module = type(exc).__module__ or ""
-    if type_name in ("DefaultCredentialsError", "RefreshError"):
-        return True
-    if "DefaultCredentials" in type_name or "DefaultCredentials" in module:
-        return True
-    if isinstance(exc, RuntimeError):
-        msg = str(exc)
-        if "google-cloud-bigquery is not installed" in msg:
-            return True
-        if "google.cloud.bigquery" in msg:
-            return True
-    cause = exc.__cause__
-    if cause is not None and cause is not exc and _is_bq_not_configured(cause):
-        return True
-    return False
+
+    if isinstance(exc, ImportError):
+        return "bq_library_missing", type_name
+    if isinstance(exc, RuntimeError) and _BQ_LIBRARY_MISSING_MESSAGE in str(exc):
+        return "bq_library_missing", type_name
+
+    if (
+        type_name in ("DefaultCredentialsError", "RefreshError")
+        or "DefaultCredentials" in type_name
+        or "DefaultCredentials" in module
+    ):
+        return "bq_credentials", type_name
+
+    if type_name in _BQ_PERMISSION_TYPE_NAMES:
+        return "bq_permission_denied", type_name
+
+    for next_exc in (exc.__cause__, exc.__context__):
+        if next_exc is not None and next_exc is not exc:
+            result = _classify_bq_exception(next_exc, _depth=_depth + 1, _seen=seen)
+            if result is not None:
+                return result
+    return None
 
 
-def _contacts_enrichment_error_from_exc(exc: BaseException) -> dict[str, str]:
-    """Map exceptions → {code, message}. Never put str(exc) in the return."""
-    if _is_bq_not_configured(exc):
-        return _contacts_error("bq_not_configured")
-    return _contacts_error("bq_query_failed")
+def _contacts_enrichment_error_from_exc(
+    exc: BaseException, *, stage: str
+) -> dict[str, Any]:
+    """Map an exception → a contacts error dict. Never puts str(exc) on the wire.
+
+    Library/credentials/permission signatures win regardless of stage; an
+    unclassified exception falls back to ``bq_query_failed`` when raised from a
+    known BQ call site (``hash_lookup`` / ``person_fetch``) or ``enrichment_failed``
+    otherwise (e.g. the outer detail-catch safety net at stage ``enrich``).
+    """
+    classified = _classify_bq_exception(exc)
+    if classified is not None:
+        code, exc_type = classified
+        return _contacts_error(code, stage=stage, exc_type=exc_type)
+    if stage in ("hash_lookup", "person_fetch"):
+        return _contacts_error("bq_query_failed", stage=stage, exc_type=type(exc).__name__)
+    return _contacts_error("enrichment_failed", stage=stage, exc_type=type(exc).__name__)
+
+
+def _log_contacts_enrichment_error(
+    *, request_id: str, err: dict[str, Any], exc: BaseException
+) -> None:
+    """Privacy-safe: error_code / error_stage / error_type only — never str(exc)."""
+    logger.warning(
+        "matching_contacts_enrichment_failed",
+        extra={
+            "event": "matching_contacts_enrichment_failed",
+            "request_id": request_id,
+            "error_code": err["code"],
+            "error_stage": err.get("stage"),
+            "error_type": err.get("exc_type") or type(exc).__name__,
+        },
+    )
 
 
 async def _resolve_matched_dwids(
@@ -2139,9 +2240,11 @@ async def _resolve_matched_dwids(
 ) -> tuple[list[str], str | None, str | None]:
     """Resolve DWIDs for review enrichment (single: DB consumer_id; multi: BQ re-lookup).
 
-    Returns ``(dwids, lookup_state, resolve_error_code)``. Soft empty cases set
-    ``resolve_error_code`` to ``no_lookup_state``, ``invalid_state``, or
-    ``no_dwids``; BigQuery failures raise for the enrich classifier.
+    Returns ``(dwids, lookup_state, resolve_error_code)``. Soft empty cases (all
+    surfaced at wire ``stage="resolve"`` by the caller) set ``resolve_error_code``
+    to one of ``no_matching_result``, ``no_lookup_state``, ``invalid_state``,
+    ``no_consumer_id``, ``non_drop_intake``, ``missing_hash``, or ``no_dwids``.
+    BigQuery hash-lookup failures raise for the enrich classifier (``hash_lookup``).
     """
     if match_count <= 0:
         return [], requestor_state, None
@@ -2161,7 +2264,7 @@ async def _resolve_matched_dwids(
         request_id,
     )
     if row is None:
-        return [], requestor_state, "no_dwids"
+        return [], requestor_state, "no_matching_result"
 
     lookup_state = requestor_state or (
         str(row["requestor_state"]).strip().upper() if row["requestor_state"] else None
@@ -2177,13 +2280,20 @@ async def _resolve_matched_dwids(
     if match_count == 1 and row["consumer_id"]:
         return [str(row["consumer_id"])], normalized_state, None
 
+    # Single match without a persisted consumer id still attempts the hash
+    # re-lookup fallback; only report `no_consumer_id` when that path is
+    # itself ineligible, rather than the coarser multi-match codes below.
+    single_missing_consumer = match_count == 1 and not row["consumer_id"]
+
     if row["intake_source"] != IntakeSource.DROP.value or row["raw_record_id"] is None:
-        return [], normalized_state, "no_dwids"
+        code = "no_consumer_id" if single_missing_consumer else "non_drop_intake"
+        return [], normalized_state, code
 
     payload = await request_resolver(conn, IntakeSource.DROP, int(row["raw_record_id"]))
     hash_value, _via = _primary_hash_for_list_type(payload.list_type, payload.hash_fields)
     if not hash_value:
-        return [], normalized_state, "no_dwids"
+        code = "no_consumer_id" if single_missing_consumer else "missing_hash"
+        return [], normalized_state, code
 
     dwids = _lookup_dwids_by_hash(
         list_type=payload.list_type,
@@ -2271,17 +2381,20 @@ async def enrich_matching_result_contacts(
             requestor_state=detail.get("requestor_state"),
         )
     except Exception as exc:
+        # Hash re-lookup (and rare resolve bugs) raise from inside resolve today.
+        err = _contacts_enrichment_error_from_exc(exc, stage="hash_lookup")
+        _log_contacts_enrichment_error(request_id=request_id, err=err, exc=exc)
         return {
             "matched_contacts": [],
             "matched_contacts_status": "unavailable",
-            "matched_contacts_error": _contacts_enrichment_error_from_exc(exc),
+            "matched_contacts_error": err,
         }
 
     if resolve_code:
         return {
             "matched_contacts": [],
             "matched_contacts_status": "unavailable",
-            "matched_contacts_error": _contacts_error(resolve_code),
+            "matched_contacts_error": _contacts_error(resolve_code, stage="resolve"),
         }
 
     try:
@@ -2292,10 +2405,12 @@ async def enrich_matching_result_contacts(
             client=bq_client,
         )
     except Exception as exc:
+        err = _contacts_enrichment_error_from_exc(exc, stage="person_fetch")
+        _log_contacts_enrichment_error(request_id=request_id, err=err, exc=exc)
         return {
             "matched_contacts": [],
             "matched_contacts_status": "unavailable",
-            "matched_contacts_error": _contacts_enrichment_error_from_exc(exc),
+            "matched_contacts_error": err,
         }
 
     return {
@@ -2585,16 +2700,11 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
                 )
             )
         except Exception as exc:
-            err = _contacts_enrichment_error_from_exc(exc)
-            logger.warning(
-                "matching_contacts_enrichment_failed",
-                extra={
-                    "event": "matching_contacts_enrichment_failed",
-                    "request_id": request_id,
-                    "error_type": type(exc).__name__,
-                    "error_code": err["code"],
-                },
-            )
+            # Unexpected bug escaping enrich — not a classified BQ soft code, so
+            # the classifier's stage="enrich" fallback is `enrichment_failed`
+            # rather than a false `bq_query_failed` blame.
+            err = _contacts_enrichment_error_from_exc(exc, stage="enrich")
+            _log_contacts_enrichment_error(request_id=request_id, err=err, exc=exc)
             detail["matched_contacts"] = []
             detail["matched_contacts_status"] = "unavailable"
             detail["matched_contacts_error"] = err

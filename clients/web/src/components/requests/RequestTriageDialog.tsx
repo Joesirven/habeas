@@ -824,6 +824,9 @@ export function MatchedContactsUnavailableCallout({
   const err = matching?.matched_contacts_error
   const message = err?.message?.trim() || null
   const code = err?.code?.trim() || null
+  const stage = err?.stage?.trim() || null
+  const hint = err?.hint?.trim() || null
+  const excType = err?.exc_type?.trim() || null
 
   return (
     <div
@@ -837,15 +840,22 @@ export function MatchedContactsUnavailableCallout({
             {code}
           </span>
         ) : null}
+        {stage ? (
+          <span className="rounded border border-red-200/80 bg-red-50/60 px-1 py-px font-mono text-[0.6rem] text-red-700/80">
+            {stage}
+          </span>
+        ) : null}
       </div>
       <p className="text-red-700">
         {message ??
-          'Person contact lookup failed, or BigQuery is not connected in this environment. Matched DWID details cannot be loaded.'}
+          'Contact enrichment returned unavailable without a diagnostic reason. Reload this request; if it persists, the API may be an older build.'}
       </p>
       <p className="text-[0.65rem] text-red-800/80">
-        Check requestor state, matching DWIDs, and BigQuery configuration — then reload this
-        request.
+        {hint ?? 'Reload this request, then check requestor state and matching configuration.'}
       </p>
+      {excType ? (
+        <p className="font-mono text-[0.6rem] text-red-800/70">type: {excType}</p>
+      ) : null}
     </div>
   )
 }
@@ -1075,18 +1085,25 @@ export function MatchingReviewPanel({
   ) : null
 
   const reviewActions = canReviewActions && !hideActions ? (
-    <div className="flex flex-wrap items-center gap-2 pt-1">
-      <Button size="sm" disabled={actionPending} onClick={() => setConfirm('fulfill')}>
-        {actionPending && confirm === 'fulfill' ? 'Fulfilling…' : 'Fulfill'}
-      </Button>
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={actionPending}
-        onClick={() => setConfirm('decline')}
-      >
-        {actionPending && confirm === 'decline' ? 'Declining…' : 'Decline'}
-      </Button>
+    <div className="space-y-1.5 pt-1">
+      <p className="text-[0.65rem] text-ink-soft">
+        <span className="font-medium text-ink">Matching disposition</span> — Choose CA DROP
+        status (3 Deleted · 4 Opted out · 5 Not found) and which matched people apply. Approves
+        matching review for fulfillment readiness; does not start Legal kickoff.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" disabled={actionPending} onClick={() => setConfirm('fulfill')}>
+          {actionPending && confirm === 'fulfill' ? 'Fulfilling…' : 'Fulfill'}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={actionPending}
+          onClick={() => setConfirm('decline')}
+        >
+          {actionPending && confirm === 'decline' ? 'Declining…' : 'Decline'}
+        </Button>
+      </div>
     </div>
   ) : null
 

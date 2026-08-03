@@ -375,6 +375,9 @@ export type MatchedPersonContact = {
 export type MatchedContactsError = {
   code: string
   message: string
+  stage?: string | null
+  hint?: string | null
+  exc_type?: string | null
 }
 
 export type MatchingResultDetail = MatchingResultRow & {
@@ -984,6 +987,13 @@ export function postDropMatchingResultPromote(
     approval_id: number | null
     response_status?: number
     response_status_set?: boolean
+    disposition?: {
+      recorded?: boolean
+      reason?: string
+      status?: number
+      vertical?: string
+      selected_dwid_count?: number
+    }
   }>(`/ops/drop/matching-results/${requestId}/promote`, {
     method: 'POST',
     body: JSON.stringify({

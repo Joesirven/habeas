@@ -1895,12 +1895,26 @@ export function RequestDetailBody({
       }
       return postDropMatchingResultDecline(requestId)
     },
-    onSuccess: async (_data, variables) => {
-      actionToast.success({
-        title:
-          variables.action === 'promote' ? 'Matching approved' : 'Matching declined',
-        id: `request-matching-disposition-${requestId}`,
-      })
+    onSuccess: async (data, variables) => {
+      const dispositionRecorded =
+        data &&
+        typeof data === 'object' &&
+        'disposition' in data &&
+        (data as { disposition?: { recorded?: boolean } }).disposition?.recorded
+      if (variables.action === 'promote' && dispositionRecorded === false) {
+        actionToast.warning({
+          title: 'Matching approved — disposition not recorded',
+          description:
+            'Review was approved, but the vertical disposition write did not record. Check DWIDs and retry if needed.',
+          id: `request-matching-disposition-${requestId}`,
+        })
+      } else {
+        actionToast.success({
+          title:
+            variables.action === 'promote' ? 'Matching approved' : 'Matching declined',
+          id: `request-matching-disposition-${requestId}`,
+        })
+      }
       await invalidateAll()
     },
     onError: (mutationError, variables) => {
@@ -1976,7 +1990,9 @@ export function RequestDetailBody({
     matching != null &&
     matching.review_status === 'pending' &&
     Boolean(matching.approval_id) &&
-    ((legalAdmin && assignmentToLegal) || (role === 'data_owner' && !legalAdmin))
+    (isSuperAdmin ||
+      (legalAdmin && assignmentToLegal) ||
+      (role === 'data_owner' && !legalAdmin))
 
   const dropPreMatch =
     intakeSource === 'drop' &&
@@ -2177,7 +2193,16 @@ export function RequestDetailBody({
           </div>
         </TabsContent>
         <TabsContent value="matching" className="mt-0 px-4 py-4">
-          {assignmentToLegal ? (
+          {isSuperAdmin && canMatchingDisposition ? (
+            <p className="mb-2 text-[0.65rem] text-habeas-navy">
+              Ops override — you can set the CA DROP status and matched DWIDs, same as data owner.
+              This is not Legal kickoff or Fulfillment start.
+            </p>
+          ) : isSuperAdmin ? (
+            <p className="mb-2 text-[0.65rem] text-mute">
+              Ops override available when matching review is pending with an open approval.
+            </p>
+          ) : assignmentToLegal ? (
             <p className="mb-2 text-[0.65rem] text-habeas-navy">
               Assignment to legal — review matching context (disposition remains data-owner
               canonical unless escalated here).
@@ -2223,17 +2248,14 @@ export function RequestDetailBody({
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <RequestStageActionBar actions={stageActions} onInvalidate={invalidateAll} />
-      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          {/* Four-panel journey chrome — clusters/substeps live inside ThinJourneyPipeline */}
-          <div
-            className={cn(
-              'shrink-0 space-y-2 overflow-x-auto border-b border-line px-4',
-              variant === 'overlay' ? 'py-2' : 'py-3',
-            )}
-          >
-            {pipelineContent}
-            {variant === 'page' ? (
+
+      {variant === 'page' ? (
+        /* PAGE: left = pipeline → attempt/activity detail → Activity feed; right = tabs */
+        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+          {/* LEFT / MAIN */}
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+            <div className="shrink-0 space-y-2 overflow-x-auto border-b border-line px-4 py-3">
+              {pipelineContent}
               <div
                 id="pipeline-activity-detail"
                 role="region"
@@ -2248,51 +2270,61 @@ export function RequestDetailBody({
                   matchingError={matchingQuery.isError}
                 />
               </div>
-            ) : null}
+            </div>
+
+      <div
+        className="min-h-0 flex-1 overflow-y-auto"
+        role="region"
+        aria-label="Request activity"
+      >
+        <ActivityPanel
+          requestId={requestId}
+          entries={timelineQuery.data?.entries ?? []}
+          isPending={timelineQuery.isPending && !timelineQuery.data}
+          selectable
+          selectedKey={selectedTimelineKey}
+          onSelectEntry={handleActivitySelect}
+        />
+      </div>
+          </div>
+
+          {/* RIGHT: Details / Fulfillment / Matching */}
+          <aside
+            className="flex w-[min(26rem,45%)] shrink-0 flex-col overflow-hidden border-l border-line bg-canvas/30"
+            aria-label="Request details and workflow"
+          >
+            {tabsNode}
+          </aside>
+        </div>
+      ) : (
+        /* OVERLAY: unchanged single column */
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <div className="shrink-0 space-y-2 overflow-x-auto border-b border-line px-4 py-2">
+            {pipelineContent}
           </div>
 
           {tabsNode}
 
-          {variant === 'overlay' ? (
-            <div className="flex shrink-0 flex-wrap gap-2 border-t border-line px-4 py-2">
+          <div className="flex shrink-0 flex-wrap gap-2 border-t border-line px-4 py-2">
+            <Link
+              to="/requests/$requestId"
+              params={{ requestId }}
+              className="text-[0.7rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
+            >
+              Open full page →
+            </Link>
+            {isSuperAdmin ? (
               <Link
-                to="/requests/$requestId"
-                params={{ requestId }}
+                to="/ops/runs"
+                search={{ request_id: requestId }}
                 className="text-[0.7rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
               >
-                Open full page →
+                Runs for request →
               </Link>
-              {isSuperAdmin ? (
-                <Link
-                  to="/ops/runs"
-                  search={{ request_id: requestId }}
-                  className="text-[0.7rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
-                >
-                  Runs for request →
-                </Link>
-              ) : null}
-            </div>
-          ) : null}
+            ) : null}
+          </div>
         </div>
-
-        {variant === 'page' ? (
-          <aside
-            className="flex w-[min(22rem,38%)] shrink-0 flex-col overflow-hidden border-l border-line bg-canvas/30"
-            aria-label="Request activity"
-          >
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              <ActivityPanel
-                requestId={requestId}
-                entries={timelineQuery.data?.entries ?? []}
-                isPending={timelineQuery.isPending && !timelineQuery.data}
-                selectable
-                selectedKey={selectedTimelineKey}
-                onSelectEntry={handleActivitySelect}
-              />
-            </div>
-          </aside>
-        ) : null}
-      </div>
+      )}
     </div>
   )
 }
