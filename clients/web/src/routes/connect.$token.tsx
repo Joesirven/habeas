@@ -81,37 +81,26 @@ function formatExpiresAt(iso: string): string {
   })
 }
 
-/** Silver raster logo is invisible on light canvas — mask it with Habeas navy. */
+/** Original silver logo — sits on a dark navy band for contrast. */
 function HabeasConnectLogo() {
   return (
-    <div className="flex flex-col items-center gap-3">
-      <div
-        role="img"
-        aria-label="Habeas"
-        className="h-11 w-[10.5rem] bg-habeas-navy sm:h-12 sm:w-48"
-        style={{
-          WebkitMask: "url('/habeas-logo.png') center / contain no-repeat",
-          mask: "url('/habeas-logo.png') center / contain no-repeat",
-        }}
-      />
-      <div className="text-center">
-        <p className="font-display text-lg font-medium tracking-tight text-habeas-navy">
-          Habeas
-        </p>
-        <p className="mt-0.5 text-[11px] font-medium uppercase tracking-[0.16em] text-[#64748B]">
-          Data Privacy
-        </p>
-      </div>
-    </div>
+    <img
+      src="/habeas-logo.png"
+      alt="Habeas"
+      width={200}
+      height={86}
+      className="mx-auto h-11 w-auto sm:h-12"
+      draggable={false}
+    />
   )
 }
 
 const HELP_CARD =
-  'rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs leading-relaxed text-[#64748B]'
+  'rounded-md border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2.5 text-xs leading-relaxed text-[#334155]'
 const HELP_SUMMARY =
   'cursor-pointer list-none text-xs font-medium text-habeas-navy marker:content-none [&::-webkit-details-marker]:hidden'
-const HELP_SUBTITLE = 'text-xs font-medium text-[#0F172A]'
-const HELP_LIST = 'space-y-1.5 text-xs leading-relaxed text-[#64748B]'
+const HELP_SUBTITLE = 'text-xs font-semibold text-[#0F172A]'
+const HELP_LIST = 'space-y-1.5 text-xs leading-relaxed text-[#334155]'
 
 const TRUST_SECTIONS = [
   {
@@ -165,7 +154,7 @@ function TrustSection({ trustCopy }: { trustCopy: string }) {
         <summary className={HELP_SUMMARY}>
           <span className="inline-flex items-center gap-1.5">
             Privacy & security overview
-            <span className="font-normal text-[#64748B]">(tap to expand)</span>
+            <span className="font-normal text-[#475569]">(tap to expand)</span>
           </span>
         </summary>
         <div className="mt-3 space-y-3 border-t border-[#E2E8F0] pt-3">
@@ -220,7 +209,7 @@ function FieldHelp({ help }: { help: string }) {
       <summary className={HELP_SUMMARY}>
         <span className="inline-flex items-center gap-1.5">
           How to find this
-          <span className="font-normal text-[#64748B]">(tap to expand)</span>
+          <span className="font-normal text-[#475569]">(tap to expand)</span>
         </span>
       </summary>
       <div className="mt-3 space-y-3 border-t border-[#E2E8F0] pt-3">
@@ -273,7 +262,7 @@ function CredentialInput({
     <div className="space-y-2">
       <label htmlFor={field.id} className="block text-sm font-medium text-[#0F172A]">
         {field.label}
-        {field.required ? <span className="font-normal text-[#64748B]"> · required</span> : null}
+        {field.required ? <span className="font-normal text-[#475569]"> · required</span> : null}
       </label>
       {field.help ? <FieldHelp help={field.help} /> : null}
       <input
@@ -292,15 +281,19 @@ function CredentialInput({
 }
 
 function ConnectShell({ children }: { children: ReactNode }) {
+  // z-[60] above AppShell sticky header (z-40) and role switcher so they cannot cover the logo.
   return (
-    <div className="fixed inset-0 z-30 overflow-y-auto bg-[#F8FAFC]">
-      <div className="mx-auto flex min-h-full max-w-lg flex-col px-4 py-10 sm:px-6 sm:py-14">
-        <header className="mb-8">
-          <HabeasConnectLogo />
-        </header>
+    <div className="fixed inset-0 z-[60] flex flex-col overflow-y-auto bg-[#F8FAFC]">
+      <header className="shrink-0 bg-habeas-navy px-4 py-6 sm:px-6 sm:py-7">
+        <HabeasConnectLogo />
+        <p className="mt-3 text-center text-[11px] font-medium uppercase tracking-[0.16em] text-white/80">
+          Data Privacy · Secure connection
+        </p>
+      </header>
+      <div className="mx-auto flex w-full max-w-lg flex-1 flex-col px-4 py-8 sm:px-6 sm:py-10">
         <main className="flex-1">{children}</main>
-        <footer className="mt-10 text-center text-xs text-[#64748B]">
-          Habeas · secure integration onboarding
+        <footer className="mt-10 text-center text-xs text-[#475569]">
+          Secure integration onboarding
         </footer>
       </div>
     </div>
@@ -361,7 +354,7 @@ function ConnectForm({
             </svg>
           </div>
           <h1 className="text-xl font-medium text-[#0F172A]">Connected</h1>
-          <p className="text-sm text-[#64748B]">You can close this page.</p>
+          <p className="text-sm text-[#475569]">You can close this page.</p>
         </div>
       </ConnectCard>
     )
@@ -392,10 +385,10 @@ function ConnectForm({
           <h1 className="text-xl font-medium tracking-tight text-[#0F172A]">
             {preview.display_name}
           </h1>
-          <p className="text-sm text-[#64748B]">
+          <p className="text-sm text-[#475569]">
             Invited: <span className="text-[#0F172A]">{preview.owner_email}</span>
           </p>
-          <p className="pt-1 text-xs text-[#64748B]">
+          <p className="pt-1 text-xs text-[#475569]">
             Expires{' '}
             <time dateTime={preview.expires_at}>{formatExpiresAt(preview.expires_at)}</time>
           </p>
@@ -404,7 +397,7 @@ function ConnectForm({
         <TrustSection trustCopy={preview.trust_copy} />
 
         {preview.fields.length === 0 ? (
-          <p className="text-sm text-[#64748B]">
+          <p className="text-sm text-[#475569]">
             No credentials are collected on this page. Contact Habeas if you expected a form.
           </p>
         ) : (
@@ -472,7 +465,7 @@ export function ConnectTokenPage() {
         <ConnectCard>
           <div className="space-y-3 text-center">
             <h1 className="text-lg font-medium text-[#0F172A]">Link unavailable</h1>
-            <p className="text-sm text-[#64748B]">
+            <p className="text-sm text-[#475569]">
               {friendlyApiError(
                 previewQuery.error,
                 'This invite link is invalid or has expired.',
