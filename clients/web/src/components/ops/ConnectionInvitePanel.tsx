@@ -1,10 +1,16 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { ConfirmActionDialog } from '@/components/ui/dialog'
 import {
+  connectTestFailureMessage,
+  connectTestSuccessDescription,
   createConnectionInvite,
   revokeConnectionInvite,
+  testConnection,
   type ConnectionInviteCreateResponse,
+  type ConnectionRecord,
   type IntegrationSystemId,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
@@ -17,8 +23,14 @@ const fieldClass =
 export type ConnectionInvitePanelProps = {
   connectionId: string
   system?: IntegrationSystemId
+  displayName?: string
   ownerEmail?: string
+  status?: ConnectionRecord['status']
+  lastTestOk?: boolean | null
+  lastTestDetail?: string | null
+  lastTestedAt?: string | null
   onDone?: () => void
+  onUpdated?: () => void
 }
 
 function buildInviteMailto(
@@ -47,19 +59,50 @@ function buildInviteMailto(
   return `mailto:${to}?subject=${subject}&body=${body}`
 }
 
+function formatLastTestLine(
+  lastTestedAt: string | null | undefined,
+  lastTestOk: boolean | null | undefined,
+  lastTestDetail: string | null | undefined,
+): string {
+  if (!lastTestedAt) return 'Not tested yet'
+  const when = new Date(lastTestedAt).toLocaleString()
+  if (lastTestOk === true) return `Last test ${when} · passed`
+  if (lastTestOk === false) {
+    return `Last test ${when} · failed — ${connectTestFailureMessage(lastTestDetail)}`
+  }
+  return `Last test ${when}`
+}
+
 export function ConnectionInvitePanel({
   connectionId,
   system,
+  displayName,
   ownerEmail,
+  status,
+  lastTestOk,
+  lastTestDetail,
+  lastTestedAt,
   onDone,
+  onUpdated,
 }: ConnectionInvitePanelProps) {
   const { me } = useAuth()
   const inviteAllowed = system !== 'cassandra'
+  const canRetest = system != null && system !== 'cassandra'
   const [invite, setInvite] = useState<ConnectionInviteCreateResponse | null>(null)
   const [minting, setMinting] = useState(false)
   const [revoking, setRevoking] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [confirmTestOpen, setConfirmTestOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [copyNote, setCopyNote] = useState<string | null>(null)
+  const [localLastTestOk, setLocalLastTestOk] = useState(lastTestOk)
+  const [localLastTestDetail, setLocalLastTestDetail] = useState(lastTestDetail)
+  const [localLastTestedAt, setLocalLastTestedAt] = useState(lastTestedAt)
+
+  useEffect(() => {
+    setLocalLastTestOk(lastTestOk)
+    setLocalLastTestDetail(lastTestDetail)
+    setLocalLastTestedAt(lastTestedAt)
+  }, [lastTestOk, lastTestDetail, lastTestedAt])
 
   async function handleMint() {
     setMinting(true)
@@ -71,8 +114,24 @@ export function ConnectionInvitePanel({
         trimmedOwner ? { owner_email: trimmedOwner } : {},
       )
       setInvite(response)
+      actionToast.success({
+        title: 'Invite link ready',
+        description: 'Copy it once — it is not shown again after you close this dialog.',
+      })
+      onUpdated?.()
     } catch (err) {
-      setError(actionToast.safeErrorMessage(err, 'Could not create invite'))
+      const message = actionToast.safeErrorMessage(err, 'Could not create invite')
+      setError(message)
+      actionToast.error({
+        title: 'Could not create invite',
+        description: message,
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            void handleMint()
+          },
+        },
+      })
     } finally {
       setMinting(false)
     }
@@ -85,18 +144,77 @@ export function ConnectionInvitePanel({
     try {
       await revokeConnectionInvite(connectionId, invite.invite_id)
       setInvite(null)
+      actionToast.success({ title: 'Invite revoked' })
+      onUpdated?.()
     } catch (err) {
-      setError(actionToast.safeErrorMessage(err, 'Could not revoke invite'))
+      const message = actionToast.safeErrorMessage(err, 'Could not revoke invite')
+      setError(message)
+      actionToast.error({
+        title: 'Could not revoke invite',
+        description: message,
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            void handleRevoke()
+          },
+        },
+      })
     } finally {
       setRevoking(false)
     }
   }
 
+  async function runRetest() {
+    setTesting(true)
+    setError(null)
+    try {
+      const result = await testConnection(connectionId)
+      const testedAt = new Date().toISOString()
+      setLocalLastTestOk(result.ok)
+      setLocalLastTestDetail(result.detail)
+      setLocalLastTestedAt(testedAt)
+      setConfirmTestOpen(false)
+      if (result.ok) {
+        actionToast.success({
+          title: 'Connection test passed',
+          description: connectTestSuccessDescription(
+            result.detail,
+            displayName ?? system ?? 'connection',
+          ),
+        })
+      } else {
+        actionToast.error({
+          title: 'Connection test failed',
+          description: connectTestFailureMessage(result.detail),
+          action: {
+            label: 'Retry',
+            onClick: () => setConfirmTestOpen(true),
+          },
+        })
+      }
+      onUpdated?.()
+    } catch (err) {
+      setConfirmTestOpen(false)
+      const message = actionToast.safeErrorMessage(err, 'Could not run connection test')
+      setError(message)
+      actionToast.error({
+        title: 'Could not run connection test',
+        description: message,
+        action: {
+          label: 'Retry',
+          onClick: () => setConfirmTestOpen(true),
+        },
+      })
+    } finally {
+      setTesting(false)
+    }
+  }
+
   function copyInviteUrl() {
     if (!invite?.invite_url) return
-    void navigator.clipboard.writeText(absoluteInviteUrl(invite.invite_url)).then(() => {
-      setCopyNote('Copied link')
-      window.setTimeout(() => setCopyNote(null), 2000)
+    const url = absoluteInviteUrl(invite.invite_url)
+    void navigator.clipboard.writeText(url).then(() => {
+      actionToast.copied('Copied invite link', copyInviteUrl)
     })
   }
 
@@ -139,8 +257,38 @@ export function ConnectionInvitePanel({
         Cloud Secret Manager — never through email or chat.
       </p>
 
+      {(status != null || localLastTestedAt != null) && (
+        <div className="space-y-2 rounded-md border border-line bg-canvas px-3 py-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            {status ? (
+              <Badge
+                variant={
+                  status === 'connected'
+                    ? 'ok'
+                    : status === 'failed' || status === 'revoked'
+                      ? 'fail'
+                      : status === 'invited'
+                        ? 'run'
+                        : 'wait'
+                }
+              >
+                {status.replaceAll('_', ' ')}
+              </Badge>
+            ) : null}
+            {localLastTestOk === true ? (
+              <Badge variant="ok">Last test ok</Badge>
+            ) : localLastTestOk === false ? (
+              <Badge variant="fail">Last test failed</Badge>
+            ) : null}
+          </div>
+          <p className="text-xs text-ink-soft">
+            {formatLastTestLine(localLastTestedAt, localLastTestOk, localLastTestDetail)}
+          </p>
+        </div>
+      )}
+
       {error ? (
-        <p className="rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-xs text-red-800">
+        <p className="rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-xs text-red-800" role="alert">
           {error}
         </p>
       ) : null}
@@ -172,19 +320,37 @@ export function ConnectionInvitePanel({
               type="button"
               size="sm"
               variant="outline"
-              disabled={revoking}
+              disabled={revoking || testing}
               onClick={() => void handleRevoke()}
             >
               {revoking ? 'Revoking…' : 'Revoke invite'}
             </Button>
           </div>
-          {copyNote ? <p className="text-xs text-mute">{copyNote}</p> : null}
         </div>
       ) : (
-        <Button type="button" size="sm" disabled={minting} onClick={() => void handleMint()}>
+        <Button
+          type="button"
+          size="sm"
+          disabled={minting || testing}
+          onClick={() => void handleMint()}
+        >
           {minting ? 'Creating link…' : 'Create invite link'}
         </Button>
       )}
+
+      {canRetest ? (
+        <div className="flex flex-wrap gap-2 border-t border-line pt-3">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={testing || minting || revoking}
+            onClick={() => setConfirmTestOpen(true)}
+          >
+            {testing ? 'Testing…' : 'Test connection'}
+          </Button>
+        </div>
+      ) : null}
 
       {onDone ? (
         <div className="flex justify-end pt-1">
@@ -193,6 +359,22 @@ export function ConnectionInvitePanel({
           </Button>
         </div>
       ) : null}
+
+      <ConfirmActionDialog
+        open={confirmTestOpen}
+        onOpenChange={(open) => {
+          if (testing) return
+          setConfirmTestOpen(open)
+        }}
+        title="Test this connection?"
+        description="Habeas will read the stored secret and verify authentication with the provider. Secret values are never shown here."
+        confirmLabel="Yes, test now"
+        cancelLabel="Cancel"
+        confirming={testing}
+        onConfirm={() => {
+          void runRetest()
+        }}
+      />
     </div>
   )
 }

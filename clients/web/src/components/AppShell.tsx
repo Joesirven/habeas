@@ -155,8 +155,14 @@ function AppShellFrame({ children }: AppShellProps) {
   useEffect(() => {
     if (me && !splashTriggered.current) {
       splashTriggered.current = true
-      if (shouldPlayPostAuthSplash()) {
+      // Owner invite links should open immediately — skip the post-auth bumper.
+      const onConnectInvite =
+        typeof window !== 'undefined' &&
+        window.location.pathname.startsWith('/connect/')
+      if (!onConnectInvite && shouldPlayPostAuthSplash()) {
         setShowPostAuthSplash(true)
+      } else if (onConnectInvite) {
+        markPostAuthSplashSeen()
       }
     }
   }, [me])

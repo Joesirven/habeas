@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { listConnections, type ConnectionRecord } from '@/lib/api'
+import { actionToast } from '@/lib/action-toast'
 import { RoleGate, isSuperAdmin } from '@/lib/auth'
 
 function Micro({ children }: { children: ReactNode }) {
@@ -111,7 +112,40 @@ function ConnectionsBody() {
         {connectionsQuery.isPending && !connectionsQuery.data ? (
           <SkeletonLines lines={6} />
         ) : connectionsQuery.isError && !connectionsQuery.data ? (
-          <p className="text-sm text-red-700">Could not load connections.</p>
+          <div className="space-y-2">
+            <p className="text-sm text-red-700" role="alert">
+              {actionToast.safeErrorMessage(
+                connectionsQuery.error,
+                'Could not load connections.',
+              )}
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                void connectionsQuery.refetch().then((result) => {
+                  if (result.isError) {
+                    actionToast.error({
+                      title: 'Could not load connections',
+                      description: actionToast.safeErrorMessage(
+                        result.error,
+                        'Could not load connections.',
+                      ),
+                      action: {
+                        label: 'Retry',
+                        onClick: () => {
+                          void connectionsQuery.refetch()
+                        },
+                      },
+                    })
+                  }
+                })
+              }}
+            >
+              Retry
+            </Button>
+          </div>
         ) : connections.length === 0 ? (
           <p className="text-sm text-ink-soft">
             No connections yet. Create one to send an owner invite.
@@ -167,8 +201,28 @@ function ConnectionsBody() {
             <ConnectionInvitePanel
               connectionId={selected.id}
               system={selected.system}
+              displayName={selected.display_name}
               ownerEmail={selected.owner_email ?? undefined}
+              status={selected.status}
+              lastTestOk={selected.last_test_ok}
+              lastTestDetail={selected.last_test_detail}
+              lastTestedAt={selected.last_tested_at}
               onDone={() => setSelected(null)}
+              onUpdated={() => {
+                void queryClient
+                  .invalidateQueries({ queryKey: ['admin-api', 'ops', 'connections'] })
+                  .then(async () => {
+                    const refreshed = await queryClient.fetchQuery({
+                      queryKey: ['admin-api', 'ops', 'connections'],
+                      queryFn: async () => {
+                        const payload = await listConnections()
+                        return payload.connections
+                      },
+                    })
+                    const next = refreshed.find((row) => row.id === selected.id)
+                    if (next) setSelected(next)
+                  })
+              }}
             />
           ) : null}
         </DialogContent>

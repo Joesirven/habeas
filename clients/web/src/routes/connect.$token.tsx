@@ -38,6 +38,10 @@ const SAFE_API_ERROR_DETAILS: Record<string, string> = {
   'invite not found': 'This invite link is invalid or has expired.',
   'this connection cannot be redeemed via invite':
     'This connection cannot be completed through an invite link. Contact Habeas.',
+  'invite expired': 'This invite link has expired. Ask for a new invite.',
+  'invite already used': 'This invite link was already used.',
+  'secret not stored':
+    'No credentials are stored for this connection yet. Ask Habeas to send a new invite.',
 }
 
 function safeApiDetail(detail: string, fallback: string): string {
@@ -363,12 +367,19 @@ function ConnectForm({
       setConfirmTestOpen(false)
       if (data.test_ok) {
         setSuccessOpen(true)
+        actionToast.success({
+          title: 'Connection confirmed',
+          description: connectTestSuccessDescription(data.detail, preview.display_name),
+        })
         return
       }
       actionToast.error({
         title: 'Connection test failed',
         description: connectTestFailureMessage(data.detail),
-        action: { label: 'Dismiss', onClick: () => undefined },
+        action: {
+          label: 'Retry',
+          onClick: () => setConfirmTestOpen(true),
+        },
       })
     },
     onError: (error) => {
@@ -379,7 +390,10 @@ function ConnectForm({
           error,
           'Could not save credentials. Check the fields and try again.',
         ),
-        action: { label: 'Dismiss', onClick: () => undefined },
+        action: {
+          label: 'Retry',
+          onClick: () => setConfirmTestOpen(true),
+        },
       })
     },
   })

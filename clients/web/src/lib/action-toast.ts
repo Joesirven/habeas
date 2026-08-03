@@ -25,12 +25,27 @@ export const SAFE_API_ERROR_DETAILS: Record<string, string> = {
   'connection not found': 'That connection could not be found.',
   'invalid credentials': 'The credentials could not be verified.',
   'test failed': 'Connection test failed. Check the values and try again.',
+  'secret not stored':
+    'No credentials are stored for this connection yet. Send an owner invite first.',
+  'invites not allowed for cassandra':
+    'Cassandra is infrastructure-only — no owner invite is sent.',
+  'owner_email required': 'Choose an owner email before continuing.',
+  'owner_email must be an allowlisted habeas operator':
+    'Owner email must be an allowlisted Habeas operator.',
+  'display_name required': 'Enter a display name.',
+  'failed to create invite': 'Could not create the invite link. Try again.',
+  'failed to create connection': 'Could not create the connection. Try again.',
   unauthorized: 'You are not allowed to do that.',
   forbidden: 'You are not allowed to do that.',
-  missing_credentials: 'Connection test could not run. Check the fields and try again.',
+  missing_credentials: 'Connection test could not run. Credentials are missing or unreadable.',
   unknown_system: 'Connection test failed. Ask your Habeas contact to send a new invite.',
   infra_only:
     'This system is provisioned by Habeas Infrastructure, not through this form.',
+  auth_failed: 'Authentication failed. Check the credentials and try again.',
+  unreachable: 'Could not reach the service. Try again in a few minutes.',
+  invalid_config: 'The connection settings look incorrect. Check the fields and try again.',
+  unknown_error: 'Connection test failed. Check the values and try again.',
+  failed: 'Connection test failed. Check the values and try again.',
 }
 
 function isCredentialFieldNoise(detail: string): boolean {
