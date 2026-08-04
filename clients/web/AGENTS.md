@@ -15,10 +15,10 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
 ## Navigation (Ops IA — Request / Job / Run)
 
 - **Requests** → list (row opens **detail workbench** — no journey strip on rows), Needs attention, SLAs (shell), Conditions (Legal), Upload.
-- **Ops** (super_admin): Dashboard (Pipeline · Hash refresh · History · Errors · Logs · Configurations), Workers, Runs, Jobs (shell), Insights (`/ops/health`), Incidents (shell → failed Runs), Connections (`/ops/connections`).
-- **Console** (super_admin): `/ops/drop-pipeline?tab=` mutation power surface (same tab set as Dashboard).
+- **Ops** (super_admin): **Pipeline** nav (`/?tab=` — Pipeline · Hash refresh · History · Errors · Logs; no Dashboard home, no Configurations tab), Workers (overview + escalations; **Settings** for fleet/schedules/retry), Runs, Connections (`/ops/connections`). Legacy `/ops/health` and `?tab=configurations` redirect to Workers / Settings.
 - Browser never calls worker URLs — only admin-api aggregates.
-- Dashboard **Errors** / **Logs** share one explorer (`GET /ops/logs`); Errors locks severity to ERROR.
+- Pipeline **Errors** / **Logs** share one explorer (`GET /ops/logs`); Errors locks severity to ERROR (severity filtered in SQL so ERROR is not drowned by INFO audits).
+- **Workers Settings** (`/ops/workers/settings`, Pipeline ▾ → Settings, console gear): fleet health (`GET /ops/workers/fleet`), Cloud Scheduler schedules, retry floors, attempt-table browser. Single edit surface — do not reintroduce a Pipeline Configurations tab.
 - Connections onboarding (shipped): Ops `/ops/connections` (create, invite, revoke, retest,
   **delete**) + owner redeem `/connect/$token` (Confirm → Privacy → Credentials → Test).
   Google Sheets create: confirm + loading toasts; dedicated SA email must appear in
@@ -47,8 +47,9 @@ General Amigo frost: [`.agent/modules/design-taste.md`](../../.agent/modules/des
 
 ## DROP pipeline
 
-- Top tabs: Pipeline · Hash refresh · History · Errors · Logs · Configurations (`tab=`). **Run Pipeline** (CA DROP) queues download → land → promote.
+- Top tabs: Pipeline · Hash refresh · History · Errors · Logs (`tab=`). **Run Pipeline** (CA DROP) queues download → land → promote; confirm dialog must stay `fixed` (never pass `relative` into `DialogContent` — twMerge would park it at page bottom). Gear → Workers Settings.
 - Errors / Logs: shared project log explorer (`GET /ops/logs`); Errors = ERROR severity only.
+- Schedules / retry / fleet: **Workers → Settings** only (not a Pipeline tab).
 - Stage tabs Download / Ingest / Matching / Review / Fulfillment live inside each bulk card (`stage=`); Land+Promote combined as Ingest — not top console tabs.
 - Bulk cards: compact collapsed row (Dur/Prog + tiny stage chips); Matching completion % from `matching_attempts` only (do not blend review); Review tab uses `stages.review`; **Matching results** when Review stage is selected.
 - Bulk-card state tiles → `/ops/runs?process=<id>&job=…&status=…&window=…` (`process` = download attempt id; API query `process_id`).

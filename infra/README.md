@@ -385,7 +385,7 @@ needs `roles/iam.serviceAccountTokenCreator` on itself).
 
 ## Cloud Scheduler (worker ticks)
 
-Workers are HTTP + queue-claim. Cloud Scheduler OIDC-invokes worker endpoints on a cadence. Schedules are **live in GCP** (no Postgres mirror). Super_admins edit them via admin-api `GET|PATCH /ops/workers/schedules` (Workers Settings / Ops Configuration UI).
+Workers are HTTP + queue-claim. Cloud Scheduler OIDC-invokes worker endpoints on a cadence. Schedules are **live in GCP** (no Postgres mirror). Super_admins edit them via admin-api `GET|PATCH /ops/workers/schedules` (Workers → Settings UI).
 
 | Job id pattern | Target | Default |
 |----------------|--------|---------|
@@ -416,7 +416,7 @@ Hash-index refresh is **not** auto-scheduled (manual/ops enqueue).
 
 ### Fleet discovery naming conventions
 
-Pull-based inventory joins Cloud Scheduler ∪ Cloud Run (no worker heartbeat). Codify these as the single source of truth for admin-api discovery and Workers Settings.
+Pull-based inventory joins Cloud Scheduler ∪ Cloud Run (no worker heartbeat). Codify these as the single source of truth for admin-api discovery and Workers **Settings** (`/ops/workers/settings`).
 
 #### Identifiers
 

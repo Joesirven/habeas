@@ -11,7 +11,8 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
   (bulk download attempt id; ingest/matching via download `gcs_uri`), `window`/`since`
 - Ops logs: `GET /ops/logs` — project-level feed (worker attempt tables +
   `admin_audit_log`); filters `severity`, `resource`, `source`, `q`, `window`/`since`
-  (Dashboard Errors = `severity=ERROR`; Logs = unfiltered). Planned Ops IA
+  (Pipeline Errors = `severity=ERROR`; Logs = unfiltered). Severity filters push into
+  SQL so ERROR/WARNING rows are not drowned by recent INFO audits. Planned Ops IA
   consolidation: `docs/plans/2026-07-30-005-feat-ops-command-center-ia-plan.md`.
 - Integration connections (shipped): `GET/POST/DELETE /ops/connections`, invites, test, revoke
   (`connections_admin`); redeem `GET/POST /connect/{token}` (`connections_redeem`).
@@ -31,10 +32,18 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
   Connecting a system does **not** by itself enable matching/hash workers for that vertical.
 - DROP ops: `GET /ops/drop/pipeline`, spine proxies, hash-index refresh enqueue /
   enqueue-all (USPS 50+DC) / process
-- Fleet visibility (U23): `GET /ops/drop/workers`, `GET /ops/health/queues` —
+- Worker fleet discovery (shipped): `GET /ops/workers/fleet` — pull-based union of
+  Cloud Scheduler + Cloud Run (DEV: `dpra-dev-*` / `*-dev`); health = existing
+  `/readyz` probes; conventions in `habeas_privacy_core.fleet`. Schedules:
+  `GET|PATCH /ops/workers/schedules`. Attempt-table browser:
+  `GET /ops/workers/attempt-tables` (+ rows) with allowlisted columns/filters only.
+  Web: `/ops/workers/settings` (single Settings surface). Naming: `infra/README.md`
+  § Fleet discovery naming conventions.
+- Fleet visibility (legacy rollup): `GET /ops/drop/workers`, `GET /ops/health/queues` —
   admin_api aggregates `/readyz` + Postgres depths; browser never calls workers
 - Health Configuration (U24): `GET/PATCH /ops/health/retry-config` persists
-  `ops_retry_config` overrides (floor 4); reaper merges on next `/reap` cycle
+  `ops_retry_config` overrides (floor 4); reaper merges on next `/reap` cycle;
+  edited under Workers → Settings (UI), not a separate Health product.
 - Home summary: `GET /ops/drop/stats/global` (ids/counts only)
 - Matching result detail includes attempt history + allowlisted `audit_payload`
 - `POST /ops/drop/match` proxies matching worker `/process` (one row) and opens a

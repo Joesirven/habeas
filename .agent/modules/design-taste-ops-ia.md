@@ -45,9 +45,10 @@
 
 ### Dashboard request processing pipeline
 
-- Top console tabs: **Pipeline** · Hash refresh · History · Errors · Logs · Configurations (not Download/Ingest/Matching/Fulfillment at top).
-- Errors / Logs: shared GCP-style log explorer over attempt tables + admin audit (`severity=ERROR` vs all).
-- Header: **Run Pipeline** (shadcn dropdown → CA DROP + confirm dialog with staged queue). Compact metric cards with ring/spark viz + hover detail popovers.
+- Top console tabs: **Pipeline** · Hash refresh · History · Errors · Logs (not Download/Ingest/Matching/Fulfillment at top; no Configurations tab).
+- Errors / Logs: shared GCP-style log explorer over attempt tables + admin audit (`severity=ERROR` vs all). ERROR severity is applied in SQL so sparse failures are not crowded out by INFO volume.
+- Header: **Run Pipeline** (shadcn dropdown → CA DROP + confirm dialog with staged queue; dialog stays viewport-`fixed`) + gear → Workers Settings.
+- Schedules, retry floors, fleet discovery: **Workers → Settings** only (`/ops/workers/settings`).
 - Pipeline list: shadcn Tabs (Bulk / Individual); compact Popover filters.
 - Bulk cards: human title from `process_at`; collapsed ~1–2 lines with Dur/Prog inline + tiny stage chips (no Matching results in header); expanded title row shares Dur + Est/err; stage tabs Download · Ingest · Matching · **Review** · Fulfillment stay local (no URL write per click — apply `?stage=` once on expand).
 - Matching completion % / Finished·Queued·Failed chips use `matching_attempts` only — never blend review (Review tab uses `detail.stages.review`).
@@ -59,7 +60,8 @@
 
 ### Workers
 
-- Fleet table → click worker → full attempt history.
+- Fleet table from Scheduler ∪ Cloud Run discovery (`GET /ops/workers/fleet`) → click worker → attempt history / queue browser.
+- Settings: schedules + retry + attempt-table index (no per-worker UI allowlist).
 - Runs list links to `/ops/runs/{job}:{id}` detail.
 
 ### Run detail

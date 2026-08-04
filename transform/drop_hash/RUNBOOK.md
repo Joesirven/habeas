@@ -131,7 +131,7 @@ curl -sS -H "Authorization: Bearer $IAP_ID_TOKEN" "$ADMIN_API_URL/auth/me"
 | Surface | Entry |
 |---------|--------|
 | Admin-api | `POST /ops/drop/hash-index-refresh/enqueue-all` (IAP bearer) → `enqueue_hash_index_refresh_all_states` |
-| Web | Drop ops → Pipeline → Configurations → **Enqueue all states** (local: Vite `/api`; remote needs IAP) |
+| Web | Drop ops → Pipeline → **Hash refresh** (or Workers → Settings) → enqueue / refresh (local: Vite `/api`; remote needs IAP) |
 | CLI | `habeas-cli drop hash-index-refresh enqueue --all-states --execute` with `ADMIN_API_URL` + IAP SA token |
 | Process | `habeas-cli drop hash-index-refresh process --execute` (admin-api proxies the worker; never call worker `/process` as a user) |
 | Worker | Invoked only by admin-api runtime SA (`roles/run.invoker` on workers — never user/IAP) |
