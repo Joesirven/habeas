@@ -5,29 +5,25 @@ import { useMemo, useState, type ReactNode } from 'react'
 import { SkeletonLines } from '@/components/AppShell'
 import {
   getDropPipeline,
+  getFleetWorkers,
   listRuns,
   type OpsTimeWindow,
   type RunSummary,
   type WorkerHealthProbe,
 } from '@/lib/api'
 import { RoleGate } from '@/lib/auth'
+import {
+  isWorkerHealthy,
+  orderedWorkers,
+  workerDisplayLabel,
+  workerKey,
+} from '@/lib/worker-fleet'
 
 const WINDOW_OPTIONS: { value: OpsTimeWindow; label: string }[] = [
   { value: '8h', label: '8h' },
   { value: '1w', label: '1w' },
   { value: '3m', label: '3m' },
 ]
-
-const WORKER_ORDER = [
-  'drop_connector',
-  'drop_ingestor',
-  'request_dispatcher',
-  'matching',
-  'data_fulfillment',
-  'hash_index_refresh',
-  'reaper',
-  'intake_drop_poller',
-] as const
 
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
@@ -144,10 +140,12 @@ function VolumeStrip({ runs, window }: { runs: RunSummary[]; window: OpsTimeWind
 function TallyRow({
   summary,
   workersUp,
+  workersTotal,
   window,
 }: {
   summary: { total: number; failed: number; inFlight: number }
   workersUp: number | null
+  workersTotal: number
   window: OpsTimeWindow
 }) {
   return (
@@ -168,17 +166,25 @@ function TallyRow({
       <div className="flex items-baseline gap-2">
         <dt className="taste-micro !text-[0.65rem]">Workers up</dt>
         <dd className="font-medium tabular-nums text-ink">
-          {workersUp != null ? `${workersUp}/${WORKER_ORDER.length}` : '—'}
+          {workersUp != null && workersTotal > 0
+            ? `${workersUp}/${workersTotal}`
+            : '—'}
         </dd>
       </div>
     </dl>
   )
 }
 
-function WorkerHealthCard({ probe }: { probe: WorkerHealthProbe }) {
+function WorkerHealthCard({
+  name,
+  probe,
+}: {
+  name: string
+  probe: WorkerHealthProbe | { ok: boolean; status_code?: number | null; ready?: { status?: string } }
+}) {
   return (
     <div className="rounded-lg border border-line bg-paper/60 px-3 py-2.5">
-      <p className="taste-micro text-[0.65rem]">{probe.name.replaceAll('_', ' ')}</p>
+      <p className="taste-micro text-[0.65rem]">{name.replaceAll('_', ' ')}</p>
       <p className={`mt-1 text-xs font-medium ${probe.ok ? 'text-emerald-700' : 'text-red-700'}`}>
         {probe.ok ? 'Up' : 'Down'}
       </p>
@@ -229,15 +235,59 @@ function DashboardContent() {
     placeholderData: (previous) => previous,
   })
 
+  const fleetQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'fleet-workers'],
+    queryFn: getFleetWorkers,
+    refetchInterval: 15_000,
+    placeholderData: (previous) => previous,
+  })
+
   const runs = runsQuery.data ?? []
   const summary = useMemo(() => summarizeRuns(runs), [runs])
   const failedRuns = useMemo(() => runs.filter((run) => isFailedStatus(run.status)), [runs])
-  const workersUp = pipelineQuery.data
-    ? WORKER_ORDER.filter((name) => pipelineQuery.data!.worker_health[name]?.ok).length
-    : null
+
+  const fleetWorkers = orderedWorkers(fleetQuery.data)
+  const pipelineHealth = pipelineQuery.data?.worker_health
+
+  /** Prefer fleet discovery order; fall back to pipeline worker_health keys. */
+  const workerEntries = useMemo(() => {
+    if (fleetWorkers.length > 0) {
+      return fleetWorkers.map((worker) => {
+        const key = workerKey(worker)
+        const probe = pipelineHealth?.[key]
+        return {
+          name: key,
+          label: workerDisplayLabel(worker),
+          ok: probe?.ok ?? isWorkerHealthy(worker),
+          status_code: probe?.status_code ?? worker.health?.status_code ?? worker.status_code ?? null,
+          ready: probe?.ready ?? worker.health?.ready ?? worker.ready,
+        }
+      })
+    }
+    if (pipelineHealth) {
+      return Object.keys(pipelineHealth).map((name) => {
+        const probe = pipelineHealth[name]!
+        return {
+          name,
+          label: name.replaceAll('_', ' '),
+          ok: probe.ok,
+          status_code: probe.status_code ?? null,
+          ready: probe.ready,
+        }
+      })
+    }
+    return []
+  }, [fleetWorkers, pipelineHealth])
+
+  const workersUp =
+    workerEntries.length > 0
+      ? workerEntries.filter((entry) => entry.ok).length
+      : null
 
   const loading =
-    (runsQuery.isPending && !runsQuery.data) || (pipelineQuery.isPending && !pipelineQuery.data)
+    (runsQuery.isPending && !runsQuery.data) ||
+    ((pipelineQuery.isPending && !pipelineQuery.data) &&
+      (fleetQuery.isPending && !fleetQuery.data))
 
   const failedRunsSearch = { status: 'failed' as const, window }
 
@@ -250,7 +300,10 @@ function DashboardContent() {
             <h2 className="font-display text-xl font-medium tracking-tight text-ink">
               Ops dashboard
             </h2>
-            {(runsQuery.isFetching || pipelineQuery.isFetching) && !loading ? (
+            {(runsQuery.isFetching ||
+              pipelineQuery.isFetching ||
+              fleetQuery.isFetching) &&
+            !loading ? (
               <span className="taste-frost-chip">Refreshing</span>
             ) : null}
           </div>
@@ -280,7 +333,12 @@ function DashboardContent() {
             <div className="mt-4">
               <VolumeStrip runs={runs} window={window} />
             </div>
-            <TallyRow summary={summary} workersUp={workersUp} window={window} />
+            <TallyRow
+              summary={summary}
+              workersUp={workersUp}
+              workersTotal={workerEntries.length}
+              window={window}
+            />
           </div>
 
           <div className="grid gap-5 lg:grid-cols-[1.35fr_0.65fr]">
@@ -342,27 +400,25 @@ function DashboardContent() {
                 <Micro>Worker pool</Micro>
                 <p className="mt-1 text-xs text-ink-soft">Live health probes per worker.</p>
               </div>
-              {pipelineQuery.data ? (
+              {workerEntries.length > 0 ? (
                 <div className="grid gap-2">
-                  {WORKER_ORDER.map((name) => {
-                    const probe = pipelineQuery.data!.worker_health[name]
-                    if (!probe) {
-                      return (
-                        <div
-                          key={name}
-                          className="rounded-lg border border-line bg-paper/60 px-3 py-2.5"
-                        >
-                          <p className="taste-micro text-[0.65rem]">{name.replaceAll('_', ' ')}</p>
-                          <p className="mt-1 text-xs text-mute">—</p>
-                        </div>
-                      )
-                    }
-                    return <WorkerHealthCard key={name} probe={probe} />
-                  })}
+                  {workerEntries.map((entry) => (
+                    <WorkerHealthCard
+                      key={entry.name}
+                      name={entry.name}
+                      probe={{
+                        ok: entry.ok,
+                        status_code: entry.status_code,
+                        ready: entry.ready,
+                      }}
+                    />
+                  ))}
                 </div>
-              ) : pipelineQuery.isError ? (
+              ) : pipelineQuery.isError && fleetQuery.isError ? (
                 <p className="text-sm text-red-700">Could not load worker probes.</p>
-              ) : null}
+              ) : (
+                <p className="text-sm text-ink-soft">No workers discovered yet.</p>
+              )}
             </div>
           </div>
         </>

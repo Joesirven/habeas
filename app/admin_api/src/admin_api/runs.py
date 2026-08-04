@@ -588,6 +588,58 @@ def _parse_severity_filter(raw: str | None) -> set[str] | None:
     return values
 
 
+_ATTEMPT_INFO_STATUSES = ("pending", "claimed", "in_flight", "success")
+
+
+def _attempt_error_status_sql(column: str = "status") -> str:
+    """SQL matching `_attempt_severity` ERROR mapping (failed statuses + error/fail substrings)."""
+    failed = ", ".join(f"'{status}'" for status in _FAILED_STATUSES)
+    return (
+        f"(lower({column}) IN ({failed}) "
+        f"OR lower({column}) LIKE '%error%' "
+        f"OR lower({column}) LIKE '%fail%')"
+    )
+
+
+def _attempt_info_status_sql(column: str = "status") -> str:
+    info = ", ".join(f"'{status}'" for status in _ATTEMPT_INFO_STATUSES)
+    return f"lower({column}) IN ({info})"
+
+
+def _severity_sql_predicate(
+    severity: set[str] | None,
+    *,
+    kind: Literal["attempt", "audit"],
+) -> str | None:
+    """Push severity into SQL so ERROR/WARNING rows are not drowned by INFO volume."""
+    if severity is None or severity >= _LOG_SEVERITIES:
+        return None
+    parts: list[str] = []
+    if kind == "attempt":
+        error_pred = _attempt_error_status_sql()
+        info_pred = _attempt_info_status_sql()
+        if "ERROR" in severity:
+            parts.append(error_pred)
+        if "INFO" in severity:
+            parts.append(info_pred)
+        if "WARNING" in severity:
+            parts.append(f"(NOT {error_pred} AND NOT {info_pred})")
+    else:
+        if "ERROR" in severity:
+            parts.append("(result_status IS NOT NULL AND result_status >= 500)")
+        if "WARNING" in severity:
+            parts.append(
+                "(result_status IS NOT NULL AND result_status >= 400 AND result_status < 500)"
+            )
+        if "INFO" in severity:
+            parts.append("(result_status IS NULL OR result_status < 400)")
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return f"({' OR '.join(parts)})"
+
+
 async def fetch_ops_logs(
     conn: Any,
     *,
@@ -617,11 +669,17 @@ async def fetch_ops_logs(
         params.append(resource)
         idx += 1
 
+    attempt_sev = _severity_sql_predicate(severity, kind="attempt")
+    if attempt_sev is not None:
+        attempt_clauses.append(attempt_sev)
+    audit_sev = _severity_sql_predicate(severity, kind="audit")
+    if audit_sev is not None:
+        audit_clauses.append(audit_sev)
+
     attempt_where = f"WHERE {' AND '.join(attempt_clauses)}" if attempt_clauses else ""
     audit_where = f"WHERE {' AND '.join(audit_clauses)}" if audit_clauses else ""
 
-    # Fetch a wider window then filter severity/source/q in Python so severity
-    # derived from status/HTTP codes stays consistent with the API mapping.
+    # Over-fetch then refine source/q (and severity as a safety net) in Python.
     fetch_limit = min(max(limit + offset, limit) * 3, 600)
     sql = f"""
         SELECT 'attempt'::text AS source,

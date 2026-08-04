@@ -47,23 +47,29 @@ function HealthEscalationsBody() {
     (workersQuery.isError && !workersQuery.data) || (queuesQuery.isError && !queuesQuery.data)
 
   return (
-    <section className="space-y-12">
-      <header className="grid gap-8 lg:grid-cols-[1.1fr_0.9fr] lg:items-end">
+    <section className="taste-ops-page space-y-4">
+      <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <Micro>Health</Micro>
-          <h2 className="mt-3 max-w-md font-display text-[2.75rem] font-medium leading-[1.05] tracking-tight text-ink sm:text-[3.25rem]">
+          <Micro>Workers</Micro>
+          <h2 className="mt-1 font-display text-xl font-medium tracking-tight text-ink">
             Escalations
-            <br />
-            / retries
           </h2>
+          <p className="mt-1 max-w-xl text-xs text-ink-soft">
+            Failed terminal attempts and workers that need attention. Ids and counts only.
+          </p>
         </div>
-        <p className="max-w-sm border-l border-line pl-5 text-sm leading-relaxed text-ink-soft">
-          Failed terminal attempts and workers that need attention. Ids and counts only.
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link to="/ops/workers" className="taste-btn text-xs">
+            ← Overview
+          </Link>
+          <Link to="/ops/workers/settings" className="taste-btn text-xs">
+            Settings
+          </Link>
+        </div>
       </header>
 
       {loading ? (
-        <div className="taste-panel-soft p-6">
+        <div className="taste-panel p-4">
           <SkeletonLines lines={6} />
         </div>
       ) : null}
@@ -74,10 +80,10 @@ function HealthEscalationsBody() {
 
       {!loading && !error ? (
         <>
-          <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
+          <div className="taste-panel flex flex-col gap-4 p-4 sm:p-5">
             <div>
               <Micro>Workers down</Micro>
-              <p className="mt-2 text-sm text-ink-soft">
+              <p className="mt-1 text-xs text-ink-soft">
                 Workers failing readiness checks — investigate before retrying work.
               </p>
             </div>
@@ -109,10 +115,10 @@ function HealthEscalationsBody() {
             )}
           </div>
 
-          <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
+          <div className="taste-panel flex flex-col gap-4 p-4 sm:p-5">
             <div>
               <Micro>Failed terminal</Micro>
-              <p className="mt-2 text-sm text-ink-soft">
+              <p className="mt-1 text-xs text-ink-soft">
                 Attempt rows in terminal failure statuses (submit_error, outcome_error, timeout,
                 abandoned).
               </p>
@@ -145,10 +151,10 @@ function HealthEscalationsBody() {
             )}
           </div>
 
-          <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
+          <div className="taste-panel flex flex-col gap-4 p-4 sm:p-5">
             <div>
               <Micro>Needs attention</Micro>
-              <p className="mt-2 text-sm text-ink-soft">
+              <p className="mt-1 text-xs text-ink-soft">
                 Queues with backlog, terminal failures, or an unhealthy worker.
               </p>
             </div>
@@ -200,12 +206,6 @@ function HealthEscalationsBody() {
           </div>
         </>
       ) : null}
-
-      <p className="text-sm text-ink-soft">
-        <Link to="/ops/health" className="text-habeas-mid hover:underline">
-          ← Health overview
-        </Link>
-      </p>
     </section>
   )
 }

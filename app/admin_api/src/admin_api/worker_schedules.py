@@ -1,7 +1,13 @@
-"""Live Cloud Scheduler proxies for worker run schedules (super_admin only)."""
+"""Live Cloud Scheduler proxies for worker run schedules (super_admin only).
+
+Inventory comes from Scheduler **list** (prefix-filtered) when enabled, or from
+local schedule conventions when ``cloud_scheduler_enabled=false``. Static
+``JOB_SPECS`` is no longer the GCP inventory source.
+"""
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -32,6 +38,20 @@ SuperAdminActor = Annotated[
 _MINUTE_CRON_RE = re.compile(r"^\*/(\d+)\s+\*\s+\*\s+\*\s+\*$")
 _DAILY_CRON_RE = re.compile(r"^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*$")
 
+# Exact job ids (and prefixed variants) excluded from discovery.
+_NOISE_SCHEDULER_JOB_IDS = frozenset({"test-probe-job"})
+
+# Label overrides for known DROP/platform jobs (fallback: humanize job_key).
+_LABEL_OVERRIDES: dict[str, str] = {
+    "drop_connector_download": "CA DROP download",
+    "reaper": "Reaper",
+    "drop_ingestor_land": "DROP land",
+    "drop_ingestor_promote": "DROP promote",
+    "request_dispatcher": "Request dispatcher",
+    "matching": "Matching",
+    "data_fulfillment": "Data fulfillment",
+}
+
 
 class ScheduleSettings(CoreSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -48,8 +68,122 @@ class ScheduleSettings(CoreSettings):
 settings = ScheduleSettings()
 
 
+# ---------------------------------------------------------------------------
+# Fleet helper API (mirror E1 names). Prefer habeas_privacy_core.fleet when
+# present; otherwise keep local copies so the import swap is a one-liner.
+# ---------------------------------------------------------------------------
+
+try:
+    from habeas_privacy_core.fleet import (  # type: ignore[import-not-found]
+        cron_from_interval_minutes,
+        cron_from_time_utc,
+        infer_schedule_kind,
+        is_noise_scheduler_job,
+        job_key_from_job_name,
+        label_for_job_key,
+        parse_cron,
+        parse_interval_days_from_body,
+    )
+
+    _USING_FLEET_PACKAGE = True
+except ImportError:
+    _USING_FLEET_PACKAGE = False
+
+    def is_noise_scheduler_job(job_id: str) -> bool:
+        """Return True for probe/noise Scheduler job ids (E1 mirror)."""
+        basename = job_id.rsplit("/", 1)[-1].strip()
+        if not basename:
+            return False
+        if basename in _NOISE_SCHEDULER_JOB_IDS:
+            return True
+        # Prefixed variant e.g. dpra-dev-test-probe-job
+        for noise in _NOISE_SCHEDULER_JOB_IDS:
+            if basename.endswith(f"-{noise}") or basename == noise:
+                return True
+        return False
+
+    def job_key_from_job_name(
+        job_name: str, prefix: str | None = None
+    ) -> str | None:
+        """Map GCP job resource name / id → job_key, or None if excluded (E1 mirror)."""
+        job_id = job_name.rsplit("/", 1)[-1].strip()
+        if not job_id or is_noise_scheduler_job(job_id):
+            return None
+        pfx = (prefix or settings.cloud_scheduler_job_prefix).rstrip("-")
+        expected = f"{pfx}-"
+        if not job_id.startswith(expected):
+            return None
+        slug = job_id[len(expected) :]
+        if not slug:
+            return None
+        return slug.replace("-", "_")
+
+    def label_for_job_key(job_key: str) -> str:
+        """Human label for a schedule job_key (E1 mirror)."""
+        if job_key in _LABEL_OVERRIDES:
+            return _LABEL_OVERRIDES[job_key]
+        return job_key.replace("_", " ").strip().title() or job_key
+
+    def cron_from_interval_minutes(minutes: int) -> str:
+        return f"*/{minutes} * * * *"
+
+    def cron_from_time_utc(time_utc: str) -> str:
+        hour, minute = _parse_hhmm(time_utc)
+        return f"{minute} {hour} * * *"
+
+    def parse_cron(
+        cron: str, *, schedule_kind: str
+    ) -> tuple[int | None, int | None, str | None]:
+        """Return (interval_minutes, interval_days_placeholder, time_utc)."""
+        text = cron.strip()
+        minute_match = _MINUTE_CRON_RE.match(text)
+        if minute_match:
+            return int(minute_match.group(1)), None, None
+        daily_match = _DAILY_CRON_RE.match(text)
+        if daily_match:
+            minute = int(daily_match.group(1))
+            hour = int(daily_match.group(2))
+            return None, None, f"{hour:02d}:{minute:02d}"
+        if schedule_kind == "interval_minutes":
+            return 5, None, None
+        return None, None, "14:00"
+
+    def parse_interval_days_from_body(body: str | None) -> int | None:
+        if not body:
+            return None
+        try:
+            payload = json.loads(body)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        raw = payload.get("interval_days")
+        if raw is None:
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    def infer_schedule_kind(
+        *, cron: str, body_text: str | None = None
+    ) -> str:
+        """Infer schedule_kind from cron and/or HTTP body (E1 mirror)."""
+        text = (cron or "").strip()
+        if _MINUTE_CRON_RE.match(text):
+            return "interval_minutes"
+        if parse_interval_days_from_body(body_text) is not None:
+            return "interval_days"
+        if _DAILY_CRON_RE.match(text):
+            return "interval_days"
+        return "interval_minutes"
+
+
 @dataclass(frozen=True, slots=True)
-class JobSpec:
+class LocalScheduleConvention:
+    """Local-mode row seed — not the GCP inventory allowlist."""
+
     job_key: str
     label: str
     schedule_kind: str  # interval_days | interval_minutes
@@ -59,8 +193,9 @@ class JobSpec:
     default_cron: str = ""
 
 
-JOB_SPECS: tuple[JobSpec, ...] = (
-    JobSpec(
+# Conventional DROP/platform schedules for local synthesis (upsert script parity).
+LOCAL_SCHEDULE_CONVENTIONS: tuple[LocalScheduleConvention, ...] = (
+    LocalScheduleConvention(
         job_key="drop_connector_download",
         label="CA DROP download",
         schedule_kind="interval_days",
@@ -68,42 +203,42 @@ JOB_SPECS: tuple[JobSpec, ...] = (
         default_time_utc="14:00",
         default_cron="0 14 * * *",
     ),
-    JobSpec(
+    LocalScheduleConvention(
         job_key="reaper",
         label="Reaper",
         schedule_kind="interval_minutes",
         default_interval_minutes=1,
         default_cron="*/1 * * * *",
     ),
-    JobSpec(
+    LocalScheduleConvention(
         job_key="drop_ingestor_land",
         label="DROP land",
         schedule_kind="interval_minutes",
         default_interval_minutes=5,
         default_cron="*/5 * * * *",
     ),
-    JobSpec(
+    LocalScheduleConvention(
         job_key="drop_ingestor_promote",
         label="DROP promote",
         schedule_kind="interval_minutes",
         default_interval_minutes=5,
         default_cron="*/5 * * * *",
     ),
-    JobSpec(
+    LocalScheduleConvention(
         job_key="request_dispatcher",
         label="Request dispatcher",
         schedule_kind="interval_minutes",
         default_interval_minutes=5,
         default_cron="*/5 * * * *",
     ),
-    JobSpec(
+    LocalScheduleConvention(
         job_key="matching",
         label="Matching",
         schedule_kind="interval_minutes",
         default_interval_minutes=5,
         default_cron="*/5 * * * *",
     ),
-    JobSpec(
+    LocalScheduleConvention(
         job_key="data_fulfillment",
         label="Data fulfillment",
         schedule_kind="interval_minutes",
@@ -112,7 +247,7 @@ JOB_SPECS: tuple[JobSpec, ...] = (
     ),
 )
 
-_JOB_BY_KEY = {spec.job_key: spec for spec in JOB_SPECS}
+_LOCAL_BY_KEY = {spec.job_key: spec for spec in LOCAL_SCHEDULE_CONVENTIONS}
 
 
 def job_name_for(job_key: str, prefix: str | None = None) -> str:
@@ -128,52 +263,6 @@ def _parse_hhmm(raw: str) -> tuple[int, int]:
     except (TypeError, ValueError):
         pass
     return 14, 0
-
-
-def cron_from_interval_minutes(minutes: int) -> str:
-    return f"*/{minutes} * * * *"
-
-
-def cron_from_time_utc(time_utc: str) -> str:
-    hour, minute = _parse_hhmm(time_utc)
-    return f"{minute} {hour} * * *"
-
-
-def parse_cron(
-    cron: str, *, schedule_kind: str
-) -> tuple[int | None, int | None, str | None]:
-    """Return (interval_minutes, interval_days_placeholder, time_utc)."""
-    text = cron.strip()
-    minute_match = _MINUTE_CRON_RE.match(text)
-    if minute_match:
-        return int(minute_match.group(1)), None, None
-    daily_match = _DAILY_CRON_RE.match(text)
-    if daily_match:
-        minute = int(daily_match.group(1))
-        hour = int(daily_match.group(2))
-        return None, None, f"{hour:02d}:{minute:02d}"
-    if schedule_kind == "interval_minutes":
-        return 5, None, None
-    return None, None, "14:00"
-
-
-def parse_interval_days_from_body(body: str | None) -> int | None:
-    if not body:
-        return None
-    try:
-        payload = json.loads(body)
-    except (TypeError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    raw = payload.get("interval_days")
-    if raw is None:
-        return None
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return value if value > 0 else None
 
 
 def next_daily_fire_utc(*, time_utc: str, now: datetime | None = None) -> datetime:
@@ -193,8 +282,34 @@ def cadence_label(interval_days: int) -> str:
     return f"every_{interval_days}_days"
 
 
+def _decode_http_body(body_b64: Any) -> str | None:
+    if not isinstance(body_b64, str) or not body_b64:
+        return None
+    try:
+        return base64.b64decode(body_b64).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _job_id_from_resource(name: str) -> str:
+    return name.rsplit("/", 1)[-1]
+
+
+def _resolve_label(job_key: str) -> str:
+    if job_key == "drop_connector_download":
+        return settings.drop_connector_schedule_label
+    if _USING_FLEET_PACKAGE:
+        return label_for_job_key(job_key)
+    local = _LOCAL_BY_KEY.get(job_key)
+    if local is not None:
+        return local.label
+    return label_for_job_key(job_key)
+
+
 class SchedulerClient(Protocol):
     def get_job(self, job_name: str) -> dict[str, Any]: ...
+
+    def list_jobs(self, *, name_prefix: str | None = None) -> list[dict[str, Any]]: ...
 
     def patch_job(self, job_name: str, body: dict[str, Any], update_mask: str) -> dict[str, Any]: ...
 
@@ -248,6 +363,34 @@ class RestSchedulerClient:
             raise RuntimeError(f"scheduler get failed: {response.status_code}")
         return response.json()
 
+    def list_jobs(self, *, name_prefix: str | None = None) -> list[dict[str, Any]]:
+        """Paginated jobs.list; optional basename prefix filter + noise exclusion."""
+        url = f"https://cloudscheduler.googleapis.com/v1/{self._parent()}/jobs"
+        prefix = (name_prefix or "").rstrip("-")
+        collected: list[dict[str, Any]] = []
+        page_token: str | None = None
+        while True:
+            params: dict[str, Any] = {"pageSize": 100}
+            if page_token:
+                params["pageToken"] = page_token
+            response = self._http.get(url, headers=self._headers(), params=params)
+            if response.status_code >= 400:
+                raise RuntimeError(f"scheduler list failed: {response.status_code}")
+            payload = response.json()
+            for job in payload.get("jobs") or []:
+                if not isinstance(job, dict):
+                    continue
+                job_id = _job_id_from_resource(str(job.get("name") or ""))
+                if not job_id or is_noise_scheduler_job(job_id):
+                    continue
+                if prefix and not job_id.startswith(f"{prefix}-"):
+                    continue
+                collected.append(job)
+            page_token = payload.get("nextPageToken") or None
+            if not page_token:
+                break
+        return collected
+
     def patch_job(self, job_name: str, body: dict[str, Any], update_mask: str) -> dict[str, Any]:
         url = (
             f"https://cloudscheduler.googleapis.com/v1/{self._job_path(job_name)}"
@@ -292,7 +435,7 @@ def _make_client() -> SchedulerClient:
     )
 
 
-def _default_schedule_row(spec: JobSpec) -> dict[str, Any]:
+def _default_schedule_row(spec: LocalScheduleConvention) -> dict[str, Any]:
     interval_days = spec.default_interval_days
     interval_minutes = spec.default_interval_minutes
     time_utc = spec.default_time_utc
@@ -309,11 +452,7 @@ def _default_schedule_row(spec: JobSpec) -> dict[str, Any]:
     return {
         "job_key": spec.job_key,
         "job_name": job_name_for(spec.job_key),
-        "label": (
-            settings.drop_connector_schedule_label
-            if spec.job_key == "drop_connector_download"
-            else spec.label
-        ),
+        "label": _resolve_label(spec.job_key),
         "enabled": True,
         "schedule_kind": spec.schedule_kind,
         "interval_days": interval_days,
@@ -327,31 +466,40 @@ def _default_schedule_row(spec: JobSpec) -> dict[str, Any]:
         "timezone": "UTC",
         "next_run_at": next_run,
         "last_success_at": None,
-        "scheduler_state": "ENABLED",
+        "scheduler_state": "LOCAL",
         "scheduler_reachable": False,
     }
 
 
-def _row_from_gcp_job(spec: JobSpec, job: dict[str, Any]) -> dict[str, Any]:
-    cron = str(job.get("schedule") or spec.default_cron)
-    interval_minutes, _, time_utc = parse_cron(cron, schedule_kind=spec.schedule_kind)
+def _row_from_gcp_job(job: dict[str, Any], *, job_key: str) -> dict[str, Any]:
+    local = _LOCAL_BY_KEY.get(job_key)
+    cron = str(job.get("schedule") or (local.default_cron if local else "") or "")
     http_target = job.get("httpTarget") or {}
-    body_b64 = http_target.get("body")
-    body_text = None
-    if isinstance(body_b64, str) and body_b64:
-        import base64
-
-        try:
-            body_text = base64.b64decode(body_b64).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
-            body_text = None
+    body_text = _decode_http_body(http_target.get("body"))
+    schedule_kind = infer_schedule_kind(cron=cron, body_text=body_text)
+    interval_minutes, _, time_utc = parse_cron(cron, schedule_kind=schedule_kind)
     interval_days = parse_interval_days_from_body(body_text)
-    if spec.schedule_kind == "interval_days":
-        interval_days = interval_days or spec.default_interval_days or 15
-        time_utc = time_utc or spec.default_time_utc or "14:00"
+
+    if schedule_kind == "interval_days":
+        interval_days = (
+            interval_days
+            or (local.default_interval_days if local else None)
+            or settings.drop_connector_interval_days
+            or 15
+        )
+        time_utc = (
+            time_utc
+            or (local.default_time_utc if local else None)
+            or settings.drop_connector_schedule_utc
+            or "14:00"
+        )
         interval_minutes = None
     else:
-        interval_minutes = interval_minutes or spec.default_interval_minutes or 5
+        interval_minutes = (
+            interval_minutes
+            or (local.default_interval_minutes if local else None)
+            or 5
+        )
         interval_days = None
         time_utc = None
 
@@ -363,15 +511,11 @@ def _row_from_gcp_job(spec: JobSpec, job: dict[str, Any]) -> dict[str, Any]:
         next_run_at = next_daily_fire_utc(time_utc=time_utc).isoformat()
 
     return {
-        "job_key": spec.job_key,
-        "job_name": job_name_for(spec.job_key),
-        "label": (
-            settings.drop_connector_schedule_label
-            if spec.job_key == "drop_connector_download"
-            else spec.label
-        ),
+        "job_key": job_key,
+        "job_name": job_name_for(job_key),
+        "label": _resolve_label(job_key),
         "enabled": enabled,
-        "schedule_kind": spec.schedule_kind,
+        "schedule_kind": schedule_kind,
         "interval_days": interval_days,
         "interval_minutes": interval_minutes,
         "time_utc": time_utc,
@@ -414,10 +558,14 @@ async def _last_connector_success_at() -> str | None:
     return str(value)
 
 
+def discovery_mode() -> str:
+    return "gcp" if settings.cloud_scheduler_enabled else "local"
+
+
 async def build_schedule_rows() -> list[dict[str, Any]]:
     last_success = await _last_connector_success_at()
     if not settings.cloud_scheduler_enabled:
-        rows = [_default_schedule_row(spec) for spec in JOB_SPECS]
+        rows = [_default_schedule_row(spec) for spec in LOCAL_SCHEDULE_CONVENTIONS]
         for row in rows:
             if row["job_key"] == "drop_connector_download":
                 row["last_success_at"] = last_success
@@ -426,27 +574,28 @@ async def build_schedule_rows() -> list[dict[str, Any]]:
     client = _make_client()
     rows: list[dict[str, Any]] = []
     try:
-        for spec in JOB_SPECS:
-            name = job_name_for(spec.job_key)
-            try:
-                job = client.get_job(name)
-                row = _row_from_gcp_job(spec, job)
-            except LookupError:
-                row = _default_schedule_row(spec)
-                row["scheduler_reachable"] = True
-                row["scheduler_state"] = "NOT_FOUND"
-            except Exception as exc:
-                logger.warning(
-                    "worker_schedule_get_failed",
-                    extra={
-                        "event": "worker_schedule_get_failed",
-                        "job_key": spec.job_key,
-                        "error_type": type(exc).__name__,
-                    },
-                )
-                raise HTTPException(
-                    status_code=503, detail="Cloud Scheduler unreachable"
-                ) from exc
+        try:
+            jobs = client.list_jobs(name_prefix=settings.cloud_scheduler_job_prefix)
+        except Exception as exc:
+            logger.warning(
+                "worker_schedule_list_failed",
+                extra={
+                    "event": "worker_schedule_list_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
+            raise HTTPException(
+                status_code=503, detail="Cloud Scheduler unreachable"
+            ) from exc
+
+        for job in jobs:
+            resource_name = str(job.get("name") or "")
+            job_key = job_key_from_job_name(
+                resource_name, prefix=settings.cloud_scheduler_job_prefix
+            )
+            if job_key is None:
+                continue
+            row = _row_from_gcp_job(job, job_key=job_key)
             if row["job_key"] == "drop_connector_download":
                 row["last_success_at"] = last_success
             rows.append(row)
@@ -505,19 +654,8 @@ class SchedulePatchBody(BaseModel):
     time_utc: str | None = Field(default=None, max_length=5)
 
 
-@router.get("/schedules")
-async def get_worker_schedules(_actor: SuperAdminActor):
-    rows = await build_schedule_rows()
-    return {"schedules": rows}
-
-
-@router.patch("/schedules")
-async def patch_worker_schedule(body: SchedulePatchBody, actor: SuperAdminActor):
-    spec = _JOB_BY_KEY.get(body.job_key)
-    if spec is None:
-        raise HTTPException(status_code=422, detail=f"unknown job_key: {body.job_key}")
-
-    if spec.schedule_kind == "interval_minutes":
+def _validate_patch_fields(*, schedule_kind: str, body: SchedulePatchBody) -> None:
+    if schedule_kind == "interval_minutes":
         if body.interval_days is not None:
             raise HTTPException(
                 status_code=422, detail="interval_days not valid for this job"
@@ -534,7 +672,22 @@ async def patch_worker_schedule(body: SchedulePatchBody, actor: SuperAdminActor)
         if body.time_utc is not None:
             _parse_hhmm(body.time_utc)
 
+
+@router.get("/schedules")
+async def get_worker_schedules(_actor: SuperAdminActor):
+    rows = await build_schedule_rows()
+    return {"schedules": rows, "discovery_mode": discovery_mode()}
+
+
+@router.patch("/schedules")
+async def patch_worker_schedule(body: SchedulePatchBody, actor: SuperAdminActor):
     if not settings.cloud_scheduler_enabled:
+        spec = _LOCAL_BY_KEY.get(body.job_key)
+        if spec is None:
+            raise HTTPException(
+                status_code=422, detail=f"unknown job_key: {body.job_key}"
+            )
+        _validate_patch_fields(schedule_kind=spec.schedule_kind, body=body)
         # Local/test mode: echo applied defaults without calling GCP.
         row = _default_schedule_row(spec)
         if body.enabled is not None:
@@ -556,54 +709,71 @@ async def patch_worker_schedule(body: SchedulePatchBody, actor: SuperAdminActor)
                 "actor_role": actor.role,
             },
         )
-        return {"status": "ok", "schedule": row, "mode": "local"}
+        return {
+            "status": "ok",
+            "schedule": row,
+            "mode": "local",
+            "discovery_mode": "local",
+        }
 
-    name = job_name_for(spec.job_key)
+    name = job_name_for(body.job_key)
     client = _make_client()
     try:
         try:
             current = client.get_job(name)
         except LookupError as exc:
             raise HTTPException(
-                status_code=404, detail=f"scheduler job not found: {name}"
+                status_code=422, detail=f"unknown job_key: {body.job_key}"
             ) from exc
         except Exception as exc:
             raise HTTPException(
                 status_code=503, detail="Cloud Scheduler unreachable"
             ) from exc
 
-        cron = str(current.get("schedule") or spec.default_cron)
+        # Refuse noise / off-prefix keys even if somehow addressable.
+        resolved_key = job_key_from_job_name(
+            name, prefix=settings.cloud_scheduler_job_prefix
+        )
+        if resolved_key is None or resolved_key != body.job_key:
+            raise HTTPException(
+                status_code=422, detail=f"unknown job_key: {body.job_key}"
+            )
+
         http_target = dict(current.get("httpTarget") or {})
+        body_text = _decode_http_body(http_target.get("body"))
+        cron = str(current.get("schedule") or "")
+        schedule_kind = infer_schedule_kind(cron=cron, body_text=body_text)
+        _validate_patch_fields(schedule_kind=schedule_kind, body=body)
+
         update_paths: list[str] = []
 
-        if spec.schedule_kind == "interval_minutes" and body.interval_minutes is not None:
+        if schedule_kind == "interval_minutes" and body.interval_minutes is not None:
             cron = cron_from_interval_minutes(body.interval_minutes)
             update_paths.append("schedule")
-        if spec.schedule_kind == "interval_days":
+        if schedule_kind == "interval_days":
             time_utc = body.time_utc
             if time_utc is None:
                 _, _, parsed = parse_cron(cron, schedule_kind="interval_days")
-                time_utc = parsed or spec.default_time_utc or "14:00"
+                local = _LOCAL_BY_KEY.get(body.job_key)
+                time_utc = (
+                    parsed
+                    or (local.default_time_utc if local else None)
+                    or settings.drop_connector_schedule_utc
+                    or "14:00"
+                )
             if body.time_utc is not None or body.interval_days is not None:
                 cron = cron_from_time_utc(time_utc)
                 update_paths.append("schedule")
             interval_days = body.interval_days
             if interval_days is None:
-                body_b64 = http_target.get("body")
-                body_text = None
-                if isinstance(body_b64, str) and body_b64:
-                    import base64
-
-                    try:
-                        body_text = base64.b64decode(body_b64).decode("utf-8")
-                    except (ValueError, UnicodeDecodeError):
-                        body_text = None
-                interval_days = parse_interval_days_from_body(body_text) or (
-                    spec.default_interval_days or 15
+                local = _LOCAL_BY_KEY.get(body.job_key)
+                interval_days = (
+                    parse_interval_days_from_body(body_text)
+                    or (local.default_interval_days if local else None)
+                    or settings.drop_connector_interval_days
+                    or 15
                 )
             if body.interval_days is not None:
-                import base64
-
                 payload = json.dumps(
                     {"interval_days": interval_days, "source": "cloud_scheduler"}
                 ).encode("utf-8")
@@ -633,7 +803,7 @@ async def patch_worker_schedule(body: SchedulePatchBody, actor: SuperAdminActor)
                 ) from exc
 
         job = client.get_job(name)
-        row = _row_from_gcp_job(spec, job)
+        row = _row_from_gcp_job(job, job_key=body.job_key)
         if row["job_key"] == "drop_connector_download":
             row["last_success_at"] = await _last_connector_success_at()
         logger.info(
@@ -644,7 +814,12 @@ async def patch_worker_schedule(body: SchedulePatchBody, actor: SuperAdminActor)
                 "actor_role": actor.role,
             },
         )
-        return {"status": "ok", "schedule": row, "mode": "gcp"}
+        return {
+            "status": "ok",
+            "schedule": row,
+            "mode": "gcp",
+            "discovery_mode": "gcp",
+        }
     finally:
         close = getattr(client, "close", None)
         if callable(close):

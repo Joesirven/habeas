@@ -422,11 +422,26 @@ async def _probe_worker_health(name: str, base_url: str) -> dict[str, Any]:
 
 
 async def collect_worker_health() -> dict[str, Any]:
-    probes = await asyncio.gather(
-        *[
-            _probe_worker_health(name, getattr(settings, attr))
+    """Probe /readyz for discovered fleet URLs; fall back to WORKER_KEYS."""
+    targets: list[tuple[str, str]] = []
+    try:
+        from admin_api.worker_fleet import discovered_worker_probe_targets
+
+        targets = discovered_worker_probe_targets()
+    except Exception:
+        logger.exception(
+            "fleet_discovery_health_fallback",
+            extra={"event": "fleet_discovery_health_fallback"},
+        )
+        targets = []
+    if not targets:
+        targets = [
+            (name, getattr(settings, attr))
             for name, attr in WORKER_KEYS
+            if getattr(settings, attr, None)
         ]
+    probes = await asyncio.gather(
+        *[_probe_worker_health(name, url) for name, url in targets]
     )
     return {probe["name"]: probe for probe in probes}
 
@@ -2064,19 +2079,12 @@ def _fetch_person_contacts_from_bq(
         dob = str(birthdate).strip() if birthdate is not None and str(birthdate).strip() else None
         email_raw = row.get("emailaddress")
         email = str(email_raw).strip() if email_raw is not None and str(email_raw).strip() else None
-        lastname_raw = row.get("lastname")
-        last_name = (
-            str(lastname_raw).strip()
-            if lastname_raw is not None and str(lastname_raw).strip()
-            else None
-        )
         contacts.append(
             {
                 "dwid": str(row["dwid"]),
                 "state": str(row["state"]).strip().upper(),
                 "first_initial": _initial_from_name(row.get("firstname")),
                 "last_initial": _initial_from_name(row.get("lastname")),
-                "last_name": last_name,
                 "dob": dob,
                 "email": email,
                 "phones": phones,
@@ -2085,169 +2093,16 @@ def _fetch_person_contacts_from_bq(
     return contacts
 
 
-_CONTACTS_ERROR_MESSAGES: dict[str, str] = {
-    "no_dwids": "No matched person identifiers could be resolved for this request.",
-    "no_lookup_state": (
-        "Requestor state is missing; person lookup requires a two-letter state."
-    ),
-    "invalid_state": "Requestor state is invalid or not in the served allowlist.",
-    "no_matching_result": "No matching result row was found for this request.",
-    "no_consumer_id": "Single-match result has no stored consumer id.",
-    "non_drop_intake": "Person re-lookup requires DROP intake with a raw record id.",
-    "missing_hash": "No primary hash was available to resolve matched persons.",
-    "bq_not_configured": "BigQuery is not configured in this environment.",
-    "bq_library_missing": "BigQuery client library is not available in this environment.",
-    "bq_credentials": "BigQuery credentials are unavailable in this environment.",
-    "bq_permission_denied": "BigQuery denied access for person or hash lookup.",
-    "bq_query_failed": "BigQuery person lookup failed.",
-    "enrichment_failed": "Matched person enrichment failed unexpectedly.",
-}
-
-_CONTACTS_ERROR_HINTS: dict[str, str] = {
-    "no_dwids": "Confirm hash index coverage for this state, then rematch or reload.",
-    "no_lookup_state": "Set or correct requestor state (two-letter), then reload.",
-    "invalid_state": "Use a served USPS state acronym, then reload.",
-    "no_matching_result": "Re-run matching or refresh the request detail.",
-    "no_consumer_id": (
-        "Inspect matching attempt audit; rematch if the match did not persist a "
-        "consumer id."
-    ),
-    "non_drop_intake": "Confirm intake source and raw record linkage.",
-    "missing_hash": "Confirm DROP list type and hash fields on the raw record.",
-    "bq_not_configured": "Verify BQ client, credentials, and env for this deployment.",
-    "bq_library_missing": "Install/deploy google-cloud-bigquery with admin-api.",
-    "bq_credentials": (
-        "Fix ADC / runtime service account; do not paste key material into tickets."
-    ),
-    "bq_permission_denied": (
-        "Grant the runtime SA read on hash index + MDR person/phones datasets."
-    ),
-    "bq_query_failed": (
-        "Check admin-api logs for matching_contacts_enrichment_failed (type + "
-        "code only)."
-    ),
-    "enrichment_failed": (
-        "Retry; if persistent, check logs by request id (no PII in log fields)."
-    ),
-}
-
-_BQ_LIBRARY_MISSING_MESSAGE = "google-cloud-bigquery is not installed"
-_BQ_PERMISSION_TYPE_NAMES = ("Forbidden", "PermissionDenied", "Unauthorized")
-_BQ_CAUSE_CHAIN_DEPTH_CAP = 4
-
-
-def _contacts_error(
-    code: str, *, stage: str, exc_type: str | None = None
-) -> dict[str, Any]:
-    """Build a fixed contacts error (no exception text ever on the wire)."""
-    out: dict[str, Any] = {
-        "code": code,
-        "message": _CONTACTS_ERROR_MESSAGES[code],
-        "stage": stage,
-        "hint": _CONTACTS_ERROR_HINTS[code],
-    }
-    if exc_type:
-        out["exc_type"] = exc_type
-    return out
-
-
-def _classify_bq_exception(
-    exc: BaseException | None,
-    *,
-    _depth: int = 0,
-    _seen: set[int] | None = None,
-) -> tuple[str, str] | None:
-    """Walk exc + cause/context chain for a known BigQuery failure signature.
-
-    Depth-capped and cycle-guarded. Returns ``(code, exc_type_name)`` for the
-    leaf exception that matched, or ``None`` when nothing in the chain is a
-    recognized library/credentials/permission signature.
-    """
-    if exc is None or _depth > _BQ_CAUSE_CHAIN_DEPTH_CAP:
-        return None
-    seen = _seen if _seen is not None else set()
-    if id(exc) in seen:
-        return None
-    seen.add(id(exc))
-
-    type_name = type(exc).__name__
-    module = type(exc).__module__ or ""
-
-    if isinstance(exc, ImportError):
-        return "bq_library_missing", type_name
-    if isinstance(exc, RuntimeError) and _BQ_LIBRARY_MISSING_MESSAGE in str(exc):
-        return "bq_library_missing", type_name
-
-    if (
-        type_name in ("DefaultCredentialsError", "RefreshError")
-        or "DefaultCredentials" in type_name
-        or "DefaultCredentials" in module
-    ):
-        return "bq_credentials", type_name
-
-    if type_name in _BQ_PERMISSION_TYPE_NAMES:
-        return "bq_permission_denied", type_name
-
-    for next_exc in (exc.__cause__, exc.__context__):
-        if next_exc is not None and next_exc is not exc:
-            result = _classify_bq_exception(next_exc, _depth=_depth + 1, _seen=seen)
-            if result is not None:
-                return result
-    return None
-
-
-def _contacts_enrichment_error_from_exc(
-    exc: BaseException, *, stage: str
-) -> dict[str, Any]:
-    """Map an exception → a contacts error dict. Never puts str(exc) on the wire.
-
-    Library/credentials/permission signatures win regardless of stage; an
-    unclassified exception falls back to ``bq_query_failed`` when raised from a
-    known BQ call site (``hash_lookup`` / ``person_fetch``) or ``enrichment_failed``
-    otherwise (e.g. the outer detail-catch safety net at stage ``enrich``).
-    """
-    classified = _classify_bq_exception(exc)
-    if classified is not None:
-        code, exc_type = classified
-        return _contacts_error(code, stage=stage, exc_type=exc_type)
-    if stage in ("hash_lookup", "person_fetch"):
-        return _contacts_error("bq_query_failed", stage=stage, exc_type=type(exc).__name__)
-    return _contacts_error("enrichment_failed", stage=stage, exc_type=type(exc).__name__)
-
-
-def _log_contacts_enrichment_error(
-    *, request_id: str, err: dict[str, Any], exc: BaseException
-) -> None:
-    """Privacy-safe: error_code / error_stage / error_type only — never str(exc)."""
-    logger.warning(
-        "matching_contacts_enrichment_failed",
-        extra={
-            "event": "matching_contacts_enrichment_failed",
-            "request_id": request_id,
-            "error_code": err["code"],
-            "error_stage": err.get("stage"),
-            "error_type": err.get("exc_type") or type(exc).__name__,
-        },
-    )
-
-
 async def _resolve_matched_dwids(
     conn: Any,
     *,
     request_id: str,
     match_count: int,
     requestor_state: str | None,
-) -> tuple[list[str], str | None, str | None]:
-    """Resolve DWIDs for review enrichment (single: DB consumer_id; multi: BQ re-lookup).
-
-    Returns ``(dwids, lookup_state, resolve_error_code)``. Soft empty cases (all
-    surfaced at wire ``stage="resolve"`` by the caller) set ``resolve_error_code``
-    to one of ``no_matching_result``, ``no_lookup_state``, ``invalid_state``,
-    ``no_consumer_id``, ``non_drop_intake``, ``missing_hash``, or ``no_dwids``.
-    BigQuery hash-lookup failures raise for the enrich classifier (``hash_lookup``).
-    """
+) -> tuple[list[str], str | None]:
+    """Resolve DWIDs for review enrichment (single: DB consumer_id; multi: BQ re-lookup)."""
     if match_count <= 0:
-        return [], requestor_state, None
+        return [], requestor_state
 
     row = await conn.fetchrow(
         """
@@ -2264,45 +2119,35 @@ async def _resolve_matched_dwids(
         request_id,
     )
     if row is None:
-        return [], requestor_state, "no_matching_result"
+        return [], requestor_state
 
     lookup_state = requestor_state or (
         str(row["requestor_state"]).strip().upper() if row["requestor_state"] else None
     )
+    if match_count == 1 and row["consumer_id"]:
+        return [str(row["consumer_id"])], lookup_state
+
+    if row["intake_source"] != IntakeSource.DROP.value or row["raw_record_id"] is None:
+        return [], lookup_state
     if not lookup_state:
-        return [], None, "no_lookup_state"
+        return [], lookup_state
 
     try:
         normalized_state = normalize_state_acronym(lookup_state)
     except InvalidStateAcronymError:
-        return [], lookup_state, "invalid_state"
-
-    if match_count == 1 and row["consumer_id"]:
-        return [str(row["consumer_id"])], normalized_state, None
-
-    # Single match without a persisted consumer id still attempts the hash
-    # re-lookup fallback; only report `no_consumer_id` when that path is
-    # itself ineligible, rather than the coarser multi-match codes below.
-    single_missing_consumer = match_count == 1 and not row["consumer_id"]
-
-    if row["intake_source"] != IntakeSource.DROP.value or row["raw_record_id"] is None:
-        code = "no_consumer_id" if single_missing_consumer else "non_drop_intake"
-        return [], normalized_state, code
+        return [], lookup_state
 
     payload = await request_resolver(conn, IntakeSource.DROP, int(row["raw_record_id"]))
     hash_value, _via = _primary_hash_for_list_type(payload.list_type, payload.hash_fields)
     if not hash_value:
-        code = "no_consumer_id" if single_missing_consumer else "missing_hash"
-        return [], normalized_state, code
+        return [], normalized_state
 
     dwids = _lookup_dwids_by_hash(
         list_type=payload.list_type,
         hash_value=hash_value,
         lookup_state=normalized_state,
     )
-    if not dwids:
-        return [], normalized_state, "no_dwids"
-    return dwids, normalized_state, None
+    return dwids, normalized_state
 
 
 async def _dwids_for_promote(
@@ -2337,7 +2182,7 @@ async def _dwids_for_promote(
     if match_count is None:
         return None
     try:
-        dwids, _state, _resolve_error = await _resolve_matched_dwids(
+        dwids, _state = await _resolve_matched_dwids(
             conn,
             request_id=request_id,
             match_count=int(match_count),
@@ -2367,57 +2212,25 @@ async def enrich_matching_result_contacts(
     """Attach matched_contacts for matching review (PII — never logged or audited)."""
     match_count = int(detail.get("match_count") or 0)
     if match_count <= 0:
-        return {
-            "matched_contacts": [],
-            "matched_contacts_status": "none",
-            "matched_contacts_error": None,
-        }
+        return {"matched_contacts": [], "matched_contacts_status": "none"}
 
-    try:
-        dwids, lookup_state, resolve_code = await _resolve_matched_dwids(
-            conn,
-            request_id=request_id,
-            match_count=match_count,
-            requestor_state=detail.get("requestor_state"),
-        )
-    except Exception as exc:
-        # Hash re-lookup (and rare resolve bugs) raise from inside resolve today.
-        err = _contacts_enrichment_error_from_exc(exc, stage="hash_lookup")
-        _log_contacts_enrichment_error(request_id=request_id, err=err, exc=exc)
-        return {
-            "matched_contacts": [],
-            "matched_contacts_status": "unavailable",
-            "matched_contacts_error": err,
-        }
+    dwids, lookup_state = await _resolve_matched_dwids(
+        conn,
+        request_id=request_id,
+        match_count=match_count,
+        requestor_state=detail.get("requestor_state"),
+    )
+    if not dwids or not lookup_state:
+        return {"matched_contacts": [], "matched_contacts_status": "unavailable"}
 
-    if resolve_code:
-        return {
-            "matched_contacts": [],
-            "matched_contacts_status": "unavailable",
-            "matched_contacts_error": _contacts_error(resolve_code, stage="resolve"),
-        }
+    contacts = await asyncio.to_thread(
+        _fetch_person_contacts_from_bq,
+        dwids=dwids,
+        lookup_state=lookup_state,
+        client=bq_client,
+    )
+    return {"matched_contacts": contacts, "matched_contacts_status": "ok"}
 
-    try:
-        contacts = await asyncio.to_thread(
-            _fetch_person_contacts_from_bq,
-            dwids=dwids,
-            lookup_state=lookup_state or "",
-            client=bq_client,
-        )
-    except Exception as exc:
-        err = _contacts_enrichment_error_from_exc(exc, stage="person_fetch")
-        _log_contacts_enrichment_error(request_id=request_id, err=err, exc=exc)
-        return {
-            "matched_contacts": [],
-            "matched_contacts_status": "unavailable",
-            "matched_contacts_error": err,
-        }
-
-    return {
-        "matched_contacts": contacts,
-        "matched_contacts_status": "ok",
-        "matched_contacts_error": None,
-    }
 
 def _serialize_matching_result_row(row: Any) -> dict[str, Any]:
     """Ids/counts/status/state acronym only — never consumer_id or PII."""
@@ -2661,7 +2474,6 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
                attempted_at,
                completed_at,
                error_code,
-               error_message,
                audit_payload
           FROM matching_attempts
          WHERE request_id = $1::uuid
@@ -2681,9 +2493,6 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
             if a["completed_at"] is not None
             else None,
             "error_code": a["error_code"],
-            "error_message": (
-                redact_error_text(a["error_message"]) if a["error_message"] else None
-            ),
             # Allowlisted JSONB already — never add hash/dwid fields here.
             "audit_payload": _coerce_audit_payload(a["audit_payload"]),
         }
@@ -2700,18 +2509,19 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
                 )
             )
         except Exception as exc:
-            # Unexpected bug escaping enrich — not a classified BQ soft code, so
-            # the classifier's stage="enrich" fallback is `enrichment_failed`
-            # rather than a false `bq_query_failed` blame.
-            err = _contacts_enrichment_error_from_exc(exc, stage="enrich")
-            _log_contacts_enrichment_error(request_id=request_id, err=err, exc=exc)
+            logger.warning(
+                "matching_contacts_enrichment_failed",
+                extra={
+                    "event": "matching_contacts_enrichment_failed",
+                    "request_id": request_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
             detail["matched_contacts"] = []
             detail["matched_contacts_status"] = "unavailable"
-            detail["matched_contacts_error"] = err
     else:
         detail["matched_contacts"] = []
         detail["matched_contacts_status"] = "none"
-        detail["matched_contacts_error"] = None
     return detail
 
 
@@ -3300,8 +3110,21 @@ async def drop_workers(_principal: SuperAdminPrincipal):
     async with pool.acquire() as conn:
         queues = await collect_queue_depths(conn)
     by_worker = {q["worker"]: q for q in queues}
+    worker_names: list[str] = []
+    try:
+        from admin_api.worker_fleet import list_fleet_worker_keys
+
+        worker_names = list_fleet_worker_keys()
+    except Exception:
+        logger.exception(
+            "fleet_discovery_workers_fallback",
+            extra={"event": "fleet_discovery_workers_fallback"},
+        )
+        worker_names = []
+    if not worker_names:
+        worker_names = [name for name, _attr in WORKER_KEYS]
     workers = []
-    for name, _attr in WORKER_KEYS:
+    for name in worker_names:
         probe = health.get(name) or {}
         queue = by_worker.get(name) or {}
         ready_body = probe.get("body")
@@ -3350,60 +3173,20 @@ class RetryConfigPatchBody(BaseModel):
     max_attempts: int = Field(ge=4, le=20)
 
 
-_RETRY_CONFIG_TABLES = (
-    "matching_attempts",
-    "drop_connector_attempts",
-    "drop_ingest_attempts",
-    "hash_index_refresh_attempts",
-)
+# Deprecated static inventory — discovery via attempt_tables.discover_attempt_table_names.
+# Kept as an empty alias so importers fail loudly if they still treat this as the source.
+_RETRY_CONFIG_TABLES: tuple[str, ...] = ()
 
 
 @health_router.get("/retry-config")
 async def get_retry_config(_principal: SuperAdminPrincipal):
-    """Current per-table max_attempts (defaults + ops_retry_config overrides)."""
-    from habeas_privacy_core.queue.reap import ReapedTableConfig
+    """Current per-table max_attempts (discovered attempt tables + ops_retry_config)."""
+    from admin_api.attempt_tables import build_retry_config_payload
 
     _require_database()
     pool = get_pool()
-    overrides: dict[str, dict[str, Any]] = {}
-    try:
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT table_name, max_attempts, updated_at, updated_by
-                  FROM ops_retry_config
-                 ORDER BY table_name
-                """
-            )
-        overrides = {r["table_name"]: dict(r) for r in rows}
-    except Exception as exc:
-        logger.warning(
-            "ops_retry_config_unavailable",
-            extra={
-                "event": "ops_retry_config_unavailable",
-                "error_type": type(exc).__name__,
-            },
-        )
-    tables = []
-    for table in _RETRY_CONFIG_TABLES:
-        default = ReapedTableConfig(table=table).max_attempts
-        override = overrides.get(table)
-        tables.append(
-            {
-                "table_name": table,
-                "max_attempts": int(override["max_attempts"])
-                if override
-                else default,
-                "default_max_attempts": default,
-                "overridden": override is not None,
-                "updated_at": override["updated_at"].isoformat()
-                if override and override.get("updated_at")
-                else None,
-                "updated_by": override.get("updated_by") if override else None,
-                "apply_note": "reaper_reads_on_next_cycle",
-            }
-        )
-    return {"tables": tables, "floor": 4}
+    async with pool.acquire() as conn:
+        return await build_retry_config_payload(conn)
 
 
 @health_router.patch("/retry-config")
@@ -3413,33 +3196,18 @@ async def patch_retry_config(
     actor: DropMutationActor,
 ):
     """Persist max_attempts override (≥4). Matching must stay ≥4 (A6)."""
-    if body.table_name not in _RETRY_CONFIG_TABLES:
-        raise HTTPException(status_code=422, detail=f"unknown table: {body.table_name}")
-    if body.table_name == "matching_attempts" and body.max_attempts < 4:
-        raise HTTPException(status_code=422, detail="matching max_attempts floor is 4")
+    from admin_api.attempt_tables import apply_retry_config_patch
+
     _require_database()
     decided_by = decided_by_for_mutation(actor, None)
     pool = get_pool()
     async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO ops_retry_config (table_name, max_attempts, updated_at, updated_by)
-            VALUES ($1, $2, NOW(), $3)
-            ON CONFLICT (table_name) DO UPDATE
-               SET max_attempts = EXCLUDED.max_attempts,
-                   updated_at = NOW(),
-                   updated_by = EXCLUDED.updated_by
-            """,
-            body.table_name,
-            body.max_attempts,
-            decided_by,
+        return await apply_retry_config_patch(
+            table_name=body.table_name,
+            max_attempts=body.max_attempts,
+            decided_by=decided_by,
+            conn=conn,
         )
-    return {
-        "status": "ok",
-        "table_name": body.table_name,
-        "max_attempts": body.max_attempts,
-        "apply_note": "reaper_reads_on_next_cycle",
-    }
 
 
 @router.get("/stats/global")
@@ -3490,5 +3258,5 @@ async def drop_stats_global(_principal: SuperAdminPrincipal):
         "matching_failed_terminal": int(matching_failed or 0),
         "hash_index_refresh_inflight": int(hash_inflight or 0),
         "workers_down": workers_down,
-        "workers_total": len(WORKER_KEYS),
+        "workers_total": len(worker_health) if worker_health else len(WORKER_KEYS),
     }

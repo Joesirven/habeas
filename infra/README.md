@@ -414,6 +414,68 @@ CONFIRM=yes ENV=dev ./infra/scripts/upsert_worker_scheduler_jobs.sh
 
 Hash-index refresh is **not** auto-scheduled (manual/ops enqueue).
 
+### Fleet discovery naming conventions
+
+Pull-based inventory joins Cloud Scheduler ∪ Cloud Run (no worker heartbeat). Codify these as the single source of truth for admin-api discovery and Workers Settings.
+
+#### Identifiers
+
+| Concept | Form | Examples |
+|---------|------|----------|
+| **worker_key** | `snake_case` stable app id | `matching`, `data_fulfillment`, `mailchimp`, `google_sheets` |
+| **Cloud Run service name** | `{service_slug}{-dev\|}` | `matching-dev`, `data-fulfillment-dispatcher-dev`, `google-sheets-dev` |
+| **worker_id** (runtime env) | `{service_slug}-dev` (dev) | `mailchimp-dev`, `admin-api-dev` |
+| **Scheduler job id** | `dpra-{env}-{job_slug}` | `dpra-dev-matching`, `dpra-dev-drop-connector-download` |
+| **job_key** (admin-api) | `snake_case`; becomes job slug via `_` → `-` | `drop_connector_download` → `dpra-dev-drop-connector-download` |
+
+`job_name_for` already implements: `f"{prefix}-{job_key.replace('_', '-')}"` with `CLOUD_SCHEDULER_JOB_PREFIX=dpra-dev`.
+
+#### Env suffix / DEV filter
+
+| Env | Cloud Run suffix | Scheduler prefix |
+|-----|------------------|------------------|
+| `dev` | `-dev` | `dpra-dev` |
+| `prod` | *(none)* for most workers; some use `-prod` | `dpra-prod` |
+
+**Discovery filter (DEV):** only services whose name ends with `-dev`, and only scheduler jobs whose id starts with `dpra-dev-`. Never union prod services (`admin-api-prod`, bare prod workers) into the DEV fleet view.
+
+#### Excludes
+
+**EXCLUDE_SERVICES (non-workers):** `admin-api-dev`, `admin-web-dev`, `ops-ia-web-dev` (+ any future `*-web-dev`).
+
+**EXCLUDE_JOBS:** `test-probe-job`, any job not prefixed `dpra-dev-`.
+
+Do **not** treat Cloud Run **Jobs** (`matching-drain-dev`) as fleet workers; surface drain as metadata on `matching` if needed.
+
+#### Service slug ↔ worker_key aliases
+
+| worker_key | Cloud Run service (dev) | Notes |
+|------------|-------------------------|-------|
+| `drop_connector` | `drop-connector-dev` | |
+| `drop_ingestor` | `drop-ingestor-dev` | two scheduler jobs (land / promote) |
+| `request_dispatcher` | `request-dispatcher-dev` | |
+| `matching` | `matching-dev` | drain is a Job, not a Scheduler upsert |
+| `data_fulfillment` | `data-fulfillment-dispatcher-dev` | **alias:** strip `-dispatcher` before snake |
+| `hash_index_refresh` | `hash-index-refresh-dev` | not auto-scheduled |
+| `reaper` | `reaper-dev` | |
+| `intake_drop_poller` | `intake-drop-poller-dev` | discover-only until scheduled |
+| `drop_notice_dispatcher` | `drop-notice-dispatcher-dev` | not live yet |
+
+**Connection / vertical workers (lock before first Cloud Run create):**
+
+| worker_key | service_name (dev) |
+|------------|-------------------|
+| `mailchimp` | `mailchimp-dev` |
+| `paylocity` | `paylocity-dev` |
+| `lever` | `lever-dev` |
+| `auth0` | `auth0-dev` |
+| `google_sheets` | `google-sheets-dev` |
+| `cassandra` | `cassandra-dev` |
+
+Rules: service name = kebab-case + `-dev`; `google_sheets` → `google-sheets-dev` (hyphen), worker_key stays underscore. Health probe path is always `GET {service_url}/readyz`.
+
+**Discover-only this wave:** do **not** expand `upsert_worker_scheduler_jobs.sh` for undeployed connection workers. Discovery must work for scheduled DROP workers, unscheduled deployed workers (`hash-index-refresh`, `intake-drop-poller`), and future `*-dev` services as soon as they appear.
+
 ## Manual deploy (dev)
 
 ```bash

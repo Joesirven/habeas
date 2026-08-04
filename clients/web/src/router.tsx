@@ -3,19 +3,18 @@ import { TanStackRouterDevtools } from '@tanstack/router-devtools'
 
 import { AppShell } from '@/components/AppShell'
 import { DashboardPage } from '@/routes/index'
-import { OpsDashboardPage } from '@/routes/ops/dashboard'
 import { DeMonitorPage } from '@/routes/ops/de-monitor'
 import { OpsIncidentsPage } from '@/routes/ops/incidents'
 import { OpsJobsPage } from '@/routes/ops/jobs'
 import { OpsRunsPage } from '@/routes/ops/runs'
 import { RunDetailPage } from '@/routes/ops/run-detail'
 import { WorkersPage, WorkersTrendsPage } from '@/routes/ops/workers'
+import { AttemptTablesIndexPage } from '@/routes/ops/workers/AttemptTablesIndexPage'
+import { WorkerQueuePage } from '@/routes/ops/workers/WorkerQueuePage'
 import { WorkersSettingsPage } from '@/routes/ops/workers/settings'
 import { ConnectionsPage } from '@/routes/ops/connections'
 import { ConnectTokenPage } from '@/routes/connect.$token'
-import { HealthConfigurationPage } from '@/routes/ops/health/configuration'
 import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
-import { HealthLandingPage } from '@/routes/ops/health/index'
 import { RequestDetailPage } from '@/routes/requests/$requestId'
 import { NeedsAttentionPage } from '@/routes/requests/needs-attention'
 import { ManualRequestPage } from '@/routes/requests/new'
@@ -30,7 +29,6 @@ export const PIPELINE_TABS = [
   'history',
   'errors',
   'logs',
-  'configurations',
 ] as const
 
 export type PipelineTab = (typeof PIPELINE_TABS)[number]
@@ -315,6 +313,94 @@ function parseWorkersSearch(search: Record<string, unknown>): WorkersSearch {
   return parsed
 }
 
+/** Attempt-tables index — `/ops/workers/settings/tables`. */
+export type AttemptTablesSearch = {
+  table?: string
+  worker?: string
+}
+
+function parseAttemptTablesSearch(
+  search: Record<string, unknown>,
+): AttemptTablesSearch {
+  const parsed: AttemptTablesSearch = {}
+  if (typeof search.table === 'string' && search.table.trim()) {
+    parsed.table = search.table.trim()
+  }
+  if (typeof search.worker === 'string' && search.worker.trim()) {
+    parsed.worker = search.worker.trim()
+  }
+  return parsed
+}
+
+export const WORKER_QUEUE_WINDOWS = ['8h', '1w', '3m', 'custom'] as const
+export type WorkerQueueWindow = (typeof WORKER_QUEUE_WINDOWS)[number]
+
+/** Worker queue browser — `/ops/workers/$workerName/queue`. */
+export type WorkerQueueSearch = {
+  table?: string
+  status?: string
+  window?: WorkerQueueWindow
+  since?: string
+  request_id?: string
+  step?: string
+  limit?: number
+  offset?: number
+}
+
+function parseWorkerQueueLimit(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 1) {
+    return Math.min(200, Math.floor(value))
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10)
+    if (Number.isFinite(parsed) && parsed >= 1) return Math.min(200, parsed)
+  }
+  return undefined
+}
+
+function parseWorkerQueueOffset(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value)
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10)
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed
+  }
+  return undefined
+}
+
+function parseWorkerQueueSearch(
+  search: Record<string, unknown>,
+): WorkerQueueSearch {
+  const parsed: WorkerQueueSearch = {}
+  if (typeof search.table === 'string' && search.table.trim()) {
+    parsed.table = search.table.trim()
+  }
+  if (typeof search.status === 'string' && search.status.trim()) {
+    parsed.status = search.status.trim()
+  }
+  if (
+    typeof search.window === 'string' &&
+    (WORKER_QUEUE_WINDOWS as readonly string[]).includes(search.window)
+  ) {
+    parsed.window = search.window as WorkerQueueWindow
+  }
+  if (typeof search.since === 'string' && search.since.trim()) {
+    parsed.since = search.since.trim()
+  }
+  if (typeof search.request_id === 'string' && search.request_id.trim()) {
+    parsed.request_id = search.request_id.trim()
+  }
+  if (typeof search.step === 'string' && search.step.trim()) {
+    parsed.step = search.step.trim()
+  }
+  const limit = parseWorkerQueueLimit(search.limit)
+  if (limit != null) parsed.limit = limit
+  const offset = parseWorkerQueueOffset(search.offset)
+  if (offset != null) parsed.offset = offset
+  return parsed
+}
+
 /** @deprecated Use WorkersSearch — kept for /ops/de-monitor redirect. */
 export const DE_MONITOR_TABS = WORKERS_TABS
 export type DeMonitorStatusTab = WorkersStatusTab
@@ -364,6 +450,13 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
   validateSearch: (search: Record<string, unknown>) => parseIndexSearch(search),
+  beforeLoad: ({ location }) => {
+    // Legacy Pipeline "Configurations" tab → Workers Settings
+    const rawTab = (location.search as Record<string, unknown>).tab
+    if (rawTab === 'configurations') {
+      throw redirect({ to: '/ops/workers/settings' })
+    }
+  },
   component: DashboardPage,
 })
 
@@ -546,7 +639,10 @@ const matchingReviewRoute = createRoute({
 const opsDashboardRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/dashboard',
-  component: OpsDashboardPage,
+  beforeLoad: () => {
+    throw redirect({ to: '/ops/drop-pipeline', search: { tab: 'pipeline' } })
+  },
+  component: () => null,
 })
 
 const opsWorkersRoute = createRoute({
@@ -574,6 +670,14 @@ const opsWorkersSettingsRoute = createRoute({
   component: WorkersSettingsPage,
 })
 
+const opsWorkersSettingsTablesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/workers/settings/tables',
+  validateSearch: (search: Record<string, unknown>) =>
+    parseAttemptTablesSearch(search),
+  component: AttemptTablesIndexPage,
+})
+
 const opsConnectionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/connections',
@@ -590,6 +694,15 @@ const opsWorkersTrendsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/workers/trends',
   component: WorkersTrendsPage,
+})
+
+/** Queue browser — register before `$workerName` → Runs redirect. */
+const opsWorkerQueueRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/workers/$workerName/queue',
+  validateSearch: (search: Record<string, unknown>) =>
+    parseWorkerQueueSearch(search),
+  component: WorkerQueuePage,
 })
 
 const opsWorkerDetailRoute = createRoute({
@@ -653,22 +766,37 @@ const dropPipelineRoute = createRoute({
   component: () => null,
 })
 
+const opsWorkersEscalationsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/ops/workers/escalations',
+  component: HealthEscalationsPage,
+})
+
 const healthRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/health',
-  component: HealthLandingPage,
+  beforeLoad: () => {
+    throw redirect({ to: '/ops/workers' })
+  },
+  component: () => null,
 })
 
 const healthEscalationsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/health/escalations',
-  component: HealthEscalationsPage,
+  beforeLoad: () => {
+    throw redirect({ to: '/ops/workers/escalations' })
+  },
+  component: () => null,
 })
 
 const healthConfigurationRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/health/configuration',
-  component: HealthConfigurationPage,
+  beforeLoad: () => {
+    throw redirect({ to: '/ops/workers/settings' })
+  },
+  component: () => null,
 })
 
 const runDetailRoute = createRoute({
@@ -690,9 +818,12 @@ const routeTree = rootRoute.addChildren([
   opsWorkersRoute,
   opsWorkersFailedRoute,
   opsWorkersSettingsRoute,
+  opsWorkersSettingsTablesRoute,
+  opsWorkersEscalationsRoute,
   opsConnectionsRoute,
   connectTokenRoute,
   opsWorkersTrendsRoute,
+  opsWorkerQueueRoute,
   opsWorkerDetailRoute,
   opsDeMonitorRoute,
   opsRunsRoute,

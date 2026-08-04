@@ -653,6 +653,8 @@ def test_hash_index_refresh_enqueue_rejects_invalid_state(monkeypatch: pytest.Mo
 
 
 def test_retry_config_get_and_patch_floor(monkeypatch: pytest.MonkeyPatch):
+    from admin_api import attempt_tables as at
+
     class _Acquire:
         async def __aenter__(self):
             conn = MagicMock()
@@ -667,8 +669,23 @@ def test_retry_config_get_and_patch_floor(monkeypatch: pytest.MonkeyPatch):
         def acquire(self):
             return _Acquire()
 
+    async def fake_discover(_conn: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "table_name": "matching_attempts",
+                "worker_key": "matching",
+                "columns": ["id", "status", "step", "attempted_at", "worker_id", "claim_expires_at"],
+                "supports_attempt_retry": True,
+            }
+        ]
+
+    async def fake_names(_conn: Any) -> tuple[str, ...]:
+        return ("matching_attempts",)
+
     monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
     monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(at, "discover_attempt_tables", fake_discover)
+    monkeypatch.setattr(at, "discover_attempt_table_names", fake_names)
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
     monkeypatch.setattr(roles.settings, "admin_api_admins", "")
     monkeypatch.setattr(roles.settings, "admin_api_legals", "")
@@ -971,7 +988,6 @@ async def test_get_matching_result_detail_shape(monkeypatch: pytest.MonkeyPatch)
                 attempted_at=recorded,
                 completed_at=recorded,
                 error_code=None,
-                error_message="lookup failed email=jane@example.com consumer_id=5551212",
                 audit_payload={"match_count": 4, "lookup_state": "CA"},
             )
         ]
@@ -993,17 +1009,7 @@ async def test_get_matching_result_detail_shape(monkeypatch: pytest.MonkeyPatch)
         drop_pipeline,
         "enrich_matching_result_contacts",
         AsyncMock(
-            return_value={
-                "matched_contacts": [],
-                "matched_contacts_status": "unavailable",
-                "matched_contacts_error": {
-                    "code": "bq_query_failed",
-                    "message": drop_pipeline._CONTACTS_ERROR_MESSAGES["bq_query_failed"],
-                    "stage": "person_fetch",
-                    "hint": drop_pipeline._CONTACTS_ERROR_HINTS["bq_query_failed"],
-                    "exc_type": "RuntimeError",
-                },
-            }
+            return_value={"matched_contacts": [], "matched_contacts_status": "unavailable"}
         ),
     )
     detail = await drop_pipeline.get_matching_result_detail(
@@ -1015,19 +1021,10 @@ async def test_get_matching_result_detail_shape(monkeypatch: pytest.MonkeyPatch)
     assert detail["requestor_state"] == "TX"
     assert detail["attempt_id"] == 99
     assert detail["attempts"][0]["audit_payload"]["lookup_state"] == "CA"
-    assert detail["attempts"][0]["error_message"] is not None
-    assert "jane@example.com" not in detail["attempts"][0]["error_message"]
-    assert "5551212" not in detail["attempts"][0]["error_message"]
     assert detail["assignment"]["target_role"] == "legal"
     assert "consumer_id" not in detail
     assert "email" not in detail["attempts"][0]["audit_payload"]
-    assert detail["matched_contacts_status"] == "unavailable"
-    err = detail["matched_contacts_error"]
-    assert err["code"] == "bq_query_failed"
-    assert err["message"] == drop_pipeline._CONTACTS_ERROR_MESSAGES["bq_query_failed"]
-    assert err["stage"] == "person_fetch"
-    assert err["hint"] == drop_pipeline._CONTACTS_ERROR_HINTS["bq_query_failed"]
-    assert set(err) >= {"code", "message", "stage", "hint"}
+
 
 @pytest.mark.asyncio
 async def test_get_matching_result_detail_tolerates_list_audit_payload(
@@ -1063,7 +1060,6 @@ async def test_get_matching_result_detail_tolerates_list_audit_payload(
                 attempted_at=recorded,
                 completed_at=recorded,
                 error_code=None,
-                error_message=None,
                 audit_payload=["legacy", "list"],
             )
         ]
@@ -1077,17 +1073,7 @@ async def test_get_matching_result_detail_tolerates_list_audit_payload(
         drop_pipeline,
         "enrich_matching_result_contacts",
         AsyncMock(
-            return_value={
-                "matched_contacts": [],
-                "matched_contacts_status": "unavailable",
-                "matched_contacts_error": {
-                    "code": "bq_credentials",
-                    "message": drop_pipeline._CONTACTS_ERROR_MESSAGES["bq_credentials"],
-                    "stage": "person_fetch",
-                    "hint": drop_pipeline._CONTACTS_ERROR_HINTS["bq_credentials"],
-                    "exc_type": "DefaultCredentialsError",
-                },
-            }
+            return_value={"matched_contacts": [], "matched_contacts_status": "unavailable"}
         ),
     )
     detail = await drop_pipeline.get_matching_result_detail(
@@ -1095,7 +1081,7 @@ async def test_get_matching_result_detail_tolerates_list_audit_payload(
     )
     assert detail is not None
     assert detail["attempts"][0]["audit_payload"] == {}
-    assert detail["matched_contacts_error"]["code"] == "bq_credentials"
+
 
 @pytest.mark.asyncio
 async def test_enrich_matching_result_contacts_single_uses_consumer_id(
@@ -1120,7 +1106,6 @@ async def test_enrich_matching_result_contacts_single_uses_consumer_id(
                 "state": "CA",
                 "first_initial": "J",
                 "last_initial": "D",
-                "last_name": "Doe",
                 "dob": "1990-01-15",
                 "email": "jane@example.com",
                 "phones": [{"type": "cell", "number": "5551234567"}],
@@ -1134,53 +1119,8 @@ async def test_enrich_matching_result_contacts_single_uses_consumer_id(
         detail={"match_count": 1, "requestor_state": "CA"},
     )
     assert payload["matched_contacts_status"] == "ok"
-    assert payload["matched_contacts_error"] is None
     assert payload["matched_contacts"][0]["first_initial"] == "J"
-    assert payload["matched_contacts"][0]["last_name"] == "Doe"
-    assert "first_name" not in payload["matched_contacts"][0]
     assert payload["matched_contacts"][0]["email"] == "jane@example.com"
-
-def test_fetch_person_contacts_from_bq_includes_stripped_last_name():
-    """BQ lastname becomes last_name; full first name is never returned."""
-
-    class _FakeClient:
-        def query(self, _sql: str, job_config: Any = None) -> list[dict[str, Any]]:
-            return [
-                {
-                    "dwid": "1001",
-                    "state": "ca",
-                    "firstname": "Jane",
-                    "lastname": "  Doe  ",
-                    "birthdate": "1990-01-15",
-                    "emailaddress": "jane@example.com",
-                    "likely_cell_phone": None,
-                    "likely_land_phone": None,
-                },
-                {
-                    "dwid": "1002",
-                    "state": "CA",
-                    "firstname": "Alex",
-                    "lastname": "   ",
-                    "birthdate": None,
-                    "emailaddress": None,
-                    "likely_cell_phone": "5551112222",
-                    "likely_land_phone": None,
-                },
-            ]
-
-    contacts = drop_pipeline._fetch_person_contacts_from_bq(
-        dwids=["1001", "1002"],
-        lookup_state="CA",
-        client=_FakeClient(),
-    )
-    assert contacts[0]["last_name"] == "Doe"
-    assert contacts[0]["first_initial"] == "J"
-    assert contacts[0]["last_initial"] == "D"
-    assert "firstname" not in contacts[0]
-    assert "first_name" not in contacts[0]
-    assert contacts[1]["last_name"] is None
-    assert contacts[1]["first_initial"] == "A"
-    assert contacts[1]["phones"] == [{"type": "cell", "number": "5551112222"}]
 
 
 @pytest.mark.asyncio
@@ -1221,7 +1161,6 @@ async def test_enrich_matching_result_contacts_multi_relooks_up_hash(
                 "state": kwargs["lookup_state"],
                 "first_initial": "A",
                 "last_initial": "B",
-                "last_name": "Baker",
                 "dob": None,
                 "email": None,
                 "phones": [],
@@ -1236,484 +1175,8 @@ async def test_enrich_matching_result_contacts_multi_relooks_up_hash(
         detail={"match_count": 2, "requestor_state": "TX"},
     )
     assert payload["matched_contacts_status"] == "ok"
-    assert payload["matched_contacts_error"] is None
     assert len(payload["matched_contacts"]) == 2
     assert {c["dwid"] for c in payload["matched_contacts"]} == {"2001", "2002"}
-    assert all(c["last_name"] == "Baker" for c in payload["matched_contacts"])
-    assert all("first_name" not in c for c in payload["matched_contacts"])
-
-
-_PRIVACY_LEAK_MARKERS = (
-    "jane@example.com",
-    "leak@example.com",
-    "5551212",
-    "5551112222",
-    "abcdef0123456789",
-)
-
-
-def _assert_contacts_error_shape(
-    err: dict[str, Any],
-    *,
-    code: str,
-    stage: str,
-    exc_type: str | None = None,
-) -> None:
-    """Assert fixed wire shape: code/message/stage/hint (+ optional exc_type)."""
-    assert err["code"] == code
-    assert err["message"] == drop_pipeline._CONTACTS_ERROR_MESSAGES[code]
-    assert err["stage"] == stage
-    assert err["hint"] == drop_pipeline._CONTACTS_ERROR_HINTS[code]
-    assert err["message"]
-    assert err["hint"]
-    if exc_type is None:
-        assert "exc_type" not in err
-    else:
-        assert err["exc_type"] == exc_type
-    # Privacy: no emails / phones / long hex in any string field.
-    for value in err.values():
-        if not isinstance(value, str):
-            continue
-        for marker in _PRIVACY_LEAK_MARKERS:
-            assert marker not in value
-        assert "ADC missing" not in value
-        assert "unexpected boom" not in value
-        assert "job failed" not in value
-
-
-@pytest.mark.asyncio
-async def test_enrich_no_lookup_state():
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_Row(
-            consumer_id="1001",
-            raw_record_id=42,
-            intake_source="drop",
-            requestor_state=None,
-        )
-    )
-    payload = await drop_pipeline.enrich_matching_result_contacts(
-        conn,
-        request_id="00000000-0000-0000-0000-000000000077",
-        detail={"match_count": 1, "requestor_state": None},
-    )
-    assert payload["matched_contacts"] == []
-    assert payload["matched_contacts_status"] == "unavailable"
-    _assert_contacts_error_shape(
-        payload["matched_contacts_error"],
-        code="no_lookup_state",
-        stage="resolve",
-    )
-
-
-@pytest.mark.asyncio
-async def test_enrich_invalid_state():
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_Row(
-            consumer_id="1001",
-            raw_record_id=42,
-            intake_source="drop",
-            requestor_state="ZZ",
-        )
-    )
-    payload = await drop_pipeline.enrich_matching_result_contacts(
-        conn,
-        request_id="00000000-0000-0000-0000-000000000076",
-        detail={"match_count": 1, "requestor_state": "ZZ"},
-    )
-    assert payload["matched_contacts"] == []
-    assert payload["matched_contacts_status"] == "unavailable"
-    _assert_contacts_error_shape(
-        payload["matched_contacts_error"],
-        code="invalid_state",
-        stage="resolve",
-    )
-
-
-@pytest.mark.asyncio
-async def test_enrich_no_dwids_single_missing_consumer(monkeypatch: pytest.MonkeyPatch):
-    from habeas_privacy_core.models.intake import DropListType, DropMatchingPayload
-
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_Row(
-            consumer_id=None,
-            raw_record_id=7,
-            intake_source="drop",
-            requestor_state="CA",
-        )
-    )
-
-    async def fake_resolver(_conn: Any, _source: Any, _raw_id: int) -> DropMatchingPayload:
-        return DropMatchingPayload(
-            drop_record_id="drop-1",
-            list_type=DropListType.EMAIL,
-            hash_fields={"hashed_email": "abc"},
-        )
-
-    monkeypatch.setattr(drop_pipeline, "request_resolver", fake_resolver)
-    monkeypatch.setattr(drop_pipeline, "_lookup_dwids_by_hash", lambda **_kwargs: [])
-
-    payload = await drop_pipeline.enrich_matching_result_contacts(
-        conn,
-        request_id="00000000-0000-0000-0000-000000000075",
-        detail={"match_count": 1, "requestor_state": "CA"},
-    )
-    assert payload["matched_contacts"] == []
-    assert payload["matched_contacts_status"] == "unavailable"
-    # Eligible hash path returned empty → residual no_dwids (not no_consumer_id).
-    _assert_contacts_error_shape(
-        payload["matched_contacts_error"],
-        code="no_dwids",
-        stage="resolve",
-    )
-
-
-@pytest.mark.asyncio
-async def test_enrich_no_matching_result():
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(return_value=None)
-    payload = await drop_pipeline.enrich_matching_result_contacts(
-        conn,
-        request_id="00000000-0000-0000-0000-000000000071",
-        detail={"match_count": 2, "requestor_state": "CA"},
-    )
-    assert payload["matched_contacts"] == []
-    assert payload["matched_contacts_status"] == "unavailable"
-    _assert_contacts_error_shape(
-        payload["matched_contacts_error"],
-        code="no_matching_result",
-        stage="resolve",
-    )
-
-
-@pytest.mark.asyncio
-async def test_enrich_non_drop_intake():
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_Row(
-            consumer_id=None,
-            raw_record_id=7,
-            intake_source="web",
-            requestor_state="CA",
-        )
-    )
-    payload = await drop_pipeline.enrich_matching_result_contacts(
-        conn,
-        request_id="00000000-0000-0000-0000-000000000070",
-        detail={"match_count": 2, "requestor_state": "CA"},
-    )
-    assert payload["matched_contacts"] == []
-    assert payload["matched_contacts_status"] == "unavailable"
-    _assert_contacts_error_shape(
-        payload["matched_contacts_error"],
-        code="non_drop_intake",
-        stage="resolve",
-    )
-
-
-@pytest.mark.asyncio
-async def test_enrich_missing_hash(monkeypatch: pytest.MonkeyPatch):
-    from habeas_privacy_core.models.intake import DropListType, DropMatchingPayload
-
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_Row(
-            consumer_id=None,
-            raw_record_id=7,
-            intake_source="drop",
-            requestor_state="CA",
-        )
-    )
-
-    async def fake_resolver(_conn: Any, _source: Any, _raw_id: int) -> DropMatchingPayload:
-        return DropMatchingPayload(
-            drop_record_id="drop-1",
-            list_type=DropListType.EMAIL,
-            hash_fields={},
-        )
-
-    monkeypatch.setattr(drop_pipeline, "request_resolver", fake_resolver)
-    payload = await drop_pipeline.enrich_matching_result_contacts(
-        conn,
-        request_id="00000000-0000-0000-0000-000000000069",
-        detail={"match_count": 2, "requestor_state": "CA"},
-    )
-    assert payload["matched_contacts"] == []
-    assert payload["matched_contacts_status"] == "unavailable"
-    _assert_contacts_error_shape(
-        payload["matched_contacts_error"],
-        code="missing_hash",
-        stage="resolve",
-    )
-
-
-@pytest.mark.asyncio
-async def test_enrich_bq_not_configured(monkeypatch: pytest.MonkeyPatch):
-    """DefaultCredentialsError → bq_credentials (split from former bq_not_configured)."""
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_Row(
-            consumer_id="1001",
-            raw_record_id=42,
-            intake_source="drop",
-            requestor_state="CA",
-        )
-    )
-
-    class DefaultCredentialsError(Exception):
-        pass
-
-    def boom(*, dwids: list[str], lookup_state: str, client: Any | None = None):
-        raise DefaultCredentialsError("ADC missing for project-x email=jane@example.com")
-
-    monkeypatch.setattr(drop_pipeline, "_fetch_person_contacts_from_bq", boom)
-    payload = await drop_pipeline.enrich_matching_result_contacts(
-        conn,
-        request_id="00000000-0000-0000-0000-000000000074",
-        detail={"match_count": 1, "requestor_state": "CA"},
-    )
-    assert payload["matched_contacts"] == []
-    assert payload["matched_contacts_status"] == "unavailable"
-    _assert_contacts_error_shape(
-        payload["matched_contacts_error"],
-        code="bq_credentials",
-        stage="person_fetch",
-        exc_type="DefaultCredentialsError",
-    )
-
-
-@pytest.mark.asyncio
-async def test_enrich_bq_library_missing(monkeypatch: pytest.MonkeyPatch):
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_Row(
-            consumer_id="1001",
-            raw_record_id=42,
-            intake_source="drop",
-            requestor_state="CA",
-        )
-    )
-
-    def boom(*, dwids: list[str], lookup_state: str, client: Any | None = None):
-        raise RuntimeError("google-cloud-bigquery is not installed") from ImportError(
-            "No module named 'google.cloud.bigquery' email=jane@example.com"
-        )
-
-    monkeypatch.setattr(drop_pipeline, "_fetch_person_contacts_from_bq", boom)
-    payload = await drop_pipeline.enrich_matching_result_contacts(
-        conn,
-        request_id="00000000-0000-0000-0000-000000000068",
-        detail={"match_count": 1, "requestor_state": "CA"},
-    )
-    assert payload["matched_contacts"] == []
-    assert payload["matched_contacts_status"] == "unavailable"
-    _assert_contacts_error_shape(
-        payload["matched_contacts_error"],
-        code="bq_library_missing",
-        stage="person_fetch",
-        exc_type="RuntimeError",
-    )
-
-
-@pytest.mark.asyncio
-async def test_enrich_bq_permission_denied(monkeypatch: pytest.MonkeyPatch):
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_Row(
-            consumer_id="1001",
-            raw_record_id=42,
-            intake_source="drop",
-            requestor_state="CA",
-        )
-    )
-
-    class PermissionDenied(Exception):
-        pass
-
-    def boom(*, dwids: list[str], lookup_state: str, client: Any | None = None):
-        raise RuntimeError("query denied email=jane@example.com") from PermissionDenied(
-            "403 Forbidden hash=abcdef0123456789"
-        )
-
-    monkeypatch.setattr(drop_pipeline, "_fetch_person_contacts_from_bq", boom)
-    payload = await drop_pipeline.enrich_matching_result_contacts(
-        conn,
-        request_id="00000000-0000-0000-0000-000000000067",
-        detail={"match_count": 1, "requestor_state": "CA"},
-    )
-    assert payload["matched_contacts"] == []
-    assert payload["matched_contacts_status"] == "unavailable"
-    _assert_contacts_error_shape(
-        payload["matched_contacts_error"],
-        code="bq_permission_denied",
-        stage="person_fetch",
-        exc_type="PermissionDenied",
-    )
-
-
-@pytest.mark.asyncio
-async def test_enrich_bq_query_failed(monkeypatch: pytest.MonkeyPatch):
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_Row(
-            consumer_id="1001",
-            raw_record_id=42,
-            intake_source="drop",
-            requestor_state="CA",
-        )
-    )
-
-    def boom(*, dwids: list[str], lookup_state: str, client: Any | None = None):
-        raise RuntimeError(
-            "job failed email=jane@example.com consumer_id=5551212 "
-            "hash=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        )
-
-    monkeypatch.setattr(drop_pipeline, "_fetch_person_contacts_from_bq", boom)
-    payload = await drop_pipeline.enrich_matching_result_contacts(
-        conn,
-        request_id="00000000-0000-0000-0000-000000000073",
-        detail={"match_count": 1, "requestor_state": "CA"},
-    )
-    assert payload["matched_contacts"] == []
-    assert payload["matched_contacts_status"] == "unavailable"
-    _assert_contacts_error_shape(
-        payload["matched_contacts_error"],
-        code="bq_query_failed",
-        stage="person_fetch",
-        exc_type="RuntimeError",
-    )
-
-
-@pytest.mark.asyncio
-async def test_classifier_does_not_treat_module_mention_as_unconfigured(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """A RuntimeError that merely mentions google.cloud.bigquery is a query failure."""
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_Row(
-            consumer_id="1001",
-            raw_record_id=42,
-            intake_source="drop",
-            requestor_state="CA",
-        )
-    )
-
-    def boom(*, dwids: list[str], lookup_state: str, client: Any | None = None):
-        raise RuntimeError(
-            "query failed via google.cloud.bigquery.Client email=jane@example.com"
-        )
-
-    monkeypatch.setattr(drop_pipeline, "_fetch_person_contacts_from_bq", boom)
-    payload = await drop_pipeline.enrich_matching_result_contacts(
-        conn,
-        request_id="00000000-0000-0000-0000-000000000066",
-        detail={"match_count": 1, "requestor_state": "CA"},
-    )
-    assert payload["matched_contacts_status"] == "unavailable"
-    _assert_contacts_error_shape(
-        payload["matched_contacts_error"],
-        code="bq_query_failed",
-        stage="person_fetch",
-        exc_type="RuntimeError",
-    )
-
-
-@pytest.mark.asyncio
-async def test_hash_lookup_stage(monkeypatch: pytest.MonkeyPatch):
-    from habeas_privacy_core.models.intake import DropListType, DropMatchingPayload
-
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_Row(
-            consumer_id=None,
-            raw_record_id=7,
-            intake_source="drop",
-            requestor_state="TX",
-        )
-    )
-
-    async def fake_resolver(_conn: Any, _source: Any, _raw_id: int) -> DropMatchingPayload:
-        return DropMatchingPayload(
-            drop_record_id="drop-1",
-            list_type=DropListType.EMAIL,
-            hash_fields={"hashed_email": "abc"},
-        )
-
-    class DefaultCredentialsError(Exception):
-        pass
-
-    def boom_lookup(**_kwargs: Any) -> list[str]:
-        raise DefaultCredentialsError("ADC missing email=jane@example.com")
-
-    monkeypatch.setattr(drop_pipeline, "request_resolver", fake_resolver)
-    monkeypatch.setattr(drop_pipeline, "_lookup_dwids_by_hash", boom_lookup)
-
-    payload = await drop_pipeline.enrich_matching_result_contacts(
-        conn,
-        request_id="00000000-0000-0000-0000-000000000065",
-        detail={"match_count": 2, "requestor_state": "TX"},
-    )
-    assert payload["matched_contacts"] == []
-    assert payload["matched_contacts_status"] == "unavailable"
-    _assert_contacts_error_shape(
-        payload["matched_contacts_error"],
-        code="bq_credentials",
-        stage="hash_lookup",
-        exc_type="DefaultCredentialsError",
-    )
-
-
-@pytest.mark.asyncio
-async def test_get_matching_result_detail_catch_sets_error(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from datetime import datetime, timezone
-
-    recorded = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
-    conn = MagicMock()
-    conn.fetchrow = AsyncMock(
-        return_value=_Row(
-            request_id="00000000-0000-0000-0000-000000000072",
-            matched=True,
-            match_count=1,
-            matched_via="drop_hash",
-            recorded_at=recorded,
-            requestor_state="CA",
-            attempt_id=99,
-            approval_id=11,
-            review_status="pending",
-            decided_by=None,
-            decided_at=None,
-            decision_reason=None,
-        )
-    )
-    conn.fetch = AsyncMock(return_value=[])
-
-    async def fake_assignment(_conn: Any, request_id: str) -> dict[str, Any] | None:
-        return None
-
-    monkeypatch.setattr(drop_pipeline, "get_current_assignment", fake_assignment)
-    monkeypatch.setattr(
-        drop_pipeline,
-        "enrich_matching_result_contacts",
-        AsyncMock(side_effect=RuntimeError("unexpected boom email=leak@example.com")),
-    )
-    detail = await drop_pipeline.get_matching_result_detail(
-        conn, "00000000-0000-0000-0000-000000000072"
-    )
-    assert detail is not None
-    assert detail["matched_contacts"] == []
-    assert detail["matched_contacts_status"] == "unavailable"
-    _assert_contacts_error_shape(
-        detail["matched_contacts_error"],
-        code="enrichment_failed",
-        stage="enrich",
-        exc_type="RuntimeError",
-    )
 
 
 def test_matching_results_list_route(monkeypatch: pytest.MonkeyPatch):
@@ -2983,6 +2446,8 @@ def test_ops_health_and_workers_require_super_admin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Health/workers reads match other ops surfaces — super_admin only."""
+    from admin_api import attempt_tables as at
+
     monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
     monkeypatch.setattr(
         drop_pipeline,
@@ -3005,10 +2470,25 @@ def test_ops_health_and_workers_require_super_admin(
         def acquire(self):
             return _Acquire()
 
+    async def fake_discover(_conn: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "table_name": "matching_attempts",
+                "worker_key": "matching",
+                "columns": ["id", "status", "step", "attempted_at", "worker_id", "claim_expires_at"],
+                "supports_attempt_retry": True,
+            }
+        ]
+
+    async def fake_names(_conn: Any) -> tuple[str, ...]:
+        return ("matching_attempts",)
+
     monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
     monkeypatch.setattr(
         drop_pipeline, "collect_queue_depths", AsyncMock(return_value=[])
     )
+    monkeypatch.setattr(at, "discover_attempt_tables", fake_discover)
+    monkeypatch.setattr(at, "discover_attempt_table_names", fake_names)
 
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
     monkeypatch.setattr(roles.settings, "admin_api_admins", "admin@example.com")

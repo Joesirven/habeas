@@ -11,5 +11,6 @@ Just-in-time workflow files. Load only when root `AGENTS.md` gate matches — do
 | [`frontend-stack.md`](frontend-stack.md) | `clients/web/` |
 | [`design-taste.md`](design-taste.md) | Any UI / visual design |
 | [`cli-agent-interface.md`](cli-agent-interface.md) | Habeas CLI |
+| [`atlassian-acli.md`](atlassian-acli.md) | Jira / Confluence / PRs / merge / Atlassian |
 | [`privacy-invariants.md`](privacy-invariants.md) | Request / audit code |
 | [`review-personas.md`](review-personas.md) | Pre-merge review |
