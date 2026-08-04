@@ -94,6 +94,32 @@ function recommendedStatusFromItem(
   )
 }
 
+/** DWIDs for promote body: all/selected for 3/4, empty for 5, omit otherwise. */
+function promoteDwidsForStatus(
+  status: DropResponseStatusCode | undefined,
+  dwids: string[] | undefined,
+): { dwids?: string[] } {
+  if (status === 5) return { dwids: [] }
+  if ((status === 3 || status === 4) && dwids != null) return { dwids }
+  return {}
+}
+
+async function resolvePromoteDwids(
+  requestId: string,
+  status: DropResponseStatusCode | undefined,
+  selected?: string[],
+): Promise<string[] | undefined> {
+  if (status === 5) return []
+  if (status !== 3 && status !== 4) return undefined
+  if (selected != null) return selected
+  try {
+    const detail = await getDropMatchingResultDetail(requestId)
+    return (detail.matched_contacts ?? []).map((contact) => contact.dwid)
+  } catch {
+    return undefined
+  }
+}
+
 const SOURCE_LABELS: Record<string, string> = {
   webform: 'Gravity Forms',
   drop: 'CA DROP',
@@ -1645,19 +1671,55 @@ function InboxReviewPane({
     placeholderData: (previous) => previous,
   })
 
+  const suggestedStatus = recommendedStatusFromItem(item, matchingQuery.data)
+  const matchedContacts = matchingQuery.data?.matched_contacts ?? []
+  const contactDwids = matchedContacts.map((contact) => contact.dwid)
   const [fulfillStatus, setFulfillStatus] = useState<DropResponseStatusCode | null>(() =>
     recommendedStatusFromItem(item),
   )
-  const suggestedStatus = recommendedStatusFromItem(item, matchingQuery.data)
+  const [selectedDwids, setSelectedDwids] = useState<string[]>(() => {
+    const initial = recommendedStatusFromItem(item)
+    return initial === 3 || initial === 4 ? contactDwids : []
+  })
+
+  const handleFulfillStatusChange = (code: DropResponseStatusCode) => {
+    setFulfillStatus(code)
+    if (code === 5) {
+      setSelectedDwids([])
+      return
+    }
+    if (code === 3 || code === 4) {
+      setSelectedDwids(matchedContacts.map((contact) => contact.dwid))
+    }
+  }
+
+  const fulfillNeedsDwids = fulfillStatus === 3 || fulfillStatus === 4
+  // Require explicit DWID selection for 3/4 — empty contacts must not enable confirm.
+  const fulfillDwidsReady = !fulfillNeedsDwids || selectedDwids.length > 0
 
   const promoteMutation = useMutation({
-    mutationFn: (responseStatus: DropResponseStatusCode) =>
+    mutationFn: ({
+      responseStatus,
+      dwids,
+    }: {
+      responseStatus: DropResponseStatusCode
+      dwids?: string[]
+    }) =>
       postDropMatchingResultPromote(item.request_id, {
         response_status: responseStatus,
+        ...promoteDwidsForStatus(responseStatus, dwids),
       }),
-    onSuccess: async () => {
+    onSuccess: async (data) => {
       setConfirmAction(null)
-      actionToast.success({ title: 'Request fulfilled' })
+      if (data.disposition?.recorded === false) {
+        actionToast.warning({
+          title: 'Matching approved — disposition incomplete',
+          description:
+            'No person id recorded for status 3/4. Select matched people and set disposition again before fulfillment kickoff.',
+        })
+      } else {
+        actionToast.success({ title: 'Request fulfilled' })
+      }
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
     onError: (error, variables) => {
@@ -1988,22 +2050,34 @@ function InboxReviewPane({
           open={confirmAction === 'fulfill'}
           onOpenChange={(open) => {
             if (!open && !actionPending) setConfirmAction(null)
-            if (open) setFulfillStatus(suggestedStatus)
+            if (open) {
+              setFulfillStatus(suggestedStatus)
+              setSelectedDwids(
+                suggestedStatus === 3 || suggestedStatus === 4
+                  ? matchedContacts.map((contact) => contact.dwid)
+                  : [],
+              )
+            }
           }}
           title="Fulfill this match?"
           description={`Approve matching review for ${item.request_id.slice(0, 8)}… and set the CA DROP status result.`}
           confirmLabel="Fulfill"
           confirming={actionPending && confirmAction === 'fulfill'}
-          confirmDisabled={fulfillStatus == null}
+          confirmDisabled={fulfillStatus == null || !fulfillDwidsReady}
           onConfirm={() => {
-            if (fulfillStatus != null) promoteMutation.mutate(fulfillStatus)
+            if (fulfillStatus == null) return
+            const dwids = fulfillStatus === 5 ? [] : selectedDwids
+            promoteMutation.mutate({ responseStatus: fulfillStatus, dwids })
           }}
         >
           <DropResponseStatusPicker
             value={fulfillStatus}
-            onChange={setFulfillStatus}
+            onChange={handleFulfillStatusChange}
             disabled={actionPending}
             suggested={suggestedStatus}
+            contacts={matchedContacts}
+            selectedDwids={selectedDwids}
+            onSelectedDwidsChange={setSelectedDwids}
           />
         </ConfirmActionDialog>
         <ConfirmActionDialog
@@ -2350,8 +2424,8 @@ function InboxReviewPane({
                   isError={matchingQuery.isError}
                   canReviewActions={canReviewActions && !legalPersona}
                   actionPending={actionPending}
-                  onPromote={(responseStatus) =>
-                    promoteMutation.mutate(responseStatus)
+                  onPromote={(responseStatus, dwids) =>
+                    promoteMutation.mutate({ responseStatus, dwids })
                   }
                   onDecline={() => declineMutation.mutate()}
                   compact
@@ -3490,13 +3564,16 @@ export function NeedsAttentionPage() {
       responseStatus?: DropResponseStatusCode
     }) => {
       const results = await Promise.allSettled(
-        requestIds.map((requestId) =>
-          action === 'fulfill'
-            ? postDropMatchingResultPromote(requestId, {
-                response_status: responseStatus,
-              })
-            : postDropMatchingResultDecline(requestId),
-        ),
+        requestIds.map(async (requestId) => {
+          if (action !== 'fulfill') {
+            return postDropMatchingResultDecline(requestId)
+          }
+          const dwids = await resolvePromoteDwids(requestId, responseStatus)
+          return postDropMatchingResultPromote(requestId, {
+            response_status: responseStatus,
+            ...promoteDwidsForStatus(responseStatus, dwids),
+          })
+        }),
       )
       const failedResults = results.filter(
         (result): result is PromiseRejectedResult => result.status === 'rejected',

@@ -27,9 +27,11 @@ import {
   WORKBENCH_STAGE_ORDER,
   actionReasonLabel,
   deriveWorkbenchChromeFromOpsJourney,
+  opsStageToWorkbench,
   workbenchStageLabel,
   workbenchStatusLabel,
   type DerivedWorkbenchSubstep,
+  type WorkbenchStageKey,
 } from '@/lib/legalJourneyLabels'
 import { actionToast } from '@/lib/action-toast'
 import {
@@ -72,8 +74,11 @@ import { cn } from '@/lib/utils'
 
 import {
   AccessHandoffPanel,
+  AttemptRow,
+  MatchedContactsUnavailableCallout,
   MatchingReviewPanel,
   fetchMatchingDetailOptional,
+  formatMatchedContactsSummary,
 } from '@/components/requests/RequestTriageDialog'
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -254,6 +259,17 @@ function stageIsActive(status: JourneyStageStatus): boolean {
   return status === 'in_progress' || status === 'waiting' || status === 'failed'
 }
 
+/** Same heuristic as `ThinJourneyPipeline`'s uncontrolled default — active, else latest complete. */
+function defaultExpandedFromRail(
+  rail: Array<{ stage: string; status: JourneyStageStatus }>,
+): string | null {
+  return (
+    rail.find((stage) => stageIsActive(stage.status))?.stage ??
+    rail.find((stage) => stage.status === 'complete')?.stage ??
+    null
+  )
+}
+
 function JourneySubstepList({
   items,
   compact,
@@ -310,6 +326,8 @@ export function ThinJourneyPipeline({
   fulfillmentCluster,
   splitPosture,
   density = 'comfortable',
+  expandedStage: expandedStageControlled,
+  onExpandedStageChange,
 }: {
   stages: Array<{ stage: string; label: string; status: JourneyStageStatus; blocker: string | null }>
   substeps?: DerivedWorkbenchSubstep[]
@@ -317,6 +335,9 @@ export function ThinJourneyPipeline({
   fulfillmentCluster?: PipelineClusterRow[]
   splitPosture?: boolean
   density?: 'compact' | 'comfortable'
+  /** When provided (including `null`), expansion is controlled by the parent (page layout). */
+  expandedStage?: string | null
+  onExpandedStageChange?: (stage: string | null) => void
 }) {
   const rail =
     stages.length > 0
@@ -335,13 +356,28 @@ export function ThinJourneyPipeline({
     rail.find((stage) => stage.status === 'complete')?.stage ??
     null
 
-  const [expandedStage, setExpandedStage] = useState<string | null>(defaultExpanded)
+  const isControlled = expandedStageControlled !== undefined
+  const [expandedStageUncontrolled, setExpandedStageUncontrolled] = useState<string | null>(
+    defaultExpanded,
+  )
+  const expandedStage = isControlled ? expandedStageControlled : expandedStageUncontrolled
+
+  const setExpandedStage = (next: string | null | ((prev: string | null) => string | null)) => {
+    const resolved = typeof next === 'function' ? next(expandedStage) : next
+    if (isControlled) {
+      onExpandedStageChange?.(resolved)
+    } else {
+      setExpandedStageUncontrolled(resolved)
+    }
+  }
+
   const railKey = rail.map((stage) => `${stage.stage}:${stage.status}`).join('|')
   useEffect(() => {
-    setExpandedStage(defaultExpanded)
+    if (isControlled) return
+    setExpandedStageUncontrolled(defaultExpanded)
     // Re-sync when stage statuses change for this request (not on every parent render).
     // eslint-disable-next-line react-hooks/exhaustive-deps -- railKey captures status shifts
-  }, [railKey])
+  }, [railKey, isControlled])
 
   const contentForStage = (stageKey: string) => {
     if (stageKey === 'matching' && matchingCluster && matchingCluster.length > 0) {
@@ -780,13 +816,6 @@ function RequestStageActionBar({
   )
 }
 
-function matchedContactDisplayName(contact: MatchedPersonContact): string | null {
-  const first = contact.first_initial?.trim()
-  const last = contact.last_initial?.trim()
-  if (first || last) return [first, last].filter(Boolean).join('')
-  return null
-}
-
 function phoneSummaryFromMatched(contact: MatchedPersonContact): string | null {
   if (!contact.phones?.length) return null
   return contact.phones.map((phone) => `${phone.type}: ${phone.number}`).join(' · ')
@@ -831,7 +860,7 @@ export function RequesterContactSection({
       return (
         <div className={cn('space-y-1.5', compact ? 'text-[0.7rem]' : 'text-xs')}>
           <p className="taste-micro">Requester contact</p>
-          <p className="text-mute">Matched person details unavailable right now.</p>
+          <MatchedContactsUnavailableCallout matching={matching ?? undefined} />
         </div>
       )
     }
@@ -843,16 +872,13 @@ export function RequesterContactSection({
         </div>
       )
     }
-    const initials = matchedContactDisplayName(primaryMatched!)
-    if (initials) rows.push({ label: 'Initials', value: initials })
-    if (primaryMatched?.state) rows.push({ label: 'State', value: primaryMatched.state })
+    const personSummary = formatMatchedContactsSummary(matched)
+    if (personSummary && personSummary !== '—') {
+      rows.push({ label: 'Matched', value: personSummary })
+    }
     if (primaryMatched?.email) rows.push({ label: 'Email', value: primaryMatched.email })
     const phones = phoneSummaryFromMatched(primaryMatched!)
     if (phones) rows.push({ label: 'Phone', value: phones })
-    if (primaryMatched?.dob) rows.push({ label: 'DOB', value: primaryMatched.dob })
-    if (matched.length > 1) {
-      rows.push({ label: 'Persons', value: `${matched.length} matched` })
-    }
   } else {
     const name = requestContact?.name?.trim() || displayLabel?.trim() || null
     const email = requestContact?.email?.trim() || null
@@ -885,10 +911,9 @@ export function RequesterContactSection({
             <dd
               className={cn(
                 'mt-0.5 text-ink',
-                row.label === 'Email' || row.label === 'Phone' || row.label === 'Initials'
+                row.label === 'Email' || row.label === 'Phone' || row.label === 'Matched'
                   ? 'break-all'
                   : 'truncate',
-                row.label === 'Initials' || row.label === 'State' ? 'font-mono' : null,
               )}
               title={row.value}
             >
@@ -1033,14 +1058,46 @@ function humanizeActivitySummary(summary: string): string {
   )
 }
 
+/** Prefer stable meta ids so All ↔ Notes filter changes do not remap selection. */
+function timelineEntryKey(entry: TimelineEntry, index: number): string {
+  const meta = entry.meta ?? {}
+  if (meta.comment_id != null) return `comment:${String(meta.comment_id)}`
+  if (meta.approval_id != null) return `approval:${String(meta.approval_id)}`
+  if (entry.kind === 'stage' && typeof meta.stage === 'string') {
+    return `stage:${meta.stage}:${entry.at}`
+  }
+  if (typeof meta.command === 'string') {
+    return `audit:${meta.command}:${entry.at}`
+  }
+  return `${entry.at}-${entry.kind}-${index}`
+}
+
+/** Only `kind === 'stage'` entries carry `meta.stage` (ops fine-stage key). */
+function timelineEntryOpsStage(entry: TimelineEntry): string | null {
+  const raw = entry.meta?.stage
+  return typeof raw === 'string' && raw.trim() ? raw.trim().toLowerCase() : null
+}
+
+function timelineEntryWorkbenchStage(entry: TimelineEntry): WorkbenchStageKey | null {
+  const ops = timelineEntryOpsStage(entry)
+  return ops ? opsStageToWorkbench(ops) : null
+}
+
 function ActivityPanel({
   requestId,
   entries,
   isPending,
+  selectable = false,
+  selectedKey = null,
+  onSelectEntry,
 }: {
   requestId: string
   entries: TimelineEntry[]
   isPending: boolean
+  /** Page rail: clickable rows that link to the pipeline detail underneath. */
+  selectable?: boolean
+  selectedKey?: string | null
+  onSelectEntry?: (entry: TimelineEntry, key: string) => void
 }) {
   const queryClient = useQueryClient()
   const [filter, setFilter] = useState<ActivityFilter>('all')
@@ -1073,12 +1130,14 @@ function ActivityPanel({
     },
   })
 
-  const filtered = entries.filter((entry) => {
-    const human = isHumanActivityKind(entry.kind)
-    if (filter === 'notes') return human
-    if (filter === 'system') return !human
-    return true
-  })
+  const filtered = entries
+    .map((entry, index) => ({ entry, index }))
+    .filter(({ entry }) => {
+      const human = isHumanActivityKind(entry.kind)
+      if (filter === 'notes') return human
+      if (filter === 'system') return !human
+      return true
+    })
 
   const filters: { id: ActivityFilter; label: string }[] = [
     { id: 'all', label: 'All' },
@@ -1118,30 +1177,52 @@ function ActivityPanel({
       ) : null}
 
       <ol className="space-y-1.5">
-        {filtered.map((entry, index) => {
+        {filtered.map(({ entry, index }) => {
           const human = isHumanActivityKind(entry.kind)
           const kindLabel = activityKindLabel(entry.kind)
           const summary = humanizeActivitySummary(entry.summary)
+          const key = timelineEntryKey(entry, index)
+          const selected = selectable && selectedKey === key
 
           if (!human) {
-            return (
-              <li
-                key={`${entry.at}-${entry.kind}-${index}`}
-                className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 py-1 text-xs text-mute"
-              >
+            const rowContent = (
+              <>
                 <time className="shrink-0 tabular-nums text-[0.65rem]">
                   {formatTimestamp(entry.at)}
                 </time>
                 <span className="min-w-0 text-ink-soft">{summary}</span>
+              </>
+            )
+            if (selectable) {
+              return (
+                <li key={key}>
+                  <button
+                    type="button"
+                    className={cn(
+                      'flex w-full flex-wrap items-baseline gap-x-2 gap-y-0.5 rounded-md px-1.5 py-1 text-left text-xs text-mute transition-colors hover:bg-panel/40',
+                      selected && 'bg-habeas-navy/5 ring-1 ring-habeas-navy/40',
+                    )}
+                    aria-pressed={selected}
+                    aria-controls="pipeline-activity-detail"
+                    onClick={() => onSelectEntry?.(entry, key)}
+                  >
+                    {rowContent}
+                  </button>
+                </li>
+              )
+            }
+            return (
+              <li
+                key={key}
+                className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 py-1 text-xs text-mute"
+              >
+                {rowContent}
               </li>
             )
           }
 
-          return (
-            <li
-              key={`${entry.at}-${entry.kind}-${index}`}
-              className="rounded-lg border border-line/80 bg-paper/70 px-3 py-2 text-xs"
-            >
+          const cardContent = (
+            <>
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                   {kindLabel ? (
@@ -1158,6 +1239,34 @@ function ActivityPanel({
                 </time>
               </div>
               <p className="mt-1.5 whitespace-pre-wrap text-ink">{summary}</p>
+            </>
+          )
+
+          if (selectable) {
+            return (
+              <li key={key}>
+                <button
+                  type="button"
+                  className={cn(
+                    'w-full rounded-lg border border-line/80 bg-paper/70 px-3 py-2 text-left text-xs transition-colors hover:border-ink/30',
+                    selected && 'border-habeas-navy/50 bg-habeas-navy/5 ring-1 ring-habeas-navy/40',
+                  )}
+                  aria-pressed={selected}
+                  aria-controls="pipeline-activity-detail"
+                  onClick={() => onSelectEntry?.(entry, key)}
+                >
+                  {cardContent}
+                </button>
+              </li>
+            )
+          }
+
+          return (
+            <li
+              key={key}
+              className="rounded-lg border border-line/80 bg-paper/70 px-3 py-2 text-xs"
+            >
+              {cardContent}
             </li>
           )
         })}
@@ -1184,6 +1293,177 @@ function ActivityPanel({
       </div>
     </div>
   )
+}
+
+function MatchingAttemptsUnderPipeline({
+  matching,
+  pending,
+  error = false,
+}: {
+  matching?: MatchingResultDetail | null
+  pending: boolean
+  error?: boolean
+}) {
+  if (pending && !matching) {
+    return <SkeletonLines lines={2} />
+  }
+  if (error && !matching) {
+    return (
+      <p className="text-[0.7rem] text-red-700">
+        Could not load matching attempts for this request.
+      </p>
+    )
+  }
+  const attempts = [...(matching?.attempts ?? [])].sort(
+    (a, b) => b.attempt_number - a.attempt_number,
+  )
+  return (
+    <div className="max-h-64 space-y-1.5 overflow-y-auto">
+      <p className="sticky top-0 z-[1] bg-canvas/95 text-[0.65rem] text-mute">
+        Pipeline · Matching attempts
+      </p>
+      {attempts.length === 0 ? (
+        <p className="text-[0.7rem] text-mute">No matching attempts recorded.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {attempts.map((attempt) => (
+            <AttemptRow key={attempt.id} attempt={attempt} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ActivityNoteDetail({ entry }: { entry: TimelineEntry }) {
+  const kindLabel = activityKindLabel(entry.kind)
+  return (
+    <div className="rounded-md border border-line/70 bg-paper/70 px-2.5 py-2 text-[0.7rem]">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          {kindLabel ? (
+            <Badge variant="wait" className="normal-case tracking-normal">
+              {kindLabel}
+            </Badge>
+          ) : null}
+          <span className="font-medium text-ink">{entry.actor?.trim() || 'Operator'}</span>
+        </div>
+        <time className="shrink-0 tabular-nums text-mute">{formatTimestamp(entry.at)}</time>
+      </div>
+      <p className="mt-1 whitespace-pre-wrap text-ink">{humanizeActivitySummary(entry.summary)}</p>
+    </div>
+  )
+}
+
+function StageActivityDetail({
+  entry,
+  expandedStage,
+}: {
+  entry: TimelineEntry
+  expandedStage: string | null
+}) {
+  const opsStage = timelineEntryOpsStage(entry)
+  return (
+    <div className="rounded-md border border-line/70 bg-canvas/40 px-2.5 py-2 text-[0.7rem]">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          <Badge variant="wait" className="normal-case tracking-normal">
+            Stage
+          </Badge>
+          {opsStage ? <span className="font-medium capitalize text-ink">{opsStage}</span> : null}
+        </div>
+        <time className="shrink-0 tabular-nums text-mute">{formatTimestamp(entry.at)}</time>
+      </div>
+      <p className="mt-1 text-ink-soft">{humanizeActivitySummary(entry.summary)}</p>
+      {expandedStage === 'fulfillment' ? (
+        <p className="mt-1 text-habeas-navy">
+          Open the Fulfillment tab for kickoff / delivery detail.
+        </p>
+      ) : expandedStage === 'notice' ? (
+        <p className="mt-1 text-habeas-navy">
+          Open the Fulfillment tab for notice approval / delivery detail.
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+function ActivitySummaryDetail({ entry }: { entry: TimelineEntry }) {
+  const kindLabel = activityKindLabel(entry.kind)
+  return (
+    <div className="rounded-md border border-line/70 bg-canvas/40 px-2.5 py-2 text-[0.7rem]">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          {kindLabel ? (
+            <Badge variant="wait" className="normal-case tracking-normal">
+              {kindLabel}
+            </Badge>
+          ) : null}
+          <span className="font-medium text-ink">{entry.actor?.trim() || 'System'}</span>
+        </div>
+        <time className="shrink-0 tabular-nums text-mute">{formatTimestamp(entry.at)}</time>
+      </div>
+      <p className="mt-1 text-ink-soft">{humanizeActivitySummary(entry.summary)}</p>
+    </div>
+  )
+}
+
+/**
+ * Detail region rendered under the pipeline on the page layout — reflects the selected
+ * Activity row (attempts / note / stage summary) without duplicating tab content.
+ */
+function PipelineActivityDetail({
+  entry,
+  expandedStage,
+  matching,
+  matchingPending,
+  matchingError = false,
+}: {
+  entry: TimelineEntry | null
+  expandedStage: string | null
+  matching?: MatchingResultDetail | null
+  matchingPending: boolean
+  matchingError?: boolean
+}) {
+  if (entry == null) {
+    if (expandedStage === 'matching') {
+      return (
+        <MatchingAttemptsUnderPipeline
+          matching={matching}
+          pending={matchingPending}
+          error={matchingError}
+        />
+      )
+    }
+    return <p className="text-[0.65rem] text-mute">Select an activity to inspect details.</p>
+  }
+
+  // Notes / assignments always win over ambient Matching expansion.
+  if (isHumanActivityKind(entry.kind)) {
+    return <ActivityNoteDetail entry={entry} />
+  }
+
+  const workbenchStage = timelineEntryWorkbenchStage(entry)
+  const opsStage = timelineEntryOpsStage(entry)
+  const isMatchingContext =
+    workbenchStage === 'matching' ||
+    (entry.kind === 'stage' && (opsStage === 'match' || opsStage === 'review'))
+
+  if (isMatchingContext) {
+    return (
+      <MatchingAttemptsUnderPipeline
+        matching={matching}
+        pending={matchingPending}
+        error={matchingError}
+      />
+    )
+  }
+
+  if (entry.kind === 'stage') {
+    return <StageActivityDetail entry={entry} expandedStage={expandedStage} />
+  }
+
+  return <ActivitySummaryDetail entry={entry} />
 }
 
 /** Legal kickoff (R11/KD6) + Access identity-comment gate (R13/KTD6). */
@@ -1476,8 +1756,26 @@ export function RequestDetailBody({
   const [tab, setTab] = useState<RequestDetailTab>(defaultTab)
 
   useEffect(() => {
-    setTab(defaultTab)
-  }, [requestId, defaultTab])
+    // Page layout has no Activity tab — coerce a deep-linked `activity` default.
+    const next = variant === 'page' && defaultTab === 'activity' ? 'fulfillment' : defaultTab
+    setTab(next)
+  }, [requestId, defaultTab, variant])
+
+  // Page-only activity ↔ pipeline linkage — inert on the overlay (pipeline stays uncontrolled).
+  const [expandedStage, setExpandedStage] = useState<string | null>(null)
+  const [selectedTimelineKey, setSelectedTimelineKey] = useState<string | null>(null)
+  const [selectedTimelineEntry, setSelectedTimelineEntry] = useState<TimelineEntry | null>(null)
+  const selectedEntryRef = useRef<TimelineEntry | null>(null)
+  selectedEntryRef.current = selectedTimelineEntry
+  /** When the operator manually collapses the rail, skip auto-default until they expand or pick activity. */
+  const userCollapsedRef = useRef(false)
+
+  useEffect(() => {
+    setExpandedStage(null)
+    setSelectedTimelineKey(null)
+    setSelectedTimelineEntry(null)
+    userCollapsedRef.current = false
+  }, [requestId])
 
   const requestQuery = useQuery({
     queryKey: ['admin-api', 'requests', requestId],
@@ -1541,11 +1839,12 @@ export function RequestDetailBody({
     staleTime: 10_000,
   })
 
+  const timelineAlways = variant === 'page' || tab === 'activity'
   const timelineQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', requestId, 'timeline'],
     queryFn: () => getRequestTimeline(requestId),
-    enabled: tab === 'activity',
-    refetchInterval: tab === 'activity' ? 15_000 : false,
+    enabled: timelineAlways,
+    refetchInterval: timelineAlways ? 15_000 : false,
     placeholderData: (previous) => previous,
   })
 
@@ -1578,23 +1877,44 @@ export function RequestDetailBody({
     mutationFn: async ({
       action,
       responseStatus,
+      dwids,
     }: {
       action: 'promote' | 'decline'
       responseStatus?: DropResponseStatusCode
+      dwids?: string[]
     }) => {
       if (action === 'promote') {
         return postDropMatchingResultPromote(requestId, {
           response_status: responseStatus,
+          ...(responseStatus === 5
+            ? { dwids: [] }
+            : responseStatus === 3 || responseStatus === 4
+              ? { dwids: dwids ?? [] }
+              : {}),
         })
       }
       return postDropMatchingResultDecline(requestId)
     },
-    onSuccess: async (_data, variables) => {
-      actionToast.success({
-        title:
-          variables.action === 'promote' ? 'Matching approved' : 'Matching declined',
-        id: `request-matching-disposition-${requestId}`,
-      })
+    onSuccess: async (data, variables) => {
+      const dispositionRecorded =
+        data &&
+        typeof data === 'object' &&
+        'disposition' in data &&
+        (data as { disposition?: { recorded?: boolean } }).disposition?.recorded
+      if (variables.action === 'promote' && dispositionRecorded === false) {
+        actionToast.warning({
+          title: 'Matching approved — disposition not recorded',
+          description:
+            'Review was approved, but the vertical disposition write did not record. Check DWIDs and retry if needed.',
+          id: `request-matching-disposition-${requestId}`,
+        })
+      } else {
+        actionToast.success({
+          title:
+            variables.action === 'promote' ? 'Matching approved' : 'Matching declined',
+          id: `request-matching-disposition-${requestId}`,
+        })
+      }
       await invalidateAll()
     },
     onError: (mutationError, variables) => {
@@ -1638,12 +1958,41 @@ export function RequestDetailBody({
   const railSubsteps = workbench ? undefined : derivedChrome?.substeps
   const splitPosture = workbench?.split_posture ?? derivedChrome?.split_posture ?? false
 
+  // Page rail: keep the pipeline expansion following the active stage while polling,
+  // unless the operator has an activity selected or manually collapsed the rail.
+  const railStatusKey = railStages.map((stage) => `${stage.stage}:${stage.status}`).join('|')
+  useEffect(() => {
+    if (variant !== 'page') return
+    if (selectedEntryRef.current != null) return
+    if (userCollapsedRef.current) return
+    if (railStatusKey === '') return
+    setExpandedStage(defaultExpandedFromRail(railStages))
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- railStatusKey captures status shifts
+  }, [variant, railStatusKey])
+
+  const handleActivitySelect = (entry: TimelineEntry, key: string) => {
+    if (selectedTimelineKey === key) {
+      setSelectedTimelineKey(null)
+      setSelectedTimelineEntry(null)
+      return
+    }
+    userCollapsedRef.current = false
+    setSelectedTimelineKey(key)
+    setSelectedTimelineEntry(entry)
+    const workbenchStage = timelineEntryWorkbenchStage(entry)
+    if (workbenchStage) {
+      setExpandedStage(workbenchStage)
+    }
+  }
+
   const assignmentToLegal = isAssignmentToLegalContext(attentionItem)
   const canMatchingDisposition =
     matching != null &&
     matching.review_status === 'pending' &&
     Boolean(matching.approval_id) &&
-    ((legalAdmin && assignmentToLegal) || (role === 'data_owner' && !legalAdmin))
+    (isSuperAdmin ||
+      (legalAdmin && assignmentToLegal) ||
+      (role === 'data_owner' && !legalAdmin))
 
   const dropPreMatch =
     intakeSource === 'drop' &&
@@ -1700,176 +2049,262 @@ export function RequestDetailBody({
     railStages.find((step) => step.status === 'failed') ??
     railStages[railStages.length - 1]
 
+  const pipelineSubsteps = workbench
+    ? derivedChrome?.substeps.filter(
+        (step) => step.parent === 'ingest' || step.parent === 'notice',
+      )
+    : railSubsteps
+
+  const pipelineContent =
+    workbenchQuery.isPending && !workbench && !derivedChrome ? (
+      <p className="text-[0.7rem] text-mute">Loading stage rail…</p>
+    ) : railStages.length > 0 ? (
+      variant === 'page' ? (
+        <ThinJourneyPipeline
+          stages={railStages}
+          substeps={pipelineSubsteps}
+          matchingCluster={workbench?.matching_cluster}
+          fulfillmentCluster={workbench?.fulfillment_cluster}
+          splitPosture={splitPosture}
+          density="comfortable"
+          expandedStage={expandedStage}
+          onExpandedStageChange={(next) => {
+            setExpandedStage(next)
+            if (next == null) {
+              userCollapsedRef.current = true
+              setSelectedTimelineKey(null)
+              setSelectedTimelineEntry(null)
+            } else {
+              userCollapsedRef.current = false
+            }
+          }}
+        />
+      ) : (
+        <ThinJourneyPipeline
+          stages={railStages}
+          substeps={pipelineSubsteps}
+          matchingCluster={workbench?.matching_cluster}
+          fulfillmentCluster={workbench?.fulfillment_cluster}
+          splitPosture={splitPosture}
+          density="compact"
+        />
+      )
+    ) : (
+      <p className="text-[0.7rem] text-mute">
+        {currentRail?.label ? `Stage: ${currentRail.label}` : 'No stage rail.'}
+      </p>
+    )
+
+  const tabsNode = (
+    <Tabs
+      value={tab}
+      onValueChange={(value) => setTab(value as RequestDetailTab)}
+      className="flex min-h-0 flex-1 flex-col overflow-hidden"
+    >
+      <div className="shrink-0 border-b border-line px-4 py-2">
+        <TabsList className="h-9 w-full justify-start gap-1 bg-canvas p-1">
+          <TabsTrigger value="details" className="h-7 px-3">
+            Details
+          </TabsTrigger>
+          <TabsTrigger value="fulfillment" className="h-7 px-3">
+            Fulfillment
+          </TabsTrigger>
+          <TabsTrigger value="matching" className="h-7 px-3">
+            Matching
+          </TabsTrigger>
+          {variant === 'overlay' ? (
+            <TabsTrigger value="activity" className="h-7 px-3">
+              Activity
+            </TabsTrigger>
+          ) : null}
+        </TabsList>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <TabsContent value="details" className="mt-0 px-4 py-4">
+          <RequestDetailsPanel
+            requestId={requestId}
+            intakeSource={intakeSource}
+            displayLabel={displayLabel}
+            requestContact={requestQuery.data?.contact}
+            requestorState={requestQuery.data?.requestor_state}
+            identityStatus={identityQuery.data?.status}
+            matching={matching}
+            dropStatusCode={dropStatusCode}
+            dropStatusIsRecommended={dropStatusIsRecommended}
+            dropPreMatch={dropPreMatch}
+          />
+          <AttachmentsPanel requestId={requestId} />
+        </TabsContent>
+        <TabsContent value="fulfillment" className="mt-0 px-4 py-4">
+          <div className="space-y-4">
+            {workbench && (isSuperAdmin || isAdmin || legalAdmin) ? (
+              <FulfillmentGateControls
+                requestId={requestId}
+                rows={workbench.fulfillment_cluster}
+                onInvalidate={invalidateAll}
+              />
+            ) : null}
+            <AccessHandoffPanel
+              requestId={requestId}
+              artifact={artifactQuery.data}
+              isPending={artifactQuery.isPending}
+              isError={artifactQuery.isError}
+              canMutate={Boolean(isSuperAdmin || isAdmin)}
+              busy={deliveryMutation.isPending}
+              onCopyUrl={() => {
+                const url =
+                  artifactQuery.data?.shareable_url ??
+                  artifactQuery.data?.fulfillment_artifact_uri
+                if (!url) return
+                const copyUrl = () => {
+                  void navigator.clipboard.writeText(url).then(() => {
+                    actionToast.copied('Copied URL', copyUrl)
+                  })
+                }
+                copyUrl()
+              }}
+              onSetStatus={(status) => deliveryMutation.mutate(status)}
+            />
+            <div className="space-y-1">
+              <p className="taste-micro">Identity verification</p>
+              {identityQuery.data ? (
+                <p className="text-xs text-ink-soft">
+                  Status:{' '}
+                  <span className="capitalize text-ink">{identityQuery.data.status}</span>
+                  <span className="text-mute">
+                    {' '}
+                    · {formatTimestamp(identityQuery.data.verified_at)}
+                  </span>
+                  {identityQuery.data.method ? (
+                    <span className="text-mute">
+                      {' '}
+                      · {identityQuery.data.method}
+                    </span>
+                  ) : null}
+                </p>
+              ) : (
+                <p className="text-xs text-mute">
+                  None recorded — use Identity verified in stage actions when ready.
+                </p>
+              )}
+            </div>
+            <AccessDeliveryEmailCard requestId={requestId} />
+          </div>
+        </TabsContent>
+        <TabsContent value="matching" className="mt-0 px-4 py-4">
+          {isSuperAdmin && canMatchingDisposition ? (
+            <p className="mb-2 text-[0.65rem] text-habeas-navy">
+              Ops override — you can set the CA DROP status and matched DWIDs, same as data owner.
+              This is not Legal kickoff or Fulfillment start.
+            </p>
+          ) : isSuperAdmin ? (
+            <p className="mb-2 text-[0.65rem] text-mute">
+              Ops override available when matching review is pending with an open approval.
+            </p>
+          ) : assignmentToLegal ? (
+            <p className="mb-2 text-[0.65rem] text-habeas-navy">
+              Assignment to legal — review matching context (disposition remains data-owner
+              canonical unless escalated here).
+            </p>
+          ) : legalAdmin ? (
+            <p className="mb-2 text-[0.65rem] text-mute">
+              Read-only for legal/admin — matching disposition is data-owner-owned (KTD11).
+            </p>
+          ) : null}
+          <MatchingReviewPanel
+            requestId={requestId}
+            matching={matching}
+            isPending={matchingQuery.isPending}
+            isError={matchingQuery.isError}
+            canReviewActions={canMatchingDisposition}
+            actionPending={matchingDispositionMutation.isPending}
+            hideActions={!canMatchingDisposition}
+            layout="tabs"
+            compact
+            onPromote={(responseStatus, dwids) =>
+              matchingDispositionMutation.mutate({
+                action: 'promote',
+                responseStatus,
+                dwids,
+              })
+            }
+            onDecline={() => matchingDispositionMutation.mutate({ action: 'decline' })}
+          />
+        </TabsContent>
+        {variant === 'overlay' ? (
+          <TabsContent value="activity" className="mt-0">
+            <ActivityPanel
+              requestId={requestId}
+              entries={timelineQuery.data?.entries ?? []}
+              isPending={timelineQuery.isPending && !timelineQuery.data}
+            />
+          </TabsContent>
+        ) : null}
+      </div>
+    </Tabs>
+  )
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <RequestStageActionBar actions={stageActions} onInvalidate={invalidateAll} />
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        {/* Four-panel journey chrome — clusters/substeps live inside ThinJourneyPipeline */}
-        <div
-          className={cn(
-            'shrink-0 space-y-2 overflow-x-auto border-b border-line px-4',
-            variant === 'overlay' ? 'py-2' : 'py-3',
-          )}
-        >
-          {workbenchQuery.isPending && !workbench && !derivedChrome ? (
-            <p className="text-[0.7rem] text-mute">Loading stage rail…</p>
-          ) : railStages.length > 0 ? (
-            <ThinJourneyPipeline
-              stages={railStages}
-              substeps={
-                workbench
-                  ? derivedChrome?.substeps.filter(
-                      (step) => step.parent === 'ingest' || step.parent === 'notice',
-                    )
-                  : railSubsteps
-              }
-              matchingCluster={workbench?.matching_cluster}
-              fulfillmentCluster={workbench?.fulfillment_cluster}
-              splitPosture={splitPosture}
-              density={variant === 'overlay' ? 'compact' : 'comfortable'}
-            />
-          ) : (
-            <p className="text-[0.7rem] text-mute">
-              {currentRail?.label ? `Stage: ${currentRail.label}` : 'No stage rail.'}
-            </p>
-          )}
-        </div>
 
-        <Tabs
-          value={tab}
-          onValueChange={(value) => setTab(value as RequestDetailTab)}
-          className="flex min-h-0 flex-1 flex-col overflow-hidden"
-        >
-          <div className="shrink-0 border-b border-line px-4 py-2">
-            <TabsList className="h-9 w-full justify-start gap-1 bg-canvas p-1">
-              <TabsTrigger value="details" className="h-7 px-3">
-                Details
-              </TabsTrigger>
-              <TabsTrigger value="fulfillment" className="h-7 px-3">
-                Fulfillment
-              </TabsTrigger>
-              <TabsTrigger value="matching" className="h-7 px-3">
-                Matching
-              </TabsTrigger>
-              <TabsTrigger value="activity" className="h-7 px-3">
-                Activity
-              </TabsTrigger>
-            </TabsList>
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            <TabsContent value="details" className="mt-0 px-4 py-4">
-              <RequestDetailsPanel
-                requestId={requestId}
-                intakeSource={intakeSource}
-                displayLabel={displayLabel}
-                requestContact={requestQuery.data?.contact}
-                requestorState={requestQuery.data?.requestor_state}
-                identityStatus={identityQuery.data?.status}
-                matching={matching}
-                dropStatusCode={dropStatusCode}
-                dropStatusIsRecommended={dropStatusIsRecommended}
-                dropPreMatch={dropPreMatch}
-              />
-              <AttachmentsPanel requestId={requestId} />
-            </TabsContent>
-            <TabsContent value="fulfillment" className="mt-0 px-4 py-4">
-              <div className="space-y-4">
-                {workbench && (isSuperAdmin || isAdmin || legalAdmin) ? (
-                  <FulfillmentGateControls
-                    requestId={requestId}
-                    rows={workbench.fulfillment_cluster}
-                    onInvalidate={invalidateAll}
-                  />
-                ) : null}
-                <AccessHandoffPanel
-                  requestId={requestId}
-                  artifact={artifactQuery.data}
-                  isPending={artifactQuery.isPending}
-                  isError={artifactQuery.isError}
-                  canMutate={Boolean(isSuperAdmin || isAdmin)}
-                  busy={deliveryMutation.isPending}
-                  onCopyUrl={() => {
-                    const url =
-                      artifactQuery.data?.shareable_url ??
-                      artifactQuery.data?.fulfillment_artifact_uri
-                    if (!url) return
-                    const copyUrl = () => {
-                      void navigator.clipboard.writeText(url).then(() => {
-                        actionToast.copied('Copied URL', copyUrl)
-                      })
-                    }
-                    copyUrl()
-                  }}
-                  onSetStatus={(status) => deliveryMutation.mutate(status)}
+      {variant === 'page' ? (
+        /* PAGE: left = pipeline → attempt/activity detail → Activity feed; right = tabs */
+        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+          {/* LEFT / MAIN */}
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+            <div className="shrink-0 space-y-2 overflow-x-auto border-b border-line px-4 py-3">
+              {pipelineContent}
+              <div
+                id="pipeline-activity-detail"
+                role="region"
+                aria-label="Selected activity detail"
+                className="space-y-2 border-t border-line/70 pt-2"
+              >
+                <PipelineActivityDetail
+                  entry={selectedTimelineEntry}
+                  expandedStage={expandedStage}
+                  matching={matching}
+                  matchingPending={matchingQuery.isPending}
+                  matchingError={matchingQuery.isError}
                 />
-                <div className="space-y-1">
-                  <p className="taste-micro">Identity verification</p>
-                  {identityQuery.data ? (
-                    <p className="text-xs text-ink-soft">
-                      Status:{' '}
-                      <span className="capitalize text-ink">{identityQuery.data.status}</span>
-                      <span className="text-mute">
-                        {' '}
-                        · {formatTimestamp(identityQuery.data.verified_at)}
-                      </span>
-                      {identityQuery.data.method ? (
-                        <span className="text-mute">
-                          {' '}
-                          · {identityQuery.data.method}
-                        </span>
-                      ) : null}
-                    </p>
-                  ) : (
-                    <p className="text-xs text-mute">
-                      None recorded — use Identity verified in stage actions when ready.
-                    </p>
-                  )}
-                </div>
-                <AccessDeliveryEmailCard requestId={requestId} />
               </div>
-            </TabsContent>
-            <TabsContent value="matching" className="mt-0 px-4 py-4">
-              {assignmentToLegal ? (
-                <p className="mb-2 text-[0.65rem] text-habeas-navy">
-                  Assignment to legal — review matching context (disposition remains data-owner
-                  canonical unless escalated here).
-                </p>
-              ) : legalAdmin ? (
-                <p className="mb-2 text-[0.65rem] text-mute">
-                  Read-only for legal/admin — matching disposition is data-owner-owned (KTD11).
-                </p>
-              ) : null}
-              <MatchingReviewPanel
-                requestId={requestId}
-                matching={matching}
-                isPending={matchingQuery.isPending}
-                isError={matchingQuery.isError}
-                canReviewActions={canMatchingDisposition}
-                actionPending={matchingDispositionMutation.isPending}
-                hideActions={!canMatchingDisposition}
-                layout="tabs"
-                compact
-                onPromote={(responseStatus) =>
-                  matchingDispositionMutation.mutate({
-                    action: 'promote',
-                    responseStatus,
-                  })
-                }
-                onDecline={() => matchingDispositionMutation.mutate({ action: 'decline' })}
-              />
-            </TabsContent>
-            <TabsContent value="activity" className="mt-0">
-              <ActivityPanel
-                requestId={requestId}
-                entries={timelineQuery.data?.entries ?? []}
-                isPending={timelineQuery.isPending && !timelineQuery.data}
-              />
-            </TabsContent>
-          </div>
-        </Tabs>
+            </div>
 
-        {variant === 'overlay' ? (
+      <div
+        className="min-h-0 flex-1 overflow-y-auto"
+        role="region"
+        aria-label="Request activity"
+      >
+        <ActivityPanel
+          requestId={requestId}
+          entries={timelineQuery.data?.entries ?? []}
+          isPending={timelineQuery.isPending && !timelineQuery.data}
+          selectable
+          selectedKey={selectedTimelineKey}
+          onSelectEntry={handleActivitySelect}
+        />
+      </div>
+          </div>
+
+          {/* RIGHT: Details / Fulfillment / Matching */}
+          <aside
+            className="flex w-[min(26rem,45%)] shrink-0 flex-col overflow-hidden border-l border-line bg-canvas/30"
+            aria-label="Request details and workflow"
+          >
+            {tabsNode}
+          </aside>
+        </div>
+      ) : (
+        /* OVERLAY: unchanged single column */
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <div className="shrink-0 space-y-2 overflow-x-auto border-b border-line px-4 py-2">
+            {pipelineContent}
+          </div>
+
+          {tabsNode}
+
           <div className="flex shrink-0 flex-wrap gap-2 border-t border-line px-4 py-2">
             <Link
               to="/requests/$requestId"
@@ -1888,8 +2323,8 @@ export function RequestDetailBody({
               </Link>
             ) : null}
           </div>
-        ) : null}
-      </div>
+        </div>
+      )}
     </div>
   )
 }

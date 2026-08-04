@@ -21,21 +21,44 @@ import {
   type MatchedPersonContact,
   type RunTimelineStep,
 } from '@/lib/api'
+import { actionToast } from '@/lib/action-toast'
 import { actionReasonLabel } from '@/lib/legalJourneyLabels'
 import { cn } from '@/lib/utils'
 
-/** CA DROP response_status picker for Inbox fulfill confirms. */
+/**
+ * CA DROP response_status picker for Inbox fulfill confirms.
+ *
+ * E3 wire-up — optional DWID multi-select (status 3/4):
+ * - `contacts` / `selectedDwids` / `onSelectedDwidsChange` — when `value` is 3 or 4,
+ *   shows a checklist of matched contacts (parent should pre-select all dwids).
+ * - When `value` is 5, DWID list is hidden; parent should clear `selectedDwids`.
+ * - Promote/fulfill callbacks: `(status, dwids?) => void` — pass selected dwids for
+ *   3/4, empty/`[]` for 5.
+ */
 export function DropResponseStatusPicker({
   value,
   onChange,
   disabled,
   suggested,
+  contacts,
+  selectedDwids,
+  onSelectedDwidsChange,
 }: {
   value: DropResponseStatusCode | null
   onChange: (code: DropResponseStatusCode) => void
   disabled?: boolean
   suggested?: DropResponseStatusCode | null
+  contacts?: MatchedPersonContact[]
+  selectedDwids?: string[]
+  onSelectedDwidsChange?: (dwids: string[]) => void
 }) {
+  const needsDwids = value === 3 || value === 4
+  const showDwidSelect =
+    needsDwids &&
+    contacts != null &&
+    contacts.length > 0 &&
+    onSelectedDwidsChange != null
+
   return (
     <fieldset className="space-y-1.5" disabled={disabled}>
       <legend className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
@@ -74,8 +97,56 @@ export function DropResponseStatusPicker({
           )
         })}
       </div>
+      {showDwidSelect ? (
+        <MatchedContactsPanel
+          contacts={contacts}
+          selectable
+          selectedDwids={selectedDwids ?? []}
+          onSelectedDwidsChange={onSelectedDwidsChange}
+          disabled={disabled}
+        />
+      ) : null}
+      {value === 5 ? (
+        <p className="text-[0.65rem] text-mute">
+          Not found — matched DWIDs are not sent (selection cleared).
+        </p>
+      ) : null}
     </fieldset>
   )
+}
+
+/** Compact DOB for labels: `01/01/80` from ISO `1980-01-01`. */
+function compactDob(dob: string): string {
+  const match = dob.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (!match) return dob.trim()
+  const [, year, month, day] = match
+  return `${month}/${day}/${year!.slice(2)}`
+}
+
+/** Compact contact label: `{first_initial} {last_name} {state} {dob}`; initials fallback. */
+export function formatMatchedContactLabel(contact: MatchedPersonContact): string {
+  const lastName = contact.last_name?.trim()
+  const namePart = lastName
+    ? [contact.first_initial?.trim() || null, lastName].filter(Boolean).join(' ')
+    : formatInitials(contact)
+  const dob = contact.dob?.trim() ? compactDob(contact.dob) : null
+  return [namePart, contact.state || null, dob].filter(Boolean).join(' ')
+}
+
+/** First selected (or first) contact label + ` +N more` when multiple. */
+export function formatMatchedContactsSummary(
+  contacts: MatchedPersonContact[],
+  selectedDwids?: string[],
+): string {
+  if (contacts.length === 0) return '—'
+  const selected =
+    selectedDwids && selectedDwids.length > 0
+      ? contacts.filter((contact) => selectedDwids.includes(contact.dwid))
+      : contacts
+  const shown = selected.length > 0 ? selected : contacts
+  const firstLabel = formatMatchedContactLabel(shown[0]!)
+  const rest = shown.length - 1
+  return rest > 0 ? `${firstLabel} +${rest} more` : firstLabel
 }
 
 
@@ -276,7 +347,12 @@ function attemptGlance(attempts: MatchingAttemptRow[]): {
 } {
   if (attempts.length === 0) return { label: 'None', tone: 'default' }
   const latest = [...attempts].sort((a, b) => b.attempt_number - a.attempt_number)[0]!
-  if (latest.status === 'success') return { label: `${attempts.length} · ok`, tone: 'ok' }
+  if (latest.status === 'success') {
+    if (attemptIsUnmatchedSuccess(latest)) {
+      return { label: `${attempts.length} · not found`, tone: 'wait' }
+    }
+    return { label: `${attempts.length} · ok`, tone: 'ok' }
+  }
   if (latest.status === 'submit_error' || latest.status === 'outcome_error') {
     return { label: `${attempts.length} · error`, tone: 'fail' }
   }
@@ -332,17 +408,151 @@ export function StatusAccordion({
   )
 }
 
-function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
+function auditFieldDisplay(
+  payload: Record<string, unknown>,
+  key: string,
+): string | null {
+  if (!(key in payload)) return null
+  const value = payload[key]
+  if (value == null) return '—'
+  if (typeof value === 'boolean' || typeof value === 'number') return String(value)
+  if (typeof value === 'string') return value || '—'
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return '—'
+  }
+}
+
+function coerceAuditObject(payload: unknown): Record<string, unknown> {
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    return payload as Record<string, unknown>
+  }
+  return {}
+}
+
+function attemptIsUnmatchedSuccess(attempt: MatchingAttemptRow): boolean {
+  if (attempt.status !== 'success') return false
+  const audit = coerceAuditObject(attempt.audit_payload)
+  const matchCount = typeof audit.match_count === 'number' ? audit.match_count : null
+  const matchedVia =
+    typeof audit.matched_via === 'string' ? audit.matched_via.toLowerCase() : ''
+  // Domain: matched === (match_count == 1). Multi-match sets matched=false — not "not found".
+  if (matchedVia.includes('missing')) return true
+  if (matchCount === 0) return true
+  if (matchCount != null && matchCount > 0) return false
+  return audit.matched === false
+}
+
+function attemptRowBadge(attempt: MatchingAttemptRow): {
+  label: string
+  tone: 'default' | 'ok' | 'fail' | 'wait' | 'run'
+} {
+  if (attempt.status === 'success') {
+    const audit = coerceAuditObject(attempt.audit_payload)
+    const matchCount = typeof audit.match_count === 'number' ? audit.match_count : null
+    if (attemptIsUnmatchedSuccess(attempt)) {
+      const matchedVia =
+        typeof audit.matched_via === 'string' ? audit.matched_via : null
+      return {
+        label:
+          matchedVia && matchedVia.toLowerCase().includes('missing')
+            ? `success · ${matchedVia}`
+            : 'success · not found',
+        tone: 'wait',
+      }
+    }
+    if (matchCount != null && matchCount > 1) {
+      return { label: `success · multi (${matchCount})`, tone: 'ok' }
+    }
+    return { label: 'success · matched', tone: 'ok' }
+  }
+  if (attempt.error_code || attempt.status.includes('error')) {
+    return { label: attempt.error_code ?? attempt.status, tone: 'fail' }
+  }
+  if (attempt.status === 'in_flight' || attempt.status === 'claimed') {
+    return { label: attempt.status, tone: 'run' }
+  }
+  return { label: attempt.error_code ?? attempt.status, tone: 'wait' }
+}
+
+export function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
   const [open, setOpen] = useState(false)
-  const auditKeys = Object.keys(attempt.audit_payload ?? {})
-  const tone =
-    attempt.status === 'success'
-      ? 'ok'
-      : attempt.error_code || attempt.status.includes('error')
-        ? 'fail'
-        : attempt.status === 'in_flight' || attempt.status === 'claimed'
-          ? 'run'
-          : 'wait'
+  const audit = coerceAuditObject(attempt.audit_payload)
+  const badge = attemptRowBadge(attempt)
+  const errorMessage = attempt.error_message ?? null
+
+  const copyAttemptId = () => {
+    void navigator.clipboard
+      .writeText(String(attempt.id))
+      .then(() => {
+        actionToast.copied('Copied attempt id', copyAttemptId)
+      })
+      .catch(() => {
+        actionToast.error({
+          title: 'Copy failed',
+          description: 'Could not copy attempt id to the clipboard.',
+        })
+      })
+  }
+
+  const summaryRows: { label: string; value: string; show?: boolean }[] = [
+    { label: 'Attempted', value: formatTimestamp(attempt.attempted_at) },
+    { label: 'Completed', value: formatTimestamp(attempt.completed_at) },
+    { label: 'Status', value: attempt.status },
+    {
+      label: 'Error code',
+      value: attempt.error_code ?? '—',
+      show: Boolean(attempt.error_code),
+    },
+    {
+      label: 'Matched',
+      value: auditFieldDisplay(audit, 'matched') ?? '—',
+      show: 'matched' in audit,
+    },
+    {
+      label: 'Match count',
+      value: auditFieldDisplay(audit, 'match_count') ?? '—',
+      show: 'match_count' in audit,
+    },
+    {
+      label: 'Matched via',
+      value: auditFieldDisplay(audit, 'matched_via') ?? '—',
+      show: 'matched_via' in audit,
+    },
+    {
+      label: 'Lookup state',
+      value: auditFieldDisplay(audit, 'lookup_state') ?? '—',
+      show: 'lookup_state' in audit,
+    },
+    {
+      label: 'Duration ms',
+      value: auditFieldDisplay(audit, 'duration_ms') ?? '—',
+      show: 'duration_ms' in audit,
+    },
+    {
+      label: 'Error class',
+      value: auditFieldDisplay(audit, 'error_class') ?? '—',
+      show: 'error_class' in audit,
+    },
+    {
+      label: 'Error detail',
+      value: auditFieldDisplay(audit, 'error_detail') ?? '—',
+      show: 'error_detail' in audit,
+    },
+    {
+      label: 'Retry scheduled',
+      value: auditFieldDisplay(audit, 'retry_scheduled') ?? '—',
+      show: 'retry_scheduled' in audit,
+    },
+  ]
+
+  let auditJson = '—'
+  try {
+    auditJson = JSON.stringify(audit, null, 2)
+  } catch {
+    auditJson = String(audit)
+  }
 
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
@@ -356,8 +566,8 @@ function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
               <span className="font-medium text-ink">Attempt #{attempt.attempt_number}</span>
             </span>
             <span className="flex shrink-0 items-center gap-1.5">
-              <Badge variant={tone} className="normal-case tracking-normal">
-                {attempt.error_code ?? attempt.status}
+              <Badge variant={badge.tone} className="normal-case tracking-normal">
+                {badge.label}
               </Badge>
               <span className="tabular-nums text-[0.6rem] text-mute">
                 {open ? '▾' : '▸'}
@@ -366,26 +576,50 @@ function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
           </button>
         </CollapsibleTrigger>
         <CollapsibleContent>
-          <dl className="grid grid-cols-2 gap-x-3 gap-y-1 border-t border-line/60 px-2 py-1.5 text-[0.65rem]">
+          <div className="space-y-1.5 border-t border-line/60 px-2 py-1.5 text-[0.65rem]">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-mute">Attempt id</span>
+              <span className="font-mono tabular-nums text-ink">{attempt.id}</span>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-6 px-1.5 text-[0.6rem]"
+                aria-label="Copy attempt id"
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  copyAttemptId()
+                }}
+              >
+                Copy
+              </Button>
+            </div>
+            <dl className="grid grid-cols-2 gap-x-3 gap-y-1">
+              {summaryRows
+                .filter((row) => row.show !== false)
+                .map((row) => (
+                  <div key={row.label} className="min-w-0">
+                    <dt className="text-mute">{row.label}</dt>
+                    <dd className="truncate tabular-nums text-ink-soft">{row.value}</dd>
+                  </div>
+                ))}
+            </dl>
+            {errorMessage ? (
+              <div>
+                <p className="text-mute">Error message</p>
+                <p className="mt-0.5 whitespace-pre-wrap break-words text-ink-soft">
+                  {errorMessage}
+                </p>
+              </div>
+            ) : null}
             <div>
-              <dt className="text-mute">Attempted</dt>
-              <dd className="tabular-nums text-ink-soft">
-                {formatTimestamp(attempt.attempted_at)}
-              </dd>
+              <p className="text-mute">Audit payload</p>
+              <pre className="mt-0.5 max-h-48 overflow-auto rounded-md border border-line/60 bg-paper/50 p-1.5 font-mono text-[0.6rem] leading-snug text-ink-soft">
+                {auditJson}
+              </pre>
             </div>
-            <div>
-              <dt className="text-mute">Completed</dt>
-              <dd className="tabular-nums text-ink-soft">
-                {formatTimestamp(attempt.completed_at)}
-              </dd>
-            </div>
-            <div className="col-span-2">
-              <dt className="text-mute">Audit keys</dt>
-              <dd className="mt-0.5 font-mono text-ink-soft">
-                {auditKeys.length > 0 ? auditKeys.join(', ') : '—'}
-              </dd>
-            </div>
-          </dl>
+          </div>
         </CollapsibleContent>
       </div>
     </Collapsible>
@@ -581,23 +815,75 @@ function MatchedContactDetails({ contact }: { contact: MatchedPersonContact }) {
   )
 }
 
-function MatchedContactsPanel({
+/** Emphasized fail callout when matched person contact enrichment is unavailable. */
+export function MatchedContactsUnavailableCallout({
   matching,
 }: {
-  matching: MatchingResultDetail
+  matching?: MatchingResultDetail
 }) {
-  const contacts = matching.matched_contacts ?? []
-  const status = matching.matched_contacts_status
+  const err = matching?.matched_contacts_error
+  const message = err?.message?.trim() || null
+  const code = err?.code?.trim() || null
+  const stage = err?.stage?.trim() || null
+  const hint = err?.hint?.trim() || null
+  const excType = err?.exc_type?.trim() || null
 
-  if (matching.match_count <= 0) return null
-
-  if (status === 'unavailable') {
-    return (
-      <p className="text-[0.7rem] text-mute">
-        Matched person details are unavailable (BigQuery lookup failed or is not configured
-        locally).
+  return (
+    <div
+      role="alert"
+      className="space-y-1 rounded-md border border-red-300 bg-red-50 px-2.5 py-2 text-[0.7rem]"
+    >
+      <div className="flex flex-wrap items-center gap-1.5">
+        <p className="font-medium text-red-800">Matched person details unavailable</p>
+        {code ? (
+          <span className="rounded border border-red-300/80 bg-red-50 px-1 py-px font-mono text-[0.6rem] tabular-nums text-red-700">
+            {code}
+          </span>
+        ) : null}
+        {stage ? (
+          <span className="rounded border border-red-200/80 bg-red-50/60 px-1 py-px font-mono text-[0.6rem] text-red-700/80">
+            {stage}
+          </span>
+        ) : null}
+      </div>
+      <p className="text-red-700">
+        {message ??
+          'Contact enrichment returned unavailable without a diagnostic reason. Reload this request; if it persists, the API may be an older build.'}
       </p>
-    )
+      <p className="text-[0.65rem] text-red-800/80">
+        {hint ?? 'Reload this request, then check requestor state and matching configuration.'}
+      </p>
+      {excType ? (
+        <p className="font-mono text-[0.6rem] text-red-800/70">type: {excType}</p>
+      ) : null}
+    </div>
+  )
+}
+
+function MatchedContactsPanel({
+  matching,
+  contacts: contactsProp,
+  selectable = false,
+  selectedDwids,
+  onSelectedDwidsChange,
+  disabled = false,
+}: {
+  matching?: MatchingResultDetail
+  contacts?: MatchedPersonContact[]
+  selectable?: boolean
+  selectedDwids?: string[]
+  onSelectedDwidsChange?: (dwids: string[]) => void
+  disabled?: boolean
+}) {
+  const contacts = contactsProp ?? matching?.matched_contacts ?? []
+  const status = matching?.matched_contacts_status
+  const matchCount = matching?.match_count ?? contacts.length
+
+  if (!selectable && matchCount <= 0) return null
+  if (contacts.length === 0 && matchCount <= 0) return null
+
+  if (status === 'unavailable' && contacts.length === 0) {
+    return <MatchedContactsUnavailableCallout matching={matching} />
   }
 
   if (contacts.length === 0) {
@@ -608,7 +894,62 @@ function MatchedContactsPanel({
     )
   }
 
-  if (matching.match_type === 'single_match' && contacts.length === 1) {
+  if (selectable && onSelectedDwidsChange) {
+    const selected = selectedDwids ?? []
+    const toggle = (dwid: string) => {
+      if (selected.includes(dwid)) {
+        onSelectedDwidsChange(selected.filter((id) => id !== dwid))
+      } else {
+        onSelectedDwidsChange([...selected, dwid])
+      }
+    }
+    return (
+      <div className="space-y-1.5">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+            Matched DWIDs
+          </p>
+          <p className="min-w-0 truncate text-[0.65rem] text-ink-soft">
+            {formatMatchedContactsSummary(contacts, selected)}
+          </p>
+        </div>
+        <ul className="space-y-0.5 rounded-md border border-line/70 bg-paper/40 px-2 py-1.5">
+          {contacts.map((contact) => {
+            const checked = selected.includes(contact.dwid)
+            const inputId = `dwid-${contact.dwid}`
+            return (
+              <li key={contact.dwid}>
+                <label
+                  htmlFor={inputId}
+                  className={cn(
+                    'flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-[0.7rem] hover:bg-panel/40',
+                    disabled && 'cursor-not-allowed opacity-50',
+                  )}
+                >
+                  <input
+                    id={inputId}
+                    type="checkbox"
+                    className="size-3.5 shrink-0 accent-habeas-navy"
+                    checked={checked}
+                    disabled={disabled}
+                    onChange={() => toggle(contact.dwid)}
+                  />
+                  <span className="min-w-0 flex-1 truncate text-ink">
+                    {formatMatchedContactLabel(contact)}
+                  </span>
+                  <span className="shrink-0 font-mono tabular-nums text-[0.6rem] text-mute">
+                    {contact.dwid}
+                  </span>
+                </label>
+              </li>
+            )
+          })}
+        </ul>
+      </div>
+    )
+  }
+
+  if (matching?.match_type === 'single_match' && contacts.length === 1) {
     return (
       <div className="space-y-1.5">
         <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
@@ -635,7 +976,7 @@ function MatchedContactsPanel({
                 >
                   <span className="min-w-0 truncate font-mono tabular-nums">{contact.dwid}</span>
                   <span className="shrink-0 text-mute">
-                    {contact.state} · {formatInitials(contact)}
+                    {formatMatchedContactLabel(contact)}
                   </span>
                 </button>
               </CollapsibleTrigger>
@@ -650,6 +991,15 @@ function MatchedContactsPanel({
   )
 }
 
+/**
+ * Matching review panel — fulfill/decline + attempt drill-down.
+ *
+ * E3 wire-up — `onPromote` / fulfill disposition:
+ *   `(responseStatus: DropResponseStatusCode, dwids?: string[]) => void`
+ * Pass selected DWIDs when status is 3 or 4; pass `[]` (or omit) for status 5.
+ * Panel pre-selects all matched contact dwids when suggested/chosen status is 3/4
+ * and clears selection when status is 5.
+ */
 export function MatchingReviewPanel({
   requestId,
   matching,
@@ -669,7 +1019,8 @@ export function MatchingReviewPanel({
   isError: boolean
   canReviewActions: boolean
   actionPending: boolean
-  onPromote: (responseStatus: DropResponseStatusCode) => void
+  /** Fulfill with DROP status + optional selected DWIDs (3/4). */
+  onPromote: (responseStatus: DropResponseStatusCode, dwids?: string[]) => void
   onDecline: () => void
   /** Denser layout for inbox review pane. */
   compact?: boolean
@@ -683,8 +1034,12 @@ export function MatchingReviewPanel({
     matching?.match_type,
     matching?.match_count,
   )
+  const contactDwids = (matching?.matched_contacts ?? []).map((contact) => contact.dwid)
   const [fulfillStatus, setFulfillStatus] = useState<DropResponseStatusCode | null>(
     suggestedStatus,
+  )
+  const [selectedDwids, setSelectedDwids] = useState<string[]>(() =>
+    suggestedStatus === 3 || suggestedStatus === 4 ? contactDwids : [],
   )
   const wasActionPending = useRef(false)
   useEffect(() => {
@@ -693,11 +1048,32 @@ export function MatchingReviewPanel({
   }, [actionPending])
   useEffect(() => {
     if (confirm === 'fulfill') {
-      setFulfillStatus(
-        suggestedDropResponseStatus(matching?.match_type, matching?.match_count),
+      const next = suggestedDropResponseStatus(
+        matching?.match_type,
+        matching?.match_count,
       )
+      setFulfillStatus(next)
+      const dwids = (matching?.matched_contacts ?? []).map((contact) => contact.dwid)
+      setSelectedDwids(next === 3 || next === 4 ? dwids : [])
     }
-  }, [confirm, matching?.match_type, matching?.match_count])
+  }, [confirm, matching?.match_type, matching?.match_count, matching?.matched_contacts])
+
+  const handleFulfillStatusChange = (code: DropResponseStatusCode) => {
+    setFulfillStatus(code)
+    if (code === 5) {
+      setSelectedDwids([])
+      return
+    }
+    if (code === 3 || code === 4) {
+      setSelectedDwids((matching?.matched_contacts ?? []).map((contact) => contact.dwid))
+    }
+  }
+
+  const fulfillNeedsDwids = fulfillStatus === 3 || fulfillStatus === 4
+  // Status 3/4 require an explicit DWID selection (do not treat empty contacts as ready —
+  // empty [] would let the API default to the full matched set).
+  const fulfillDwidsReady = !fulfillNeedsDwids || selectedDwids.length > 0
+
   const attempts = matching?.attempts ?? []
   const attemptStatus = attemptGlance(attempts)
   const assignment = matching?.assignment?.assignee_identity
@@ -709,18 +1085,25 @@ export function MatchingReviewPanel({
   ) : null
 
   const reviewActions = canReviewActions && !hideActions ? (
-    <div className="flex flex-wrap items-center gap-2 pt-1">
-      <Button size="sm" disabled={actionPending} onClick={() => setConfirm('fulfill')}>
-        {actionPending && confirm === 'fulfill' ? 'Fulfilling…' : 'Fulfill'}
-      </Button>
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={actionPending}
-        onClick={() => setConfirm('decline')}
-      >
-        {actionPending && confirm === 'decline' ? 'Declining…' : 'Decline'}
-      </Button>
+    <div className="space-y-1.5 pt-1">
+      <p className="text-[0.65rem] text-ink-soft">
+        <span className="font-medium text-ink">Matching disposition</span> — Choose CA DROP
+        status (3 Deleted · 4 Opted out · 5 Not found) and which matched people apply. Approves
+        matching review for fulfillment readiness; does not start Legal kickoff.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" disabled={actionPending} onClick={() => setConfirm('fulfill')}>
+          {actionPending && confirm === 'fulfill' ? 'Fulfilling…' : 'Fulfill'}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={actionPending}
+          onClick={() => setConfirm('decline')}
+        >
+          {actionPending && confirm === 'decline' ? 'Declining…' : 'Decline'}
+        </Button>
+      </div>
     </div>
   ) : null
 
@@ -849,16 +1232,21 @@ export function MatchingReviewPanel({
         description={`Approve matching review for ${requestId.slice(0, 8)}… and set the CA DROP status result. This cannot be undone from the inbox.`}
         confirmLabel="Fulfill"
         confirming={actionPending && confirm === 'fulfill'}
-        confirmDisabled={fulfillStatus == null}
+        confirmDisabled={fulfillStatus == null || !fulfillDwidsReady}
         onConfirm={() => {
-          if (fulfillStatus != null) onPromote(fulfillStatus)
+          if (fulfillStatus == null) return
+          const dwids = fulfillStatus === 5 ? [] : selectedDwids
+          onPromote(fulfillStatus, dwids)
         }}
       >
         <DropResponseStatusPicker
           value={fulfillStatus}
-          onChange={setFulfillStatus}
+          onChange={handleFulfillStatusChange}
           disabled={actionPending}
           suggested={suggestedStatus}
+          contacts={matching?.matched_contacts}
+          selectedDwids={selectedDwids}
+          onSelectedDwidsChange={setSelectedDwids}
         />
       </ConfirmActionDialog>
       <ConfirmActionDialog
