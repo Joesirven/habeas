@@ -21,6 +21,12 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
   `DELETE /ops/connections/{id}` (super_admin): hard-deletes the row; `connection_invites`
   cascade via FK. v0 does **not** delete GSM secrets (or per-connection Sheets SAs) —
   those may remain orphaned until a later cleanup path.
+  **Google Sheets:** on create, provision per-connection SA into `metadata` (confirm + loading
+  in web). Invite help must embed that email via `google_sheets_spreadsheet_url_help` —
+  never ship redeem with `help=None` / “from your invite page”. Habeas Workspace **blocks**
+  Share to `*.iam.gserviceaccount.com`; durable path is Workspace **domain-wide delegation**
+  (INF Super Admin authorizes Client IDs). Named SAs for INF: `dpra-sheets-bizdev@` /
+  `dpra-sheets-hr@` in `example-gcp-project` — see SirvenOS `External-Integrations` § Connections.
   Plan: `docs/plans/2026-07-30-003-feat-connections-onboarding-plan.md`.
   Connecting a system does **not** by itself enable matching/hash workers for that vertical.
 - DROP ops: `GET /ops/drop/pipeline`, spine proxies, hash-index refresh enqueue /
