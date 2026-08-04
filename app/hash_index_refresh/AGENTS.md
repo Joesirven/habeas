@@ -21,7 +21,7 @@ the refreshed state (any served state — A10 USPS 50+DC).
   superseded. Skip single-match (`match_count = 1`) and other fulfilled
   statuses (3, 5, …).
 - Ops enqueue one state or all served states via admin-api
-  `.../enqueue` / `.../enqueue-all` (web Configurations + CLI `--all-states`).
+  `.../enqueue` / `.../enqueue-all` (web Hash refresh tab / Workers Settings + CLI `--all-states`).
   Live multi-state build blockers → [`transform/drop_hash/RUNBOOK.md`](../../transform/drop_hash/RUNBOOK.md)
   (“Per-state refresh” / “Live multi-state builds”).
 - Redact hashes/dwids from run error messages (privacy invariants)

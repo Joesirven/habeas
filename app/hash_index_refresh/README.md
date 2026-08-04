@@ -14,7 +14,7 @@ Cloud Run worker that rebuilds BigQuery DROP hash index marts via dbt.
 
 Ops enqueue/process only via admin-api behind Identity-Aware Proxy
 (`POST /ops/drop/hash-index-refresh/enqueue`, `.../enqueue-all`, `.../process` —
-web Configurations, or CLI with IAP token). Do **not** invoke this worker’s
+web Hash refresh tab / Workers Settings, or CLI with IAP token). Do **not** invoke this worker’s
 `/process` as a user. Do **not** run prod enqueue-all or multi-state dbt without
 Jose — see [`transform/drop_hash/RUNBOOK.md`](../../transform/drop_hash/RUNBOOK.md)
 (“Live multi-state builds”) and `infra/README.md` (IAP call flow).

@@ -61,8 +61,8 @@ Optional: copy `.env.example` to `.env` and set `VITE_ADMIN_API_URL` when not us
 
 ### Drop ops navigation
 
-- **Pipeline** (`/?tab=pipeline`, also `/ops/drop-pipeline?tab=`) — **Run Pipeline** (CA DROP → download→land→promote) + bulk/individual list. Top tabs: Pipeline · Hash refresh · History · Configurations. Stage tabs Download / Ingest / Matching / Fulfillment live inside each bulk card (`stage=`).
-- **Health** (`/ops/health`) — workers + queues from admin_api; Escalations/retries and Configuration (retry `max_attempts`) under the Health hover menu.
+- **Pipeline** (`/?tab=pipeline`, also `/ops/drop-pipeline?tab=`) — **Run Pipeline** (CA DROP → download→land→promote) + bulk/individual list. Top tabs: Pipeline · Hash refresh · History · Errors · Logs. Gear / Pipeline ▾ → **Settings** opens Workers Settings (schedules, retry, fleet). Stage tabs Download / Ingest / Matching / Review / Fulfillment live inside each bulk card (`stage=`).
+- **Workers** (`/ops/workers`) — fleet overview + escalations; Settings at `/ops/workers/settings`. Legacy `/ops/health*` redirects here.
 - Browser never calls worker URLs — only admin-api aggregates. Local Vite → deployed admin-api-dev: run `gcloud auth application-default login`, set `VITE_PROXY_TARGET` to admin-api-dev, then `bun run dev` (Vite mints ADC Bearer ID token for super_admin); see [`AGENTS.md`](AGENTS.md).
 
 ### Local DROP pipeline stack (ports)
