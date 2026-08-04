@@ -99,6 +99,8 @@ export type ConfirmActionDialogProps = {
   confirmLabel?: string
   cancelLabel?: string
   confirming?: boolean
+  confirmingTitle?: string
+  confirmingDescription?: string
   /** Destructive styling for decline / irreversible bulk actions. */
   tone?: 'default' | 'destructive'
   /** Extra body content (e.g. DROP response_status picker). */
@@ -117,6 +119,8 @@ export function ConfirmActionDialog({
   confirmLabel = 'Confirm',
   cancelLabel = 'Cancel',
   confirming = false,
+  confirmingTitle = 'Working…',
+  confirmingDescription = 'Keep this tab open.',
   tone = 'default',
   children,
   confirmDisabled = false,
@@ -148,8 +152,8 @@ export function ConfirmActionDialog({
               aria-hidden
             />
             <div className="min-w-0 text-xs">
-              <p className="font-medium text-ink">Testing connection…</p>
-              <p className="text-ink-soft">Saving keys securely, then verifying with the provider. Keep this tab open.</p>
+              <p className="font-medium text-ink">{confirmingTitle}</p>
+              <p className="text-ink-soft">{confirmingDescription}</p>
             </div>
           </div>
         ) : null}
@@ -172,7 +176,7 @@ export function ConfirmActionDialog({
             disabled={confirming || confirmDisabled}
             onClick={onConfirm}
           >
-            {confirming ? 'Testing…' : confirmLabel}
+            {confirming ? 'Working…' : confirmLabel}
           </button>
         </DialogFooter>
       </DialogContent>

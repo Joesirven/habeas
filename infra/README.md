@@ -264,6 +264,8 @@ Prerequisites Jose must keep granted:
 | `ADMIN_API_SUPER_ADMINS` / admins / data_owners env | operator emails | Cloud Run env on admin-api (Bearer ADC → super_admins only) |
 | Worker `roles/run.invoker` | **only** admin-api runtime SA | `hash-index-refresh-dev`, `matching-dev`, … |
 | `roles/cloudscheduler.admin` | admin-api runtime SA (`95660886550-compute@…`) | project (live schedule GET/PATCH) |
+| `roles/iam.serviceAccountAdmin` | admin-api runtime SA (`95660886550-compute@…`) | project — live **per-connection Google Sheets SA** create on connection create (`CONNECTIONS_SHEETS_SA_PROVISION=live`) |
+| `roles/iam.serviceAccountTokenCreator` | admin-api runtime SA | on each Sheets share SA (auto on provision; also on named `dpra-sheets-bizdev@` / `dpra-sheets-hr@` for DWD prep) |
 
 Do **not** use `DATABASE_URL` for ops mutations — SELECT-only analysis only.
 Do **not** curl workers or grant yourself worker `run.invoker`.

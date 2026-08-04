@@ -92,6 +92,30 @@ def test_get_connect_info_returns_catalog_fields(
     assert "api_key" not in payload["trust_copy"].lower() or "api" in payload["fields"][0]["id"]
 
 
+def test_get_connect_info_google_sheets_uses_connection_service_account(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    sa_email = "dpra-gs-abc123@example-gcp-project.iam.gserviceaccount.com"
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_invite_row(
+            system="google_sheets",
+        )
+        | {
+            "display_name": "BizDev sheet",
+            "metadata": {"service_account_email": sa_email},
+        }
+    )
+    monkeypatch.setattr(connections_redeem, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_redeem, "get_pool", lambda: FakePool(conn))
+
+    response = client.get(f"/connect/{RAW_TOKEN}")
+    assert response.status_code == 200
+    fields = {field["id"]: field for field in response.json()["fields"]}
+    assert sa_email in fields["spreadsheet_url"]["help"]
+    assert "Editor" in fields["spreadsheet_url"]["help"]
+
+
 @pytest.mark.parametrize(
     "row",
     [
@@ -126,9 +150,15 @@ def test_redeem_success_stores_secret_and_burns_invite(
         def put_secret(self, secret_id: str, value: str) -> None:
             stored[secret_id] = value
 
-    async def fake_test(system: str, credentials: dict[str, str]):
+    async def fake_test(
+        system: str,
+        credentials: dict[str, str],
+        *,
+        impersonate_service_account: str | None = None,
+    ):
         assert system == "mailchimp"
         assert credentials == {"api_key": secret_value}
+        assert impersonate_service_account is None
         return True, "stub_ok"
 
     monkeypatch.setattr(connections_redeem, "_require_database", lambda: None)
@@ -212,8 +242,13 @@ def test_redeem_failed_test_marks_connection_failed(
         def put_secret(self, secret_id: str, value: str) -> None:
             _ = (secret_id, value)
 
-    async def failing_test(system: str, credentials: dict[str, str]):
-        _ = (system, credentials)
+    async def failing_test(
+        system: str,
+        credentials: dict[str, str],
+        *,
+        impersonate_service_account: str | None = None,
+    ):
+        _ = (system, credentials, impersonate_service_account)
         return False, "missing_credentials"
 
     monkeypatch.setattr(connections_redeem, "_require_database", lambda: None)

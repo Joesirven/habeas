@@ -28,6 +28,7 @@ def _reset_role_settings(monkeypatch: pytest.MonkeyPatch, request: pytest.Fixtur
     monkeypatch.setattr(roles.settings, "admin_api_id_token_audience", "")
     monkeypatch.setattr(roles.settings, "require_iap_identity", False)
     monkeypatch.setattr(connections_admin.settings, "public_web_base_url", "")
+    connections_admin.set_sheets_sa_provisioner(None)
 
     if "integration" in request.node.name:
         database_url = os.environ["DATABASE_URL"]
@@ -222,6 +223,165 @@ async def test_create_connection_sets_infra_pending_for_cassandra(
 
 
 @pytest.mark.asyncio
+async def test_create_google_sheets_connection_provisions_share_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_id = uuid4()
+    created = Connection(
+        id=str(connection_id),
+        system="google_sheets",
+        display_name="BizDev sheet",
+        status="pending",
+        owner_email="owner@example.com",
+        secret_resource_name=f"dpra/connections/google_sheets/{connection_id}",
+        last_tested_at=None,
+        last_test_ok=None,
+        last_test_detail=None,
+        created_by="ops@example.com",
+        created_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
+        metadata={},
+    )
+    provisioned_email = f"dpra-gs-{connection_id.hex[:20]}@example-gcp-project.iam.gserviceaccount.com"
+    updated = created.model_copy(
+        update={
+            "metadata": {
+                "service_account_email": provisioned_email,
+                "service_account_id": f"dpra-gs-{connection_id.hex[:20]}",
+                "provision_mode": "stub",
+            }
+        }
+    )
+
+    async def _insert_connection(*_args, **_kwargs):
+        return created
+
+    async def _update_connection_status(*_args, **_kwargs):
+        return created
+
+    async def _update_connection_metadata(*_args, **_kwargs):
+        return updated
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    roles.settings.admin_api_data_owners = "owner@example.com"
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "insert_connection", _insert_connection)
+    monkeypatch.setattr(
+        connections_admin.connections_db,
+        "update_connection_status",
+        _update_connection_status,
+    )
+    monkeypatch.setattr(
+        connections_admin.connections_db,
+        "update_connection_metadata",
+        _update_connection_metadata,
+    )
+    connections_admin.set_sheets_sa_provisioner(
+        lambda cid: {
+            "service_account_email": f"dpra-gs-{cid.hex[:20]}@example-gcp-project.iam.gserviceaccount.com",
+            "service_account_id": f"dpra-gs-{cid.hex[:20]}",
+            "provision_mode": "stub",
+        }
+    )
+
+    result = await connections_admin.create_connection(
+        connections_admin.ConnectionCreateBody(
+            system="google_sheets",
+            display_name="BizDev sheet",
+            owner_email="owner@example.com",
+        ),
+        principal,
+    )
+
+    assert result.system == "google_sheets"
+    assert result.metadata["service_account_email"] == provisioned_email
+    assert result.metadata["provision_mode"] == "stub"
+
+
+@pytest.mark.asyncio
+async def test_create_google_sheets_rolls_back_when_provision_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_id = uuid4()
+    created = Connection(
+        id=str(connection_id),
+        system="google_sheets",
+        display_name="BizDev sheet",
+        status="pending",
+        owner_email="owner@example.com",
+        secret_resource_name=f"dpra/connections/google_sheets/{connection_id}",
+        last_tested_at=None,
+        last_test_ok=None,
+        last_test_detail=None,
+        created_by="ops@example.com",
+        created_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
+        metadata={},
+    )
+    deleted: list[object] = []
+
+    async def _insert_connection(*_args, **_kwargs):
+        return created
+
+    async def _update_connection_status(*_args, **_kwargs):
+        return created
+
+    async def _delete_connection(*_args, **_kwargs):
+        deleted.append(_args[1] if len(_args) > 1 else _kwargs.get("connection_id"))
+        return True
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    roles.settings.admin_api_data_owners = "owner@example.com"
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "insert_connection", _insert_connection)
+    monkeypatch.setattr(
+        connections_admin.connections_db,
+        "update_connection_status",
+        _update_connection_status,
+    )
+    monkeypatch.setattr(connections_admin.connections_db, "delete_connection", _delete_connection)
+    connections_admin.set_sheets_sa_provisioner(
+        lambda _cid: (_ for _ in ()).throw(RuntimeError("iam denied"))
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await connections_admin.create_connection(
+            connections_admin.ConnectionCreateBody(
+                system="google_sheets",
+                display_name="BizDev sheet",
+                owner_email="owner@example.com",
+            ),
+            principal,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.detail == "failed to provision google sheets service account"
+    assert deleted
+
+
+@pytest.mark.asyncio
 async def test_create_invite_rejects_cassandra(monkeypatch: pytest.MonkeyPatch) -> None:
     connection_id = uuid4()
     connection = Connection(
@@ -266,6 +426,100 @@ async def test_create_invite_rejects_cassandra(monkeypatch: pytest.MonkeyPatch) 
         )
 
     assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_delete_connection_hard_deletes_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_id = uuid4()
+    connection = Connection(
+        id=str(connection_id),
+        system="mailchimp",
+        display_name="Marketing list",
+        status="connected",
+        owner_email="owner@example.com",
+        secret_resource_name=f"dpra/connections/mailchimp/{connection_id}",
+        last_tested_at=None,
+        last_test_ok=True,
+        last_test_detail="ok",
+        created_by="ops@example.com",
+        created_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+        metadata={},
+    )
+    deleted_ids: list[str] = []
+
+    async def _get_connection(*_args, **_kwargs):
+        return connection
+
+    async def _delete_connection(_conn, cid):
+        deleted_ids.append(str(cid))
+        return True
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
+    monkeypatch.setattr(connections_admin.connections_db, "delete_connection", _delete_connection)
+
+    result = await connections_admin.delete_connection(connection_id, principal)
+
+    assert result == {"status": "ok", "connection_id": str(connection_id)}
+    assert deleted_ids == [str(connection_id)]
+
+
+@pytest.mark.asyncio
+async def test_delete_connection_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_id = uuid4()
+
+    async def _get_connection(*_args, **_kwargs):
+        return None
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await connections_admin.delete_connection(connection_id, principal)
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "connection not found"
+
+
+def test_delete_connection_forbidden_for_non_super_admin() -> None:
+    connection_id = uuid4()
+    with TestClient(app) as client:
+        response = client.delete(
+            f"/ops/connections/{connection_id}",
+            headers=_admin_headers(),
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "insufficient role"
 
 
 @pytest.mark.skipif(

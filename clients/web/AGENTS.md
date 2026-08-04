@@ -19,12 +19,16 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
 - **Console** (super_admin): `/ops/drop-pipeline?tab=` mutation power surface (same tab set as Dashboard).
 - Browser never calls worker URLs — only admin-api aggregates.
 - Dashboard **Errors** / **Logs** share one explorer (`GET /ops/logs`); Errors locks severity to ERROR.
-- Connections onboarding (shipped): Ops `/ops/connections` (create, invite, revoke, retest)
-  + owner redeem `/connect/$token` (Confirm → Privacy → Credentials → Test). Secrets only
-  in Secret Manager; UI uses `actionToast` + allowlisted test `detail` codes. Absolute invite
-  URLs when copying/mailing. Connecting ≠ enabling matching for that vertical. Cassandra =
-  infra card only. Plan: `docs/plans/2026-07-30-003-feat-connections-onboarding-plan.md`.
-  KB: SirvenOS `01-ARCHITECTURE/External-Integrations.md` § Connections onboarding.
+- Connections onboarding (shipped): Ops `/ops/connections` (create, invite, revoke, retest,
+  **delete**) + owner redeem `/connect/$token` (Confirm → Privacy → Credentials → Test).
+  Google Sheets create: confirm + loading toasts; dedicated SA email must appear in
+  Credentials help (Editor). Habeas Workspace may block Share to `*.iam.gserviceaccount.com`
+  — need INF domain-wide delegation / allowlist (SirvenOS External-Integrations). Secrets
+  only in Secret Manager; UI uses `actionToast` + allowlisted test `detail` codes. Absolute
+  invite URLs when copying/mailing. Connecting ≠ enabling matching. Cassandra = infra card
+  only. Do not store Slack/Jira outreach copy in repo. Plan:
+  `docs/plans/2026-07-30-003-feat-connections-onboarding-plan.md`. KB: SirvenOS
+  `01-ARCHITECTURE/External-Integrations.md` § Connections onboarding.
 - **Planned consolidation** (requirements-only): command-center Home + hybrid Inbox — `docs/plans/2026-07-30-005-feat-ops-command-center-ia-plan.md` (not shipped yet).
 
 ## Ops density (Prefect / Dagster feel)

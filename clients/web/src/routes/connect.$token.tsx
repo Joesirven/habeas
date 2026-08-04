@@ -755,6 +755,8 @@ function ConnectForm({
           confirmLabel="Yes, test now"
           cancelLabel="Cancel"
           confirming={redeemMutation.isPending}
+          confirmingTitle="Testing connection…"
+          confirmingDescription="Saving keys securely, then verifying with the provider. Keep this tab open."
           onConfirm={runCredentialTest}
         />
 

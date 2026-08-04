@@ -53,6 +53,142 @@ SuperAdminPrincipal = Annotated[
     Depends(require_roles(ROLE_SUPER_ADMIN)),
 ]
 
+# Injectable Sheets SA provisioner for tests. Signature: (connection_id: UUID) -> dict
+_sheets_sa_provisioner: Any | None = None
+
+
+def set_sheets_sa_provisioner(fn: Any | None) -> None:
+    """Override Google Sheets service-account provisioning (tests / stubs)."""
+    global _sheets_sa_provisioner
+    _sheets_sa_provisioner = fn
+
+
+def _gcp_project_id() -> str:
+    project = (settings.gcp_project or "").strip()
+    if project:
+        return project
+    import os
+
+    return (
+        os.environ.get("GCP_PROJECT", "").strip()
+        or os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+        or "example-gcp-project"
+    )
+
+
+def _sheets_account_id(connection_id: UUID) -> str:
+    # GCP service account id max length 30.
+    return f"dpra-gs-{connection_id.hex[:20]}"
+
+
+def _stub_sheets_share_account(connection_id: UUID) -> dict[str, Any]:
+    project = _gcp_project_id()
+    account_id = _sheets_account_id(connection_id)
+    return {
+        "service_account_email": f"{account_id}@{project}.iam.gserviceaccount.com",
+        "service_account_id": account_id,
+        "provision_mode": "stub",
+    }
+
+
+def _provision_sheets_share_account_live(connection_id: UUID) -> dict[str, Any]:
+    """Create a dedicated GCP SA for this Sheets connection and allow admin-api to impersonate it."""
+    import os
+
+    import google.auth
+    import google.auth.transport.requests
+
+    project = _gcp_project_id()
+    account_id = _sheets_account_id(connection_id)
+    email = f"{account_id}@{project}.iam.gserviceaccount.com"
+    credentials, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    credentials.refresh(google.auth.transport.requests.Request())
+    session = google.auth.transport.requests.AuthorizedSession(credentials)
+
+    create_url = f"https://iam.googleapis.com/v1/projects/{project}/serviceAccounts"
+    create_body = {
+        "accountId": account_id,
+        "serviceAccount": {
+            "displayName": f"DPRA Sheets {connection_id.hex[:8]}",
+            "description": "Per-connection share target for privacy Google Sheets onboarding",
+        },
+    }
+    create_resp = session.post(create_url, json=create_body, timeout=60)
+    if create_resp.status_code == 409:
+        get_url = (
+            f"https://iam.googleapis.com/v1/projects/{project}/serviceAccounts/{email}"
+        )
+        get_resp = session.get(get_url, timeout=60)
+        if get_resp.status_code >= 300:
+            raise RuntimeError(
+                f"sheets SA already exists but could not be loaded ({get_resp.status_code})"
+            )
+        email = get_resp.json().get("email") or email
+    elif create_resp.status_code >= 300:
+        raise RuntimeError(
+            f"failed to create sheets service account ({create_resp.status_code}): "
+            f"{create_resp.text[:200]}"
+        )
+    else:
+        email = create_resp.json().get("email") or email
+
+    runtime_sa = (
+        os.environ.get("GCS_SIGNING_SERVICE_ACCOUNT", "").strip()
+        or getattr(credentials, "service_account_email", None)
+        or ""
+    )
+    if runtime_sa:
+        # Allow admin-api / workers to impersonate this SA for connection tests.
+        policy_url = (
+            f"https://iam.googleapis.com/v1/projects/{project}/serviceAccounts/{email}"
+            ":getIamPolicy"
+        )
+        policy_resp = session.post(policy_url, json={}, timeout=60)
+        policy = policy_resp.json() if policy_resp.status_code < 300 else {"bindings": []}
+        bindings = list(policy.get("bindings") or [])
+        member = f"serviceAccount:{runtime_sa}"
+        role = "roles/iam.serviceAccountTokenCreator"
+        found = False
+        for binding in bindings:
+            if binding.get("role") == role:
+                members = list(binding.get("members") or [])
+                if member not in members:
+                    members.append(member)
+                    binding["members"] = members
+                found = True
+                break
+        if not found:
+            bindings.append({"role": role, "members": [member]})
+        set_url = (
+            f"https://iam.googleapis.com/v1/projects/{project}/serviceAccounts/{email}"
+            ":setIamPolicy"
+        )
+        session.post(
+            set_url,
+            json={"policy": {"bindings": bindings, "etag": policy.get("etag")}},
+            timeout=60,
+        )
+
+    return {
+        "service_account_email": email,
+        "service_account_id": account_id,
+        "provision_mode": "live",
+    }
+
+
+def provision_google_sheets_share_account(connection_id: UUID) -> dict[str, Any]:
+    """Return metadata for a dedicated Sheets share SA (stub or live IAM create)."""
+    import os
+
+    if _sheets_sa_provisioner is not None:
+        return dict(_sheets_sa_provisioner(connection_id))
+    mode = os.environ.get("CONNECTIONS_SHEETS_SA_PROVISION", "live").strip().lower()
+    if mode in {"stub", "fake", "off"}:
+        return _stub_sheets_share_account(connection_id)
+    return _provision_sheets_share_account_live(connection_id)
+
 
 class ConnectionResponse(BaseModel):
     id: UUID
@@ -413,7 +549,12 @@ def _load_stored_credentials(secret_resource_name: str | None) -> dict[str, str]
     return {"_stub": "1"}
 
 
-async def _run_connection_test(system: str, credentials: dict[str, str]) -> tuple[bool, str]:
+async def _run_connection_test(
+    system: str,
+    credentials: dict[str, str],
+    *,
+    impersonate_service_account: str | None = None,
+) -> tuple[bool, str]:
     try:
         testers_mod = importlib.import_module("admin_api.connection_testers")
     except ImportError:
@@ -421,7 +562,11 @@ async def _run_connection_test(system: str, credentials: dict[str, str]) -> tupl
     test_fn = getattr(testers_mod, "test_connection", None)
     if test_fn is None:
         return True, "stub_ok"
-    result = test_fn(system, credentials)
+    result = test_fn(
+        system,
+        credentials,
+        impersonate_service_account=impersonate_service_account,
+    )
     if inspect.isawaitable(result):
         result = await result
     if isinstance(result, tuple) and len(result) == 2:
@@ -515,6 +660,51 @@ async def create_connection(body: ConnectionCreateBody, principal: SuperAdminPri
                     row["id"],
                     secret_name,
                 )
+        if not row:
+            raise HTTPException(status_code=500, detail="failed to create connection")
+
+        if system == "google_sheets":
+            connection_id = UUID(str(getattr(row, "id", None) or row["id"]))
+            try:
+                sa_meta = provision_google_sheets_share_account(connection_id)
+            except Exception as exc:
+                if connections_db is not None:
+                    await connections_db.delete_connection(conn, connection_id)
+                else:
+                    await conn.execute(
+                        "DELETE FROM integration_connections WHERE id = $1",
+                        connection_id,
+                    )
+                raise HTTPException(
+                    status_code=502,
+                    detail="failed to provision google sheets service account",
+                ) from exc
+            metadata = {
+                "service_account_email": sa_meta["service_account_email"],
+                "service_account_id": sa_meta.get("service_account_id"),
+                "provision_mode": sa_meta.get("provision_mode"),
+            }
+            if connections_db is not None:
+                updated = await connections_db.update_connection_metadata(
+                    conn,
+                    connection_id,
+                    metadata,
+                )
+                row = updated or row
+            else:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE integration_connections
+                       SET metadata = $2::jsonb, updated_at = NOW()
+                     WHERE id = $1
+                    RETURNING id, system, display_name, status, owner_email, secret_resource_name,
+                              last_tested_at, last_test_ok, last_test_detail,
+                              created_by, created_at, updated_at, metadata
+                    """,
+                    connection_id,
+                    json.dumps(metadata),
+                )
+
     if not row:
         raise HTTPException(status_code=500, detail="failed to create connection")
     return _connection_from_row(row)
@@ -646,6 +836,30 @@ async def revoke_invite(
     return {"status": "ok", "invite_id": str(invite_id)}
 
 
+@router.delete("/{connection_id}")
+async def delete_connection(
+    connection_id: UUID,
+    _principal: SuperAdminPrincipal,
+):
+    """Hard-delete a connection; invite rows cascade. GSM secrets are not deleted in v0."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await _fetch_connection(conn, connection_id)
+        if connections_db is not None:
+            deleted = await connections_db.delete_connection(conn, connection_id)
+            if not deleted:
+                raise HTTPException(status_code=404, detail="connection not found")
+        else:
+            result = await conn.execute(
+                "DELETE FROM integration_connections WHERE id = $1",
+                connection_id,
+            )
+            if result == "DELETE 0":
+                raise HTTPException(status_code=404, detail="connection not found")
+    return {"status": "ok", "connection_id": str(connection_id)}
+
+
 @router.post("/{connection_id}/test", response_model=ConnectionTestResponse)
 async def test_connection(connection_id: UUID, _principal: SuperAdminPrincipal):
     _require_database()
@@ -658,7 +872,17 @@ async def test_connection(connection_id: UUID, _principal: SuperAdminPrincipal):
                 credentials = {"_stub": "1"}
             else:
                 raise HTTPException(status_code=400, detail="secret not stored")
-        ok, detail = await _run_connection_test(connection.system, credentials)
+        share_sa = None
+        meta = connection.metadata or {}
+        if isinstance(meta, dict):
+            raw_sa = meta.get("service_account_email")
+            if isinstance(raw_sa, str) and raw_sa.strip():
+                share_sa = raw_sa.strip()
+        ok, detail = await _run_connection_test(
+            connection.system,
+            credentials,
+            impersonate_service_account=share_sa,
+        )
         safe_detail = sanitize_test_detail(detail) or "unknown_error"
         tested_at = datetime.now(timezone.utc)
         if connections_db is not None:
