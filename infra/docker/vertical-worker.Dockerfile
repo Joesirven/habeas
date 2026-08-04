@@ -27,5 +27,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
 ENV EXTERNAL_HASH_DBT_DIR=/app/transform/external_hash
 ENV DBT_PROFILES_DIR=/app/transform/external_hash
+ENV WORKER_MODULE=${WORKER_MODULE}
+ENV UVICORN_APP_DIR=${UVICORN_APP_DIR}
 EXPOSE 8080
 CMD uvicorn ${WORKER_MODULE}.main:app --host 0.0.0.0 --port 8080 --app-dir ${UVICORN_APP_DIR}
