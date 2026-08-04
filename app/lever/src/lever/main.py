@@ -15,11 +15,6 @@ from pydantic_settings import SettingsConfigDict
 
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
-from habeas_privacy_core.db.vertical_hash_refresh import (
-    claim_vertical_hash_refresh,
-    mark_vertical_hash_refresh_in_flight,
-    record_vertical_hash_refresh_run,
-)
 from habeas_privacy_core.health import health_payload, ready_payload
 from habeas_privacy_core.observability.logging import configure_logging
 from habeas_privacy_core.observability.tracing import setup_tracing
@@ -28,10 +23,11 @@ from habeas_privacy_core.queue.constants import (
     LEVER_ATTEMPTS_TABLE,
     STEP_MATCHING,
     STEP_SUPPRESSION,
-    VERTICAL_HASH_REFRESH_ATTEMPTS_TABLE,
 )
 from habeas_privacy_core.workflow.approval import fetch_active_rule
 from habeas_privacy_core.vertical_hash.audit import build_vertical_audit_payload
+from habeas_privacy_core.vertical_hash.settings import vertical_hash_refresh_config_from_env
+from habeas_privacy_core.vertical_hash.worker import handle_hash_refresh_process
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +42,11 @@ class Settings(CoreSettings):
     service_name: str = "lever"
     port: int = 8080
     worker_id: str = "lever-dev"
+    external_hash_bq_dataset: str = "external_hash_index"
+    external_hash_dbt_timeout_seconds: int = 1800
+    external_hash_skip_dbt: bool = False
+    external_hash_skip_bq: bool = False
+    external_hash_lease_minutes: int = 60
 
 
 settings = Settings()
@@ -210,46 +211,21 @@ async def suppression_collect():
 
 @app.post("/hash-refresh/process")
 async def hash_refresh_process():
-    """Claim vertical_hash_refresh for Lever; stub extract (no plaintext persist)."""
+    """Claim vertical_hash_refresh for Lever; extract → hash → BQ → dbt."""
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
 
     pool = get_pool()
     async with pool.acquire() as conn:
-        claim = await claim_vertical_hash_refresh(
+        return await handle_hash_refresh_process(
             conn,
             system=SYSTEM,
             worker_id=settings.worker_id,
+            config=vertical_hash_refresh_config_from_env(
+                settings,
+                from_file=__file__,
+            ),
         )
-        if claim is None:
-            return {"processed": False, "reason": "idle"}
-
-        attempt_id = int(claim["id"])
-        started_at = datetime.now(timezone.utc)
-        await mark_vertical_hash_refresh_in_flight(conn, attempt_id)
-
-        # Stub extract path: hash in memory only; no plaintext BQ write in scaffold.
-        finished_at = datetime.now(timezone.utc)
-        await record_vertical_hash_refresh_run(
-            conn,
-            attempt_id=attempt_id,
-            status="success",
-            started_at=started_at,
-            finished_at=finished_at,
-            rows_written=0,
-        )
-        await conn.execute(
-            f"""
-            UPDATE {VERTICAL_HASH_REFRESH_ATTEMPTS_TABLE}
-               SET status = 'success',
-                   completed_at = NOW()
-             WHERE id = $1
-               AND status = 'in_flight'
-            """,
-            attempt_id,
-        )
-
-    return {"processed": True, "attempt_id": attempt_id, "status": "success"}
 
 
 def run() -> None:

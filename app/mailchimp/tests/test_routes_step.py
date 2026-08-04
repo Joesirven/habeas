@@ -115,8 +115,6 @@ def test_suppression_submit_claims_suppression_step():
 def test_hash_refresh_process_claims_mailchimp_system():
     from mailchimp import main
 
-    claim_row = {"id": 3, "system": "mailchimp", "status": "claimed"}
-
     original_db_url = main.settings.database_url
     main.settings.database_url = "postgresql://test"
     try:
@@ -124,14 +122,19 @@ def test_hash_refresh_process_claims_mailchimp_system():
             patch.object(main, "get_pool", return_value=_FakePool()),
             patch.object(
                 main,
-                "claim_vertical_hash_refresh",
+                "handle_hash_refresh_process",
                 new_callable=AsyncMock,
-                return_value=claim_row,
-            ) as mock_claim,
-            patch.object(main, "mark_vertical_hash_refresh_in_flight", new_callable=AsyncMock),
-            patch.object(main, "record_vertical_hash_refresh_run", new_callable=AsyncMock),
+                return_value={
+                    "processed": True,
+                    "attempt_id": 3,
+                    "system": "mailchimp",
+                    "adapter": "stub",
+                    "rows_written": 2,
+                    "dbt_ran": True,
+                    "status": "success",
+                },
+            ) as mock_handle,
         ):
-            # execute on conn for success UPDATE
             client = TestClient(main.app)
             response = client.post("/hash-refresh/process")
 
@@ -139,7 +142,7 @@ def test_hash_refresh_process_claims_mailchimp_system():
         body = response.json()
         assert body["processed"] is True
         assert body["attempt_id"] == 3
-        mock_claim.assert_awaited_once()
-        assert mock_claim.await_args.kwargs["system"] == "mailchimp"
+        mock_handle.assert_awaited_once()
+        assert mock_handle.await_args.kwargs["system"] == "mailchimp"
     finally:
         main.settings.database_url = original_db_url

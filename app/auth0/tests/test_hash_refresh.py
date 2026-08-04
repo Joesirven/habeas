@@ -24,10 +24,10 @@ def test_hash_refresh_idle_when_no_claim(client):
     with (
         patch("auth0.main.get_pool") as get_pool,
         patch(
-            "auth0.main.claim_vertical_hash_refresh",
+            "auth0.main.handle_hash_refresh_process",
             new_callable=AsyncMock,
-            return_value=None,
-        ) as claim_refresh,
+            return_value={"processed": False, "reason": "idle"},
+        ) as handle_refresh,
     ):
         pool = MagicMock()
         pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
@@ -38,8 +38,7 @@ def test_hash_refresh_idle_when_no_claim(client):
 
     assert response.status_code == 200
     assert response.json() == {"processed": False, "reason": "idle"}
-    claim_refresh.assert_awaited_once()
-    assert claim_refresh.await_args.kwargs["system"] == "auth0"
+    handle_refresh.assert_awaited_once()
 
 
 def test_hash_refresh_stub_success(client):
@@ -48,19 +47,18 @@ def test_hash_refresh_stub_success(client):
     with (
         patch("auth0.main.get_pool") as get_pool,
         patch(
-            "auth0.main.claim_vertical_hash_refresh",
+            "auth0.main.handle_hash_refresh_process",
             new_callable=AsyncMock,
-            return_value={"id": 99, "system": "auth0"},
-        ),
-        patch(
-            "auth0.main.mark_vertical_hash_refresh_in_flight",
-            new_callable=AsyncMock,
-        ),
-        patch(
-            "auth0.main.record_vertical_hash_refresh_run",
-            new_callable=AsyncMock,
-            return_value=1,
-        ),
+            return_value={
+                "processed": True,
+                "attempt_id": 99,
+                "system": "auth0",
+                "adapter": "stub",
+                "rows_written": 2,
+                "dbt_ran": True,
+                "status": "success",
+            },
+        ) as handle_refresh,
     ):
         pool = MagicMock()
         pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
@@ -75,4 +73,5 @@ def test_hash_refresh_stub_success(client):
     assert body["attempt_id"] == 99
     assert body["system"] == "auth0"
     assert body["adapter"] == "stub"
-    mock_conn.execute.assert_awaited_once()
+    assert body["rows_written"] == 2
+    handle_refresh.assert_awaited_once()

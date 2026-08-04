@@ -16,9 +16,49 @@ sources:
         columns:
           - name: email_hash
             description: Base64(SHA-256) of DROP-standardized email
+          - name: phone_hash
+            description: Base64(SHA-256) of DROP-standardized phone when present
+          - name: ndz_hash
+            description: Base64(SHA-256) of DROP-standardized name+DOB+ZIP when present
           - name: vendor_record_id
             description: Opaque Mailchimp member id (mc_user_id vocabulary stays in app)
           - name: system
             description: Bounded context identifier (e.g. mailchimp)
           - name: extracted_at
             description: When the extract worker wrote this row
+      - name: paylocity_hashed_raw
+        description: Paylocity HR hashed extract (email and optional phone hashes).
+        columns:
+          - name: email_hash
+          - name: phone_hash
+          - name: ndz_hash
+          - name: vendor_record_id
+          - name: system
+          - name: extracted_at
+      - name: lever_hashed_raw
+        description: Lever recruiting hashed extract.
+        columns:
+          - name: email_hash
+          - name: phone_hash
+          - name: ndz_hash
+          - name: vendor_record_id
+          - name: system
+          - name: extracted_at
+      - name: auth0_hashed_raw
+        description: Auth0 user directory hashed extract.
+        columns:
+          - name: email_hash
+          - name: phone_hash
+          - name: ndz_hash
+          - name: vendor_record_id
+          - name: system
+          - name: extracted_at
+      - name: google_sheets_hashed_raw
+        description: Google Sheets ad-hoc hashed extract.
+        columns:
+          - name: email_hash
+          - name: phone_hash
+          - name: ndz_hash
+          - name: vendor_record_id
+          - name: system
+          - name: extracted_at

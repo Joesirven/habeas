@@ -1,0 +1,56 @@
+substitutions:
+  _REGION: us-east4
+  _PROJECT: example-gcp-project
+  _SERVICE: paylocity-dev
+  _TAG: latest
+  _CLOUDSQL_INSTANCE: example-gcp-project:us-east4:dpra-dev-temp
+  _WORKER_PACKAGE: paylocity-worker
+  _WORKER_MODULE: paylocity
+  _UVICORN_APP_DIR: app/paylocity/src
+  _WORKER_ID: paylocity-dev
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+      - -f
+      - infra/docker/vertical-worker.Dockerfile
+      - --build-arg
+      - WORKER_PACKAGE=${_WORKER_PACKAGE}
+      - --build-arg
+      - WORKER_MODULE=${_WORKER_MODULE}
+      - --build-arg
+      - UVICORN_APP_DIR=${_UVICORN_APP_DIR}
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
+      - --timeout=3600
+      - --cpu=2
+      - --memory=4Gi
+      - --set-env-vars=SERVICE_NAME=paylocity,WORKER_ID=${_WORKER_ID},GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,EXTERNAL_HASH_DBT_DIR=/app/transform/external_hash,DBT_PROFILES_DIR=/app/transform/external_hash,EXTERNAL_HASH_BQ_DATASET=external_hash_index,EXTERNAL_HASH_DBT_TIMEOUT_SECONDS=3300,DATABASE_URL=${_DATABASE_URL}
+
+images:
+  - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}

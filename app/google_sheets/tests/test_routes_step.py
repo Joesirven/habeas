@@ -69,25 +69,26 @@ def test_matching_submit_returns_unclaimed_when_empty(client: TestClient):
 def test_hash_refresh_process_claims_google_sheets_system(client: TestClient):
     from google_sheets import main
 
-    claim_row = {"id": 3, "system": "google_sheets", "status": "claimed"}
-
     with (
         patch.object(main, "get_pool") as mock_pool,
         patch.object(
             main,
-            "claim_vertical_hash_refresh",
+            "handle_hash_refresh_process",
             new_callable=AsyncMock,
-            return_value=claim_row,
-        ) as mock_claim,
-        patch.object(main, "mark_vertical_hash_refresh_in_flight", new_callable=AsyncMock),
-        patch.object(main, "record_vertical_hash_refresh_run", new_callable=AsyncMock),
+            return_value={
+                "processed": True,
+                "attempt_id": 3,
+                "system": "google_sheets",
+                "adapter": "stub",
+                "rows_written": 1,
+                "dbt_ran": True,
+                "status": "success",
+            },
+        ) as mock_handle,
     ):
-        conn = AsyncMock()
-        conn.execute = AsyncMock()
-
         class _Acquire:
             async def __aenter__(self):
-                return conn
+                return AsyncMock()
 
             async def __aexit__(self, *args):
                 return None
@@ -103,8 +104,8 @@ def test_hash_refresh_process_claims_google_sheets_system(client: TestClient):
     assert body["processed"] is True
     assert body["system"] == "google_sheets"
     assert body["attempt_id"] == 3
-    mock_claim.assert_awaited_once()
-    assert mock_claim.await_args.kwargs["system"] == "google_sheets"
+    mock_handle.assert_awaited_once()
+    assert mock_handle.await_args.kwargs["system"] == "google_sheets"
 
 
 def test_hash_refresh_process_idle_when_no_claim(client: TestClient):
@@ -114,9 +115,9 @@ def test_hash_refresh_process_idle_when_no_claim(client: TestClient):
         patch.object(main, "get_pool") as mock_pool,
         patch.object(
             main,
-            "claim_vertical_hash_refresh",
+            "handle_hash_refresh_process",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value={"processed": False, "reason": "idle"},
         ),
     ):
         class _Acquire:
@@ -136,5 +137,4 @@ def test_hash_refresh_process_idle_when_no_claim(client: TestClient):
     assert response.json() == {
         "processed": False,
         "reason": "idle",
-        "system": "google_sheets",
     }

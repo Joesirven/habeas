@@ -1,0 +1,22 @@
+# Copy to profiles.yml in this directory (gitignored) or point DBT_PROFILES_DIR here.
+#
+#   cp profiles.yml.example profiles.yml
+#   DBT_PROFILES_DIR=. dbt build --select tag:system_mailchimp
+#
+# Auth: Application Default Credentials or a service account with BigQuery
+# jobUser + dataEditor on external_hash_index (OQ1 — confirm dataset with Jose).
+#
+# Do not commit profiles.yml or credentials.
+
+external_hash:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: "{{ env_var('DBT_GCP_PROJECT', 'example-gcp-project') }}"
+      dataset: external_hash_index
+      location: us-east4
+      threads: 4
+      job_execution_timeout_seconds: 3600
+      priority: interactive

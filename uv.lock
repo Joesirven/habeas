@@ -213,6 +213,7 @@ version = "0.1.0"
 source = { editable = "app/auth0" }
 dependencies = [
     { name = "habeas-privacy-core" },
+    { name = "dbt-bigquery" },
     { name = "fastapi" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -220,6 +221,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "dbt-bigquery", specifier = ">=1.8" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
@@ -314,6 +316,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "email-validator" },
     { name = "google-auth" },
+    { name = "google-cloud-bigquery" },
     { name = "google-cloud-storage" },
     { name = "httpx" },
     { name = "opentelemetry-api" },
@@ -330,6 +333,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "email-validator", specifier = ">=2.0" },
     { name = "google-auth", specifier = ">=2.36" },
+    { name = "google-cloud-bigquery", specifier = ">=3.25" },
     { name = "google-cloud-storage", specifier = ">=2.18" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "opentelemetry-api", specifier = ">=1.29" },
@@ -1186,6 +1190,7 @@ version = "0.1.0"
 source = { editable = "app/google_sheets" }
 dependencies = [
     { name = "habeas-privacy-core" },
+    { name = "dbt-bigquery" },
     { name = "fastapi" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -1193,6 +1198,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "dbt-bigquery", specifier = ">=1.8" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
@@ -1560,6 +1566,7 @@ version = "0.1.0"
 source = { editable = "app/lever" }
 dependencies = [
     { name = "habeas-privacy-core" },
+    { name = "dbt-bigquery" },
     { name = "fastapi" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -1567,6 +1574,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "dbt-bigquery", specifier = ">=1.8" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
@@ -1639,6 +1647,7 @@ version = "0.1.0"
 source = { editable = "app/mailchimp" }
 dependencies = [
     { name = "habeas-privacy-core" },
+    { name = "dbt-bigquery" },
     { name = "fastapi" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -1646,6 +1655,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "dbt-bigquery", specifier = ">=1.8" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
@@ -2182,6 +2192,7 @@ version = "0.1.0"
 source = { editable = "app/paylocity" }
 dependencies = [
     { name = "habeas-privacy-core" },
+    { name = "dbt-bigquery" },
     { name = "fastapi" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -2189,6 +2200,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "dbt-bigquery", specifier = ">=1.8" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]

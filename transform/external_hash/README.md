@@ -84,14 +84,29 @@ Disable serving swap when macros exist: `--vars '{perform_serving_swap: false}'`
 
 ## Systems in scope
 
-| System | Hashed raw (stub) | Mart (example) | Hash refresh |
-|--------|-------------------|----------------|--------------|
-| Mailchimp | `mailchimp_hashed_raw` | `mart_mailchimp_email_hash` | Yes |
-| Paylocity | (future) | (future) | Yes |
-| Lever | (future) | (future) | Yes |
-| Auth0 | (future) | (future) | Yes |
-| Google Sheets | (future) | (future) | Yes |
-| Cassandra | — | — | No (suppress-only pipe) |
+| System | Hashed raw | Staging | Serving mart(s) | Hash refresh |
+|--------|------------|---------|-----------------|--------------|
+| Mailchimp | `mailchimp_hashed_raw` | `stg_mailchimp_hashed` | `mailchimp_email_hash` | Yes |
+| Paylocity | `paylocity_hashed_raw` | `stg_paylocity_hashed` | `paylocity_email_hash`, `paylocity_phone_hash` | Yes |
+| Lever | `lever_hashed_raw` | `stg_lever_hashed` | `lever_email_hash` | Yes |
+| Auth0 | `auth0_hashed_raw` | `stg_auth0_hashed` | `auth0_email_hash` | Yes |
+| Google Sheets | `google_sheets_hashed_raw` | `stg_google_sheets_hashed` | `google_sheets_email_hash` | Yes |
+| Cassandra | — | — | — | No (suppress-only pipe) |
+
+### Per-system manual refresh
+
+After a hash-refresh worker writes hashed raw, build that system's marts only:
+
+```bash
+cd transform/external_hash
+DBT_PROFILES_DIR=. dbt build --select tag:system_mailchimp
+DBT_PROFILES_DIR=. dbt build --select tag:system_paylocity
+DBT_PROFILES_DIR=. dbt build --select tag:system_lever
+DBT_PROFILES_DIR=. dbt build --select tag:system_auth0
+DBT_PROFILES_DIR=. dbt build --select tag:system_google_sheets
+```
+
+Workers invoke the same `--select tag:system_<name>` after BQ load (swap macros deferred).
 
 ## Worker contract
 

@@ -1,6 +1,6 @@
 {{ config(
-    alias='mailchimp_email_hash__build',
-    tags=['mart', 'serving_staging', 'system_mailchimp'],
+    alias='google_sheets_email_hash__build',
+    tags=['mart', 'serving_staging', 'system_google_sheets'],
     cluster_by=['system', 'hash_value']
 ) }}
 
@@ -9,5 +9,5 @@ select distinct
     vendor_record_id,
     system,
     current_timestamp() as built_at
-from {{ ref('stg_mailchimp_hashed') }}
+from {{ ref('stg_google_sheets_hashed') }}
 where email_hash is not null
