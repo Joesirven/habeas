@@ -314,6 +314,8 @@ export type MatchingAttemptRow = {
   attempted_at: string | null
   completed_at: string | null
   error_code: string | null
+  /** Present when the attempt failed; redacted server-side. */
+  error_message?: string | null
   audit_payload: Record<string, unknown>
 }
 
@@ -365,9 +367,19 @@ export type MatchedPersonContact = {
   state: string
   first_initial: string | null
   last_initial: string | null
+  /** Optional full last name when enrichment returns it (falls back to initials). */
+  last_name?: string | null
   dob: string | null
   email: string | null
   phones: MatchedPersonPhone[]
+}
+
+export type MatchedContactsError = {
+  message?: string | null
+  code?: string | null
+  stage?: string | null
+  hint?: string | null
+  exc_type?: string | null
 }
 
 export type MatchingResultDetail = MatchingResultRow & {
@@ -379,6 +391,7 @@ export type MatchingResultDetail = MatchingResultRow & {
   assignment?: WorkflowAssignmentSummary | null
   matched_contacts?: MatchedPersonContact[]
   matched_contacts_status?: 'ok' | 'none' | 'unavailable' | string
+  matched_contacts_error?: MatchedContactsError | null
 }
 
 export type BulkApproveMatchingResultsInput = {
@@ -975,6 +988,7 @@ export function postDropMatchingResultPromote(
     approval_id: number | null
     response_status?: number
     response_status_set?: boolean
+    disposition?: { recorded?: boolean; reason?: string | null } | null
   }>(`/ops/drop/matching-results/${requestId}/promote`, {
     method: 'POST',
     body: JSON.stringify({
