@@ -38,6 +38,8 @@ from admin_api.request_journey import router as request_journey_router
 from admin_api.roles import CurrentRolePrincipal, MeResponse, RolePrincipal, require_roles
 from admin_api.vertical_dispositions import router as vertical_dispositions_router
 from admin_api.worker_schedules import router as worker_schedules_router
+from admin_api.worker_fleet import router as worker_fleet_router
+from admin_api.attempt_tables import router as attempt_tables_router
 from habeas_privacy_core.audit import AuditMiddleware
 from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_DATA_OWNER, ROLE_LEGAL, ROLE_SUPER_ADMIN
 from habeas_privacy_core.config import CoreSettings
@@ -169,6 +171,8 @@ app.include_router(ops_logs_router)
 app.include_router(request_journey_router)
 app.include_router(vertical_dispositions_router)
 app.include_router(worker_schedules_router)
+app.include_router(worker_fleet_router)
+app.include_router(attempt_tables_router)
 app.include_router(connections_admin_router)
 app.include_router(connections_redeem_router)
 

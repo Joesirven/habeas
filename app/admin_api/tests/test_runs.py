@@ -500,6 +500,23 @@ def test_list_ops_logs_severity_error_only(mock_pool: MagicMock) -> None:
     assert len(body) == 1
     assert body[0]["severity"] == "ERROR"
     assert body[0]["id"] == "attempt:matching:1"
+    sql = mock_pool.fetch.await_args.args[0]
+    assert "LIKE '%error%'" in sql
+    assert "result_status >= 500" in sql
+
+
+def test_severity_sql_predicate_error_only() -> None:
+    from admin_api.runs import _severity_sql_predicate
+
+    attempt = _severity_sql_predicate({"ERROR"}, kind="attempt")
+    assert attempt is not None
+    assert "submit_error" in attempt
+    assert "LIKE '%fail%'" in attempt
+    audit = _severity_sql_predicate({"ERROR"}, kind="audit")
+    assert audit is not None
+    assert "result_status >= 500" in audit
+    assert _severity_sql_predicate(None, kind="attempt") is None
+    assert _severity_sql_predicate({"ERROR", "WARNING", "INFO"}, kind="attempt") is None
 
 
 def test_list_ops_logs_rejects_invalid_severity(mock_pool: MagicMock) -> None:

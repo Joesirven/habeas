@@ -33,16 +33,15 @@ type NavGroup = {
   children: NavChild[]
 }
 
-/** Super-admin DROP ops — one Ops menu; legal/admin keep Home · Requests · Inbox (KD2). */
-const OPS_GROUP: NavGroup = {
-  label: 'Ops',
+/** Super-admin DROP ops — Pipeline umbrella; legal/admin keep Home · Requests · Inbox (KD2). */
+const PIPELINE_GROUP: NavGroup = {
+  label: 'Pipeline',
   to: '/ops/drop-pipeline',
   children: [
-    { label: 'Pipeline', to: '/ops/drop-pipeline' },
     { label: 'Workers', to: '/ops/workers' },
+    { label: 'Settings', to: '/ops/workers/settings' },
     { label: 'Runs', to: '/ops/runs' },
     { label: 'Connections', to: '/ops/connections' },
-    { label: 'Health', to: '/ops/health' },
   ],
 }
 
@@ -53,8 +52,8 @@ function pathMatches(pathname: string, to: string) {
 function groupIsActive(pathname: string, group: NavGroup) {
   if (pathMatches(pathname, group.to)) return true
   if (group.children.some((child) => pathMatches(pathname, child.to))) return true
-  // Ops umbrella: light up for any /ops/* surface (settings, trends, jobs, …).
-  if (group.label === 'Ops' && pathname.startsWith('/ops/')) return true
+  // Pipeline umbrella: light up for any /ops/* surface (settings, trends, jobs, …).
+  if (group.label === 'Pipeline' && pathname.startsWith('/ops/')) return true
   return false
 }
 
@@ -203,11 +202,7 @@ export function NavMenu() {
   const { role, isLoading } = useAuth()
   const showOps = canAccessOpsSurfaces(role)
   const legalAdminNav = isLegalAdminPersona(role)
-  const homeLabel = showOps
-    ? 'Dashboard'
-    : legalAdminNav
-      ? 'Home'
-      : 'My work'
+  const homeLabel = legalAdminNav ? 'Home' : 'My work'
 
   const isLegalNav = legalAdminNav
   const inboxQuery = useQuery({
@@ -233,8 +228,7 @@ export function NavMenu() {
       className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2 text-[0.8125rem]"
       aria-busy={isLoading}
     >
-      <NavLink to="/" label={homeLabel} exact />
-      {showOps ? <NavDropdown group={OPS_GROUP} /> : null}
+      {showOps ? <NavDropdown group={PIPELINE_GROUP} /> : <NavLink to="/" label={homeLabel} exact />}
       <NavLink
         to="/requests"
         label={legalAdminNav ? 'All requests' : 'Requests'}

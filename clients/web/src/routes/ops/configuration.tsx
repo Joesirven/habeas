@@ -27,7 +27,7 @@ export function OpsConfigurationPage() {
 
         <p className="text-xs">
           <Link to="/ops/workers/settings" className="taste-link">
-            Open Workers Settings (schedules + retry)
+            Open Settings (schedules + retry)
           </Link>
         </p>
       </section>

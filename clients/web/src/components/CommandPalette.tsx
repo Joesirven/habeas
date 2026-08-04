@@ -124,10 +124,10 @@ function staticActions(
         onSelect: finish(() => navigate({ to: '/ops/connections' })),
       },
       {
-        id: 'action-health',
+        id: 'action-workers-escalations',
         group: 'actions',
-        label: 'Go to Health',
-        onSelect: finish(() => navigate({ to: '/ops/health' })),
+        label: 'Workers · Escalations',
+        onSelect: finish(() => navigate({ to: '/ops/workers/escalations' })),
       },
     )
   }

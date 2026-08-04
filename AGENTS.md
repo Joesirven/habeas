@@ -4,6 +4,8 @@ Code repo for **Habeas Data Privacy Request Automation**. Design authority (arch
 
 **Bitbucket:** `dsts/data-privacy` · **Branch:** `master` for integration; agent work on `agent/<slug>`.
 
+**Atlassian:** always **`acli`** for Jira / Confluence / admin — never `gh` or the broken Python `bb` package. See [`.agent/modules/atlassian-acli.md`](.agent/modules/atlassian-acli.md).
+
 ---
 
 ## Session start
@@ -48,6 +50,7 @@ If pre-merge → read [`.agent/modules/review-personas.md`](.agent/modules/revie
 
 | If you are… | Read |
 |-------------|------|
+| Touching Jira / Confluence / PRs / merge / Atlassian | [`atlassian-acli.md`](.agent/modules/atlassian-acli.md) |
 | Editing Python | [`python-uv.md`](.agent/modules/python-uv.md) |
 | Editing `db/migrations/` | [`db-migrations.md`](.agent/modules/db-migrations.md) |
 | Deploy / prod migrate / CLI `--execute` | [`prod-write-gate.md`](.agent/modules/prod-write-gate.md) |

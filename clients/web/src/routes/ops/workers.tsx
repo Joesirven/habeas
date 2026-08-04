@@ -7,36 +7,24 @@ import {
   getDropGlobalStats,
   getDropWorkerTrends,
   getDropWorkers,
+  getFleetWorkers,
+  getHealthQueues,
   listRuns,
   resolveRunsTimeParams,
   type DropWorkerRecord,
+  type HealthQueueRecord,
   type RunSummary,
   type WorkersTimeWindow,
 } from '@/lib/api'
 import { RoleGate, isSuperAdmin } from '@/lib/auth'
+import {
+  buildJobFilterOptions,
+  supportsUnifiedRuns,
+  workerByName,
+} from '@/lib/worker-fleet'
 import { runsSearchForWorker, type WorkersSearch, type WorkersStatusTab } from '@/router'
 
 const WINDOW_OPTIONS: WorkersTimeWindow[] = ['8h', '1w', '3m', 'custom']
-
-const JOB_OPTIONS = [
-  { value: '', label: 'All workers' },
-  { value: 'drop_connector', label: 'drop_connector' },
-  { value: 'drop_ingestor', label: 'drop_ingestor' },
-  { value: 'request_dispatcher', label: 'request_dispatcher' },
-  { value: 'matching', label: 'matching' },
-  { value: 'data_fulfillment', label: 'data_fulfillment' },
-  { value: 'hash_index_refresh', label: 'hash_index_refresh' },
-  { value: 'reaper', label: 'reaper' },
-  { value: 'intake_drop_poller', label: 'intake_drop_poller' },
-] as const
-
-/** Workers that have unified /ops/runs history. */
-const RUN_HISTORY_JOBS = new Set([
-  'drop_connector',
-  'drop_ingestor',
-  'matching',
-  'hash_index_refresh',
-])
 
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
@@ -83,6 +71,54 @@ function StatusPill({ status }: { status: string }) {
       <span className="taste-status-dot" aria-hidden />
       {status.replaceAll('_', ' ')}
     </span>
+  )
+}
+
+function QueuesRollup({ queues }: { queues: HealthQueueRecord[] }) {
+  if (queues.length === 0) {
+    return <p className="px-3 py-4 text-xs text-ink-soft">No queue tables configured.</p>
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="taste-table">
+        <thead>
+          <tr>
+            <th>Worker</th>
+            <th>Table</th>
+            <th>Pending</th>
+            <th>Claimed</th>
+            <th>In flight</th>
+            <th>Failed terminal</th>
+            <th>By status</th>
+            <th>Oldest pending</th>
+          </tr>
+        </thead>
+        <tbody>
+          {queues.map((queue) => (
+            <tr key={`${queue.worker}-${queue.table ?? 'none'}`}>
+              <td className="font-mono text-xs">{queue.worker}</td>
+              <td className="font-mono text-xs text-ink-soft">{queue.table ?? '—'}</td>
+              <td className="tabular-nums">{queue.pending}</td>
+              <td className="tabular-nums">{queue.claimed}</td>
+              <td className="tabular-nums">{queue.in_flight}</td>
+              <td className="tabular-nums text-red-700">{queue.failed_terminal}</td>
+              <td className="max-w-[18rem] text-[0.65rem] text-ink-soft">
+                {queue.by_status.length === 0
+                  ? '—'
+                  : queue.by_status
+                      .map((row) => `${row.status}:${row.count}`)
+                      .join(' · ')}
+              </td>
+              <td className="tabular-nums text-ink-soft">
+                {queue.oldest_pending_age_seconds == null
+                  ? '—'
+                  : formatDuration(queue.oldest_pending_age_seconds)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
@@ -248,8 +284,35 @@ function WorkersBody() {
 
   const timeParams = resolveRunsTimeParams(window, since)
 
+  const fleetQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'fleet-workers'],
+    queryFn: getFleetWorkers,
+    refetchInterval: 15_000,
+  })
+
+  const jobOptions = useMemo(() => {
+    const fromFleet = buildJobFilterOptions(fleetQuery.data)
+    if (fromFleet.length > 1) return fromFleet
+    // Loading / empty fleet — still show All so the select is usable.
+    return [{ value: '', label: 'All workers' }]
+  }, [fleetQuery.data])
+
+  const fleetWorker = job ? workerByName(fleetQuery.data, job) : undefined
   const runJob =
-    job && RUN_HISTORY_JOBS.has(job) ? job : job ? null : undefined
+    job == null || job === ''
+      ? undefined
+      : fleetWorker
+        ? supportsUnifiedRuns(fleetWorker)
+          ? job
+          : null
+        : // Fleet not loaded yet — allow known unified jobs; otherwise wait.
+          ['drop_connector', 'drop_ingestor', 'matching', 'hash_index_refresh'].includes(
+            job,
+          )
+          ? job
+          : fleetQuery.isFetched
+            ? null
+            : undefined
 
   const runsQuery = useQuery({
     queryKey: ['ops', 'workers', 'runs', window, since, job],
@@ -267,6 +330,13 @@ function WorkersBody() {
     queryKey: ['ops', 'workers', 'fleet'],
     queryFn: getDropWorkers,
     refetchInterval: 15_000,
+  })
+
+  const queuesQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'health-queues'],
+    queryFn: getHealthQueues,
+    refetchInterval: 15_000,
+    placeholderData: (previous) => previous,
   })
 
   const statsQuery = useQuery({
@@ -323,13 +393,21 @@ function WorkersBody() {
             Fleet health, queue depth, and run triage — poll 15s · refreshed {refreshedAt}
           </p>
         </div>
-        <Link
-          to="/ops/runs"
-          search={{ status: 'failed', window: window === 'custom' ? 'custom' : window, since }}
-          className="taste-btn text-xs"
-        >
-          Failed in Runs →
-        </Link>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link to="/ops/workers/escalations" className="taste-btn text-xs">
+            Escalations
+          </Link>
+          <Link to="/ops/workers/settings" className="taste-btn text-xs">
+            Settings
+          </Link>
+          <Link
+            to="/ops/runs"
+            search={{ status: 'failed', window: window === 'custom' ? 'custom' : window, since }}
+            className="taste-btn text-xs"
+          >
+            Failed in Runs →
+          </Link>
+        </div>
       </header>
 
       <div className="taste-panel p-4 sm:p-5">
@@ -395,7 +473,7 @@ function WorkersBody() {
               patchSearch({ job: event.target.value ? event.target.value : undefined })
             }
           >
-            {JOB_OPTIONS.map((option) => (
+            {jobOptions.map((option) => (
               <option key={option.value || 'all'} value={option.value}>
                 {option.label}
               </option>
@@ -441,32 +519,56 @@ function WorkersBody() {
                     </td>
                   </tr>
                 ) : (
-                  workers.map((worker) => (
+                  workers.map((worker) => {
+                    const fleet = workerByName(fleetQuery.data, worker.name)
+                    const queueTable = fleet?.attempt_table
+                    const openWorker = () => {
+                      if (queueTable) {
+                        void navigate({
+                          to: '/ops/workers/$workerName/queue',
+                          params: { workerName: worker.name },
+                          search: { table: queueTable },
+                        })
+                        return
+                      }
+                      void navigate({
+                        to: '/ops/runs',
+                        search: runsSearchForWorker(worker.name, {
+                          window: window === 'custom' ? 'custom' : window,
+                          since,
+                        }),
+                      })
+                    }
+                    return (
                     <tr
                       key={worker.name}
                       className="cursor-pointer transition-colors hover:bg-panel/50"
-                      onClick={() =>
-                        void navigate({
-                          to: '/ops/runs',
-                          search: runsSearchForWorker(worker.name, {
-                            window: window === 'custom' ? 'custom' : window,
-                            since,
-                          }),
-                        })
-                      }
+                      onClick={openWorker}
                     >
                       <td className="font-mono text-xs">
-                        <Link
-                          to="/ops/runs"
-                          search={runsSearchForWorker(worker.name, {
-                            window: window === 'custom' ? 'custom' : window,
-                            since,
-                          })}
-                          className="text-habeas-mid underline decoration-habeas-mid/30 underline-offset-2"
-                          onClick={(event) => event.stopPropagation()}
-                        >
-                          {worker.name}
-                        </Link>
+                        {queueTable ? (
+                          <Link
+                            to="/ops/workers/$workerName/queue"
+                            params={{ workerName: worker.name }}
+                            search={{ table: queueTable }}
+                            className="text-habeas-mid underline decoration-habeas-mid/30 underline-offset-2"
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            {worker.name}
+                          </Link>
+                        ) : (
+                          <Link
+                            to="/ops/runs"
+                            search={runsSearchForWorker(worker.name, {
+                              window: window === 'custom' ? 'custom' : window,
+                              since,
+                            })}
+                            className="text-habeas-mid underline decoration-habeas-mid/30 underline-offset-2"
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            {worker.name}
+                          </Link>
+                        )}
                       </td>
                       <td>
                         <StatusPill status={worker.ok ? 'ok' : 'failed'} />
@@ -481,11 +583,32 @@ function WorkersBody() {
                           : formatDuration(worker.queue.oldest_pending_age_seconds)}
                       </td>
                     </tr>
-                  ))
+                    )
+                  })
                 )}
               </tbody>
             </table>
           </div>
+        )}
+      </div>
+
+      <div className="taste-panel overflow-hidden">
+        <div className="border-b border-line px-3 py-2">
+          <Micro>Queues rollup · attempt tables</Micro>
+        </div>
+        {queuesQuery.isError && !queuesQuery.data ? (
+          <p className="px-3 py-4 text-xs text-red-700">
+            Queue rollup failed.{' '}
+            <button type="button" className="underline" onClick={() => void queuesQuery.refetch()}>
+              Retry
+            </button>
+          </p>
+        ) : queuesQuery.isPending && !queuesQuery.data ? (
+          <div className="p-4">
+            <SkeletonLines lines={4} />
+          </div>
+        ) : (
+          <QueuesRollup queues={queuesQuery.data?.queues ?? []} />
         )}
       </div>
 

@@ -36,7 +36,6 @@ import {
   getDropBulkProcess,
   getDropPipeline,
   getDropWorkerTrends,
-  getDropWorkers,
   listDropBulkProcesses,
   listDropBulkProcessRuns,
   listOpsLogs,
@@ -60,7 +59,6 @@ import {
   type OpsTimeWindow,
   type WorkerHealthProbe,
 } from '@/lib/api'
-import { RetryConfigPanel } from '@/routes/ops/health/configuration'
 import {
   runsSearchForBulkStage,
   runsSearchForWorker,
@@ -100,7 +98,6 @@ const PIPELINE_TAB_BAR: { key: PipelineTab; label: string }[] = [
   { key: 'history', label: 'History' },
   { key: 'errors', label: 'Errors' },
   { key: 'logs', label: 'Logs' },
-  { key: 'configurations', label: 'Configurations' },
 ]
 
 type BulkPipelineStageKey = keyof BulkProcessDetail['stages']
@@ -2848,7 +2845,8 @@ function RunPipelineButton({
           setConfirmOpen(open)
         }}
       >
-        <DialogContent className="relative max-w-md overflow-hidden">
+        {/* No `relative`: twMerge would override DialogContent `fixed` and park the modal at page bottom. */}
+        <DialogContent className="max-w-md overflow-hidden">
           <div className="pointer-events-none absolute inset-x-0 top-0 h-1 overflow-hidden bg-panel">
             <div
               className={`h-full bg-habeas-navy transition-all duration-500 ${
@@ -2906,164 +2904,6 @@ function RunPipelineButton({
   )
 }
 
-
-function ConfigurationsPanel({
-  data,
-  scheduleNext,
-  scheduleLast,
-  scheduleUtc,
-  scheduleCadence,
-}: {
-  data: DropPipelineStatus | undefined
-  scheduleNext: string | null
-  scheduleLast: string | null
-  scheduleUtc: string | null
-  scheduleCadence: string | null
-}) {
-  const workersQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'drop-workers', 'config'],
-    queryFn: getDropWorkers,
-    refetchInterval: 15_000,
-    placeholderData: (previous) => previous,
-  })
-  const workers = workersQuery.data?.workers ?? []
-  const cadenceLabel = scheduleCadence
-    ? scheduleCadence.replaceAll('_', ' ')
-    : null
-
-  return (
-    <div className="space-y-4">
-      <div className="rounded-md border border-line bg-paper p-4">
-        <Micro>Scheduled workers</Micro>
-        <p className="mt-1 max-w-2xl text-xs text-ink-soft">
-          CA DROP retrieval fires on the connector schedule (interval gate). Other workers claim
-          from attempt queues — concurrency and retry floors below. Edit schedules under Workers
-          → Settings.
-        </p>
-        <p className="mt-2 text-xs">
-          <Link to="/ops/workers/settings" className="taste-link">
-            Edit schedules
-          </Link>
-        </p>
-        <div className="mt-3 grid gap-3 sm:grid-cols-3">
-          <div className="rounded-md border border-line/80 px-3 py-2">
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Next CA DROP</p>
-            <p className="mt-1 text-sm tabular-nums text-ink">
-              {scheduleNext ? new Date(scheduleNext).toLocaleString() : '—'}
-            </p>
-            <p className="mt-0.5 text-[0.65rem] text-mute">
-              {scheduleUtc
-                ? `${cadenceLabel ?? 'schedule'} · tick ${scheduleUtc} UTC`
-                : 'Schedule unset'}
-            </p>
-          </div>
-          <div className="rounded-md border border-line/80 px-3 py-2">
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Last success</p>
-            <p className="mt-1 text-sm tabular-nums text-ink">
-              {scheduleLast ? new Date(scheduleLast).toLocaleString() : '—'}
-            </p>
-          </div>
-          <div className="rounded-md border border-line/80 px-3 py-2">
-            <p className="text-[0.65rem] uppercase tracking-wide text-mute">Workers up</p>
-            <p className="mt-1 text-sm tabular-nums text-ink">
-              {data
-                ? `${WORKER_ORDER.filter((name) => data.worker_health[name]?.ok).length}/${WORKER_ORDER.length}`
-                : '—'}
-            </p>
-          </div>
-        </div>
-        <div className="mt-3 overflow-x-auto">
-          <table className="taste-table">
-            <thead>
-              <tr>
-                <th>Worker</th>
-                <th>Ready</th>
-                <th>Pending</th>
-                <th>In flight</th>
-                <th>Concurrency</th>
-                <th>Max attempts</th>
-              </tr>
-            </thead>
-            <tbody>
-              {workers.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="text-mute">
-                    {workersQuery.isPending ? 'Loading workers…' : 'No worker records.'}
-                  </td>
-                </tr>
-              ) : (
-                workers.map((worker) => (
-                  <tr key={worker.name}>
-                    <td className="font-mono text-xs">
-                      <Link
-                        to="/ops/runs"
-                        search={runsSearchForWorker(worker.name)}
-                        className="text-habeas-mid underline decoration-habeas-mid/30 underline-offset-2"
-                      >
-                        {worker.name}
-                      </Link>
-                    </td>
-                    <td className={worker.ok ? 'text-emerald-700' : 'text-red-700'}>
-                      {worker.ok ? 'up' : 'down'}
-                    </td>
-                    <td className="tabular-nums">{worker.queue.pending}</td>
-                    <td className="tabular-nums">{worker.queue.in_flight}</td>
-                    <td className="tabular-nums">
-                      {worker.pool.configured_concurrency ?? '—'}
-                    </td>
-                    <td className="tabular-nums">{worker.pool.max_attempts ?? '—'}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      <RetryConfigPanel />
-
-      <div className="rounded-md border border-line bg-paper p-4">
-        <Micro>Auto-process steps & rules</Micro>
-        <p className="mt-1 max-w-2xl text-xs text-ink-soft">
-          Use <span className="font-medium text-ink">Run Pipeline</span> for CA DROP
-          (download → land → promote). Expand a bulk card for stage detail. Matching review and
-          fulfill / decline live in Inbox. Hash refresh enqueues and processes in one action.
-        </p>
-        <ul className="mt-3 space-y-1.5 text-xs text-ink-soft">
-          <li>
-            <span className="font-medium text-ink">CA DROP</span> — scheduled connector or Run
-            Pipeline.
-          </li>
-          <li>
-            <span className="font-medium text-ink">Ingest</span> — Land + Promote (combined on bulk
-            cards).
-          </li>
-          <li>
-            <span className="font-medium text-ink">Matching</span> — workers claim on schedule;
-            review in Inbox.
-          </li>
-          <li>
-            <span className="font-medium text-ink">Hash refresh</span> — enqueue then process from
-            the Hash refresh tab.
-          </li>
-        </ul>
-        <p className="mt-3 text-xs text-ink-soft">
-          <Link to="/ops/workers/settings" className="text-habeas-mid underline-offset-2 hover:underline">
-            Workers → Settings
-          </Link>
-          {' · '}
-          <Link
-            to="/"
-            search={{ tab: 'hash_refresh' }}
-            className="text-habeas-mid underline-offset-2 hover:underline"
-          >
-            Hash refresh tab
-          </Link>
-        </p>
-      </div>
-    </div>
-  )
-}
 
 function StatusCountTable({
   rows,
@@ -3517,8 +3357,8 @@ function DropPipelinePageInner() {
     <section className="space-y-4">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">Ops</p>
-          <h2 className="mt-1 text-xl font-semibold tracking-tight text-ink">Dashboard</h2>
+          <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">Pipeline</p>
+          <h2 className="mt-1 text-xl font-semibold tracking-tight text-ink">Console</h2>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {pipelineQuery.isFetching && !pipelineQuery.isPending ? (
@@ -3526,6 +3366,26 @@ function DropPipelinePageInner() {
               Refreshing
             </span>
           ) : null}
+          <Link
+            to="/ops/workers/settings"
+            className="taste-btn inline-flex h-9 w-9 items-center justify-center p-0"
+            aria-label="Settings"
+            title="Settings"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              className="size-4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.75"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
+              <path d="M19.4 13.5a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V19a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H5a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01A1.7 1.7 0 0 0 11 5.09V5a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h.01a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.55 1H19a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1Z" />
+            </svg>
+          </Link>
           <RunPipelineButton
             disabled={showSkeleton}
             focusResultPanel={() => focusActionResultPanel('pipeline')}
@@ -3608,16 +3468,6 @@ function DropPipelinePageInner() {
           onHashRefresh={runHashRefresh}
           hashRefreshPending={hashIndexMutation.isPending}
           actionMutation={actionMutation}
-        />
-      )}
-
-      {tab === 'configurations' && (
-        <ConfigurationsPanel
-          data={data}
-          scheduleNext={caSchedule?.next_run_at ?? null}
-          scheduleLast={caSchedule?.last_success_at ?? null}
-          scheduleUtc={caSchedule?.schedule_utc ?? null}
-          scheduleCadence={caSchedule?.cadence ?? null}
         />
       )}
 

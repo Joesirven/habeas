@@ -314,7 +314,6 @@ export type MatchingAttemptRow = {
   attempted_at: string | null
   completed_at: string | null
   error_code: string | null
-  error_message?: string | null
   audit_payload: Record<string, unknown>
 }
 
@@ -366,18 +365,9 @@ export type MatchedPersonContact = {
   state: string
   first_initial: string | null
   last_initial: string | null
-  last_name?: string | null
   dob: string | null
   email: string | null
   phones: MatchedPersonPhone[]
-}
-
-export type MatchedContactsError = {
-  code: string
-  message: string
-  stage?: string | null
-  hint?: string | null
-  exc_type?: string | null
 }
 
 export type MatchingResultDetail = MatchingResultRow & {
@@ -389,7 +379,6 @@ export type MatchingResultDetail = MatchingResultRow & {
   assignment?: WorkflowAssignmentSummary | null
   matched_contacts?: MatchedPersonContact[]
   matched_contacts_status?: 'ok' | 'none' | 'unavailable' | string
-  matched_contacts_error?: MatchedContactsError | null
 }
 
 export type BulkApproveMatchingResultsInput = {
@@ -776,6 +765,9 @@ export type RetryConfigTable = {
   updated_at: string | null
   updated_by: string | null
   apply_note: string
+  /** Additive when discovery expands retry-config. */
+  worker_key?: string | null
+  supports_attempt_retry?: boolean
 }
 
 export type RetryConfigPayload = {
@@ -975,11 +967,7 @@ export function dropResponseStatusLabel(code: number | null | undefined): string
 
 export function postDropMatchingResultPromote(
   requestId: string,
-  body?: {
-    decision_reason?: string
-    response_status?: DropResponseStatusCode
-    dwids?: string[]
-  },
+  body?: { decision_reason?: string; response_status?: DropResponseStatusCode },
 ) {
   return fetchAdminApi<{
     status: string
@@ -987,13 +975,6 @@ export function postDropMatchingResultPromote(
     approval_id: number | null
     response_status?: number
     response_status_set?: boolean
-    disposition?: {
-      recorded?: boolean
-      reason?: string
-      status?: number
-      vertical?: string
-      selected_dwid_count?: number
-    }
   }>(`/ops/drop/matching-results/${requestId}/promote`, {
     method: 'POST',
     body: JSON.stringify({
@@ -1002,7 +983,6 @@ export function postDropMatchingResultPromote(
       ...(body?.response_status != null
         ? { response_status: body.response_status }
         : {}),
-      ...(body?.dwids != null ? { dwids: body.dwids } : {}),
     }),
   })
 }
@@ -2360,4 +2340,149 @@ export function redeemConnect(token: string, credentials: Record<string, string>
     method: 'POST',
     body: JSON.stringify({ credentials }),
   })
+}
+
+// ---------------------------------------------------------------------------
+// Worker fleet discovery + attempt-table browser (E5 contract — additive)
+// ---------------------------------------------------------------------------
+
+export type FleetWorkerHealth = {
+  ok: boolean
+  status_code?: number | null
+  ready?: { status?: string; service?: string }
+  error?: string
+}
+
+export type FleetWorkerRecord = {
+  /** Stable snake_case id — prefer over legacy `name`. */
+  worker_key: string
+  /** Legacy alias — some payloads still use `name`. */
+  name?: string
+  label?: string
+  ok?: boolean
+  status_code?: number | null
+  ready?: { status?: string; service?: string }
+  scheduled: boolean
+  deployed: boolean
+  service_name?: string | null
+  base_url?: string | null
+  sources?: ('scheduler' | 'cloud_run' | 'env')[]
+  schedule_job_keys?: string[]
+  attempt_table: string | null
+  supports_unified_runs?: boolean
+  health?: FleetWorkerHealth
+  queue?: DropWorkerQueue
+}
+
+export type FleetWorkersPayload = {
+  discovery_mode?: 'gcp' | 'local' | string
+  discovery_warnings?: { code?: string; detail?: string }[]
+  workers: FleetWorkerRecord[]
+}
+
+export type AttemptTableCatalogEntry = {
+  table_name: string
+  worker_key?: string | null
+  worker_name?: string | null
+  label?: string
+  /** Allowlisted column ids — server advertises; never invent client-side. */
+  columns?: string[]
+  filterable_columns?: string[]
+  sortable_columns?: string[]
+}
+
+export type AttemptTableCatalogPayload = {
+  tables: AttemptTableCatalogEntry[]
+}
+
+export type AttemptTableRow = Record<string, string | number | boolean | null>
+
+export type AttemptTableRowsPayload = {
+  table_name: string
+  columns: string[]
+  rows: AttemptTableRow[]
+  total?: number
+  count?: number
+  next_offset?: number | null
+  next_cursor?: string | null
+}
+
+export type AttemptTableRowsQuery = {
+  table_name: string
+  status?: string
+  request_id?: string
+  step?: string
+  window?: OpsTimeWindow
+  since?: string
+  limit?: number
+  offset?: number
+}
+
+function mapDropWorkerToFleet(worker: DropWorkerRecord): FleetWorkerRecord {
+  return {
+    worker_key: worker.name,
+    name: worker.name,
+    label: worker.name,
+    ok: worker.ok,
+    status_code: worker.status_code,
+    ready: worker.ready,
+    scheduled: false,
+    deployed: true,
+    service_name: worker.ready?.service ?? null,
+    base_url: null,
+    sources: [],
+    schedule_job_keys: [],
+    attempt_table: worker.queue?.table ?? null,
+    health: {
+      ok: worker.ok,
+      status_code: worker.status_code,
+      ready: worker.ready,
+    },
+    queue: worker.queue,
+  }
+}
+
+/** Prefer `GET /ops/workers/fleet`; fall back to drop workers when discovery is not deployed. */
+export async function getFleetWorkers(): Promise<FleetWorkersPayload> {
+  try {
+    return await fetchAdminApi<FleetWorkersPayload>('/ops/workers/fleet')
+  } catch (error) {
+    const missing =
+      error instanceof Error && /Admin API (404|501)/.test(error.message)
+    if (!missing) throw error
+    const drop = await getDropWorkers()
+    return {
+      discovery_mode: 'drop_workers_fallback',
+      discovery_warnings: [
+        {
+          code: 'fleet_endpoint_unavailable',
+          detail: 'Fell back to GET /ops/drop/workers',
+        },
+      ],
+      workers: drop.workers.map(mapDropWorkerToFleet),
+    }
+  }
+}
+
+export function getAttemptTableCatalog(): Promise<AttemptTableCatalogPayload> {
+  return fetchAdminApi<AttemptTableCatalogPayload>('/ops/workers/attempt-tables')
+}
+
+export function getAttemptTableRows(
+  query: AttemptTableRowsQuery,
+): Promise<AttemptTableRowsPayload> {
+  const params = new URLSearchParams()
+  if (query.status) params.set('status', query.status)
+  if (query.request_id) params.set('request_id', query.request_id)
+  if (query.step) params.set('step', query.step)
+  if (query.window && query.window !== 'custom') params.set('window', query.window)
+  if (query.since) params.set('since', query.since)
+  if (query.limit != null) params.set('limit', String(query.limit))
+  if (query.offset != null) params.set('offset', String(query.offset))
+  const qs = params.toString()
+  return fetchAdminApi<AttemptTableRowsPayload>(
+    `/ops/workers/attempt-tables/${encodeURIComponent(query.table_name)}/rows${
+      qs ? `?${qs}` : ''
+    }`,
+  )
 }
