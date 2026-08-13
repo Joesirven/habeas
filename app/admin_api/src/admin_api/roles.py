@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 
 from fastapi import Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
 
 from habeas_privacy_core.auth import (
@@ -42,11 +42,21 @@ class RoleSettings(CoreSettings):
 settings = RoleSettings()
 
 
+class ConnectorReminderOut(BaseModel):
+    """Soft connector reminder — allowlisted codes only; no PII (KTD13)."""
+
+    code: str
+    system: str
+    vertical_id: str
+    severity: Literal["approaching", "overdue"]
+
+
 class MeResponse(BaseModel):
     email: str
     role: Role
     real_role: Role
-
+    verticals: list[str] = []
+    connector_reminders: list[ConnectorReminderOut] = Field(default_factory=list)
 
 @dataclass(frozen=True, slots=True)
 class RolePrincipal:

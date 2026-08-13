@@ -23,6 +23,11 @@ import {
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
 import { useAuth } from '@/lib/auth'
+import {
+  connectionInviteAllowed,
+  isCreatableConnectionSystem,
+  isUploadOnlySystem,
+} from '@/lib/connection-display'
 import { absoluteInviteUrl, firstNameFromEmail } from '@/lib/utils'
 
 type ConnectionSystemOption = ConnectionSystemsPayload['systems'][number]
@@ -35,9 +40,31 @@ const FALLBACK_SYSTEMS: ConnectionSystemOption[] = [
   { system_id: 'paylocity', display_label: 'Paylocity', invite_allowed: true, credential_fields: [], trust_copy: '' },
   { system_id: 'lever', display_label: 'Lever', invite_allowed: true, credential_fields: [], trust_copy: '' },
   { system_id: 'auth0', display_label: 'Auth0', invite_allowed: true, credential_fields: [], trust_copy: '' },
-  { system_id: 'google_sheets', display_label: 'Google Sheets', invite_allowed: true, credential_fields: [], trust_copy: '' },
+  {
+    system_id: 'bizdev_contacts',
+    display_label: 'BizDev Contacts',
+    invite_allowed: true,
+    credential_fields: [],
+    trust_copy: '',
+  },
+  {
+    system_id: 'hr_alumni',
+    display_label: 'HR Alumni List',
+    invite_allowed: true,
+    credential_fields: [],
+    trust_copy: '',
+  },
   { system_id: 'cassandra', display_label: 'Cassandra', invite_allowed: false, credential_fields: [], trust_copy: '' },
 ]
+
+function creatableSystems(systems: ConnectionSystemOption[]): ConnectionSystemOption[] {
+  return systems.filter((entry) =>
+    isCreatableConnectionSystem({
+      system_id: entry.system_id,
+      invite_allowed: entry.invite_allowed,
+    }),
+  )
+}
 
 export type ConnectionCreateDialogProps = {
   open: boolean
@@ -79,7 +106,9 @@ export function ConnectionCreateDialog({
   onCreated,
 }: ConnectionCreateDialogProps) {
   const { me } = useAuth()
-  const [systems, setSystems] = useState<ConnectionSystemOption[]>(FALLBACK_SYSTEMS)
+  const [systems, setSystems] = useState<ConnectionSystemOption[]>(
+    creatableSystems(FALLBACK_SYSTEMS),
+  )
   const [owners, setOwners] = useState<ConnectionOwnerCandidate[]>([])
   const [ownersError, setOwnersError] = useState<string | null>(null)
   const [system, setSystem] = useState<IntegrationSystemId>('mailchimp')
@@ -99,7 +128,16 @@ export function ConnectionCreateDialog({
   const selectedSystem = systems.find((entry) => entry.system_id === system)
   const isCassandra = system === 'cassandra'
   const isGoogleSheets = system === 'google_sheets'
-  const inviteAllowed = selectedSystem?.invite_allowed ?? !isCassandra
+  const uploadOnly = isUploadOnlySystem(system)
+  // Omit empty credential_fields from fallbacks — upload-only / invite_allowed cover gating.
+  const inviteAllowed = connectionInviteAllowed({
+    system,
+    inviteAllowed: selectedSystem?.invite_allowed,
+    credentialFieldCount:
+      selectedSystem != null && selectedSystem.credential_fields.length > 0
+        ? selectedSystem.credential_fields.length
+        : null,
+  })
 
   function resetForm() {
     setSystem('mailchimp')
@@ -125,12 +163,20 @@ export function ConnectionCreateDialog({
     let cancelled = false
     void getConnectionSystems()
       .then((payload) => {
-        if (!cancelled && payload.systems.length > 0) {
-          setSystems(payload.systems)
-        }
+        if (cancelled) return
+        const next =
+          payload.systems.length > 0
+            ? creatableSystems(payload.systems)
+            : creatableSystems(FALLBACK_SYSTEMS)
+        setSystems(next)
+        setSystem((current) =>
+          next.some((entry) => entry.system_id === current)
+            ? current
+            : (next[0]?.system_id ?? 'mailchimp'),
+        )
       })
       .catch(() => {
-        if (!cancelled) setSystems(FALLBACK_SYSTEMS)
+        if (!cancelled) setSystems(creatableSystems(FALLBACK_SYSTEMS))
       })
 
     void listConnectionOwnerCandidates()
@@ -322,7 +368,8 @@ export function ConnectionCreateDialog({
                 <DialogTitle>New connection</DialogTitle>
                 <DialogDescription>
                   Register an integration connection. SaaS systems use a one-time owner invite;
-                  Cassandra is provisioned by Infrastructure.
+                  upload-only systems create without an invite; Cassandra is provisioned by
+                  Infrastructure.
                 </DialogDescription>
               </DialogHeader>
 
@@ -335,12 +382,14 @@ export function ConnectionCreateDialog({
                     onChange={(event) => {
                       const next = event.target.value as IntegrationSystemId
                       setSystem(next)
-                      if (next === 'cassandra') setOwnerEmail('')
+                      if (next === 'cassandra' || isUploadOnlySystem(next)) setOwnerEmail('')
                     }}
                   >
                     {systems.map((entry) => (
                       <option key={entry.system_id} value={entry.system_id}>
                         {entry.display_label}
+                        {isUploadOnlySystem(entry.system_id) ? ' (upload only)' : ''}
+                        {entry.system_id === 'cassandra' ? ' (infra)' : ''}
                       </option>
                     ))}
                   </select>
@@ -384,6 +433,11 @@ export function ConnectionCreateDialog({
                       <span className="text-xs text-red-700">{ownersError}</span>
                     ) : null}
                   </label>
+                ) : uploadOnly ? (
+                  <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
+                    Upload-only — creates the connection without minting an invite. Owners refresh
+                    data via the vertical connector upload wizard.
+                  </div>
                 ) : (
                   <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
                     Cassandra connectivity is handled by Habeas Infrastructure (INF). No owner
@@ -442,7 +496,7 @@ export function ConnectionCreateDialog({
                 <Button type="submit" disabled={submitting}>
                   {submitting
                     ? 'Creating…'
-                    : isCassandra || isGoogleSheets
+                    : isCassandra || uploadOnly || isGoogleSheets
                       ? 'Create connection'
                       : 'Create & invite'}
                 </Button>
@@ -455,9 +509,11 @@ export function ConnectionCreateDialog({
                 <DialogDescription>
                   {isCassandra
                     ? 'Infrastructure handoff — no owner invite.'
-                    : isGoogleSheets
-                      ? 'Dedicated service account is ready. Share the invite link with the owner.'
-                      : 'Share the invite link with the owner. It is shown only once.'}
+                    : uploadOnly
+                      ? 'Upload-only connection registered — no invite minted.'
+                      : isGoogleSheets
+                        ? 'Dedicated service account is ready. Share the invite link with the owner.'
+                        : 'Share the invite link with the owner. It is shown only once.'}
                 </DialogDescription>
               </DialogHeader>
 
@@ -483,6 +539,14 @@ export function ConnectionCreateDialog({
                     Open an INF ticket for TLS certificates, service account credentials, and egress
                     allowlisting. Habeas does not collect secrets on this path.
                   </p>
+                </div>
+              ) : uploadOnly ? (
+                <div className="space-y-2 rounded-md border border-line bg-canvas p-3 text-xs text-ink-soft">
+                  <p>
+                    <span className="font-medium text-ink">{createdConnection?.display_name}</span>{' '}
+                    is ready for owner upload refresh via the vertical connector wizard.
+                  </p>
+                  <p>Assign the owner on the Verticals tab if they are not already mapped.</p>
                 </div>
               ) : invite ? (
                 <div className="space-y-2 rounded-md border border-line bg-canvas p-3">

@@ -203,7 +203,10 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
         ),
         trust_copy=_saas_trust_copy(
             extra=(
-                "Paylocity: credentials come from the Developer Portal integration app "
+                "Paylocity supports two approaches. Upload mode: download the Habeas "
+                "CSV template, fill required columns, and upload the file on your chosen "
+                "refresh cadence — no Developer Portal credentials needed for Upload. "
+                "Live mode: use SFTP credentials from the Developer Portal integration app "
                 "(partner.paylocity.com). HR or IT usually creates the app. Never use a "
                 "personal Web Pay login."
             ),
@@ -223,19 +226,21 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                     "1. Sign in to Lever as a Super Admin (only Super Admins can create keys).\n"
                     "2. Go to Settings → Integrations and API → API Credentials.\n"
                     "3. Under Lever API credentials, click Generate New Key "
-                    "(not the Postings API key at the top).\n"
-                    "4. Name it “Habeas privacy automation” and set the endpoint permissions "
-                    "you need (permissions cannot be changed later).\n"
+                    "(not the Postings API key at the top — Postings-only keys will fail).\n"
+                    "4. Name it “Habeas privacy automation” and enable Users read/list "
+                    "(permissions cannot be changed later — regenerate if missing).\n"
                     "5. Click Generate key → Copy Key immediately (shown only once) → Done.\n"
                     "6. Paste that key here.\n"
-                    "Do not paste your Lever password or the Postings API key."
+                    "Do not paste your Lever password or the Postings API key. "
+                    "Habeas probes GET /v1/users — the key must allow Users read/list."
                 ),
             ),
         ),
         trust_copy=_saas_trust_copy(
             extra=(
                 "Lever: only a Super Admin can create API credentials. Use a dedicated "
-                "Habeas key — not your login password and not the Postings API key."
+                "Habeas key with Users read/list — not your login password and not a "
+                "Postings-only API key."
             ),
         ),
     ),
@@ -294,7 +299,7 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
     "google_sheets": ConnectionSystem(
         system_id="google_sheets",
         display_label="Google Sheets",
-        invite_allowed=True,
+        invite_allowed=False,
         credential_fields=(
             CredentialField(
                 id="spreadsheet_url",
@@ -311,6 +316,34 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                 "email shown in the credential steps, then paste the editable spreadsheet URL. "
                 "Editor access is required so Habeas can update or remove rows for "
                 "suppression later. We never ask for your Google password or a credentials JSON."
+            ),
+        ),
+    ),
+    "bizdev_contacts": ConnectionSystem(
+        system_id="bizdev_contacts",
+        display_label="BizDev Contacts",
+        invite_allowed=False,
+        credential_fields=(),
+        trust_copy=_saas_trust_copy(
+            extra=(
+                "BizDev Contacts uses Upload mode only. Download the Habeas CSV "
+                "template, reshape your Contact Us export to match the required "
+                "headers, select a multi-value delimiter if needed, and upload the "
+                "file. No API credentials or Google Sheets sharing is required."
+            ),
+        ),
+    ),
+    "hr_alumni": ConnectionSystem(
+        system_id="hr_alumni",
+        display_label="HR Alumni List",
+        invite_allowed=False,
+        credential_fields=(),
+        trust_copy=_saas_trust_copy(
+            extra=(
+                "HR Alumni uses Upload mode only. Download the Habeas CSV template, "
+                "reshape your alumni list to match the required headers, select a "
+                "multi-value delimiter if needed, and upload the file. No API "
+                "credentials or Google Sheets sharing is required."
             ),
         ),
     ),
@@ -380,6 +413,8 @@ _SYSTEM_ORDER: Final[tuple[str, ...]] = (
     "lever",
     "auth0",
     "google_sheets",
+    "bizdev_contacts",
+    "hr_alumni",
     "cassandra",
 )
 

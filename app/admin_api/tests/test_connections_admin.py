@@ -89,6 +89,8 @@ def test_systems_catalog_shape() -> None:
         "lever",
         "auth0",
         "google_sheets",
+        "bizdev_contacts",
+        "hr_alumni",
         "cassandra",
     }
     assert systems["mailchimp"]["invite_allowed"] is True
@@ -578,3 +580,404 @@ def test_create_invite_integration() -> None:
     assert invite["owner_email"] == "owner@example.com"
     assert invite["invite_url"].startswith("/connect/")
     assert invite["raw_token"]
+
+
+def test_list_connections_includes_display_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_id = uuid4()
+    row = Connection(
+        id=str(connection_id),
+        system="mailchimp",
+        display_name="Marketing list",
+        status="connected",
+        owner_email="owner@example.com",
+        secret_resource_name=f"dpra/connections/mailchimp/{connection_id}",
+        last_tested_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        last_test_ok=True,
+        last_test_detail="ok",
+        created_by="ops@example.com",
+        created_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        metadata={
+            "wizard_completed_at": "2026-08-01T12:00:00+00:00",
+            "active_mode": "live",
+            "credentials_rotated_at": "2026-08-01T12:00:00+00:00",
+        },
+    )
+
+    async def _list_connections(*_args, **_kwargs):
+        return [row]
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "list_connections", _list_connections)
+
+    with TestClient(app) as client:
+        response = client.get("/ops/connections", headers=_super_admin_headers())
+
+    assert response.status_code == 200
+    connections = response.json()["connections"]
+    assert len(connections) == 1
+    assert connections[0]["display_status"] == "connected"
+    assert connections[0]["gate_code"] == "ok"
+    assert connections[0]["gate_allowed"] is True
+
+
+def test_force_mode_forbidden_for_non_super_admin() -> None:
+    connection_id = uuid4()
+    with TestClient(app) as client:
+        response = client.post(
+            f"/ops/connections/{connection_id}/mode",
+            headers=_admin_headers(),
+            json={"mode": "live"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "insufficient role"
+
+
+def test_cadence_override_forbidden_for_non_super_admin() -> None:
+    connection_id = uuid4()
+    with TestClient(app) as client:
+        response = client.post(
+            f"/ops/connections/{connection_id}/cadence",
+            headers=_admin_headers(),
+            json={"cadence_days_override": 7},
+        )
+
+    assert response.status_code == 403
+
+
+def test_wizard_reset_forbidden_for_non_super_admin() -> None:
+    connection_id = uuid4()
+    with TestClient(app) as client:
+        response = client.post(
+            f"/ops/connections/{connection_id}/wizard/reset",
+            headers=_admin_headers(),
+        )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_force_mode_paylocity_upload_to_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_id = uuid4()
+    connection = Connection(
+        id=str(connection_id),
+        system="paylocity",
+        display_name="People HR",
+        status="connected",
+        owner_email="owner@example.com",
+        secret_resource_name=f"dpra/connections/paylocity/{connection_id}",
+        last_tested_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        last_test_ok=True,
+        last_test_detail="ok",
+        created_by="ops@example.com",
+        created_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        metadata={
+            "active_mode": "upload",
+            "wizard_completed_at": "2026-08-01T12:00:00+00:00",
+        },
+    )
+    updated = connection.model_copy(
+        update={"metadata": {**connection.metadata, "active_mode": "live"}}
+    )
+    mode_events: list[dict[str, object]] = []
+
+    async def _get_connection(*_args, **_kwargs):
+        return connection
+
+    async def _merge_connection_metadata(*_args, **_kwargs):
+        return updated
+
+    async def _insert_connection_mode_event(*_args, **kwargs):
+        mode_events.append(dict(kwargs))
+        return 1
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
+    monkeypatch.setattr(
+        connections_admin.connections_db,
+        "merge_connection_metadata",
+        _merge_connection_metadata,
+    )
+    monkeypatch.setattr(
+        connections_admin.connections_db,
+        "insert_connection_mode_event",
+        _insert_connection_mode_event,
+    )
+
+    result = await connections_admin.force_connection_mode(
+        connection_id,
+        connections_admin.ForceModeBody(mode="live", reason="ops strategy"),
+        principal,
+    )
+
+    assert result.metadata["active_mode"] == "live"
+    assert len(mode_events) == 1
+    assert mode_events[0]["from_mode"] == "upload"
+    assert mode_events[0]["to_mode"] == "live"
+    assert mode_events[0]["actor"] == "ops@example.com"
+    assert mode_events[0]["reason"] == "ops strategy"
+
+    from habeas_privacy_core.connections.freshness import (
+        connection_gate_input,
+        evaluate_connection_gate,
+    )
+
+    gate = evaluate_connection_gate(
+        connection_gate_input(
+            system="paylocity",
+            status="connected",
+            last_test_ok=True,
+            metadata={
+                **updated.metadata,
+                "last_successful_upload_at": "2026-08-11T12:00:00+00:00",
+            },
+        ),
+        now=datetime(2026, 8, 12, tzinfo=timezone.utc),
+    )
+    assert gate.allowed is False
+    assert gate.code == "rotation_overdue"
+    assert gate.display_status == "needs_refresh"
+
+
+@pytest.mark.asyncio
+async def test_force_live_on_hr_alumni_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    connection_id = uuid4()
+    connection = Connection(
+        id=str(connection_id),
+        system="hr_alumni",
+        display_name="Alumni list",
+        status="connected",
+        owner_email="owner@example.com",
+        secret_resource_name=f"dpra/connections/hr_alumni/{connection_id}",
+        last_tested_at=None,
+        last_test_ok=True,
+        last_test_detail="upload_ok",
+        created_by="ops@example.com",
+        created_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        metadata={"active_mode": "upload"},
+    )
+
+    async def _get_connection(*_args, **_kwargs):
+        return connection
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await connections_admin.force_connection_mode(
+            connection_id,
+            connections_admin.ForceModeBody(mode="live"),
+            principal,
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "live mode not allowed for this system"
+
+
+@pytest.mark.asyncio
+async def test_cadence_override_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    connection_id = uuid4()
+    connection = Connection(
+        id=str(connection_id),
+        system="paylocity",
+        display_name="People HR",
+        status="connected",
+        owner_email="owner@example.com",
+        secret_resource_name=f"dpra/connections/paylocity/{connection_id}",
+        last_tested_at=None,
+        last_test_ok=True,
+        last_test_detail="ok",
+        created_by="ops@example.com",
+        created_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        metadata={"active_mode": "upload", "cadence_days": 30},
+    )
+    updated = connection.model_copy(
+        update={"metadata": {**connection.metadata, "cadence_days_override": 7}}
+    )
+
+    async def _get_connection(*_args, **_kwargs):
+        return connection
+
+    async def _merge_connection_metadata(*_args, **_kwargs):
+        return updated
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
+    monkeypatch.setattr(
+        connections_admin.connections_db,
+        "merge_connection_metadata",
+        _merge_connection_metadata,
+    )
+
+    result = await connections_admin.override_connection_cadence(
+        connection_id,
+        connections_admin.CadenceOverrideBody(cadence_days_override=7),
+        principal,
+    )
+
+    assert result.metadata["cadence_days_override"] == 7
+
+
+@pytest.mark.asyncio
+async def test_wizard_reset_clears_wizard_completed_at(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_id = uuid4()
+    connection = Connection(
+        id=str(connection_id),
+        system="paylocity",
+        display_name="People HR",
+        status="connected",
+        owner_email="owner@example.com",
+        secret_resource_name=f"dpra/connections/paylocity/{connection_id}",
+        last_tested_at=None,
+        last_test_ok=True,
+        last_test_detail="ok",
+        created_by="ops@example.com",
+        created_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        metadata={
+            "wizard_completed_at": "2026-08-01T12:00:00+00:00",
+            "wizard_step": "confirm",
+            "active_mode": "upload",
+        },
+    )
+    updated = connection.model_copy(
+        update={"metadata": {"active_mode": "upload"}},
+    )
+
+    async def _get_connection(*_args, **_kwargs):
+        return connection
+
+    async def _update_connection_metadata(*_args, **_kwargs):
+        return updated
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
+    monkeypatch.setattr(
+        connections_admin.connections_db,
+        "update_connection_metadata",
+        _update_connection_metadata,
+    )
+
+    result = await connections_admin.reset_connection_wizard(connection_id, principal)
+
+    assert "wizard_completed_at" not in result.metadata
+    assert "wizard_step" not in result.metadata
+    assert result.metadata["active_mode"] == "upload"
+    assert result.gate_allowed is False
+    assert result.gate_code == "wizard_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_create_invite_rejects_upload_only_system(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_id = uuid4()
+    connection = Connection(
+        id=str(connection_id),
+        system="hr_alumni",
+        display_name="Alumni list",
+        status="pending",
+        owner_email="owner@example.com",
+        secret_resource_name=f"dpra/connections/hr_alumni/{connection_id}",
+        last_tested_at=None,
+        last_test_ok=None,
+        last_test_detail=None,
+        created_by="ops@example.com",
+        created_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        metadata={},
+    )
+
+    async def _get_connection(*_args, **_kwargs):
+        return connection
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    roles.settings.admin_api_data_owners = "owner@example.com"
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await connections_admin.create_invite(
+            connection_id,
+            principal,
+            connections_admin.InviteCreateBody(),
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "invites not allowed for upload-only systems"

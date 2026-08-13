@@ -30,12 +30,22 @@ from admin_api.legal_operators import router as legal_operators_router
 from admin_api.legal_sla import apply_request_due_at_on_intake, router as legal_sla_router
 from admin_api.connections_admin import router as connections_admin_router
 from admin_api.connections_redeem import router as connections_redeem_router
+from admin_api.owner_connectors import router as owner_connectors_router
 from admin_api.legal_team import router as legal_team_router
 from admin_api.request_correspondence import router as request_correspondence_router
 from admin_api.runs import logs_router as ops_logs_router
 from admin_api.runs import router as runs_router
 from admin_api.request_journey import router as request_journey_router
-from admin_api.roles import CurrentRolePrincipal, MeResponse, RolePrincipal, require_roles
+from admin_api.roles import (
+    ConnectorReminderOut,
+    CurrentRolePrincipal,
+    MeResponse,
+    RolePrincipal,
+    require_roles,
+)
+from admin_api.owner_connectors import collect_connector_reminders
+from admin_api.vertical_assignments import fetch_principal_verticals
+from admin_api.vertical_assignments import router as vertical_assignments_router
 from admin_api.vertical_dispositions import router as vertical_dispositions_router
 from admin_api.worker_schedules import router as worker_schedules_router
 from admin_api.worker_fleet import router as worker_fleet_router
@@ -175,6 +185,8 @@ app.include_router(worker_fleet_router)
 app.include_router(attempt_tables_router)
 app.include_router(connections_admin_router)
 app.include_router(connections_redeem_router)
+app.include_router(owner_connectors_router)
+app.include_router(vertical_assignments_router)
 
 
 def _approval_record(row: dict[str, Any]) -> ApprovalRecord:
@@ -189,23 +201,67 @@ def _approval_record(row: dict[str, Any]) -> ApprovalRecord:
     )
 
 
-@app.get("/me", response_model=MeResponse)
-async def me(principal: CurrentRolePrincipal) -> MeResponse:
+async def _load_me_verticals(email: str) -> list[str]:
+    """Active vertical assignments for *email*; empty when DB unavailable or on error."""
+    if not settings.database_url:
+        return []
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            return await fetch_principal_verticals(conn, email=email)
+    except Exception:
+        return []
+
+
+async def _load_me_reminders(
+    email: str,
+    role: str,
+    *,
+    vertical_ids: list[str] | None = None,
+) -> list[ConnectorReminderOut]:
+    """Soft connector reminders; empty when DB unavailable so login never blocks (KTD13)."""
+    if role in {ROLE_SUPER_ADMIN, ROLE_ADMIN}:
+        return []
+    if not settings.database_url:
+        return []
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            return await collect_connector_reminders(
+                conn,
+                email=email,
+                role=role,
+                vertical_ids=vertical_ids,
+            )
+    except Exception:
+        return []
+
+
+async def _build_me_response(principal: CurrentRolePrincipal) -> MeResponse:
+    verticals = await _load_me_verticals(principal.email)
+    reminders = await _load_me_reminders(
+        principal.email,
+        principal.role,
+        vertical_ids=verticals,
+    )
     return MeResponse(
         email=principal.email,
         role=principal.role,
         real_role=principal.real_role,
+        verticals=verticals,
+        connector_reminders=reminders,
     )
+
+
+@app.get("/me", response_model=MeResponse)
+async def me(principal: CurrentRolePrincipal) -> MeResponse:
+    return await _build_me_response(principal)
 
 
 @app.get("/auth/me", response_model=MeResponse)
 async def auth_me(principal: CurrentRolePrincipal) -> MeResponse:
     """Alias for /me — primary IAP branch used /auth/me as the identity probe."""
-    return MeResponse(
-        email=principal.email,
-        role=principal.role,
-        real_role=principal.real_role,
-    )
+    return await _build_me_response(principal)
 
 
 @app.get("/healthz")

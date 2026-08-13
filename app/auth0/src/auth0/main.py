@@ -12,6 +12,12 @@ from fastapi import FastAPI, HTTPException
 from pydantic_settings import SettingsConfigDict
 
 from habeas_privacy_core.config import CoreSettings
+from habeas_privacy_core.connections.freshness import GateResult
+from habeas_privacy_core.connections.matching_gate import (
+    evaluate_vertical_matching_gate,
+    gate_block_audit,
+    vertical_id_from_attempt_row,
+)
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
 from habeas_privacy_core.db.vertical_hash_refresh import (
     claim_vertical_hash_refresh,
@@ -131,6 +137,43 @@ async def _complete_stub(
     return {"attempt_id": attempt_id, "step": step, "status": status}
 
 
+async def _complete_gate_blocked(
+    attempt_id: int,
+    gate: GateResult,
+) -> dict[str, Any]:
+    """Terminal non-match when the matching freshness gate blocks this system."""
+    pool = get_pool()
+    step = STEP_MATCHING
+    # CHECK constraint allows submit_error (not skipped); gate_blocked lives in audit.
+    db_status = "submit_error"
+    audit = json.dumps(
+        {
+            **build_vertical_audit_payload(
+                adapter="stub",
+                step=step,
+                system=SYSTEM,
+                error_code="gate_blocked",
+            ),
+            **gate_block_audit(system=SYSTEM, gate=gate),
+        }
+    )
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"""
+            UPDATE {AUTH0_ATTEMPTS_TABLE}
+               SET status = $2,
+                   completed_at = NOW(),
+                   error_code = 'gate_blocked',
+                   audit_payload = COALESCE(audit_payload, '{{}}'::jsonb) || $3::jsonb
+             WHERE id = $1 AND status = 'claimed'
+            """,
+            attempt_id,
+            db_status,
+            audit,
+        )
+    return {"attempt_id": attempt_id, "step": step, "status": "gate_blocked"}
+
+
 @app.post("/matching/submit")
 async def matching_submit():
     if not settings.database_url:
@@ -138,6 +181,16 @@ async def matching_submit():
     row = await _claim(STEP_MATCHING)
     if row is None:
         return {"claimed": False}
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        gate = await evaluate_vertical_matching_gate(
+            conn,
+            system=SYSTEM,
+            vertical_id=vertical_id_from_attempt_row(row),
+        )
+    if not gate.allowed:
+        result = await _complete_gate_blocked(int(row["id"]), gate)
+        return {"claimed": True, **result}
     from auth0.adapters.stub import StubMatchAdapter
 
     request_id = str(row["request_id"])

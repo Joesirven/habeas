@@ -27,6 +27,7 @@ ALLOWED_TEST_DETAIL_CODES: Final[frozenset[str]] = frozenset(
         "lever_ok",
         "auth0_ok",
         "google_sheets_ok",
+        "upload_ok",
         # failure
         "unknown_system",
         "infra_only",
@@ -34,9 +35,15 @@ ALLOWED_TEST_DETAIL_CODES: Final[frozenset[str]] = frozenset(
         "failed",
         "unknown_error",
         "auth_failed",
+        "lever_unauthorized",
+        "lever_forbidden",
         "unreachable",
         "invalid_credentials",
         "invalid_config",
+        "upload_missing_headers",
+        "upload_no_usable_rows",
+        "upload_invalid_delimiter",
+        "gate_blocked",
     }
 )
 
@@ -49,6 +56,8 @@ class ConnectionSystem(StrEnum):
     LEVER = "lever"
     AUTH0 = "auth0"
     GOOGLE_SHEETS = "google_sheets"
+    BIZDEV_CONTACTS = "bizdev_contacts"
+    HR_ALUMNI = "hr_alumni"
     CASSANDRA = "cassandra"
 
 

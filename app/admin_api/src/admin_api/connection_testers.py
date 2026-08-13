@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 
 import httpx
 
-from admin_api.connection_tests import auth0, google_sheets, lever, mailchimp, paylocity
+from admin_api.connection_tests import auth0, google_sheets, lever, mailchimp, paylocity, upload_csv
 from habeas_privacy_core.connections.models import sanitize_test_detail
 from habeas_privacy_core.connections.systems import get_system, validate_credentials
 
@@ -92,3 +92,46 @@ async def test_connection(
 
 # Not a pytest test — public API for connection onboarding routes.
 test_connection.__test__ = False
+
+
+async def test_upload_connection(
+    system: str,
+    *,
+    content: bytes,
+    multi_pii_delimiter: str | None,
+) -> tuple[bool, str]:
+    """Run an upload CSV connection test without Live credential validation."""
+    logger.info("connection_test_started system=%s mode=upload", system)
+
+    if system not in upload_csv.UPLOAD_SYSTEMS:
+        logger.info(
+            "connection_test_finished system=%s ok=false detail=unknown_system",
+            system,
+        )
+        return False, "unknown_system"
+
+    try:
+        ok, detail, _stats = await upload_csv.test_upload_system(
+            system,
+            content=content,
+            multi_pii_delimiter=multi_pii_delimiter,
+        )
+    except Exception:
+        logger.info(
+            "connection_test_finished system=%s ok=false detail=unknown_error",
+            system,
+        )
+        return False, "unknown_error"
+
+    safe_detail = sanitize_test_detail(detail) or "unknown_error"
+    logger.info(
+        "connection_test_finished system=%s ok=%s detail=%s",
+        system,
+        ok,
+        safe_detail,
+    )
+    return ok, safe_detail
+
+
+# Not a pytest test — public API for upload onboarding routes.
+test_upload_connection.__test__ = False

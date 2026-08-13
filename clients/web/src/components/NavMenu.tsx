@@ -202,6 +202,8 @@ export function NavMenu() {
   const { role, isLoading } = useAuth()
   const showOps = canAccessOpsSurfaces(role)
   const legalAdminNav = isLegalAdminPersona(role)
+  const showOwnerConnectors =
+    role === 'data_owner' || role === 'admin' || role === 'super_admin'
   const homeLabel = legalAdminNav ? 'Home' : 'My work'
 
   const isLegalNav = legalAdminNav
@@ -240,6 +242,9 @@ export function NavMenu() {
         count={inboxCount}
         search={isLegalNav ? { kind: 'triage' } : undefined}
       />
+      {showOwnerConnectors ? (
+        <NavLink to="/owner/connectors" label="Connectors" exact />
+      ) : null}
       <NavLink to="/docs" label="Docs" exact />
     </nav>
   )

@@ -154,6 +154,57 @@ async def update_connection_metadata(
     return _row_to_connection(row) if row else None
 
 
+async def merge_connection_metadata(
+    conn: asyncpg.Connection,
+    connection_id: UUID | str,
+    patch: dict[str, Any],
+) -> Connection | None:
+    """Shallow-merge keys into connection metadata JSON (non-secret only)."""
+    row = await conn.fetchrow(
+        f"""
+        UPDATE integration_connections
+           SET metadata = COALESCE(metadata, '{{}}'::jsonb) || $2::jsonb,
+               updated_at = NOW()
+         WHERE id = $1
+        RETURNING {_CONNECTION_SELECT}
+        """,
+        _as_uuid(connection_id),
+        json.dumps(patch),
+    )
+    return _row_to_connection(row) if row else None
+
+
+async def insert_connection_mode_event(
+    conn: asyncpg.Connection,
+    *,
+    connection_id: UUID | str,
+    to_mode: str,
+    actor: str,
+    from_mode: str | None = None,
+    reason: str | None = None,
+) -> int:
+    """Append a Live/Upload mode transition to connection_mode_events."""
+    row = await conn.fetchrow(
+        """
+        INSERT INTO connection_mode_events (
+            connection_id,
+            from_mode,
+            to_mode,
+            actor,
+            reason
+        ) VALUES ($1, $2, $3, $4, $5)
+        RETURNING id
+        """,
+        _as_uuid(connection_id),
+        from_mode,
+        to_mode,
+        actor,
+        reason,
+    )
+    assert row is not None
+    return int(row["id"])
+
+
 async def delete_connection(
     conn: asyncpg.Connection,
     connection_id: UUID | str,

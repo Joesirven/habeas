@@ -17,7 +17,15 @@ VERTICAL_HASH_REFRESH_ATTEMPTS_TABLE = "vertical_hash_refresh_attempts"
 VERTICAL_HASH_REFRESH_RUNS_TABLE = "vertical_hash_refresh_runs"
 VERTICAL_HASH_REFRESH_STEP = "refresh"
 VERTICAL_HASH_REFRESH_SYSTEMS = frozenset(
-    {"mailchimp", "paylocity", "lever", "auth0", "google_sheets"}
+    {
+        "mailchimp",
+        "paylocity",
+        "lever",
+        "auth0",
+        "google_sheets",
+        "bizdev_contacts",
+        "hr_alumni",
+    }
 )
 
 MAILCHIMP_ATTEMPTS_TABLE = "mailchimp_attempts"

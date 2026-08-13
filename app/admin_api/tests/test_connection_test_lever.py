@@ -33,17 +33,23 @@ async def test_lever_ok() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [401, 403])
-async def test_lever_auth_failed(status: int) -> None:
+@pytest.mark.parametrize(
+    ("status", "detail"),
+    [
+        (401, "lever_unauthorized"),
+        (403, "lever_forbidden"),
+    ],
+)
+async def test_lever_auth_triage_codes(status: int, detail: str) -> None:
     with patch(
         "admin_api.connection_tests.lever._http.request",
         new_callable=AsyncMock,
         return_value=(status, False),
     ):
-        ok, detail = await test_lever({"api_key": _VALID_KEY})
+        ok, code = await test_lever({"api_key": _VALID_KEY})
 
     assert ok is False
-    assert detail == "auth_failed"
+    assert code == detail
 
 
 @pytest.mark.asyncio

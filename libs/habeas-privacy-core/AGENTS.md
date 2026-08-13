@@ -17,7 +17,11 @@ Shared library package. Each submodule under `src/habeas_privacy_core/` has its 
 | [`observability/`](src/habeas_privacy_core/observability/) | Logging, tracing, metrics |
 | [`auth/`](src/habeas_privacy_core/auth/) | IAP header + Bearer Google ID token identity parsing |
 | [`live/`](src/habeas_privacy_core/live/) | NOTIFY helpers for live events |
-| [`connections/`](src/habeas_privacy_core/connections/) | Integration connection models, invite tokens, Secret Manager paths (no secret values logged) |
+| [`connections/`](src/habeas_privacy_core/connections/) | Integration connection models, invite tokens, Secret Manager paths (no secret values logged); vertical catalog + freshness/matching gate (`freshness.py` — soft reminders vs hard gate) |
 | [`vertical_hash/`](src/habeas_privacy_core/vertical_hash/) | External vertical hash helpers + allowlisted attempt audit |
 
 Vendor adapters belong in `app/<name>/adapters/`, not here.
+
+**Connections / gate:** Connecting credentials or completing an Upload does not alone clear
+matching — evaluate `evaluate_connection_gate` (Upload cadence / Live ~180-day rotation /
+wizard). Soft login reminders use `evaluate_connection_reminder` (KTD13; no SMTP).

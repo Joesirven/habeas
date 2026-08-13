@@ -5,6 +5,7 @@ import { useState, type ReactNode } from 'react'
 import { SkeletonLines } from '@/components/AppShell'
 import { ConnectionCreateDialog } from '@/components/ops/ConnectionCreateDialog'
 import { ConnectionInvitePanel } from '@/components/ops/ConnectionInvitePanel'
+import { VerticalCatalogPanel } from '@/components/ops/VerticalCatalogPanel'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -13,33 +14,18 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { listConnections, type ConnectionRecord } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
 import { RoleGate, isSuperAdmin } from '@/lib/auth'
+import {
+  connectionDisplayStatusLabel,
+  connectionDisplayStatusVariant,
+  resolveConnectionChipStatus,
+} from '@/lib/connection-display'
 
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
-}
-
-type ConnectionStatus = ConnectionRecord['status']
-
-function connectionStatusVariant(
-  status: ConnectionStatus,
-): 'ok' | 'fail' | 'run' | 'wait' | 'default' {
-  switch (status) {
-    case 'connected':
-      return 'ok'
-    case 'failed':
-    case 'revoked':
-      return 'fail'
-    case 'invited':
-      return 'run'
-    case 'pending':
-    case 'infra_pending':
-      return 'wait'
-    default:
-      return 'default'
-  }
 }
 
 function formatSystemLabel(system: string): string {
@@ -64,10 +50,83 @@ function formatLastTest(connection: ConnectionRecord): string {
   return when
 }
 
+function ConnectionsTable({
+  connections,
+  loading,
+  error,
+  onRetry,
+  onSelect,
+}: {
+  connections: ConnectionRecord[]
+  loading: boolean
+  error: unknown
+  onRetry: () => void
+  onSelect: (connection: ConnectionRecord) => void
+}) {
+  if (loading) {
+    return <SkeletonLines lines={6} />
+  }
+  if (error) {
+    return (
+      <div className="space-y-2">
+        <p className="text-sm text-red-700" role="alert">
+          {actionToast.safeErrorMessage(error, 'Could not load connections.')}
+        </p>
+        <Button type="button" size="sm" variant="outline" onClick={onRetry}>
+          Retry
+        </Button>
+      </div>
+    )
+  }
+  if (connections.length === 0) {
+    return (
+      <p className="text-sm text-ink-soft">
+        No connections yet. Create one to send an owner invite.
+      </p>
+    )
+  }
+  return (
+    <table className="taste-table">
+      <thead>
+        <tr>
+          <th>System</th>
+          <th>Name</th>
+          <th>Owner</th>
+          <th>Status</th>
+          <th>Last test</th>
+        </tr>
+      </thead>
+      <tbody>
+        {connections.map((connection) => {
+          const chip = resolveConnectionChipStatus(connection)
+          return (
+            <tr
+              key={connection.id}
+              className="cursor-pointer hover:bg-canvas/80"
+              onClick={() => onSelect(connection)}
+            >
+              <td className="font-mono text-xs">{formatSystemLabel(connection.system)}</td>
+              <td>{connection.display_name}</td>
+              <td className="text-ink-soft">{connection.owner_email ?? '—'}</td>
+              <td>
+                <Badge variant={connectionDisplayStatusVariant(chip)}>
+                  {connectionDisplayStatusLabel(chip)}
+                </Badge>
+              </td>
+              <td className="text-xs text-ink-soft">{formatLastTest(connection)}</td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
+  )
+}
+
 function ConnectionsBody() {
   const queryClient = useQueryClient()
   const [createOpen, setCreateOpen] = useState(false)
   const [selected, setSelected] = useState<ConnectionRecord | null>(null)
+  const [tab, setTab] = useState('connections')
 
   const connectionsQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'connections'],
@@ -94,36 +153,39 @@ function ConnectionsBody() {
             Connections
           </h2>
           <p className="mt-1 max-w-xl text-xs text-ink-soft">
-            Secure owner onboarding — invite links and connection tests; credentials never appear
-            here.
+            Secure owner onboarding — invite links, gated status, and vertical catalog assignments;
+            credentials never appear here.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Link to="/ops/workers/settings" className="taste-btn text-xs">
             ← Worker settings
           </Link>
-          <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
-            New connection
-          </Button>
+          {tab === 'connections' ? (
+            <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
+              New connection
+            </Button>
+          ) : null}
         </div>
       </header>
 
-      <div className="taste-panel overflow-x-auto p-4 sm:p-5">
-        {connectionsQuery.isPending && !connectionsQuery.data ? (
-          <SkeletonLines lines={6} />
-        ) : connectionsQuery.isError && !connectionsQuery.data ? (
-          <div className="space-y-2">
-            <p className="text-sm text-red-700" role="alert">
-              {actionToast.safeErrorMessage(
-                connectionsQuery.error,
-                'Could not load connections.',
-              )}
-            </p>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => {
+      <Tabs value={tab} onValueChange={setTab}>
+        <TabsList aria-label="Connections views">
+          <TabsTrigger value="connections">Connections</TabsTrigger>
+          <TabsTrigger value="verticals">Verticals</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="connections">
+          <div className="taste-panel overflow-x-auto p-4 sm:p-5">
+            <ConnectionsTable
+              connections={connections}
+              loading={connectionsQuery.isPending && !connectionsQuery.data}
+              error={
+                connectionsQuery.isError && !connectionsQuery.data
+                  ? connectionsQuery.error
+                  : null
+              }
+              onRetry={() => {
                 void connectionsQuery.refetch().then((result) => {
                   if (result.isError) {
                     actionToast.error({
@@ -142,47 +204,15 @@ function ConnectionsBody() {
                   }
                 })
               }}
-            >
-              Retry
-            </Button>
+              onSelect={setSelected}
+            />
           </div>
-        ) : connections.length === 0 ? (
-          <p className="text-sm text-ink-soft">
-            No connections yet. Create one to send an owner invite.
-          </p>
-        ) : (
-          <table className="taste-table">
-            <thead>
-              <tr>
-                <th>System</th>
-                <th>Name</th>
-                <th>Owner</th>
-                <th>Status</th>
-                <th>Last test</th>
-              </tr>
-            </thead>
-            <tbody>
-              {connections.map((connection) => (
-                <tr
-                  key={connection.id}
-                  className="cursor-pointer hover:bg-canvas/80"
-                  onClick={() => setSelected(connection)}
-                >
-                  <td className="font-mono text-xs">{formatSystemLabel(connection.system)}</td>
-                  <td>{connection.display_name}</td>
-                  <td className="text-ink-soft">{connection.owner_email ?? '—'}</td>
-                  <td>
-                    <Badge variant={connectionStatusVariant(connection.status)}>
-                      {connection.status.replaceAll('_', ' ')}
-                    </Badge>
-                  </td>
-                  <td className="text-xs text-ink-soft">{formatLastTest(connection)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+        </TabsContent>
+
+        <TabsContent value="verticals">
+          <VerticalCatalogPanel />
+        </TabsContent>
+      </Tabs>
 
       <ConnectionCreateDialog
         open={createOpen}
@@ -191,7 +221,7 @@ function ConnectionsBody() {
       />
 
       <Dialog open={selected != null} onOpenChange={(open) => !open && setSelected(null)}>
-        <DialogContent>
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>
               {selected ? connectionDetailTitle(selected) : 'Connection'}
@@ -204,6 +234,10 @@ function ConnectionsBody() {
               displayName={selected.display_name}
               ownerEmail={selected.owner_email ?? undefined}
               status={selected.status}
+              displayStatus={selected.display_status}
+              gateCode={selected.gate_code}
+              gateAllowed={selected.gate_allowed}
+              metadata={selected.metadata}
               lastTestOk={selected.last_test_ok}
               lastTestDetail={selected.last_test_detail}
               lastTestedAt={selected.last_tested_at}

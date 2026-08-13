@@ -53,6 +53,10 @@ def _invite_row(
 class FakePool:
     def __init__(self, conn: AsyncMock) -> None:
         self._conn = conn
+        txn = MagicMock()
+        txn.__aenter__ = AsyncMock(return_value=None)
+        txn.__aexit__ = AsyncMock(return_value=None)
+        conn.transaction = MagicMock(return_value=txn)
 
     def acquire(self):
         return MagicMock(
@@ -90,6 +94,8 @@ def test_get_connect_info_returns_catalog_fields(
     assert payload["trust_copy"] == get_system("mailchimp").trust_copy
     assert payload["fields"][0]["id"] == "api_key"
     assert "api_key" not in payload["trust_copy"].lower() or "api" in payload["fields"][0]["id"]
+    lookup_sql = conn.fetchrow.await_args.args[0]
+    assert "FOR UPDATE" not in lookup_sql
 
 
 def test_get_connect_info_google_sheets_uses_connection_service_account(
@@ -178,8 +184,19 @@ def test_redeem_success_stores_secret_and_burns_invite(
     assert stored[f"dpra/connections/mailchimp/{CONNECTION_ID}"] == (
         '{"api_key": "super-secret-api-key-value"}'
     )
-    assert conn.execute.await_count == 2
+    # status update + test result + credentials_rotated_at metadata merge
+    assert conn.execute.await_count == 3
+    rotated_calls = [
+        call
+        for call in conn.execute.await_args_list
+        if call.args and "credentials_rotated_at" in str(call.args)
+    ]
+    assert len(rotated_calls) == 1
+    assert "credentials_rotated_at" in rotated_calls[0].args[2]
+    assert "active_mode" in rotated_calls[0].args[2]
     assert conn.fetchval.await_count == 1
+    assert "FOR UPDATE" in conn.fetchrow.await_args.args[0]
+    conn.transaction.assert_called()
 
 
 def test_redeem_consumed_invite_returns_404(
@@ -268,6 +285,67 @@ def test_redeem_failed_test_marks_connection_failed(
     }
     # Failed tests must leave the invite usable for retry.
     assert conn.fetchval.await_count == 0
+    conn.transaction.assert_called()
+
+
+def test_redeem_sequential_second_touch_does_not_rewrite_secret(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """First successful redeem burns the invite; a second POST must not write GSM."""
+    consumed = False
+    secret_writes: list[str] = []
+
+    async def fetchrow(*_args: object, **_kwargs: object):
+        if consumed:
+            return _invite_row(consumed_at=_now())
+        return _invite_row()
+
+    async def fetchval(*_args: object, **_kwargs: object):
+        nonlocal consumed
+        if consumed:
+            return None
+        consumed = True
+        return INVITE_ID
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    conn.execute = AsyncMock()
+    conn.fetchval = AsyncMock(side_effect=fetchval)
+
+    class RecordingWriter:
+        def put_secret(self, secret_id: str, value: str) -> None:
+            secret_writes.append(secret_id)
+            _ = value
+
+    async def fake_test(
+        system: str,
+        credentials: dict[str, str],
+        *,
+        impersonate_service_account: str | None = None,
+    ):
+        _ = (system, credentials, impersonate_service_account)
+        return True, "stub_ok"
+
+    monkeypatch.setattr(connections_redeem, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_redeem, "get_pool", lambda: FakePool(conn))
+    monkeypatch.setattr(connections_redeem, "get_secret_writer", RecordingWriter)
+    monkeypatch.setattr(connections_redeem, "test_connection", fake_test)
+
+    first = client.post(
+        f"/connect/{RAW_TOKEN}",
+        json={"credentials": {"api_key": "first-key"}},
+    )
+    assert first.status_code == 200
+    assert first.json()["test_ok"] is True
+    assert len(secret_writes) == 1
+
+    second = client.post(
+        f"/connect/{RAW_TOKEN}",
+        json={"credentials": {"api_key": "second-key"}},
+    )
+    assert second.status_code == 404
+    assert second.json()["detail"] == "invite not found"
+    assert len(secret_writes) == 1
 
 
 @pytest.mark.skipif(

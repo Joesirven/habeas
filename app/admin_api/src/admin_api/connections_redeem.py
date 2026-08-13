@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from admin_api.drop_pipeline import _require_database
+from habeas_privacy_core.connections.freshness import parse_stored_active_mode
 from habeas_privacy_core.connections.models import sanitize_test_detail
 from habeas_privacy_core.connections.token import hash_token
 from habeas_privacy_core.db.pool import get_pool
@@ -19,6 +20,11 @@ from habeas_privacy_core.db.pool import get_pool
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/connect", tags=["connections-redeem"])
+
+try:
+    from habeas_privacy_core.db import connections as connections_db
+except ImportError:  # pragma: no cover
+    connections_db = None  # type: ignore[assignment]
 
 try:
     from habeas_privacy_core.connections.systems import (
@@ -168,6 +174,8 @@ _INVITE_LOOKUP_SQL = """
      WHERE ci.token_hash = $1
 """
 
+_INVITE_LOOKUP_FOR_UPDATE_SQL = _INVITE_LOOKUP_SQL.rstrip() + "\nFOR UPDATE OF ci\n"
+
 
 def secret_resource_name_for(*, system: str, connection_id: UUID) -> str:
     return f"dpra/connections/{system}/{connection_id}"
@@ -201,8 +209,11 @@ def _ensure_valid_invite(row: dict[str, Any] | None) -> dict[str, Any]:
     return row
 
 
-async def _fetch_invite(conn: Any, token_hash: str) -> dict[str, Any] | None:
-    row = await conn.fetchrow(_INVITE_LOOKUP_SQL, token_hash)
+async def _fetch_invite(
+    conn: Any, token_hash: str, *, for_update: bool = False
+) -> dict[str, Any] | None:
+    sql = _INVITE_LOOKUP_FOR_UPDATE_SQL if for_update else _INVITE_LOOKUP_SQL
+    row = await conn.fetchrow(sql, token_hash)
     return dict(row) if row else None
 
 
@@ -268,91 +279,112 @@ async def redeem_connection(token: str, body: RedeemBody) -> RedeemResponse:
     token_hash = hash_token(token)
     pool = get_pool()
     async with pool.acquire() as conn:
-        row = _ensure_valid_invite(await _fetch_invite(conn, token_hash))
-        system = get_system(row["system"])
-        if not system.invite_allowed or row["system"] == "cassandra":
-            raise HTTPException(
-                status_code=400,
-                detail="this connection cannot be redeemed via invite",
+        async with conn.transaction():
+            # Lock the invite row before any secret write so concurrent first-touch
+            # cannot last-writer-win on GSM. Failed tests still skip consume.
+            row = _ensure_valid_invite(
+                await _fetch_invite(conn, token_hash, for_update=True)
             )
+            system = get_system(row["system"])
+            if not system.invite_allowed or row["system"] == "cassandra":
+                raise HTTPException(
+                    status_code=400,
+                    detail="this connection cannot be redeemed via invite",
+                )
 
-        try:
-            cleaned = validate_credentials(system, body.credentials)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        connection_id = row["connection_id"]
-        secret_name = secret_resource_name_for(
-            system=row["system"],
-            connection_id=connection_id,
-        )
-        writer = get_secret_writer()
-        writer.put_secret(secret_name, json.dumps(cleaned, sort_keys=True))
-
-        await conn.execute(
-            """
-            UPDATE integration_connections
-               SET status = 'invited',
-                   secret_resource_name = $2,
-                   owner_email = $3,
-                   updated_at = NOW()
-             WHERE id = $1
-            """,
-            connection_id,
-            secret_name,
-            row["invite_owner_email"],
-        )
-
-        share_sa = None
-        meta = row.get("metadata") or {}
-        if isinstance(meta, str):
             try:
-                meta = json.loads(meta)
-            except json.JSONDecodeError:
-                meta = {}
-        if isinstance(meta, dict):
-            raw_sa = meta.get("service_account_email")
-            if isinstance(raw_sa, str) and raw_sa.strip():
-                share_sa = raw_sa.strip()
+                cleaned = validate_credentials(system, body.credentials)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        test_ok, detail = await test_connection(
-            row["system"],
-            cleaned,
-            impersonate_service_account=share_sa,
-        )
-        safe_detail = sanitize_test_detail(detail)
-        final_status = "connected" if test_ok else "failed"
-        await conn.execute(
-            """
-            UPDATE integration_connections
-               SET status = $2,
-                   last_tested_at = NOW(),
-                   last_test_ok = $3,
-                   last_test_detail = $4,
-                   updated_at = NOW()
-             WHERE id = $1
-            """,
-            connection_id,
-            final_status,
-            test_ok,
-            safe_detail,
-        )
-
-        if test_ok:
-            consumed = await conn.fetchval(
-                """
-                UPDATE connection_invites
-                   SET consumed_at = NOW()
-                 WHERE id = $1
-                   AND consumed_at IS NULL
-                   AND revoked_at IS NULL
-             RETURNING id
-                """,
-                row["invite_id"],
+            connection_id = row["connection_id"]
+            secret_name = secret_resource_name_for(
+                system=row["system"],
+                connection_id=connection_id,
             )
-            if consumed is None:
-                raise HTTPException(status_code=404, detail="invite not found")
-        # Failed tests leave the invite usable so the owner can correct credentials.
+            writer = get_secret_writer()
+            writer.put_secret(secret_name, json.dumps(cleaned, sort_keys=True))
+
+            await conn.execute(
+                """
+                UPDATE integration_connections
+                   SET status = 'invited',
+                       secret_resource_name = $2,
+                       owner_email = $3,
+                       updated_at = NOW()
+                 WHERE id = $1
+                """,
+                connection_id,
+                secret_name,
+                row["invite_owner_email"],
+            )
+
+            share_sa = None
+            meta = row.get("metadata") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except json.JSONDecodeError:
+                    meta = {}
+            if isinstance(meta, dict):
+                raw_sa = meta.get("service_account_email")
+                if isinstance(raw_sa, str) and raw_sa.strip():
+                    share_sa = raw_sa.strip()
+
+            test_ok, detail = await test_connection(
+                row["system"],
+                cleaned,
+                impersonate_service_account=share_sa,
+            )
+            safe_detail = sanitize_test_detail(detail)
+            final_status = "connected" if test_ok else "failed"
+            await conn.execute(
+                """
+                UPDATE integration_connections
+                   SET status = $2,
+                       last_tested_at = NOW(),
+                       last_test_ok = $3,
+                       last_test_detail = $4,
+                       updated_at = NOW()
+                 WHERE id = $1
+                """,
+                connection_id,
+                final_status,
+                test_ok,
+                safe_detail,
+            )
+
+            if test_ok:
+                rotated_at = datetime.now(timezone.utc).isoformat()
+                rotation_patch: dict[str, Any] = {"credentials_rotated_at": rotated_at}
+                if parse_stored_active_mode(
+                    meta if isinstance(meta, dict) else {}
+                ) is None:
+                    rotation_patch["active_mode"] = "live"
+                await conn.execute(
+                    """
+                    UPDATE integration_connections
+                       SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
+                           updated_at = NOW()
+                     WHERE id = $1
+                    """,
+                    connection_id,
+                    json.dumps(rotation_patch),
+                )
+                consumed = await conn.fetchval(
+                    """
+                    UPDATE connection_invites
+                       SET consumed_at = NOW()
+                     WHERE id = $1
+                       AND consumed_at IS NULL
+                       AND revoked_at IS NULL
+                 RETURNING id
+                    """,
+                    row["invite_id"],
+                )
+                if consumed is None:
+                    raise HTTPException(status_code=404, detail="invite not found")
+            # Failed tests leave the invite usable so the owner can correct credentials.
 
     logger.info(
         "connection invite redeemed connection_id=%s system=%s status=%s test_ok=%s",

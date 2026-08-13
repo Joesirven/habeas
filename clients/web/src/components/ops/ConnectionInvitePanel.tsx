@@ -8,6 +8,9 @@ import {
   connectTestSuccessDescription,
   createConnectionInvite,
   deleteConnection,
+  forceConnectionMode,
+  overrideConnectionCadence,
+  resetConnectionWizard,
   revokeConnectionInvite,
   testConnection,
   type ConnectionInviteCreateResponse,
@@ -16,6 +19,14 @@ import {
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
 import { useAuth } from '@/lib/auth'
+import {
+  connectionDisplayStatusLabel,
+  connectionDisplayStatusVariant,
+  connectionInviteAllowed,
+  isUploadOnlySystem,
+  leverTriageCopy,
+  resolveConnectionChipStatus,
+} from '@/lib/connection-display'
 import { absoluteInviteUrl, firstNameFromEmail } from '@/lib/utils'
 
 const fieldClass =
@@ -27,6 +38,10 @@ export type ConnectionInvitePanelProps = {
   displayName?: string
   ownerEmail?: string
   status?: ConnectionRecord['status']
+  displayStatus?: ConnectionRecord['display_status']
+  gateCode?: string | null
+  gateAllowed?: boolean | null
+  metadata?: Record<string, unknown>
   lastTestOk?: boolean | null
   lastTestDetail?: string | null
   lastTestedAt?: string | null
@@ -75,12 +90,32 @@ function formatLastTestLine(
   return `Last test ${when}`
 }
 
+function readActiveMode(metadata: Record<string, unknown> | undefined): 'live' | 'upload' | null {
+  const raw = metadata?.active_mode
+  if (raw === 'live' || raw === 'upload') return raw
+  return null
+}
+
+function readCadenceOverride(metadata: Record<string, unknown> | undefined): number | null {
+  const raw = metadata?.cadence_days_override
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) return Math.floor(raw)
+  if (typeof raw === 'string' && raw.trim()) {
+    const parsed = Number.parseInt(raw, 10)
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+  }
+  return null
+}
+
 export function ConnectionInvitePanel({
   connectionId,
   system,
   displayName,
   ownerEmail,
   status,
+  displayStatus,
+  gateCode,
+  gateAllowed,
+  metadata,
   lastTestOk,
   lastTestDetail,
   lastTestedAt,
@@ -89,25 +124,44 @@ export function ConnectionInvitePanel({
   onDeleted,
 }: ConnectionInvitePanelProps) {
   const { me } = useAuth()
-  const inviteAllowed = system !== 'cassandra'
-  const canRetest = system != null && system !== 'cassandra'
+  const inviteAllowed = connectionInviteAllowed({ system })
+  const uploadOnly = isUploadOnlySystem(system)
+  const canRetest = system != null && system !== 'cassandra' && !uploadOnly
+  const isCassandra = system === 'cassandra'
   const [invite, setInvite] = useState<ConnectionInviteCreateResponse | null>(null)
   const [minting, setMinting] = useState(false)
   const [revoking, setRevoking] = useState(false)
   const [testing, setTesting] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [forcingMode, setForcingMode] = useState(false)
+  const [savingCadence, setSavingCadence] = useState(false)
+  const [resettingWizard, setResettingWizard] = useState(false)
   const [confirmTestOpen, setConfirmTestOpen] = useState(false)
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false)
+  const [cadenceInput, setCadenceInput] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [localLastTestOk, setLocalLastTestOk] = useState(lastTestOk)
   const [localLastTestDetail, setLocalLastTestDetail] = useState(lastTestDetail)
   const [localLastTestedAt, setLocalLastTestedAt] = useState(lastTestedAt)
+
+  const chipStatus = resolveConnectionChipStatus({
+    status: status ?? 'pending',
+    display_status: displayStatus,
+  })
+  const activeMode = readActiveMode(metadata)
+  const cadenceOverride = readCadenceOverride(metadata)
+  const triageCopy = leverTriageCopy(localLastTestDetail)
 
   useEffect(() => {
     setLocalLastTestOk(lastTestOk)
     setLocalLastTestDetail(lastTestDetail)
     setLocalLastTestedAt(lastTestedAt)
   }, [lastTestOk, lastTestDetail, lastTestedAt])
+
+  useEffect(() => {
+    setCadenceInput(cadenceOverride != null ? String(cadenceOverride) : '')
+  }, [cadenceOverride, connectionId])
 
   async function handleMint() {
     setMinting(true)
@@ -244,6 +298,94 @@ export function ConnectionInvitePanel({
     }
   }
 
+  async function handleForceMode(mode: 'live' | 'upload') {
+    setForcingMode(true)
+    setError(null)
+    try {
+      await forceConnectionMode(connectionId, { mode })
+      actionToast.success({
+        title: mode === 'live' ? 'Forced Live mode' : 'Forced Upload mode',
+        description: 'Active mode updated for this connection.',
+      })
+      onUpdated?.()
+    } catch (err) {
+      const message = actionToast.safeErrorMessage(err, 'Could not force mode')
+      setError(message)
+      actionToast.error({
+        title: 'Could not force mode',
+        description: message,
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            void handleForceMode(mode)
+          },
+        },
+      })
+    } finally {
+      setForcingMode(false)
+    }
+  }
+
+  async function handleSaveCadence(days: number | null) {
+    setSavingCadence(true)
+    setError(null)
+    try {
+      await overrideConnectionCadence(connectionId, { cadence_days_override: days })
+      actionToast.success({
+        title: days == null ? 'Cadence override cleared' : 'Cadence override saved',
+        description:
+          days == null
+            ? 'Owner cadence will apply again.'
+            : `Upload freshness now uses ${days} day${days === 1 ? '' : 's'}.`,
+      })
+      onUpdated?.()
+    } catch (err) {
+      const message = actionToast.safeErrorMessage(err, 'Could not update cadence')
+      setError(message)
+      actionToast.error({
+        title: 'Could not update cadence',
+        description: message,
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            void handleSaveCadence(days)
+          },
+        },
+      })
+    } finally {
+      setSavingCadence(false)
+    }
+  }
+
+  async function handleResetWizard() {
+    setResettingWizard(true)
+    setError(null)
+    try {
+      await resetConnectionWizard(connectionId)
+      setConfirmResetOpen(false)
+      actionToast.success({
+        title: 'Wizard reset',
+        description: 'The owner must complete setup again before matching is eligible.',
+      })
+      onUpdated?.()
+    } catch (err) {
+      const message = actionToast.safeErrorMessage(err, 'Could not reset wizard')
+      setError(message)
+      actionToast.error({
+        title: 'Could not reset wizard',
+        description: message,
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            void handleResetWizard()
+          },
+        },
+      })
+    } finally {
+      setResettingWizard(false)
+    }
+  }
+
   function copyInviteUrl() {
     if (!invite?.invite_url) return
     const url = absoluteInviteUrl(invite.invite_url)
@@ -263,7 +405,122 @@ export function ConnectionInvitePanel({
         )
       : null
 
-  const busy = minting || revoking || testing || deleting
+  const busy =
+    minting || revoking || testing || deleting || forcingMode || savingCadence || resettingWizard
+
+  const statusBlock = (
+    <div className="space-y-2 rounded-md border border-line bg-canvas px-3 py-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={connectionDisplayStatusVariant(chipStatus)}>
+          {connectionDisplayStatusLabel(chipStatus)}
+        </Badge>
+        {gateAllowed === false ? (
+          <Badge variant="fail">Matching gated</Badge>
+        ) : null}
+        {gateCode ? (
+          <span className="font-mono text-[0.65rem] text-mute">{gateCode}</span>
+        ) : null}
+        {localLastTestOk === true ? (
+          <Badge variant="ok">Last test ok</Badge>
+        ) : localLastTestOk === false ? (
+          <Badge variant="fail">Last test failed</Badge>
+        ) : null}
+      </div>
+      <p className="text-xs text-ink-soft">
+        {formatLastTestLine(localLastTestedAt, localLastTestOk, localLastTestDetail)}
+      </p>
+      {triageCopy ? (
+        <p className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-xs text-amber-950">
+          {triageCopy}
+        </p>
+      ) : null}
+    </div>
+  )
+
+  const adminControls = !isCassandra ? (
+    <div className="space-y-3 border-t border-line pt-3">
+      <p className="text-xs font-medium text-ink">Super admin controls</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-ink-soft">
+          Mode{activeMode ? `: ${activeMode}` : ' (unset)'}
+        </span>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={busy || uploadOnly}
+          onClick={() => void handleForceMode('live')}
+        >
+          Force Live
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          onClick={() => void handleForceMode('upload')}
+        >
+          Force Upload
+        </Button>
+      </div>
+      {uploadOnly ? (
+        <p className="text-xs text-mute">Live mode is not available for upload-only systems.</p>
+      ) : null}
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="flex min-w-[8rem] flex-col gap-1">
+          <span className="text-xs text-ink-soft">Cadence override (days)</span>
+          <input
+            type="number"
+            min={1}
+            className={`${fieldClass} text-xs`}
+            value={cadenceInput}
+            onChange={(event) => setCadenceInput(event.target.value)}
+            placeholder="e.g. 30"
+            disabled={busy}
+          />
+        </label>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={busy}
+          onClick={() => {
+            const trimmed = cadenceInput.trim()
+            if (!trimmed) {
+              setError('Enter a positive day count, or Clear override.')
+              return
+            }
+            const days = Number.parseInt(trimmed, 10)
+            if (!Number.isFinite(days) || days < 1) {
+              setError('Cadence override must be a positive number of days.')
+              return
+            }
+            void handleSaveCadence(days)
+          }}
+        >
+          Save override
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={busy || cadenceOverride == null}
+          onClick={() => void handleSaveCadence(null)}
+        >
+          Clear override
+        </Button>
+      </div>
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        disabled={busy}
+        onClick={() => setConfirmResetOpen(true)}
+      >
+        Reset owner wizard
+      </Button>
+    </div>
+  ) : null
 
   const deleteConfirmDialog = (
     <ConfirmActionDialog
@@ -286,9 +543,31 @@ export function ConnectionInvitePanel({
     />
   )
 
-  if (!inviteAllowed) {
+  const resetConfirmDialog = (
+    <ConfirmActionDialog
+      open={confirmResetOpen}
+      onOpenChange={(open) => {
+        if (resettingWizard) return
+        setConfirmResetOpen(open)
+      }}
+      title="Reset owner wizard?"
+      description="The owner must complete setup again before matching is eligible, even if credentials still authenticate."
+      confirmLabel="Reset wizard"
+      cancelLabel="Cancel"
+      tone="destructive"
+      confirming={resettingWizard}
+      confirmingTitle="Resetting…"
+      confirmingDescription="Clearing wizard completion."
+      onConfirm={() => {
+        void handleResetWizard()
+      }}
+    />
+  )
+
+  if (isCassandra) {
     return (
       <div className="space-y-3 text-sm">
+        {statusBlock}
         <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
           Cassandra connectivity is handled by Habeas Infrastructure (INF). No owner invite is
           sent — ops marks the connection{' '}
@@ -327,40 +606,23 @@ export function ConnectionInvitePanel({
 
   return (
     <div className="space-y-3 text-sm">
-      <p className="text-xs text-ink-soft">
-        Owner invite links expire in 72 hours, work once, and send credentials directly to Google
-        Cloud Secret Manager — never through email or chat.
-      </p>
-
-      {(status != null || localLastTestedAt != null) && (
-        <div className="space-y-2 rounded-md border border-line bg-canvas px-3 py-2.5">
-          <div className="flex flex-wrap items-center gap-2">
-            {status ? (
-              <Badge
-                variant={
-                  status === 'connected'
-                    ? 'ok'
-                    : status === 'failed' || status === 'revoked'
-                      ? 'fail'
-                      : status === 'invited'
-                        ? 'run'
-                        : 'wait'
-                }
-              >
-                {status.replaceAll('_', ' ')}
-              </Badge>
-            ) : null}
-            {localLastTestOk === true ? (
-              <Badge variant="ok">Last test ok</Badge>
-            ) : localLastTestOk === false ? (
-              <Badge variant="fail">Last test failed</Badge>
-            ) : null}
-          </div>
-          <p className="text-xs text-ink-soft">
-            {formatLastTestLine(localLastTestedAt, localLastTestOk, localLastTestDetail)}
-          </p>
+      {inviteAllowed ? (
+        <p className="text-xs text-ink-soft">
+          Owner invite links expire in 72 hours, work once, and send credentials directly to Google
+          Cloud Secret Manager — never through email or chat.
+        </p>
+      ) : uploadOnly ? (
+        <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
+          Upload-only system — owners refresh via the vertical connector upload wizard. No Live
+          credential invite is minted from Ops.
+        </div>
+      ) : (
+        <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
+          Owner invite is not available for this system.
         </div>
       )}
+
+      {(status != null || displayStatus != null || localLastTestedAt != null) && statusBlock}
 
       {error ? (
         <p
@@ -371,45 +633,47 @@ export function ConnectionInvitePanel({
         </p>
       ) : null}
 
-      {invite ? (
-        <div className="space-y-2 rounded-md border border-line bg-canvas p-3">
-          <p className="text-xs text-ink-soft">
-            Send this link to{' '}
-            <span className="font-mono text-ink">{invite.owner_email}</span>. It is shown only
-            once.
-          </p>
-          <input
-            type="text"
-            readOnly
-            className={`${fieldClass} font-mono text-xs`}
-            value={shareUrl ?? ''}
-            aria-label="Invite URL"
-          />
-          <div className="flex flex-wrap gap-2">
-            <Button type="button" size="sm" onClick={copyInviteUrl}>
-              Copy link
-            </Button>
-            {mailtoHref ? (
-              <Button type="button" size="sm" variant="outline" asChild>
-                <a href={mailtoHref}>Email owner</a>
+      {inviteAllowed ? (
+        invite ? (
+          <div className="space-y-2 rounded-md border border-line bg-canvas p-3">
+            <p className="text-xs text-ink-soft">
+              Send this link to{' '}
+              <span className="font-mono text-ink">{invite.owner_email}</span>. It is shown only
+              once.
+            </p>
+            <input
+              type="text"
+              readOnly
+              className={`${fieldClass} font-mono text-xs`}
+              value={shareUrl ?? ''}
+              aria-label="Invite URL"
+            />
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" size="sm" onClick={copyInviteUrl}>
+                Copy link
               </Button>
-            ) : null}
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={() => void handleRevoke()}
-            >
-              {revoking ? 'Revoking…' : 'Revoke invite'}
-            </Button>
+              {mailtoHref ? (
+                <Button type="button" size="sm" variant="outline" asChild>
+                  <a href={mailtoHref}>Email owner</a>
+                </Button>
+              ) : null}
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={busy}
+                onClick={() => void handleRevoke()}
+              >
+                {revoking ? 'Revoking…' : 'Revoke invite'}
+              </Button>
+            </div>
           </div>
-        </div>
-      ) : (
-        <Button type="button" size="sm" disabled={busy} onClick={() => void handleMint()}>
-          {minting ? 'Creating link…' : 'Create invite link'}
-        </Button>
-      )}
+        ) : (
+          <Button type="button" size="sm" disabled={busy} onClick={() => void handleMint()}>
+            {minting ? 'Creating link…' : 'Create invite link'}
+          </Button>
+        )
+      ) : null}
 
       {canRetest ? (
         <div className="flex flex-wrap gap-2 border-t border-line pt-3">
@@ -424,6 +688,8 @@ export function ConnectionInvitePanel({
           </Button>
         </div>
       ) : null}
+
+      {adminControls}
 
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
         <Button
@@ -458,6 +724,7 @@ export function ConnectionInvitePanel({
         }}
       />
       {deleteConfirmDialog}
+      {resetConfirmDialog}
     </div>
   )
 }

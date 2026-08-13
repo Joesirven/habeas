@@ -24,6 +24,8 @@ def test_auth_me_without_iap_header(monkeypatch) -> None:
         "email": "unknown",
         "role": ROLE_SUPER_ADMIN,
         "real_role": ROLE_SUPER_ADMIN,
+        "verticals": [],
+        "connector_reminders": [],
     }
 
 
@@ -42,4 +44,6 @@ def test_auth_me_with_iap_header(monkeypatch) -> None:
         "email": "dev-owner-1@example.com",
         "role": ROLE_SUPER_ADMIN,
         "real_role": ROLE_SUPER_ADMIN,
+        "verticals": [],
+        "connector_reminders": [],
     }

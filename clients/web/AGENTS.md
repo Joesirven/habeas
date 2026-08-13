@@ -29,6 +29,10 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
   only. Do not store Slack/Jira outreach copy in repo. Plan:
   `docs/plans/2026-07-30-003-feat-connections-onboarding-plan.md`. KB: SirvenOS
   `01-ARCHITECTURE/External-Integrations.md` § Connections onboarding.
+- Vertical connectors (in progress): owners use assigned-vertical wizard surfaces; Ops shows
+  gated statuses (**Needs refresh** / **Action required**) when auth/upload succeeds but
+  matching is blocked for staleness/rotation. Soft `connector_reminders` on `/me` never
+  block login. Plan: `docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md`.
 - **Planned consolidation** (requirements-only): command-center Home + hybrid Inbox — `docs/plans/2026-07-30-005-feat-ops-command-center-ia-plan.md` (not shipped yet).
 
 ## Ops density (Prefect / Dagster feel)

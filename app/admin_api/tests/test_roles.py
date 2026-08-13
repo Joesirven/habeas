@@ -27,11 +27,13 @@ def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(roles.settings, "require_iap_identity", False)
 
 
-def _me_payload(email: str, role: str, *, real_role: str | None = None) -> dict[str, str]:
+def _me_payload(email: str, role: str, *, real_role: str | None = None) -> dict:
     return {
         "email": email,
         "role": role,
         "real_role": real_role if real_role is not None else role,
+        "verticals": [],
+        "connector_reminders": [],
     }
 
 

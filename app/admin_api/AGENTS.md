@@ -30,6 +30,11 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
   `dpra-sheets-hr@` in `example-gcp-project` — see SirvenOS `External-Integrations` § Connections.
   Plan: `docs/plans/2026-07-30-003-feat-connections-onboarding-plan.md`.
   Connecting a system does **not** by itself enable matching/hash workers for that vertical.
+- Vertical-scoped connectors (plan `2026-08-11-001`): owners operate inside assigned
+  verticals (`/owner/...`); soft reminders on `GET /me` + `GET /owner/connector-reminders`
+  (allowlisted codes only — no SMTP). Matching is **hard-gated** when Upload is stale or
+  Live rotation is overdue (`habeas_privacy_core.connections.freshness`); gated UX shows
+  Needs refresh / Action required, not Connected. Connecting ≠ matching.
 - DROP ops: `GET /ops/drop/pipeline`, spine proxies, hash-index refresh enqueue /
   enqueue-all (USPS 50+DC) / process
 - Worker fleet discovery (shipped): `GET /ops/workers/fleet` — pull-based union of

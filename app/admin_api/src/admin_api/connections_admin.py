@@ -6,11 +6,11 @@ import importlib
 import inspect
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from pydantic_settings import SettingsConfigDict
 
 from admin_api.drop_pipeline import _require_database
@@ -18,7 +18,13 @@ from admin_api.roles import RolePrincipal, require_roles, settings as role_setti
 from habeas_privacy_core.auth import ROLE_SUPER_ADMIN
 from habeas_privacy_core.auth.roles import parse_email_allowlist
 from habeas_privacy_core.config import CoreSettings
+from habeas_privacy_core.connections.catalog import UPLOAD_ONLY_SYSTEMS
+from habeas_privacy_core.connections.freshness import (
+    gate_fields_from_parts,
+    parse_stored_active_mode,
+)
 from habeas_privacy_core.connections.models import sanitize_test_detail
+from habeas_privacy_core.connections.systems import SYSTEM_IDS
 from habeas_privacy_core.connections.token import (
     INVITE_TTL_HOURS,
     generate_invite_token,
@@ -32,9 +38,7 @@ except ImportError:
     connections_db = None  # type: ignore[assignment]
 
 INVITE_TTL = timedelta(hours=INVITE_TTL_HOURS)
-VALID_SYSTEMS = frozenset(
-    {"mailchimp", "paylocity", "lever", "auth0", "google_sheets", "cassandra"}
-)
+VALID_SYSTEMS = SYSTEM_IDS
 _CASSANDRA_SYSTEM = "cassandra"
 
 
@@ -204,6 +208,9 @@ class ConnectionResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     metadata: dict[str, Any] = Field(default_factory=dict)
+    display_status: str | None = None
+    gate_code: str | None = None
+    gate_allowed: bool | None = None
 
 
 class ConnectionListResponse(BaseModel):
@@ -262,6 +269,22 @@ class OwnerCandidatesResponse(BaseModel):
     owners: list[OwnerCandidate]
 
 
+class ForceModeBody(BaseModel):
+    mode: Literal["live", "upload"]
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class CadenceOverrideBody(BaseModel):
+    cadence_days_override: int | None = None
+
+    @field_validator("cadence_days_override")
+    @classmethod
+    def _positive_override(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("cadence_days_override must be a positive integer or null")
+        return value
+
+
 def _owner_allowlist_candidates() -> list[OwnerCandidate]:
     """Union of role allowlists (app identity after IAP) — first-match role label."""
     buckets: list[tuple[str, frozenset[str]]] = [
@@ -297,41 +320,46 @@ def _require_allowlisted_owner(owner_email: str | None) -> str | None:
     return normalized
 
 
-def _connection_from_row(row: Any) -> ConnectionResponse:
+def _connection_from_row(
+    row: Any,
+    *,
+    now: datetime | None = None,
+) -> ConnectionResponse:
     if hasattr(row, "model_dump"):
         data = row.model_dump()
-        return ConnectionResponse(
-            id=UUID(str(data["id"])),
-            system=str(data["system"]),
-            display_name=str(data["display_name"]),
-            status=str(data["status"]),
-            owner_email=data.get("owner_email"),
-            secret_resource_name=data.get("secret_resource_name"),
-            last_tested_at=data.get("last_tested_at"),
-            last_test_ok=data.get("last_test_ok"),
-            last_test_detail=data.get("last_test_detail"),
-            created_by=str(data["created_by"]),
-            created_at=data["created_at"],
-            updated_at=data["updated_at"],
-            metadata=dict(data.get("metadata") or {}),
-        )
-    metadata = row["metadata"]
+    else:
+        data = dict(row)
+    metadata = data.get("metadata")
     if isinstance(metadata, str):
         metadata = json.loads(metadata)
+    metadata = dict(metadata or {})
+    system = str(data["system"])
+    status = str(data["status"])
+    last_test_ok = data.get("last_test_ok")
+    display_status, gate_code, gate_allowed = gate_fields_from_parts(
+        system=system,
+        status=status,
+        last_test_ok=last_test_ok,
+        metadata=metadata,
+        now=now,
+    )
     return ConnectionResponse(
-        id=row["id"],
-        system=str(row["system"]),
-        display_name=str(row["display_name"]),
-        status=str(row["status"]),
-        owner_email=row["owner_email"],
-        secret_resource_name=row["secret_resource_name"],
-        last_tested_at=row["last_tested_at"],
-        last_test_ok=row["last_test_ok"],
-        last_test_detail=row["last_test_detail"],
-        created_by=str(row["created_by"]),
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
-        metadata=dict(metadata or {}),
+        id=UUID(str(data["id"])),
+        system=system,
+        display_name=str(data["display_name"]),
+        status=status,
+        owner_email=data.get("owner_email"),
+        secret_resource_name=data.get("secret_resource_name"),
+        last_tested_at=data.get("last_tested_at"),
+        last_test_ok=last_test_ok,
+        last_test_detail=data.get("last_test_detail"),
+        created_by=str(data["created_by"]),
+        created_at=data["created_at"],
+        updated_at=data["updated_at"],
+        metadata=metadata,
+        display_status=display_status,
+        gate_code=gate_code,
+        gate_allowed=gate_allowed,
     )
 
 
@@ -502,6 +530,99 @@ def _validate_system(system: str) -> str:
     return normalized
 
 
+def _validate_active_mode(mode: str, system: str) -> str:
+    normalized = mode.strip().lower()
+    if normalized not in {"live", "upload"}:
+        raise HTTPException(status_code=422, detail="invalid mode")
+    if normalized == "live" and (
+        system in UPLOAD_ONLY_SYSTEMS or system == _CASSANDRA_SYSTEM
+    ):
+        raise HTTPException(status_code=422, detail="live mode not allowed for this system")
+    return normalized
+
+
+async def _merge_connection_metadata(
+    conn,
+    connection_id: UUID,
+    patch: dict[str, Any],
+) -> ConnectionResponse | None:
+    if connections_db is not None:
+        row = await connections_db.merge_connection_metadata(conn, connection_id, patch)
+        return _connection_from_row(row) if row else None
+    row = await conn.fetchrow(
+        """
+        UPDATE integration_connections
+           SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
+               updated_at = NOW()
+         WHERE id = $1
+        RETURNING id, system, display_name, status, owner_email, secret_resource_name,
+                  last_tested_at, last_test_ok, last_test_detail,
+                  created_by, created_at, updated_at, metadata
+        """,
+        connection_id,
+        json.dumps(patch),
+    )
+    return _connection_from_row(row) if row else None
+
+
+async def _replace_connection_metadata(
+    conn,
+    connection_id: UUID,
+    metadata: dict[str, Any],
+) -> ConnectionResponse | None:
+    if connections_db is not None:
+        row = await connections_db.update_connection_metadata(conn, connection_id, metadata)
+        return _connection_from_row(row) if row else None
+    row = await conn.fetchrow(
+        """
+        UPDATE integration_connections
+           SET metadata = $2::jsonb,
+               updated_at = NOW()
+         WHERE id = $1
+        RETURNING id, system, display_name, status, owner_email, secret_resource_name,
+                  last_tested_at, last_test_ok, last_test_detail,
+                  created_by, created_at, updated_at, metadata
+        """,
+        connection_id,
+        json.dumps(metadata),
+    )
+    return _connection_from_row(row) if row else None
+
+
+async def _record_mode_event(
+    conn,
+    *,
+    connection_id: UUID,
+    from_mode: str | None,
+    to_mode: str,
+    actor: str,
+    reason: str | None,
+) -> None:
+    if connections_db is not None:
+        await connections_db.insert_connection_mode_event(
+            conn,
+            connection_id=connection_id,
+            from_mode=from_mode,
+            to_mode=to_mode,
+            actor=actor,
+            reason=reason,
+        )
+        return
+    await conn.execute(
+        """
+        INSERT INTO connection_mode_events (
+            connection_id, from_mode, to_mode, actor, reason
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        """,
+        connection_id,
+        from_mode,
+        to_mode,
+        actor,
+        reason,
+    )
+
+
 async def _fetch_connection(conn, connection_id: UUID) -> ConnectionResponse:
     if connections_db is not None:
         row = await connections_db.get_connection(conn, connection_id)
@@ -581,6 +702,7 @@ async def _run_connection_test(
 async def list_connections(_principal: SuperAdminPrincipal):
     _require_database()
     pool = get_pool()
+    now = datetime.now(timezone.utc)
     async with pool.acquire() as conn:
         if connections_db is not None:
             rows = await connections_db.list_connections(conn)
@@ -594,7 +716,9 @@ async def list_connections(_principal: SuperAdminPrincipal):
                  ORDER BY created_at DESC
                 """
             )
-    return ConnectionListResponse(connections=[_connection_from_row(r) for r in rows])
+    return ConnectionListResponse(
+        connections=[_connection_from_row(r, now=now) for r in rows]
+    )
 
 
 @router.post("", response_model=ConnectionResponse, status_code=201)
@@ -733,6 +857,11 @@ async def create_invite(
         connection = await _fetch_connection(conn, connection_id)
         if connection.system == _CASSANDRA_SYSTEM or connection.status == "infra_pending":
             raise HTTPException(status_code=400, detail="invites not allowed for cassandra")
+        if connection.system in UPLOAD_ONLY_SYSTEMS:
+            raise HTTPException(
+                status_code=422,
+                detail="invites not allowed for upload-only systems",
+            )
         owner_email = _require_allowlisted_owner(
             body.owner_email.strip().lower()
             if body.owner_email
@@ -893,6 +1022,11 @@ async def test_connection(connection_id: UUID, _principal: SuperAdminPrincipal):
                 detail=safe_detail,
                 tested_at=tested_at,
             )
+            await connections_db.update_connection_status(
+                conn,
+                connection_id,
+                status="connected" if ok else "failed",
+            )
         else:
             await conn.execute(
                 """
@@ -910,3 +1044,85 @@ async def test_connection(connection_id: UUID, _principal: SuperAdminPrincipal):
                 safe_detail,
             )
     return ConnectionTestResponse(ok=ok, detail=safe_detail)
+
+
+@router.post("/{connection_id}/mode", response_model=ConnectionResponse)
+async def force_connection_mode(
+    connection_id: UUID,
+    body: ForceModeBody,
+    principal: SuperAdminPrincipal,
+):
+    """Super_admin forces Live or Upload active mode; records mode history."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        connection = await _fetch_connection(conn, connection_id)
+        to_mode = _validate_active_mode(body.mode, connection.system)
+        from_mode = parse_stored_active_mode(connection.metadata)
+        if from_mode == to_mode:
+            return connection
+        updated = await _merge_connection_metadata(
+            conn,
+            connection_id,
+            {"active_mode": to_mode},
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="connection not found")
+        await _record_mode_event(
+            conn,
+            connection_id=connection_id,
+            from_mode=from_mode,
+            to_mode=to_mode,
+            actor=principal.email,
+            reason=body.reason,
+        )
+    return updated
+
+
+@router.post("/{connection_id}/cadence", response_model=ConnectionResponse)
+async def override_connection_cadence(
+    connection_id: UUID,
+    body: CadenceOverrideBody,
+    _principal: SuperAdminPrincipal,
+):
+    """Super_admin sets or clears Upload cadence override (days)."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        connection = await _fetch_connection(conn, connection_id)
+        if body.cadence_days_override is None:
+            metadata = dict(connection.metadata)
+            metadata.pop("cadence_days_override", None)
+            updated = await _replace_connection_metadata(conn, connection_id, metadata)
+        else:
+            updated = await _merge_connection_metadata(
+                conn,
+                connection_id,
+                {"cadence_days_override": body.cadence_days_override},
+            )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="connection not found")
+    return updated
+
+
+@router.post("/{connection_id}/wizard/reset", response_model=ConnectionResponse)
+async def reset_connection_wizard(
+    connection_id: UUID,
+    _principal: SuperAdminPrincipal,
+):
+    """Super_admin clears wizard completion so owner must redo setup."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        connection = await _fetch_connection(conn, connection_id)
+        metadata = dict(connection.metadata)
+        for key in (
+            "wizard_completed_at",
+            "wizard_step",
+            "wizard_started_at",
+        ):
+            metadata.pop(key, None)
+        updated = await _replace_connection_metadata(conn, connection_id, metadata)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="connection not found")
+    return updated

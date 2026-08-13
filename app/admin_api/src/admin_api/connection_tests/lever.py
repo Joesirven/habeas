@@ -22,8 +22,12 @@ async def test_lever(credentials: dict[str, str]) -> tuple[bool, str]:
         return False, "unreachable"
     if status == 200:
         return True, "lever_ok"
-    if status in (401, 403):
-        return False, "auth_failed"
+    # Distinct triage codes (AE11 / KD15): 401 = bad/revoked key;
+    # 403 = key accepted but missing Users read/list (often Postings-only).
+    if status == 401:
+        return False, "lever_unauthorized"
+    if status == 403:
+        return False, "lever_forbidden"
     if 400 <= status < 500:
         return False, "invalid_credentials"
     return False, "unreachable"

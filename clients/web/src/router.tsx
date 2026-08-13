@@ -14,6 +14,10 @@ import { WorkerQueuePage } from '@/routes/ops/workers/WorkerQueuePage'
 import { WorkersSettingsPage } from '@/routes/ops/workers/settings'
 import { ConnectionsPage } from '@/routes/ops/connections'
 import { ConnectTokenPage } from '@/routes/connect.$token'
+import {
+  OwnerConnectorsPage,
+  type OwnerConnectorsSearch,
+} from '@/routes/owner/connectors'
 import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
 import { RequestDetailPage } from '@/routes/requests/$requestId'
 import { NeedsAttentionPage } from '@/routes/requests/needs-attention'
@@ -690,6 +694,27 @@ const connectTokenRoute = createRoute({
   component: ConnectTokenPage,
 })
 
+function parseOwnerConnectorsSearch(
+  search: Record<string, unknown>,
+): OwnerConnectorsSearch {
+  const parsed: OwnerConnectorsSearch = {}
+  if (typeof search.vertical === 'string' && search.vertical.trim()) {
+    parsed.vertical = search.vertical.trim()
+  }
+  return parsed
+}
+
+const ownerConnectorsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/owner/connectors',
+  validateSearch: (search: Record<string, unknown>) =>
+    parseOwnerConnectorsSearch(search),
+  component: function OwnerConnectorsRoute() {
+    const search = ownerConnectorsRoute.useSearch()
+    return <OwnerConnectorsPage search={search} />
+  },
+})
+
 const opsWorkersTrendsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/ops/workers/trends',
@@ -822,6 +847,7 @@ const routeTree = rootRoute.addChildren([
   opsWorkersEscalationsRoute,
   opsConnectionsRoute,
   connectTokenRoute,
+  ownerConnectorsRoute,
   opsWorkersTrendsRoute,
   opsWorkerQueueRoute,
   opsWorkerDetailRoute,

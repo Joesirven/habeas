@@ -13,12 +13,25 @@ export const SIMULATE_ROLE_VALUES: UserRole[] = [
   'data_owner',
 ]
 
+export type ConnectorReminderSeverity = 'approaching' | 'overdue'
+
+export type ConnectorReminder = {
+  code: string
+  system: string
+  vertical_id: string
+  severity: ConnectorReminderSeverity
+}
+
 export type MePayload = {
   email: string
   /** Effective role (after X-Dev-Simulate-Role when allowed). */
   role: UserRole
   /** Allowlist role before simulate override. */
   real_role: UserRole
+  /** Assigned KD20 vertical ids (empty when none). */
+  verticals?: string[]
+  /** Soft connector reminders — never block login (KTD13). */
+  connector_reminders?: ConnectorReminder[]
 }
 
 export function getStoredSimulateRole(): UserRole | null {
@@ -67,7 +80,15 @@ export async function fetchAdminApi<T>(path: string, init?: RequestInit): Promis
     throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
   }
 
-  return response.json() as Promise<T>
+  // 204 No Content (e.g. DELETE assignment) — no JSON body.
+  if (response.status === 204) {
+    return undefined as T
+  }
+  const text = await response.text()
+  if (!text) {
+    return undefined as T
+  }
+  return JSON.parse(text) as T
 }
 
 export type HealthPayload = {
@@ -2132,7 +2153,16 @@ export type IntegrationSystemId =
   | 'lever'
   | 'auth0'
   | 'google_sheets'
+  | 'bizdev_contacts'
+  | 'hr_alumni'
   | 'cassandra'
+
+export type ConnectionDisplayStatus =
+  | 'needs_setup'
+  | 'action_required'
+  | 'needs_refresh'
+  | 'connected'
+  | 'view_only'
 
 export type ConnectionRecord = {
   id: string
@@ -2154,6 +2184,10 @@ export type ConnectionRecord = {
   created_at: string
   updated_at: string
   metadata: Record<string, unknown>
+  /** Gated matching UX status (KD18) — prefer over raw `status` for chips. */
+  display_status?: ConnectionDisplayStatus | string | null
+  gate_code?: string | null
+  gate_allowed?: boolean | null
 }
 
 export type ConnectionInviteCreateResponse = {
@@ -2210,7 +2244,10 @@ export type ConnectTestDetailCode =
   | 'lever_ok'
   | 'auth0_ok'
   | 'google_sheets_ok'
+  | 'upload_ok'
   | 'auth_failed'
+  | 'lever_unauthorized'
+  | 'lever_forbidden'
   | 'unreachable'
   | 'invalid_credentials'
   | 'invalid_config'
@@ -2219,6 +2256,9 @@ export type ConnectTestDetailCode =
   | 'infra_only'
   | 'unknown_error'
   | 'failed'
+  | 'upload_missing_headers'
+  | 'upload_no_usable_rows'
+  | 'upload_invalid_delimiter'
 
 const CONNECT_SYSTEM_LABELS: Record<IntegrationSystemId, string> = {
   mailchimp: 'Mailchimp',
@@ -2226,6 +2266,8 @@ const CONNECT_SYSTEM_LABELS: Record<IntegrationSystemId, string> = {
   lever: 'Lever',
   auth0: 'Auth0',
   google_sheets: 'Google Sheets',
+  bizdev_contacts: 'BizDev Contacts',
+  hr_alumni: 'HR Alumni List',
   cassandra: 'Cassandra',
 }
 
@@ -2235,12 +2277,17 @@ const CONNECT_TEST_SUCCESS_DESCRIPTIONS: Record<string, string> = {
   lever_ok: 'Lever API credentials were verified successfully.',
   auth0_ok: 'Auth0 credentials were verified successfully.',
   google_sheets_ok: 'Google Sheets connection was verified successfully.',
+  upload_ok: 'Upload file was validated successfully.',
   stub_ok: 'Connection test completed successfully.',
   ok: 'Connection test completed successfully.',
 }
 
 const CONNECT_TEST_FAILURE_MESSAGES: Record<string, string> = {
   auth_failed: 'Authentication failed. Check the credentials and try again.',
+  lever_unauthorized:
+    'Lever rejected the API key (unauthorized). Confirm you pasted the Lever API key — not your password and not the Postings API key — then try again.',
+  lever_forbidden:
+    'Lever accepted the key but denied Users access (forbidden). Enable Users read/list on the Lever API key (not Postings-only) and regenerate if permissions cannot be changed.',
   unreachable: 'Could not reach the service. Try again in a few minutes.',
   invalid_credentials: 'The credentials could not be verified. Check the values and try again.',
   invalid_config: 'The connection settings look incorrect. Check the fields and try again.',
@@ -2249,6 +2296,11 @@ const CONNECT_TEST_FAILURE_MESSAGES: Record<string, string> = {
   infra_only: 'This system is provisioned by Habeas Infrastructure, not through this form.',
   unknown_error: 'Connection test failed. Check the values and try again.',
   failed: 'Connection test failed. Check the values and try again.',
+  upload_missing_headers:
+    'Upload is missing required template headers. Download the Habeas CSV template and match the column names exactly.',
+  upload_no_usable_rows:
+    'Upload has no usable required identifiers. Check the multi-value delimiter and required columns, then try again.',
+  upload_invalid_delimiter: 'The multi-value delimiter is not supported. Choose None, ;, |, or ,.',
 }
 
 /** Human label for loading/success copy — prefers system id, falls back to display name. */
@@ -2343,6 +2395,196 @@ export function listConnectionOwnerCandidates() {
   return fetchAdminApi<{ owners: ConnectionOwnerCandidate[] }>(
     '/ops/connections/owner-candidates',
   )
+}
+
+export function forceConnectionMode(
+  connectionId: string,
+  body: { mode: 'live' | 'upload'; reason?: string | null },
+) {
+  return fetchAdminApi<ConnectionRecord>(
+    `/ops/connections/${encodeURIComponent(connectionId)}/mode`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+}
+
+export function overrideConnectionCadence(
+  connectionId: string,
+  body: { cadence_days_override: number | null },
+) {
+  return fetchAdminApi<ConnectionRecord>(
+    `/ops/connections/${encodeURIComponent(connectionId)}/cadence`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+}
+
+export function resetConnectionWizard(connectionId: string) {
+  return fetchAdminApi<ConnectionRecord>(
+    `/ops/connections/${encodeURIComponent(connectionId)}/wizard/reset`,
+    { method: 'POST', body: JSON.stringify({}) },
+  )
+}
+
+export type VerticalCatalogEntry = {
+  id: string
+  display_label: string
+  view_only: boolean
+  sort_order: number
+}
+
+export type VerticalAssignment = {
+  email: string
+  vertical_id: string
+  active: boolean
+  added_at?: string | null
+  added_by?: string | null
+}
+
+export type VerticalBinding = {
+  vertical_id: string
+  system: string
+  allowed_approaches: string[]
+  active?: boolean
+}
+
+export function listVerticalCatalog() {
+  return fetchAdminApi<VerticalCatalogEntry[]>('/ops/verticals')
+}
+
+export function listVerticalAssignments() {
+  return fetchAdminApi<VerticalAssignment[]>('/ops/verticals/assignments')
+}
+
+export function addVerticalAssignment(body: { email: string; vertical_id: string }) {
+  return fetchAdminApi<VerticalAssignment>('/ops/verticals/assignments', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function removeVerticalAssignment(verticalId: string, email: string) {
+  return fetchAdminApi<void>(
+    `/ops/verticals/assignments/${encodeURIComponent(verticalId)}/${encodeURIComponent(email)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export function listVerticalBindings(verticalId: string) {
+  return fetchAdminApi<VerticalBinding[]>(
+    `/ops/verticals/${encodeURIComponent(verticalId)}/bindings`,
+  )
+}
+
+export type OwnerConnectorSystem = {
+  system: string
+  display_name: string
+  allowed_approaches: string[]
+  connection_id: string | null
+  status: string | null
+  metadata: Record<string, unknown>
+  display_status: string
+  gate_code: string
+  gate_allowed: boolean
+}
+
+export type OwnerConnectorList = {
+  vertical_id: string
+  display_label: string
+  view_only: boolean
+  connectors: OwnerConnectorSystem[]
+}
+
+export type OwnerUploadResult = {
+  ok: boolean
+  detail: string
+  connection_id: string
+  upload_row_count?: number | null
+  gcs_uri?: string | null
+}
+
+export function listOwnerConnectors(verticalId: string) {
+  return fetchAdminApi<OwnerConnectorList>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/connectors`,
+  )
+}
+
+export function setOwnerConnectorMode(
+  verticalId: string,
+  system: string,
+  body: { mode: 'live' | 'upload' },
+) {
+  return fetchAdminApi<OwnerConnectorSystem>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/mode`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+}
+
+export function setOwnerConnectorCadence(
+  verticalId: string,
+  system: string,
+  body: { cadence_days: number },
+) {
+  return fetchAdminApi<OwnerConnectorSystem>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/cadence`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+}
+
+export function completeOwnerConnectorWizard(verticalId: string, system: string) {
+  return fetchAdminApi<OwnerConnectorSystem>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/wizard/complete`,
+    { method: 'POST', body: JSON.stringify({}) },
+  )
+}
+
+export async function uploadOwnerConnectorCsv(
+  verticalId: string,
+  system: string,
+  file: File,
+  multiPiiDelimiter: string | null,
+): Promise<OwnerUploadResult> {
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  const simulateRole = getStoredSimulateRole()
+  if (simulateRole) {
+    headers['X-Dev-Simulate-Role'] = simulateRole
+  }
+  const form = new FormData()
+  form.append('file', file)
+  if (multiPiiDelimiter != null) {
+    form.append('multi_pii_delimiter', multiPiiDelimiter)
+  }
+  const response = await fetch(
+    `${API_BASE}/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/upload`,
+    { method: 'POST', headers, body: form },
+  )
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
+  }
+  return (await response.json()) as OwnerUploadResult
+}
+
+export async function downloadOwnerUploadTemplate(
+  verticalId: string,
+  system: string,
+): Promise<Blob> {
+  const headers: Record<string, string> = {}
+  const simulateRole = getStoredSimulateRole()
+  if (simulateRole) {
+    headers['X-Dev-Simulate-Role'] = simulateRole
+  }
+  const response = await fetch(
+    `${API_BASE}/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/upload-template`,
+    { headers },
+  )
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
+  }
+  return response.blob()
+}
+
+export function listOwnerConnectorReminders() {
+  return fetchAdminApi<{ reminders: ConnectorReminder[] }>('/owner/connector-reminders')
 }
 
 export function getConnectPreview(token: string) {
