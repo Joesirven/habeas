@@ -14,8 +14,13 @@ import {
   matchingGateFromAttempts,
   matchingGateFromConnection,
   matchingGateFromReminder,
+  ownerConnectorActionRequiredCount,
+  overlayCalloutShowsOwnerCta,
+  ownerConnectorsSearch,
   resolveMatchingConnectorGate,
+  resolveOverlayConnectorCallout,
   resolveConnectionChipStatus,
+  OVERLAY_LIVE_DOWN_COPY,
 } from './connection-display'
 
 describe('connection-display (AE8 / KD18)', () => {
@@ -250,5 +255,209 @@ describe('connection-display (AE8 / KD18)', () => {
     })
     expect(copy.title).toContain('Needs refresh')
     expect(copy.description).toContain('stale')
+  })
+})
+
+describe('ownerConnectorActionRequiredCount (R62)', () => {
+  test('returns null when /me is missing — no fake number', () => {
+    expect(ownerConnectorActionRequiredCount(null)).toBeNull()
+    expect(ownerConnectorActionRequiredCount(undefined)).toBeNull()
+  })
+
+  test('counts overdue and hard-gate reminders plus wizard flag', () => {
+    expect(
+      ownerConnectorActionRequiredCount({
+        connector_reminders: [
+          {
+            code: 'rotation_overdue',
+            system: 'mailchimp',
+            vertical_id: 'communications',
+            severity: 'overdue',
+          },
+          {
+            code: 'upload_approaching',
+            system: 'paylocity',
+            vertical_id: 'people_hr',
+            severity: 'approaching',
+          },
+        ],
+        needs_connector_setup: true,
+      }),
+    ).toBe(2)
+  })
+
+  test('does not double-count wizard_incomplete when setup is also flagged', () => {
+    expect(
+      ownerConnectorActionRequiredCount({
+        connector_reminders: [
+          {
+            code: 'wizard_incomplete',
+            system: 'mailchimp',
+            vertical_id: 'communications',
+            severity: 'overdue',
+          },
+        ],
+        needs_connector_setup: true,
+      }),
+    ).toBe(1)
+  })
+})
+
+describe('overlay connector callout (U19 / AE32)', () => {
+  test('data_owner stale upload → Needs refresh + Connectors CTA', () => {
+    const callout = resolveOverlayConnectorCallout({
+      role: 'data_owner',
+      assignedVerticals: ['communications'],
+      reminders: [
+        {
+          code: 'upload_stale',
+          system: 'mailchimp',
+          vertical_id: 'communications',
+          severity: 'overdue',
+        },
+      ],
+    })
+    expect(callout?.title).toBe('Needs refresh')
+    expect(callout?.title).not.toBe('Connected')
+    expect(callout?.showCta).toBe(true)
+    expect(callout?.verticalId).toBe('communications')
+    expect(callout?.description).toBe(OVERLAY_LIVE_DOWN_COPY)
+    expect(callout?.description.toLowerCase()).not.toContain('invite')
+    expect(ownerConnectorsSearch(callout?.verticalId)).toEqual({
+      vertical: 'communications',
+    })
+  })
+
+  test('data_owner Live rotation overdue → Action required + CTA', () => {
+    const callout = resolveOverlayConnectorCallout({
+      role: 'data_owner',
+      assignedVerticals: ['people_hr'],
+      reminders: [
+        {
+          code: 'rotation_overdue',
+          system: 'lever',
+          vertical_id: 'people_hr',
+          severity: 'overdue',
+        },
+      ],
+    })
+    expect(callout?.title).toBe('Action required')
+    expect(callout?.showCta).toBe(true)
+    expect(callout?.verticalId).toBe('people_hr')
+  })
+
+  test('Data vertical is view-only — no upload CTA', () => {
+    const callout = resolveOverlayConnectorCallout({
+      role: 'data_owner',
+      assignedVerticals: ['data'],
+      reminders: [
+        {
+          code: 'wizard_incomplete',
+          system: 'cassandra',
+          vertical_id: 'data',
+          severity: 'overdue',
+        },
+      ],
+    })
+    expect(callout?.title).toBe('Action required')
+    expect(callout?.showCta).toBe(false)
+    expect(overlayCalloutShowsOwnerCta('data_owner', 'data')).toBe(false)
+  })
+
+  test('legal/admin see informational callout without Connectors CTA', () => {
+    const callout = resolveOverlayConnectorCallout({
+      role: 'legal',
+      attempts: [
+        {
+          id: 1,
+          attempt_number: 1,
+          status: 'submit_error',
+          attempted_at: null,
+          completed_at: null,
+          error_code: 'gate_blocked',
+          audit_payload: {
+            event: 'gate_blocked',
+            display_status: 'action_required',
+            system: 'mailchimp',
+            vertical_id: 'communications',
+          },
+        },
+      ],
+    })
+    expect(callout?.title).toBe('Action required')
+    expect(callout?.showCta).toBe(false)
+    expect(overlayCalloutShowsOwnerCta('legal', 'communications')).toBe(false)
+    expect(overlayCalloutShowsOwnerCta('admin', 'communications')).toBe(false)
+  })
+
+  test('super_admin simulating data_owner gets CTA', () => {
+    expect(overlayCalloutShowsOwnerCta('data_owner', 'communications')).toBe(true)
+  })
+
+  test('Live test / not permissioned error codes → Action required', () => {
+    const callout = resolveOverlayConnectorCallout({
+      role: 'data_owner',
+      assignedVerticals: ['people_hr'],
+      attempts: [
+        {
+          id: 1,
+          attempt_number: 1,
+          status: 'submit_error',
+          attempted_at: null,
+          completed_at: null,
+          error_code: 'lever_forbidden',
+          audit_payload: { vertical_id: 'people_hr', system: 'lever' },
+        },
+      ],
+    })
+    expect(callout?.title).toBe('Action required')
+    expect(callout?.showCta).toBe(true)
+    expect(callout?.verticalId).toBe('people_hr')
+  })
+
+  test('approaching reminder alone does not show callout', () => {
+    expect(
+      resolveOverlayConnectorCallout({
+        role: 'data_owner',
+        assignedVerticals: ['communications'],
+        reminders: [
+          {
+            code: 'upload_approaching',
+            system: 'mailchimp',
+            vertical_id: 'communications',
+            severity: 'approaching',
+          },
+        ],
+      }),
+    ).toBeNull()
+  })
+
+  test('data_owner assigned to SaaS does not get Data-cluster callout', () => {
+    expect(
+      resolveOverlayConnectorCallout({
+        role: 'data_owner',
+        assignedVerticals: ['communications'],
+        attempts: [
+          {
+            id: 1,
+            attempt_number: 1,
+            status: 'gate_blocked',
+            attempted_at: null,
+            completed_at: null,
+            error_code: 'gate_blocked',
+            audit_payload: {
+              event: 'gate_blocked',
+              system: 'cassandra',
+              vertical_id: 'data',
+            },
+          },
+        ],
+      }),
+    ).toBeNull()
+  })
+
+  test('ownerConnectorsSearch omits vertical when unknown', () => {
+    expect(ownerConnectorsSearch(null)).toEqual({})
+    expect(ownerConnectorsSearch('  ')).toEqual({})
   })
 })

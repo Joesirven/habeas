@@ -28,7 +28,7 @@ import {
   type MePayload,
   type UserRole,
 } from '@/lib/api'
-import { AuthProvider, canAccessLegalSurfaces, useAuth } from '@/lib/auth'
+import { AuthProvider, canAccessOwnerPalette, useAuth } from '@/lib/auth'
 import { PLATFORM_NAME, PLATFORM_SLUG } from '@/lib/brand'
 import { verticalLabel } from '@/lib/legalJourneyLabels'
 import { useLiveEvents } from '@/lib/live-events'
@@ -263,7 +263,7 @@ function AppShellFrame({ children }: AppShellProps) {
   useLiveEvents()
   const navigate = useNavigate()
   const { role, me } = useAuth()
-  const showPalette = canAccessLegalSurfaces(role)
+  const showPalette = canAccessOwnerPalette(role)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const openPalette = useCallback(() => setPaletteOpen(true), [])
   useCommandPaletteShortcut(openPalette)

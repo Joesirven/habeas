@@ -84,6 +84,9 @@ class FakeConn:
         succeeded_attempt_count: int = 0,
         pending_notice_ids: tuple[int, ...] = (),
         matched_consumer_id: str | None = None,
+        assigned_verticals: frozenset[str] = frozenset(),
+        open_owner_attempt: dict[str, Any] | None = None,
+        next_owner_attempt_id: int = 901,
     ) -> None:
         self.disposition = disposition
         self.kickoff_approved = kickoff_approved
@@ -94,12 +97,18 @@ class FakeConn:
         self.succeeded_attempt_count = succeeded_attempt_count
         self.pending_notice_ids = pending_notice_ids
         self.matched_consumer_id = matched_consumer_id
+        self.assigned_verticals = assigned_verticals
+        self.open_owner_attempt = open_owner_attempt
+        self.next_owner_attempt_id = next_owner_attempt_id
         self.kickoff_contexts: list[dict[str, Any]] = []
         self.decisions: list[dict[str, Any]] = []
         self.superseded_kickoff_ids: list[int] = []
         self.abandon_sql: list[str] = []
         self.upserts: list[dict[str, Any]] = []
         self.drop_syncs: list[int] = []
+        self.inserted_attempts: list[dict[str, Any]] = []
+        self.updated_attempts: list[dict[str, Any]] = []
+        self.communication_inserts: list[dict[str, Any]] = []
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
         if "FROM requests WHERE id" in sql:
@@ -110,6 +119,23 @@ class FakeConn:
             return self.pending_kickoff_id
         if "COUNT(*)" in sql and "data_fulfillment_attempts" in sql:
             return self.succeeded_attempt_count
+        if "MAX(attempt_number)" in sql and "data_fulfillment_attempts" in sql:
+            if self.open_owner_attempt is not None:
+                return int(self.open_owner_attempt.get("attempt_number") or 0)
+            return len(self.inserted_attempts)
+        if "INSERT INTO data_fulfillment_attempts" in sql:
+            record = {
+                "id": self.next_owner_attempt_id,
+                "request_id": str(args[0]),
+                "step": args[1],
+                "attempt_number": args[2],
+                "status": args[3],
+                "error_code": args[4],
+                "audit_payload": args[5],
+            }
+            self.inserted_attempts.append(record)
+            self.next_owner_attempt_id += 1
+            return record["id"]
         return None
 
     async def fetchrow(self, sql: str, *args: Any) -> Any:
@@ -148,6 +174,11 @@ class FakeConn:
             if self.matched_consumer_id is None:
                 return None
             return {"consumer_id": self.matched_consumer_id, "match_count": 1}
+        if (
+            "FROM data_fulfillment_attempts" in sql
+            and "audit_payload->>'vertical'" in sql
+        ):
+            return self.open_owner_attempt
         if "FROM request_vertical_dispositions" in sql:
             return self.disposition
         if "INSERT INTO request_vertical_dispositions" in sql:
@@ -178,12 +209,34 @@ class FakeConn:
         if "UPDATE data_fulfillment_attempts" in sql:
             self.abandon_sql.append(sql)
             return [{"id": i} for i in self.open_attempt_ids]
+        if "user_vertical_assignments" in sql:
+            vertical_id = str(args[1]) if len(args) > 1 else ""
+            if vertical_id in self.assigned_verticals:
+                return [{"assigned": 1}]
+            return []
         return []
 
     async def execute(self, sql: str, *args: Any) -> str:
         if "UPDATE drop_raw_requests" in sql:
             self.drop_syncs.append(int(args[1]))
             return "UPDATE 1"
+        if "UPDATE data_fulfillment_attempts" in sql:
+            self.updated_attempts.append({"sql": sql, "args": args})
+            if self.open_owner_attempt is not None:
+                self.open_owner_attempt = {
+                    **self.open_owner_attempt,
+                    "status": args[1] if len(args) > 1 else "success",
+                }
+            return "UPDATE 1"
+        if "INSERT INTO communication_attempts" in sql:
+            self.communication_inserts.append(
+                {
+                    "purpose": args[1] if len(args) > 1 else None,
+                    "contacted_by": args[2] if len(args) > 2 else None,
+                    "notes": args[3] if len(args) > 3 else None,
+                }
+            )
+            return "INSERT 0 1"
         return "UPDATE 0"
 
 
@@ -518,3 +571,330 @@ async def test_kickoff_lock_reads_the_shared_core_helper():
         )
         is True
     )
+
+
+OWNER_COMMENT = "done in Mailchimp for Jane Doe"
+
+
+@pytest.mark.asyncio
+async def test_owner_status_completed_in_source_closes_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """AE31 — Done in source closes the attempt; comment stays off the audit."""
+    conn = FakeConn(
+        kickoff_approved=True,
+        assigned_verticals=frozenset({"communications"}),
+        open_owner_attempt={"id": 44, "status": "pending", "attempt_number": 1},
+    )
+    audited = fake_pool(monkeypatch, conn)
+
+    result = await fk.patch_fulfillment_owner_status(
+        REQUEST_ID,
+        "communications",
+        fk.OwnerFulfillmentStatusBody(
+            status="completed_in_source",
+            comment=OWNER_COMMENT,
+        ),
+        _fake_request(),
+        DATA_OWNER,
+    )
+
+    assert result.owner_status == "completed_in_source"
+    assert result.attempt_id == 44
+    assert result.attempt_status == "success"
+    assert result.comment_recorded is True
+    assert result.vertical == "communications"
+    assert conn.updated_attempts
+    assert conn.updated_attempts[0]["args"][1] == "success"
+    assert conn.updated_attempts[0]["args"][2] == "completed_in_source"
+    assert conn.communication_inserts == [
+        {
+            "purpose": fk.OWNER_STATUS_PURPOSE,
+            "contacted_by": DATA_OWNER.email,
+            "notes": OWNER_COMMENT,
+        }
+    ]
+    assert len(audited) == 1
+    arguments = audited[0]["arguments"]
+    assert arguments["owner_status"] == "completed_in_source"
+    assert arguments["comment_recorded"] is True
+    assert arguments["attempt_id"] == 44
+    dumped = json.dumps(arguments)
+    assert OWNER_COMMENT not in dumped
+    assert "Jane Doe" not in dumped
+    assert "comment" not in arguments
+
+
+@pytest.mark.asyncio
+async def test_owner_status_inserts_success_when_no_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = FakeConn(
+        kickoff_approved=True,
+        assigned_verticals=frozenset({"communications"}),
+    )
+    fake_pool(monkeypatch, conn)
+
+    result = await fk.patch_fulfillment_owner_status(
+        REQUEST_ID,
+        "mailchimp",
+        fk.OwnerFulfillmentStatusBody(status="completed_in_source"),
+        _fake_request(),
+        DATA_OWNER,
+    )
+
+    assert result.attempt_id == 901
+    assert result.attempt_status == "success"
+    assert result.vertical == "communications"
+    assert result.comment_recorded is False
+    assert conn.inserted_attempts[0]["status"] == "success"
+    assert conn.inserted_attempts[0]["step"] == fk.OWNER_STATUS_ATTEMPT_STEP
+    payload = json.loads(conn.inserted_attempts[0]["audit_payload"])
+    assert payload["vertical"] == "communications"
+    assert payload["owner_status"] == "completed_in_source"
+    assert "comment" not in payload
+
+
+@pytest.mark.asyncio
+async def test_owner_status_409_without_kickoff(monkeypatch: pytest.MonkeyPatch):
+    conn = FakeConn(
+        kickoff_approved=False,
+        assigned_verticals=frozenset({"communications"}),
+    )
+    fake_pool(monkeypatch, conn)
+
+    with pytest.raises(HTTPException) as exc:
+        await fk.patch_fulfillment_owner_status(
+            REQUEST_ID,
+            "communications",
+            fk.OwnerFulfillmentStatusBody(status="in_progress"),
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "kickoff_not_approved"
+
+
+@pytest.mark.asyncio
+async def test_owner_status_422_for_data_vertical(monkeypatch: pytest.MonkeyPatch):
+    conn = FakeConn(kickoff_approved=True)
+    fake_pool(monkeypatch, conn)
+
+    with pytest.raises(HTTPException) as exc:
+        await fk.patch_fulfillment_owner_status(
+            REQUEST_ID,
+            "data",
+            fk.OwnerFulfillmentStatusBody(status="completed_in_source"),
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 422
+    assert exc.value.detail == "data_vertical_automatic"
+
+
+@pytest.mark.asyncio
+async def test_owner_status_403_when_owner_not_assigned(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = FakeConn(
+        kickoff_approved=True,
+        assigned_verticals=frozenset({"tech"}),
+    )
+    fake_pool(monkeypatch, conn)
+
+    with pytest.raises(HTTPException) as exc:
+        await fk.patch_fulfillment_owner_status(
+            REQUEST_ID,
+            "communications",
+            fk.OwnerFulfillmentStatusBody(status="completed_in_source"),
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "vertical access denied"
+
+
+@pytest.mark.asyncio
+async def test_owner_status_assign_to_legal_reuses_fanout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = FakeConn(
+        kickoff_approved=True,
+        assigned_verticals=frozenset({"people_hr"}),
+    )
+    fake_pool(monkeypatch, conn)
+    captured: dict[str, Any] = {}
+
+    async def _fake_fanout(
+        _conn: Any, *, request_id: str, decided_by: str
+    ) -> list[dict[str, Any]]:
+        captured["request_id"] = request_id
+        captured["decided_by"] = decided_by
+        return [{"id": 71, "status": "pending"}]
+
+    monkeypatch.setattr(fk, "escalate_to_legal_with_fanout", _fake_fanout)
+
+    result = await fk.patch_fulfillment_owner_status(
+        REQUEST_ID,
+        "paylocity",
+        fk.OwnerFulfillmentStatusBody(status="assign_to_legal"),
+        _fake_request(),
+        DATA_OWNER,
+    )
+    assert result.assigned_to_legal is True
+    assert result.attempt_status == "in_flight"
+    assert captured["request_id"] == REQUEST_ID
+    assert captured["decided_by"] == DATA_OWNER.email
+
+
+@pytest.mark.asyncio
+async def test_owner_status_invalid_status_is_400(monkeypatch: pytest.MonkeyPatch):
+    conn = FakeConn(
+        kickoff_approved=True,
+        assigned_verticals=frozenset({"communications"}),
+    )
+    fake_pool(monkeypatch, conn)
+    body = fk.OwnerFulfillmentStatusBody.model_construct(status="not_a_status")
+
+    with pytest.raises(HTTPException) as exc:
+        await fk.patch_fulfillment_owner_status(
+            REQUEST_ID,
+            "communications",
+            body,
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "invalid status"
+    assert conn.inserted_attempts == []
+    assert conn.updated_attempts == []
+
+
+@pytest.mark.asyncio
+async def test_owner_status_unknown_request_is_404(monkeypatch: pytest.MonkeyPatch):
+    conn = FakeConn(
+        request_exists=False,
+        kickoff_approved=True,
+        assigned_verticals=frozenset({"communications"}),
+    )
+    fake_pool(monkeypatch, conn)
+
+    with pytest.raises(HTTPException) as exc:
+        await fk.patch_fulfillment_owner_status(
+            REQUEST_ID,
+            "communications",
+            fk.OwnerFulfillmentStatusBody(status="in_progress"),
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "request not found"
+    assert conn.inserted_attempts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_status", ["in_progress", "blocked"])
+async def test_owner_status_keeps_attempt_open(
+    monkeypatch: pytest.MonkeyPatch,
+    owner_status: str,
+):
+    conn = FakeConn(
+        kickoff_approved=True,
+        assigned_verticals=frozenset({"communications"}),
+        open_owner_attempt={"id": 55, "status": "pending", "attempt_number": 1},
+    )
+    audited = fake_pool(monkeypatch, conn)
+
+    result = await fk.patch_fulfillment_owner_status(
+        REQUEST_ID,
+        "communications",
+        fk.OwnerFulfillmentStatusBody(status=owner_status, comment=OWNER_COMMENT),
+        _fake_request(),
+        DATA_OWNER,
+    )
+
+    assert result.owner_status == owner_status
+    assert result.attempt_id == 55
+    assert result.attempt_status == "in_flight"
+    assert result.comment_recorded is True
+    assert conn.updated_attempts
+    assert conn.updated_attempts[0]["args"][1] == "in_flight"
+    assert conn.updated_attempts[0]["args"][2] == owner_status
+    assert "completed_at" not in conn.updated_attempts[0]["sql"]
+    assert conn.inserted_attempts == []
+    arguments = audited[0]["arguments"]
+    assert arguments["attempt_status"] == "in_flight"
+    assert arguments["comment_recorded"] is True
+    assert "comment" not in arguments
+    assert OWNER_COMMENT not in json.dumps(arguments)
+
+
+@pytest.mark.asyncio
+async def test_owner_status_super_admin_overrides_unassigned_owner(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = FakeConn(kickoff_approved=True, assigned_verticals=frozenset())
+    fake_pool(monkeypatch, conn)
+
+    with pytest.raises(HTTPException) as exc:
+        await fk.patch_fulfillment_owner_status(
+            REQUEST_ID,
+            "communications",
+            fk.OwnerFulfillmentStatusBody(status="in_progress"),
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "vertical access denied"
+
+    super_admin = RolePrincipal(
+        email="root@example.com", role=ROLE_SUPER_ADMIN, real_role=ROLE_SUPER_ADMIN
+    )
+    result = await fk.patch_fulfillment_owner_status(
+        REQUEST_ID,
+        "communications",
+        fk.OwnerFulfillmentStatusBody(status="in_progress"),
+        _fake_request(),
+        super_admin,
+    )
+    assert result.owner_status == "in_progress"
+    assert result.attempt_status == "in_flight"
+    assert result.attempt_id == 901
+
+
+def test_catalog_vertical_for_owner_path_accepts_aliases():
+    assert fk._catalog_vertical_for_owner_path("communications") == (
+        "communications",
+        "communications",
+    )
+    assert fk._catalog_vertical_for_owner_path("mailchimp") == (
+        "mailchimp",
+        "communications",
+    )
+    assert fk._catalog_vertical_for_owner_path("Mailchimp") == (
+        "mailchimp",
+        "communications",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path_vertical", ["communications", "mailchimp"])
+async def test_owner_status_accepts_catalog_and_system_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    path_vertical: str,
+):
+    conn = FakeConn(
+        kickoff_approved=True,
+        assigned_verticals=frozenset({"communications"}),
+    )
+    fake_pool(monkeypatch, conn)
+
+    result = await fk.patch_fulfillment_owner_status(
+        REQUEST_ID,
+        path_vertical,
+        fk.OwnerFulfillmentStatusBody(status="in_progress"),
+        _fake_request(),
+        DATA_OWNER,
+    )
+    assert result.vertical == "communications"
+    assert result.attempt_status == "in_flight"

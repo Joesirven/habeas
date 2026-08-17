@@ -1684,6 +1684,126 @@ export function postFulfillmentKickoff(
   )
 }
 
+/** KD37 named statuses — SaaS owner Inbox after Legal kickoff (U17 / U18). */
+export type FulfillmentOwnerStatus =
+  | 'in_progress'
+  | 'completed_in_source'
+  | 'blocked'
+  | 'assign_to_legal'
+
+export type FulfillmentOwnerStatusBody = {
+  status: FulfillmentOwnerStatus
+  comment?: string
+}
+
+export type FulfillmentOwnerStatusResponse = {
+  request_id: string
+  vertical: string
+  owner_status: FulfillmentOwnerStatus
+  attempt_id: number
+  attempt_status: string
+  assigned_to_legal: boolean
+  comment_recorded: boolean
+}
+
+/** Assigned SaaS owner sets KD37 status after Legal kickoff. */
+export function patchFulfillmentOwnerStatus(
+  requestId: string,
+  vertical: string,
+  body: FulfillmentOwnerStatusBody,
+) {
+  return fetchAdminApi<FulfillmentOwnerStatusResponse>(
+    `/requests/${encodeURIComponent(requestId)}/fulfillment/${encodeURIComponent(vertical)}/owner-status`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+export function ownerFulfillmentItemFromRequest(record: RequestRecord): NeedsAttentionItem {
+  return {
+    request_id: record.id,
+    reason: 'fulfillment.owner',
+    current_stage: 'fulfillment',
+    intake_source: record.intake_source,
+    received_at: record.received_at,
+    requested_at: record.received_at,
+    requestor_state: record.requestor_state ?? null,
+  }
+}
+
+export function ownerFulfillmentItemFromApproval(
+  approval: ApprovalRecord,
+): NeedsAttentionItem {
+  return {
+    request_id: approval.request_id,
+    reason: 'fulfillment.kickoff',
+    current_stage: 'fulfillment',
+    intake_source: 'drop',
+    received_at: null,
+    requested_at: null,
+  }
+}
+
+/** Prefer list-request metadata; keep kickoff reason when an approval also matched. */
+export function mergeOwnerFulfillmentItems(
+  fromRequests: NeedsAttentionItem[],
+  fromApprovals: NeedsAttentionItem[],
+): NeedsAttentionItem[] {
+  const byId = new Map<string, NeedsAttentionItem>()
+  for (const item of fromApprovals) {
+    if (!item.request_id) continue
+    byId.set(item.request_id, item)
+  }
+  for (const item of fromRequests) {
+    if (!item.request_id) continue
+    const existing = byId.get(item.request_id)
+    byId.set(item.request_id, existing ? { ...existing, ...item } : item)
+  }
+  return [...byId.values()]
+}
+
+async function listApprovedFulfillmentKickoffs(limit: number): Promise<ApprovalRecord[]> {
+  const search = new URLSearchParams({
+    action_type: 'fulfillment.kickoff',
+    status: 'approved',
+    limit: String(Math.min(200, Math.max(1, limit))),
+  })
+  return fetchAdminApi<ApprovalRecord[]>(`/approvals?${search}`)
+}
+
+/**
+ * Owner-safe Fulfillment queue — do not call `getLegalNeedsAttention` (403).
+ * `getNeedsAttention` has no fulfillment kind; All-requests `stage=fulfillment`
+ * plus approved kickoff gates cover SaaS legs that have no open attempt yet.
+ */
+export async function getOwnerFulfillmentNeedsAttention(params?: {
+  limit?: number
+}): Promise<NeedsAttentionResponse> {
+  const limit = params?.limit ?? 200
+  const [page, approvals] = await Promise.all([
+    listRequests({ stage: 'fulfillment', limit, offset: 0 }),
+    listApprovedFulfillmentKickoffs(limit).catch((error: unknown) => {
+      if (error instanceof Error && /Admin API 403/.test(error.message)) {
+        return [] as ApprovalRecord[]
+      }
+      throw error
+    }),
+  ])
+  const items = mergeOwnerFulfillmentItems(
+    page.items.map(ownerFulfillmentItemFromRequest),
+    approvals.map(ownerFulfillmentItemFromApproval),
+  )
+  return {
+    items: items.slice(0, limit),
+    kind: 'all',
+    total: items.length,
+    limit,
+    offset: 0,
+  }
+}
+
 export function getNeedsAttention(
   limitOrParams?:
     | number

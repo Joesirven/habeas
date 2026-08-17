@@ -74,6 +74,11 @@ export function canAccessLegalSurfaces(role: UserRole | undefined): boolean {
   return role === 'legal' || role === 'super_admin' || role === 'admin'
 }
 
+/** ⌘K palette — legal/admin plus data owners (Requests + Actions; People stays legal-only). */
+export function canAccessOwnerPalette(role: UserRole | undefined): boolean {
+  return canAccessLegalSurfaces(role) || role === 'data_owner'
+}
+
 /** Legal Home / inbox persona — admin and legal share surfaces (KD1). */
 export function isLegalAdminPersona(role: UserRole | undefined): boolean {
   return role === 'legal' || role === 'admin'

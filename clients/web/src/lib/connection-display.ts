@@ -4,6 +4,7 @@ import type {
   ConnectionRecord,
   IntegrationSystemId,
   MatchingAttemptRow,
+  MePayload,
 } from './api'
 
 /** Upload-only systems — no Live credential invite (KD14). */
@@ -114,6 +115,30 @@ const MATCHING_HARD_GATE_REMINDER_CODES = new Set([
   'rotation_overdue',
   'wizard_incomplete',
 ])
+
+const CONNECTOR_ACTION_REMINDER_CODES = new Set([
+  'upload_stale',
+  'rotation_overdue',
+  'wizard_incomplete',
+])
+
+/** `/me` reminders + wizard flag — never invent a count when `me` is missing. */
+export function ownerConnectorActionRequiredCount(
+  me: Pick<MePayload, 'connector_reminders' | 'needs_connector_setup'> | null | undefined,
+): number | null {
+  if (!me) return null
+  const reminders: ConnectorReminder[] = me.connector_reminders ?? []
+  const fromReminders = reminders.filter(
+    (reminder) =>
+      reminder.severity === 'overdue' || CONNECTOR_ACTION_REMINDER_CODES.has(reminder.code),
+  ).length
+  const setupExtra =
+    me.needs_connector_setup &&
+    !reminders.some((reminder) => reminder.code === 'wizard_incomplete')
+      ? 1
+      : 0
+  return fromReminders + setupExtra
+}
 
 const REMINDER_CODE_TO_DISPLAY_STATUS: Record<string, ConnectionDisplayStatus> = {
   upload_stale: 'needs_refresh',
@@ -335,4 +360,189 @@ export function leverTriageCopy(detail: string | null | undefined): string | nul
     return 'Lever triage: key accepted but Users access denied (forbidden). Enable Users read/list on the Lever API key and regenerate if permissions cannot be changed.'
   }
   return null
+}
+
+/** Catalog id for the view-only Data vertical (KD8 / KD20). */
+export const DATA_CATALOG_VERTICAL_ID = 'data'
+
+/** AE32 — Live-down overlay copy. No Ops invite language. */
+export const OVERLAY_LIVE_DOWN_COPY =
+  "Live isn't connected or permissioned — upload a file or retest in Connectors."
+
+const LIVE_DOWN_ERROR_CODES = new Set([
+  'gate_blocked',
+  'auth_failed',
+  'lever_unauthorized',
+  'lever_forbidden',
+  'test_failed',
+  'live_test_failed',
+  'not_permissioned',
+  'permission_denied',
+  'forbidden',
+])
+
+export type OverlayConnectorCallout = {
+  title: string
+  description: string
+  displayStatus: string
+  verticalId: string | null
+  showCta: boolean
+}
+
+export function isDataCatalogVertical(verticalId: string | null | undefined): boolean {
+  return (verticalId ?? '').trim().toLowerCase() === DATA_CATALOG_VERTICAL_ID
+}
+
+export function ownerConnectorsSearch(
+  verticalId: string | null | undefined,
+): { vertical?: string } {
+  const id = verticalId?.trim()
+  return id ? { vertical: id } : {}
+}
+
+/** Owner Connectors CTA — data_owner only; never for Data (view-only). */
+export function overlayCalloutShowsOwnerCta(
+  role: string | null | undefined,
+  verticalId: string | null | undefined,
+): boolean {
+  return role === 'data_owner' && !isDataCatalogVertical(verticalId)
+}
+
+function overlayCalloutTitle(displayStatus: string): string {
+  if (displayStatus === 'needs_refresh') {
+    return connectionDisplayStatusLabel('needs_refresh')
+  }
+  return connectionDisplayStatusLabel('action_required')
+}
+
+function remindersForViewer(
+  reminders: ConnectorReminder[] | null | undefined,
+  assignedVerticals: readonly string[] | null | undefined,
+): ConnectorReminder[] {
+  if (!reminders?.length) return []
+  const assigned = new Set(
+    (assignedVerticals ?? []).map((id) => id.trim()).filter(Boolean),
+  )
+  if (assigned.size === 0) return [...reminders]
+  return reminders.filter((reminder) => assigned.has(reminder.vertical_id))
+}
+
+function verticalIdFromAttempts(
+  attempts: MatchingAttemptRow[] | null | undefined,
+): string | null {
+  if (!attempts?.length) return null
+  const sorted = [...attempts].sort((a, b) => b.attempt_number - a.attempt_number)
+  for (const attempt of sorted) {
+    const raw = coerceAttemptAudit(attempt.audit_payload).vertical_id
+    if (typeof raw === 'string' && raw.trim()) return raw.trim()
+  }
+  return null
+}
+
+function matchingGateFromLiveDownErrors(
+  attempts: MatchingAttemptRow[] | null | undefined,
+  extraCodes: readonly (string | null | undefined)[] | null | undefined,
+): MatchingConnectorGate | null {
+  const codes: string[] = []
+  for (const attempt of attempts ?? []) {
+    if (attempt.error_code) codes.push(attempt.error_code)
+    const audit = coerceAttemptAudit(attempt.audit_payload)
+    if (typeof audit.error_code === 'string') codes.push(audit.error_code)
+    if (typeof audit.event === 'string') codes.push(audit.event)
+    if (audit.last_test_ok === false) codes.push('live_test_failed')
+  }
+  for (const code of extraCodes ?? []) {
+    if (code) codes.push(code)
+  }
+  for (const code of codes) {
+    const normalized = code.trim().toLowerCase()
+    const liveDown =
+      LIVE_DOWN_ERROR_CODES.has(normalized) ||
+      isMatchingGateBlockedDisplayStatus(normalized)
+    if (!liveDown) continue
+    return {
+      blocked: true,
+      displayStatus:
+        normalized === 'needs_refresh' || normalized === 'upload_stale'
+          ? 'needs_refresh'
+          : 'action_required',
+      gateCode: normalized,
+      source: 'attempt',
+    }
+  }
+  return null
+}
+
+function resolveCalloutVerticalId(options: {
+  gate: MatchingConnectorGate
+  reminders: ConnectorReminder[]
+  attempts?: MatchingAttemptRow[] | null
+  assignedVerticals?: readonly string[] | null
+}): string | null {
+  const fromReminder = options.reminders.find(
+    (reminder) =>
+      reminder.system === options.gate.system ||
+      reminder.code === options.gate.gateCode,
+  )
+  if (fromReminder?.vertical_id) return fromReminder.vertical_id
+  if (options.gate.system === 'cassandra') return DATA_CATALOG_VERTICAL_ID
+  const fromAttempt = verticalIdFromAttempts(options.attempts)
+  if (fromAttempt) return fromAttempt
+  const assigned = (options.assignedVerticals ?? [])
+    .map((id) => id.trim())
+    .filter(Boolean)
+  const nonData = assigned.filter((id) => !isDataCatalogVertical(id))
+  if (nonData.length === 1) return nonData[0] ?? null
+  if (assigned.length === 1) return assigned[0] ?? null
+  return null
+}
+
+/**
+ * Overlay Live-down / freshness callout (U19 / AE32 / KD18).
+ * Uses matching attempts + `/me` reminders — no extra API.
+ */
+export function resolveOverlayConnectorCallout(options: {
+  role?: string | null
+  assignedVerticals?: readonly string[] | null
+  reminders?: ConnectorReminder[] | null
+  attempts?: MatchingAttemptRow[] | null
+  journeyErrorCodes?: readonly (string | null | undefined)[] | null
+}): OverlayConnectorCallout | null {
+  const assigned = (options.assignedVerticals ?? [])
+    .map((id) => id.trim())
+    .filter(Boolean)
+  const scopedReminders = remindersForViewer(options.reminders, assigned)
+  const gate =
+    resolveMatchingConnectorGate({
+      attempts: options.attempts,
+      reminders: scopedReminders,
+    }) ?? matchingGateFromLiveDownErrors(options.attempts, options.journeyErrorCodes)
+  if (!gate?.blocked) return null
+
+  const verticalId = resolveCalloutVerticalId({
+    gate,
+    reminders: scopedReminders,
+    attempts: options.attempts,
+    assignedVerticals: assigned,
+  })
+
+  if (
+    assigned.length > 0 &&
+    verticalId &&
+    !assigned.includes(verticalId) &&
+    options.role === 'data_owner'
+  ) {
+    return null
+  }
+
+  const displayStatus =
+    gate.displayStatus === 'needs_refresh' ? 'needs_refresh' : 'action_required'
+
+  return {
+    title: overlayCalloutTitle(displayStatus),
+    description: OVERLAY_LIVE_DOWN_COPY,
+    displayStatus,
+    verticalId,
+    showCta: overlayCalloutShowsOwnerCta(options.role, verticalId),
+  }
 }

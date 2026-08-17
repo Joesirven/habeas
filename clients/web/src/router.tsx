@@ -544,6 +544,7 @@ export const NEEDS_ATTENTION_KINDS = [
   'delivery',
   'notice',
   'communications',
+  'fulfillment',
   'pending_tasks',
 ] as const
 

@@ -3,6 +3,7 @@ import { Link } from '@tanstack/react-router'
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type RefObject,
@@ -34,6 +35,12 @@ import {
   type WorkbenchStageKey,
 } from '@/lib/legalJourneyLabels'
 import { actionToast } from '@/lib/action-toast'
+import {
+  matchingConnectorGateChip,
+  ownerConnectorsSearch,
+  resolveOverlayConnectorCallout,
+  type OverlayConnectorCallout,
+} from '@/lib/connection-display'
 import {
   deleteRequestDocument,
   downloadRequestDocument,
@@ -79,6 +86,7 @@ import {
   MatchingReviewPanel,
   fetchMatchingDetailOptional,
   formatMatchedContactsSummary,
+  ownerDropStatusLabel,
 } from '@/components/requests/RequestTriageDialog'
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -528,6 +536,43 @@ export function ThinJourneyPipeline({
 }
 
 
+/** U19 / AE32 — compact Live-down callout. Fail-tone; no frost. */
+function OverlayConnectorFreshnessCallout({
+  callout,
+}: {
+  callout: OverlayConnectorCallout
+}) {
+  const chip = matchingConnectorGateChip({
+    blocked: true,
+    displayStatus: callout.displayStatus,
+    source: 'reminder',
+  })
+  return (
+    <div
+      className="rounded-md border border-red-300/80 bg-red-50 px-2.5 py-1.5"
+      role="status"
+    >
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <Badge variant={chip.variant} className="normal-case tracking-normal">
+          {callout.title}
+        </Badge>
+        <p className="min-w-0 flex-1 text-[0.65rem] leading-snug text-red-900/90">
+          {callout.description}
+        </p>
+        {callout.showCta ? (
+          <Link
+            to="/owner/connectors"
+            search={ownerConnectorsSearch(callout.verticalId)}
+            className="shrink-0 text-[0.65rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
+          >
+            Open Connectors
+          </Link>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 function isTriageContext(item: NeedsAttentionItem | undefined, journeyStage: string): boolean {
   if (!item) return journeyStage === 'triage'
   return (
@@ -938,6 +983,7 @@ function RequestDetailsPanel({
   dropStatusCode = null,
   dropStatusIsRecommended = false,
   dropPreMatch = false,
+  ownerLanguage = false,
 }: {
   requestId: string
   intakeSource: string
@@ -949,6 +995,7 @@ function RequestDetailsPanel({
   dropStatusCode?: number | null
   dropStatusIsRecommended?: boolean
   dropPreMatch?: boolean
+  ownerLanguage?: boolean
 }) {
   const channel = SOURCE_LABELS[intakeSource] ?? intakeSource
   const isDrop = intakeSource === 'drop'
@@ -961,11 +1008,12 @@ function RequestDetailsPanel({
   rows.push({ label: 'Request id', value: requestId })
   rows.push({ label: 'Channel', value: channel })
   if (isDrop) {
+    const ownerLabel = ownerDropStatusLabel(dropStatusCode)
     rows.push({
-      label: 'CA DROP status',
+      label: ownerLanguage ? 'Match result' : 'CA DROP status',
       value:
         dropStatusCode != null
-          ? `${dropResponseStatusLabel(dropStatusCode)}${
+          ? `${ownerLanguage ? (ownerLabel ?? String(dropStatusCode)) : dropResponseStatusLabel(dropStatusCode)}${
               dropStatusIsRecommended ? ' (recommended)' : ''
             }`
           : 'Pending',
@@ -1753,6 +1801,8 @@ export function RequestDetailBody({
   const queryClient = useQueryClient()
   const { isAdmin, isSuperAdmin, role, me } = useMe()
   const legalAdmin = isLegalAdminPersona(role)
+  const matchingPersona =
+    role === 'data_owner' ? 'data_owner' : legalAdmin ? 'legal' : 'ops'
   const [tab, setTab] = useState<RequestDetailTab>(defaultTab)
 
   useEffect(() => {
@@ -2026,6 +2076,36 @@ export function RequestDetailBody({
       })
     : []
 
+  const overlayCallout = useMemo(
+    () =>
+      resolveOverlayConnectorCallout({
+        role,
+        assignedVerticals: me?.verticals,
+        reminders: me?.connector_reminders,
+        attempts: matching?.attempts,
+        journeyErrorCodes: [
+          journey?.blocker,
+          ...(journey?.stages ?? []).map((stage) => stage.blocker),
+          ...(matching?.attempts ?? []).map((attempt) => attempt.error_code),
+          ...(workbench?.matching_cluster ?? []).map((row) => row.blocker),
+          ...(workbench?.fulfillment_cluster ?? []).flatMap((row) => [
+            row.blocker,
+            ...row.fulfillment_steps.map((step) => step.error_code),
+          ]),
+        ],
+      }),
+    [
+      role,
+      me?.verticals,
+      me?.connector_reminders,
+      matching?.attempts,
+      journey?.blocker,
+      journey?.stages,
+      workbench?.matching_cluster,
+      workbench?.fulfillment_cluster,
+    ],
+  )
+
   const loading = journeyQuery.isPending && !journey
 
   if (loading) {
@@ -2133,6 +2213,7 @@ export function RequestDetailBody({
             dropStatusCode={dropStatusCode}
             dropStatusIsRecommended={dropStatusIsRecommended}
             dropPreMatch={dropPreMatch}
+            ownerLanguage={matchingPersona === 'data_owner'}
           />
           <AttachmentsPanel requestId={requestId} />
         </TabsContent>
@@ -2224,6 +2305,7 @@ export function RequestDetailBody({
             compact
             connectorReminders={me?.connector_reminders}
             fetchConnectorConnections={Boolean(isAdmin || isSuperAdmin)}
+            persona={matchingPersona}
             onPromote={(responseStatus, dwids) =>
               matchingDispositionMutation.mutate({
                 action: 'promote',
@@ -2302,6 +2384,9 @@ export function RequestDetailBody({
         /* OVERLAY: unchanged single column */
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           <div className="shrink-0 space-y-2 overflow-x-auto border-b border-line px-4 py-2">
+            {overlayCallout ? (
+              <OverlayConnectorFreshnessCallout callout={overlayCallout} />
+            ) : null}
             {pipelineContent}
           </div>
 
@@ -2339,6 +2424,8 @@ export function RequestDetailOverlay({
   seedRequest,
 }: RequestDetailOverlayProps) {
   const contentRef = useRef<HTMLDivElement>(null)
+  const { role } = useMe()
+  const ownerLanguage = role === 'data_owner'
 
   useEffect(() => {
     if (!open) return
@@ -2422,17 +2509,23 @@ export function RequestDetailOverlay({
                 variant="run"
                 className="normal-case tracking-normal"
                 title={
-                  dropStatusIsRecommended
-                    ? 'Recommended CA DROP status from matching'
-                    : 'CA DROP response status'
+                  ownerLanguage
+                    ? dropStatusIsRecommended
+                      ? 'Recommended match result'
+                      : 'Match result'
+                    : dropStatusIsRecommended
+                      ? 'Recommended CA DROP status from matching'
+                      : 'CA DROP response status'
                 }
               >
-                CA DROP · {dropResponseStatusLabel(dropStatusCode)}
+                {ownerLanguage
+                  ? `Match result · ${ownerDropStatusLabel(dropStatusCode) ?? dropStatusCode}`
+                  : `CA DROP · ${dropResponseStatusLabel(dropStatusCode)}`}
                 {dropStatusIsRecommended ? ' (recommended)' : ''}
               </Badge>
             ) : intakeSource === 'drop' ? (
               <Badge variant="wait" className="normal-case tracking-normal">
-                CA DROP · status pending
+                {ownerLanguage ? 'Match result · pending' : 'CA DROP · status pending'}
               </Badge>
             ) : null}
           </div>

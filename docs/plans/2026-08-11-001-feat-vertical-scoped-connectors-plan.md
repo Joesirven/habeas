@@ -10,6 +10,8 @@ execution: code
 deepened: 2026-08-13
 walkthrough: 2026-08-13-mailchimp
 provenance_slice: user-directed 2026-08-13 (first-login welcome + Habeas Platform rename; Jose confirmed rename scope + IAP first name + kill invite URLs entirely 2026-08-13; Jose 2026-08-13 presentation + request-attempt chat c02a7e4a — journey demo beats merged)
+enriched: 2026-08-17
+provenance_slice_2026_08_17: user-directed 2026-08-17 — data-owner workbench: post-match selector, SaaS manual fulfillment after Legal kickoff, port legal/admin IA patterns to data owner; incomplete forks merged (nav badge, Tasks fetch, palette without People)
 ---
 
 # Vertical-scoped connectors - Plan
@@ -18,7 +20,7 @@ provenance_slice: user-directed 2026-08-13 (first-login welcome + Habeas Platfor
 
 Extend the shipped per-system Connections onboarding and external vertical hash workers so **data owners operate inside assigned verticals** — choosing Live vs Upload per system, **connecting (credentials or upload) inside the vertical wizard**, setting refresh cadence, and keeping credentials fresh — while **super_admin** configures vertical→system mappings and can override or reset owner setup.
 
-**Objective:** First ship covers the v1 **vertical catalog** (KD20): SaaS owner verticals get vertical-scoped roles, a per-vertical setup wizard (mode explainer → in-wizard connect+test → cadence → confirm), **first-login welcome** routing into the assigned vertical, soft reminders, a **skippable quick-start nav tour** (re-offered **on every login** until completed or skipped), and a **hard gate on matching** when Upload data is stale or Live credential rotation is overdue (~6 months). **Data** appears in the catalog as **already connected** (view-only; no Upload or owner credential wizard). **Owner access = vertical assignment + IAP login** — no one-off invite links as the routine owner path (KD22). Google Sheets direct/live connection is deferred; Paylocity **Upload** is template file ingest; Paylocity **Live** is SFTP. Shell/welcome chrome and **login animation (PostAuthSplash)** rename to **Habeas Platform** (`habeas-cli` slug) across **all user-visible chrome** — not welcome-only (KD28; Jose confirmed OQ14).
+**Objective:** First ship covers the v1 **vertical catalog** (KD20): SaaS owner verticals get vertical-scoped roles, a per-vertical setup wizard (mode explainer → in-wizard connect+test → cadence → confirm), **first-login welcome** routing into the assigned vertical, soft reminders, a **skippable quick-start nav tour** (re-offered **on every login** until completed or skipped), and a **hard gate on matching** when Upload data is stale or Live credential rotation is overdue (~6 months). **Data** appears in the catalog as **already connected** (view-only; no Upload or owner credential wizard). **Owner access = vertical assignment + IAP login** — no one-off invite links as the routine owner path (KD22). **2026-08-17 slice:** data-owner **My work / Inbox / detail** inherit legal/admin workbench density (not Legal Home Variation B); **post-match selector** uses owner language mapped to DROP 3/4/5; after **Legal kickoff**, owners **manually complete SaaS fulfillment** via comment + named status (Data stays automatic). If Live is not working, not set up, or not permissioned, owners **re-upload** (or switch to Upload) from Connectors and from Inbox freshness callouts. Google Sheets direct/live connection is deferred; Paylocity **Upload** is template file ingest; Paylocity **Live** is SFTP. Shell/welcome chrome and **login animation (PostAuthSplash)** rename to **Habeas Platform** (`habeas-cli` slug) across **all user-visible chrome** — not welcome-only (KD28; Jose confirmed OQ14).
 
 **Product authority:** Session brainstorm 2026-08-11 + 2026-08-13 onboarding deltas + **2026-08-13 Mailchimp walkthrough (Jose)** + **2026-08-13 presentation / request-attempt chat (`c02a7e4a`)** — **single walkthrough authority** for connector setup through Notice > SirvenOS External-Integrations + Data-Verticals KB > shipped connections-onboarding plan > external-vertical-hash-workers plan > journey workbench (`2026-07-29-001`) + fulfillment (`2026-07-21-001`) for adjacent stages only.
 
@@ -26,7 +28,7 @@ Extend the shipped per-system Connections onboarding and external vertical hash 
 
 **Open blockers:** **Must-fix (walkthrough):** Connect-step Continue fires `wizard_incomplete` reminder before inline save+test — see KD27, R31. None other for core connector scope — OQ1–OQ4 resolved (KD17–KD20). Planning HOW for OQ5–OQ9 resolved (KTD1–KTD14). OQ12, OQ15–OQ18 remain open (OQ14 rename scope and OQ17 IAP first name **resolved by Jose 2026-08-13**). ~~OQ13 emergency ops invite~~ — **Resolved (KD22, KD30, Jose 2026-08-13):** invite URLs killed entirely; no break-glass `/connect/{token}`.
 
-**Stop when:** Vertical catalog + assignments persist; SaaS owners land on first login → welcome → wizard; complete wizard (mode + **in-wizard** connect+test + cadence); gated status surfaces Needs refresh / Action required; matching claim helpers refuse Upload-stale or Live-rotation-overdue systems; eligible owners see skippable nav tour on **each login** until tour completed/skipped; Data remains view-only; **invite URLs and `/connect/{token}` removed entirely** (KD22, KD30); tests green; no secrets/PII in logs.
+**Stop when:** Vertical catalog + assignments persist; SaaS owners land on first login → welcome → wizard; complete wizard (mode + **in-wizard** connect+test + cadence); gated status surfaces Needs refresh / Action required; matching claim helpers refuse Upload-stale or Live-rotation-overdue systems; eligible owners see skippable nav tour on **each login** until tour completed/skipped; Data remains view-only; **invite URLs and `/connect/{token}` removed entirely** (KD22, KD30); owner matching selector uses confirm / not a match / multi-person (KD34); owner Inbox has Fulfillment after Legal kickoff for SaaS (KD36); incomplete DO forks fixed (KD38); tests green; no secrets/PII in logs.
 
 **Product Contract preservation:** KD1–KD20 and R/A/F/AE IDs stable; KD21+ and R23+ extend scope without rewriting settled decisions. Planning resolved deferred OQs without rewriting core product scope.
 
@@ -91,11 +93,16 @@ Connections onboarding shipped a secure credential path per system, but mutation
 - KD30. (session-settled: user-directed — **supersedes invite-primary**; **confirmed Jose 2026-08-13**) **Vertical assignment is the only access grant** — super_admin assigning an owner to a vertical **is** the onboarding authorization; first login routes into the **same data vertical wizard** for mode select, credential paste, how-to overlay, connection test, and cadence. **Kill** separate Connections invite process and **all** owner `/connect/{token}` paths — not primary, not fallback (KD22).
 - KD32. (session-settled: user-directed 2026-08-13 — chosen over tour before connect+test) **Tour eligibility follows connection test** — tour is **not offered** until **Connect-step test passes** (Live `ok` or Upload `upload_ok` on the vertical-scoped row) **and** wizard Confirm succeeds; mode/cadence-only progress does not make tour eligible.
 - KD33. (session-settled: **Jose-confirmed 2026-08-13** — chosen over one-shot post-wizard-only tour) **Tour every login until complete** — once KD32-eligible, client offers tour **on each login** (after PostAuthSplash/welcome deferrals) while persistence is neither `completed` nor `skipped`; mid-chain exit without skip → re-offer next login. **super_admin `connections.wizard_reset`** clears tour state for affected vertical owners (align KTD8 `connections.wizard_reset`).
+- KD34. (session-settled: user-directed 2026-08-17 — chosen over exposing DROP codes as the primary owner control) **Post-match selector is owner language** — primary choices **Confirm match**, **Not a match**, **Multi-person**, plus **Assign to legal**. Map to CA DROP `response_status` 3 / 5 / 4 (multi-person → 4 Opted out for selected persons per KB KD29). Numeric codes and “Promote-to-raw” copy stay secondary or hidden for `data_owner`. DWID multi-select on Confirm / Multi-person unchanged (R39–R41).
+- KD35. (session-settled: user-directed 2026-08-17 — chosen over copying Legal Home Variation B onto My work) **Port legal/admin workbench patterns, not the Legal command center** — data owner keeps **My work · Requests · Inbox · Connectors**. Port: dual-pane Inbox, four-stage detail overlay, grouping/due chrome, command palette **Requests + Actions** (no People). Do **not** port Legal Home funnel/heatmap/pulse, Settings sheet, or Legal Inbox chips (Unassigned · Notice · Delivery · Pre-matching holds).
+- KD36. (session-settled: user-directed 2026-08-17 — chosen over owner-starts-fulfillment and over waiting for SaaS API automation) **Legal kickoff, then owner manual fulfillment for SaaS** — Legal still starts fulfillment (`fulfillment.kickoff`). **Data** vertical stays **automatic** (Cassandra/CEPI). **Communications, People/HR, Tech, BizDev** owners mark each owned vertical complete in Inbox via **comment + named status** (KD37). Does **not** invent new fulfillment workers this slice.
+- KD37. (session-settled: user-directed 2026-08-17 — chosen over comment-only and over reusing DROP 3/4/5 for fulfillment) **SaaS fulfillment status updater** — required named status plus optional comment. v1 statuses: **In progress**, **Done in source**, **Blocked**, **Assign to legal**. Writes the vertical’s fulfillment attempt + correspondence body (audit metadata only). **Done in source** closes that vertical’s fulfillment leg. DROP 3/4/5 stay matching-disposition-only.
+- KD38. (session-settled: user-directed 2026-08-17 — chosen over discarding the incomplete persona forks) **Merge incomplete data-owner forks into this slice** — (1) nav Inbox badge uses matching + fulfillment counts, not ops `kind=all`; (2) Tasks tab fetch matches the Tasks filter (not matching-only); (3) mount command palette for `data_owner` with Requests + Actions, **no People** (legal/admin KD18 preserved).
 
 ### Actors
 
 - A1. **Super_admin** — maps verticals to systems and approaches; assigns owners to verticals; forces active mode; overrides cadence; resets owner wizard; retains global Connections admin (retest, force mode — **no** invite mint).
-- A2. **Vertical data owner** — assigned to one or more verticals via vertical-scoped role; on first login sees welcome and runs setup wizard; sets mode, connects (Live credentials+test or Upload validate) in-wizard, sets cadence, submits Upload refreshes or Live/SFTP credential rotation, disposes matching for owned systems.
+- A2. **Vertical data owner** — assigned to one or more verticals; first login → welcome → wizard; Live or Upload connect; matching disposition (KD34); after Legal kickoff, **manual SaaS fulfillment** in Inbox (KD36–KD37); re-upload when Live is down or unpermissioned.
 - A3. **Platform engineer** — configures vertical/system catalog bindings with super_admin; extends testers and workers within existing patterns.
 - A4. **Legal / admin** — request-wide journey and legal disposition; **not** vertical connector operators in v1 (see KD6).
 - A5. **Matching worker** — consumes freshness/rotation gate state before running vertical external matching attempts.
@@ -141,6 +148,19 @@ Connections onboarding shipped a secure credential path per system, but mutation
 - R31. **Must-fix: Connect Continue before connect+test** — on Connect step, Continue control **disabled** until Live inline test passes or Upload validates (KD27); pressing Continue **must not** trigger `wizard_incomplete` reminder or advance wizard while connection is untested. Regression target: Communications + Mailchimp + Live walkthrough path (KD30, AE21).
 - R32. **Tour reset on wizard reset** — `connections.wizard_reset` (KTD8) returns `clear_onboarding_tour: true` for assigned owners of that vertical; client clears tour persistence so tour is re-offered on subsequent logins once KD32-eligible again (KD33). In-app only — no SMTP invent (KTD13).
 
+**Data-owner workbench (2026-08-17)**
+
+- R59. **Post-match selector copy** — owner primary labels Confirm match / Not a match / Multi-person (KD34); map to DROP 3 / 5 / 4; hide “Promote-to-raw” and code-first chrome for `data_owner`.
+- R60. **Live down → Upload** — when Live test fails, is not set up, or is not permissioned, owner can switch to Upload or re-upload from Connectors **and** from an Inbox/detail **Needs refresh** callout (R8, KD18).
+- R61. **Owner Inbox tabs** — Matching · Fulfillment · Tasks (KD35). Default Matching. Fulfillment lists kicked-off SaaS legs for assigned verticals only.
+- R62. **Owner My work** — matching-review count, assigned-to-me count, fulfillment-waiting count, and connector action-required count. Not Legal Home Variation B.
+- R63. **SaaS fulfillment after kickoff** — Legal `fulfillment.kickoff` required first (KD36). Owner then sets KD37 status + optional comment for owned SaaS verticals. **Data** cluster is read-only automatic.
+- R64. **Fulfillment comment** — body in correspondence / queue-as-table; audit metadata only (actor, timestamp, action, request id, vertical id). No PII in logs.
+- R65. **Command palette for owners** — mount ⌘K for `data_owner` with Requests + Actions; omit People (KD38).
+- R66. **Nav Inbox badge** — data-owner badge counts matching + fulfillment work, not ops `kind=all` (KD38).
+- R67. **Tasks fetch** — Tasks tab requests `pending_tasks` (or `assignee=me` across matching + fulfillment), not matching-only (KD38).
+- R68. **No Legal queues on owner Inbox** — do not show Unassigned, Notice, Delivery, or Pre-matching holds chips to `data_owner`.
+
 **First-run IA sketch** (owner, incomplete connectors — user-directed 2026-08-13)
 
 | Step | Surface | Copy / action |
@@ -170,7 +190,7 @@ First name from Google IAP `given_name` (Jose confirmed OQ17). Generic body fall
 |-------|--------------|-------|
 | **Matching disposition** | CA DROP `response_status` 3 Deleted / 4 Opted out / 5 Not found + optional DWIDs | Approves matching review; **does not** auto-start Legal kickoff or Fulfillment (`Fulfill` button ≠ start fulfillment workflow) |
 | **Legal review** | Assignment-to-legal; legal read-only on matching disposition unless escalated | KTD11 / legal admin plans (`2026-07-23-001`–`027`) |
-| **Fulfillment** | `fulfillment.kickoff` on Fulfillment tab after legal review | **Data vertical (Cassandra/CEPI) is the only automatic fulfillment today**; Mailchimp/Paylocity/Lever/Auth0 automation **ships week of 2026-08-18** (Jose 2026-08-13) |
+| **Fulfillment** | `fulfillment.kickoff` on Fulfillment tab after legal review | **Data** stays automatic (Cassandra/CEPI). **SaaS** (Communications, People/HR, Tech, BizDev): owner marks **Done in source** (or Blocked / In progress) after kickoff — no new SaaS workers this slice (KD36–KD37) |
 | **Notice** | CA DROP response rows appended + uploaded | **Wednesday nights** — demo mentions Notice stage even if upload is scheduled/off-screen |
 
 **Demo beats** (Jose 2026-08-13 presentation + request-attempt chat [`c02a7e4a`](file:///Users/jsirven/.cursor/projects/Users-jsirven-Habeas-data-privacy/agent-transcripts/c02a7e4a-dd5a-4b22-9f73-0d3bff2063e8/c02a7e4a-dd5a-4b22-9f73-0d3bff2063e8.jsonl)):
@@ -181,7 +201,7 @@ First name from Google IAP `given_name` (Jose confirmed OQ17). Generic body fall
 | DWID assign | **Dropdown / multi-select** to assign which matched person(s) apply for status **3** or **4** |
 | Auto-assign DWID | Data owners: **pre-select all matched DWIDs** on 3/4 for 1:1 and multi (may deselect in multi) |
 | Bulk status | **Bulk status update** on inbox exact-1:1 threads |
-| Legal → fulfillment | Legal review first, then fulfillment — **Data auto only**; other verticals **this coming week** |
+| Legal → fulfillment | Legal kickoff first; **Data auto**; SaaS owner Inbox Fulfillment (KD36) |
 | Notice | Responses **appended and uploaded Wednesday nights** |
 
 **Request journey — matching disposition & audit** (merged from request-attempt chat)
@@ -211,7 +231,7 @@ First name from Google IAP `given_name` (Jose confirmed OQ17). Generic body fall
 - R55. **Demo exemplars** — demo vertical includes requests for all three match shapes: 1:1, 1:many, no-match — walk attempt audit then disposition per shape (R-DEMO-1).
 - R56. **Demo DWID picker** — multi-select checklist on status 3/4 is a first-class demo beat.
 - R57. **Demo bulk status** — inbox/thread bulk fulfill or bulk disposition on exact-1:1 threads.
-- R58. **Demo legal → fulfillment → notice** — narrative: matching disposition → legal review/kickoff → fulfillment (**Data auto only**; SaaS automation next week) → **Wednesday-night Notice** append + upload.
+- R58. **Demo legal → fulfillment → notice** — narrative: matching disposition (owner language, KD34) → legal review/kickoff → **Data auto** + **SaaS owner status updater** (KD36) → **Wednesday-night Notice** append + upload.
 
 **Explicit non-goals (request-attempt session):** persisting raw traceback/stdout; changing CA DROP rematch/retry loop; auto-starting Legal kickoff or Fulfillment from matching approve; unrestricted legal promote without assignment.
 
@@ -351,9 +371,23 @@ flowchart LR
 - F10. **End-to-end demo walkthrough** (Jose 2026-08-13 presentation + request-attempt chat)
   - **Trigger:** Demo or stakeholder review of vertical connectors + request journey.
   - **Actors:** A2 (data owner), A4 (legal — read-only unless assignment), A1 (`super_admin` ops override optional)
-  - **Steps:** (1) Owner completes connector wizard (F2) for assigned SaaS vertical. (2) Open exemplar requests on request journey workbench — **1:1**, **1:many**, **no-match** — drill attempt audit (R33–R37). (3) Set matching disposition with DWID multi-select / auto-assign (R38–R45); show bulk status on exact-1:1 inbox thread (R57). (4) Legal review → Fulfillment tab kickoff — **Data vertical auto fulfillment only**; note SaaS verticals ship week of 2026-08-18 (R58). (5) Mention **Notice** stage — responses appended + uploaded **Wednesday nights** via existing `drop_notice_dispatcher`.
-  - **Outcome:** Single scripted path from connector setup through Notice without inventing new fulfillment stacks; KD6 vertical scope visible throughout.
-  - **Covered by:** R33–R58, Adjacent journey table; UI per `2026-07-29-001`; fulfillment per `2026-07-21-001`
+  - **Steps:** (1) Owner completes connector wizard (F2) for assigned SaaS vertical. (2) Open exemplar requests on request journey workbench — **1:1**, **1:many**, **no-match** — drill attempt audit (R33–R37). (3) Set matching disposition with **owner-language** selector + DWID multi-select (R38–R45, KD34); show bulk status on exact-1:1 inbox thread (R57). (4) Legal review → Fulfillment kickoff — **Data auto**; **SaaS owner Inbox Fulfillment** status updater (R58, KD36). (5) Mention **Notice** stage — responses appended + uploaded **Wednesday nights** via existing `drop_notice_dispatcher`.
+  - **Outcome:** Single scripted path from connector setup through Notice; SaaS fulfillment is owner-manual after kickoff, not a new worker stack; KD6 vertical scope visible throughout.
+  - **Covered by:** R33–R68, Adjacent journey table; UI per `2026-07-29-001`; Data fulfillment per `2026-07-21-001`
+
+- F11. **Owner matching disposition (plain language)**
+  - **Trigger:** Matching review pending on owner Inbox.
+  - **Actors:** A2
+  - **Steps:** Open dual-pane Inbox; choose Confirm match / Not a match / Multi-person; select DWIDs when Confirm or Multi-person; optional Assign to legal.
+  - **Outcome:** DROP 3/5/4 recorded; Legal kickoff still required before fulfillment.
+  - **Covered by:** R59, KD34
+
+- F12. **Owner SaaS fulfillment after Legal kickoff**
+  - **Trigger:** Legal has kicked off fulfillment; SaaS vertical still open.
+  - **Actors:** A2, A4 (kickoff already done)
+  - **Steps:** Owner Inbox · Fulfillment → named status (In progress / Done in source / Blocked / Assign to legal) + optional comment. If Live failed, follow Needs refresh to Connectors and re-upload (F6).
+  - **Outcome:** Done in source closes that vertical’s fulfillment leg; Data remains automatic.
+  - **Covered by:** R60–R64, KD36, KD37
 
 ### Acceptance Examples
 
@@ -384,7 +418,12 @@ flowchart LR
 - AE25. **Covers R43, R44, KD6.** Legal user without assignment sees read-only matching disposition; `super_admin` sees ops override banner with same affordances as data owner.
 - AE26. **Covers R46–R48.** Matched contacts BQ-not-configured returns structured error; UI shows emphasized callout with retry — no PII in toast.
 - AE27. **Covers R57, F10.** Exact-1:1 inbox thread supports bulk status update across grouped requests.
-- AE28. **Covers R58, F10.** Demo narrative states Data-only auto fulfillment today; Notice stage cites Wednesday-night `drop_notice_dispatcher` cadence — no new fulfillment stack invented.
+- AE28. **Covers R58, F10.** Demo narrative: Data auto after Legal kickoff; SaaS owner Inbox Fulfillment status updater; Notice cites Wednesday-night `drop_notice_dispatcher`.
+- AE29. **Covers R59, KD34.** Data owner matching confirm dialog shows Confirm match / Not a match / Multi-person — not “CA DROP status result” as the legend.
+- AE30. **Covers R61, R63, KD36.** After Legal kickoff, Communications owner sees the request on Inbox · Fulfillment; Data cluster is read-only automatic.
+- AE31. **Covers R63, R64, KD37.** Owner sets Done in source + comment → fulfillment attempt closes; comment body not in audit payload.
+- AE32. **Covers R60.** Live Mailchimp test fails — Inbox callout + Connectors allow Upload re-upload without Ops invite.
+- AE33. **Covers R65–R67, KD38.** Owner ⌘K opens palette without People; Inbox badge ≠ ops-all; Tasks tab is not matching-only.
 
 ### Success Criteria
 
@@ -395,7 +434,8 @@ flowchart LR
 - SC4. Super_admin can force mode, override cadence, and reset wizard with auditable history.
 - SC5. No new parallel connection registry — vertical scope layers on shipped Connections and hash workers.
 
-- SC7. End-to-end demo walkthrough (F10) scriptable from connector wizard through Notice using exemplar 1:1 / 1:many / no-match requests; fulfillment and Notice cite existing journey + `drop_notice_dispatcher` plans only.
+- SC7. End-to-end demo walkthrough (F10) scriptable from connector wizard through Notice using exemplar 1:1 / 1:many / no-match requests; Data auto + SaaS owner status after Legal kickoff; Notice cites `drop_notice_dispatcher`.
+- SC8. Data-owner Inbox Fulfillment + owner-language matching selector + merged forks (KD34–KD38).
 
 ### Scope Boundaries
 
@@ -413,6 +453,7 @@ flowchart LR
 - Hard gate on matching; soft login reminders.
 - Extension of existing connections, testers, workers, attempt tables.
 - **Request journey demo authority** — matching disposition, attempt audit, bulk status, legal→fulfillment→notice demo beats (R33–R58, F10); UI implementation per `2026-07-29-001`, fulfillment per `2026-07-21-001`.
+- **Data-owner workbench (2026-08-17)** — owner-language post-match selector (KD34); port workbench density not Legal Home (KD35); SaaS manual fulfillment after Legal kickoff (KD36–KD37); merge incomplete DO forks (KD38).
 - **Remove invite URLs entirely** — Ops invite mint/mailto/revoke, `connection_invites` creation, owner `/connect/{token}` route + redeem API (KD22, KD30, R26).
 
 **Deferred for later**
@@ -489,9 +530,9 @@ flowchart LR
 
 ## Out of scope / related
 
-**Legal admin IA and fulfillment** (`docs/plans/2026-07-23-001` through `2026-07-27-001`) — separate program: Legal/admin Home, Inbox, request detail, correspondence, and fulfillment journeys. This plan owns **data-owner vertical connector setup and matching freshness gates** only; do not fold Legal persona nav, assignment-to-legal, or fulfillment Slice A/B into connector units.
+**Legal admin IA** (`docs/plans/2026-07-23-001` through `2026-07-27-001`) — Legal/admin Home Variation B, Settings sheet, and Legal Inbox chips stay those plans. This plan now **ports workbench density to data owners** (KD35) and **owner SaaS fulfillment after kickoff** (KD36) — it does **not** rebuild Legal Home or give owners legal close / Notice / Delivery queues.
 
-**Request journey workbench** (`docs/plans/2026-07-29-001`) — separate program for Legal/admin **detail chrome** (four-stage rail, per-vertical Matching/Fulfillment clusters, `fulfillment.kickoff`, Access identity-comment). This plan owns **connector onboarding + matching freshness gates** for data owners. When a SaaS vertical goes live, extend journey `LIVE_VERTICALS` and fulfillment attempt ledgers with a `vertical` column per journey KTD3 — do not conflate journey disposition rows with connector wizard state.
+**Request journey workbench** (`docs/plans/2026-07-29-001`) — still owns four-stage rail, per-vertical clusters, `fulfillment.kickoff`, Access identity-comment. This plan **extends** owner matching selector copy and owner Fulfillment-tab actions after kickoff. Do not conflate connector wizard state with journey disposition rows.
 
 ### Journey IA ↔ catalog vertical mapping (absorbed 2026-08-11 triage)
 
@@ -510,7 +551,7 @@ Journey workbench today (`vertical_dispositions.py`) uses **system slugs** for c
 
 **Intake spine** (`docs/plans/2026-07-16-001`): connector/ingestor split (DROP: `drop_connector` + `drop_ingestor`) is the pattern for intake lanes; SaaS verticals use Connections + external hash workers instead of new intake pollers.
 
-**Fulfillment automation** (`docs/plans/2026-07-21-001`): Data-vertical access export (`transform/access_export/`) and DROP suppression/notice remain authoritative for the **Data** vertical; per-system SaaS fulfillment dispatchers follow external-hash-workers + journey kickoff gates — not new Tier-C connectors in the intake-spine stub sense.
+**Fulfillment automation** (`docs/plans/2026-07-21-001`): Data-vertical access export and DROP suppression/notice remain authoritative for **Data** (automatic after kickoff). SaaS v1 is **manual owner status** after Legal kickoff (KD36) — do not invent Mailchimp/Paylocity/Lever/Auth0 fulfillment workers in this slice.
 
 ---
 
@@ -544,6 +585,10 @@ KD1–KD20 and settled KTD1–KTD14 preserved — KD21+ and KTD15+ extend scope.
 | KTD18 | **Onboarding tour:** `localStorage` key `habeas-cli.tour.v1.owner.{userId}` (`completed` \| `skipped`); **login hook** in AppShell after PostAuthSplash/welcome — offer when KD32-eligible and persistence unset; re-offer every login until terminal state (KD33); popover chain per F9 tab table; no SMTP (KD26, KTD13). |
 | KTD19 | **Brand constant:** `PLATFORM_NAME = 'Habeas Platform'`, `PLATFORM_SLUG = 'habeas-cli'` in `clients/web/src/lib/brand.ts`; all user-visible chrome + PostAuthSplash — not DROP/regulatory strings (KD28). |
 | KTD20 | **Tour reset:** `connections.wizard_reset` response includes `clear_onboarding_tour: true` for assigned owners of that vertical; client removes matching `habeas-cli.tour.v1.owner.{userId}` key; tour re-offers on later logins once KD32-eligible again (KD33, R32). v1 localStorage-only — no server-side tour ledger. |
+| KTD21 | **Owner matching selector:** keep `DropResponseStatusPicker` mapping 3/4/5; add owner-facing labels via a `persona="data_owner"` (or `plainLanguage`) prop. Confirm → 3, Multi-person → 4, Not a match → 5. Suggested chip stays. Files: `RequestTriageDialog.tsx`, inbox fulfill dialog, overlay matching pane. |
+| KTD22 | **SaaS fulfillment status API:** `PATCH /ops/requests/{id}/workflow/fulfillment/{attempt_id}/owner-status` (name flexible) — body `{ status, comment? }` where status ∈ `in_progress` \| `completed_in_source` \| `blocked` \| `assign_to_legal`. Gate: Legal kickoff already recorded; caller assigned to that vertical; system ≠ Data. Comment → correspondence row; audit metadata only. `completed_in_source` marks attempt succeeded without calling a SaaS worker. |
+| KTD23 | **Owner Inbox fetch:** `getNeedsAttention` for `data_owner` accepts `kind=matching\|fulfillment\|pending_tasks`. Nav badge: `kind` matching+fulfillment (or a small totals field). Do not call `getLegalNeedsAttention` for owners. |
+| KTD24 | **Owner palette:** `canAccessOwnerPalette(role)` = `canAccessLegalSurfaces(role) \|\| role === 'data_owner'`; `showPeople` remains `canAccessLegalSurfaces` only. |
 
 ### High-Level Technical Design
 
@@ -600,6 +645,7 @@ flowchart TB
 4. U11 (Live credentials API) before U13 owner Connect step UI
 5. U12 first-login welcome parallel with U13 once `/me` verticals stable
 6. U14 tour login hook after U12 welcome + U9 eligibility signals; U15 rename can land anytime (low coupling)
+7. **2026-08-17:** U16 selector + fork fixes (web-only) parallel with U17 API; U18 Inbox/My work after U17; U19 freshness callout after U9 + U18
 
 ### Parallel ownership (ce-work)
 
@@ -628,6 +674,10 @@ Disjoint file ownership for up to 10 implementers — see Unit Index `files touc
 | U13 | Mode explainer + Connect step gating (Live/Upload) | extend `owner/connectors.tsx`, `owner-connector-ui.ts`, reuse `ConnectForm` fields | U9, U11 |
 | U14 | Post-login onboarding tour | `OnboardingTour` component, `AppShell` login hook | U4, U9, U12 |
 | U15 | Habeas Platform rename (all chrome) | `brand.ts`, `AppShell.tsx`, `PostAuthSplash.tsx`, `index.html`, splash variants; **remove** `connect.$token.tsx` route | — |
+| U16 | Owner matching selector + incomplete-fork fixes | `RequestTriageDialog.tsx`, `needs-attention.tsx`, `NavMenu.tsx`, `AppShell.tsx`, `CommandPalette.tsx` | U9 |
+| U17 | SaaS owner-status fulfillment API | fulfillment workflow route + tests; correspondence write | U3, journey kickoff |
+| U18 | Owner Inbox Fulfillment + My work counts | `needs-attention.tsx`, `index.tsx` DataOwnerHome | U16, U17 |
+| U19 | Live-down Inbox callout → Connectors upload | Inbox/detail freshness chip → `/owner/connectors` | U9, U18 |
 
 ### U1. Schema: verticals, assignments, mode events, system CHECKs
 
@@ -833,6 +883,54 @@ Disjoint file ownership for up to 10 implementers — see Unit Index `files touc
 - **Verification:** bun test; grep audit
 - **Dependencies:** None (parallel)
 
+### U16. Owner matching selector + incomplete-fork fixes
+
+- **Goal:** Owner-language post-match selector (KD34) and merge the three incomplete data-owner forks (KD38).
+- **Requirements:** R59, R65–R67; KD34, KD35, KD38
+- **Files:** Modify `clients/web/src/components/requests/RequestTriageDialog.tsx`, `clients/web/src/routes/requests/needs-attention.tsx`, `clients/web/src/components/NavMenu.tsx`, `clients/web/src/components/AppShell.tsx`, `clients/web/src/components/CommandPalette.tsx`; tests beside those modules
+- **Approach:** `DropResponseStatusPicker` owner labels Confirm match / Not a match / Multi-person mapping 3/5/4. Nav badge: matching+fulfillment for `data_owner`. Tasks tab fetch `pending_tasks`. Palette: mount for `data_owner`, `showPeople` still legal/admin only.
+- **Test scenarios:**
+  - AE29: owner dialog legend is not “CA DROP status result”.
+  - AE33: badge/Tasks/palette forks.
+  - Edge: legal/admin picker copy unchanged.
+- **Verification:** `cd clients/web && bun test`
+- **Dependencies:** U9
+
+### U17. SaaS owner-status fulfillment API
+
+- **Goal:** After Legal kickoff, assigned owners set KD37 status + optional comment on a SaaS fulfillment attempt (KTD22).
+- **Requirements:** R63, R64; KD36, KD37
+- **Files:** Modify fulfillment workflow module under `app/admin_api/src/admin_api/` (existing kickoff/status routes); add tests; correspondence write path already used by inbox comments
+- **Approach:** Gate on kickoff recorded + vertical assignment + system not Data. `completed_in_source` succeeds the attempt without a SaaS worker. `assign_to_legal` reuses existing assignment. Comment bodies not in audit JSONB.
+- **Test scenarios:**
+  - AE31: Done in source closes attempt; comment not in audit.
+  - Error: no kickoff → 409; Data vertical → 422; other vertical’s owner → 403.
+  - Privacy: no PII in logs.
+- **Verification:** targeted pytest on the new tests
+- **Dependencies:** U3; existing `fulfillment.kickoff`
+
+### U18. Owner Inbox Fulfillment + My work counts
+
+- **Goal:** Data-owner Inbox adds Fulfillment tab; My work shows matching, assigned, fulfillment-waiting, connector action-required (KD35).
+- **Requirements:** R61, R62, R68; KD35, KD36
+- **Files:** Modify `clients/web/src/routes/requests/needs-attention.tsx`, `clients/web/src/routes/index.tsx`; `DATA_OWNER_INBOX_KIND_TABS`
+- **Approach:** Tabs Matching · Fulfillment · Tasks. Fulfillment pane: KD37 status updater + comment composer (required status, optional comment). Data cluster read-only “Automatic”. Do not render Legal chips.
+- **Test scenarios:**
+  - AE30: kicked-off Communications row on Fulfillment; Data not owner-actionable.
+  - Edge: no kickoff → not in Fulfillment tab.
+- **Verification:** bun test for tab/fetch helpers
+- **Dependencies:** U16, U17
+
+### U19. Live-down Inbox callout → Connectors upload
+
+- **Goal:** When Live is failing, unset, or unpermissioned, owner can re-upload from Inbox/detail without an invite (R60).
+- **Requirements:** R60, R8, R11; KD18
+- **Files:** Inbox detail + overlay matching/fulfillment panes; link to `/owner/connectors?vertical={id}`
+- **Approach:** Reuse gated display status. Callout **Needs refresh** / **Action required** with CTA to wizard Connect/Upload. No Ops invite copy.
+- **Test scenarios:** AE32; edge: Data view-only has no upload CTA.
+- **Verification:** bun test for callout visibility helpers
+- **Dependencies:** U9, U18
+
 ---
 
 ## Verification Contract
@@ -869,7 +967,7 @@ Release validate: not required for this control-plane feature unless infra bucke
 
 ### Global
 
-- [ ] `artifact_readiness: implementation-ready` executed via U1–U15 (U1–U10 shipped; U11–U15 extend onboarding UX)
+- [ ] `artifact_readiness: implementation-ready` executed via U1–U19 (U1–U10 shipped; U11–U15 onboarding; U16–U19 data-owner workbench)
 - [ ] AE1–AE22 evidenced by automated tests and/or browser proof
 - [ ] SC1–SC6 met or explicitly deferred with Product Contract deferred list
 - [ ] No parallel connection registry; extends shipped Connections + hash workers (KD7)
@@ -896,13 +994,17 @@ Release validate: not required for this control-plane feature unless infra bucke
 - [ ] U14: post-login onboarding tour (AE16, AE20, AE22)
 - [ ] U15: Habeas Platform rename (AE18)
 - [ ] U8: Ops invite mint retired for SaaS (AE17)
+- [ ] U16: owner matching selector + fork fixes (AE29, AE33)
+- [ ] U17: SaaS owner-status API (AE31)
+- [ ] U18: owner Inbox Fulfillment + My work (AE30)
+- [ ] U19: Live-down → Connectors upload (AE32)
 
 ### Slice boundaries (explicit non-goals in this ship)
 
 - Paylocity GCP inbound SFTP host / automated Live extract beyond credential mode + tester
 - Google Sheets live API / owner sheet-share
 - Full `bizdev_contacts` / `hr_alumni` matching workers + multi-hash mart expansion
-- Journey `LIVE_VERTICALS` flip for SaaS
+- Journey `LIVE_VERTICALS` flip for SaaS **matching workers** (owner manual fulfillment after kickoff still ships — KD36)
 - SMTP reminder delivery
 - CLI `connections list/test` unless Ops path insufficient
 - Ops-variant super_admin onboarding tour (OQ15)

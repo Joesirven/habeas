@@ -31,6 +31,8 @@ import {
   matchingConnectorGateBannerCopy,
   matchingConnectorGateChip,
   matchingGateFromAttempts,
+  ownerConnectorsSearch,
+  overlayCalloutShowsOwnerCta,
   resolveMatchingConnectorGate,
   type MatchingConnectorGate,
 } from '@/lib/connection-display'
@@ -47,6 +49,67 @@ import { cn } from '@/lib/utils'
  * - Promote/fulfill callbacks: `(status, dwids?) => void` — pass selected dwids for
  *   3/4, empty/`[]` for 5.
  */
+export const OWNER_RESPONSE_STATUS_OPTIONS: {
+  code: DropResponseStatusCode
+  label: string
+}[] = [
+  { code: 3, label: 'Confirm match' },
+  { code: 4, label: 'Multi-person' },
+  { code: 5, label: 'Not a match' },
+]
+
+export type DropResponseStatusPersona = 'data_owner' | 'legal' | 'ops'
+
+const LEGAL_OPS_HELPER =
+  'Confirm the response status code written to DROP (3 Deleted · 4 Opted out · 5 Not found). Distinct from ingest Promote-to-raw.'
+
+/** Persona chrome for Inbox fulfill confirm — AE29 owner language vs legal/ops codes. */
+export function dropResponseStatusPickerChrome(
+  persona?: DropResponseStatusPersona,
+) {
+  const ownerLanguage = persona === 'data_owner'
+  return {
+    ownerLanguage,
+    options: ownerLanguage
+      ? OWNER_RESPONSE_STATUS_OPTIONS
+      : DROP_RESPONSE_STATUS_OPTIONS,
+    legend: ownerLanguage ? 'Match result' : 'CA DROP status result',
+    helperText: ownerLanguage ? null : LEGAL_OPS_HELPER,
+    ariaLabel: ownerLanguage ? 'Match result' : 'DROP response status',
+    showCodes: !ownerLanguage,
+  }
+}
+
+export function ownerDropStatusLabel(code: number | null | undefined): string | null {
+  return (
+    OWNER_RESPONSE_STATUS_OPTIONS.find((row) => row.code === code)?.label ?? null
+  )
+}
+
+export function matchingDispositionCopy(persona?: DropResponseStatusPersona) {
+  const chrome = dropResponseStatusPickerChrome(persona)
+  if (chrome.ownerLanguage) {
+    return {
+      blurb:
+        'Matching disposition — Confirm the match result (Confirm match, Multi-person, or Not a match) and which selected people apply. Does not start Legal kickoff.',
+      confirmTitle: 'Confirm this match?',
+      confirmLabel: 'Confirm',
+      pendingLabel: 'Confirming…',
+      confirmDescription: (shortId: string) =>
+        `Confirm the match result for ${shortId}…. This cannot be undone from here.`,
+    }
+  }
+  return {
+    blurb:
+      'Matching disposition — Choose CA DROP status (3 Deleted · 4 Opted out · 5 Not found) and which matched people apply. Approves matching review for fulfillment readiness; does not start Legal kickoff.',
+    confirmTitle: 'Fulfill this match?',
+    confirmLabel: 'Fulfill',
+    pendingLabel: 'Fulfilling…',
+    confirmDescription: (shortId: string) =>
+      `Approve matching review for ${shortId}… and set the CA DROP status result. This cannot be undone from the inbox.`,
+  }
+}
+
 export function DropResponseStatusPicker({
   value,
   onChange,
@@ -55,6 +118,7 @@ export function DropResponseStatusPicker({
   contacts,
   selectedDwids,
   onSelectedDwidsChange,
+  persona,
 }: {
   value: DropResponseStatusCode | null
   onChange: (code: DropResponseStatusCode) => void
@@ -63,7 +127,10 @@ export function DropResponseStatusPicker({
   contacts?: MatchedPersonContact[]
   selectedDwids?: string[]
   onSelectedDwidsChange?: (dwids: string[]) => void
+  /** data_owner: Confirm match / Multi-person / Not a match. Legal/ops keep code+label chrome. */
+  persona?: DropResponseStatusPersona
 }) {
+  const chrome = dropResponseStatusPickerChrome(persona)
   const needsDwids = value === 3 || value === 4
   const showDwidSelect =
     needsDwids &&
@@ -74,14 +141,17 @@ export function DropResponseStatusPicker({
   return (
     <fieldset className="space-y-1.5" disabled={disabled}>
       <legend className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
-        CA DROP status result
+        {chrome.legend}
       </legend>
-      <p className="text-[0.65rem] text-ink-soft">
-        Confirm the response status code written to DROP (3 Deleted · 4 Opted out ·
-        5 Not found). Distinct from ingest Promote-to-raw.
-      </p>
-      <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="DROP response status">
-        {DROP_RESPONSE_STATUS_OPTIONS.map((option) => {
+      {chrome.helperText ? (
+        <p className="text-[0.65rem] text-ink-soft">{chrome.helperText}</p>
+      ) : null}
+      <div
+        className="flex flex-wrap gap-1.5"
+        role="radiogroup"
+        aria-label={chrome.ariaLabel}
+      >
+        {chrome.options.map((option) => {
           const selected = value === option.code
           const isSuggested = suggested === option.code
           return (
@@ -100,7 +170,9 @@ export function DropResponseStatusPicker({
                 disabled && 'opacity-50',
               )}
             >
-              <span className="font-mono tabular-nums">{option.code}</span>
+              {chrome.showCodes ? (
+                <span className="font-mono tabular-nums">{option.code}</span>
+              ) : null}
               <span>{option.label}</span>
               {isSuggested && !selected ? (
                 <span className="text-[0.55rem] text-mute">suggested</span>
@@ -120,7 +192,9 @@ export function DropResponseStatusPicker({
       ) : null}
       {value === 5 ? (
         <p className="text-[0.65rem] text-mute">
-          Not found — matched DWIDs are not sent (selection cleared).
+          {chrome.ownerLanguage
+            ? 'Not a match — selected people are not sent (selection cleared).'
+            : 'Not found — matched DWIDs are not sent (selection cleared).'}
         </p>
       ) : null}
     </fieldset>
@@ -1057,14 +1131,18 @@ export function MatchingConnectorGateBanner({
   gate,
   compact = false,
   showOwnerLink = false,
+  connectorsVerticalId = null,
 }: {
   gate: MatchingConnectorGate | null | undefined
   compact?: boolean
   showOwnerLink?: boolean
+  connectorsVerticalId?: string | null
 }) {
   if (!gate?.blocked) return null
   const chip = matchingConnectorGateChip(gate)
   const copy = matchingConnectorGateBannerCopy(gate)
+  const showConnectorsCta =
+    showOwnerLink && overlayCalloutShowsOwnerCta('data_owner', connectorsVerticalId)
   return (
     <div
       className={cn(
@@ -1080,9 +1158,10 @@ export function MatchingConnectorGateBanner({
         <span className="text-[0.7rem] font-medium text-red-950">{copy.title}</span>
       </div>
       <p className="mt-1 text-[0.65rem] leading-snug text-red-900/90">{copy.description}</p>
-      {showOwnerLink && gate.source === 'reminder' ? (
+      {showConnectorsCta ? (
         <Link
           to="/owner/connectors"
+          search={ownerConnectorsSearch(connectorsVerticalId)}
           className="mt-1 inline-block text-[0.65rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
         >
           Open connectors
@@ -1145,6 +1224,7 @@ export function MatchingReviewPanel({
   hideActions = false,
   connectorReminders,
   fetchConnectorConnections = false,
+  persona,
 }: {
   requestId: string
   matching: MatchingResultDetail | null | undefined
@@ -1165,6 +1245,8 @@ export function MatchingReviewPanel({
   connectorReminders?: ConnectorReminder[] | null
   /** Ops/admin — load gated connections when attempts lack gate audit. */
   fetchConnectorConnections?: boolean
+  /** Owner-language picker when `data_owner`; legal/ops keep code chrome. */
+  persona?: 'data_owner' | 'legal' | 'ops'
 }) {
   const [confirm, setConfirm] = useState<'fulfill' | 'decline' | null>(null)
   const suggestedStatus = suggestedDropResponseStatus(
@@ -1227,16 +1309,19 @@ export function MatchingReviewPanel({
     />
   ) : null
 
+  const dispositionCopy = matchingDispositionCopy(persona)
+  const ownerConnectorVertical =
+    connectorReminders?.find((reminder) => reminder.severity === 'overdue')
+      ?.vertical_id ?? connectorReminders?.[0]?.vertical_id ?? null
+
   const reviewActions = canReviewActions && !hideActions ? (
     <div className="space-y-1.5 pt-1">
-      <p className="text-[0.65rem] text-ink-soft">
-        <span className="font-medium text-ink">Matching disposition</span> — Choose CA DROP
-        status (3 Deleted · 4 Opted out · 5 Not found) and which matched people apply. Approves
-        matching review for fulfillment readiness; does not start Legal kickoff.
-      </p>
+      <p className="text-[0.65rem] text-ink-soft">{dispositionCopy.blurb}</p>
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" disabled={actionPending} onClick={() => setConfirm('fulfill')}>
-          {actionPending && confirm === 'fulfill' ? 'Fulfilling…' : 'Fulfill'}
+          {actionPending && confirm === 'fulfill'
+            ? dispositionCopy.pendingLabel
+            : dispositionCopy.confirmLabel}
         </Button>
         <Button
           size="sm"
@@ -1371,9 +1456,9 @@ export function MatchingReviewPanel({
         onOpenChange={(open) => {
           if (!open && !actionPending) setConfirm(null)
         }}
-        title="Fulfill this match?"
-        description={`Approve matching review for ${requestId.slice(0, 8)}… and set the CA DROP status result. This cannot be undone from the inbox.`}
-        confirmLabel="Fulfill"
+        title={dispositionCopy.confirmTitle}
+        description={dispositionCopy.confirmDescription(requestId.slice(0, 8))}
+        confirmLabel={dispositionCopy.confirmLabel}
         confirming={actionPending && confirm === 'fulfill'}
         confirmDisabled={fulfillStatus == null || !fulfillDwidsReady}
         onConfirm={() => {
@@ -1390,6 +1475,7 @@ export function MatchingReviewPanel({
           contacts={matching?.matched_contacts}
           selectedDwids={selectedDwids}
           onSelectedDwidsChange={setSelectedDwids}
+          persona={persona}
         />
       </ConfirmActionDialog>
       <ConfirmActionDialog
@@ -1424,7 +1510,8 @@ export function MatchingReviewPanel({
       <MatchingConnectorGateBanner
         gate={connectorGate}
         compact={compact}
-        showOwnerLink={Boolean(connectorReminders?.length)}
+        showOwnerLink={persona === 'data_owner'}
+        connectorsVerticalId={ownerConnectorVertical}
       />
       {processStrip}
       {matching && layout === 'tabs' ? tabsBody : null}

@@ -23,7 +23,9 @@ import {
   getHealth,
   getLegalPortfolio,
   getNeedsAttention,
+  getOwnerFulfillmentNeedsAttention,
 } from '@/lib/api'
+import { ownerConnectorActionRequiredCount } from '@/lib/connection-display'
 import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
 
 function OperatorDashboardHome() {
@@ -463,6 +465,7 @@ function LegalHome() {
 }
 
 function DataOwnerHome() {
+  const { me } = useMe()
   const attentionQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'do-home'],
     queryFn: () => getNeedsAttention({ limit: 1000, kind: 'matching' }),
@@ -476,8 +479,17 @@ function DataOwnerHome() {
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })
+  const fulfillmentQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'do-fulfillment'],
+    queryFn: () => getOwnerFulfillmentNeedsAttention({ limit: 1000 }),
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  })
   const items = attentionQuery.data?.items ?? []
   const mine = assignedQuery.data?.items.length ?? 0
+  const fulfillmentWaiting =
+    fulfillmentQuery.data?.total ?? fulfillmentQuery.data?.items.length ?? 0
+  const connectorCount = ownerConnectorActionRequiredCount(me)
 
   return (
     <section className="space-y-6">
@@ -487,8 +499,8 @@ function DataOwnerHome() {
           My work
         </h2>
         <p className="mt-2 max-w-xl text-sm text-ink-soft">
-          Approve recommended CA DROP statuses, comment, escalate to Legal, or assign an
-          employee.
+          Review matches and fulfill assigned SaaS systems after Legal kickoff. Data
+          fulfillment runs automatically.
         </p>
       </header>
       <div className="grid gap-3 sm:grid-cols-2">
@@ -511,6 +523,24 @@ function DataOwnerHome() {
           <p className="font-display text-3xl tabular-nums text-ink">
             {assignedQuery.isPending && !assignedQuery.data ? '—' : mine}
           </p>
+        </Link>
+        <Link
+          to="/requests/needs-attention"
+          search={{ kind: 'fulfillment' }}
+          className="taste-panel-soft block space-y-1 p-4"
+        >
+          <p className="text-[0.65rem] uppercase tracking-wide text-mute">Fulfillment waiting</p>
+          <p className="font-display text-3xl tabular-nums text-ink">
+            {fulfillmentQuery.isPending && !fulfillmentQuery.data ? '—' : fulfillmentWaiting}
+          </p>
+        </Link>
+        <Link to="/owner/connectors" className="taste-panel-soft block space-y-1 p-4">
+          <p className="text-[0.65rem] uppercase tracking-wide text-mute">Connectors</p>
+          {connectorCount == null ? (
+            <p className="text-sm text-ink-soft">Open connector setup and reminders</p>
+          ) : (
+            <p className="font-display text-3xl tabular-nums text-ink">{connectorCount}</p>
+          )}
         </Link>
       </div>
       <Button asChild size="sm">

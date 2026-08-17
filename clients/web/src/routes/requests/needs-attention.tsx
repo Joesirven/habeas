@@ -47,6 +47,7 @@ import {
   getLegalNeedsAttention,
   getLegalOperators,
   getNeedsAttention,
+  getOwnerFulfillmentNeedsAttention,
   getBatchJourneyWorkbench,
   getRequest,
   getRequestComments,
@@ -54,6 +55,7 @@ import {
   getRequestJourneyWorkbench,
   getRequestTimeline,
   patchAccessDeliveryStatus,
+  patchFulfillmentOwnerStatus,
   postDropMatchingResultDecline,
   postDropMatchingResultPromote,
   postDropWorkflowAssign,
@@ -64,6 +66,7 @@ import {
   postTriageSendToMatching,
   suggestedDropResponseStatus,
   type DropResponseStatusCode,
+  type FulfillmentOwnerStatus,
   type IdentityVerificationRecord,
   type IntakeSource,
   type MatchingResultDetail,
@@ -71,6 +74,7 @@ import {
   type RequestRecord,
   type TimelineEntry,
   type WorkbenchVerticalBatchRow,
+  type WorkbenchVerticalRow,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
 import {
@@ -181,6 +185,7 @@ type InboxKind =
   | 'delivery'
   | 'notice'
   | 'communications'
+  | 'fulfillment'
   | 'pending_tasks'
 type MatchFilter = 'all' | 'single_match' | 'multi_match' | 'not_found' | 'unknown'
 type DueFilter = 'all' | 'overdue' | 'due_soon' | 'on_track'
@@ -303,11 +308,64 @@ function matchesLegalInboxFilter(
   }
 }
 
-/** Data-owner / employee queue — matching review + assigned Tasks. */
-const DATA_OWNER_INBOX_KIND_TABS: { value: InboxKind; label: string }[] = [
+/** Data-owner / employee queue — Matching · Fulfillment · Tasks (R61). */
+export const DATA_OWNER_INBOX_KIND_TABS: { value: InboxKind; label: string }[] = [
   { value: 'matching', label: 'Matching' },
+  { value: 'fulfillment', label: 'Fulfillment' },
   { value: 'pending_tasks', label: 'Tasks' },
 ]
+
+const AUTOMATIC_FULFILLMENT_VERTICALS = new Set(['data', 'cassandra'])
+
+const OWNER_FULFILLMENT_STATUS_OPTIONS: {
+  value: FulfillmentOwnerStatus
+  label: string
+}[] = [
+  { value: 'in_progress', label: 'In progress' },
+  { value: 'completed_in_source', label: 'Done in source' },
+  { value: 'blocked', label: 'Blocked' },
+  { value: 'assign_to_legal', label: 'Assign to legal' },
+]
+
+const OWNER_STATUS_SUCCESS_TITLE: Record<FulfillmentOwnerStatus, string> = {
+  in_progress: 'Fulfillment marked in progress',
+  completed_in_source: 'Marked done in source',
+  blocked: 'Fulfillment marked blocked',
+  assign_to_legal: 'Assigned to legal',
+}
+
+/** Data / Cassandra fulfill automatically after Legal kickoff (KD36). */
+export function isAutomaticFulfillmentVertical(vertical: string | null | undefined): boolean {
+  return AUTOMATIC_FULFILLMENT_VERTICALS.has((vertical ?? '').trim().toLowerCase())
+}
+
+/** Kicked-off fulfillment still on the owner Inbox · Fulfillment lane (R61). */
+export function isOwnerFulfillmentItem(item: NeedsAttentionItem): boolean {
+  if (isTriageItem(item) || isNoticeItem(item) || isDeliveryItem(item)) return false
+  if (isAssignmentToLegalItem(item)) return false
+  const stage = (item.current_stage ?? '').trim().toLowerCase()
+  const reason = (item.reason ?? '').trim().toLowerCase()
+  return (
+    stage === 'fulfillment' ||
+    stage === 'fulfill' ||
+    reason === 'fulfillment.kickoff' ||
+    reason === 'fulfillment.owner'
+  )
+}
+
+export function ownerStatusErrorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error ?? '')
+  if (/kickoff_not_approved/i.test(raw)) {
+    return 'Legal has not kicked off this vertical yet.'
+  }
+  if (/data_vertical_automatic/i.test(raw)) {
+    return 'The Data vertical fulfills automatically.'
+  }
+  if (/vertical access denied/i.test(raw)) {
+    return 'You are not assigned to this vertical.'
+  }
+  return actionToast.safeErrorMessage(error)
+}
 
 function isTriageItem(item: NeedsAttentionItem): boolean {
   return (
@@ -401,12 +459,38 @@ function formatInboxTimestamp(value: string | null | undefined): string {
   return date.toLocaleString()
 }
 
-function matchTypeLabel(matchType: string | null | undefined): string {
+export function matchTypeLabel(
+  matchType: string | null | undefined,
+  ownerLanguage = false,
+): string {
   if (!matchType) return 'No match data'
-  if (matchType === 'single_match') return 'Single match'
+  if (matchType === 'single_match') return ownerLanguage ? 'Confirm match' : 'Single match'
   if (matchType === 'multi_match') return 'Multi-person'
-  if (matchType === 'not_found') return 'Not found'
+  if (matchType === 'not_found') return ownerLanguage ? 'Not a match' : 'Not found'
   return matchType.replaceAll('_', ' ')
+}
+
+const OWNER_MATCH_RESULT_BY_CODE: Record<number, string> = {
+  3: 'Confirm match',
+  4: 'Multi-person',
+  5: 'Not a match',
+}
+
+export function ownerMatchResultLabel(code: number): string {
+  return OWNER_MATCH_RESULT_BY_CODE[code] ?? formatDropStatusCode(code)
+}
+
+/** Bulk / thread default — multi → 4, not-found → 5, else 3 (never hardcode 3). */
+export function suggestedBulkFulfillStatus(
+  items: Array<Pick<NeedsAttentionItem, 'match_type' | 'match_count'>>,
+): DropResponseStatusCode {
+  if (items.length === 0) return 3
+  const suggestions = items.map((item) =>
+    suggestedDropResponseStatus(item.match_type, item.match_count),
+  )
+  if (suggestions.some((code) => code === 4)) return 4
+  if (suggestions.every((code) => code === 5)) return 5
+  return suggestions[0] ?? 3
 }
 
 function matchingStatusLabel(reviewStatus: string | null | undefined): string {
@@ -458,9 +542,10 @@ function resolveDropStatusCode(
  * Prefer actual `response_status` when present; otherwise recommended/suggested code.
  * Green when set/complete; amber when matched but not yet fulfilled; mute when unknown.
  */
-function dropStatusPill(
+export function dropStatusPill(
   item: NeedsAttentionItem,
   matching?: MatchingResultDetail | null,
+  ownerLanguage = false,
 ): { label: string; tone: 'set' | 'pending' | 'unknown' } | null {
   if (item.intake_source !== 'drop') return null
   const code = resolveDropStatusCode(item, matching)
@@ -482,6 +567,19 @@ function dropStatusPill(
       reviewStatus === 'pending' ||
       item.reason === 'matching.review' ||
       item.current_stage === 'review')
+
+  if (ownerLanguage) {
+    if (statusSet && code != null) {
+      return { label: `Match result · ${ownerMatchResultLabel(code)}`, tone: 'set' }
+    }
+    if (code != null) {
+      return { label: `Match result · ${ownerMatchResultLabel(code)}`, tone: 'pending' }
+    }
+    if (matchedPending) {
+      return { label: 'Match result · pending', tone: 'pending' }
+    }
+    return { label: 'Match result · unknown', tone: 'unknown' }
+  }
 
   if (statusSet && code != null) {
     return {
@@ -562,6 +660,7 @@ function inboxItemTitle(item: NeedsAttentionItem): string {
   if (isDeliveryItem(item)) return 'Access delivery'
   if (isNoticeItem(item)) return 'Fulfillment notice'
   if (isCommsItem(item)) return 'Communications'
+  if (isOwnerFulfillmentItem(item)) return 'Fulfillment'
   if (isFulfillmentLegalItem(item)) return 'Pre-fulfillment'
   return reasonLabel(item.reason)
 }
@@ -1481,12 +1580,14 @@ function RequestProcessSummary({
   identity,
   identityPending,
   legalPersona = false,
+  dataOwnerPersona = false,
 }: {
   item: NeedsAttentionItem
   matching?: MatchingResultDetail | null
   identity?: IdentityVerificationRecord | null
   identityPending?: boolean
   legalPersona?: boolean
+  dataOwnerPersona?: boolean
 }) {
   const channel = SOURCE_LABELS[item.intake_source] ?? item.intake_source
   const matchType = matching?.match_type ?? item.match_type
@@ -1533,7 +1634,7 @@ function RequestProcessSummary({
     rows.push({
       label: 'Matching',
       value: [
-        matchType ? matchTypeLabel(matchType) : null,
+        matchType ? matchTypeLabel(matchType, dataOwnerPersona) : null,
         matchCount != null ? `${matchCount} matches` : null,
         matchingStatusLabel(reviewStatus),
       ]
@@ -1543,8 +1644,10 @@ function RequestProcessSummary({
   }
   if (recommended != null) {
     rows.push({
-      label: 'DROP response',
-      value: formatDropStatusCode(recommended),
+      label: dataOwnerPersona ? 'Match result' : 'DROP response',
+      value: dataOwnerPersona
+        ? ownerMatchResultLabel(recommended)
+        : formatDropStatusCode(recommended),
     })
   }
 
@@ -1571,11 +1674,189 @@ function RequestProcessSummary({
   )
 }
 
+function ownerFulfillmentVerticalRows(options: {
+  cluster: WorkbenchVerticalRow[]
+  assignedVerticals?: string[]
+  assignedLabels?: { vertical_id: string; display_label: string }[]
+}): { vertical: string; label: string; kickedOff: boolean }[] {
+  const byId = new Map<string, { vertical: string; label: string; kickedOff: boolean }>()
+  for (const row of options.cluster) {
+    const id = row.vertical.trim()
+    if (!id) continue
+    byId.set(id, {
+      vertical: id,
+      label: row.label || id.replaceAll('_', ' '),
+      kickedOff: row.kicked_off,
+    })
+  }
+  const labels = new Map(
+    (options.assignedLabels ?? []).map((entry) => [entry.vertical_id, entry.display_label]),
+  )
+  for (const vertical of options.assignedVerticals ?? []) {
+    const id = vertical.trim()
+    if (!id || byId.has(id)) continue
+    byId.set(id, {
+      vertical: id,
+      label: labels.get(id) || id.replaceAll('_', ' '),
+      kickedOff: true,
+    })
+  }
+  return [...byId.values()]
+}
+
+function OwnerFulfillmentStatusPanel({
+  requestId,
+  cluster,
+  assignedVerticals,
+  assignedLabels,
+  canSubmit,
+}: {
+  requestId: string
+  cluster: WorkbenchVerticalRow[]
+  assignedVerticals?: string[]
+  assignedLabels?: { vertical_id: string; display_label: string }[]
+  canSubmit: boolean
+}) {
+  const queryClient = useQueryClient()
+  const rows = ownerFulfillmentVerticalRows({
+    cluster,
+    assignedVerticals,
+    assignedLabels,
+  })
+  const [statusByVertical, setStatusByVertical] = useState<
+    Record<string, FulfillmentOwnerStatus | ''>
+  >({})
+  const [commentByVertical, setCommentByVertical] = useState<Record<string, string>>({})
+
+  const submitMutation = useMutation({
+    mutationFn: (input: {
+      vertical: string
+      status: FulfillmentOwnerStatus
+      comment?: string
+    }) => patchFulfillmentOwnerStatus(requestId, input.vertical, {
+      status: input.status,
+      ...(input.comment ? { comment: input.comment } : {}),
+    }),
+    onSuccess: async (_data, variables) => {
+      setCommentByVertical((previous) => ({ ...previous, [variables.vertical]: '' }))
+      actionToast.success({ title: OWNER_STATUS_SUCCESS_TITLE[variables.status] })
+      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+    },
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Could not update fulfillment',
+        description: ownerStatusErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => submitMutation.mutate(variables),
+        },
+      })
+    },
+  })
+
+  if (rows.length === 0) {
+    return (
+      <p className="text-[0.7rem] text-ink-soft">
+        No owned fulfillment verticals on this request yet.
+      </p>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      {rows.map((row) => {
+        const automatic = isAutomaticFulfillmentVertical(row.vertical)
+        const status = statusByVertical[row.vertical] ?? ''
+        const comment = commentByVertical[row.vertical] ?? ''
+        const pending =
+          submitMutation.isPending && submitMutation.variables?.vertical === row.vertical
+        return (
+          <div
+            key={row.vertical}
+            className="space-y-2 rounded-md border border-line/80 bg-paper px-2.5 py-2"
+          >
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <p className="text-[0.7rem] font-medium capitalize text-ink">{row.label}</p>
+              {automatic ? (
+                <Badge variant="default" className="normal-case tracking-normal">
+                  Automatic
+                </Badge>
+              ) : null}
+            </div>
+            {automatic ? (
+              <p className="text-[0.65rem] text-ink-soft">
+                Data fulfills automatically after Legal kickoff. No owner status to set.
+              </p>
+            ) : (
+              <>
+                <label className="flex flex-col gap-1 text-[0.65rem] text-ink-soft">
+                  Status
+                  <select
+                    className="rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
+                    value={status}
+                    onChange={(event) =>
+                      setStatusByVertical((previous) => ({
+                        ...previous,
+                        [row.vertical]: event.target.value as FulfillmentOwnerStatus | '',
+                      }))
+                    }
+                    disabled={!canSubmit || pending}
+                    aria-label={`${row.label} fulfillment status`}
+                    required
+                  >
+                    <option value="">Choose status</option>
+                    {OWNER_FULFILLMENT_STATUS_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <textarea
+                  className="min-h-[2.5rem] max-h-20 w-full resize-y rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
+                  value={comment}
+                  onChange={(event) =>
+                    setCommentByVertical((previous) => ({
+                      ...previous,
+                      [row.vertical]: event.target.value,
+                    }))
+                  }
+                  placeholder="Optional comment — stored as correspondence, not in audit."
+                  aria-label={`${row.label} fulfillment comment`}
+                  maxLength={2000}
+                  disabled={!canSubmit || pending}
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={!canSubmit || pending || !status}
+                  onClick={() => {
+                    if (!status) return
+                    submitMutation.mutate({
+                      vertical: row.vertical,
+                      status,
+                      comment: comment.trim() || undefined,
+                    })
+                  }}
+                >
+                  {pending ? 'Saving…' : 'Update status'}
+                </Button>
+              </>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function InboxReviewPane({
   item,
   canReviewActions,
   assigneeCandidates,
   legalPersona = false,
+  dataOwnerPersona = false,
+  inboxKind,
   onBackToQueue,
   onOpenDetail,
 }: {
@@ -1584,6 +1865,9 @@ function InboxReviewPane({
   assigneeCandidates: string[]
   /** Legal case-queue mode — no matching disposition; status-required composer. */
   legalPersona?: boolean
+  /** Owner-language matching selector (Confirm match / Multi-person / Not a match). */
+  dataOwnerPersona?: boolean
+  inboxKind?: InboxKind
   onBackToQueue?: () => void
   onOpenDetail?: (item: NeedsAttentionItem, trigger: HTMLElement) => void
 }) {
@@ -1603,13 +1887,19 @@ function InboxReviewPane({
 
   const showTriage = isTriageItem(item)
   const showAssignmentToLegal = legalPersona && isAssignmentToLegalItem(item)
+  const showOwnerFulfillmentPane =
+    dataOwnerPersona &&
+    (inboxKind === 'fulfillment' || isOwnerFulfillmentItem(item))
   const showMatching =
     isMatchingItem(item) &&
     !isDeliveryItem(item) &&
     !isNoticeItem(item) &&
     !showTriage &&
-    !legalPersona
-  const showDelivery = isDeliveryItem(item) || item.current_stage === 'fulfill'
+    !legalPersona &&
+    !showOwnerFulfillmentPane
+  const showDelivery =
+    !showOwnerFulfillmentPane &&
+    (isDeliveryItem(item) || item.current_stage === 'fulfill')
   const showNotice = isNoticeItem(item)
   const showComms = isCommsItem(item) && !legalPersona
 
@@ -1985,7 +2275,7 @@ function InboxReviewPane({
     artifactQuery.data?.shareable_url ?? artifactQuery.data?.fulfillment_artifact_uri ?? ''
   const showHandoffTab = showDelivery || showComms
   const showResolveMatching = showMatching || showAssignmentToLegal
-  const dropPill = dropStatusPill(item, matchingQuery.data)
+  const dropPill = dropStatusPill(item, matchingQuery.data, dataOwnerPersona)
   /** Work-type tabs only when they hold tools — notice CTA lives in the next-step card. */
   const primaryTab = showTriage
     ? 'triage'
@@ -2013,11 +2303,13 @@ function InboxReviewPane({
         ? 'Reject as exempted, or release to matching for the data owner.'
         : showMatching
           ? 'Confirm the match disposition, or send to legal if you need help.'
-          : showAssignmentToLegal
-            ? 'Review matching context, then continue pre-fulfillment work.'
-            : legalPersona && isFulfillmentLegalItem(item)
-              ? 'Matching approve alone does not start the worker — kick off fulfillment for each disposed vertical.'
-              : null
+          : showOwnerFulfillmentPane
+            ? 'Legal kicked off fulfillment. Mark each owned SaaS system; Data runs automatically.'
+            : showAssignmentToLegal
+              ? 'Review matching context, then continue pre-fulfillment work.'
+              : legalPersona && isFulfillmentLegalItem(item)
+                ? 'Matching approve alone does not start the worker — kick off fulfillment for each disposed vertical.'
+                : null
 
   const kickoffRows = workbench?.fulfillment_cluster ?? []
   const showLegalKickoff =
@@ -2062,7 +2354,11 @@ function InboxReviewPane({
             }
           }}
           title="Fulfill this match?"
-          description={`Approve matching review for ${item.request_id.slice(0, 8)}… and set the CA DROP status result.`}
+          description={
+            dataOwnerPersona
+              ? `Confirm the match result for ${item.request_id.slice(0, 8)}…`
+              : `Approve matching review for ${item.request_id.slice(0, 8)}… and set the CA DROP status result.`
+          }
           confirmLabel="Fulfill"
           confirming={actionPending && confirmAction === 'fulfill'}
           confirmDisabled={fulfillStatus == null || !fulfillDwidsReady}
@@ -2080,6 +2376,7 @@ function InboxReviewPane({
             contacts={matchedContacts}
             selectedDwids={selectedDwids}
             onSelectedDwidsChange={setSelectedDwids}
+            persona={dataOwnerPersona ? 'data_owner' : legalPersona ? 'legal' : 'ops'}
           />
         </ConfirmActionDialog>
         <ConfirmActionDialog
@@ -2194,6 +2491,17 @@ function InboxReviewPane({
                     onInvalidate={async () => {
                       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
                     }}
+                  />
+                </div>
+              ) : null}
+              {showOwnerFulfillmentPane ? (
+                <div className={cn(nextStepHint && 'mt-1.5')}>
+                  <OwnerFulfillmentStatusPanel
+                    requestId={item.request_id}
+                    cluster={kickoffRows}
+                    assignedVerticals={me?.verticals}
+                    assignedLabels={me?.assigned_vertical_labels}
+                    canSubmit={canReviewActions}
                   />
                 </div>
               ) : null}
@@ -2398,6 +2706,7 @@ function InboxReviewPane({
                 identity={identityQuery.data}
                 identityPending={identityQuery.isPending}
                 legalPersona={legalPersona}
+                dataOwnerPersona={dataOwnerPersona}
               />
             </TabsContent>
 
@@ -2435,6 +2744,7 @@ function InboxReviewPane({
                   compact
                   layout="tabs"
                   hideActions
+                  persona={dataOwnerPersona ? 'data_owner' : legalPersona ? 'legal' : 'ops'}
                 />
                 {legalPersona && showAssignmentToLegal ? (
                   <p className="mt-2 text-[0.7rem] text-ink-soft">
@@ -2862,6 +3172,7 @@ function ThreadReviewPane({
   items,
   stackKind = 'batch',
   canReviewActions,
+  dataOwnerPersona = false,
   onPromoteAll,
   onDeclineAll,
   actionPending,
@@ -2872,6 +3183,7 @@ function ThreadReviewPane({
   items: NeedsAttentionItem[]
   stackKind?: InboxStackKind
   canReviewActions: boolean
+  dataOwnerPersona?: boolean
   onPromoteAll: (responseStatus: DropResponseStatusCode) => void
   onDeclineAll: () => void
   actionPending: boolean
@@ -2879,8 +3191,10 @@ function ThreadReviewPane({
   onOpenDetail?: (item: NeedsAttentionItem, trigger: HTMLElement) => void
 }) {
   const [confirm, setConfirm] = useState<'fulfill' | 'decline' | null>(null)
-  // Exact 1:1 thread → Deleted (3) by default.
-  const [fulfillStatus, setFulfillStatus] = useState<DropResponseStatusCode | null>(3)
+  const threadFulfillSuggestion = suggestedBulkFulfillStatus(items)
+  const [fulfillStatus, setFulfillStatus] = useState<DropResponseStatusCode | null>(
+    threadFulfillSuggestion,
+  )
   const wasActionPending = useRef(false)
   useEffect(() => {
     if (wasActionPending.current && !actionPending) setConfirm(null)
@@ -2969,10 +3283,14 @@ function ThreadReviewPane({
         open={confirm === 'fulfill'}
         onOpenChange={(open) => {
           if (!open && !actionPending) setConfirm(null)
-          if (open) setFulfillStatus(3)
+          if (open) setFulfillStatus(threadFulfillSuggestion)
         }}
         title={`Bulk fulfill ${items.length} exact matches?`}
-        description={`Approve matching review for all single-match requests from batch ${batchLabel} and set the CA DROP status result.`}
+        description={
+          dataOwnerPersona
+            ? `Confirm the match result for all single-match requests from batch ${batchLabel}.`
+            : `Approve matching review for all single-match requests from batch ${batchLabel} and set the CA DROP status result.`
+        }
         confirmLabel={`Fulfill ${items.length}`}
         confirming={actionPending && confirm === 'fulfill'}
         confirmDisabled={fulfillStatus == null}
@@ -2984,7 +3302,8 @@ function ThreadReviewPane({
           value={fulfillStatus}
           onChange={setFulfillStatus}
           disabled={actionPending}
-          suggested={3}
+          suggested={threadFulfillSuggestion}
+          persona={dataOwnerPersona ? 'data_owner' : 'ops'}
         />
       </ConfirmActionDialog>
       <ConfirmActionDialog
@@ -3121,7 +3440,9 @@ function ThreadReviewPane({
                   </span>
                   <span className="text-mute">
                     {entry.requestor_state ?? '—'}
-                    {entry.match_type ? ` · ${matchTypeLabel(entry.match_type)}` : ''}
+                    {entry.match_type
+                      ? ` · ${matchTypeLabel(entry.match_type, dataOwnerPersona)}`
+                      : ''}
                     {entry.matched_via ? ` · ${entry.matched_via}` : ''}
                   </span>
                 </button>
@@ -3132,7 +3453,9 @@ function ThreadReviewPane({
                   </span>
                   <span className="text-mute">
                     {entry.requestor_state ?? '—'}
-                    {entry.match_type ? ` · ${matchTypeLabel(entry.match_type)}` : ''}
+                    {entry.match_type
+                      ? ` · ${matchTypeLabel(entry.match_type, dataOwnerPersona)}`
+                      : ''}
                     {entry.matched_via ? ` · ${entry.matched_via}` : ''}
                   </span>
                 </div>
@@ -3198,7 +3521,7 @@ export function NeedsAttentionPage() {
   const showInboxConnectorGateBanner =
     inboxConnectorGate != null &&
     !legalPersona &&
-    (inboxKind === 'matching' || inboxKind === 'all' || dataOwnerPersona)
+    (inboxKind === 'matching' || inboxKind === 'all')
   const [matchFilter, setMatchFilter] = useState<MatchFilter>('all')
   const [dueFilter, setDueFilter] = useState<DueFilter>('all')
   /** null → persona default (legal: off, ops/matching: on). */
@@ -3258,6 +3581,22 @@ export function NeedsAttentionPage() {
   // 1000-row admin-api safety limit as before, but most sessions never page that far.
   const inboxFetchLimit = Math.min(1000, page * INBOX_PAGE_SIZE)
 
+  const ownerFulfillmentQuery = useQuery({
+    queryKey: [
+      'admin-api',
+      'ops',
+      'requests',
+      'needs-attention',
+      'data-owner',
+      'fulfillment',
+      inboxFetchLimit,
+    ],
+    queryFn: () => getOwnerFulfillmentNeedsAttention({ limit: inboxFetchLimit }),
+    enabled: dataOwnerPersona,
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  })
+
   const attentionQuery = useQuery({
     queryKey: [
       'admin-api',
@@ -3266,6 +3605,7 @@ export function NeedsAttentionPage() {
       'needs-attention',
       legalPersona ? 'legal' : dataOwnerPersona ? 'data-owner' : 'ops',
       search.assignee ?? null,
+      dataOwnerPersona && inboxKind === 'pending_tasks' ? 'pending_tasks' : null,
       inboxFetchLimit,
     ],
     queryFn: () => {
@@ -3277,12 +3617,20 @@ export function NeedsAttentionPage() {
           assignee: search.assignee,
         })
       }
-      return legalPersona
-        ? getLegalNeedsAttention({ limit: inboxFetchLimit, offset: 0 })
-        : dataOwnerPersona
-          ? getNeedsAttention({ limit: inboxFetchLimit, offset: 0, kind: 'matching' })
-          : getNeedsAttention({ limit: inboxFetchLimit, offset: 0 })
+      if (legalPersona) {
+        return getLegalNeedsAttention({ limit: inboxFetchLimit, offset: 0 })
+      }
+      if (dataOwnerPersona) {
+        return getNeedsAttention({
+          limit: inboxFetchLimit,
+          offset: 0,
+          kind: 'matching',
+          ...(inboxKind === 'pending_tasks' ? { assignee: 'me' } : {}),
+        })
+      }
+      return getNeedsAttention({ limit: inboxFetchLimit, offset: 0 })
     },
+    enabled: !(dataOwnerPersona && inboxKind === 'fulfillment'),
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })
@@ -3333,7 +3681,14 @@ export function NeedsAttentionPage() {
     })
   }
 
-  const items = attentionQuery.data?.items ?? []
+  const items =
+    dataOwnerPersona && inboxKind === 'fulfillment'
+      ? (ownerFulfillmentQuery.data?.items ?? [])
+      : (attentionQuery.data?.items ?? [])
+  const ownerFulfillmentCount =
+    ownerFulfillmentQuery.data?.total ?? ownerFulfillmentQuery.data?.items.length ?? 0
+  const attentionListQuery =
+    dataOwnerPersona && inboxKind === 'fulfillment' ? ownerFulfillmentQuery : attentionQuery
 
   const operatorsQuery = useQuery({
     queryKey: ['admin-api', 'legal', 'operators'],
@@ -3364,6 +3719,7 @@ export function NeedsAttentionPage() {
     let delivery = 0
     let notice = 0
     let communications = 0
+    let fulfillment = 0
     let pendingTasks = 0
     for (const item of items) {
       if (isMatchingItem(item)) matching += 1
@@ -3372,6 +3728,7 @@ export function NeedsAttentionPage() {
       if (isDeliveryItem(item)) delivery += 1
       if (isNoticeItem(item)) notice += 1
       if (isCommsItem(item)) communications += 1
+      if (isOwnerFulfillmentItem(item)) fulfillment += 1
       if (isPendingTaskFor(item, myEmail)) pendingTasks += 1
     }
     return {
@@ -3382,9 +3739,10 @@ export function NeedsAttentionPage() {
       delivery,
       notice,
       communications,
+      fulfillment: dataOwnerPersona ? ownerFulfillmentCount : fulfillment,
       pending_tasks: pendingTasks,
     } satisfies Record<InboxKind, number>
-  }, [items, me?.email])
+  }, [dataOwnerPersona, items, me?.email, ownerFulfillmentCount])
 
   const matchOptions = useMemo(() => {
     const pool = items.filter(isMatchingItem)
@@ -3444,6 +3802,7 @@ export function NeedsAttentionPage() {
         if (inboxKind === 'delivery' && !isDeliveryItem(item)) return false
         if (inboxKind === 'notice' && !isNoticeItem(item)) return false
         if (inboxKind === 'communications' && !isCommsItem(item)) return false
+        if (inboxKind === 'fulfillment' && !isOwnerFulfillmentItem(item)) return false
         if (inboxKind === 'pending_tasks' && !isPendingTaskFor(item, myEmail)) {
           return false
         }
@@ -3510,7 +3869,7 @@ export function NeedsAttentionPage() {
   // items.length can lag behind the server's real total while a bigger page's worth of
   // rows is still loading (growing prefix window) — keep "Next" enabled in that case so
   // paging forward triggers the fetch instead of looking like a dead end.
-  const rawInboxTotal = attentionQuery.data?.total ?? items.length
+  const rawInboxTotal = attentionListQuery.data?.total ?? items.length
   const moreRowsToLoad = items.length < Math.min(rawInboxTotal, 1000)
   const inboxTotalPages = moreRowsToLoad
     ? Math.max(inboxLocalTotalPages, inboxCurrentPage + 1)
@@ -3562,8 +3921,12 @@ export function NeedsAttentionPage() {
     filteredIds.length > 0 && filteredIds.every((id) => selectedIds.has(id))
   const someFilteredSelected = filteredIds.some((id) => selectedIds.has(id))
 
+  const bulkFulfillTargets = allFilteredSelected
+    ? filteredItems
+    : filteredItems.filter((item) => selectedIds.has(item.request_id))
+  const bulkFulfillSuggestion = suggestedBulkFulfillStatus(bulkFulfillTargets)
   const [bulkFulfillStatus, setBulkFulfillStatus] =
-    useState<DropResponseStatusCode | null>(3)
+    useState<DropResponseStatusCode | null>(null)
 
   const bulkMutation = useMutation({
     mutationFn: async ({
@@ -3765,7 +4128,7 @@ export function NeedsAttentionPage() {
     },
   })
 
-  const loading = attentionQuery.isPending && !attentionQuery.data
+  const loading = attentionListQuery.isPending && !attentionListQuery.data
   const triageBulkPending =
     bulkTriageRejectMutation.isPending || bulkTriageMatchMutation.isPending
   const noticeBulkPending = bulkNoticeApproveMutation.isPending
@@ -3839,12 +4202,16 @@ export function NeedsAttentionPage() {
         open={bulkConfirm === 'fulfill'}
         onOpenChange={(open) => {
           if (!open && !bulkMutation.isPending) setBulkConfirm(null)
-          if (open) setBulkFulfillStatus(3)
+          if (open) setBulkFulfillStatus(bulkFulfillSuggestion)
         }}
         title={`Fulfill ${allFilteredSelected ? filteredIds.length : selectedCount} request${
           (allFilteredSelected ? filteredIds.length : selectedCount) === 1 ? '' : 's'
         }?`}
-        description="Selected items leave matching review with the CA DROP status result you confirm below."
+        description={
+          dataOwnerPersona
+            ? 'Confirm the match result for the selected items.'
+            : 'Selected items leave matching review with the CA DROP status result you confirm below.'
+        }
         confirmLabel="Fulfill selected"
         confirming={bulkMutation.isPending && bulkConfirm === 'fulfill'}
         confirmDisabled={bulkFulfillStatus == null}
@@ -3856,7 +4223,8 @@ export function NeedsAttentionPage() {
           value={bulkFulfillStatus}
           onChange={setBulkFulfillStatus}
           disabled={bulkMutation.isPending}
-          suggested={3}
+          suggested={bulkFulfillSuggestion}
+          persona={dataOwnerPersona ? 'data_owner' : legalPersona ? 'legal' : 'ops'}
         />
       </ConfirmActionDialog>
       <ConfirmActionDialog
@@ -3957,7 +4325,7 @@ export function NeedsAttentionPage() {
             <h2 className="font-display text-xl font-medium tracking-tight text-ink">
               Inbox
             </h2>
-            {attentionQuery.isFetching && !attentionQuery.isPending ? (
+            {attentionListQuery.isFetching && !attentionListQuery.isPending ? (
               <span className="taste-frost-chip text-[0.65rem]">Refreshing</span>
             ) : null}
             {bulkMutation.isPending ||
@@ -3978,11 +4346,11 @@ export function NeedsAttentionPage() {
                         : 'Assigning…'}
               </span>
             ) : null}
-            {attentionQuery.data && attentionQuery.data.items.length > 0 ? (
-              <Badge variant="notification" aria-label={`${attentionQuery.data.items.length} to review`}>
-                {attentionQuery.data.items.length > 99
+            {attentionListQuery.data && attentionListQuery.data.items.length > 0 ? (
+              <Badge variant="notification" aria-label={`${attentionListQuery.data.items.length} to review`}>
+                {attentionListQuery.data.items.length > 99
                   ? '99+'
-                  : attentionQuery.data.items.length}
+                  : attentionListQuery.data.items.length}
               </Badge>
             ) : null}
           </div>
@@ -3990,7 +4358,7 @@ export function NeedsAttentionPage() {
             {legalPersona
               ? 'Open work for legal — filter, act, move on.'
               : dataOwnerPersona
-                ? 'Matching review and tasks assigned to you.'
+                ? 'Matching review, fulfillment after Legal kickoff, and tasks assigned to you.'
                 : 'Pending matching, delivery, notice, and communications.'}
           </p>
           {bulkFilter != null ? (
@@ -4178,7 +4546,7 @@ export function NeedsAttentionPage() {
                   key={matchType}
                   compact
                   active={matchFilter === matchType}
-                  label={matchTypeLabel(matchType)}
+                  label={matchTypeLabel(matchType, dataOwnerPersona)}
                   count={count}
                   onClick={() =>
                     setMatchFilter((current) =>
@@ -4228,7 +4596,11 @@ export function NeedsAttentionPage() {
             <MatchingConnectorGateBanner
               gate={inboxConnectorGate}
               compact
-              showOwnerLink={Boolean(me?.connector_reminders?.length)}
+              showOwnerLink={dataOwnerPersona}
+              connectorsVerticalId={
+                me?.connector_reminders?.find((reminder) => reminder.severity === 'overdue')
+                  ?.vertical_id ?? me?.connector_reminders?.[0]?.vertical_id ?? null
+              }
             />
           </div>
         ) : null}
@@ -4410,15 +4782,17 @@ export function NeedsAttentionPage() {
                 <SkeletonLines lines={6} />
               </div>
             ) : null}
-            {attentionQuery.isError ? (
+            {attentionListQuery.isError ? (
               <p className="p-4 text-xs text-red-700">Could not load inbox.</p>
             ) : null}
-            {!loading && !attentionQuery.isError && filteredItems.length === 0 ? (
+            {!loading && !attentionListQuery.isError && filteredItems.length === 0 ? (
               <p className="p-6 text-xs text-ink-soft">
                 {legalPersona
                   ? legalFilterEmptyMessage(legalInboxFilter)
                   : items.length === 0
-                    ? 'Nothing needs attention right now.'
+                    ? inboxKind === 'fulfillment'
+                      ? 'No kicked-off fulfillment waiting — Legal kickoff comes first.'
+                      : 'Nothing needs attention right now.'
                     : inboxKind === 'triage'
                       ? 'No Legal Triage holds — condition hits land here before matching.'
                       : inboxKind === 'escalations'
@@ -4429,13 +4803,15 @@ export function NeedsAttentionPage() {
                             ? NOTICE_APPROVAL.empty
                             : inboxKind === 'communications'
                               ? 'No requester comms yet — drafts and replies will land here.'
-                              : inboxKind === 'pending_tasks'
-                                ? 'No pending tasks assigned to you.'
-                                : 'No items match the current view.'}
+                              : inboxKind === 'fulfillment'
+                                ? 'No kicked-off fulfillment in this filter.'
+                                : inboxKind === 'pending_tasks'
+                                  ? 'No pending tasks assigned to you.'
+                                  : 'No items match the current view.'}
               </p>
             ) : null}
 
-            {!loading && !attentionQuery.isError && filteredItems.length > 0 ? (
+            {!loading && !attentionListQuery.isError && filteredItems.length > 0 ? (
               <ul
                 key={`inbox-group-${groupByBatch ? 'b' : ''}${groupByType ? 't' : ''}-n`}
                 className={cn(
@@ -4742,7 +5118,7 @@ export function NeedsAttentionPage() {
             ) : null}
           </div>
 
-          {!loading && !attentionQuery.isError && filteredItems.length > 0 ? (
+          {!loading && !attentionListQuery.isError && filteredItems.length > 0 ? (
             <InboxPaginationBar
               start={inboxPageStart}
               end={inboxPageEnd}
@@ -4767,6 +5143,7 @@ export function NeedsAttentionPage() {
               items={activeThread.items}
               stackKind={activeThread.stackKind}
               canReviewActions={canReviewActions}
+              dataOwnerPersona={dataOwnerPersona}
               actionPending={bulkMutation.isPending}
               onBackToQueue={() => setMobilePane('queue')}
               onOpenDetail={(item, trigger) => {
@@ -4796,6 +5173,8 @@ export function NeedsAttentionPage() {
               canReviewActions={canReviewActions}
               assigneeCandidates={assigneeCandidates}
               legalPersona={legalPersona}
+              dataOwnerPersona={dataOwnerPersona}
+              inboxKind={inboxKind}
               onBackToQueue={() => setMobilePane('queue')}
               onOpenDetail={(item, trigger) => {
                 detailOverlay.openOverlay(
