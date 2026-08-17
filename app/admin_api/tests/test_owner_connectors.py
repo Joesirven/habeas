@@ -17,11 +17,13 @@ from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
 from habeas_privacy_core.connections.catalog import (
     VERTICAL_BIZDEV,
+    VERTICAL_COMMUNICATIONS,
     VERTICAL_DATA,
     VERTICAL_PEOPLE_HR,
 )
 from habeas_privacy_core.connections.freshness import evaluate_connection_gate
 from habeas_privacy_core.connections.models import Connection
+from habeas_privacy_core.db import connections as connections_db
 
 CONNECTION_ID = UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 NOW = datetime(2026, 8, 12, 16, 0, 0, tzinfo=timezone.utc)
@@ -497,3 +499,232 @@ def test_upload_returns_503_when_gcs_unconfigured(
         )
     assert upload.status_code == 503
     helpers["merge"].assert_not_awaited()
+
+
+def test_mailchimp_live_credentials_success_stamps_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meta: dict = {"vertical_id": VERTICAL_COMMUNICATIONS, "active_mode": "live"}
+    current = _connection(
+        system="mailchimp",
+        metadata=meta,
+        status="pending",
+    )
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    monkeypatch.setattr(
+        owner_connectors,
+        "test_connection",
+        AsyncMock(return_value=(True, "mailchimp_ok")),
+    )
+    set_test = AsyncMock(return_value=current)
+    update_status = AsyncMock(return_value=current)
+    monkeypatch.setattr(owner_connectors.connections_db, "set_test_result", set_test)
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "update_connection_status",
+        update_status,
+    )
+    writer = owner_connectors.get_secret_writer()
+    assert hasattr(writer, "put_secret")
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/mailchimp/credentials",
+            headers=_owner_headers("comm-owner@example.com"),
+            json={"credentials": {"api_key": "mc-key-us19"}},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["detail"] == "mailchimp_ok"
+    assert body["connection_id"] == str(CONNECTION_ID)
+    assert meta.get("credentials_rotated_at")
+    assert meta.get("active_mode") == "live"
+    set_test.assert_awaited_once()
+    assert set_test.await_args.kwargs["ok"] is True
+    update_status.assert_awaited()
+    assert update_status.await_args.args[2] == "connected"
+
+
+def test_live_credentials_failed_test_allows_retry_without_wizard_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meta: dict = {
+        "vertical_id": VERTICAL_COMMUNICATIONS,
+        "active_mode": "live",
+        "cadence_days": 30,
+    }
+    current = _connection(
+        system="mailchimp",
+        metadata=meta,
+        status="pending",
+        last_test_ok=False,
+    )
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    monkeypatch.setattr(
+        owner_connectors,
+        "test_connection",
+        AsyncMock(return_value=(False, "auth_failed")),
+    )
+    get_conn = AsyncMock(return_value=current)
+    monkeypatch.setattr(owner_connectors.connections_db, "get_connection", get_conn)
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "set_test_result",
+        AsyncMock(return_value=current),
+    )
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "update_connection_status",
+        AsyncMock(return_value=current),
+    )
+
+    with TestClient(app) as client:
+        save = client.post(
+            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/mailchimp/credentials",
+            headers=_owner_headers("comm-owner@example.com"),
+            json={"credentials": {"api_key": "bad-key"}},
+        )
+        assert save.status_code == 200
+        assert save.json()["ok"] is False
+        assert "credentials_rotated_at" not in meta
+
+        complete = client.post(
+            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/mailchimp/wizard/complete",
+            headers=_owner_headers("comm-owner@example.com"),
+        )
+        assert complete.status_code == 422
+        assert "live credentials required" in complete.json()["detail"]
+        assert "wizard_completed_at" not in meta
+
+
+def test_cross_vertical_live_credentials_forbidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    from admin_api import vertical_assignments
+
+    monkeypatch.setattr(owner_connectors, "_require_database", lambda: None)
+    monkeypatch.setattr(owner_connectors, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(vertical_assignments, "_require_database", lambda: None)
+    monkeypatch.setattr(vertical_assignments, "get_pool", lambda: FakePool())
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/mailchimp/credentials",
+            headers=_owner_headers("outsider@example.com"),
+            json={"credentials": {"api_key": "mc-key-us19"}},
+        )
+    assert response.status_code == 403
+
+
+def test_live_credentials_rejected_when_active_mode_is_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = _connection(
+        system="mailchimp",
+        metadata={"vertical_id": VERTICAL_COMMUNICATIONS, "active_mode": "upload"},
+    )
+    _patch_owner_access(monkeypatch, connection=current)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/mailchimp/credentials",
+            headers=_owner_headers("comm-owner@example.com"),
+            json={"credentials": {"api_key": "mc-key-us19"}},
+        )
+    assert response.status_code == 422
+    assert "upload" in response.json()["detail"].lower()
+
+
+def test_live_retest_uses_stored_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meta: dict = {
+        "vertical_id": VERTICAL_COMMUNICATIONS,
+        "active_mode": "live",
+        "credentials_rotated_at": "2026-01-01T00:00:00+00:00",
+    }
+    current = _connection(
+        system="mailchimp",
+        metadata=meta,
+        status="connected",
+        last_test_ok=True,
+    )
+    secret_name = connections_db.secret_resource_name("mailchimp", str(CONNECTION_ID))
+    current = current.model_copy(update={"secret_resource_name": secret_name})
+    writer = owner_connectors.get_secret_writer()
+    writer.put_secret(
+        secret_name,
+        '{"api_key": "stored-key-us19"}',
+    )
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    test_mock = AsyncMock(return_value=(True, "mailchimp_ok"))
+    monkeypatch.setattr(owner_connectors, "test_connection", test_mock)
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "set_test_result",
+        AsyncMock(return_value=current),
+    )
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "update_connection_status",
+        AsyncMock(return_value=current),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/mailchimp/test",
+            headers=_owner_headers("comm-owner@example.com"),
+        )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    test_mock.assert_awaited_once()
+    assert test_mock.await_args.args[1] == {"api_key": "stored-key-us19"}
+    assert meta.get("credentials_rotated_at")
+    assert meta["credentials_rotated_at"] != "2026-01-01T00:00:00+00:00"
+
+
+def test_live_retest_without_secret_returns_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = _connection(
+        system="mailchimp",
+        metadata={"vertical_id": VERTICAL_COMMUNICATIONS, "active_mode": "live"},
+    )
+    _patch_owner_access(monkeypatch, connection=current)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/mailchimp/test",
+            headers=_owner_headers("comm-owner@example.com"),
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "secret not stored"

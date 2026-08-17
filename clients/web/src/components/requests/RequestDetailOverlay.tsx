@@ -1751,7 +1751,7 @@ export function RequestDetailBody({
   seedRequest?: RequestRecord | null
 }) {
   const queryClient = useQueryClient()
-  const { isAdmin, isSuperAdmin, role } = useMe()
+  const { isAdmin, isSuperAdmin, role, me } = useMe()
   const legalAdmin = isLegalAdminPersona(role)
   const [tab, setTab] = useState<RequestDetailTab>(defaultTab)
 
@@ -2222,6 +2222,8 @@ export function RequestDetailBody({
             hideActions={!canMatchingDisposition}
             layout="tabs"
             compact
+            connectorReminders={me?.connector_reminders}
+            fetchConnectorConnections={Boolean(isAdmin || isSuperAdmin)}
             onPromote={(responseStatus, dwids) =>
               matchingDispositionMutation.mutate({
                 action: 'promote',

@@ -6,8 +6,12 @@ React admin UI for Legal, Operations, and Data Owners.
 
 Deploy targets:
 
-- **Dev:** Cloud Run `admin-web-dev` (nginx static image; see [Docker](#docker) below).
-- **Prod path:** Firebase Hosting in front of Identity-Aware Proxy (`.firebaserc` / `firebase.json`).
+- **Dev (browser):** Cloud Run `ops-ia-web-dev` — IAP front door for **Habeas Platform** chrome
+  ([`https://ops-ia-web-dev-hsa55rg7ja-uk.a.run.app`](https://ops-ia-web-dev-hsa55rg7ja-uk.a.run.app)).
+  Legacy `admin-web-dev` remains for nginx-only smoke; prefer ops-ia for DROP ops + owner flows.
+- **Prod path:** Firebase Hosting in front of Identity-Aware Proxy (`.firebaserc` / `firebase.json`) — not live in this repo doc.
+
+All browser mutations go through **admin-api** only — the SPA never calls worker URLs directly.
 
 **Agent rules:** [`AGENTS.md`](AGENTS.md)
 
@@ -64,6 +68,24 @@ Optional: copy `.env.example` to `.env` and set `VITE_ADMIN_API_URL` when not us
 - **Pipeline** (`/?tab=pipeline`, also `/ops/drop-pipeline?tab=`) — **Run Pipeline** (CA DROP → download→land→promote) + bulk/individual list. Top tabs: Pipeline · Hash refresh · History · Errors · Logs. Gear / Pipeline ▾ → **Settings** opens Workers Settings (schedules, retry, fleet). Stage tabs Download / Ingest / Matching / Review / Fulfillment live inside each bulk card (`stage=`).
 - **Workers** (`/ops/workers`) — fleet overview + escalations; Settings at `/ops/workers/settings`. Legacy `/ops/health*` redirects here.
 - Browser never calls worker URLs — only admin-api aggregates. Local Vite → deployed admin-api-dev: run `gcloud auth application-default login`, set `VITE_PROXY_TARGET` to admin-api-dev, then `bun run dev` (Vite mints ADC Bearer ID token for super_admin); see [`AGENTS.md`](AGENTS.md).
+
+### Vertical connectors (owner onboarding)
+
+Owner access is **vertical assignment + IAP login** — there are **no invite URLs** and no
+`/connect/{token}` redeem flow. Super_admin assigns owners to verticals under Ops
+**Connections** (`/ops/connections`); assigned owners sign in through the **ops-ia-web-dev**
+IAP front door and land in **Habeas Platform** chrome (welcome uses IAP `given_name`).
+
+- **Owner wizard:** `/owner/connectors` — Mode explainer → in-wizard Live credentials + test (or
+  Upload template validate) → cadence → confirm. First-login welcome routes here for the assigned
+  vertical. Connecting a system does **not** by itself enable matching.
+- **Ops admin:** `/ops/connections` — vertical catalog, assign owners, mode/cadence overrides,
+  retest, wizard reset, delete. No invite mint, mailto, or revoke.
+- **Thin client:** all writes via admin-api (`/ops/connections*`, `/ops/verticals*`, `/owner/*`);
+  secrets stay in Secret Manager; UI uses `actionToast` and allowlisted test `detail` codes only.
+
+Non–super_admin browsers: use the **ops-ia** IAP front door — not the ADC Vite proxy. Plan:
+[`docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md`](../../docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md).
 
 ### Local DROP pipeline stack (ports)
 

@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any, AsyncIterator
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
@@ -37,11 +37,14 @@ from admin_api.runs import logs_router as ops_logs_router
 from admin_api.runs import router as runs_router
 from admin_api.request_journey import router as request_journey_router
 from admin_api.roles import (
+    AssignedVerticalLabelOut,
     ConnectorReminderOut,
     CurrentRolePrincipal,
     MeResponse,
     RolePrincipal,
+    needs_connector_setup,
     require_roles,
+    resolve_given_name,
 )
 from admin_api.owner_connectors import collect_connector_reminders
 from admin_api.vertical_assignments import fetch_principal_verticals
@@ -52,6 +55,7 @@ from admin_api.worker_fleet import router as worker_fleet_router
 from admin_api.attempt_tables import router as attempt_tables_router
 from habeas_privacy_core.audit import AuditMiddleware
 from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_DATA_OWNER, ROLE_LEGAL, ROLE_SUPER_ADMIN
+from habeas_privacy_core.connections.catalog import VERTICAL_DATA, get_vertical
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
 from admin_api.requests_list import (
@@ -237,7 +241,30 @@ async def _load_me_reminders(
         return []
 
 
-async def _build_me_response(principal: CurrentRolePrincipal) -> MeResponse:
+def _assigned_vertical_labels(vertical_ids: list[str]) -> list[AssignedVerticalLabelOut]:
+    """Catalog labels for assigned SaaS verticals (excludes view-only Data)."""
+    labels: list[AssignedVerticalLabelOut] = []
+    for vertical_id in vertical_ids:
+        if vertical_id == VERTICAL_DATA:
+            continue
+        try:
+            vertical = get_vertical(vertical_id)
+        except ValueError:
+            continue
+        labels.append(
+            AssignedVerticalLabelOut(
+                vertical_id=vertical.vertical_id,
+                display_label=vertical.display_label,
+            )
+        )
+    labels.sort(key=lambda entry: get_vertical(entry.vertical_id).sort_order)
+    return labels
+
+
+async def _build_me_response(
+    principal: CurrentRolePrincipal,
+    request: Request | None = None,
+) -> MeResponse:
     verticals = await _load_me_verticals(principal.email)
     reminders = await _load_me_reminders(
         principal.email,
@@ -248,20 +275,37 @@ async def _build_me_response(principal: CurrentRolePrincipal) -> MeResponse:
         email=principal.email,
         role=principal.role,
         real_role=principal.real_role,
+        given_name=resolve_given_name(request, principal.email),
         verticals=verticals,
+        assigned_vertical_labels=_assigned_vertical_labels(verticals),
+        needs_connector_setup=needs_connector_setup(principal.role, reminders),
         connector_reminders=reminders,
     )
 
 
+async def me(
+    principal: RolePrincipal,
+    request: Request | None = None,
+) -> MeResponse:
+    """Build /me payload — tests may call without a Request."""
+    return await _build_me_response(principal, request)
+
+
 @app.get("/me", response_model=MeResponse)
-async def me(principal: CurrentRolePrincipal) -> MeResponse:
-    return await _build_me_response(principal)
+async def me_route(
+    principal: CurrentRolePrincipal,
+    request: Request,
+) -> MeResponse:
+    return await me(principal, request)
 
 
 @app.get("/auth/me", response_model=MeResponse)
-async def auth_me(principal: CurrentRolePrincipal) -> MeResponse:
+async def auth_me(
+    principal: CurrentRolePrincipal,
+    request: Request,
+) -> MeResponse:
     """Alias for /me — primary IAP branch used /auth/me as the identity probe."""
-    return await _build_me_response(principal)
+    return await me(principal, request)
 
 
 @app.get("/healthz")

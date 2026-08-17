@@ -1,4 +1,5 @@
 import { SPLASH_PALETTE } from './palette'
+import { PLATFORM_NAME } from '@/lib/brand'
 
 /** Pixel cat licking its paw — optional accent for character-led bumpers. */
 export function PixelCat({ size = 140 }: { size?: number }) {
@@ -66,7 +67,7 @@ export function HabeasLogoImg({ className = '' }: { className?: string }) {
 
 export function DppTitle({ className = '' }: { className?: string }) {
   return (
-    <p className={`splash-shared-dpp ${className}`.trim()}>CataPriv Platform (DPP)</p>
+    <p className={`splash-shared-dpp ${className}`.trim()}>{PLATFORM_NAME}</p>
   )
 }
 

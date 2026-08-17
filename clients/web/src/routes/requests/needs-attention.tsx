@@ -11,7 +11,9 @@ import {
 import {
   AccessHandoffPanel,
   DropResponseStatusPicker,
+  MatchingConnectorGateBanner,
   MatchingReviewPanel,
+  useMatchingConnectorGate,
 } from '@/components/requests/RequestTriageDialog'
 import {
   RequestDetailOverlay,
@@ -1586,7 +1588,7 @@ function InboxReviewPane({
   onOpenDetail?: (item: NeedsAttentionItem, trigger: HTMLElement) => void
 }) {
   const queryClient = useQueryClient()
-  const { me } = useMe()
+  const { me, isAdmin } = useMe()
   const [commentDraft, setCommentDraft] = useState('')
   const [confirmAction, setConfirmAction] = useState<
     | 'fulfill'
@@ -2424,6 +2426,8 @@ function InboxReviewPane({
                   isError={matchingQuery.isError}
                   canReviewActions={canReviewActions && !legalPersona}
                   actionPending={actionPending}
+                  connectorReminders={me?.connector_reminders}
+                  fetchConnectorConnections={isAdmin}
                   onPromote={(responseStatus, dwids) =>
                     promoteMutation.mutate({ responseStatus, dwids })
                   }
@@ -3169,6 +3173,10 @@ export function NeedsAttentionPage() {
   const dataOwnerPersona = role === 'data_owner'
   const canReviewActions =
     Boolean(isAdmin) || legalPersona || dataOwnerPersona
+  const inboxConnectorGate = useMatchingConnectorGate({
+    reminders: me?.connector_reminders,
+    fetchConnections: Boolean(isAdmin),
+  })
   const inboxTabs = dataOwnerPersona
     ? DATA_OWNER_INBOX_KIND_TABS
     : OPS_INBOX_KIND_TABS
@@ -3187,6 +3195,10 @@ export function NeedsAttentionPage() {
   const [inboxKind, setInboxKind] = useState<InboxKind>(
     () => (search.kind as InboxKind | undefined) ?? defaultKind,
   )
+  const showInboxConnectorGateBanner =
+    inboxConnectorGate != null &&
+    !legalPersona &&
+    (inboxKind === 'matching' || inboxKind === 'all' || dataOwnerPersona)
   const [matchFilter, setMatchFilter] = useState<MatchFilter>('all')
   const [dueFilter, setDueFilter] = useState<DueFilter>('all')
   /** null → persona default (legal: off, ops/matching: on). */
@@ -4210,6 +4222,16 @@ export function NeedsAttentionPage() {
             </>
           ) : null}
         </div>
+
+        {showInboxConnectorGateBanner ? (
+          <div className="shrink-0 border-b border-line px-3 py-2">
+            <MatchingConnectorGateBanner
+              gate={inboxConnectorGate}
+              compact
+              showOwnerLink={Boolean(me?.connector_reminders?.length)}
+            />
+          </div>
+        ) : null}
 
         <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden md:grid-cols-[minmax(16rem,22rem)_minmax(0,1fr)]">
         <div

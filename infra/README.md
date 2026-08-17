@@ -178,10 +178,17 @@ gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
 
 ### Cloud Run auth (dev)
 
+**Dev URLs (not prod):**
+
+| Service | URL |
+|---------|-----|
+| `ops-ia-web-dev` (browser IAP — Habeas Platform) | `https://ops-ia-web-dev-hsa55rg7ja-uk.a.run.app` |
+| `admin-api-dev` (API — IAP off; app-level identity) | `https://admin-api-dev-hsa55rg7ja-uk.a.run.app` |
+
 | Surface | Invoker |
 |---------|---------|
 | `admin-api-dev` | Compute SA + allowlisted user invokers; Cloud Run **IAP off** (`--no-iap`); app-level `REQUIRE_IAP_IDENTITY` accepts IAP email header **or** verified Bearer Google ID token (ADC) |
-| `admin-web-dev` / `ops-ia-web-dev` | Public Cloud Run + browser IAP front door (see `admin-web-dev.yaml` / ops-ia deploy) |
+| `admin-web-dev` / `ops-ia-web-dev` | Public Cloud Run + browser IAP front door (see `admin-web-dev.yaml` / `ops-ia-web-dev.yaml`); prefer **ops-ia-web-dev** for DROP ops + owner connector flows |
 | Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`, `hash-index-refresh-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) — never user/IAP direct |
 
 Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Operators never call workers directly — process/enqueue goes through admin-api. Localhost worker URLs skip auth.

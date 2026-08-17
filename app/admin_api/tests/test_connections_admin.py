@@ -101,17 +101,6 @@ def test_systems_catalog_shape() -> None:
     assert systems["cassandra"]["trust_copy"]
 
 
-def test_invite_url_relative_by_default() -> None:
-    raw = "abc123token"
-    assert connections_admin._invite_url(raw) == "/connect/abc123token"
-
-
-def test_invite_url_absolute_when_base_configured() -> None:
-    connections_admin.settings.public_web_base_url = "https://ops.example.com"
-    raw = "abc123token"
-    assert connections_admin._invite_url(raw) == "https://ops.example.com/connect/abc123token"
-
-
 def test_owner_candidates_union_of_role_allowlists() -> None:
     roles.settings.admin_api_super_admins = "ops@example.com"
     roles.settings.admin_api_admins = "admin@example.com,ops@example.com"
@@ -138,6 +127,29 @@ def test_owner_candidates_union_of_role_allowlists() -> None:
     assert by_email["admin@example.com"] == "admin"
     assert by_email["legal@example.com"] == "legal"
     assert by_email["owner@example.com"] == "data_owner"
+
+
+def test_create_invite_returns_410_gone() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            f"/ops/connections/{uuid4()}/invites",
+            headers=_super_admin_headers(),
+            json={},
+        )
+
+    assert response.status_code == 410
+    assert response.json()["detail"] == connections_admin.INVITE_ROUTE_GONE_DETAIL
+
+
+def test_revoke_invite_returns_410_gone() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            f"/ops/connections/{uuid4()}/invites/{uuid4()}/revoke",
+            headers=_super_admin_headers(),
+        )
+
+    assert response.status_code == 410
+    assert response.json()["detail"] == connections_admin.INVITE_ROUTE_GONE_DETAIL
 
 
 def test_owner_candidates_forbidden_for_non_super_admin() -> None:
@@ -222,6 +234,67 @@ async def test_create_connection_sets_infra_pending_for_cassandra(
 
     assert result.system == "cassandra"
     assert result.status == "infra_pending"
+
+
+@pytest.mark.asyncio
+async def test_create_connection_without_owner_email_succeeds_for_mailchimp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_id = uuid4()
+    created = Connection(
+        id=str(connection_id),
+        system="mailchimp",
+        display_name="Marketing list",
+        status="pending",
+        owner_email=None,
+        secret_resource_name=f"dpra/connections/mailchimp/{connection_id}",
+        last_tested_at=None,
+        last_test_ok=None,
+        last_test_detail=None,
+        created_by="ops@example.com",
+        created_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
+        metadata={},
+    )
+
+    async def _insert_connection(*_args, **_kwargs):
+        assert _kwargs.get("owner_email") is None
+        return created
+
+    async def _update_connection_status(*_args, **_kwargs):
+        return created
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "insert_connection", _insert_connection)
+    monkeypatch.setattr(
+        connections_admin.connections_db,
+        "update_connection_status",
+        _update_connection_status,
+    )
+
+    result = await connections_admin.create_connection(
+        connections_admin.ConnectionCreateBody(
+            system="mailchimp",
+            display_name="Marketing list",
+        ),
+        principal,
+    )
+
+    assert result.system == "mailchimp"
+    assert result.status == "pending"
+    assert result.owner_email is None
 
 
 @pytest.mark.asyncio
@@ -384,50 +457,20 @@ async def test_create_google_sheets_rolls_back_when_provision_fails(
 
 
 @pytest.mark.asyncio
-async def test_create_invite_rejects_cassandra(monkeypatch: pytest.MonkeyPatch) -> None:
-    connection_id = uuid4()
-    connection = Connection(
-        id=str(connection_id),
-        system="cassandra",
-        display_name="Prod cluster",
-        status="infra_pending",
-        owner_email="owner@example.com",
-        secret_resource_name=f"dpra/connections/cassandra/{connection_id}",
-        last_tested_at=None,
-        last_test_ok=None,
-        last_test_detail=None,
-        created_by="ops@example.com",
-        created_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
-        updated_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
-        metadata={},
-    )
-
-    async def _get_connection(*_args, **_kwargs):
-        return connection
-
-    conn = AsyncMock()
-
-    class FakePool:
-        def acquire(self):
-            return _fake_pool(conn)
-
-    principal = RolePrincipal(
-        email="ops@example.com",
-        role=ROLE_SUPER_ADMIN,
-        real_role=ROLE_SUPER_ADMIN,
-    )
-    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
-    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
-    monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
-
+async def test_create_invite_returns_410_gone_direct() -> None:
     with pytest.raises(HTTPException) as exc_info:
         await connections_admin.create_invite(
-            connection_id,
-            principal,
+            uuid4(),
+            RolePrincipal(
+                email="ops@example.com",
+                role=ROLE_SUPER_ADMIN,
+                real_role=ROLE_SUPER_ADMIN,
+            ),
             connections_admin.InviteCreateBody(),
         )
 
-    assert exc_info.value.status_code == 400
+    assert exc_info.value.status_code == 410
+    assert exc_info.value.detail == connections_admin.INVITE_ROUTE_GONE_DETAIL
 
 
 @pytest.mark.asyncio
@@ -575,11 +618,8 @@ def test_create_invite_integration() -> None:
             json={},
         )
 
-    assert invite_response.status_code == 201
-    invite = invite_response.json()
-    assert invite["owner_email"] == "owner@example.com"
-    assert invite["invite_url"].startswith("/connect/")
-    assert invite["raw_token"]
+    assert invite_response.status_code == 410
+    assert invite_response.json()["detail"] == connections_admin.INVITE_ROUTE_GONE_DETAIL
 
 
 def test_list_connections_includes_display_status(
@@ -932,52 +972,3 @@ async def test_wizard_reset_clears_wizard_completed_at(
     assert result.gate_code == "wizard_incomplete"
 
 
-@pytest.mark.asyncio
-async def test_create_invite_rejects_upload_only_system(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    connection_id = uuid4()
-    connection = Connection(
-        id=str(connection_id),
-        system="hr_alumni",
-        display_name="Alumni list",
-        status="pending",
-        owner_email="owner@example.com",
-        secret_resource_name=f"dpra/connections/hr_alumni/{connection_id}",
-        last_tested_at=None,
-        last_test_ok=None,
-        last_test_detail=None,
-        created_by="ops@example.com",
-        created_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
-        updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
-        metadata={},
-    )
-
-    async def _get_connection(*_args, **_kwargs):
-        return connection
-
-    conn = AsyncMock()
-
-    class FakePool:
-        def acquire(self):
-            return _fake_pool(conn)
-
-    principal = RolePrincipal(
-        email="ops@example.com",
-        role=ROLE_SUPER_ADMIN,
-        real_role=ROLE_SUPER_ADMIN,
-    )
-    roles.settings.admin_api_data_owners = "owner@example.com"
-    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
-    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
-    monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
-
-    with pytest.raises(HTTPException) as exc_info:
-        await connections_admin.create_invite(
-            connection_id,
-            principal,
-            connections_admin.InviteCreateBody(),
-        )
-
-    assert exc_info.value.status_code == 422
-    assert exc_info.value.detail == "invites not allowed for upload-only systems"

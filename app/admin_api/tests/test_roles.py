@@ -28,11 +28,15 @@ def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _me_payload(email: str, role: str, *, real_role: str | None = None) -> dict:
+    local = email.split("@", 1)[0] if "@" in email else email
     return {
         "email": email,
         "role": role,
         "real_role": real_role if real_role is not None else role,
+        "given_name": local,
         "verticals": [],
+        "assigned_vertical_labels": [],
+        "needs_connector_setup": False,
         "connector_reminders": [],
     }
 

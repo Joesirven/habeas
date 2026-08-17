@@ -29,7 +29,7 @@ function TypeLockup({ motion }: { motion: LockupMotion }) {
       </div>
       <p className="art-03-full">
         <span className="art-03-brand">Habeas</span>
-        <span className="art-03-product">Data Privacy Platform</span>
+        <span className="art-03-product">Platform</span>
       </p>
     </div>
   )

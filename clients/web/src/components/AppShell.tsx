@@ -1,14 +1,17 @@
 import { useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 
 import { CommandPalette, useCommandPaletteShortcut } from '@/components/CommandPalette'
 import { NavMenu } from '@/components/NavMenu'
+import { TourHost } from '@/components/onboarding/TourHost'
 import {
   KEYHOLE_SLOT_SLIDE_IN_ID,
   markPostAuthSplashSeen,
   PostAuthSplash,
   shouldPlayPostAuthSplash,
 } from '@/components/PostAuthSplash'
+import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -22,10 +25,14 @@ import {
   getStoredSimulateRole,
   setStoredSimulateRole,
   SIMULATE_ROLE_VALUES,
+  type MePayload,
   type UserRole,
 } from '@/lib/api'
 import { AuthProvider, canAccessLegalSurfaces, useAuth } from '@/lib/auth'
+import { PLATFORM_NAME, PLATFORM_SLUG } from '@/lib/brand'
+import { verticalLabel } from '@/lib/legalJourneyLabels'
 import { useLiveEvents } from '@/lib/live-events'
+import { firstNameFromEmail } from '@/lib/utils'
 
 type AppShellProps = {
   children: ReactNode
@@ -59,6 +66,120 @@ export function SkeletonLines({
 
 function roleLabel(role: UserRole) {
   return role.replace(/_/g, ' ')
+}
+
+const CONNECTOR_WELCOME_DISMISSED_PREFIX = `${PLATFORM_SLUG}.connector-welcome.dismissed`
+
+function connectorWelcomeDismissedKey(email: string) {
+  return `${CONNECTOR_WELCOME_DISMISSED_PREFIX}:${email.trim().toLowerCase()}`
+}
+
+function isConnectorWelcomeDismissed(email: string): boolean {
+  try {
+    return localStorage.getItem(connectorWelcomeDismissedKey(email)) === '1'
+  } catch {
+    return false
+  }
+}
+
+function markConnectorWelcomeDismissed(email: string) {
+  try {
+    localStorage.setItem(connectorWelcomeDismissedKey(email), '1')
+  } catch {
+    /* ignore */
+  }
+}
+
+function isConnectInvitePath(): boolean {
+  return (
+    typeof window !== 'undefined' && window.location.pathname.startsWith('/connect/')
+  )
+}
+
+/** OQ12: first assigned SaaS vertical in catalog order (skip Data). */
+function primarySetupVerticalId(me: MePayload): string | undefined {
+  const labels = me.assigned_vertical_labels ?? []
+  const actionableLabel = labels.find((entry) => entry.vertical_id !== 'data')
+  if (actionableLabel) return actionableLabel.vertical_id
+
+  const verticals = me.verticals ?? []
+  if (!verticals.length) return undefined
+  const actionable = verticals.find((id) => id !== 'data')
+  return actionable ?? verticals[0]
+}
+
+function primarySetupVerticalLabel(me: MePayload, verticalId: string | undefined): string | null {
+  if (!verticalId) return null
+  const fromApi = me.assigned_vertical_labels?.find(
+    (entry) => entry.vertical_id === verticalId,
+  )?.display_label
+  if (fromApi?.trim()) return fromApi.trim()
+  return verticalLabel(verticalId)
+}
+
+function shouldShowConnectorWelcome(me: MePayload | undefined): boolean {
+  if (!me?.needs_connector_setup) return false
+  if (isConnectInvitePath()) return false
+  if (isConnectorWelcomeDismissed(me.email)) return false
+  return true
+}
+
+function welcomeFirstName(me: MePayload): string {
+  const given = me.given_name?.trim()
+  if (given) return given
+  return firstNameFromEmail(me.email)
+}
+
+type ConnectorSetupWelcomeProps = {
+  me: MePayload
+  onDismiss: () => void
+  onGetStarted: (verticalId: string) => void
+}
+
+function ConnectorSetupWelcome({ me, onDismiss, onGetStarted }: ConnectorSetupWelcomeProps) {
+  const verticalId = primarySetupVerticalId(me)
+  const verticalName = primarySetupVerticalLabel(me, verticalId)
+  const setupLine = verticalName
+    ? `Let's set up your ${verticalName} data vertical`
+    : "Let's set up your data vertical"
+
+  return (
+    <div className="flex min-h-screen flex-col items-center justify-center bg-paper px-4 py-10">
+      <section
+        className="w-full max-w-md rounded-xl border border-line bg-white p-6 shadow-sm"
+        role="dialog"
+        aria-labelledby="connector-welcome-title"
+        aria-describedby="connector-welcome-body"
+      >
+        <p className="text-[0.65rem] font-medium uppercase tracking-[0.12em] text-mute">
+          Welcome
+        </p>
+        <h2
+          id="connector-welcome-title"
+          className="mt-3 font-display text-xl font-medium tracking-tight text-ink"
+        >
+          Hello {welcomeFirstName(me)}, welcome to {PLATFORM_NAME}
+        </h2>
+        <p id="connector-welcome-body" className="mt-3 text-sm leading-relaxed text-ink-soft">
+          {setupLine}
+        </p>
+        <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <Button type="button" variant="outline" onClick={onDismiss}>
+            Maybe later
+          </Button>
+          <Button
+            type="button"
+            disabled={!verticalId}
+            onClick={() => {
+              if (verticalId) onGetStarted(verticalId)
+            }}
+          >
+            Get started
+          </Button>
+        </div>
+      </section>
+    </div>
+  )
 }
 
 function RoleStatusBanner() {
@@ -140,6 +261,7 @@ function RoleStatusBanner() {
 
 function AppShellFrame({ children }: AppShellProps) {
   useLiveEvents()
+  const navigate = useNavigate()
   const { role, me } = useAuth()
   const showPalette = canAccessLegalSurfaces(role)
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -150,22 +272,49 @@ function AppShellFrame({ children }: AppShellProps) {
   // resolves for the first time (not on every app load/reload of an already
   // -signed-in session; shouldPlayPostAuthSplash gates on sessionStorage).
   const [showPostAuthSplash, setShowPostAuthSplash] = useState(false)
+  const [showConnectorWelcome, setShowConnectorWelcome] = useState(false)
   const splashTriggered = useRef(false)
+
+  const maybeShowConnectorWelcome = useCallback((profile: MePayload) => {
+    if (shouldShowConnectorWelcome(profile)) {
+      setShowConnectorWelcome(true)
+    }
+  }, [])
+
+  const dismissConnectorWelcome = useCallback(() => {
+    if (me) markConnectorWelcomeDismissed(me.email)
+    setShowConnectorWelcome(false)
+  }, [me])
+
+  const startConnectorSetup = useCallback(
+    (verticalId: string) => {
+      if (me) markConnectorWelcomeDismissed(me.email)
+      setShowConnectorWelcome(false)
+      void navigate({
+        to: '/owner/connectors',
+        search: { vertical: verticalId },
+      })
+    },
+    [me, navigate],
+  )
 
   useEffect(() => {
     if (me && !splashTriggered.current) {
       splashTriggered.current = true
       // Owner invite links should open immediately — skip the post-auth bumper.
-      const onConnectInvite =
-        typeof window !== 'undefined' &&
-        window.location.pathname.startsWith('/connect/')
+      const onConnectInvite = isConnectInvitePath()
       if (!onConnectInvite && shouldPlayPostAuthSplash()) {
         setShowPostAuthSplash(true)
-      } else if (onConnectInvite) {
-        markPostAuthSplashSeen()
+      } else {
+        if (onConnectInvite) {
+          markPostAuthSplashSeen()
+        } else {
+          markPostAuthSplashSeen()
+          maybeShowConnectorWelcome(me)
+        }
       }
     }
-  }, [me])
+  }, [me, maybeShowConnectorWelcome])
 
   if (showPostAuthSplash) {
     return (
@@ -175,7 +324,18 @@ function AppShellFrame({ children }: AppShellProps) {
         onDone={() => {
           markPostAuthSplashSeen()
           setShowPostAuthSplash(false)
+          if (me) maybeShowConnectorWelcome(me)
         }}
+      />
+    )
+  }
+
+  if (showConnectorWelcome && me) {
+    return (
+      <ConnectorSetupWelcome
+        me={me}
+        onDismiss={dismissConnectorWelcome}
+        onGetStarted={startConnectorSetup}
       />
     )
   }
@@ -185,10 +345,7 @@ function AppShellFrame({ children }: AppShellProps) {
       <header className="sticky top-0 z-40 overflow-visible border-b border-line bg-white/95 backdrop-blur-sm">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 overflow-visible px-4 py-2.5 sm:px-6">
           <div className="min-w-0">
-            <p className="text-[0.65rem] font-medium uppercase tracking-[0.12em] text-mute">
-              Habeas
-            </p>
-            <h1 className="text-base font-semibold tracking-tight text-ink">Data Privacy</h1>
+            <h1 className="text-base font-semibold tracking-tight text-ink">{PLATFORM_NAME}</h1>
           </div>
           <div className="relative z-50 flex items-center gap-3 overflow-visible">
             {showPalette ? (
@@ -218,9 +375,11 @@ function AppShellFrame({ children }: AppShellProps) {
 
       <Toaster />
 
+      <TourHost />
+
       <footer className="mt-auto border-t border-line bg-white">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3 sm:px-6">
-          <p className="text-xs text-mute">Habeas · Data Privacy</p>
+          <p className="text-xs text-mute">{PLATFORM_NAME}</p>
           <p className="text-[0.65rem] text-mute">Ops</p>
         </div>
       </footer>

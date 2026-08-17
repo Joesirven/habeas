@@ -7,26 +7,28 @@ artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-brainstorm
 execution: code
-deepened: 2026-08-11
+deepened: 2026-08-13
+walkthrough: 2026-08-13-mailchimp
+provenance_slice: user-directed 2026-08-13 (first-login welcome + Habeas Platform rename; Jose confirmed rename scope + IAP first name + kill invite URLs entirely 2026-08-13; Jose 2026-08-13 presentation + request-attempt chat c02a7e4a — journey demo beats merged)
 ---
 
 # Vertical-scoped connectors - Plan
 
 ## Goal Capsule
 
-Extend the shipped per-system Connections onboarding and external vertical hash workers so **data owners operate inside assigned verticals** — choosing Live vs Upload per system, setting refresh cadence, and keeping credentials fresh — while **super_admin** configures vertical→system mappings and can override or reset owner setup.
+Extend the shipped per-system Connections onboarding and external vertical hash workers so **data owners operate inside assigned verticals** — choosing Live vs Upload per system, **connecting (credentials or upload) inside the vertical wizard**, setting refresh cadence, and keeping credentials fresh — while **super_admin** configures vertical→system mappings and can override or reset owner setup.
 
-**Objective:** First ship covers the v1 **vertical catalog** (KD20): SaaS owner verticals get vertical-scoped roles, a per-vertical setup wizard, soft reminders, and a **hard gate on matching** when Upload data is stale or Live credential rotation is overdue (~6 months). **Data** appears in the catalog as **already connected** (view-only; no Upload or owner credential wizard). Google Sheets direct/live connection is deferred; Paylocity **Upload** is template file ingest; Paylocity **Live** is SFTP.
+**Objective:** First ship covers the v1 **vertical catalog** (KD20): SaaS owner verticals get vertical-scoped roles, a per-vertical setup wizard (mode explainer → in-wizard connect+test → cadence → confirm), **first-login welcome** routing into the assigned vertical, soft reminders, a **skippable quick-start nav tour** (re-offered **on every login** until completed or skipped), and a **hard gate on matching** when Upload data is stale or Live credential rotation is overdue (~6 months). **Data** appears in the catalog as **already connected** (view-only; no Upload or owner credential wizard). **Owner access = vertical assignment + IAP login** — no one-off invite links as the routine owner path (KD22). Google Sheets direct/live connection is deferred; Paylocity **Upload** is template file ingest; Paylocity **Live** is SFTP. Shell/welcome chrome and **login animation (PostAuthSplash)** rename to **Habeas Platform** (`habeas-cli` slug) across **all user-visible chrome** — not welcome-only (KD28; Jose confirmed OQ14).
 
-**Product authority:** Session brainstorm 2026-08-11 > SirvenOS External-Integrations + Data-Verticals KB > shipped connections-onboarding plan > external-vertical-hash-workers plan.
+**Product authority:** Session brainstorm 2026-08-11 + 2026-08-13 onboarding deltas + **2026-08-13 Mailchimp walkthrough (Jose)** + **2026-08-13 presentation / request-attempt chat (`c02a7e4a`)** — **single walkthrough authority** for connector setup through Notice > SirvenOS External-Integrations + Data-Verticals KB > shipped connections-onboarding plan > external-vertical-hash-workers plan > journey workbench (`2026-07-29-001`) + fulfillment (`2026-07-21-001`) for adjacent stages only.
 
 **Supersedes:** Cursor plan `upload_verticals_lever_fix_b1d70869` (`~/.cursor/plans/upload_verticals_lever_fix_b1d70869.plan.md`) — durable upload-vertical and Lever-triage requirements are folded into this Product Contract; the Cursor plan is retired.
 
-**Open blockers:** None — OQ1, OQ2, and OQ4 resolved (see Key Decisions KD17–KD20). Planning HOW for OQ5–OQ9 resolved in Planning Contract (KTD1–KTD12).
+**Open blockers:** **Must-fix (walkthrough):** Connect-step Continue fires `wizard_incomplete` reminder before inline save+test — see KD27, R31. None other for core connector scope — OQ1–OQ4 resolved (KD17–KD20). Planning HOW for OQ5–OQ9 resolved (KTD1–KTD14). OQ12, OQ15–OQ18 remain open (OQ14 rename scope and OQ17 IAP first name **resolved by Jose 2026-08-13**). ~~OQ13 emergency ops invite~~ — **Resolved (KD22, KD30, Jose 2026-08-13):** invite URLs killed entirely; no break-glass `/connect/{token}`.
 
-**Stop when:** Vertical catalog + assignments persist; SaaS owners complete wizard (mode + cadence + Live redeem or Upload template); gated status surfaces Needs refresh / Action required; matching claim helpers refuse Upload-stale or Live-rotation-overdue systems; Data remains view-only; tests green; no secrets/PII in logs.
+**Stop when:** Vertical catalog + assignments persist; SaaS owners land on first login → welcome → wizard; complete wizard (mode + **in-wizard** connect+test + cadence); gated status surfaces Needs refresh / Action required; matching claim helpers refuse Upload-stale or Live-rotation-overdue systems; eligible owners see skippable nav tour on **each login** until tour completed/skipped; Data remains view-only; **invite URLs and `/connect/{token}` removed entirely** (KD22, KD30); tests green; no secrets/PII in logs.
 
-**Product Contract preservation:** Product Contract unchanged (R/A/F/AE/KD IDs stable). Planning resolved deferred OQs without rewriting product scope.
+**Product Contract preservation:** KD1–KD20 and R/A/F/AE IDs stable; KD21+ and R23+ extend scope without rewriting settled decisions. Planning resolved deferred OQs without rewriting core product scope.
 
 **Execution direction:** Characterization-first around shipped connections testers/redeem before extending; upload parse and matching gate are new behavior → add focused unit tests with each unit.
 
@@ -36,11 +38,11 @@ Extend the shipped per-system Connections onboarding and external vertical hash 
 
 ### Summary
 
-Move from per-system Connections (super_admin-only, global `data_owner` role) to **vertical-scoped connectors**: each SaaS vertical owns its systems, picks one active mode (Live or Upload) per system, and maintains data freshness on a cadence they set. Super_admin maps verticals to systems and approaches, forces mode transitions, and resets wizard state. Matching for a vertical stays blocked until freshness and rotation rules pass; login reminders stay soft.
+Move from per-system Connections (super_admin-only, global `data_owner` role, Ops-minted invite links) to **vertical-scoped connectors**: each SaaS vertical owns its systems, picks one active mode (Live or Upload) per system, **connects inside the vertical wizard** (Live: credential fields + **how-to + test overlay**; Upload: validate — **no** `/connect/{token}` invite page), and maintains data freshness on a cadence they set. **Owner access = assigned vertical + IAP login only** — **no invite URLs** (KD22, KD30). First login with incomplete connectors shows a **Habeas Platform welcome** (first name from Google IAP) and routes into the **super_admin-assigned vertical** wizard — the **only** owner path (KD23–KD24). Once wizard is complete with a passing Connect test, owners get a **skippable quick-start popover tour** of primary nav — **re-offered on every login** until they finish the tour or skip (Jose-confirmed). Super_admin maps verticals to systems and approaches, forces mode transitions, and resets wizard state. Matching for a vertical stays blocked until freshness and rotation rules pass; login and welcome reminders stay **soft** — incomplete wizard does not block IAP login (KD4, KD29). **End-to-end demo (F10):** connector wizard → request journey workbench matching disposition (1:1 / 1:many / no-match) → legal review → fulfillment (**Data vertical auto only today**; other SaaS verticals week of 2026-08-18) → **Notice** (Wednesday-night append + upload per existing `drop_notice_dispatcher` cadence) — see **Adjacent journey** and R33–R58.
 
 ### Problem Frame
 
-Connections onboarding shipped a secure credential path per system, but mutations remain super_admin-only and `data_owner` is a global allowlist with no vertical binding. External hash workers and attempt tables are per-system; journey IA lists SaaS verticals as coming soon while only Data is live. Owners cannot self-serve mode choice, cadence, or credential rotation within their vertical. Ops cannot see which verticals are connected yet gated for matching. Without vertical scope and freshness gates, Habeas risks matching on stale Upload extracts or overdue Live credentials while owners lack a clear operating surface.
+Connections onboarding shipped a secure credential path per system, but mutations remain super_admin-only and `data_owner` is a global allowlist with no vertical binding. External hash workers and attempt tables are per-system; journey IA lists SaaS verticals as coming soon while only Data is live. Owners cannot self-serve mode choice, cadence, or credential rotation within their vertical. Ops cannot see which verticals are connected yet gated for matching. **2026-08-13 Mailchimp walkthrough:** assigned owner chose Live on Communications, reached Connect, pressed Continue before pasting/testing credentials — wizard advanced intent surfaced red `wizard_incomplete` reminder instead of walking them through inline connect+test (must-fix KD27, R31). Without vertical scope, in-wizard connect, and freshness gates, Habeas risks matching on stale Upload extracts or overdue Live credentials while owners lack a clear operating surface.
 
 ### Key Decisions
 
@@ -50,7 +52,7 @@ Connections onboarding shipped a secure credential path per system, but mutation
 - KD4. (session-settled: user-directed — chosen over gate-on-login-only or no gate: protect matching integrity without blocking routine access) **Hard gate on matching** when Upload data is stale **or** Live credential rotation is overdue (~6 months); **soft** login prompts and reminders only.
 - KD5. (session-settled: user-directed — chosen over fixed platform cadence or no cadence) **Per-vertical setup wizard includes cadence** — owner sets refresh cadence; super_admin can override cadence and **reset** wizard (forces redo).
 - KD6. (session-settled: user-directed — chosen over request-wide owner powers) **Owner access is vertical-scoped** — read/write/delete on their vertical(s) and disposition for **their systems only**; not request-wide legal close, cross-vertical disposition, or platform-wide admin.
-- KD7. (session-settled: user-directed — chosen over greenfield connector platform) **Extend existing artifacts** — `integration_connections`, connection testers, owner invite/redeem, external hash workers, and per-system attempt tables; not a new integration stack.
+- KD7. (session-settled: user-directed — chosen over greenfield connector platform) **Extend existing artifacts** — `integration_connections`, connection testers, external hash workers, and per-system attempt tables; not a new integration stack. Owner connect uses in-wizard APIs only — **no** token redeem / `/connect/{token}` (KD22, KD30).
 - KD8. (session-settled: user-directed — refined by Jose OQ2) **Data vertical is catalog-visible, not owner-onboarded** — Data / Cassandra appears in the vertical catalog as **already connected** (view-only for owners/engineers); no Upload approach, no owner invite, and no credential/upload wizard (Cassandra remains INF handoff per External-Integrations KB). Owner connector flows ship for SaaS verticals only.
 - KD9. (session-settled: user-approved — chosen over API-first Paylocity live path) **Paylocity automated/live path is SFTP** — v1 Upload for flat-file ingest; SFTP is the Live successor (not a separate Paylocity API live mode in this model). **QCQA (settled_conflict, do not invert):** v1 keeps the existing Paylocity API connection tester; SFTP is the Live successor (KTD12 upload-first) — do not rip out the API tester.
 - KD10. (session-settled: user-approved — chosen over Sheets API live in v1) **Google Sheets direct/live connection deferred** — no v1 live Sheets API path; BizDev Contact Use vs HR alumni list are distinct usage shapes (see R12, R13).
@@ -77,10 +79,23 @@ Connections onboarding shipped a secure credential path per system, but mutation
 
 **Vertical catalog** (definition): the v1 list of **data verticals** above and, for each, which **systems + allowed approaches** are configured — not a separate product surface name.
 
+- KD21. (session-settled: user-directed — chosen over separate invite/redeem; **refined Jose 2026-08-13**) **In-wizard connect** — after Mode selection, **Live credentials or Upload file** are submitted and tested **inside** the vertical setup wizard Connect step on `/owner/connectors`. **Live:** reuse existing per-system **how-to + test overlay** (credential fields, help copy, inline test result) from shipped connect UI — embedded in wizard, not a separate invite page. **Upload:** template + delimiter + validate inline. No invite/redeem process for assigned owners.
+- KD22. (session-settled: user-directed — **confirmed Jose 2026-08-13:** kill invite URLs entirely) **No invite URLs** — owner onboarding is **vertical assignment + IAP login only**; super_admin assigns owners to verticals. **Remove** Ops invite mint, mailto invite URLs, `connection_invites` creation, and owner `/connect/{token}` redeem route — **no primary path, no fallback, no break-glass**.
+- KD23. (session-settled: user-directed — chosen over landing on generic home with wizard_incomplete reminder) **First-login routing** — when an assigned owner logs in with incomplete connector setup, show welcome then route into the **super_admin-assigned vertical** wizard — the **only** owner onboarding path (KD22, KD30); primary vertical is the assigned catalog vertical named in welcome copy (OQ12 if multiple).
+- KD24. (session-settled: Jose confirmed 2026-08-13) **Welcome copy** — first-login welcome headline: “Hello {first_name from Google IAP}, welcome to **Habeas Platform**”; body: “Let's set up your {Vertical} data vertical” (e.g. Communications from super_admin assignment); generic fallback when vertical not yet resolved: “Let's set up your data vertical”; primary CTA launches assigned vertical wizard (KD23).
+- KD25. (session-settled: user-directed — chosen over mode toggle without context; **refined 2026-08-13 Mailchimp walkthrough**) **Mode step explainer** — Mode step always shows **Upload vs Live** definition cards in **plain language for non-engineers** (data owners are not expected to know API vs file ingest): **Upload** = you send Habeas Platform a file on a schedule you set; **Live** = Habeas Platform connects directly to the service to pull data. Per-system one-line hint; disallowed mode greyed with reason; shared “Connecting ≠ matching” footnote.
+- KD26. (session-settled: user-directed — chosen over silent post-wizard landing; **Jose-confirmed 2026-08-13**) **Quick-start nav tour** — skippable popover/coach-mark tour of role-appropriate primary nav tabs (F9 table); **re-offered on every login** until user completes all steps or taps **Skip tour**; persist `completed` \| `skipped` in `localStorage`. In-app only — no SMTP (KTD13).
+- KD27. (session-settled: user-directed — fixes shipped split-brain bug; **must-fix observed 2026-08-13 Mailchimp walkthrough**) **Connect Continue gated on inline connect+test** — Connect step **Continue** stays **disabled** until inline save+test succeeds on the **same vertical-scoped connection row**; must not advance to Cadence/Confirm and must **not** surface the red `wizard_incomplete` reminder (“connector setup incomplete… Finish the connector wizard so matching can run… This reminder does not block login”) when owner presses Continue before credentials are pasted and tested in-wizard. *Observed:* super_admin assigned Communications → Live → Connect → Continue at top fired reminder without inline connect.
+- KD28. (session-settled: Jose confirmed 2026-08-13 — product rename, not regulatory relabel) **Habeas Platform** — user-facing display name **Habeas Platform** (slug `habeas-cli`); applies to **all user-visible chrome** — AppShell header/footer, document title, connect chrome, welcome sheet, **and PostAuthSplash login animation** — not welcome-only; keep **CA DROP** / **DROP** / company-as-vendor / support **Habeas** copy unchanged (OQ14 resolved).
+- KD29. (session-settled: user-directed 2026-08-13 — chosen over hard login block for incomplete wizard) **Soft login, hard matching** — incomplete connector wizard does **not** block IAP login or routine navigation after welcome dismiss; login and connector reminders stay **soft** only (KD4, R10); **matching remains hard-gated** until wizard complete and freshness/rotation pass (KD4, KD18).
+- KD30. (session-settled: user-directed — **supersedes invite-primary**; **confirmed Jose 2026-08-13**) **Vertical assignment is the only access grant** — super_admin assigning an owner to a vertical **is** the onboarding authorization; first login routes into the **same data vertical wizard** for mode select, credential paste, how-to overlay, connection test, and cadence. **Kill** separate Connections invite process and **all** owner `/connect/{token}` paths — not primary, not fallback (KD22).
+- KD32. (session-settled: user-directed 2026-08-13 — chosen over tour before connect+test) **Tour eligibility follows connection test** — tour is **not offered** until **Connect-step test passes** (Live `ok` or Upload `upload_ok` on the vertical-scoped row) **and** wizard Confirm succeeds; mode/cadence-only progress does not make tour eligible.
+- KD33. (session-settled: **Jose-confirmed 2026-08-13** — chosen over one-shot post-wizard-only tour) **Tour every login until complete** — once KD32-eligible, client offers tour **on each login** (after PostAuthSplash/welcome deferrals) while persistence is neither `completed` nor `skipped`; mid-chain exit without skip → re-offer next login. **super_admin `connections.wizard_reset`** clears tour state for affected vertical owners (align KTD8 `connections.wizard_reset`).
+
 ### Actors
 
-- A1. **Super_admin** — maps verticals to systems and approaches; forces active mode; overrides cadence; resets owner wizard; retains global Connections admin.
-- A2. **Vertical data owner** — assigned to one or more verticals via vertical-scoped role; runs setup wizard, sets cadence, submits Upload refreshes or Live/SFTP credentials, disposes matching for owned systems.
+- A1. **Super_admin** — maps verticals to systems and approaches; assigns owners to verticals; forces active mode; overrides cadence; resets owner wizard; retains global Connections admin (retest, force mode — **no** invite mint).
+- A2. **Vertical data owner** — assigned to one or more verticals via vertical-scoped role; on first login sees welcome and runs setup wizard; sets mode, connects (Live credentials+test or Upload validate) in-wizard, sets cadence, submits Upload refreshes or Live/SFTP credential rotation, disposes matching for owned systems.
 - A3. **Platform engineer** — configures vertical/system catalog bindings with super_admin; extends testers and workers within existing patterns.
 - A4. **Legal / admin** — request-wide journey and legal disposition; **not** vertical connector operators in v1 (see KD6).
 - A5. **Matching worker** — consumes freshness/rotation gate state before running vertical external matching attempts.
@@ -109,17 +124,100 @@ Connections onboarding shipped a secure credential path per system, but mutation
 
 **Per-vertical owner wizard**
 
-- R12. Each **SaaS owner vertical** has an **owner setup wizard** covering: active mode per system, credential or upload path, and **refresh cadence**; completion is required before matching is eligible (subject to R9). **Data** vertical has no wizard — already connected, view-only (KD8).
+- R12. Each **SaaS owner vertical** has an **owner setup wizard** covering: active mode per system (with Upload vs Live explainer when both allowed), **in-wizard connect+test** (Live credentials or Upload file), and **refresh cadence**; completion is required before matching is eligible (subject to R9). Data owners complete **all** connection steps through this wizard — not via Ops Connections invite mint or `/connect/{token}` redeem (KD22, KD30). **Data** vertical has no wizard — already connected, view-only (KD8).
 - R13. **Upload vertical system split** — BizDev **Contact Use** maps to connection system `bizdev_contacts`; HR **alumni list** maps to `hr_alumni` (not `google_sheets`); v1 does not ship Sheets API live or owner sheet-share path for either.
 - R14. **BizDev and HR alumni in v1** — both provisioned as **upload-only** via `bizdev_contacts` and `hr_alumni` template file upload; BizDev templates derive from Contact Us match fields (no canonical sheet URL in KB).
+
+**First login, welcome, and onboarding**
+
+- R23. **In-wizard connect (Live and Upload)** — Connect step is the **single place** to finish the connection: **Live** = credential paste + per-system **how-to + test overlay** (reuse shipped connect UI) inline after mode select; **Upload** = template + delimiter + validate inline (KD21, KD30); **Continue** disabled until test passes on the **vertical-scoped** `integration_connections` row (KD27).
+- R24. **Mode step explainer** — Mode step renders always-visible Upload and Live definition cards in **plain language for non-engineers** (Upload = scheduled file you send; Live = direct service connection); per-system one-line hint; shared “Connecting ≠ matching” footnote (KD25).
+- R25. **First-login welcome and routing** — assigned owner with any incomplete wizard for their vertical(s) sees welcome (KD24) naming the **super_admin-assigned vertical** in CTA copy, then enters that vertical wizard; no dependency on Ops invite URL (KD22, KD23); welcome does not block subsequent logins (KD29).
+- R26. **Invite URL removal** — **remove** Ops invite mint/mailto/revoke UI, stop creating `connection_invites`, **remove** owner `/connect/{token}` route and redeem API — **no fallback** (KD22, KD30). Vertical assignment is the only owner access grant.
+- R27. **Quick-start nav tour** — once eligible (Connect test pass + wizard Confirm), offer role-appropriate popover tour **on every login** until user completes all steps or **Skip tour**; persist `completed` \| `skipped` per user per variant — no re-offer after either terminal state (KD26, KD32, KD33).
+- R28. **Habeas Platform rename (all chrome)** — display name **Habeas Platform** (`habeas-cli` slug) on **all user-visible chrome** including header, footer, document title, connect chrome, welcome sheet, **and PostAuthSplash login animation**; DROP/regulatory strings unchanged (KD28).
+- R29. **First-run vertical CTA** — welcome primary CTA copy names the assigned vertical display label (e.g. “Let's set up your Communications data vertical”); CTA navigates directly to `/owner/connectors?vertical={id}` and starts the wizard (KD23, KD24).
+- R30. **Soft login vs hard matching** — incomplete wizard surfaces soft reminders on login and connector pages only; matching claim helpers refuse incomplete wizard, Upload-stale, or Live-rotation-overdue systems (KD4, KD18, KD29).
+- R31. **Must-fix: Connect Continue before connect+test** — on Connect step, Continue control **disabled** until Live inline test passes or Upload validates (KD27); pressing Continue **must not** trigger `wizard_incomplete` reminder or advance wizard while connection is untested. Regression target: Communications + Mailchimp + Live walkthrough path (KD30, AE21).
+- R32. **Tour reset on wizard reset** — `connections.wizard_reset` (KTD8) returns `clear_onboarding_tour: true` for assigned owners of that vertical; client clears tour persistence so tour is re-offered on subsequent logins once KD32-eligible again (KD33). In-app only — no SMTP invent (KTD13).
+
+**First-run IA sketch** (owner, incomplete connectors — user-directed 2026-08-13)
+
+| Step | Surface | Copy / action |
+|------|---------|---------------|
+| 1 | IAP sign-in | Google IAP authenticates owner |
+| 2 | PostAuthSplash | Login animation shows **Habeas Platform** branding; animation completes |
+| 3 | Welcome sheet/modal | Headline: “Hello {first_name}, welcome to **Habeas Platform**” |
+| 4 | Welcome body | “Let's set up your **{Vertical}** data vertical” (Vertical = super_admin-assigned catalog label, e.g. Communications) |
+| 5 | Welcome CTA | Primary: “Get started” → `/owner/connectors?vertical={id}` (starts wizard F2) |
+| 6 | Wizard F2 | Mode explainer → Connect (+ test pass) → Cadence → Confirm (unchanged) |
+| 7 | Subsequent logins (when tour-eligible) | Skippable nav popover tour re-offered until completed/skipped (KD26, KD33) |
+| 8 | Later logins | No welcome intercept; soft reminder banners only (R10); matching hard-gated until wizard + freshness pass (KD4, KD29) |
+
+First name from Google IAP `given_name` (Jose confirmed OQ17). Generic body fallback when vertical unresolved: “Let's set up your data vertical”.
 
 **Owner disposition scope**
 
 - R15. Owners can read, write, and delete connector configuration and disposition **matching results for their vertical systems only** — not legal disposition, request close, or other verticals' results.
 
+### Adjacent journey (matching / fulfillment / notice)
+
+**Walkthrough authority:** Demo flow **F10** and requirements **R33–R58** make this plan the **single end-to-end walkthrough** for vertical connectors plus request journey. Request-detail chrome, attempt drill-down, and journey rail are implemented per **`docs/plans/2026-07-29-001`** (request journey workbench — four-stage rail: **Ingest → Matching → Fulfillment → Notice**). Fulfillment automation follows **`docs/plans/2026-07-21-001`** — **do not invent new fulfillment stacks.** Notice append + scheduled upload uses existing **`drop_notice_dispatcher`** — Wednesday **00:00 America/Los_Angeles** upload, **04:00 PT** amend window (DROP Specs v1.2.0).
+
+**KD6 preserved:** Matching disposition is **vertical-system-scoped** — owners disposition **their systems only**; `super_admin` ops override on request-detail Matching is an explicit exception with banner, not a substitute for vertical assignment.
+
+| Stage | Product term | Notes |
+|-------|--------------|-------|
+| **Matching disposition** | CA DROP `response_status` 3 Deleted / 4 Opted out / 5 Not found + optional DWIDs | Approves matching review; **does not** auto-start Legal kickoff or Fulfillment (`Fulfill` button ≠ start fulfillment workflow) |
+| **Legal review** | Assignment-to-legal; legal read-only on matching disposition unless escalated | KTD11 / legal admin plans (`2026-07-23-001`–`027`) |
+| **Fulfillment** | `fulfillment.kickoff` on Fulfillment tab after legal review | **Data vertical (Cassandra/CEPI) is the only automatic fulfillment today**; Mailchimp/Paylocity/Lever/Auth0 automation **ships week of 2026-08-18** (Jose 2026-08-13) |
+| **Notice** | CA DROP response rows appended + uploaded | **Wednesday nights** — demo mentions Notice stage even if upload is scheduled/off-screen |
+
+**Demo beats** (Jose 2026-08-13 presentation + request-attempt chat [`c02a7e4a`](file:///Users/jsirven/.cursor/projects/Users-jsirven-Habeas-data-privacy/agent-transcripts/c02a7e4a-dd5a-4b22-9f73-0d3bff2063e8/c02a7e4a-dd5a-4b22-9f73-0d3bff2063e8.jsonl)):
+
+| Beat | What to show |
+|------|----------------|
+| Match shapes | **1:1** (`match_count === 1`), **1:many** (`match_count > 1`), **no-match** (`match_count === 0` / `hash_missing`) — read attempt audit; update status per shape |
+| DWID assign | **Dropdown / multi-select** to assign which matched person(s) apply for status **3** or **4** |
+| Auto-assign DWID | Data owners: **pre-select all matched DWIDs** on 3/4 for 1:1 and multi (may deselect in multi) |
+| Bulk status | **Bulk status update** on inbox exact-1:1 threads |
+| Legal → fulfillment | Legal review first, then fulfillment — **Data auto only**; other verticals **this coming week** |
+| Notice | Responses **appended and uploaded Wednesday nights** |
+
+**Request journey — matching disposition & audit** (merged from request-attempt chat)
+
+- R33. **Copyable attempt id** — each matching attempt row exposes bigint `matching_attempts.id` (not UUID) for operator/agent diagnosis.
+- R34. **Response summary** — expanded attempts show brief summary from audit fields (`matched`, `match_count`, `matched_via`, `lookup_state`, `error_code`, `error_detail`, `retry_scheduled`, `duration_ms`, `error_class`, timestamps).
+- R35. **Full audit payload** — expanded rows show redacted `audit_payload` JSON + `error_message` when present (closest substitute for traceback; raw stdout **not** stored — out of scope).
+- R36. **Success badge semantics** — distinguish `success · matched`, `success · not found` / `success · {matched_via}` (e.g. `hash_missing`), `success · multi (N)` — plain green "success" must not imply identity found.
+- R37. **Rematch clarity** — operator copy: matching `success` means worker finished cleanly (includes unmatched); CA DROP rematch re-enqueues when `match_count ≠ 1`; changing rematch loop is a separate decision.
+- R38. **Disposition roles** — `data_owner`, `super_admin`, and `legal` (only when **assignment-to-legal**) may set CA DROP disposition 3/4/5 from matching results UI.
+- R39. **Multi-DWID select** — status 3/4: multi-select DWIDs from matched contacts (pre-select all; operator may deselect); status 5: no DWIDs.
+- R40. **Explicit DWID confirm** — status 3/4 blocked until ≥1 DWID explicitly selected — no silent client default to all matched.
+- R41. **Contact labels** — `{first_initial} {last_name} {state} {MM/DD/YY}`; multi summary: first label + `+N more`; checklist shows DWID for disambiguation.
+- R42. **Promote API** — disposition passes selected `dwids` for 3/4; labels enable legal/admin search on multi-match requests.
+- R43. **KTD11 preserved** — `data_owner` canonical; `legal`/`admin` read-only unless assignment-to-legal; disposition ≠ Legal kickoff / Fulfillment start (copy must say so).
+- R44. **Super_admin ops override** — same Fulfill/Decline + status + DWID affordances as `data_owner` when review pending, with explicit **"Ops override"** banner.
+- R45. **Incomplete disposition warning** — if promote returns `disposition.recorded === false`, surface warning (not silent success) before fulfillment kickoff.
+- R46. **Matched contacts errors — UI** — emphasized fail-tone alert (not muted one-liner) with title, reason, next steps when contacts cannot load.
+- R47. **Matched contacts errors — API** — structured `matched_contacts_error` distinguishing at least: no lookup state, invalid state, no DWIDs, BQ lookup failure, BQ not configured / not connected.
+- R48. **Error copy** — no PII in toasts; `actionToast` error + Retry for mutations.
+- R49. **Page layout** — full request detail (`variant="page"`): pipeline journey rail + substeps **left**; activity/attempt detail **under pipeline**; Details · Fulfillment · Matching tabs **right**.
+- R50. **Activity → stage expand** — clicking timeline entry tied to a pipeline stage expands that stage on the rail and shows stage-specific detail under pipeline (matching: attempt rows with audit payload).
+- R51. **Tab relocation** — Details · Fulfillment · Matching remain content tabs on the **right column**; overlay/drawer may keep Activity as tab (narrow width).
+- R52. **Connector freshness on matching** — when KD4/KD18 gates block matching, request-detail matching surfaces **Needs refresh** / **Action required** — not "Connected" while attempts fail or contacts cannot resolve.
+- R53. **Vertical scope (KD6)** — owner connector ops remain vertical-scoped; matching disposition is system/vertical-scoped in effect; `super_admin` is explicit ops override only.
+- R54. **Legal searchability** — disposition label format (`first_initial last_name state DOB +N more`) preserved when extending owner connector flows.
+- R55. **Demo exemplars** — demo vertical includes requests for all three match shapes: 1:1, 1:many, no-match — walk attempt audit then disposition per shape (R-DEMO-1).
+- R56. **Demo DWID picker** — multi-select checklist on status 3/4 is a first-class demo beat.
+- R57. **Demo bulk status** — inbox/thread bulk fulfill or bulk disposition on exact-1:1 threads.
+- R58. **Demo legal → fulfillment → notice** — narrative: matching disposition → legal review/kickoff → fulfillment (**Data auto only**; SaaS automation next week) → **Wednesday-night Notice** append + upload.
+
+**Explicit non-goals (request-attempt session):** persisting raw traceback/stdout; changing CA DROP rematch/retry loop; auto-starting Legal kickoff or Fulfillment from matching approve; unrestricted legal promote without assignment.
+
 **Platform extension (not greenfield)**
 
-- R16. Vertical connector state extends **existing** `integration_connections`, connection invite/redeem, connection testers, external hash workers, and per-system attempt tables — no parallel connection registry.
+- R16. Vertical connector state extends **existing** `integration_connections`, connection testers, external hash workers, and per-system attempt tables — no parallel connection registry. **No** owner token redeem / `/connect/{token}` (KD22, KD30).
 - R17. **Connecting ≠ enabling matching** remains true — a passing connection test means credentials authenticate or upload validates; vertical matching additionally requires wizard completion, active mode, and freshness gates.
 - R18. **Frozen per-system upload templates** — each upload system publishes required and optional CSV headers; connection test rejects unknown or missing required headers. Canonical headers:
   - `bizdev_contacts`: required `first_name`, `last_name`, `email`; optional `phone`, `company`, `source`, `submitted_at`, `notes`
@@ -137,23 +235,26 @@ flowchart TB
     FORCE["Force active mode / reset wizard"]
   end
   subgraph owner["Vertical owner operations"]
+    WEL["First-login welcome"]
     WIZ["Per-vertical setup wizard"]
+    MODE["Mode + explainer"]
+    CONN["In-wizard connect+test"]
     CAD["Set cadence"]
-    UP["Upload refresh"]
-    LIVE["Live credentials / SFTP"]
+    TOUR["Quick-start nav tour"]
   end
   subgraph gate["Matching gate"]
     FRESH{"Upload stale OR rotation overdue?"}
     MATCH["Vertical matching allowed"]
     BLOCK["Matching blocked — gated"]
   end
-  MAP --> WIZ
-  WIZ --> CAD
-  CAD --> UP
-  CAD --> LIVE
-  UP --> FRESH
-  LIVE --> FRESH
+  MAP --> WEL
+  WEL --> WIZ
+  WIZ --> MODE
+  MODE --> CONN
+  CONN --> CAD
+  CONN --> FRESH
   FORCE --> WIZ
+  WEL --> TOUR
   FRESH -->|no| MATCH
   FRESH -->|yes| BLOCK
 ```
@@ -168,11 +269,40 @@ flowchart TB
   - **Covered by:** R1, R2, R3
 
 - F2. **Owner completes vertical setup wizard**
-  - **Trigger:** Owner first assigned or super_admin reset.
+  - **Trigger:** Owner first assigned, first login with incomplete setup, or super_admin reset.
   - **Actors:** A2
-  - **Steps:** Choose active mode per system; complete template Upload path or Live/SFTP/API credentials via existing invite/redeem patterns; set cadence; pass connection test where applicable.
-  - **Outcome:** Vertical wizard complete; matching still blocked if R9 fires.
-  - **Covered by:** R4, R6, R7, R12
+  - **Steps:** Mode (with Upload vs Live explainer) → **Connect** (Live: inline credentials + test **or** Upload: template + delimiter + validate) → Cadence → Confirm; all on `/owner/connectors` against the vertical-scoped connection row.
+  - **Outcome:** Vertical wizard complete; tour becomes eligible (KD32, F9); matching still blocked if R9 fires.
+  - **Covered by:** R4, R6, R7, R12, R23–R24, KD21, KD25, KD27
+
+- F8. **First login welcome → vertical wizard**
+  - **Trigger:** Assigned owner signs in via IAP; any assigned vertical has incomplete wizard (`wizard_completed_at` null).
+  - **Actors:** A2
+  - **Steps:** After PostAuthSplash — show welcome: “Hello {first name}, welcome to **Habeas Platform**”; body: “Let's set up your {Vertical} data vertical” (Vertical = super_admin-assigned catalog label); CTA “Get started” → `/owner/connectors?vertical={id}` for primary assigned vertical (OQ12 if multiple). Login not blocked on dismiss; matching still hard-gated (KD29).
+  - **Outcome:** Owner enters F2 without Ops invite link.
+  - **Covered by:** R25, R29, R30, KD23, KD24, KD29
+
+- F9. **Quick-start nav tour (login until complete)**
+  - **Eligibility:** Connect-step test pass + wizard Confirm on vertical-scoped row (KD32) — not offered before healthy connect.
+  - **Trigger:** **Each login** while eligible and tour persistence is neither `completed` nor `skipped` (KD33, Jose-confirmed) — after PostAuthSplash/welcome deferrals. Not a one-shot at wizard Confirm only.
+  - **Actors:** A2 (v1); A1 ops variant deferred (OQ15, OQ18).
+  - **Steps:** Sequential popovers anchor visible nav items; each step explains what that tab is for daily work. **Skip tour** ends chain and persists `skipped`. Finish all steps → persist `completed`. Steps only include nav items the principal can see (`NavMenu` role gates).
+  - **Outcome:** Owner oriented to Connectors + request surfaces; stops re-offering after complete/skip; super_admin wizard reset clears persistence so tour re-offers on later logins once re-eligible.
+  - **Covered by:** R27, R32, KD26, KD32, KD33
+
+  **Tab annotation (v1 draft — OQ18 for super_admin exact set):**
+
+  | Step | Anchor | Route | Visible to | Popover explains (draft) |
+  |------|--------|-------|------------|--------------------------|
+  | 1 | **Connectors** | `/owner/connectors` | `data_owner`, `admin`, `super_admin` | Manage your vertical systems — mode, upload refresh, credential rotation, cadence. |
+  | 2 | **My work** | `/` | `data_owner` only (non-ops nav) | Home for your assigned connector and disposition work. |
+  | 2′ | **Pipeline** (ops) | `/ops/drop-pipeline` | `super_admin` / ops roles only | DROP pipeline health — deferred ops tour variant (OQ15); **not** in v1 owner chain. |
+  | 3 | **Requests** | `/requests` | all authenticated | Open privacy requests; request detail holds the **journey workbench** (per-vertical matching/fulfillment) when that vertical is live. |
+  | 4 | **Inbox** | `/requests/needs-attention` | all authenticated | Items needing attention — triage queue. |
+  | 5 | **Docs** | `/docs` | all authenticated | Help, runbooks, and training material. |
+  | — | **Connections** (ops) | `/ops/connections` | `super_admin` via Pipeline menu | Catalog, assignments, gated status, wizard reset — **OQ18:** include in super_admin tour or defer to ops variant? |
+
+  **v1 owner chain (default):** steps 1 → 2 → 3 → 4 → 5 (skip any anchor not rendered for role). **super_admin** who completes owner wizard gets owner chain unless OQ18 specifies Pipeline/ops anchors instead.
 
 - F3. **Upload cadence lapse hard-gates matching**
   - **Trigger:** Upload data age exceeds owner cadence (or super_admin override).
@@ -184,9 +314,9 @@ flowchart TB
 - F4. **Live rotation overdue hard-gates matching**
   - **Trigger:** Live/SFTP credentials past ~6 months without rotation.
   - **Actors:** A2, A5
-  - **Steps:** Soft reminders; owner rotates via redeem flow; Paylocity path uses SFTP credentials; test passes; gate clears.
+  - **Steps:** Soft reminders; owner re-opens wizard Connect step and rotates credentials in-wizard (no new invite); Paylocity path uses SFTP credentials; test passes; gate clears.
   - **Outcome:** Matching resumes when rotation fresh.
-  - **Covered by:** R7, R9, R10
+  - **Covered by:** R7, R9, R10, KD21
 
 - F5. **Super_admin forces mode change**
   - **Trigger:** Ops strategy shift (e.g., Upload → Paylocity SFTP).
@@ -218,6 +348,13 @@ flowchart LR
   - **Outcome:** Owner receives actionable 401 vs 403 guidance; connection test passes after key fix.
   - **Covered by:** R22, KD15
 
+- F10. **End-to-end demo walkthrough** (Jose 2026-08-13 presentation + request-attempt chat)
+  - **Trigger:** Demo or stakeholder review of vertical connectors + request journey.
+  - **Actors:** A2 (data owner), A4 (legal — read-only unless assignment), A1 (`super_admin` ops override optional)
+  - **Steps:** (1) Owner completes connector wizard (F2) for assigned SaaS vertical. (2) Open exemplar requests on request journey workbench — **1:1**, **1:many**, **no-match** — drill attempt audit (R33–R37). (3) Set matching disposition with DWID multi-select / auto-assign (R38–R45); show bulk status on exact-1:1 inbox thread (R57). (4) Legal review → Fulfillment tab kickoff — **Data vertical auto fulfillment only**; note SaaS verticals ship week of 2026-08-18 (R58). (5) Mention **Notice** stage — responses appended + uploaded **Wednesday nights** via existing `drop_notice_dispatcher`.
+  - **Outcome:** Single scripted path from connector setup through Notice without inventing new fulfillment stacks; KD6 vertical scope visible throughout.
+  - **Covered by:** R33–R58, Adjacent journey table; UI per `2026-07-29-001`; fulfillment per `2026-07-21-001`
+
 ### Acceptance Examples
 
 - AE1. **Covers R1, R3.** People/HR owner assigned only to People/HR vertical cannot mutate Mailchimp connector state (403 or hidden).
@@ -231,14 +368,34 @@ flowchart LR
 - AE9. **Covers R18, R20.** BizDev owner uploads CSV missing required `email` header — connection test fails with template guidance; no ingest.
 - AE10. **Covers R19, R20.** HR owner selects `;` delimiter and uploads two emails in one cell — both identifiers parsed and hashed; wrong delimiter choice yields zero usable identifiers and test failure.
 - AE11. **Covers R22, KD15.** Lever test returns 403 with Postings-only key — owner sees Users read/list guidance; Ops reads triage fields without new CLI.
+- AE12. **Covers R23, KD21, KD27.** Mailchimp Live owner enters API key in wizard Connect step, test passes, Continue enables — no `/connect/{token}` invite; wizard completes without `wizard_incomplete` reminder.
+- AE13. **Covers R23, KD27.** Live Connect Continue disabled until test success; owner cannot reach Confirm with failing or untested credentials.
+- AE14. **Covers R24, KD25.** Mode step shows Upload and Live explainer cards; disallowed mode greyed; per-system hint visible.
+- AE15. **Covers R25, R29, KD23, KD24.** First login for assigned Communications owner with incomplete wizard shows “Hello {first name}, welcome to Habeas Platform”, body “Let's set up your Communications data vertical”, and routes to Communications wizard.
+- AE16. **Covers R27, KD26, KD33.** Eligible owner sees tour on login until **Skip tour** or full completion; after `skipped`/`completed`, no re-offer on next login.
+- AE20. **Covers R32, KD33.** Super_admin wizard reset clears tour persistence; eligible owner sees tour again on subsequent login.
+- AE22. **Covers KD33.** Owner exits tour mid-chain without skip — next login re-offers tour (restart or resume — implementer choice; must re-offer).
+- AE17. **Covers R26, KD22, KD30.** Ops Connections panel has **no** invite mint/mailto/revoke; owner `/connect/{token}` route removed — assignment-only onboarding.
+- AE18. **Covers R28, KD28.** App shell, document title, connect chrome, **and PostAuthSplash login animation** read **Habeas Platform**; DROP pipeline labels unchanged.
+- AE19. **Covers R30, KD29.** Owner with incomplete wizard can log in and navigate after welcome dismiss; matching claim for that vertical is refused until wizard complete.
+- AE21. **Covers R31, KD27 (must-fix).** Communications owner selects Live, reaches Connect step without pasting/testing credentials — Continue disabled; no red `wizard_incomplete` reminder; inline credential fields + Test connection affordance visible in wizard.
+- AE23. **Covers R33–R36, R55.** Request detail Matching tab shows copyable attempt id, response summary, full audit JSON; badges distinguish matched / hash_missing / multi (N).
+- AE24. **Covers R38–R41, R56.** Status 3/4 confirm shows DWID multi-select with human labels; empty selection blocked; status 5 sends no DWIDs.
+- AE25. **Covers R43, R44, KD6.** Legal user without assignment sees read-only matching disposition; `super_admin` sees ops override banner with same affordances as data owner.
+- AE26. **Covers R46–R48.** Matched contacts BQ-not-configured returns structured error; UI shows emphasized callout with retry — no PII in toast.
+- AE27. **Covers R57, F10.** Exact-1:1 inbox thread supports bulk status update across grouped requests.
+- AE28. **Covers R58, F10.** Demo narrative states Data-only auto fulfillment today; Notice stage cites Wednesday-night `drop_notice_dispatcher` cadence — no new fulfillment stack invented.
 
 ### Success Criteria
 
-- SC1. All first-ship SaaS owner verticals in the KD20 catalog operable end-to-end: map → wizard → Upload or Live/SFTP → gate → matching; **Data** visible in catalog as already connected (no owner wizard).
+- SC1. All first-ship SaaS owner verticals in the KD20 catalog operable end-to-end: assign → first-login welcome → wizard (mode explainer → in-wizard connect+test → cadence) → gate → matching; **Data** visible in catalog as already connected (no owner wizard).
+- SC6. Eligible owners see skippable nav tour on each login until completed/skipped; Habeas Platform rename visible in shell/welcome.
 - SC2. Zero matching runs against Upload-stale or rotation-overdue vertical-system pairs when gate is enforced.
 - SC3. Owners self-serve cadence and credential rotation within assigned verticals without super_admin for routine operations.
 - SC4. Super_admin can force mode, override cadence, and reset wizard with auditable history.
 - SC5. No new parallel connection registry — vertical scope layers on shipped Connections and hash workers.
+
+- SC7. End-to-end demo walkthrough (F10) scriptable from connector wizard through Notice using exemplar 1:1 / 1:many / no-match requests; fulfillment and Notice cite existing journey + `drop_notice_dispatcher` plans only.
 
 ### Scope Boundaries
 
@@ -246,15 +403,21 @@ flowchart LR
 
 - Vertical-scoped roles and v1 vertical catalog (KD20), including Data as view-only.
 - Single active mode per vertical-system with super_admin force and reset.
-- Per-vertical owner wizard with cadence.
+- Per-vertical owner wizard with mode explainer, **in-wizard** Live connect (**how-to + test overlay**) and Upload validate, and cadence.
+- First-login welcome (Habeas Platform + first name + vertical-named CTA) routing into assigned vertical wizard.
+- Login-gated owner quick-start nav tour (popover/coach marks; re-offered until complete/skipped).
+- Habeas Platform platform rename in shell, splash, title, connect chrome (`habeas-cli` slug).
 - Upload + Live/SFTP/API approaches for SaaS systems in scope.
 - Template-mandated upload for `bizdev_contacts`, `hr_alumni`, and Paylocity Upload mode with multi-PII delimiter.
 - Lever connection-test help and Ops triage improvements.
 - Hard gate on matching; soft login reminders.
 - Extension of existing connections, testers, workers, attempt tables.
+- **Request journey demo authority** — matching disposition, attempt audit, bulk status, legal→fulfillment→notice demo beats (R33–R58, F10); UI implementation per `2026-07-29-001`, fulfillment per `2026-07-21-001`.
+- **Remove invite URLs entirely** — Ops invite mint/mailto/revoke, `connection_invites` creation, owner `/connect/{token}` route + redeem API (KD22, KD30, R26).
 
 **Deferred for later**
 
+- Super_admin **ops-variant** onboarding tour trigger (first Pipeline visit vs owner wizard) — owner variant ships first (OQ15).
 - Super_admin **Runs** visibility for vertical SaaS worker attempts (mailchimp, lever, paylocity, auth0, `bizdev_contacts`, `hr_alumni`) — v1 Runs is DROP-spine-centric (`drop_connector` / ingest / matching / hash-index only); extend when vertical external-hash workers are ops-triageable (absorbed from `docs/plans/2026-07-17-001-feat-drop-ops-ia-plan.md` follow-up).
 - Google Sheets **direct/live API** connection and owner sheet-share / domain-wide delegation (BizDev Contact Use live path).
 - GCP inbound SFTP / Paylocity vendor push host.
@@ -287,6 +450,8 @@ flowchart LR
 - OQ2. ~~**Exact vertical catalog and owner mapping for first ship**~~ — **Resolved (KD19, KD20):** catalog shape A (department-style verticals); see KD20 table; Data included view-only.
 - OQ3. ~~**BizDev Sheets provisioning in v1**~~ — **Resolved (KD14, R14):** `bizdev_contacts` upload-only; sheet-share path retired; templates based on Contact Us match fields.
 - OQ4. ~~**Connected-but-gated visibility**~~ — **Resolved (KD18):** **Needs refresh** / **Action required** when matching paused; not “Connected”.
+- OQ14. ~~**Rename scope**~~ — **Resolved (KD28, Jose 2026-08-13):** **Habeas Platform** on all user-visible chrome + PostAuthSplash login animation; slug `habeas-cli`; Habeas kept for support/infra/DROP copy.
+- OQ17. ~~**IAP first-name source**~~ — **Resolved (KD24, Jose 2026-08-13):** first name from Google IAP (`given_name`).
 
 **Resolved in Planning (HOW — see KTD1–KTD12)**
 
@@ -300,6 +465,11 @@ flowchart LR
 
 - OQ10. Exact GCS bucket/prefix for connection uploads in prod — default `gs://example-gcp-project-dpra-uploads/connections/{system}/{connection_id}/` (or env `CONNECTIONS_UPLOAD_BUCKET`); confirm with INF before prod apply.
 - OQ11. Whether `google_sheets` system id is removed from invite UI in same PR or left retired-but-present until ops cleanup — default: stop offering new owner invites; keep enum for existing rows.
+- OQ12. **Multi-vertical first-login order** — when owner is assigned to multiple verticals with incomplete wizards, which vertical wizard opens first? Default: first incomplete by catalog sort (`communications` → `people_hr` → `tech` → `bizdev`) until Jose confirms priority.
+- OQ13. ~~**Emergency ops invite**~~ — **Resolved (KD22, KD30, Jose 2026-08-13):** invite URLs killed entirely; no break-glass `/connect/{token}`; assignment + first login is the only owner path.
+- OQ15. **Tour audience** — `super_admin` ops-variant tour trigger: first visit to Pipeline (`/`) vs first successful ops connection test? Default: defer ops variant; ship owner variant only (KD26).
+- OQ16. **Legal persona tour** — legal users have no Connectors nav; separate legal onboarding variant deferred.
+- OQ18. **Tour tab set by role** — which exact nav anchors for **`data_owner`** vs **`super_admin`**? Default owner chain: Connectors → My work → Requests (+ journey callout in Requests copy) → Inbox → Docs. **Open:** does `super_admin` use the same owner chain after completing owner wizard, or add Pipeline / `/ops/connections` steps? Does `data_owner` skip Inbox if empty? Confirm with Jose before U14.
 
 ### Sources / Research
 
@@ -310,6 +480,9 @@ flowchart LR
 - `app/admin_api/src/admin_api/vertical_dispositions.py` — LIVE vs COMING_SOON verticals.
 - `app/admin_api/src/admin_api/legal_team.py` — env+DB hybrid membership pattern to mirror for vertical assignments.
 - SirvenOS KB `01-ARCHITECTURE/External-Integrations.md` — department→system table (Heather/Communications→Mailchimp, Chris/Tech→Auth0, Melody/HR→Paylocity+Lever, Brad/BizDev→Sheets; v1 BizDev uses `bizdev_contacts` upload per KD14).
+- `docs/plans/2026-07-29-001` — request journey workbench (four-stage rail, Matching/Fulfillment tabs, attempt drill-down UI).
+- `docs/plans/2026-07-21-001` — fulfillment automation (Data vertical access export; per-vertical kickoff gates).
+- `tmp/lfg-vertical-connectors/from-request-attempt-chat.md` — merged into Product Contract R33–R58 (source transcript `c02a7e4a`).
 - SirvenOS KB `01-ARCHITECTURE/Data-Verticals.md` — vertical purposes and data sources (Tech Match, People Match, BizDev/Const).
 
 ---
@@ -345,7 +518,7 @@ Journey workbench today (`vertical_dispositions.py`) uses **system slugs** for c
 
 ### Product Contract preservation
 
-Product Contract unchanged — no R/A/F/AE/KD ID rewrites. Deferred OQ5–OQ9 resolved as KTDs below.
+KD1–KD20 and settled KTD1–KTD14 preserved — KD21+ and KTD15+ extend scope. Deferred OQ5–OQ9 resolved as KTDs below.
 
 ### Key Technical Decisions
 
@@ -365,6 +538,12 @@ Product Contract unchanged — no R/A/F/AE/KD ID rewrites. Deferred OQ5–OQ9 re
 | KTD12 | **Paylocity Live SFTP slice:** v1 allows `live` in bindings + force-mode + existing SFTP credential schema/tester; full inbound SFTP host / vendor push and automated Live extract remain deferred. Upload mode is the operable Paylocity path for freshness clears in v1. **KD9 waiver:** Paylocity Live remains the shipped API tester in v1; SFTP is successor — do not remove `connection_tests/paylocity.py`. |
 | KTD13 | **Reminders:** soft only — `GET /me` (or `/owner/connector-reminders`) returns allowlisted reminder codes when approaching/past thresholds; no SMTP. Reuse copy/mailto patterns from invites. |
 | KTD14 | **Owner disposition:** v1 enforces connector R/W/D + upload/test within assigned verticals; do **not** unlock request-wide legal close. Vertical disposition write scoping for SaaS systems stays journey-gated (coming soon) — only extend when a SaaS vertical is flipped live in journey IA (out of connector DoD). |
+| KTD15 | **In-wizard Live credentials API:** owner-authenticated `POST /owner/verticals/{v}/systems/{s}/credentials` (or `…/live/test`) writes Secret Manager on the **vertical-scoped** row, runs `test_connection`, sets `credentials_rotated_at` / `last_test_*` on success; failed test retryable without consuming wizard progress (KD21, KD27). |
+| KTD16 | **Invite URL removal (Jose 2026-08-13):** remove Ops UI mint/mailto/revoke; stop creating `connection_invites`; remove owner `/connect/{token}` web route and redeem API; redirect or 410 legacy bookmarks (KD22, KD30, R26). Extract reusable Live credential + how-to + test components from shipped connect UI into wizard — do not maintain separate invite page. |
+| KTD17 | **First-login routing:** when `/me` shows assigned verticals with incomplete wizard, client shows welcome modal/sheet after PostAuthSplash — headline “Hello {first_name}, welcome to Habeas Platform”; body “Let's set up your {Vertical} data vertical”; CTA → `/owner/connectors?vertical={id}` (KD23, KD24, R29). `{first_name}` from IAP `given_name` (OQ17 resolved). |
+| KTD18 | **Onboarding tour:** `localStorage` key `habeas-cli.tour.v1.owner.{userId}` (`completed` \| `skipped`); **login hook** in AppShell after PostAuthSplash/welcome — offer when KD32-eligible and persistence unset; re-offer every login until terminal state (KD33); popover chain per F9 tab table; no SMTP (KD26, KTD13). |
+| KTD19 | **Brand constant:** `PLATFORM_NAME = 'Habeas Platform'`, `PLATFORM_SLUG = 'habeas-cli'` in `clients/web/src/lib/brand.ts`; all user-visible chrome + PostAuthSplash — not DROP/regulatory strings (KD28). |
+| KTD20 | **Tour reset:** `connections.wizard_reset` response includes `clear_onboarding_tour: true` for assigned owners of that vertical; client removes matching `habeas-cli.tour.v1.owner.{userId}` key; tour re-offers on later logins once KD32-eligible again (KD33, R32). v1 localStorage-only — no server-side tour ledger. |
 
 ### High-Level Technical Design
 
@@ -415,9 +594,12 @@ flowchart TB
 
 ### Sequencing
 
-1. U1 migrations → U2 core → then parallel U3–U7
-2. U8/U9 after API contracts from U3–U6 stabilize (types in `api.ts`)
-3. U10 reminders + Lever polish + AGENTS last / parallel with UI
+1. U1 migrations → U2 core → then parallel U3–U7 (shipped)
+2. U8/U9 after API contracts from U3–U6 stabilize (types in `api.ts`) — **extend** for in-wizard Live, mode explainer, invite retirement (U11–U13)
+3. U10 reminders + Lever polish + AGENTS last / parallel with UI (shipped)
+4. U11 (Live credentials API) before U13 owner Connect step UI
+5. U12 first-login welcome parallel with U13 once `/me` verticals stable
+6. U14 tour login hook after U12 welcome + U9 eligibility signals; U15 rename can land anytime (low coupling)
 
 ### Parallel ownership (ce-work)
 
@@ -436,11 +618,16 @@ Disjoint file ownership for up to 10 implementers — see Unit Index `files touc
 | U3 | Vertical RBAC + assignment + catalog admin APIs | `app/admin_api/.../vertical_assignments.py`, `roles.py`, `/me`, tests | U1, U2 |
 | U4 | Connections admin: force mode, cadence override, wizard reset, gated list | `connections_admin.py`, tests | U2, U3 |
 | U5 | Upload templates + CSV parse/tester | `connection_tests/upload_*.py`, `upload_templates.py`, tester dispatch | U2 |
-| U6 | Owner wizard + redeem/upload APIs | `connections_redeem.py`, `owner_connectors.py`, tests | U2, U3, U5 |
+| U6 | Owner wizard + in-wizard connect APIs | `owner_connectors.py`, tests; **remove** `connections_redeem.py` owner paths | U2, U3, U5 |
 | U7 | Matching gate worker glue | core gate export + `app/{mailchimp,paylocity,lever,auth0}/` matching submit hooks + tests | U2 |
 | U8 | Ops web: catalog, assignments, gated connections UI | `clients/web` ops connections + catalog components, `api.ts` ops types | U3, U4 |
-| U9 | Owner web: wizard Upload/Live + gated status | `connect.$token.tsx`, owner vertical route(s), `api.ts` owner types | U5, U6 |
+| U9 | Owner web: wizard mode explainer + in-wizard Connect + gated status | `owner/connectors.tsx`, `owner-connector-ui.ts`, `api.ts` owner types | U5, U6, U11 |
 | U10 | Soft reminders, Lever triage polish, AGENTS | reminders endpoint/UI chips, Lever help copy, AGENTS.md touch-ups | U3, U6, U8 |
+| U11 | In-wizard Live credentials API | `owner_connectors.py` Live submit+test route, tests | U2, U3, U6 |
+| U12 | First-login welcome + routing | `PostAuthSplash` / welcome sheet, `AppShell` redirect, `/me` incomplete check | U3, U9 |
+| U13 | Mode explainer + Connect step gating (Live/Upload) | extend `owner/connectors.tsx`, `owner-connector-ui.ts`, reuse `ConnectForm` fields | U9, U11 |
+| U14 | Post-login onboarding tour | `OnboardingTour` component, `AppShell` login hook | U4, U9, U12 |
+| U15 | Habeas Platform rename (all chrome) | `brand.ts`, `AppShell.tsx`, `PostAuthSplash.tsx`, `index.html`, splash variants; **remove** `connect.$token.tsx` route | — |
 
 ### U1. Schema: verticals, assignments, mode events, system CHECKs
 
@@ -516,19 +703,20 @@ Disjoint file ownership for up to 10 implementers — see Unit Index `files touc
 - **Verification:** `uv run --group dev pytest app/admin_api/tests/test_connection_test_upload.py -q`
 - **Dependencies:** U2
 
-### U6. Owner wizard + redeem/upload APIs
+### U6. Owner wizard + in-wizard connect APIs
 
-- **Goal:** Assigned owners complete per-vertical wizard (mode, cadence, Live redeem or Upload); token redeem remains for Live secrets.
-- **Requirements:** R3, R6–R8, R12, R17, R19–R20; KD5, KD8, KD17
-- **Files:** Modify `app/admin_api/src/admin_api/connections_redeem.py`; Create `app/admin_api/src/admin_api/owner_connectors.py`; Create `app/admin_api/tests/test_owner_connectors.py`; Modify `app/admin_api/tests/test_connections_redeem.py` as needed
-- **Approach:** Authenticated owner routes for wizard steps scoped by assignment + binding. Upload multipart → U5 tester → stub/GCS writer → metadata timestamps. Live path keeps invite/redeem. Data vertical endpoints return view-only 404/422 for wizard. Successful upload/rotation by any assignee clears that system’s gate fields.
+- **Goal:** Assigned owners complete per-vertical wizard (mode, **in-wizard** Live credentials+test or Upload, cadence); vertical-scoped row is single source of truth (KD21, KD27).
+- **Requirements:** R3, R6–R8, R12, R17, R19–R20, R23; KD5, KD8, KD17, KD21–KD22
+- **Files:** Modify `app/admin_api/src/admin_api/owner_connectors.py`; **Remove** owner token redeem from `connections_redeem.py` (or delete module if ops-only remnants none); Create `app/admin_api/tests/test_owner_connectors.py`
+- **Approach:** Authenticated owner routes for wizard steps scoped by assignment + binding. **Live:** credentials submit+test on vertical-scoped row → GSM write → `test_connection` (KTD15). **Upload:** multipart → U5 tester → GCS → metadata. Data vertical endpoints return view-only 404/422. **No** token redeem path (KD22, KD30).
 - **Patterns:** redeem token flow; `legal_team` scoping
 - **Test scenarios:**
   - Happy: People/HR owner sets Paylocity Upload + cadence + upload → wizard complete.
+  - AE12: Mailchimp Live credentials submitted in-wizard → test pass → `credentials_rotated_at` on same vertical row.
   - AE5: `hr_alumni` / `bizdev_contacts` upload-only — no Live Sheets step.
   - AE3: stale upload blocks gate clear until refresh.
-  - Error: cross-vertical owner upload 403.
-- **Verification:** `uv run --group dev pytest app/admin_api/tests/test_owner_connectors.py app/admin_api/tests/test_connections_redeem.py -q`
+  - Error: cross-vertical owner upload 403; Live test fail allows retry without wizard complete.
+- **Verification:** `uv run --group dev pytest app/admin_api/tests/test_owner_connectors.py -q`
 - **Dependencies:** U2, U3, U5
 
 ### U7. Matching gate worker glue
@@ -545,31 +733,34 @@ Disjoint file ownership for up to 10 implementers — see Unit Index `files touc
 - **Verification:** package pytest for each modified worker + core freshness tests
 - **Dependencies:** U2
 
-### U8. Ops web: catalog, assignments, gated connections UI
+### U8. Ops web: catalog, assignments, gated connections UI (+ invite removal)
 
-- **Goal:** Super_admin configures catalog/assignments; Ops connections show gated status (KD18).
-- **Requirements:** R2, R5, R11, R15 (ops visibility); KD18, KD20
+- **Goal:** Super_admin configures catalog/assignments; Ops connections show gated status (KD18); **remove all invite mint/mailto/revoke** (KD22, KTD16).
+- **Requirements:** R2, R5, R11, R15, R26 (ops visibility); KD18, KD20, KD22
 - **Files:** Modify `clients/web/src/lib/api.ts`, `routes/ops/connections.tsx`, `components/ops/ConnectionInvitePanel.tsx`, `ConnectionCreateDialog.tsx`; Create ops components for vertical catalog/assignments as needed under `clients/web/src/components/ops/`; Modify router/nav if new ops subroute
-- **Approach:** Status chips: Needs refresh / Action required / Connected / View-only. Force mode / reset / cadence override controls for super_admin. Systems list includes new upload systems; hide/retire google_sheets invite. Follow existing Ops IA taste modules.
+- **Approach:** Status chips: Needs refresh / Action required / Connected / View-only. Force mode / reset / cadence override controls for super_admin. Remove “Create invite link”, mailto, and invite-success phase from create dialog for SaaS systems. Keep retest, triage, force mode, reset. Assign owners via `VerticalCatalogPanel` — not invite URLs.
 - **Patterns:** shipped Connections UI; action toasts
 - **Test scenarios:**
   - AE8: gated connection shows Action required / Needs refresh, not Connected.
-  - Happy: create `bizdev_contacts` connection + assign vertical owner from UI.
+  - AE17: SaaS Live connection detail has no invite mint controls.
+  - Happy: assign vertical owner from catalog UI; create `bizdev_contacts` connection without invite step.
   - Edge: Data/Cassandra card view-only — invite disabled.
 - **Verification:** `cd clients/web && bun test` (affected tests); typecheck if configured
 - **Dependencies:** U3, U4
 
-### U9. Owner web: wizard Upload/Live + gated status
+### U9. Owner web: mode explainer + in-wizard Connect + gated status
 
-- **Goal:** Owner surfaces for assigned verticals — wizard with cadence, template download, delimiter, upload; Live redeem unchanged path.
-- **Requirements:** R3, R6, R10–R14, R18–R20; KD5, KD8, KD12–KD14, KD18
-- **Files:** Modify `clients/web/src/routes/connect.$token.tsx`; Create owner route e.g. `clients/web/src/routes/owner/connectors.tsx` (or extend existing owner home if present — prefer extend); Modify `api.ts` owner client methods; tests under `clients/web/src/**/*.test.ts` as present
-- **Approach:** Wizard steps: systems in vertical → mode → credentials or upload → cadence → confirm. Soft reminder banners (non-blocking). No Upload/wizard for Data.
+- **Goal:** Owner surfaces for assigned verticals — wizard with **mode explainer**, **in-wizard** Live credentials+test and Upload validate, cadence, confirm; no “ask Ops for invite” copy (KD21, KD25, KD27).
+- **Requirements:** R3, R6, R10–R14, R18–R20, R23–R24; KD5, KD8, KD12–KD14, KD18, KD21, KD25–KD27
+- **Files:** Modify `clients/web/src/routes/owner/connectors.tsx`, `clients/web/src/lib/owner-connector-ui.ts`; **extract** Live credential + how-to + test components from shipped connect UI into shared module (source `connect.$token.tsx` fields — **delete** invite route); Modify `api.ts` owner client methods
+- **Approach:** Wizard steps: **Mode** (explainer cards) → **Connect** (Live inline fields + test **or** Upload template/delimiter/validate) → **Cadence** → **Confirm**. `liveConnectReady()` requires test pass on vertical-scoped row. Continue disabled until connect+test succeeds. Soft reminder banners (non-blocking). No Upload/wizard for Data. Retire `/connect/{token}` as owner default path.
 - **Patterns:** connect token wizard; design-taste-ops-ia for ops-adjacent owner chrome
 - **Test scenarios:**
+  - AE12–AE14: Live in-wizard test gates Continue; mode explainer visible.
   - Happy: upload flow selects delimiter and submits.
   - AE10 UI: delimiter control present with None/`;`/`|`/`,`.
   - Edge: reminder visible when approaching cadence without blocking navigation.
+  - Anti-pattern: no “ask Ops for invite link” copy on Live Connect step.
 - **Verification:** bun test for changed files; browser pipeline later
 - **Dependencies:** U5, U6
 
@@ -586,6 +777,62 @@ Disjoint file ownership for up to 10 implementers — see Unit Index `files touc
 - **Verification:** targeted pytest + bun test for triage/reminder helpers
 - **Dependencies:** U3, U6, U8
 
+### U11. In-wizard Live credentials API
+
+- **Goal:** Owner-authenticated Live credential submit + connection test on vertical-scoped row (KTD15).
+- **Requirements:** R23, R7, R17; KD21, KD27
+- **Files:** Modify `app/admin_api/src/admin_api/owner_connectors.py`; Extend `app/admin_api/tests/test_owner_connectors.py`
+- **Approach:** `POST /owner/verticals/{v}/systems/{s}/credentials` — validate fields per `systems.py`, GSM write via `secret_resource_name_for`, `test_connection`, on success set `credentials_rotated_at`, `status`, `last_test_*` on **same** row `_resolve_connection` uses. Failed test: allowlisted detail, no wizard complete, retry allowed.
+- **Test scenarios:**
+  - AE12: Mailchimp API key → test pass → vertical row updated.
+  - AE13: failed test does not set `wizard_completed_at`.
+  - Privacy: no secrets in response/logs.
+- **Verification:** `uv run --group dev pytest app/admin_api/tests/test_owner_connectors.py -q`
+- **Dependencies:** U2, U3, U6
+
+### U12. First-login welcome + routing
+
+- **Goal:** Welcome screen with IAP first name + Habeas Platform branding; route to super_admin-assigned vertical wizard when setup incomplete (KD23, KD24, KD29, KTD17).
+- **Requirements:** R25, R29, R30; KD23, KD24, KD28, KD29
+- **Files:** Modify `clients/web/src/components/PostAuthSplash.tsx` or new welcome sheet; `AppShell.tsx` redirect logic; `/me` incomplete-wizard signal from U3
+- **Approach:** After PostAuthSplash `onDone`, if assigned verticals have incomplete wizard → show “Hello {first_name}, welcome to Habeas Platform” + “Let's set up your {Vertical} data vertical” + CTA → `/owner/connectors?vertical={id}`. `{first_name}` from IAP `given_name`. Multi-vertical order per OQ12 default. Dismiss does not block login; matching gate unchanged (KD29).
+- **Test scenarios:**
+  - AE15: first login routes to wizard with welcome copy.
+  - Edge: wizard complete → no welcome intercept.
+  - Edge: does not overlap PostAuthSplash animation.
+- **Verification:** bun test for redirect helpers; browser QA
+- **Dependencies:** U3, U9
+
+### U13. Mode explainer + Connect step gating
+
+- **Goal:** Mode explainer UI + Connect step Continue gating for Live and Upload (delta 03).
+- **Requirements:** R23, R24; KD25, KD27
+- **Files:** `clients/web/src/routes/owner/connectors.tsx`, `clients/web/src/lib/owner-connector-ui.ts`
+- **Approach:** Always-visible Upload/Live cards on Mode step; inline test result panel; Continue disabled until `liveConnectReady` / `uploadOk`; remove invite-deferral copy.
+- **Test scenarios:** AE13, AE14, AE-CONNECT-1 through AE-CONNECT-4 from delta 03.
+- **Verification:** bun test; browser Live happy path
+- **Dependencies:** U9, U11
+
+### U14. Post-login onboarding tour
+
+- **Goal:** Skippable quick-start nav popover tour — **re-offered each login** until completed/skipped once KD32-eligible (KD26, KD32, KD33, KTD18, KTD20).
+- **Requirements:** R27, R32; KD26, KD32, KD33
+- **Files:** Create `clients/web/src/components/OnboardingTour.tsx` (or similar); **login hook** in `AppShell.tsx` after PostAuthSplash/welcome; listen for `clear_onboarding_tour` from wizard_reset path (U4)
+- **Approach:** On each session start, if KD32-eligible and `localStorage` neither `completed` nor `skipped` → start tour. Build step list from F9 tab table filtered by `NavMenu` visibility. **Skip tour** → `skipped`; finish chain → `completed`. Defer if PostAuthSplash/welcome active; no tour on `/connect/$token`. **Do not invent SMTP** (KTD13).
+- **Test scenarios:** AE16, AE20, AE22; unit tests for login gate + storage keys + role-filtered step list; browser skip + wizard-reset replay QA.
+- **Verification:** bun test for tour helpers; browser login re-offer + dismiss
+- **Dependencies:** U4, U9, U12
+
+### U15. Habeas Platform rename (all chrome)
+
+- **Goal:** **All user-visible chrome** + **PostAuthSplash login animation** read **Habeas Platform** (`habeas-cli` slug) (KD28, KTD19).
+- **Requirements:** R28; KD28
+- **Files:** `clients/web/src/lib/brand.ts`, `AppShell.tsx`, `PostAuthSplash.tsx`, `index.html`, splash variants; **remove** `connect.$token.tsx` route
+- **Approach:** Central `PLATFORM_NAME` / `PLATFORM_SLUG`; grep audit — keep DROP/regulatory and support-contact “Habeas” strings.
+- **Test scenarios:** AE18; A-N1 through A-N6 from delta 04.
+- **Verification:** bun test; grep audit
+- **Dependencies:** None (parallel)
+
 ---
 
 ## Verification Contract
@@ -599,7 +846,6 @@ uv run --group dev pytest \
   libs/habeas-privacy-core/tests/test_connection_freshness.py \
   app/admin_api/tests/test_vertical_assignments.py \
   app/admin_api/tests/test_connections_admin.py \
-  app/admin_api/tests/test_connections_redeem.py \
   app/admin_api/tests/test_owner_connectors.py \
   app/admin_api/tests/test_connection_test_upload.py \
   app/admin_api/tests/test_connection_test_lever.py \
@@ -613,7 +859,7 @@ Privacy / security greps before ship:
 - Secrets still absent from API responses after write.
 - Gate block paths use allowlisted codes only.
 
-Browser (LFG step 7): Ops connections gated chips + owner wizard Upload happy path when UI lands.
+Browser (LFG step 7): Ops connections gated chips + owner wizard Live in-wizard happy path + first-login welcome + tour dismiss + Habeas Platform shell + **F10 demo** (1:1/1:many/no-match disposition → Data-only fulfillment → Wednesday Notice).
 
 Release validate: not required for this control-plane feature unless infra bucket wiring is included in the same PR (then note OQ10).
 
@@ -623,9 +869,9 @@ Release validate: not required for this control-plane feature unless infra bucke
 
 ### Global
 
-- [ ] `artifact_readiness: implementation-ready` executed via U1–U10
-- [ ] AE1–AE11 evidenced by automated tests and/or browser proof
-- [ ] SC1–SC5 met or explicitly deferred with Product Contract deferred list
+- [ ] `artifact_readiness: implementation-ready` executed via U1–U15 (U1–U10 shipped; U11–U15 extend onboarding UX)
+- [ ] AE1–AE22 evidenced by automated tests and/or browser proof
+- [ ] SC1–SC6 met or explicitly deferred with Product Contract deferred list
 - [ ] No parallel connection registry; extends shipped Connections + hash workers (KD7)
 - [ ] No secrets in git; no PII in logs/audit; mutations via admin_api only
 - [ ] Settled KTDs (session-settled KD/KTD labels) preserved — report conflicts, do not silently overturn
@@ -642,8 +888,14 @@ Release validate: not required for this control-plane feature unless infra bucke
 - [ ] U6: owner wizard/upload API tests green
 - [ ] U7: matching gate refusal tests green (SC2)
 - [ ] U8: Ops UI gated status (AE8)
-- [ ] U9: Owner wizard Upload/Live UX
+- [ ] U9: Owner wizard mode explainer + in-wizard Connect UX (AE12–AE14)
 - [ ] U10: reminders soft; Lever triage (AE11); AGENTS updated
+- [ ] U11: in-wizard Live credentials API (AE12–AE13)
+- [ ] U12: first-login welcome + routing (AE15)
+- [ ] U13: Connect step gating polish
+- [ ] U14: post-login onboarding tour (AE16, AE20, AE22)
+- [ ] U15: Habeas Platform rename (AE18)
+- [ ] U8: Ops invite mint retired for SaaS (AE17)
 
 ### Slice boundaries (explicit non-goals in this ship)
 
@@ -653,6 +905,7 @@ Release validate: not required for this control-plane feature unless infra bucke
 - Journey `LIVE_VERTICALS` flip for SaaS
 - SMTP reminder delivery
 - CLI `connections list/test` unless Ops path insufficient
+- Ops-variant super_admin onboarding tour (OQ15)
 
 ---
 

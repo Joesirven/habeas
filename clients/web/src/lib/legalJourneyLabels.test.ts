@@ -138,6 +138,8 @@ describe('legalJourneyLabels', () => {
   })
 
   test('verticalLabel maps live + coming-soon catalog entries', () => {
+    expect(verticalLabel('communications')).toBe('Communications')
+    expect(verticalLabel('people_hr')).toBe('People/HR')
     expect(verticalLabel('data')).toBe('Data')
     expect(verticalLabel('mailchimp')).toBe('Mailchimp')
     expect(verticalLabel('lever')).toBe('Lever')

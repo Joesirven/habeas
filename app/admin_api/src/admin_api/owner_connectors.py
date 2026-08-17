@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
+from admin_api.connection_testers import test_connection
 from admin_api.drop_pipeline import _require_database
 from admin_api.roles import ConnectorReminderOut, RolePrincipal, require_roles
 from admin_api.vertical_assignments import fetch_principal_verticals, require_vertical_access
@@ -31,6 +33,8 @@ from habeas_privacy_core.connections.freshness import (
     validate_multi_pii_delimiter,
 )
 from habeas_privacy_core.connections.models import Connection, sanitize_test_detail
+from habeas_privacy_core.connections.secrets import get_secret_writer
+from habeas_privacy_core.connections.systems import get_system, validate_credentials
 from habeas_privacy_core.db import connections as connections_db
 from habeas_privacy_core.db.pool import get_pool
 
@@ -62,6 +66,7 @@ class ConnectorSystemOut(BaseModel):
     allowed_approaches: list[str]
     connection_id: str | None = None
     status: str | None = None
+    last_test_ok: bool | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     display_status: str
     gate_code: str
@@ -81,6 +86,31 @@ class UploadResultOut(BaseModel):
     connection_id: str
     upload_row_count: int | None = None
     gcs_uri: str | None = None
+
+
+class CredentialsBody(BaseModel):
+    credentials: dict[str, str] = Field(default_factory=dict)
+
+
+class LiveConnectResultOut(BaseModel):
+    ok: bool
+    detail: str
+    connection_id: str
+
+
+class CredentialFieldOut(BaseModel):
+    id: str
+    label: str
+    input_type: str = "text"
+    required: bool = True
+    help: str | None = None
+
+
+class LiveCredentialPreviewOut(BaseModel):
+    system: str
+    display_name: str
+    fields: list[CredentialFieldOut]
+    trust_copy: str
 
 
 class ConnectorRemindersOut(BaseModel):
@@ -240,6 +270,7 @@ def _connection_to_out(
             allowed_approaches=allowed_approaches,
             connection_id=None,
             status=None,
+            last_test_ok=None,
             metadata={},
             display_status=display_status,
             gate_code=gate_code,
@@ -258,6 +289,7 @@ def _connection_to_out(
         allowed_approaches=allowed_approaches,
         connection_id=str(connection.id),
         status=connection.status,
+        last_test_ok=connection.last_test_ok,
         metadata=metadata,
         display_status=display_status,
         gate_code=gate_code,
@@ -325,6 +357,102 @@ async def _merge_metadata(
     patch: dict[str, Any],
 ) -> Connection | None:
     return await connections_db.merge_connection_metadata(conn, connection_id, patch)
+
+
+def _reject_live_while_upload_mode(connection: Connection) -> None:
+    current_mode = parse_stored_active_mode(dict(connection.metadata or {}))
+    if current_mode == APPROACH_UPLOAD:
+        raise HTTPException(
+            status_code=422,
+            detail="live credentials not allowed while active_mode is upload",
+        )
+
+
+def _ensure_live_allowed(vertical_id: str, system: str, binding: Any) -> None:
+    if APPROACH_LIVE not in binding.allowed_approaches:
+        raise HTTPException(status_code=422, detail="live mode not allowed for this system")
+    system_def = get_system(system)
+    if not system_def.invite_allowed or system == "cassandra":
+        raise HTTPException(
+            status_code=422,
+            detail="this system does not accept live credentials via wizard",
+        )
+    _ = vertical_id
+
+
+def _service_account_from_metadata(metadata: dict[str, Any] | None) -> str | None:
+    meta = metadata or {}
+    raw_sa = meta.get("service_account_email")
+    if isinstance(raw_sa, str) and raw_sa.strip():
+        return raw_sa.strip()
+    return None
+
+
+def _load_stored_credentials(secret_resource_name: str | None) -> dict[str, str] | None:
+    if not secret_resource_name:
+        return None
+    store = get_secret_writer()
+    get_secret = getattr(store, "get_secret", None)
+    if not callable(get_secret):
+        return None
+    value = get_secret(secret_resource_name)
+    if value is None:
+        return None
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return {str(k): str(v) for k, v in parsed.items()}
+    except (TypeError, json.JSONDecodeError):
+        pass
+    return None
+
+
+async def _apply_live_test_outcome(
+    conn: Any,
+    *,
+    connection: Connection,
+    vertical_id: str,
+    principal_email: str,
+    test_ok: bool,
+    safe_detail: str,
+) -> Connection:
+    connection_id = UUID(str(connection.id))
+    tested_at = datetime.now(timezone.utc)
+    await connections_db.set_test_result(
+        conn,
+        connection_id,
+        ok=test_ok,
+        detail=safe_detail,
+        tested_at=tested_at,
+    )
+    if test_ok:
+        rotated_at = tested_at.isoformat()
+        patch: dict[str, Any] = {
+            "vertical_id": vertical_id,
+            "credentials_rotated_at": rotated_at,
+        }
+        current_mode = parse_stored_active_mode(dict(connection.metadata or {}))
+        if current_mode != APPROACH_LIVE:
+            patch["active_mode"] = APPROACH_LIVE
+        updated = await _merge_metadata(conn, connection_id, patch)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="connection not found")
+        await connections_db.update_connection_status(
+            conn,
+            connection_id,
+            "connected",
+            owner_email=principal_email,
+        )
+        return updated
+    await connections_db.update_connection_status(
+        conn,
+        connection_id,
+        "failed",
+    )
+    refreshed = await connections_db.get_connection(conn, connection_id)
+    if refreshed is None:
+        raise HTTPException(status_code=404, detail="connection not found")
+    return refreshed
 
 
 def _wizard_ready(connection: Connection) -> None:
@@ -708,6 +836,191 @@ async def upload_system_csv(
         connection_id=str(connection_id),
         upload_row_count=row_count,
         gcs_uri=gcs_uri,
+    )
+
+
+@router.get(
+    "/verticals/{vertical_id}/systems/{system}/credential-preview",
+    response_model=LiveCredentialPreviewOut,
+)
+async def live_credential_preview(
+    vertical_id: str,
+    system: str,
+    principal: VerticalAccessPrincipal,
+    _role: OwnerRolePrincipal,
+) -> LiveCredentialPreviewOut:
+    """Credential field definitions + how-to copy for in-wizard Live connect."""
+    _validate_vertical(vertical_id)
+    _reject_data_wizard(vertical_id)
+    binding = _binding_or_404(vertical_id, system)
+    _ensure_live_allowed(vertical_id, system, binding)
+    system_def = get_system(system)
+    sa_email: str | None = None
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        connection = await _find_connection_for_system(
+            conn, vertical_id=vertical_id, system=system
+        )
+        if connection is not None:
+            sa_email = _service_account_from_metadata(dict(connection.metadata or {}))
+    from habeas_privacy_core.connections.systems import google_sheets_spreadsheet_url_help
+
+    fields_out: list[CredentialFieldOut] = []
+    for field in system_def.credential_fields:
+        help_text = field.help
+        if field.id == "spreadsheet_url":
+            help_text = google_sheets_spreadsheet_url_help(service_account_email=sa_email)
+        fields_out.append(
+            CredentialFieldOut(
+                id=field.id,
+                label=field.label,
+                input_type=str(getattr(field.input_type, "value", field.input_type)),
+                required=bool(field.required),
+                help=help_text,
+            )
+        )
+    _ = principal
+    return LiveCredentialPreviewOut(
+        system=system_def.system_id,
+        display_name=system_def.display_label,
+        fields=fields_out,
+        trust_copy=system_def.trust_copy,
+    )
+
+
+@router.post(
+    "/verticals/{vertical_id}/systems/{system}/credentials",
+    response_model=LiveConnectResultOut,
+)
+async def save_live_credentials(
+    vertical_id: str,
+    system: str,
+    body: CredentialsBody,
+    principal: VerticalAccessPrincipal,
+    _role: OwnerRolePrincipal,
+) -> LiveConnectResultOut:
+    """Store Live credentials on the vertical-scoped row and run a connection test."""
+    _validate_vertical(vertical_id)
+    _reject_data_wizard(vertical_id)
+    binding = _binding_or_404(vertical_id, system)
+    _ensure_live_allowed(vertical_id, system, binding)
+    system_def = get_system(system)
+    try:
+        cleaned = validate_credentials(system_def, body.credentials)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        connection = await _resolve_connection(
+            conn,
+            vertical_id=vertical_id,
+            system=system,
+            created_by=principal.email,
+        )
+        _reject_live_while_upload_mode(connection)
+        connection_id = UUID(str(connection.id))
+        secret_name = connections_db.secret_resource_name(system, str(connection_id))
+        writer = get_secret_writer()
+        writer.put_secret(secret_name, json.dumps(cleaned, sort_keys=True))
+        await connections_db.update_connection_status(
+            conn,
+            connection_id,
+            "invited",
+            owner_email=principal.email,
+            secret_resource_name=secret_name,
+        )
+
+        share_sa = _service_account_from_metadata(dict(connection.metadata or {}))
+        test_ok, detail = await test_connection(
+            system,
+            cleaned,
+            impersonate_service_account=share_sa,
+        )
+        safe_detail = sanitize_test_detail(detail) or "unknown_error"
+        await _apply_live_test_outcome(
+            conn,
+            connection=connection,
+            vertical_id=vertical_id,
+            principal_email=principal.email,
+            test_ok=test_ok,
+            safe_detail=safe_detail,
+        )
+
+    logger.info(
+        "owner_live_credentials connection_id=%s system=%s ok=%s detail=%s",
+        connection_id,
+        system,
+        test_ok,
+        safe_detail,
+    )
+    return LiveConnectResultOut(
+        ok=test_ok,
+        detail=safe_detail,
+        connection_id=str(connection_id),
+    )
+
+
+@router.post(
+    "/verticals/{vertical_id}/systems/{system}/test",
+    response_model=LiveConnectResultOut,
+)
+async def test_live_connection(
+    vertical_id: str,
+    system: str,
+    principal: VerticalAccessPrincipal,
+    _role: OwnerRolePrincipal,
+) -> LiveConnectResultOut:
+    """Re-run a Live connection test using stored credentials."""
+    _validate_vertical(vertical_id)
+    _reject_data_wizard(vertical_id)
+    binding = _binding_or_404(vertical_id, system)
+    _ensure_live_allowed(vertical_id, system, binding)
+
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        connection = await _resolve_connection(
+            conn,
+            vertical_id=vertical_id,
+            system=system,
+            created_by=principal.email,
+        )
+        _reject_live_while_upload_mode(connection)
+        connection_id = UUID(str(connection.id))
+        credentials = _load_stored_credentials(connection.secret_resource_name)
+        if not credentials:
+            raise HTTPException(status_code=400, detail="secret not stored")
+
+        share_sa = _service_account_from_metadata(dict(connection.metadata or {}))
+        test_ok, detail = await test_connection(
+            system,
+            credentials,
+            impersonate_service_account=share_sa,
+        )
+        safe_detail = sanitize_test_detail(detail) or "unknown_error"
+        await _apply_live_test_outcome(
+            conn,
+            connection=connection,
+            vertical_id=vertical_id,
+            principal_email=principal.email,
+            test_ok=test_ok,
+            safe_detail=safe_detail,
+        )
+
+    logger.info(
+        "owner_live_test connection_id=%s system=%s ok=%s detail=%s",
+        connection_id,
+        system,
+        test_ok,
+        safe_detail,
+    )
+    return LiveConnectResultOut(
+        ok=test_ok,
+        detail=safe_detail,
+        connection_id=str(connection_id),
     )
 
 

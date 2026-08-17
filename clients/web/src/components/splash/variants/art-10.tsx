@@ -4,12 +4,11 @@ import { BadgeStage } from '../badge-stage'
 import type { SplashStageProps, SplashVariantModule } from '../types'
 import './art-10.css'
 
-const HABEAS = 'HABEAS'
-const DPP = 'DPP'
+const BRAND = 'CATAPRIVACY'
+const PLATFORM = 'PLATFORM'
 
 /**
- * Split lockup — giant HABEAS + DPP as co-heroes, with
- * “Data Privacy Platform” as secondary. Type is the art.
+ * Split lockup — giant CATAPRIVACY + PLATFORM as co-heroes. Type is the art.
  */
 
 function SplitLockup({ mode }: { mode: 'shear' | 'stack' }) {
@@ -19,7 +18,7 @@ function SplitLockup({ mode }: { mode: 'shear' | 'stack' }) {
 
       <div className="art-10-row">
         <p className="art-10-habeas">
-          {HABEAS.split('').map((ch, i) => (
+          {BRAND.split('').map((ch, i) => (
             <span
               key={`c-${i}`}
               className="art-10-letter art-10-letter-cat"
@@ -33,7 +32,7 @@ function SplitLockup({ mode }: { mode: 'shear' | 'stack' }) {
         <span className="art-10-rule" />
 
         <p className="art-10-dpp">
-          {DPP.split('').map((ch, i) => (
+          {PLATFORM.split('').map((ch, i) => (
             <span
               key={`d-${i}`}
               className="art-10-letter art-10-letter-dpp"
@@ -44,8 +43,6 @@ function SplitLockup({ mode }: { mode: 'shear' | 'stack' }) {
           ))}
         </p>
       </div>
-
-      <p className="art-10-secondary">Data Privacy Platform</p>
     </div>
   )
 }

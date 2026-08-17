@@ -41,7 +41,7 @@ function Stage({
         } as CSSProperties
       }
       role="status"
-      aria-label="CataPriv Platform loading"
+      aria-label="Habeas Platform loading"
     >
       {children}
     </div>

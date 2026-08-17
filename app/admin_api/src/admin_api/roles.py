@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated, Literal
+import logging
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 from fastapi import Depends, HTTPException, Request
@@ -16,6 +17,7 @@ from habeas_privacy_core.auth import (
     resolve_actor,
 )
 from habeas_privacy_core.auth.roles import (
+    ROLE_DATA_OWNER,
     ROLE_SUPER_ADMIN,
     Role,
     parse_email_allowlist,
@@ -24,6 +26,9 @@ from habeas_privacy_core.auth.roles import (
 from habeas_privacy_core.config import CoreSettings
 
 DEV_SIMULATE_ROLE_HEADER = "X-Dev-Simulate-Role"
+IAP_JWT_ASSERTION_HEADER = "X-Goog-IAP-JWT-Assertion"
+
+logger = logging.getLogger(__name__)
 
 
 class RoleSettings(CoreSettings):
@@ -51,11 +56,21 @@ class ConnectorReminderOut(BaseModel):
     severity: Literal["approaching", "overdue"]
 
 
+class AssignedVerticalLabelOut(BaseModel):
+    """Assigned vertical id + catalog display label for first-run welcome copy."""
+
+    vertical_id: str
+    display_label: str
+
+
 class MeResponse(BaseModel):
     email: str
     role: Role
     real_role: Role
+    given_name: str
     verticals: list[str] = []
+    assigned_vertical_labels: list[AssignedVerticalLabelOut] = Field(default_factory=list)
+    needs_connector_setup: bool = False
     connector_reminders: list[ConnectorReminderOut] = Field(default_factory=list)
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +94,83 @@ def _legal_allowlist() -> frozenset[str]:
 
 def _data_owner_allowlist() -> frozenset[str]:
     return parse_email_allowlist(settings.admin_api_data_owners)
+
+
+def _email_local_part(email: str) -> str:
+    """First segment of the mailbox before @ (fallback when IAP given_name absent)."""
+    local = email.strip().split("@", 1)[0]
+    if not local:
+        return email.strip() or "unknown"
+    return local.split("+", 1)[0] or local
+
+
+def _parse_given_name_claim(info: dict[str, Any]) -> str | None:
+    raw = info.get("given_name")
+    if not isinstance(raw, str):
+        return None
+    name = raw.strip()
+    return name or None
+
+
+def _bearer_token(request: Request) -> str | None:
+    raw = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    if not isinstance(raw, str):
+        return None
+    scheme, _, token = raw.strip().partition(" ")
+    if scheme.lower() != "bearer":
+        return None
+    token = token.strip()
+    return token or None
+
+
+def _verified_oidc_claims(request: Request) -> dict[str, Any] | None:
+    """Return verified Google OIDC claims from Bearer or IAP JWT assertion."""
+    token = _bearer_token(request)
+    if not token:
+        token = request.headers.get(IAP_JWT_ASSERTION_HEADER, "").strip() or None
+    if not token:
+        return None
+
+    audience = _id_token_audience(request)
+    if not audience:
+        return None
+
+    try:
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token
+    except ImportError:
+        logger.warning("google-auth not installed; cannot resolve given_name from OIDC")
+        return None
+
+    try:
+        info = id_token.verify_oauth2_token(
+            token,
+            google_requests.Request(),
+            audience=audience,
+        )
+    except Exception:
+        logger.debug("oidc_given_name_verify_failed", exc_info=True)
+        return None
+
+    return info if isinstance(info, dict) else None
+
+
+def resolve_given_name(request: Request | None, email: str) -> str:
+    """First name from verified IAP/Google OIDC, else email local-part."""
+    if request is not None:
+        info = _verified_oidc_claims(request)
+        if info is not None:
+            name = _parse_given_name_claim(info)
+            if name is not None:
+                return name
+    return _email_local_part(email)
+
+
+def needs_connector_setup(role: Role, reminders: list[ConnectorReminderOut]) -> bool:
+    """True when an assigned owner still has an incomplete connector wizard."""
+    if role != ROLE_DATA_OWNER:
+        return False
+    return any(reminder.code == "wizard_incomplete" for reminder in reminders)
 
 
 def _id_token_audience(request: Request) -> str | None:

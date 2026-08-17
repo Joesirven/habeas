@@ -12,23 +12,13 @@ import {
 } from '@/components/ui/dialog'
 import {
   createConnection,
-  createConnectionInvite,
   getConnectionSystems,
-  listConnectionOwnerCandidates,
-  type ConnectionInviteCreateResponse,
-  type ConnectionOwnerCandidate,
   type ConnectionRecord,
   type ConnectionSystemsPayload,
   type IntegrationSystemId,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
-import { useAuth } from '@/lib/auth'
-import {
-  connectionInviteAllowed,
-  isCreatableConnectionSystem,
-  isUploadOnlySystem,
-} from '@/lib/connection-display'
-import { absoluteInviteUrl, firstNameFromEmail } from '@/lib/utils'
+import { isCreatableConnectionSystem, isUploadOnlySystem } from '@/lib/connection-display'
 
 type ConnectionSystemOption = ConnectionSystemsPayload['systems'][number]
 
@@ -74,30 +64,14 @@ export type ConnectionCreateDialogProps = {
 
 type DialogPhase = 'form' | 'success'
 
-function buildInviteMailto(
-  inviteUrl: string,
-  displayName: string,
-  ownerEmail: string,
-  fromFirstName: string,
-): string {
-  const ownerFirst = firstNameFromEmail(ownerEmail)
-  const subject = encodeURIComponent(`Habeas connection setup — ${displayName}`)
-  const body = encodeURIComponent(
-    [
-      `Hi, ${ownerFirst},`,
-      '',
-      `Please use this secure link to submit integration credentials for "${displayName}":`,
-      '',
-      inviteUrl,
-      '',
-      'This link expires in 72 hours and works only once.',
-      'Do not share credentials by email or chat — use the link only.',
-      '',
-      'Thank you,',
-      fromFirstName,
-    ].join('\n'),
-  )
-  return `mailto:${encodeURIComponent(ownerEmail)}?subject=${subject}&body=${body}`
+function verticalAssignmentCopy(system: IntegrationSystemId): string {
+  if (system === 'cassandra') {
+    return 'Open an INF ticket for TLS, service accounts, and egress. Assign vertical owners on the Verticals tab when the connection is ready for owner setup.'
+  }
+  if (isUploadOnlySystem(system)) {
+    return 'Assign the owner on the Verticals tab. They refresh data via the vertical connector upload wizard.'
+  }
+  return 'Assign the owner on the Verticals tab. After login, they complete credentials and testing in the connector wizard — no invite link is minted here.'
 }
 
 export function ConnectionCreateDialog({
@@ -105,53 +79,29 @@ export function ConnectionCreateDialog({
   onOpenChange,
   onCreated,
 }: ConnectionCreateDialogProps) {
-  const { me } = useAuth()
   const [systems, setSystems] = useState<ConnectionSystemOption[]>(
     creatableSystems(FALLBACK_SYSTEMS),
   )
-  const [owners, setOwners] = useState<ConnectionOwnerCandidate[]>([])
-  const [ownersError, setOwnersError] = useState<string | null>(null)
   const [system, setSystem] = useState<IntegrationSystemId>('mailchimp')
   const [displayName, setDisplayName] = useState('')
-  const [ownerEmail, setOwnerEmail] = useState('')
   const [phase, setPhase] = useState<DialogPhase>('form')
   const [submitting, setSubmitting] = useState(false)
   const [confirmSheetsOpen, setConfirmSheetsOpen] = useState(false)
-  const [provisionPhase, setProvisionPhase] = useState<'idle' | 'account' | 'connection' | 'invite'>(
-    'idle',
-  )
   const [error, setError] = useState<string | null>(null)
   const [createdConnection, setCreatedConnection] = useState<ConnectionRecord | null>(null)
-  const [invite, setInvite] = useState<ConnectionInviteCreateResponse | null>(null)
-  const [copyNote, setCopyNote] = useState<string | null>(null)
 
-  const selectedSystem = systems.find((entry) => entry.system_id === system)
   const isCassandra = system === 'cassandra'
   const isGoogleSheets = system === 'google_sheets'
   const uploadOnly = isUploadOnlySystem(system)
-  // Omit empty credential_fields from fallbacks — upload-only / invite_allowed cover gating.
-  const inviteAllowed = connectionInviteAllowed({
-    system,
-    inviteAllowed: selectedSystem?.invite_allowed,
-    credentialFieldCount:
-      selectedSystem != null && selectedSystem.credential_fields.length > 0
-        ? selectedSystem.credential_fields.length
-        : null,
-  })
 
   function resetForm() {
     setSystem('mailchimp')
     setDisplayName('')
-    setOwnerEmail('')
     setPhase('form')
     setSubmitting(false)
     setConfirmSheetsOpen(false)
-    setProvisionPhase('idle')
     setError(null)
     setCreatedConnection(null)
-    setInvite(null)
-    setCopyNote(null)
-    setOwnersError(null)
   }
 
   useEffect(() => {
@@ -179,20 +129,6 @@ export function ConnectionCreateDialog({
         if (!cancelled) setSystems(creatableSystems(FALLBACK_SYSTEMS))
       })
 
-    void listConnectionOwnerCandidates()
-      .then((payload) => {
-        if (!cancelled) {
-          setOwners(payload.owners)
-          setOwnersError(null)
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setOwners([])
-          setOwnersError('Could not load allowlisted owners.')
-        }
-      })
-
     return () => {
       cancelled = true
     }
@@ -203,52 +139,33 @@ export function ConnectionCreateDialog({
     onOpenChange(next)
   }
 
-  async function mintInvite(connectionId: string, owner?: string) {
-    const trimmed = (owner ?? ownerEmail).trim()
-    const inviteResponse = await createConnectionInvite(
-      connectionId,
-      trimmed ? { owner_email: trimmed } : {},
-    )
-    setInvite(inviteResponse)
-    // Success UI is the dialog success phase (invite URL) — no toast (avoids dual chrome).
-  }
-
-  function validateForm(): { name: string; owner: string } | null {
+  function validateForm(): string | null {
     const trimmedName = displayName.trim()
     if (!trimmedName) {
       setError('Display name is required.')
       return null
     }
-    const trimmedOwner = ownerEmail.trim()
-    if (inviteAllowed && !trimmedOwner) {
-      setError('Owner email is required for invite-based systems.')
-      return null
-    }
     setError(null)
-    return { name: trimmedName, owner: trimmedOwner }
+    return trimmedName
   }
 
-  async function runCreate(trimmedName: string, trimmedOwner: string) {
+  async function runCreate(trimmedName: string) {
     setSubmitting(true)
     setError(null)
     try {
       if (isGoogleSheets) {
-        setProvisionPhase('account')
         actionToast.info({
           title: 'Creating Sheets service account',
           description: 'Provisioning a dedicated Google identity for this connection…',
         })
-      } else {
-        setProvisionPhase('connection')
       }
 
       const connection = await createConnection({
         system,
         display_name: trimmedName,
-        owner_email: inviteAllowed ? trimmedOwner : null,
+        owner_email: null,
       })
       setCreatedConnection(connection)
-      setProvisionPhase(inviteAllowed && trimmedOwner ? 'invite' : 'idle')
 
       if (isGoogleSheets) {
         const sa =
@@ -261,41 +178,6 @@ export function ConnectionCreateDialog({
             ? `Share target: ${sa}`
             : 'Dedicated service account created for this connection.',
         })
-      }
-
-      if (inviteAllowed && trimmedOwner) {
-        try {
-          await mintInvite(connection.id, trimmedOwner)
-        } catch (inviteErr) {
-          actionToast.error({
-            title: 'Could not create invite',
-            description: actionToast.safeErrorMessage(
-              inviteErr,
-              'Connection was saved, but the invite link could not be created.',
-            ),
-            action: {
-              label: 'Retry',
-              onClick: () => {
-                void mintInvite(connection.id, trimmedOwner)
-                  .then(() => {
-                    actionToast.success({
-                      title: 'Invite link ready',
-                      description: 'Copy it from the connection dialog.',
-                    })
-                  })
-                  .catch((retryErr) => {
-                    actionToast.error({
-                      title: 'Could not create invite',
-                      description: actionToast.safeErrorMessage(
-                        retryErr,
-                        'Invite link could not be created. Open the connection row and try again.',
-                      ),
-                    })
-                  })
-              },
-            },
-          })
-        }
       }
 
       setConfirmSheetsOpen(false)
@@ -312,51 +194,30 @@ export function ConnectionCreateDialog({
           label: 'Retry',
           onClick: () => {
             if (isGoogleSheets) setConfirmSheetsOpen(true)
-            else void runCreate(trimmedName, trimmedOwner)
+            else void runCreate(trimmedName)
           },
         },
       })
     } finally {
       setSubmitting(false)
-      setProvisionPhase('idle')
     }
   }
 
   function handleSubmit(event: React.FormEvent) {
     event.preventDefault()
-    const valid = validateForm()
-    if (!valid) return
+    const trimmedName = validateForm()
+    if (!trimmedName) return
     if (isGoogleSheets) {
       setConfirmSheetsOpen(true)
       return
     }
-    void runCreate(valid.name, valid.owner)
-  }
-
-  function copyInviteUrl() {
-    if (!invite?.invite_url) return
-    void navigator.clipboard.writeText(absoluteInviteUrl(invite.invite_url)).then(() => {
-      setCopyNote('Copied link')
-      window.setTimeout(() => setCopyNote(null), 2000)
-    })
+    void runCreate(trimmedName)
   }
 
   function handleDone() {
     if (createdConnection) onCreated?.(createdConnection)
     handleOpenChange(false)
   }
-
-  const shareUrl = invite?.invite_url ? absoluteInviteUrl(invite.invite_url) : null
-
-  const mailtoHref =
-    shareUrl && invite?.owner_email
-      ? buildInviteMailto(
-          shareUrl,
-          createdConnection?.display_name ?? displayName,
-          invite.owner_email,
-          firstNameFromEmail(me?.email),
-        )
-      : null
 
   return (
     <>
@@ -367,9 +228,8 @@ export function ConnectionCreateDialog({
               <DialogHeader>
                 <DialogTitle>New connection</DialogTitle>
                 <DialogDescription>
-                  Register an integration connection. SaaS systems use a one-time owner invite;
-                  upload-only systems create without an invite; Cassandra is provisioned by
-                  Infrastructure.
+                  Register an integration connection. Owner access comes from vertical assignment on
+                  the Verticals tab — not invite links. Cassandra is provisioned by Infrastructure.
                 </DialogDescription>
               </DialogHeader>
 
@@ -379,11 +239,7 @@ export function ConnectionCreateDialog({
                   <select
                     className={`${fieldClass} text-xs`}
                     value={system}
-                    onChange={(event) => {
-                      const next = event.target.value as IntegrationSystemId
-                      setSystem(next)
-                      if (next === 'cassandra' || isUploadOnlySystem(next)) setOwnerEmail('')
-                    }}
+                    onChange={(event) => setSystem(event.target.value as IntegrationSystemId)}
                   >
                     {systems.map((entry) => (
                       <option key={entry.system_id} value={entry.system_id}>
@@ -407,44 +263,23 @@ export function ConnectionCreateDialog({
                   />
                 </label>
 
-                {inviteAllowed ? (
-                  <label className="flex flex-col gap-1">
-                    <span className="text-xs font-medium text-ink-soft">Owner email</span>
-                    <select
-                      className={`${fieldClass} text-xs`}
-                      value={ownerEmail}
-                      onChange={(event) => setOwnerEmail(event.target.value)}
-                      disabled={owners.length === 0}
-                    >
-                      <option value="">
-                        {owners.length === 0 ? 'No allowlisted owners' : 'Select an owner…'}
-                      </option>
-                      {owners.map((owner) => (
-                        <option key={owner.email} value={owner.email}>
-                          {owner.email} ({owner.role.replaceAll('_', ' ')})
-                        </option>
-                      ))}
-                    </select>
-                    <span className="text-xs text-mute">
-                      Only Habeas operators already on a role allowlist (super admin, admin, legal,
-                      or data owner).
-                    </span>
-                    {ownersError ? (
-                      <span className="text-xs text-red-700">{ownersError}</span>
-                    ) : null}
-                  </label>
+                {isCassandra ? (
+                  <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
+                    Cassandra connectivity is handled by Habeas Infrastructure (INF). Ops marks the
+                    connection <span className="font-medium text-ink">infra_pending</span> until INF
+                    confirms TLS, service accounts, and egress are live. Credentials are stored only in
+                    Google Cloud Secret Manager once setup completes.
+                  </div>
                 ) : uploadOnly ? (
                   <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
-                    Upload-only — creates the connection without minting an invite. Owners refresh
-                    data via the vertical connector upload wizard.
+                    Upload-only — registers the connection without owner credentials. After create,
+                    assign the owner on the Verticals tab.
                   </div>
                 ) : (
                   <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
-                    Cassandra connectivity is handled by Habeas Infrastructure (INF). No owner
-                    invite is sent — ops marks the connection{' '}
-                    <span className="font-medium text-ink">infra_pending</span> until INF confirms
-                    TLS, service accounts, and egress are live. Credentials are stored only in
-                    Google Cloud Secret Manager once setup completes.
+                    After create, open the <span className="font-medium text-ink">Verticals</span>{' '}
+                    tab and assign an owner to the vertical that includes this system. They complete
+                    setup from Connectors after login.
                   </div>
                 )}
 
@@ -468,11 +303,7 @@ export function ConnectionCreateDialog({
                     aria-hidden
                   />
                   <div className="min-w-0 text-xs">
-                    <p className="font-medium text-ink">
-                      {provisionPhase === 'invite'
-                        ? 'Creating invite link…'
-                        : 'Creating connection…'}
-                    </p>
+                    <p className="font-medium text-ink">Creating connection…</p>
                     <p className="text-ink-soft">Keep this tab open.</p>
                   </div>
                 </div>
@@ -494,11 +325,7 @@ export function ConnectionCreateDialog({
                   Cancel
                 </Button>
                 <Button type="submit" disabled={submitting}>
-                  {submitting
-                    ? 'Creating…'
-                    : isCassandra || uploadOnly || isGoogleSheets
-                      ? 'Create connection'
-                      : 'Create & invite'}
+                  {submitting ? 'Creating…' : 'Create connection'}
                 </Button>
               </DialogFooter>
             </form>
@@ -508,12 +335,12 @@ export function ConnectionCreateDialog({
                 <DialogTitle>Connection created</DialogTitle>
                 <DialogDescription>
                   {isCassandra
-                    ? 'Infrastructure handoff — no owner invite.'
+                    ? 'Infrastructure handoff — assign vertical owners when ready.'
                     : uploadOnly
-                      ? 'Upload-only connection registered — no invite minted.'
+                      ? 'Upload-only connection registered.'
                       : isGoogleSheets
-                        ? 'Dedicated service account is ready. Share the invite link with the owner.'
-                        : 'Share the invite link with the owner. It is shown only once.'}
+                        ? 'Dedicated service account is ready.'
+                        : 'Next step: assign an owner on the Verticals tab.'}
                 </DialogDescription>
               </DialogHeader>
 
@@ -524,60 +351,24 @@ export function ConnectionCreateDialog({
                   <p className="break-all font-mono text-ink">
                     {createdConnection.metadata.service_account_email}
                   </p>
-                  <p>The owner will see this same address in the invite steps.</p>
+                  <p>The assigned owner will see this address in the connector wizard.</p>
                 </div>
               ) : null}
 
-              {isCassandra ? (
-                <div className="space-y-2 rounded-md border border-line bg-canvas p-3 text-xs text-ink-soft">
-                  <p>
-                    <span className="font-medium text-ink">{createdConnection?.display_name}</span>{' '}
-                    is registered as Cassandra with status{' '}
-                    <span className="font-medium text-ink">infra_pending</span>.
-                  </p>
-                  <p>
-                    Open an INF ticket for TLS certificates, service account credentials, and egress
-                    allowlisting. Habeas does not collect secrets on this path.
-                  </p>
-                </div>
-              ) : uploadOnly ? (
-                <div className="space-y-2 rounded-md border border-line bg-canvas p-3 text-xs text-ink-soft">
-                  <p>
-                    <span className="font-medium text-ink">{createdConnection?.display_name}</span>{' '}
-                    is ready for owner upload refresh via the vertical connector wizard.
-                  </p>
-                  <p>Assign the owner on the Verticals tab if they are not already mapped.</p>
-                </div>
-              ) : invite ? (
-                <div className="space-y-2 rounded-md border border-line bg-canvas p-3">
-                  <p className="text-xs text-ink-soft">
-                    Send to <span className="font-mono text-ink">{invite.owner_email}</span>. Link
-                    expires in 72 hours, works once, and stores credentials in Secret Manager only.
-                  </p>
-                  <input
-                    type="text"
-                    readOnly
-                    className={`${fieldClass} font-mono text-xs`}
-                    value={shareUrl ?? ''}
-                    aria-label="Invite URL"
-                  />
-                  <div className="flex flex-wrap gap-2">
-                    <Button type="button" size="sm" onClick={copyInviteUrl}>
-                      Copy link
-                    </Button>
-                    {mailtoHref ? (
-                      <Button type="button" size="sm" variant="outline" asChild>
-                        <a href={mailtoHref}>Email owner</a>
-                      </Button>
-                    ) : null}
-                  </div>
-                  {copyNote ? <p className="text-xs text-mute">{copyNote}</p> : null}
-                </div>
-              ) : (
-                <p className="text-xs text-ink-soft">
-                  Connection saved. Use the invite panel on the connection row to mint a link later.
+              <div className="space-y-2 rounded-md border border-line bg-canvas p-3 text-xs text-ink-soft">
+                <p>
+                  <span className="font-medium text-ink">{createdConnection?.display_name}</span>{' '}
+                  {isCassandra ? (
+                    <>
+                      is registered as Cassandra with status{' '}
+                      <span className="font-medium text-ink">infra_pending</span>.
+                    </>
+                  ) : (
+                    <>is registered and waiting for owner setup.</>
+                  )}
                 </p>
-              )}
+                <p>{verticalAssignmentCopy(system)}</p>
+              </div>
 
               <DialogFooter>
                 <Button type="button" onClick={handleDone}>
@@ -596,23 +387,19 @@ export function ConnectionCreateDialog({
           setConfirmSheetsOpen(next)
         }}
         title="Create Google Sheets connection?"
-        description="We’ll create a dedicated Google service account for this connection, then mint the owner invite. The owner must share the spreadsheet with that account as Editor."
+        description="We’ll create a dedicated Google service account for this connection. After create, assign the owner on the Verticals tab — they share the spreadsheet with that account as Editor in the connector wizard."
         confirmLabel="Yes, create connection"
         cancelLabel="Cancel"
         confirming={submitting}
-        confirmingTitle={
-          provisionPhase === 'invite'
-            ? 'Creating invite link…'
-            : 'Creating dedicated service account…'
-        }
+        confirmingTitle="Creating dedicated service account…"
         confirmingDescription="Provisioning Google identity and saving the connection. Keep this tab open."
         onConfirm={() => {
-          const valid = validateForm()
-          if (!valid) {
+          const trimmedName = validateForm()
+          if (!trimmedName) {
             setConfirmSheetsOpen(false)
             return
           }
-          void runCreate(valid.name, valid.owner)
+          void runCreate(trimmedName)
         }}
       />
     </>

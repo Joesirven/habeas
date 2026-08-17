@@ -22,14 +22,25 @@ export type ConnectorReminder = {
   severity: ConnectorReminderSeverity
 }
 
+export type AssignedVerticalLabel = {
+  vertical_id: string
+  display_label: string
+}
+
 export type MePayload = {
   email: string
+  /** Google IAP given_name when present — safe for welcome copy (KD24). */
+  given_name?: string | null
   /** Effective role (after X-Dev-Simulate-Role when allowed). */
   role: UserRole
   /** Allowlist role before simulate override. */
   real_role: UserRole
   /** Assigned KD20 vertical ids (empty when none). */
   verticals?: string[]
+  /** Catalog display labels for assigned verticals (welcome copy). */
+  assigned_vertical_labels?: AssignedVerticalLabel[]
+  /** True when an assigned vertical still has incomplete connector wizard (KTD17). */
+  needs_connector_setup?: boolean
   /** Soft connector reminders — never block login (KTD13). */
   connector_reminders?: ConnectorReminder[]
 }
@@ -2480,6 +2491,7 @@ export type OwnerConnectorSystem = {
   allowed_approaches: string[]
   connection_id: string | null
   status: string | null
+  last_test_ok: boolean | null
   metadata: Record<string, unknown>
   display_status: string
   gate_code: string
@@ -2532,6 +2544,55 @@ export function setOwnerConnectorCadence(
 export function completeOwnerConnectorWizard(verticalId: string, system: string) {
   return fetchAdminApi<OwnerConnectorSystem>(
     `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/wizard/complete`,
+    { method: 'POST', body: JSON.stringify({}) },
+  )
+}
+
+export type OwnerLiveConnectResult = {
+  ok: boolean
+  detail: string
+  connection_id: string
+}
+
+export type OwnerCredentialPreview = {
+  system: string
+  display_name: string
+  fields: Array<{
+    id: string
+    label: string
+    input_type: 'password' | 'text' | 'url'
+    required: boolean
+    help: string | null
+  }>
+  trust_copy: string
+}
+
+/** Credential fields + how-to copy for in-wizard Live connect (KD21). */
+export function getOwnerConnectorCredentialPreview(verticalId: string, system: string) {
+  return fetchAdminApi<OwnerCredentialPreview>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/credential-preview`,
+  )
+}
+
+/** In-wizard Live credentials submit + connection test (KTD15). */
+export function saveOwnerConnectorCredentials(
+  verticalId: string,
+  system: string,
+  credentials: Record<string, string>,
+) {
+  return fetchAdminApi<OwnerLiveConnectResult>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/credentials`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ credentials }),
+    },
+  )
+}
+
+/** Re-test stored Live credentials on the vertical-scoped row (retry without resubmit). */
+export function testOwnerConnector(verticalId: string, system: string) {
+  return fetchAdminApi<OwnerLiveConnectResult>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/test`,
     { method: 'POST', body: JSON.stringify({}) },
   )
 }

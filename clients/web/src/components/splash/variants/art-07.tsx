@@ -84,7 +84,7 @@ function TypeOrbLockup({ mode }: { mode: LockupMode }) {
 
       <div className="art-07-type">
         <p className="art-07-brand">Habeas</p>
-        <p className="art-07-product">Data Privacy Platform</p>
+        <p className="art-07-product">Platform</p>
         <p className="art-07-dpp">DPP</p>
       </div>
 

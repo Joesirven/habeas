@@ -6,7 +6,7 @@ export function SplashLabPage() {
     <section className="space-y-8">
       <div className="rounded-[1rem] border border-[#6EB8E0]/60 bg-black px-4 py-3 font-mono text-xs text-[#F2F4F7]">
         <p className="tracking-[0.14em] text-[#6EB8E0] uppercase">
-          Type lockup v3 · Habeas Data Privacy Platform / DPP
+          Type lockup v3 · Habeas Platform / DPP
         </p>
         <p className="mt-1 text-white/70">
           Typography-led idents (chrome, stacked, DPP mono, teletext, extrude, chyron, arcs,
@@ -23,7 +23,7 @@ export function SplashLabPage() {
           Post-auth splash lab
         </h2>
         <p className="mt-2 max-w-xl text-sm text-ink-soft">
-          Twenty type-led 1984 idents: “Habeas Data Privacy Platform” or DPP lockups, assembling
+          Twenty type-led 1984 idents: “Habeas Platform” or DPP lockups, assembling
           on black in Habeas black / silver / blue. Click a card to fullscreen.
         </p>
       </header>

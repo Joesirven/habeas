@@ -36,7 +36,7 @@ function connectionDetailTitle(connection: ConnectionRecord): string {
   if (connection.system === 'cassandra') {
     return `${connection.display_name} · Infrastructure`
   }
-  return `${connection.display_name} · Invite`
+  return connection.display_name
 }
 
 function formatLastTest(connection: ConnectionRecord): string {
@@ -81,7 +81,7 @@ function ConnectionsTable({
   if (connections.length === 0) {
     return (
       <p className="text-sm text-ink-soft">
-        No connections yet. Create one to send an owner invite.
+        No connections yet. Create one, then assign verticals on the Verticals tab.
       </p>
     )
   }
@@ -153,8 +153,8 @@ function ConnectionsBody() {
             Connections
           </h2>
           <p className="mt-1 max-w-xl text-xs text-ink-soft">
-            Secure owner onboarding — invite links, gated status, and vertical catalog assignments;
-            credentials never appear here.
+            Connection registry, gated status, and vertical catalog assignments — credentials never
+            appear here. Owners complete setup from Connectors after vertical assignment.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">

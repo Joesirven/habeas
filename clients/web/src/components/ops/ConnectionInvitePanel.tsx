@@ -6,28 +6,23 @@ import { ConfirmActionDialog } from '@/components/ui/dialog'
 import {
   connectTestFailureMessage,
   connectTestSuccessDescription,
-  createConnectionInvite,
   deleteConnection,
   forceConnectionMode,
   overrideConnectionCadence,
   resetConnectionWizard,
-  revokeConnectionInvite,
   testConnection,
-  type ConnectionInviteCreateResponse,
   type ConnectionRecord,
   type IntegrationSystemId,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
-import { useAuth } from '@/lib/auth'
+import { clearOwnerQuickStartTourState, tourUserIdFromEmail } from '@/lib/quick-start-tour'
 import {
   connectionDisplayStatusLabel,
   connectionDisplayStatusVariant,
-  connectionInviteAllowed,
   isUploadOnlySystem,
   leverTriageCopy,
   resolveConnectionChipStatus,
 } from '@/lib/connection-display'
-import { absoluteInviteUrl, firstNameFromEmail } from '@/lib/utils'
 
 const fieldClass =
   'w-full rounded-md border border-line bg-paper px-2.5 py-1.5 text-sm text-ink'
@@ -48,32 +43,6 @@ export type ConnectionInvitePanelProps = {
   onDone?: () => void
   onUpdated?: () => void
   onDeleted?: () => void
-}
-
-function buildInviteMailto(
-  inviteUrl: string,
-  ownerEmail: string | undefined,
-  fromFirstName: string,
-): string {
-  const ownerFirst = firstNameFromEmail(ownerEmail)
-  const subject = encodeURIComponent('Habeas connection setup')
-  const body = encodeURIComponent(
-    [
-      `Hi, ${ownerFirst},`,
-      '',
-      'Please use this secure link to submit integration credentials for Habeas privacy automation:',
-      '',
-      inviteUrl,
-      '',
-      'This link expires in 72 hours and works only once.',
-      'Do not share credentials by email or chat — use the link only.',
-      '',
-      'Thank you,',
-      fromFirstName,
-    ].join('\n'),
-  )
-  const to = ownerEmail?.trim() ? encodeURIComponent(ownerEmail.trim()) : ''
-  return `mailto:${to}?subject=${subject}&body=${body}`
 }
 
 function formatLastTestLine(
@@ -123,14 +92,9 @@ export function ConnectionInvitePanel({
   onUpdated,
   onDeleted,
 }: ConnectionInvitePanelProps) {
-  const { me } = useAuth()
-  const inviteAllowed = connectionInviteAllowed({ system })
   const uploadOnly = isUploadOnlySystem(system)
   const canRetest = system != null && system !== 'cassandra' && !uploadOnly
   const isCassandra = system === 'cassandra'
-  const [invite, setInvite] = useState<ConnectionInviteCreateResponse | null>(null)
-  const [minting, setMinting] = useState(false)
-  const [revoking, setRevoking] = useState(false)
   const [testing, setTesting] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [forcingMode, setForcingMode] = useState(false)
@@ -163,66 +127,6 @@ export function ConnectionInvitePanel({
     setCadenceInput(cadenceOverride != null ? String(cadenceOverride) : '')
   }, [cadenceOverride, connectionId])
 
-  async function handleMint() {
-    setMinting(true)
-    setError(null)
-    try {
-      const trimmedOwner = ownerEmail?.trim()
-      const response = await createConnectionInvite(
-        connectionId,
-        trimmedOwner ? { owner_email: trimmedOwner } : {},
-      )
-      setInvite(response)
-      actionToast.success({
-        title: 'Invite link ready',
-        description: 'Copy it once — it is not shown again after you close this dialog.',
-      })
-      onUpdated?.()
-    } catch (err) {
-      const message = actionToast.safeErrorMessage(err, 'Could not create invite')
-      setError(message)
-      actionToast.error({
-        title: 'Could not create invite',
-        description: message,
-        action: {
-          label: 'Retry',
-          onClick: () => {
-            void handleMint()
-          },
-        },
-      })
-    } finally {
-      setMinting(false)
-    }
-  }
-
-  async function handleRevoke() {
-    if (!invite) return
-    setRevoking(true)
-    setError(null)
-    try {
-      await revokeConnectionInvite(connectionId, invite.invite_id)
-      setInvite(null)
-      actionToast.success({ title: 'Invite revoked' })
-      onUpdated?.()
-    } catch (err) {
-      const message = actionToast.safeErrorMessage(err, 'Could not revoke invite')
-      setError(message)
-      actionToast.error({
-        title: 'Could not revoke invite',
-        description: message,
-        action: {
-          label: 'Retry',
-          onClick: () => {
-            void handleRevoke()
-          },
-        },
-      })
-    } finally {
-      setRevoking(false)
-    }
-  }
-
   async function handleDelete() {
     setDeleting(true)
     setError(null)
@@ -231,7 +135,7 @@ export function ConnectionInvitePanel({
       setConfirmDeleteOpen(false)
       actionToast.success({
         title: 'Connection deleted',
-        description: 'Active invites for this connection are no longer valid.',
+        description: 'The connection record was removed.',
       })
       onDeleted?.()
     } catch (err) {
@@ -362,6 +266,10 @@ export function ConnectionInvitePanel({
     setError(null)
     try {
       await resetConnectionWizard(connectionId)
+      const ownerUserId = tourUserIdFromEmail(ownerEmail)
+      if (ownerUserId) {
+        clearOwnerQuickStartTourState(ownerUserId)
+      }
       setConfirmResetOpen(false)
       actionToast.success({
         title: 'Wizard reset',
@@ -386,27 +294,7 @@ export function ConnectionInvitePanel({
     }
   }
 
-  function copyInviteUrl() {
-    if (!invite?.invite_url) return
-    const url = absoluteInviteUrl(invite.invite_url)
-    void navigator.clipboard.writeText(url).then(() => {
-      actionToast.copied('Copied invite link', copyInviteUrl)
-    })
-  }
-
-  const shareUrl = invite?.invite_url ? absoluteInviteUrl(invite.invite_url) : null
-
-  const mailtoHref =
-    shareUrl != null
-      ? buildInviteMailto(
-          shareUrl,
-          invite?.owner_email ?? ownerEmail,
-          firstNameFromEmail(me?.email),
-        )
-      : null
-
-  const busy =
-    minting || revoking || testing || deleting || forcingMode || savingCadence || resettingWizard
+  const busy = testing || deleting || forcingMode || savingCadence || resettingWizard
 
   const statusBlock = (
     <div className="space-y-2 rounded-md border border-line bg-canvas px-3 py-2.5">
@@ -530,7 +418,7 @@ export function ConnectionInvitePanel({
         setConfirmDeleteOpen(open)
       }}
       title="Delete this connection?"
-      description="This permanently removes the connection. Active invite links become invalid immediately. Stored credentials in Secret Manager are not deleted in this version."
+      description="This permanently removes the connection. Stored credentials in Secret Manager are not deleted in this version."
       confirmLabel="Delete connection"
       cancelLabel="Cancel"
       tone="destructive"
@@ -569,8 +457,8 @@ export function ConnectionInvitePanel({
       <div className="space-y-3 text-sm">
         {statusBlock}
         <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
-          Cassandra connectivity is handled by Habeas Infrastructure (INF). No owner invite is
-          sent — ops marks the connection{' '}
+          Cassandra connectivity is handled by Habeas Infrastructure (INF). No owner onboarding
+          flow — ops marks the connection{' '}
           <span className="font-medium text-ink">infra_pending</span> until INF confirms TLS,
           service accounts, and egress are live. Credentials are stored only in Google Cloud Secret
           Manager once setup completes.
@@ -606,19 +494,16 @@ export function ConnectionInvitePanel({
 
   return (
     <div className="space-y-3 text-sm">
-      {inviteAllowed ? (
-        <p className="text-xs text-ink-soft">
-          Owner invite links expire in 72 hours, work once, and send credentials directly to Google
-          Cloud Secret Manager — never through email or chat.
-        </p>
-      ) : uploadOnly ? (
+      {uploadOnly ? (
         <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
-          Upload-only system — owners refresh via the vertical connector upload wizard. No Live
-          credential invite is minted from Ops.
+          Upload-only system — owners refresh via the vertical connector upload wizard after a super
+          admin assigns them a vertical.
         </div>
       ) : (
         <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
-          Owner invite is not available for this system.
+          Owners complete Live credential setup from <span className="font-medium text-ink">Connectors</span>{' '}
+          after a super admin assigns them a vertical. Use the Verticals tab to manage assignments —
+          one-off invite links are no longer used.
         </div>
       )}
 
@@ -631,48 +516,6 @@ export function ConnectionInvitePanel({
         >
           {error}
         </p>
-      ) : null}
-
-      {inviteAllowed ? (
-        invite ? (
-          <div className="space-y-2 rounded-md border border-line bg-canvas p-3">
-            <p className="text-xs text-ink-soft">
-              Send this link to{' '}
-              <span className="font-mono text-ink">{invite.owner_email}</span>. It is shown only
-              once.
-            </p>
-            <input
-              type="text"
-              readOnly
-              className={`${fieldClass} font-mono text-xs`}
-              value={shareUrl ?? ''}
-              aria-label="Invite URL"
-            />
-            <div className="flex flex-wrap gap-2">
-              <Button type="button" size="sm" onClick={copyInviteUrl}>
-                Copy link
-              </Button>
-              {mailtoHref ? (
-                <Button type="button" size="sm" variant="outline" asChild>
-                  <a href={mailtoHref}>Email owner</a>
-                </Button>
-              ) : null}
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={busy}
-                onClick={() => void handleRevoke()}
-              >
-                {revoking ? 'Revoking…' : 'Revoke invite'}
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <Button type="button" size="sm" disabled={busy} onClick={() => void handleMint()}>
-            {minting ? 'Creating link…' : 'Create invite link'}
-          </Button>
-        )
       ) : null}
 
       {canRetest ? (

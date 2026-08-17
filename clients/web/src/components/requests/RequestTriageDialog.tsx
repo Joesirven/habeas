@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Link } from '@tanstack/react-router'
+import { useQuery } from '@tanstack/react-query'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -12,7 +14,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   DROP_RESPONSE_STATUS_OPTIONS,
   getDropMatchingResultDetail,
+  listConnections,
   suggestedDropResponseStatus,
+  type ConnectorReminder,
   type DropResponseStatusCode,
   type FulfillmentArtifact,
   type JourneyStage,
@@ -22,6 +26,14 @@ import {
   type RunTimelineStep,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
+import {
+  attemptIsGateBlocked,
+  matchingConnectorGateBannerCopy,
+  matchingConnectorGateChip,
+  matchingGateFromAttempts,
+  resolveMatchingConnectorGate,
+  type MatchingConnectorGate,
+} from '@/lib/connection-display'
 import { actionReasonLabel } from '@/lib/legalJourneyLabels'
 import { cn } from '@/lib/utils'
 
@@ -215,12 +227,23 @@ function matchingResultsLabel(matching: MatchingResultDetail): string {
 
 function matchingProcessStripItems(
   matching: MatchingResultDetail,
+  connectorGate?: MatchingConnectorGate | null,
 ): { label: string; value: ReactNode; show?: boolean }[] {
   const latestAttempt =
     matching.attempts && matching.attempts.length > 0
       ? [...matching.attempts].sort((a, b) => b.attempt_number - a.attempt_number)[0]
       : null
+  const gateChip = connectorGate ? matchingConnectorGateChip(connectorGate) : null
   return [
+    {
+      label: 'Connector gate',
+      value: (
+        <Badge variant={gateChip?.variant ?? 'ok'} className="normal-case tracking-normal">
+          {gateChip?.label ?? 'Clear'}
+        </Badge>
+      ),
+      show: Boolean(connectorGate),
+    },
     {
       label: 'Matching results',
       value: matchingResultsLabel(matching),
@@ -341,12 +364,27 @@ function reviewStatusVariant(status: string): 'default' | 'ok' | 'fail' | 'wait'
   return 'default'
 }
 
-function attemptGlance(attempts: MatchingAttemptRow[]): {
+function attemptGlance(
+  attempts: MatchingAttemptRow[],
+  connectorGate?: MatchingConnectorGate | null,
+): {
   label: string
   tone: 'default' | 'ok' | 'fail' | 'wait' | 'run'
 } {
+  if (connectorGate) {
+    const chip = matchingConnectorGateChip(connectorGate)
+    return {
+      label: `${attempts.length} · ${chip.label}`,
+      tone: 'fail',
+    }
+  }
   if (attempts.length === 0) return { label: 'None', tone: 'default' }
   const latest = [...attempts].sort((a, b) => b.attempt_number - a.attempt_number)[0]!
+  const gateFromLatest = attemptIsGateBlocked(latest)
+  if (gateFromLatest) {
+    const chip = matchingConnectorGateChip(gateFromLatest)
+    return { label: `${attempts.length} · ${chip.label}`, tone: 'fail' }
+  }
   if (latest.status === 'success') {
     if (attemptIsUnmatchedSuccess(latest)) {
       return { label: `${attempts.length} · not found`, tone: 'wait' }
@@ -448,6 +486,11 @@ function attemptRowBadge(attempt: MatchingAttemptRow): {
   label: string
   tone: 'default' | 'ok' | 'fail' | 'wait' | 'run'
 } {
+  const gate = attemptIsGateBlocked(attempt)
+  if (gate) {
+    const chip = matchingConnectorGateChip(gate)
+    return { label: chip.label, tone: 'fail' }
+  }
   if (attempt.status === 'success') {
     const audit = coerceAuditObject(attempt.audit_payload)
     const matchCount = typeof audit.match_count === 'number' ? audit.match_count : null
@@ -504,6 +547,21 @@ export function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
       label: 'Error code',
       value: attempt.error_code ?? '—',
       show: Boolean(attempt.error_code),
+    },
+    {
+      label: 'Gate code',
+      value: auditFieldDisplay(audit, 'gate_code') ?? '—',
+      show: 'gate_code' in audit || attempt.error_code === 'gate_blocked',
+    },
+    {
+      label: 'Display status',
+      value: auditFieldDisplay(audit, 'display_status') ?? '—',
+      show: 'display_status' in audit,
+    },
+    {
+      label: 'Blocking system',
+      value: auditFieldDisplay(audit, 'blocking_system') ?? '—',
+      show: 'blocking_system' in audit,
     },
     {
       label: 'Matched',
@@ -992,6 +1050,79 @@ function MatchedContactsPanel({
 }
 
 /**
+ * R52 — banner when connector freshness gate blocks matching (KD18).
+ * Uses attempt audit when present; otherwise honest fallback from reminders/connections.
+ */
+export function MatchingConnectorGateBanner({
+  gate,
+  compact = false,
+  showOwnerLink = false,
+}: {
+  gate: MatchingConnectorGate | null | undefined
+  compact?: boolean
+  showOwnerLink?: boolean
+}) {
+  if (!gate?.blocked) return null
+  const chip = matchingConnectorGateChip(gate)
+  const copy = matchingConnectorGateBannerCopy(gate)
+  return (
+    <div
+      className={cn(
+        'rounded-md border border-red-300/80 bg-red-50/80',
+        compact ? 'px-2 py-1.5' : 'px-2.5 py-2',
+      )}
+      role="status"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={chip.variant} className="normal-case tracking-normal">
+          {chip.label}
+        </Badge>
+        <span className="text-[0.7rem] font-medium text-red-950">{copy.title}</span>
+      </div>
+      <p className="mt-1 text-[0.65rem] leading-snug text-red-900/90">{copy.description}</p>
+      {showOwnerLink && gate.source === 'reminder' ? (
+        <Link
+          to="/owner/connectors"
+          className="mt-1 inline-block text-[0.65rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
+        >
+          Open connectors
+        </Link>
+      ) : null}
+    </div>
+  )
+}
+
+/** Attempt audit first; ops connections or owner reminders when attempts lack gate fields. */
+export function useMatchingConnectorGate(options: {
+  attempts?: MatchingAttemptRow[] | null
+  reminders?: ConnectorReminder[] | null
+  fetchConnections?: boolean
+}) {
+  const fromAttempts = useMemo(
+    () => matchingGateFromAttempts(options.attempts),
+    [options.attempts],
+  )
+
+  const connectionsQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'connections', 'matching-gate'],
+    queryFn: async () => (await listConnections()).connections,
+    enabled: Boolean(options.fetchConnections && !fromAttempts),
+    staleTime: 60_000,
+    retry: false,
+  })
+
+  return useMemo(
+    () =>
+      resolveMatchingConnectorGate({
+        attempts: options.attempts,
+        connections: connectionsQuery.data,
+        reminders: options.reminders,
+      }),
+    [options.attempts, connectionsQuery.data, options.reminders],
+  )
+}
+
+/**
  * Matching review panel — fulfill/decline + attempt drill-down.
  *
  * E3 wire-up — `onPromote` / fulfill disposition:
@@ -1012,6 +1143,8 @@ export function MatchingReviewPanel({
   compact = false,
   layout = 'accordion',
   hideActions = false,
+  connectorReminders,
+  fetchConnectorConnections = false,
 }: {
   requestId: string
   matching: MatchingResultDetail | null | undefined
@@ -1028,6 +1161,10 @@ export function MatchingReviewPanel({
   layout?: 'accordion' | 'tabs'
   /** Hide fulfill/decline buttons (e.g. when inbox header owns actions). */
   hideActions?: boolean
+  /** Soft reminders from `/me` when matching payload lacks gate audit. */
+  connectorReminders?: ConnectorReminder[] | null
+  /** Ops/admin — load gated connections when attempts lack gate audit. */
+  fetchConnectorConnections?: boolean
 }) {
   const [confirm, setConfirm] = useState<'fulfill' | 'decline' | null>(null)
   const suggestedStatus = suggestedDropResponseStatus(
@@ -1074,13 +1211,19 @@ export function MatchingReviewPanel({
   // empty [] would let the API default to the full matched set).
   const fulfillDwidsReady = !fulfillNeedsDwids || selectedDwids.length > 0
 
+  const connectorGate = useMatchingConnectorGate({
+    attempts: matching?.attempts,
+    reminders: connectorReminders,
+    fetchConnections: fetchConnectorConnections,
+  })
+
   const attempts = matching?.attempts ?? []
-  const attemptStatus = attemptGlance(attempts)
+  const attemptStatus = attemptGlance(attempts, connectorGate)
   const assignment = matching?.assignment?.assignee_identity
   const processStrip = matching ? (
     <ProcessContextStrip
       compact={compact}
-      items={matchingProcessStripItems(matching)}
+      items={matchingProcessStripItems(matching, connectorGate)}
     />
   ) : null
 
@@ -1278,6 +1421,11 @@ export function MatchingReviewPanel({
           </p>
         </div>
       ) : null}
+      <MatchingConnectorGateBanner
+        gate={connectorGate}
+        compact={compact}
+        showOwnerLink={Boolean(connectorReminders?.length)}
+      />
       {processStrip}
       {matching && layout === 'tabs' ? tabsBody : null}
       {matching && layout !== 'tabs' ? (

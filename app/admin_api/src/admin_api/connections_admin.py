@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -25,11 +25,6 @@ from habeas_privacy_core.connections.freshness import (
 )
 from habeas_privacy_core.connections.models import sanitize_test_detail
 from habeas_privacy_core.connections.systems import SYSTEM_IDS
-from habeas_privacy_core.connections.token import (
-    INVITE_TTL_HOURS,
-    generate_invite_token,
-    hash_token,
-)
 from habeas_privacy_core.db.pool import get_pool
 
 try:
@@ -37,7 +32,8 @@ try:
 except ImportError:
     connections_db = None  # type: ignore[assignment]
 
-INVITE_TTL = timedelta(hours=INVITE_TTL_HOURS)
+INVITE_ROUTE_GONE_DETAIL = "assignment-is-the-grant"
+
 VALID_SYSTEMS = SYSTEM_IDS
 _CASSANDRA_SYSTEM = "cassandra"
 
@@ -361,14 +357,6 @@ def _connection_from_row(
         gate_code=gate_code,
         gate_allowed=gate_allowed,
     )
-
-
-def _invite_url(raw_token: str) -> str:
-    path = f"/connect/{raw_token}"
-    base = settings.public_web_base_url.strip().rstrip("/")
-    if base:
-        return f"{base}{path}"
-    return path
 
 
 def _hardcoded_systems_catalog() -> SystemsCatalogResponse:
@@ -731,8 +719,6 @@ async def create_connection(body: ConnectionCreateBody, principal: SuperAdminPri
     owner_email = _require_allowlisted_owner(
         body.owner_email.strip().lower() if body.owner_email else None
     )
-    if system != _CASSANDRA_SYSTEM and not owner_email:
-        raise HTTPException(status_code=422, detail="owner_email required")
     status = "infra_pending" if system == _CASSANDRA_SYSTEM else "pending"
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -848,90 +834,12 @@ async def list_owner_candidates(_principal: SuperAdminPrincipal):
 @router.post("/{connection_id}/invites", response_model=InviteResponse, status_code=201)
 async def create_invite(
     connection_id: UUID,
-    principal: SuperAdminPrincipal,
-    body: InviteCreateBody = InviteCreateBody(),
+    _principal: SuperAdminPrincipal,
+    _body: InviteCreateBody = InviteCreateBody(),
 ):
-    _require_database()
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        connection = await _fetch_connection(conn, connection_id)
-        if connection.system == _CASSANDRA_SYSTEM or connection.status == "infra_pending":
-            raise HTTPException(status_code=400, detail="invites not allowed for cassandra")
-        if connection.system in UPLOAD_ONLY_SYSTEMS:
-            raise HTTPException(
-                status_code=422,
-                detail="invites not allowed for upload-only systems",
-            )
-        owner_email = _require_allowlisted_owner(
-            body.owner_email.strip().lower()
-            if body.owner_email
-            else (connection.owner_email or "").strip().lower() or None
-        )
-        if not owner_email:
-            raise HTTPException(status_code=422, detail="owner_email required")
-        raw_token = generate_invite_token()
-        token_hash = hash_token(raw_token)
-        expires_at = datetime.now(timezone.utc) + INVITE_TTL
-        if connections_db is not None:
-            invite_row = await connections_db.create_invite(
-                conn,
-                connection_id=connection_id,
-                token_hash=token_hash,
-                owner_email=owner_email,
-                expires_at=expires_at,
-                created_by=principal.email,
-            )
-        else:
-            invite_row = await conn.fetchrow(
-                """
-                INSERT INTO connection_invites (
-                    connection_id, token_hash, owner_email, expires_at, created_by
-                )
-                VALUES ($1, $2, $3, $4, $5)
-                RETURNING id, owner_email, expires_at
-                """,
-                connection_id,
-                token_hash,
-                owner_email,
-                expires_at,
-                principal.email,
-            )
-        if connection.status == "pending":
-            if connections_db is not None:
-                await connections_db.update_connection_status(
-                    conn,
-                    connection_id,
-                    status="invited",
-                    owner_email=owner_email,
-                )
-            else:
-                await conn.execute(
-                    """
-                    UPDATE integration_connections
-                       SET status = 'invited',
-                           owner_email = COALESCE($2, owner_email),
-                           updated_at = NOW()
-                     WHERE id = $1
-                    """,
-                    connection_id,
-                    owner_email,
-                )
-    if not invite_row:
-        raise HTTPException(status_code=500, detail="failed to create invite")
-    invite_id = invite_row.id if hasattr(invite_row, "id") else invite_row["id"]
-    invite_owner = (
-        invite_row.owner_email if hasattr(invite_row, "owner_email") else invite_row["owner_email"]
-    )
-    invite_expires = (
-        invite_row.expires_at if hasattr(invite_row, "expires_at") else invite_row["expires_at"]
-    )
-    return InviteResponse(
-        invite_id=UUID(str(invite_id)),
-        owner_email=str(invite_owner),
-        expires_at=invite_expires,
-        invite_url=_invite_url(raw_token),
-        raw_token=raw_token,
-    )
+    """Retired — vertical assignment is the only owner onboarding grant."""
+    _ = connection_id
+    raise HTTPException(status_code=410, detail=INVITE_ROUTE_GONE_DETAIL)
 
 
 @router.post("/{connection_id}/invites/{invite_id}/revoke")
@@ -940,29 +848,9 @@ async def revoke_invite(
     invite_id: UUID,
     _principal: SuperAdminPrincipal,
 ):
-    _require_database()
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        await _fetch_connection(conn, connection_id)
-        if connections_db is not None:
-            revoked = await connections_db.revoke_invite(conn, invite_id)
-            if revoked is None or str(revoked.connection_id) != str(connection_id):
-                raise HTTPException(status_code=404, detail="invite not found")
-        else:
-            result = await conn.execute(
-                """
-                UPDATE connection_invites
-                   SET revoked_at = NOW()
-                 WHERE id = $1
-                   AND connection_id = $2
-                   AND revoked_at IS NULL
-                """,
-                invite_id,
-                connection_id,
-            )
-            if result == "UPDATE 0":
-                raise HTTPException(status_code=404, detail="invite not found")
-    return {"status": "ok", "invite_id": str(invite_id)}
+    """Retired — vertical assignment is the only owner onboarding grant."""
+    _ = (connection_id, invite_id)
+    raise HTTPException(status_code=410, detail=INVITE_ROUTE_GONE_DETAIL)
 
 
 @router.delete("/{connection_id}")

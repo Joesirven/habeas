@@ -7,12 +7,21 @@ import {
   activeModeFromMetadata,
   allowsLive,
   allowsUpload,
+  buildModeStepCards,
   buildReminderBannerItems,
-    cadenceDaysFromMetadata,
+  cadenceDaysFromMetadata,
+  HABEAS_PLATFORM_DISPLAY_NAME,
+  disallowedModeReason,
   delimiterOptionFromKey,
   delimiterValueFromKey,
   displayStatusChip,
+  filterRemindersForOwnerConnectorsPage,
+  isModeAllowed,
   liveConnectReady,
+  MODE_DEFINITION_CARDS,
+  MODE_STEP_CONNECTING_NOT_MATCHING_FOOTNOTE,
+  modeStepIntroCopy,
+  modeStepSystemHint,
   ownerWizardStepIndex,
   visibleReminderBanners,
 } from './owner-connector-ui'
@@ -122,7 +131,7 @@ describe('reminder banners (R10 soft)', () => {
     expect(items[0].description.toLowerCase()).toContain('does not block')
   })
 
-  test('wizard_incomplete uses curated copy', () => {
+  test('wizard_incomplete uses curated copy and soft severity', () => {
     const items = buildReminderBannerItems([
       {
         code: 'wizard_incomplete',
@@ -132,6 +141,26 @@ describe('reminder banners (R10 soft)', () => {
       },
     ])
     expect(items[0].title.toLowerCase()).toContain('incomplete')
+    expect(items[0].severity).toBe('approaching')
+  })
+
+  test('filterRemindersForOwnerConnectorsPage drops wizard_incomplete', () => {
+    const filtered = filterRemindersForOwnerConnectorsPage([
+      {
+        code: 'wizard_incomplete',
+        system: 'mailchimp',
+        vertical_id: 'communications',
+        severity: 'overdue',
+      },
+      {
+        code: 'upload_stale',
+        system: 'mailchimp',
+        vertical_id: 'communications',
+        severity: 'overdue',
+      },
+    ])
+    expect(filtered).toHaveLength(1)
+    expect(filtered[0].code).toBe('upload_stale')
   })
 })
 
@@ -157,7 +186,7 @@ describe('mode and cadence helpers', () => {
     expect(activeModeFromMetadata({})).toBeNull()
   })
 
-  test('liveConnectReady requires redeem evidence', () => {
+  test('liveConnectReady requires redeem evidence or successful test', () => {
     expect(liveConnectReady({ status: 'pending', metadata: {} })).toBe(false)
     expect(
       liveConnectReady({
@@ -166,10 +195,100 @@ describe('mode and cadence helpers', () => {
       }),
     ).toBe(true)
     expect(liveConnectReady({ status: 'connected', metadata: {} })).toBe(true)
+    expect(
+      liveConnectReady({ status: 'pending', last_test_ok: true, metadata: {} }),
+    ).toBe(true)
   })
 
   test('ownerWizardStepIndex', () => {
     expect(ownerWizardStepIndex('mode')).toBe(0)
     expect(ownerWizardStepIndex('confirm')).toBe(3)
+  })
+})
+
+describe('mode step explainer (KD25)', () => {
+  test('definition cards use plain language and Habeas Platform name', () => {
+    expect(MODE_DEFINITION_CARDS).toHaveLength(2)
+    expect(MODE_DEFINITION_CARDS[0].title).toBe('Upload')
+    expect(MODE_DEFINITION_CARDS[1].title).toBe('Live')
+    expect(MODE_DEFINITION_CARDS[0].definition).toContain(
+      HABEAS_PLATFORM_DISPLAY_NAME,
+    )
+    expect(MODE_DEFINITION_CARDS[0].definition.toLowerCase()).toContain('schedule')
+    expect(MODE_DEFINITION_CARDS[1].definition.toLowerCase()).toContain('credentials')
+    expect(MODE_STEP_CONNECTING_NOT_MATCHING_FOOTNOTE.toLowerCase()).toContain(
+      'does not start matching',
+    )
+  })
+
+  test('modeStepIntroCopy names the system', () => {
+    expect(modeStepIntroCopy('Mailchimp')).toContain('Mailchimp')
+    expect(modeStepIntroCopy('Mailchimp')).toContain(
+      HABEAS_PLATFORM_DISPLAY_NAME,
+    )
+  })
+
+  test('isModeAllowed mirrors allowsUpload / allowsLive', () => {
+    expect(isModeAllowed('upload', ['live', 'upload'])).toBe(true)
+    expect(isModeAllowed('live', ['upload'])).toBe(false)
+    expect(isModeAllowed('live', ['live'])).toBe(true)
+  })
+
+  test('mailchimp cards include per-system hints when both modes allowed', () => {
+    const cards = buildModeStepCards({
+      systemId: 'mailchimp',
+      displayName: 'Mailchimp',
+      allowedApproaches: ['live', 'upload'],
+    })
+    expect(cards).toHaveLength(2)
+    expect(cards.every((card) => card.allowed)).toBe(true)
+    expect(cards.find((card) => card.mode === 'upload')?.hint).toContain('template')
+    expect(cards.find((card) => card.mode === 'live')?.hint).toContain('API key')
+    expect(cards.every((card) => card.disabledReason === null)).toBe(true)
+  })
+
+  test('upload-only system greys Live with curated reason', () => {
+    const cards = buildModeStepCards({
+      systemId: 'bizdev_contacts',
+      displayName: 'BizDev Contacts',
+      allowedApproaches: ['upload'],
+    })
+    const live = cards.find((card) => card.mode === 'live')
+    expect(live?.allowed).toBe(false)
+    expect(live?.hint).toBeNull()
+    expect(live?.disabledReason?.toLowerCase()).toContain('upload only')
+    expect(cards.find((card) => card.mode === 'upload')?.allowed).toBe(true)
+  })
+
+  test('lever greys Upload with live-only reason', () => {
+    const reason = disallowedModeReason('lever', 'upload')
+    expect(reason.toLowerCase()).toContain('live')
+    const cards = buildModeStepCards({
+      systemId: 'lever',
+      displayName: 'Lever',
+      allowedApproaches: ['live'],
+    })
+    expect(cards.find((card) => card.mode === 'upload')?.disabledReason).toBe(reason)
+    expect(modeStepSystemHint('lever', 'live')).toContain('Users read/list')
+  })
+
+  test('paylocity Live copy promises SFTP later, not API', () => {
+    const cards = buildModeStepCards({
+      systemId: 'paylocity',
+      displayName: 'Paylocity',
+      allowedApproaches: ['upload'],
+    })
+    const live = cards.find((card) => card.mode === 'live')
+    expect(live?.definition.toLowerCase()).toContain('sftp')
+    expect(live?.definition.toLowerCase()).toContain('not an api connection')
+    expect(live?.disabledReason?.toLowerCase()).toContain('sftp')
+    const liveAllowed = buildModeStepCards({
+      systemId: 'paylocity',
+      displayName: 'Paylocity',
+      allowedApproaches: ['live', 'upload'],
+    }).find((card) => card.mode === 'live')
+    expect(liveAllowed?.definition.toLowerCase()).toContain('sftp')
+    expect(liveAllowed?.hint?.toLowerCase()).toContain('sftp')
+    expect(liveAllowed?.hint?.toLowerCase()).toContain('not an api')
   })
 })

@@ -1,40 +1,56 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { ConfirmActionDialog } from '@/components/ui/dialog'
+import { Spinner } from '@/components/ui/spinner'
 import {
   completeOwnerConnectorWizard,
+  connectRedeemSystemLabel,
+  connectTestFailureMessage,
+  connectTestSuccessDescription,
   downloadOwnerUploadTemplate,
+  getOwnerConnectorCredentialPreview,
   listOwnerConnectorReminders,
   listOwnerConnectors,
+  saveOwnerConnectorCredentials,
   setOwnerConnectorCadence,
   setOwnerConnectorMode,
+  testOwnerConnector,
   uploadOwnerConnectorCsv,
   type ConnectorReminder,
+  type IntegrationSystemId,
   type OwnerConnectorList,
   type OwnerConnectorSystem,
+  type OwnerCredentialPreview,
   type UserRole,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
 import { RoleGate, useAuth } from '@/lib/auth'
 import {
+  MODE_STEP_CONNECTING_NOT_MATCHING_FOOTNOTE,
   MULTI_PII_DELIMITER_OPTIONS,
   OWNER_WIZARD_STEPS,
   activeModeFromMetadata,
   allowsLive,
   allowsUpload,
+  buildModeStepCards,
   buildReminderBannerItems,
   cadenceDaysFromMetadata,
   delimiterValueFromKey,
   displayStatusChip,
+  filterRemindersForOwnerConnectorsPage,
   liveConnectReady,
+  modeStepIntroCopy,
   ownerWizardStepIndex,
   visibleReminderBanners,
+  type ModeStepCardState,
   type OwnerWizardStep,
 } from '@/lib/owner-connector-ui'
+import { cn } from '@/lib/utils'
 
 const FIELD_CLASS =
   'w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none transition focus:border-habeas-mid focus:ring-2 focus:ring-habeas-mid/20'
@@ -45,6 +61,562 @@ function canAccessOwnerConnectors(role: UserRole) {
 
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
+}
+
+type CredentialField = OwnerCredentialPreview['fields'][number]
+
+const OWNER_CREDENTIAL_ERROR_FALLBACK =
+  'Could not save credentials. Check the fields and try again.'
+
+function ownerCredentialErrorMessage(error: unknown, fallback = OWNER_CREDENTIAL_ERROR_FALLBACK): string {
+  if (!(error instanceof Error)) return fallback
+  const match = error.message.match(/Admin API \d+: (.+)/)
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[1]) as { detail?: unknown }
+      if (typeof parsed.detail === 'string' && parsed.detail.trim()) {
+        const normalized = parsed.detail.trim().toLowerCase()
+        if (
+          normalized.startsWith('missing required credential field:') ||
+          normalized.startsWith('unknown credential fields for') ||
+          normalized.startsWith('credential field ')
+        ) {
+          return OWNER_CREDENTIAL_ERROR_FALLBACK
+        }
+        return parsed.detail
+      }
+    } catch {
+      // fall through
+    }
+  }
+  return fallback
+}
+
+function FieldHelp({ help }: { help: string }) {
+  const lines = help
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const steps = lines.filter((line) => /^\d+\.\s/.test(line))
+  const notes = lines.filter((line) => !/^\d+\.\s/.test(line))
+
+  return (
+    <div className="space-y-2 text-xs leading-relaxed text-ink-soft">
+      {steps.length > 0 ? (
+        <ol className="list-decimal space-y-1 pl-4 text-ink">
+          {steps.map((step) => (
+            <li key={step}>{step.replace(/^\d+\.\s*/, '')}</li>
+          ))}
+        </ol>
+      ) : null}
+      {notes.map((note) => (
+        <p key={note}>{note}</p>
+      ))}
+    </div>
+  )
+}
+
+function CredentialInput({
+  field,
+  value,
+  onChange,
+  disabled,
+}: {
+  field: CredentialField
+  value: string
+  onChange: (value: string) => void
+  disabled?: boolean
+}) {
+  const inputType =
+    field.input_type === 'password' ? 'password' : field.input_type === 'url' ? 'url' : 'text'
+
+  return (
+    <div className="space-y-2">
+      <label htmlFor={`owner-cred-${field.id}`} className="block text-xs font-medium text-ink">
+        {field.label}
+        {field.required ? <span className="font-normal text-mute"> · required</span> : null}
+      </label>
+      {field.help ? <FieldHelp help={field.help} /> : null}
+      <input
+        id={`owner-cred-${field.id}`}
+        name={field.id}
+        type={inputType}
+        autoComplete="off"
+        required={field.required}
+        disabled={disabled}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className={FIELD_CLASS}
+      />
+    </div>
+  )
+}
+
+function LiveTestOverlay({ systemLabel }: { systemLabel: string }) {
+  const [phase, setPhase] = useState<'saving' | 'testing'>('saving')
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setPhase('testing'), 1200)
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  const title = phase === 'saving' ? 'Saving credentials…' : `Testing ${systemLabel}…`
+  const detail =
+    phase === 'saving'
+      ? 'Writing your keys to Google’s secure vault.'
+      : `Checking that Habeas can authenticate with ${systemLabel}.`
+
+  return (
+    <div
+      className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-md bg-white/95 px-4 text-center backdrop-blur-[2px]"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      aria-label={title}
+    >
+      <div className="w-full max-w-sm rounded-md border border-line bg-white p-4 shadow-sm">
+        <div className="mx-auto mb-3 flex size-9 items-center justify-center rounded-full bg-habeas-navy/10">
+          <Spinner className="size-4" />
+        </div>
+        <p className="text-sm font-medium text-ink">{title}</p>
+        <p className="mt-1 text-xs text-ink-soft">{detail}</p>
+        <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-line">
+          <div
+            className={`h-full rounded-full bg-habeas-navy transition-all duration-700 ${
+              phase === 'saving' ? 'w-1/2' : 'w-full'
+            }`}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function LiveConnectPanel({
+  verticalId,
+  connector,
+  onBack,
+  onContinue,
+  invalidate,
+}: {
+  verticalId: string
+  connector: OwnerConnectorSystem
+  onBack: () => void
+  onContinue: () => void
+  invalidate: () => void
+}) {
+  const previewQuery = useQuery({
+    queryKey: [
+      'admin-api',
+      'owner',
+      'credential-preview',
+      verticalId,
+      connector.system,
+    ],
+    queryFn: () => getOwnerConnectorCredentialPreview(verticalId, connector.system),
+    staleTime: 60_000,
+  })
+
+  const preview = previewQuery.data
+  const systemLabel = connectRedeemSystemLabel({
+    system: connector.system as IntegrationSystemId,
+    display_name: connector.display_name,
+  })
+
+  const [credentials, setCredentials] = useState<Record<string, string>>({})
+  const [clientError, setClientError] = useState<string | null>(null)
+  const [confirmTestOpen, setConfirmTestOpen] = useState(false)
+  const [liveTestOk, setLiveTestOk] = useState(connector.last_test_ok === true)
+  const [fieldsDirty, setFieldsDirty] = useState(false)
+  const [credentialsSaved, setCredentialsSaved] = useState(
+    liveConnectReady(connector),
+  )
+
+  useEffect(() => {
+    if (connector.last_test_ok === true) setLiveTestOk(true)
+  }, [connector.last_test_ok])
+
+  useEffect(() => {
+    if (liveConnectReady(connector)) setCredentialsSaved(true)
+  }, [connector.last_test_ok, connector.status, connector.metadata])
+
+  useEffect(() => {
+    if (!preview?.fields.length) return
+    setCredentials((current) => {
+      const next = { ...current }
+      for (const field of preview.fields) {
+        if (next[field.id] === undefined) next[field.id] = ''
+      }
+      return next
+    })
+  }, [preview])
+
+  const credentialsMutation = useMutation({
+    mutationFn: (payload: Record<string, string>) =>
+      saveOwnerConnectorCredentials(verticalId, connector.system, payload),
+    onMutate: () => setClientError(null),
+    onSuccess: (data) => {
+      setConfirmTestOpen(false)
+      setCredentialsSaved(true)
+      setFieldsDirty(false)
+      invalidate()
+      if (data.ok) {
+        setLiveTestOk(true)
+        actionToast.success({
+          title: 'Connection confirmed',
+          description: connectTestSuccessDescription(data.detail, connector.display_name),
+        })
+        return
+      }
+      actionToast.error({
+        title: 'Connection test failed',
+        description: connectTestFailureMessage(data.detail),
+        action: {
+          label: 'Retry',
+          onClick: () => setConfirmTestOpen(true),
+        },
+      })
+    },
+    onError: (error) => {
+      setConfirmTestOpen(false)
+      actionToast.error({
+        title: 'Could not connect',
+        description: ownerCredentialErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => setConfirmTestOpen(true),
+        },
+      })
+    },
+  })
+
+  const retestMutation = useMutation({
+    mutationFn: () => testOwnerConnector(verticalId, connector.system),
+    onMutate: () => setClientError(null),
+    onSuccess: (data) => {
+      setConfirmTestOpen(false)
+      invalidate()
+      if (data.ok) {
+        setLiveTestOk(true)
+        actionToast.success({
+          title: 'Connection confirmed',
+          description: connectTestSuccessDescription(data.detail, connector.display_name),
+        })
+        return
+      }
+      actionToast.error({
+        title: 'Connection test failed',
+        description: connectTestFailureMessage(data.detail),
+        action: {
+          label: 'Retry',
+          onClick: () => setConfirmTestOpen(true),
+        },
+      })
+    },
+    onError: (error) => {
+      setConfirmTestOpen(false)
+      actionToast.error({
+        title: 'Could not connect',
+        description: ownerCredentialErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => setConfirmTestOpen(true),
+        },
+      })
+    },
+  })
+
+  const testing = credentialsMutation.isPending || retestMutation.isPending
+  const useStoredRetest = credentialsSaved && !fieldsDirty
+  const latestTest = retestMutation.isSuccess
+    ? retestMutation.data
+    : credentialsMutation.data
+  const testFailed = Boolean(latestTest && !latestTest.ok)
+  const testPassed = liveTestOk || latestTest?.ok === true
+  const testFailureMessage = testFailed
+    ? connectTestFailureMessage(latestTest?.detail)
+    : null
+  const submitError =
+    clientError ??
+    (credentialsMutation.isError
+      ? ownerCredentialErrorMessage(credentialsMutation.error)
+      : retestMutation.isError
+        ? ownerCredentialErrorMessage(retestMutation.error)
+        : null)
+
+  const filledSummary = (preview?.fields ?? [])
+    .filter((field) => credentials[field.id]?.trim())
+    .map((field) => field.label)
+
+  function updateField(fieldId: string, value: string) {
+    setCredentials((current) => ({ ...current, [fieldId]: value }))
+    setFieldsDirty(true)
+    if (liveTestOk) setLiveTestOk(false)
+    credentialsMutation.reset()
+    retestMutation.reset()
+  }
+
+  function validateCredentials(): boolean {
+    if (!preview) return false
+    for (const field of preview.fields) {
+      if (field.required && !credentials[field.id]?.trim()) {
+        setClientError(`Enter ${field.label.toLowerCase()}.`)
+        return false
+      }
+    }
+    setClientError(null)
+    return true
+  }
+
+  function runCredentialTest() {
+    if (useStoredRetest) {
+      setClientError(null)
+      retestMutation.mutate()
+      return
+    }
+    if (!validateCredentials()) return
+    credentialsMutation.mutate(credentials)
+  }
+
+  if (previewQuery.isPending) {
+    return (
+      <div className="space-y-3">
+        <SkeletonLines lines={4} />
+      </div>
+    )
+  }
+
+  if (previewQuery.isError) {
+    return (
+      <div className="space-y-3">
+        <p className="text-xs text-red-800">
+          Could not load credential fields for {connector.display_name}.
+        </p>
+        <div className="flex gap-2">
+          <Button type="button" size="sm" variant="ghost" onClick={onBack}>
+            Back
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => void previewQuery.refetch()}
+          >
+            Retry
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
+  if (!preview) return null
+
+  const canSubmitFields = preview.fields.length > 0
+  const canStartTest = !testing && (useStoredRetest || canSubmitFields)
+
+  return (
+    <div className="relative space-y-3">
+      {testing ? <LiveTestOverlay systemLabel={systemLabel} /> : null}
+
+      <p className="text-xs text-mute">
+        Paste Live credentials for {connector.display_name}. Follow the how-to steps below each
+        field, then test the connection before continuing.
+      </p>
+
+      {preview.trust_copy ? (
+        <p className="rounded border border-line bg-white px-3 py-2 text-xs leading-relaxed text-ink-soft">
+          {preview.trust_copy}
+        </p>
+      ) : null}
+
+      <p className="rounded border border-line bg-white px-3 py-2 text-xs text-ink-soft">
+        Connecting credentials is separate from enabling matching. Matching stays gated until
+        freshness and rotation rules pass.
+      </p>
+
+      {preview.fields.length === 0 ? (
+        <p className="text-xs text-mute">
+          No Live credentials are collected for this system in the wizard. Contact Habeas if you
+          expected a form.
+        </p>
+      ) : (
+        <div className="space-y-4">
+          {preview.fields.map((field) => (
+            <CredentialInput
+              key={field.id}
+              field={field}
+              value={credentials[field.id] ?? ''}
+              onChange={(value) => updateField(field.id, value)}
+              disabled={testing}
+            />
+          ))}
+        </div>
+      )}
+
+      <div className="space-y-2 rounded-md border border-line bg-white px-3 py-2.5 text-sm">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-medium text-ink">{connector.display_name}</span>
+          <Badge
+            variant={testing ? 'run' : testPassed ? 'ok' : testFailed ? 'fail' : 'wait'}
+          >
+            {testing ? 'Testing…' : testPassed ? 'Passed' : testFailed ? 'Failed' : 'Ready to test'}
+          </Badge>
+        </div>
+        <p className="text-xs text-mute">
+          Fields provided: {filledSummary.length > 0 ? filledSummary.join(', ') : 'none yet'}
+        </p>
+      </div>
+
+      {testing ? (
+        <div
+          className="flex items-start gap-3 rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5"
+          role="status"
+          aria-live="polite"
+        >
+          <Spinner className="mt-0.5 size-4 text-sky-700" />
+          <div className="min-w-0 text-xs">
+            <p className="font-medium text-sky-950">Testing your connection</p>
+            <p className="mt-0.5 text-sky-900/80">
+              {useStoredRetest
+                ? `Verifying stored credentials with ${systemLabel}. This usually takes a few seconds.`
+                : `Saving keys, then verifying with ${systemLabel}. This usually takes a few seconds.`}
+            </p>
+          </div>
+        </div>
+      ) : null}
+
+      {testPassed && !testing ? (
+        <div
+          className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-xs text-emerald-900"
+          role="status"
+        >
+          <p className="font-medium">Connection confirmed</p>
+          <p className="mt-0.5">
+            {connectTestSuccessDescription(latestTest?.detail, connector.display_name)}
+          </p>
+        </div>
+      ) : null}
+
+      {testFailed ? (
+        <div
+          className="space-y-1 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-900"
+          role="alert"
+        >
+          <p className="font-medium">Connection test failed</p>
+          <p>{testFailureMessage}</p>
+          <p className="text-red-800/80">Fix the values above and test again.</p>
+        </div>
+      ) : null}
+
+      {submitError && !testPassed ? (
+        <p className="text-xs text-red-700" role="alert">{submitError}</p>
+      ) : null}
+
+      {!testPassed ? (
+        <p className="text-xs text-mute">
+          Continue stays disabled until the connection test passes.
+        </p>
+      ) : null}
+
+      <div className="flex flex-wrap justify-between gap-2">
+        <Button type="button" size="sm" variant="ghost" onClick={onBack}>
+          Back
+        </Button>
+        <div className="flex gap-2">
+          {!testPassed ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={!canStartTest}
+              onClick={() => setConfirmTestOpen(true)}
+            >
+              {useStoredRetest
+                ? testFailed
+                  ? 'Retest stored credentials'
+                  : 'Test stored credentials'
+                : testFailed
+                  ? 'Test again'
+                  : 'Test connection'}
+            </Button>
+          ) : null}
+          <Button type="button" size="sm" disabled={!testPassed} onClick={onContinue}>
+            Continue
+          </Button>
+        </div>
+      </div>
+
+      <ConfirmActionDialog
+        open={confirmTestOpen}
+        onOpenChange={(open) => {
+          if (testing) return
+          setConfirmTestOpen(open)
+        }}
+        title={`Test ${systemLabel} connection?`}
+        description={
+          useStoredRetest
+            ? 'We’ll verify the credentials already stored in Google’s secure vault. Values are never shown back in this app.'
+            : 'We’ll save your keys in Google’s secure vault, then verify Habeas can authenticate. Values are never shown back in this app.'
+        }
+        confirmLabel="Yes, test now"
+        cancelLabel="Cancel"
+        confirming={testing}
+        confirmingTitle="Testing connection…"
+        confirmingDescription={
+          useStoredRetest
+            ? 'Verifying stored credentials with the provider. Keep this tab open.'
+            : 'Saving keys securely, then verifying with the provider. Keep this tab open.'
+        }
+        onConfirm={runCredentialTest}
+      />
+    </div>
+  )
+}
+
+function ModeExplainerCards({
+  cards,
+  selected,
+  onSelect,
+}: {
+  cards: ModeStepCardState[]
+  selected: 'live' | 'upload' | null
+  onSelect: (mode: 'live' | 'upload') => void
+}) {
+  return (
+    <div className="grid gap-2 sm:grid-cols-2">
+      {cards.map((card) => {
+        const isSelected = selected === card.mode
+        return (
+          <button
+            key={card.mode}
+            type="button"
+            disabled={!card.allowed}
+            aria-pressed={isSelected}
+            onClick={() => {
+              if (card.allowed) onSelect(card.mode)
+            }}
+            className={cn(
+              'rounded-md border px-3 py-3 text-left transition',
+              card.allowed
+                ? isSelected
+                  ? 'border-habeas-navy bg-habeas-navy/5 ring-2 ring-habeas-navy/20'
+                  : 'border-line bg-white hover:border-habeas-mid'
+                : 'cursor-not-allowed border-line bg-canvas opacity-60',
+            )}
+          >
+            <p className="text-sm font-medium text-ink">{card.title}</p>
+            <p className="mt-1 text-xs leading-relaxed text-ink-soft">{card.definition}</p>
+            {card.allowed && card.hint ? (
+              <p className="mt-2 text-xs text-mute">{card.hint}</p>
+            ) : null}
+            {!card.allowed && card.disabledReason ? (
+              <p className="mt-2 text-xs text-mute">{card.disabledReason}</p>
+            ) : null}
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
 function WizardProgress({ step }: { step: OwnerWizardStep }) {
@@ -354,32 +926,17 @@ function ConnectorWizard({
 
       {step === 'mode' ? (
         <div className="space-y-3">
-          <p className="text-xs text-mute">
-            Choose how Habeas receives data for {connector.display_name}. Only
-            approaches allowed for this system are shown.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {canUpload ? (
-              <Button
-                type="button"
-                size="sm"
-                variant={mode === 'upload' ? 'default' : 'outline'}
-                onClick={() => setMode('upload')}
-              >
-                Upload
-              </Button>
-            ) : null}
-            {canLive ? (
-              <Button
-                type="button"
-                size="sm"
-                variant={mode === 'live' ? 'default' : 'outline'}
-                onClick={() => setMode('live')}
-              >
-                Live
-              </Button>
-            ) : null}
-          </div>
+          <p className="text-xs text-mute">{modeStepIntroCopy(connector.display_name)}</p>
+          <ModeExplainerCards
+            cards={buildModeStepCards({
+              systemId: connector.system,
+              displayName: connector.display_name,
+              allowedApproaches: connector.allowed_approaches,
+            })}
+            selected={mode}
+            onSelect={setMode}
+          />
+          <p className="text-xs text-mute">{MODE_STEP_CONNECTING_NOT_MATCHING_FOOTNOTE}</p>
           {!canUpload && !canLive ? (
             <p className="text-xs text-mute">
               No owner approaches are configured for this system.
@@ -389,7 +946,12 @@ function ConnectorWizard({
             <Button
               type="button"
               size="sm"
-              disabled={!mode || modeMutation.isPending}
+              disabled={
+                !mode ||
+                modeMutation.isPending ||
+                (mode === 'upload' && !canUpload) ||
+                (mode === 'live' && !canLive)
+              }
               onClick={() => {
                 if (mode) modeMutation.mutate(mode)
               }}
@@ -472,51 +1034,13 @@ function ConnectorWizard({
       ) : null}
 
       {step === 'connect' && mode === 'live' ? (
-        <div className="space-y-3">
-          <p className="text-xs text-mute">
-            Live credentials are completed through a Habeas invite link (
-            <code className="text-ink">/connect/…</code>). Ask Ops for an invite if
-            you do not have one. After redeem succeeds, return here and refresh
-            status before continuing.
-          </p>
-          <p className="rounded border border-line bg-white px-3 py-2 text-xs text-ink-soft">
-            Connecting credentials is separate from enabling matching. Matching stays
-            gated until freshness and rotation rules pass.
-          </p>
-          {liveConnectReady(connector) ? (
-            <p className="text-xs text-ink">
-              Live credentials are recorded. Continue to set cadence.
-            </p>
-          ) : (
-            <p className="text-xs text-mute">
-              Continue stays disabled until this connection shows a successful
-              redeem (connected status or rotation timestamp).
-            </p>
-          )}
-          <div className="flex flex-wrap justify-between gap-2">
-            <Button type="button" size="sm" variant="ghost" onClick={() => setStep('mode')}>
-              Back
-            </Button>
-            <div className="flex gap-2">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => invalidate()}
-              >
-                Refresh status
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                disabled={!liveConnectReady(connector)}
-                onClick={() => setStep('cadence')}
-              >
-                Continue
-              </Button>
-            </div>
-          </div>
-        </div>
+        <LiveConnectPanel
+          verticalId={verticalId}
+          connector={connector}
+          invalidate={invalidate}
+          onBack={() => setStep('mode')}
+          onContinue={() => setStep('cadence')}
+        />
       ) : null}
 
       {step === 'cadence' ? (
@@ -775,8 +1299,9 @@ function OwnerConnectorsBody({
     enabled: role === 'data_owner' || role === 'super_admin' || role === 'admin',
   })
 
-  const reminders: ConnectorReminder[] =
-    remindersQuery.data ?? remindersFromMe ?? []
+  const reminders: ConnectorReminder[] = filterRemindersForOwnerConnectorsPage(
+    remindersQuery.data ?? remindersFromMe ?? [],
+  )
 
   if (!verticals.length) {
     return (
