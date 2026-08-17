@@ -522,6 +522,92 @@ def test_delete_connection_forbidden_for_non_super_admin() -> None:
     assert response.json()["detail"] == "insufficient role"
 
 
+@pytest.mark.asyncio
+async def test_test_connection_persists_failure_detail_and_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_id = uuid4()
+    connection = Connection(
+        id=str(connection_id),
+        system="lever",
+        display_name="ATS",
+        status="invited",
+        owner_email="owner@example.com",
+        secret_resource_name=f"dpra/connections/lever/{connection_id}",
+        last_tested_at=None,
+        last_test_ok=None,
+        last_test_detail=None,
+        created_by="ops@example.com",
+        created_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+        metadata={},
+    )
+    captured: dict[str, object] = {}
+
+    async def _get_connection(*_args, **_kwargs):
+        return connection
+
+    async def _set_test_result(_conn, cid, *, ok, detail, tested_at=None, triage=None):
+        captured["connection_id"] = str(cid)
+        captured["ok"] = ok
+        captured["detail"] = detail
+        captured["tested_at"] = tested_at
+        captured["triage"] = triage
+        return connection.model_copy(
+            update={
+                "status": "failed" if not ok else "connected",
+                "last_test_ok": ok,
+                "last_test_detail": detail,
+                "last_tested_at": tested_at,
+                "metadata": {
+                    **(connection.metadata or {}),
+                    "last_test_triage": triage or {"detail": detail},
+                },
+            }
+        )
+
+    async def _run_test(*_args, **_kwargs):
+        return False, "auth_failed", {
+            "detail": "auth_failed",
+            "step": "users_get",
+            "status_code": 401,
+            "status_class": "4xx",
+            "error_kind": "http",
+        }
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
+    monkeypatch.setattr(connections_admin.connections_db, "set_test_result", _set_test_result)
+    monkeypatch.setattr(
+        connections_admin,
+        "_load_stored_credentials",
+        lambda _name: {"api_key": "x"},
+    )
+    monkeypatch.setattr(connections_admin, "_run_connection_test", _run_test)
+
+    result = await connections_admin.test_connection(connection_id, principal)
+
+    assert result.ok is False
+    assert result.detail == "auth_failed"
+    assert captured["ok"] is False
+    assert captured["detail"] == "auth_failed"
+    assert captured["connection_id"] == str(connection_id)
+    assert captured["triage"]["status_code"] == 401
+    assert captured["triage"]["step"] == "users_get"
+
+
 @pytest.mark.skipif(
     not os.getenv("DATABASE_URL"),
     reason="DATABASE_URL required for connections integration tests",

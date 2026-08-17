@@ -6,27 +6,23 @@ from admin_api.connection_tests import _http
 
 _SYSTEM = "lever"
 _LEVER_USERS_URL = "https://api.lever.co/v1/users?limit=1"
+_STEP = "users_get"
 
 
-async def test_lever(credentials: dict[str, str]) -> tuple[bool, str]:
+async def test_lever(credentials: dict[str, str]) -> tuple[bool, str, dict]:
     api_key = credentials["api_key"]
 
-    status, _ = await _http.request(
+    probe = await _http.request(
         system=_SYSTEM,
         method="GET",
         url=_LEVER_USERS_URL,
+        step=_STEP,
         auth=(api_key, ""),
     )
-
-    if status is None:
-        return False, "unreachable"
-    if status == 200:
-        return True, "lever_ok"
-    if status in (401, 403):
-        return False, "auth_failed"
-    if 400 <= status < 500:
-        return False, "invalid_credentials"
-    return False, "unreachable"
+    ok, detail = _http.classify_http_result(probe, success_detail="lever_ok")
+    triage = probe.triage()
+    triage["detail"] = detail
+    return ok, detail, triage
 
 
 # Not a pytest test — public API for connection onboarding routes.

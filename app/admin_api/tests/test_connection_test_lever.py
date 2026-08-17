@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from admin_api.connection_tests import _http
 from admin_api.connection_tests.lever import test_lever
 
 _VALID_KEY = "lever-test-api-key"
@@ -18,16 +19,20 @@ async def test_lever_ok() -> None:
     with patch(
         "admin_api.connection_tests.lever._http.request",
         new_callable=AsyncMock,
-        return_value=(200, True),
+        return_value=_http.HttpProbeResult(status_code=200, ok=True, error_kind="http", step="users_get"),
     ) as mock_request:
-        ok, detail = await test_lever({"api_key": _VALID_KEY})
+        ok, detail, triage = await test_lever({"api_key": _VALID_KEY})
 
     assert ok is True
     assert detail == "lever_ok"
+    assert triage["step"] == "users_get"
+    assert triage["status_code"] == 200
+    assert triage["status_class"] == "2xx"
     mock_request.assert_awaited_once_with(
         system="lever",
         method="GET",
         url="https://api.lever.co/v1/users?limit=1",
+        step="users_get",
         auth=(_VALID_KEY, ""),
     )
 
@@ -38,25 +43,76 @@ async def test_lever_auth_failed(status: int) -> None:
     with patch(
         "admin_api.connection_tests.lever._http.request",
         new_callable=AsyncMock,
-        return_value=(status, False),
+        return_value=_http.HttpProbeResult(
+            status_code=status,
+            ok=False,
+            error_kind="http",
+            step="users_get",
+        ),
     ):
-        ok, detail = await test_lever({"api_key": _VALID_KEY})
+        ok, detail, triage = await test_lever({"api_key": _VALID_KEY})
 
     assert ok is False
     assert detail == "auth_failed"
+    assert triage["status_code"] == status
+    assert triage["status_class"] == "4xx"
+    assert triage["step"] == "users_get"
 
 
 @pytest.mark.asyncio
-async def test_lever_invalid_credentials() -> None:
+async def test_lever_http_4xx() -> None:
     with patch(
         "admin_api.connection_tests.lever._http.request",
         new_callable=AsyncMock,
-        return_value=(404, False),
+        return_value=_http.HttpProbeResult(
+            status_code=404,
+            ok=False,
+            error_kind="http",
+            step="users_get",
+        ),
     ):
-        ok, detail = await test_lever({"api_key": _VALID_KEY})
+        ok, detail, triage = await test_lever({"api_key": _VALID_KEY})
 
     assert ok is False
-    assert detail == "invalid_credentials"
+    assert detail == "http_4xx"
+    assert triage["status_code"] == 404
+
+
+@pytest.mark.asyncio
+async def test_lever_http_5xx() -> None:
+    with patch(
+        "admin_api.connection_tests.lever._http.request",
+        new_callable=AsyncMock,
+        return_value=_http.HttpProbeResult(
+            status_code=503,
+            ok=False,
+            error_kind="http",
+            step="users_get",
+        ),
+    ):
+        ok, detail, _triage = await test_lever({"api_key": _VALID_KEY})
+
+    assert ok is False
+    assert detail == "http_5xx"
+
+
+@pytest.mark.asyncio
+async def test_lever_timeout() -> None:
+    with patch(
+        "admin_api.connection_tests.lever._http.request",
+        new_callable=AsyncMock,
+        return_value=_http.HttpProbeResult(
+            status_code=None,
+            ok=False,
+            error_kind="timeout",
+            step="users_get",
+        ),
+    ):
+        ok, detail, triage = await test_lever({"api_key": _VALID_KEY})
+
+    assert ok is False
+    assert detail == "timeout"
+    assert triage["error_kind"] == "timeout"
 
 
 @pytest.mark.asyncio
@@ -64,9 +120,14 @@ async def test_lever_unreachable() -> None:
     with patch(
         "admin_api.connection_tests.lever._http.request",
         new_callable=AsyncMock,
-        return_value=(None, False),
+        return_value=_http.HttpProbeResult(
+            status_code=None,
+            ok=False,
+            error_kind="connect_error",
+            step="users_get",
+        ),
     ):
-        ok, detail = await test_lever({"api_key": _VALID_KEY})
+        ok, detail, _triage = await test_lever({"api_key": _VALID_KEY})
 
     assert ok is False
     assert detail == "unreachable"
@@ -79,7 +140,12 @@ async def test_lever_never_logs_api_key(
     with patch(
         "admin_api.connection_tests.lever._http.request",
         new_callable=AsyncMock,
-        return_value=(200, True),
+        return_value=_http.HttpProbeResult(
+            status_code=200,
+            ok=True,
+            error_kind="http",
+            step="users_get",
+        ),
     ):
         with caplog.at_level(logging.DEBUG):
             await test_lever({"api_key": _SECRET_KEY})

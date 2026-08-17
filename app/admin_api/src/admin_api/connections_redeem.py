@@ -112,16 +112,20 @@ except ImportError:  # pragma: no cover — U2 secrets helper expected in worksp
 
 
 try:
-    from admin_api.connection_testers import test_connection
+    from admin_api.connection_testers import sanitize_triage, test_connection
 except ImportError:  # pragma: no cover — U6 testers expected in workspace
+
+    def sanitize_triage(triage: dict[str, Any] | None) -> dict[str, Any]:
+        return dict(triage or {})
 
     async def test_connection(
         system: str,
         credentials: dict[str, str],
-    ) -> tuple[bool, str]:
+        **_kwargs: Any,
+    ) -> tuple[bool, str, dict[str, Any]]:
         _ = credentials
         logger.debug("stub connection test for system=%s", system)
-        return True, "stub_ok"
+        return True, "stub_ok", {"detail": "stub_ok"}
 
 
 class CredentialFieldResponse(BaseModel):
@@ -315,12 +319,20 @@ async def redeem_connection(token: str, body: RedeemBody) -> RedeemResponse:
             if isinstance(raw_sa, str) and raw_sa.strip():
                 share_sa = raw_sa.strip()
 
-        test_ok, detail = await test_connection(
+        test_result = await test_connection(
             row["system"],
             cleaned,
             impersonate_service_account=share_sa,
         )
+        if isinstance(test_result, tuple) and len(test_result) == 3:
+            test_ok, detail, triage = test_result
+        else:
+            test_ok, detail = test_result  # type: ignore[misc]
+            triage = {"detail": detail}
         safe_detail = sanitize_test_detail(detail)
+        safe_triage = sanitize_triage(triage if isinstance(triage, dict) else {})
+        if safe_detail and "detail" not in safe_triage:
+            safe_triage["detail"] = safe_detail
         final_status = "connected" if test_ok else "failed"
         await conn.execute(
             """
@@ -329,6 +341,12 @@ async def redeem_connection(token: str, body: RedeemBody) -> RedeemResponse:
                    last_tested_at = NOW(),
                    last_test_ok = $3,
                    last_test_detail = $4,
+                   metadata = jsonb_set(
+                       COALESCE(metadata, '{}'::jsonb),
+                       '{last_test_triage}',
+                       $5::jsonb,
+                       true
+                   ),
                    updated_at = NOW()
              WHERE id = $1
             """,
@@ -336,6 +354,7 @@ async def redeem_connection(token: str, body: RedeemBody) -> RedeemResponse:
             final_status,
             test_ok,
             safe_detail,
+            json.dumps(safe_triage or {"detail": safe_detail or "unknown_error"}),
         )
 
         if test_ok:

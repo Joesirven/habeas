@@ -16,6 +16,26 @@ live stream, mutation routes for web and Habeas CLI.
 
 Browser never calls workers — admin_api aggregates `/readyz` + Postgres queue depths.
 
+## Vertical connectors
+
+Owner onboarding is **vertical assignment + IAP login** — not invite links. Super_admin assigns
+owners via `/ops/verticals/assignments`; owners complete setup in the `/owner/connectors` wizard
+(Mode → in-wizard connect+test → cadence → confirm). Invite mint/redeem (`/connect/{token}`) is
+retired.
+
+| Surface | Endpoints (representative) |
+|---------|----------------------------|
+| Vertical catalog + assignments | `GET/POST/DELETE /ops/verticals`, `GET/POST/DELETE /ops/verticals/assignments`, bindings |
+| Ops connections admin | `GET/POST/DELETE /ops/connections`, `POST .../test`, `POST .../wizard/reset` |
+| Owner wizard | `GET/POST /owner/verticals/{id}/systems/{system}/*` (mode, credentials, upload, test, wizard complete) |
+| Session | `GET /me` — `given_name`, `assigned_vertical_labels`, `needs_connector_setup`, `connector_reminders` |
+
+Secrets write to Secret Manager only (`dpra/connections/{system}/{connection_id}`). Connection
+tests return allowlisted `detail` codes — never echo credentials. All mutations are IAP-gated on
+deployed admin-api; browser reaches admin-api through the ops-ia IAP front door or CLI auth.
+
+Plan: [`docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md`](../../docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md).
+
 ## Local
 
 ```bash

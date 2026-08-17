@@ -153,59 +153,86 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
         invite_allowed=True,
         credential_fields=(
             CredentialField(
-                id="client_id",
-                label="Client ID",
+                id="host",
+                label="Server / host name",
                 input_type=CredentialInputType.TEXT,
                 required=True,
                 help=(
-                    "1. Sign in at partner.paylocity.com (HR/IT integration access).\n"
-                    "2. Open the integration app used for Habeas.\n"
-                    "3. Choose the Sandbox or Production tab for the environment you need.\n"
-                    "4. Copy the Client ID from that app’s details page.\n"
-                    "Do not paste your personal Paylocity login."
+                    "1. Use the SFTP host name (preferred) or IP address for this Paylocity "
+                    "integration.\n"
+                    "2. Host names are recommended because they do not change.\n"
+                    "Do not paste a personal Web Pay login URL."
                 ),
             ),
             CredentialField(
-                id="client_secret",
-                label="Client secret",
+                id="port",
+                label="Port",
+                input_type=CredentialInputType.TEXT,
+                required=True,
+                help=(
+                    "1. Type exactly: 22\n"
+                    "2. Paylocity SFTP integrations only support port 22."
+                ),
+            ),
+            CredentialField(
+                id="directory",
+                label="Directory",
+                input_type=CredentialInputType.TEXT,
+                required=False,
+                help=(
+                    "Optional folder on the SFTP host for this integration. "
+                    "Leave blank to use the account home directory."
+                ),
+            ),
+            CredentialField(
+                id="username",
+                label="User name",
+                input_type=CredentialInputType.TEXT,
+                required=True,
+                help=(
+                    "SFTP user name created for this Habeas integration only — "
+                    "not a personal Paylocity employee login."
+                ),
+            ),
+            CredentialField(
+                id="auth_method",
+                label="Authentication method",
+                input_type=CredentialInputType.TEXT,
+                required=True,
+                help=(
+                    "1. Type exactly: password  or  key\n"
+                    "2. password = Enter Password in Paylocity’s SFTP form.\n"
+                    "3. key = Upload Key File (paste the private key PEM below)."
+                ),
+            ),
+            CredentialField(
+                id="password",
+                label="Password",
                 input_type=CredentialInputType.PASSWORD,
-                required=True,
+                required=False,
                 help=(
-                    "1. On the same Paylocity Developer Portal app page as Client ID.\n"
-                    "2. Copy the Client secret when it is shown (create, Production "
-                    "provision, or rotate).\n"
-                    "3. Save it immediately — you usually cannot view the same value again.\n"
-                    "Paylocity expects secrets to be rotated about once a year."
+                    "Required when authentication method is password. "
+                    "Use the dedicated SFTP password for this integration only."
                 ),
             ),
             CredentialField(
-                id="company_id",
-                label="Company ID",
-                input_type=CredentialInputType.TEXT,
-                required=True,
+                id="private_key",
+                label="Private key (PEM)",
+                input_type=CredentialInputType.PASSWORD,
+                required=False,
                 help=(
-                    "1. On the same Developer Portal app page, open the Clients card.\n"
-                    "2. Copy the company ID for that environment (max 9 characters).\n"
-                    "This is the company identifier for API paths — not your personal employee ID."
-                ),
-            ),
-            CredentialField(
-                id="environment",
-                label="Environment",
-                input_type=CredentialInputType.TEXT,
-                required=True,
-                help=(
-                    "1. Type exactly: sandbox  or  production\n"
-                    "2. Use sandbox while testing; production only with Production credentials.\n"
-                    "3. Sandbox and production values are different — do not mix them."
+                    "Required when authentication method is key. "
+                    "Paste the full private key PEM used for this SFTP integration. "
+                    "Do not paste a public key or a personal SSH key used elsewhere."
                 ),
             ),
         ),
         trust_copy=_saas_trust_copy(
             extra=(
-                "Paylocity: credentials come from the Developer Portal integration app "
-                "(partner.paylocity.com). HR or IT usually creates the app. Never use a "
-                "personal Web Pay login."
+                "Paylocity: use dedicated SFTP credentials for this Habeas integration "
+                "(host, port 22, username, and password or key file). HR or IT usually "
+                "creates the SFTP integration. Never reuse credentials across platforms "
+                "and never use a personal Web Pay login."
             ),
         ),
     ),
@@ -412,16 +439,39 @@ def validate_credentials(system: ConnectionSystem, credentials: dict[str, str]) 
             raise ValueError(f"missing required credential field: {field.id}")
         if field.input_type is CredentialInputType.URL and value:
             _validate_url(value, field_id=field.id)
-        if system.system_id == "paylocity" and field.id == "environment" and value:
-            normalized_env = value.lower()
-            if normalized_env not in {"sandbox", "production"}:
-                raise ValueError("credential field environment must be sandbox or production")
-            cleaned[field.id] = normalized_env
+        if system.system_id == "paylocity" and field.id == "port" and value:
+            if value != "22":
+                raise ValueError("credential field port must be 22")
+            cleaned[field.id] = value
+            continue
+        if system.system_id == "paylocity" and field.id == "auth_method" and value:
+            normalized_auth = value.lower()
+            if normalized_auth not in {"password", "key"}:
+                raise ValueError("credential field auth_method must be password or key")
+            cleaned[field.id] = normalized_auth
+            continue
+        if system.system_id == "paylocity" and field.id == "host" and value:
+            host = value.removeprefix("sftp://").removeprefix("ssh://").strip().rstrip("/")
+            if not host or "://" in host or "/" in host or " " in host:
+                raise ValueError("credential field host must be a hostname or IP address")
+            cleaned[field.id] = host
             continue
         if system.system_id == "auth0" and field.id == "domain" and value:
             cleaned[field.id] = value.removeprefix("https://").removeprefix("http://").rstrip("/")
             continue
         cleaned[field.id] = value
+
+    if system.system_id == "paylocity":
+        auth_method = cleaned.get("auth_method")
+        if auth_method == "password" and not cleaned.get("password"):
+            raise ValueError("missing required credential field: password")
+        if auth_method == "key" and not cleaned.get("private_key"):
+            raise ValueError("missing required credential field: private_key")
+        # Drop unused auth material so secrets stay minimal.
+        if auth_method == "password":
+            cleaned.pop("private_key", None)
+        elif auth_method == "key":
+            cleaned.pop("password", None)
 
     return cleaned
 

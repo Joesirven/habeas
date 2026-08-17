@@ -56,10 +56,22 @@ class TestInvitePolicy:
 class TestFieldSchemas:
     def test_paylocity_fields(self) -> None:
         fields = {field.id: field for field in get_system("paylocity").credential_fields}
-        assert set(fields) == {"client_id", "client_secret", "company_id", "environment"}
-        assert fields["client_secret"].input_type is CredentialInputType.PASSWORD
-        assert fields["company_id"].input_type is CredentialInputType.TEXT
-        assert fields["environment"].required is True
+        assert set(fields) == {
+            "host",
+            "port",
+            "directory",
+            "username",
+            "auth_method",
+            "password",
+            "private_key",
+        }
+        assert fields["password"].input_type is CredentialInputType.PASSWORD
+        assert fields["private_key"].input_type is CredentialInputType.PASSWORD
+        assert fields["directory"].required is False
+        assert fields["port"].required is True
+        assert "SFTP" in get_system("paylocity").trust_copy or "sftp" in get_system(
+            "paylocity"
+        ).trust_copy.lower()
 
     def test_auth0_fields(self) -> None:
         fields = {field.id: field for field in get_system("auth0").credential_fields}
@@ -105,12 +117,69 @@ class TestValidateCredentials:
         cleaned = validate_credentials(system, {"api_key": "  mc-key-123  "})
         assert cleaned == {"api_key": "mc-key-123"}
 
-    def test_paylocity_requires_all_fields(self) -> None:
+    def test_paylocity_requires_auth_material(self) -> None:
         system = get_system("paylocity")
-        with pytest.raises(ValueError, match="missing required credential field: client_secret"):
+        with pytest.raises(ValueError, match="missing required credential field: password"):
             validate_credentials(
                 system,
-                {"client_id": "cid", "company_id": "co-1"},
+                {
+                    "host": "sftp.example.com",
+                    "port": "22",
+                    "username": "u",
+                    "auth_method": "password",
+                },
+            )
+
+    def test_paylocity_password_auth_ok(self) -> None:
+        system = get_system("paylocity")
+        cleaned = validate_credentials(
+            system,
+            {
+                "host": "sftp.example.com",
+                "port": "22",
+                "username": "u",
+                "auth_method": "password",
+                "password": "secret",
+                "private_key": "should-drop",
+            },
+        )
+        assert cleaned == {
+            "host": "sftp.example.com",
+            "port": "22",
+            "username": "u",
+            "auth_method": "password",
+            "password": "secret",
+        }
+
+    def test_paylocity_key_auth_ok(self) -> None:
+        system = get_system("paylocity")
+        cleaned = validate_credentials(
+            system,
+            {
+                "host": "sftp.example.com",
+                "port": "22",
+                "directory": "/in",
+                "username": "u",
+                "auth_method": "key",
+                "private_key": "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+            },
+        )
+        assert cleaned["auth_method"] == "key"
+        assert "password" not in cleaned
+        assert cleaned["directory"] == "/in"
+
+    def test_paylocity_rejects_non_22_port(self) -> None:
+        system = get_system("paylocity")
+        with pytest.raises(ValueError, match="port must be 22"):
+            validate_credentials(
+                system,
+                {
+                    "host": "sftp.example.com",
+                    "port": "2222",
+                    "username": "u",
+                    "auth_method": "password",
+                    "password": "secret",
+                },
             )
 
     def test_google_sheets_validates_url(self) -> None:

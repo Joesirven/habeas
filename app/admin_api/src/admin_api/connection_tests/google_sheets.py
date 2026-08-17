@@ -42,11 +42,11 @@ def _fetch_spreadsheet_metadata(
     spreadsheet_id: str,
     *,
     impersonate_email: str | None = None,
-) -> tuple[bool, str] | None:
+) -> tuple[bool, str, dict] | None:
     """Attempt a live metadata fetch when Google client libraries and ADC are available.
 
-    Returns ``(ok, detail)`` when the API call runs, or ``None`` when libraries or ADC
-    are unavailable (caller should treat URL parse success as format-validated ok).
+    Returns ``(ok, detail, triage)`` when the API call runs, or ``None`` when libraries
+    or ADC are unavailable (caller should treat URL parse success as format-validated ok).
     """
     try:
         import google.auth
@@ -81,32 +81,62 @@ def _fetch_spreadsheet_metadata(
         ).execute()
     except HttpError as exc:
         status = exc.resp.status
+        status_class = f"{status // 100}xx"
         if status == 403:
-            return False, "auth_failed"
+            return False, "auth_failed", {
+                "step": "spreadsheets_get",
+                "status_code": status,
+                "status_class": status_class,
+                "detail": "auth_failed",
+            }
         if 400 <= status < 500:
-            return False, "invalid_credentials"
-        return False, "unreachable"
+            return False, "http_4xx", {
+                "step": "spreadsheets_get",
+                "status_code": status,
+                "status_class": status_class,
+                "detail": "http_4xx",
+            }
+        if 500 <= status < 600:
+            return False, "http_5xx", {
+                "step": "spreadsheets_get",
+                "status_code": status,
+                "status_class": status_class,
+                "detail": "http_5xx",
+            }
+        return False, "unreachable", {
+            "step": "spreadsheets_get",
+            "status_code": status,
+            "status_class": status_class,
+            "detail": "unreachable",
+        }
     except Exception:
-        return False, "unknown_error"
+        return False, "unknown_error", {
+            "step": "spreadsheets_get",
+            "detail": "unknown_error",
+        }
 
-    return True, "google_sheets_ok"
+    return True, "google_sheets_ok", {"step": "spreadsheets_get", "detail": "google_sheets_ok"}
 
 
 async def test_google_sheets(
     credentials: dict[str, str],
     *,
     impersonate_email: str | None = None,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, dict]:
     spreadsheet_id = _extract_spreadsheet_id(credentials["spreadsheet_url"])
     if spreadsheet_id is None:
-        return False, "invalid_config"
+        return False, "invalid_config", {"step": "parse_url", "detail": "invalid_config"}
 
     api_result = _fetch_spreadsheet_metadata(
         spreadsheet_id,
         impersonate_email=impersonate_email,
     )
     if api_result is None:
-        return True, "google_sheets_ok"
+        return True, "google_sheets_ok", {
+            "step": "parse_url",
+            "detail": "google_sheets_ok",
+            "error_kind": "adc_skipped",
+        }
 
     return api_result
 

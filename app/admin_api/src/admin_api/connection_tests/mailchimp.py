@@ -8,6 +8,7 @@ from admin_api.connection_tests import _http
 
 _SYSTEM = "mailchimp"
 _DC_SUFFIX_RE = re.compile(r"^[a-z0-9]+$", re.IGNORECASE)
+_STEP = "root_get"
 
 
 def _parse_datacenter(api_key: str) -> str | None:
@@ -19,28 +20,23 @@ def _parse_datacenter(api_key: str) -> str | None:
     return datacenter.lower()
 
 
-async def test_mailchimp(credentials: dict[str, str]) -> tuple[bool, str]:
+async def test_mailchimp(credentials: dict[str, str]) -> tuple[bool, str, dict]:
     api_key = credentials["api_key"]
     datacenter = _parse_datacenter(api_key)
     if datacenter is None:
-        return False, "invalid_config"
+        return False, "invalid_config", {"step": "parse_datacenter", "detail": "invalid_config"}
 
-    status, _ = await _http.request(
+    probe = await _http.request(
         system=_SYSTEM,
         method="GET",
         url=f"https://{datacenter}.api.mailchimp.com/3.0/",
+        step=_STEP,
         auth=("anystring", api_key),
     )
-
-    if status is None:
-        return False, "unreachable"
-    if status == 200:
-        return True, "mailchimp_ok"
-    if status in (401, 403):
-        return False, "auth_failed"
-    if 400 <= status < 500:
-        return False, "invalid_credentials"
-    return False, "unreachable"
+    ok, detail = _http.classify_http_result(probe, success_detail="mailchimp_ok")
+    triage = probe.triage()
+    triage["detail"] = detail
+    return ok, detail, triage
 
 
 # Not a pytest test — public API for connection onboarding.

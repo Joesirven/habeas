@@ -6,6 +6,7 @@ import { ConfirmActionDialog } from '@/components/ui/dialog'
 import {
   connectTestFailureMessage,
   connectTestSuccessDescription,
+  connectTestTriageSummary,
   createConnectionInvite,
   deleteConnection,
   revokeConnectionInvite,
@@ -30,6 +31,7 @@ export type ConnectionInvitePanelProps = {
   lastTestOk?: boolean | null
   lastTestDetail?: string | null
   lastTestedAt?: string | null
+  metadata?: Record<string, unknown> | null
   onDone?: () => void
   onUpdated?: () => void
   onDeleted?: () => void
@@ -65,12 +67,13 @@ function formatLastTestLine(
   lastTestedAt: string | null | undefined,
   lastTestOk: boolean | null | undefined,
   lastTestDetail: string | null | undefined,
+  metadata?: Record<string, unknown> | null,
 ): string {
   if (!lastTestedAt) return 'Not tested yet'
   const when = new Date(lastTestedAt).toLocaleString()
   if (lastTestOk === true) return `Last test ${when} · passed`
   if (lastTestOk === false) {
-    return `Last test ${when} · failed — ${connectTestFailureMessage(lastTestDetail)}`
+    return `Last test ${when} · failed — ${connectTestTriageSummary(lastTestDetail, metadata)}`
   }
   return `Last test ${when}`
 }
@@ -84,6 +87,7 @@ export function ConnectionInvitePanel({
   lastTestOk,
   lastTestDetail,
   lastTestedAt,
+  metadata,
   onDone,
   onUpdated,
   onDeleted,
@@ -357,8 +361,28 @@ export function ConnectionInvitePanel({
             ) : null}
           </div>
           <p className="text-xs text-ink-soft">
-            {formatLastTestLine(localLastTestedAt, localLastTestOk, localLastTestDetail)}
+            {formatLastTestLine(
+              localLastTestedAt,
+              localLastTestOk,
+              localLastTestDetail,
+              metadata,
+            )}
           </p>
+          {localLastTestOk === false ? (
+            <div
+              className="rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-xs text-red-900"
+              role="alert"
+            >
+              <p className="font-medium">Triage</p>
+              <p className="mt-0.5">
+                {connectTestTriageSummary(localLastTestDetail, metadata)}
+              </p>
+              <p className="mt-1 text-red-800/80">
+                Owner invite stays usable after a failed test — ask them to correct credentials and
+                retry, or run Test connection here after they update the secret.
+              </p>
+            </div>
+          ) : null}
         </div>
       )}
 

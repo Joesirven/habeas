@@ -2212,6 +2212,9 @@ export type ConnectTestDetailCode =
   | 'google_sheets_ok'
   | 'auth_failed'
   | 'unreachable'
+  | 'timeout'
+  | 'http_4xx'
+  | 'http_5xx'
   | 'invalid_credentials'
   | 'invalid_config'
   | 'missing_credentials'
@@ -2231,7 +2234,7 @@ const CONNECT_SYSTEM_LABELS: Record<IntegrationSystemId, string> = {
 
 const CONNECT_TEST_SUCCESS_DESCRIPTIONS: Record<string, string> = {
   mailchimp_ok: 'Mailchimp API credentials were verified successfully.',
-  paylocity_ok: 'Paylocity API credentials were verified successfully.',
+  paylocity_ok: 'Paylocity SFTP credentials were verified successfully.',
   lever_ok: 'Lever API credentials were verified successfully.',
   auth0_ok: 'Auth0 credentials were verified successfully.',
   google_sheets_ok: 'Google Sheets connection was verified successfully.',
@@ -2242,6 +2245,9 @@ const CONNECT_TEST_SUCCESS_DESCRIPTIONS: Record<string, string> = {
 const CONNECT_TEST_FAILURE_MESSAGES: Record<string, string> = {
   auth_failed: 'Authentication failed. Check the credentials and try again.',
   unreachable: 'Could not reach the service. Try again in a few minutes.',
+  timeout: 'The connection timed out before the vendor responded. Retry or check network egress.',
+  http_4xx: 'The vendor rejected the request (HTTP 4xx). Check values and permissions.',
+  http_5xx: 'The vendor returned a server error (HTTP 5xx). Retry later.',
   invalid_credentials: 'The credentials could not be verified. Check the values and try again.',
   invalid_config: 'The connection settings look incorrect. Check the fields and try again.',
   missing_credentials: 'Connection test could not run. Check the fields and try again.',
@@ -2249,6 +2255,29 @@ const CONNECT_TEST_FAILURE_MESSAGES: Record<string, string> = {
   infra_only: 'This system is provisioned by Habeas Infrastructure, not through this form.',
   unknown_error: 'Connection test failed. Check the values and try again.',
   failed: 'Connection test failed. Check the values and try again.',
+}
+
+export type ConnectTestTriage = {
+  step?: string
+  status_code?: number
+  status_class?: string
+  error_kind?: string
+  detail?: string
+}
+
+function readConnectTestTriage(metadata: Record<string, unknown> | null | undefined): ConnectTestTriage | null {
+  const raw = metadata?.last_test_triage
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const triage = raw as Record<string, unknown>
+  const out: ConnectTestTriage = {}
+  if (typeof triage.step === 'string') out.step = triage.step
+  if (typeof triage.status_class === 'string') out.status_class = triage.status_class
+  if (typeof triage.error_kind === 'string') out.error_kind = triage.error_kind
+  if (typeof triage.detail === 'string') out.detail = triage.detail
+  if (typeof triage.status_code === 'number' && Number.isFinite(triage.status_code)) {
+    out.status_code = triage.status_code
+  }
+  return Object.keys(out).length ? out : null
 }
 
 /** Human label for loading/success copy — prefers system id, falls back to display name. */
@@ -2277,6 +2306,43 @@ export function connectTestFailureMessage(detail: string | null | undefined): st
     return CONNECT_TEST_FAILURE_MESSAGES[code]
   }
   return 'Connection test failed. Ask your Habeas contact to send a new invite.'
+}
+
+/**
+ * Super-admin triage line: human message plus allowlisted detail code and safe
+ * structured fields (step / HTTP status class). Never includes vendor bodies.
+ */
+export function connectTestTriageSummary(
+  detail: string | null | undefined,
+  triageOrMetadata?: ConnectTestTriage | Record<string, unknown> | null,
+): string {
+  const raw = detail?.trim().toLowerCase() || ''
+  const code =
+    raw && CONNECT_TEST_FAILURE_MESSAGES[raw]
+      ? raw
+      : raw && CONNECT_TEST_SUCCESS_DESCRIPTIONS[raw]
+        ? raw
+        : 'unknown_error'
+  const human =
+    CONNECT_TEST_FAILURE_MESSAGES[code] ??
+    CONNECT_TEST_SUCCESS_DESCRIPTIONS[code] ??
+    'Connection test failed. Check the values and try again.'
+
+  let triage: ConnectTestTriage | null = null
+  if (triageOrMetadata && typeof triageOrMetadata === 'object') {
+    if ('last_test_triage' in triageOrMetadata || 'status' in triageOrMetadata) {
+      triage = readConnectTestTriage(triageOrMetadata as Record<string, unknown>)
+    } else {
+      triage = triageOrMetadata as ConnectTestTriage
+    }
+  }
+
+  const bits = [`${human} (${code})`]
+  if (triage?.step) bits.push(`step=${triage.step}`)
+  if (triage?.status_code != null) bits.push(`http=${triage.status_code}`)
+  else if (triage?.status_class) bits.push(`class=${triage.status_class}`)
+  if (triage?.error_kind) bits.push(`kind=${triage.error_kind}`)
+  return bits.join(' · ')
 }
 
 export function listConnections() {

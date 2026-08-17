@@ -2,6 +2,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { SAFE_API_ERROR_DETAILS, safeErrorMessage } from './action-toast'
+import { connectTestFailureMessage, connectTestTriageSummary } from './api'
 
 describe('safeErrorMessage', () => {
   test('unknown Error → generic message', () => {
@@ -52,5 +53,44 @@ describe('safeErrorMessage', () => {
     const msg = safeErrorMessage(err)
     expect(msg).not.toContain('@')
     expect(msg).not.toContain('abcdef')
+  })
+})
+
+describe('connectTestTriageSummary', () => {
+  test('includes allowlisted code for ops triage', () => {
+    expect(connectTestTriageSummary('auth_failed')).toContain('(auth_failed)')
+    expect(connectTestTriageSummary('auth_failed')).toContain('Authentication failed')
+  })
+
+  test('includes safe structured triage fields', () => {
+    const summary = connectTestTriageSummary('auth_failed', {
+      step: 'users_get',
+      status_code: 401,
+      status_class: '4xx',
+      error_kind: 'http',
+    })
+    expect(summary).toContain('step=users_get')
+    expect(summary).toContain('http=401')
+    expect(summary).toContain('kind=http')
+  })
+
+  test('reads last_test_triage from connection metadata', () => {
+    const summary = connectTestTriageSummary('timeout', {
+      last_test_triage: { step: 'users_get', error_kind: 'timeout' },
+    })
+    expect(summary).toContain('(timeout)')
+    expect(summary).toContain('step=users_get')
+  })
+
+  test('unknown detail falls back without echoing vendor text', () => {
+    const summary = connectTestTriageSummary('HTTP 401 body=secret')
+    expect(summary).toContain('(unknown_error)')
+    expect(summary).not.toContain('secret')
+    expect(summary).not.toContain('body=')
+  })
+
+  test('owner message stays code-free', () => {
+    expect(connectTestFailureMessage('auth_failed')).not.toContain('(')
+    expect(connectTestFailureMessage('http_5xx')).toContain('5xx')
   })
 })

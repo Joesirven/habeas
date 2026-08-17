@@ -2,7 +2,7 @@
 
 # AGENTS.md — clients/web/
 
-Admin web single-page application.
+**Habeas Platform** admin web (slug `habeas-cli`). Legal DROP hash/notice unchanged.
 
 ## Locked stack
 
@@ -19,16 +19,18 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
 - Browser never calls worker URLs — only admin-api aggregates.
 - Pipeline **Errors** / **Logs** share one explorer (`GET /ops/logs`); Errors locks severity to ERROR (severity filtered in SQL so ERROR is not drowned by INFO audits).
 - **Workers Settings** (`/ops/workers/settings`, Pipeline ▾ → Settings, console gear): fleet health (`GET /ops/workers/fleet`), Cloud Scheduler schedules, retry floors, attempt-table browser. Single edit surface — do not reintroduce a Pipeline Configurations tab.
-- Connections onboarding (shipped): Ops `/ops/connections` (create, invite, revoke, retest,
-  **delete**) + owner redeem `/connect/$token` (Confirm → Privacy → Credentials → Test).
-  Google Sheets create: confirm + loading toasts; dedicated SA email must appear in
-  Credentials help (Editor). Habeas Workspace may block Share to `*.iam.gserviceaccount.com`
-  — need INF domain-wide delegation / allowlist (SirvenOS External-Integrations). Secrets
-  only in Secret Manager; UI uses `actionToast` + allowlisted test `detail` codes. Absolute
-  invite URLs when copying/mailing. Connecting ≠ enabling matching. Cassandra = infra card
-  only. Do not store Slack/Jira outreach copy in repo. Plan:
-  `docs/plans/2026-07-30-003-feat-connections-onboarding-plan.md`. KB: SirvenOS
-  `01-ARCHITECTURE/External-Integrations.md` § Connections onboarding.
+- Vertical connectors (shipped): super_admin `/ops/connections` — vertical catalog, assign
+  owners, mode/cadence, retest, delete. Owners `/owner/connectors` wizard (Mode explainer,
+  in-wizard Live creds+test, Upload templates). **No invite mint/redeem** — `/connect/$token`
+  and invite APIs are 410 / retired.
+- `/me`: `given_name`, `needs_connector_setup`, `assigned_vertical_labels`,
+  `connector_reminders` (soft — never block login).
+- Matching hard-gated on stale upload / rotation overdue / wizard incomplete; surfaces
+  **Needs refresh** / **Action required** (R52 on matching views). Connecting ≠ matching.
+- `data` vertical view-only in owner wizard. Cassandra = infra card only.
+- First-login welcome + skippable tour (`localStorage`, `habeas-cli.tour.v1.*`). Secrets
+  only in Secret Manager; `actionToast` + allowlisted test `detail` codes. Plan:
+  `docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md`.
 - **Planned consolidation** (requirements-only): command-center Home + hybrid Inbox — `docs/plans/2026-07-30-005-feat-ops-command-center-ia-plan.md` (not shipped yet).
 
 ## Ops density (Prefect / Dagster feel)

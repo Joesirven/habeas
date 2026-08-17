@@ -1,152 +1,123 @@
-"""Tests for live Paylocity connection test."""
+"""Tests for live Paylocity SFTP connection probe."""
 
 from __future__ import annotations
 
 import logging
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from admin_api.connection_tests.paylocity import test_paylocity
 
 _CREDENTIALS = {
-    "client_id": "pay-client-id",
-    "client_secret": "pay-client-secret",
-    "company_id": "co-12345",
-    "environment": "sandbox",
+    "host": "sftp.example.com",
+    "port": "22",
+    "username": "habeas-pay",
+    "auth_method": "password",
+    "password": "pay-sftp-secret",
 }
 
 
 @pytest.mark.asyncio
-async def test_paylocity_ok_sandbox() -> None:
-    with patch(
-        "admin_api.connection_tests.paylocity._http.request",
-        new_callable=AsyncMock,
-        return_value=(200, True),
-    ) as mock_request:
-        ok, detail = await test_paylocity(_CREDENTIALS)
+async def test_paylocity_ok_password() -> None:
+    sftp = MagicMock()
+    client = MagicMock()
+    client.open_sftp.return_value = sftp
+
+    with patch("paramiko.SSHClient", return_value=client):
+        ok, detail, triage = await test_paylocity(_CREDENTIALS)
 
     assert ok is True
     assert detail == "paylocity_ok"
-    mock_request.assert_awaited_once_with(
-        system="paylocity",
-        method="POST",
-        url="https://dc1demogw.paylocity.com/IdentityServer/connect/token",
-        data={
-            "grant_type": "client_credentials",
-            "client_id": "pay-client-id",
-            "client_secret": "pay-client-secret",
-            "scope": "WebLinkAPI",
-        },
-    )
+    assert triage["step"] == "sftp_listdir"
+    client.connect.assert_called_once()
+    connect_kwargs = client.connect.call_args.kwargs
+    assert connect_kwargs["hostname"] == "sftp.example.com"
+    assert connect_kwargs["port"] == 22
+    assert connect_kwargs["username"] == "habeas-pay"
+    assert connect_kwargs["password"] == "pay-sftp-secret"
+    sftp.listdir.assert_called_once_with(".")
+    client.close.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_paylocity_ok_production_case_insensitive() -> None:
-    creds = {**_CREDENTIALS, "environment": "Production"}
-    with patch(
-        "admin_api.connection_tests.paylocity._http.request",
-        new_callable=AsyncMock,
-        return_value=(200, True),
-    ) as mock_request:
-        ok, detail = await test_paylocity(creds)
+async def test_paylocity_ok_with_directory() -> None:
+    sftp = MagicMock()
+    client = MagicMock()
+    client.open_sftp.return_value = sftp
+    creds = {**_CREDENTIALS, "directory": "/inbound/habeas"}
+
+    with patch("paramiko.SSHClient", return_value=client):
+        ok, detail, triage = await test_paylocity(creds)
 
     assert ok is True
     assert detail == "paylocity_ok"
-    mock_request.assert_awaited_once_with(
-        system="paylocity",
-        method="POST",
-        url="https://api.paylocity.com/IdentityServer/connect/token",
-        data={
-            "grant_type": "client_credentials",
-            "client_id": "pay-client-id",
-            "client_secret": "pay-client-secret",
-            "scope": "WebLinkAPI",
-        },
-    )
+    sftp.chdir.assert_called_once_with("/inbound/habeas")
+    assert triage["step"] == "sftp_listdir"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [401, 403])
-async def test_paylocity_auth_failed(status: int) -> None:
-    with patch(
-        "admin_api.connection_tests.paylocity._http.request",
-        new_callable=AsyncMock,
-        return_value=(status, False),
-    ):
-        ok, detail = await test_paylocity(_CREDENTIALS)
+async def test_paylocity_auth_failed() -> None:
+    import paramiko
+
+    client = MagicMock()
+    client.connect.side_effect = paramiko.AuthenticationException("bad")
+
+    with patch("paramiko.SSHClient", return_value=client):
+        ok, detail, triage = await test_paylocity(_CREDENTIALS)
 
     assert ok is False
     assert detail == "auth_failed"
+    assert triage["error_kind"] == "auth"
 
 
 @pytest.mark.asyncio
-async def test_paylocity_invalid_credentials() -> None:
-    with patch(
-        "admin_api.connection_tests.paylocity._http.request",
-        new_callable=AsyncMock,
-        return_value=(400, False),
-    ):
-        ok, detail = await test_paylocity(_CREDENTIALS)
+async def test_paylocity_timeout() -> None:
+    client = MagicMock()
+    client.connect.side_effect = TimeoutError()
+
+    with patch("paramiko.SSHClient", return_value=client):
+        ok, detail, triage = await test_paylocity(_CREDENTIALS)
 
     assert ok is False
-    assert detail == "invalid_credentials"
+    assert detail == "timeout"
+    assert triage["error_kind"] == "timeout"
 
 
 @pytest.mark.asyncio
 async def test_paylocity_unreachable() -> None:
-    with patch(
-        "admin_api.connection_tests.paylocity._http.request",
-        new_callable=AsyncMock,
-        return_value=(None, False),
-    ):
-        ok, detail = await test_paylocity(_CREDENTIALS)
+    client = MagicMock()
+    client.connect.side_effect = OSError("connection refused")
+
+    with patch("paramiko.SSHClient", return_value=client):
+        ok, detail, triage = await test_paylocity(_CREDENTIALS)
 
     assert ok is False
     assert detail == "unreachable"
+    assert triage["error_kind"] == "connect_error"
 
 
 @pytest.mark.asyncio
-async def test_paylocity_unknown_error_on_server_status() -> None:
-    with patch(
-        "admin_api.connection_tests.paylocity._http.request",
-        new_callable=AsyncMock,
-        return_value=(503, False),
-    ):
-        ok, detail = await test_paylocity(_CREDENTIALS)
-
-    assert ok is False
-    assert detail == "unknown_error"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("environment", ["staging", "prod", ""])
-async def test_paylocity_invalid_config_for_bad_environment(environment: str) -> None:
-    creds = {**_CREDENTIALS, "environment": environment}
-    with patch(
-        "admin_api.connection_tests.paylocity._http.request",
-        new_callable=AsyncMock,
-    ) as mock_request:
-        ok, detail = await test_paylocity(creds)
-
+async def test_paylocity_invalid_port() -> None:
+    ok, detail, triage = await test_paylocity({**_CREDENTIALS, "port": "2222"})
     assert ok is False
     assert detail == "invalid_config"
-    mock_request.assert_not_awaited()
+    assert triage["step"] == "parse_port"
 
 
 @pytest.mark.asyncio
 async def test_paylocity_logs_never_include_secrets(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    with patch(
-        "admin_api.connection_tests.paylocity._http.request",
-        new_callable=AsyncMock,
-        return_value=(200, True),
-    ):
+    sftp = MagicMock()
+    client = MagicMock()
+    client.open_sftp.return_value = sftp
+
+    with patch("paramiko.SSHClient", return_value=client):
         with caplog.at_level(logging.DEBUG):
             await test_paylocity(_CREDENTIALS)
 
     for record in caplog.records:
         message = record.getMessage()
-        assert "pay-client-secret" not in message
-        assert "pay-client-id" not in message
+        assert "pay-sftp-secret" not in message
+        assert "habeas-pay" not in message

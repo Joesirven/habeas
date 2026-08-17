@@ -81,6 +81,9 @@ def test_sanitize_test_detail_allowlists_failure_codes():
     for code in (
         "auth_failed",
         "unreachable",
+        "timeout",
+        "http_4xx",
+        "http_5xx",
         "invalid_credentials",
         "invalid_config",
         "unknown_system",
@@ -290,3 +293,16 @@ async def test_set_test_result(pool):
         assert updated.last_test_ok is True
         assert updated.last_test_detail == "stub_ok"
         assert updated.last_tested_at == tested_at
+        assert updated.status == "connected"
+
+        failed = await set_test_result(
+            conn,
+            connection.id,
+            ok=False,
+            detail="auth_failed",
+            tested_at=tested_at,
+        )
+        assert failed is not None
+        assert failed.last_test_ok is False
+        assert failed.last_test_detail == "auth_failed"
+        assert failed.status == "failed"

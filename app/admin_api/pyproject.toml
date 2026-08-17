@@ -9,6 +9,7 @@ dependencies = [
     "google-auth>=2.36",
     "google-cloud-bigquery>=3.25",
     "httpx>=0.28",
+    "paramiko>=3.4",
     "python-multipart>=0.0.9",
     "uvicorn[standard]>=0.32",
     "sse-starlette>=2.0",

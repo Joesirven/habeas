@@ -266,14 +266,51 @@ async def set_test_result(
     ok: bool,
     detail: str | None,
     tested_at: datetime | None = None,
+    triage: dict[str, Any] | None = None,
 ) -> Connection | None:
-    """Record the latest connection test outcome."""
+    """Record the latest connection test outcome and sync lifecycle status.
+
+    Pass → ``connected``; fail → ``failed`` so ops list/detail stay triageable
+    after redeem or super_admin retest (same contract as redeem SQL).
+
+    Optional *triage* is merged into ``metadata.last_test_triage`` (allowlisted
+    non-secret fields only — never bodies or credentials).
+    """
+    status = "connected" if ok else "failed"
+    safe_detail = sanitize_test_detail(detail)
+    if triage is None:
+        row = await conn.fetchrow(
+            f"""
+            UPDATE integration_connections
+               SET last_tested_at = COALESCE($2, NOW()),
+                   last_test_ok = $3,
+                   last_test_detail = $4,
+                   status = $5,
+                   updated_at = NOW()
+             WHERE id = $1
+            RETURNING {_CONNECTION_SELECT}
+            """,
+            _as_uuid(connection_id),
+            tested_at,
+            ok,
+            safe_detail,
+            status,
+        )
+        return _row_to_connection(row) if row else None
+
     row = await conn.fetchrow(
         f"""
         UPDATE integration_connections
            SET last_tested_at = COALESCE($2, NOW()),
                last_test_ok = $3,
                last_test_detail = $4,
+               status = $5,
+               metadata = jsonb_set(
+                   COALESCE(metadata, '{{}}'::jsonb),
+                   '{{last_test_triage}}',
+                   $6::jsonb,
+                   true
+               ),
                updated_at = NOW()
          WHERE id = $1
         RETURNING {_CONNECTION_SELECT}
@@ -281,7 +318,9 @@ async def set_test_result(
         _as_uuid(connection_id),
         tested_at,
         ok,
-        sanitize_test_detail(detail),
+        safe_detail,
+        status,
+        json.dumps(triage),
     )
     return _row_to_connection(row) if row else None
 

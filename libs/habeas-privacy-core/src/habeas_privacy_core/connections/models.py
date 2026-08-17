@@ -35,6 +35,9 @@ ALLOWED_TEST_DETAIL_CODES: Final[frozenset[str]] = frozenset(
         "unknown_error",
         "auth_failed",
         "unreachable",
+        "timeout",
+        "http_4xx",
+        "http_5xx",
         "invalid_credentials",
         "invalid_config",
     }
