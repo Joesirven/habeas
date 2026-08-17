@@ -11,8 +11,13 @@ import {
 import {
   AccessHandoffPanel,
   DropResponseStatusPicker,
-  MatchingConnectorGateBanner,
+  InboxConnectorNotificationsPanel,
   MatchingReviewPanel,
+  OwnerFulfillmentStatusPanel,
+  isAutomaticFulfillmentVertical,
+  matchingDispositionCopy,
+  ownerFulfillmentVerticalRows,
+  ownerStatusErrorMessage,
   useMatchingConnectorGate,
 } from '@/components/requests/RequestTriageDialog'
 import {
@@ -55,7 +60,6 @@ import {
   getRequestJourneyWorkbench,
   getRequestTimeline,
   patchAccessDeliveryStatus,
-  patchFulfillmentOwnerStatus,
   postDropMatchingResultDecline,
   postDropMatchingResultPromote,
   postDropWorkflowAssign,
@@ -66,7 +70,6 @@ import {
   postTriageSendToMatching,
   suggestedDropResponseStatus,
   type DropResponseStatusCode,
-  type FulfillmentOwnerStatus,
   type IdentityVerificationRecord,
   type IntakeSource,
   type MatchingResultDetail,
@@ -74,9 +77,14 @@ import {
   type RequestRecord,
   type TimelineEntry,
   type WorkbenchVerticalBatchRow,
-  type WorkbenchVerticalRow,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
+import {
+  buildInboxBatchStatusCrossGroups,
+  groupInboxConnectorNotifications,
+  groupInboxItemsByBatchStatus,
+  inboxBatchStatusStackSubtitle,
+} from '@/lib/inbox-batch-status'
 import {
   actionReasonLabel,
   deriveWorkbenchChromeFromOpsJourney,
@@ -315,29 +323,7 @@ export const DATA_OWNER_INBOX_KIND_TABS: { value: InboxKind; label: string }[] =
   { value: 'pending_tasks', label: 'Tasks' },
 ]
 
-const AUTOMATIC_FULFILLMENT_VERTICALS = new Set(['data', 'cassandra'])
-
-const OWNER_FULFILLMENT_STATUS_OPTIONS: {
-  value: FulfillmentOwnerStatus
-  label: string
-}[] = [
-  { value: 'in_progress', label: 'In progress' },
-  { value: 'completed_in_source', label: 'Done in source' },
-  { value: 'blocked', label: 'Blocked' },
-  { value: 'assign_to_legal', label: 'Assign to legal' },
-]
-
-const OWNER_STATUS_SUCCESS_TITLE: Record<FulfillmentOwnerStatus, string> = {
-  in_progress: 'Fulfillment marked in progress',
-  completed_in_source: 'Marked done in source',
-  blocked: 'Fulfillment marked blocked',
-  assign_to_legal: 'Assigned to legal',
-}
-
-/** Data / Cassandra fulfill automatically after Legal kickoff (KD36). */
-export function isAutomaticFulfillmentVertical(vertical: string | null | undefined): boolean {
-  return AUTOMATIC_FULFILLMENT_VERTICALS.has((vertical ?? '').trim().toLowerCase())
-}
+export { isAutomaticFulfillmentVertical, ownerFulfillmentVerticalRows }
 
 /** Kicked-off fulfillment still on the owner Inbox · Fulfillment lane (R61). */
 export function isOwnerFulfillmentItem(item: NeedsAttentionItem): boolean {
@@ -353,19 +339,7 @@ export function isOwnerFulfillmentItem(item: NeedsAttentionItem): boolean {
   )
 }
 
-export function ownerStatusErrorMessage(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error ?? '')
-  if (/kickoff_not_approved/i.test(raw)) {
-    return 'Legal has not kicked off this vertical yet.'
-  }
-  if (/data_vertical_automatic/i.test(raw)) {
-    return 'The Data vertical fulfills automatically.'
-  }
-  if (/vertical access denied/i.test(raw)) {
-    return 'You are not assigned to this vertical.'
-  }
-  return actionToast.safeErrorMessage(error)
-}
+export { ownerStatusErrorMessage }
 
 function isTriageItem(item: NeedsAttentionItem): boolean {
   return (
@@ -1674,182 +1648,6 @@ function RequestProcessSummary({
   )
 }
 
-function ownerFulfillmentVerticalRows(options: {
-  cluster: WorkbenchVerticalRow[]
-  assignedVerticals?: string[]
-  assignedLabels?: { vertical_id: string; display_label: string }[]
-}): { vertical: string; label: string; kickedOff: boolean }[] {
-  const byId = new Map<string, { vertical: string; label: string; kickedOff: boolean }>()
-  for (const row of options.cluster) {
-    const id = row.vertical.trim()
-    if (!id) continue
-    byId.set(id, {
-      vertical: id,
-      label: row.label || id.replaceAll('_', ' '),
-      kickedOff: row.kicked_off,
-    })
-  }
-  const labels = new Map(
-    (options.assignedLabels ?? []).map((entry) => [entry.vertical_id, entry.display_label]),
-  )
-  for (const vertical of options.assignedVerticals ?? []) {
-    const id = vertical.trim()
-    if (!id || byId.has(id)) continue
-    byId.set(id, {
-      vertical: id,
-      label: labels.get(id) || id.replaceAll('_', ' '),
-      kickedOff: true,
-    })
-  }
-  return [...byId.values()]
-}
-
-function OwnerFulfillmentStatusPanel({
-  requestId,
-  cluster,
-  assignedVerticals,
-  assignedLabels,
-  canSubmit,
-}: {
-  requestId: string
-  cluster: WorkbenchVerticalRow[]
-  assignedVerticals?: string[]
-  assignedLabels?: { vertical_id: string; display_label: string }[]
-  canSubmit: boolean
-}) {
-  const queryClient = useQueryClient()
-  const rows = ownerFulfillmentVerticalRows({
-    cluster,
-    assignedVerticals,
-    assignedLabels,
-  })
-  const [statusByVertical, setStatusByVertical] = useState<
-    Record<string, FulfillmentOwnerStatus | ''>
-  >({})
-  const [commentByVertical, setCommentByVertical] = useState<Record<string, string>>({})
-
-  const submitMutation = useMutation({
-    mutationFn: (input: {
-      vertical: string
-      status: FulfillmentOwnerStatus
-      comment?: string
-    }) => patchFulfillmentOwnerStatus(requestId, input.vertical, {
-      status: input.status,
-      ...(input.comment ? { comment: input.comment } : {}),
-    }),
-    onSuccess: async (_data, variables) => {
-      setCommentByVertical((previous) => ({ ...previous, [variables.vertical]: '' }))
-      actionToast.success({ title: OWNER_STATUS_SUCCESS_TITLE[variables.status] })
-      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
-    },
-    onError: (error, variables) => {
-      actionToast.error({
-        title: 'Could not update fulfillment',
-        description: ownerStatusErrorMessage(error),
-        action: {
-          label: 'Retry',
-          onClick: () => submitMutation.mutate(variables),
-        },
-      })
-    },
-  })
-
-  if (rows.length === 0) {
-    return (
-      <p className="text-[0.7rem] text-ink-soft">
-        No owned fulfillment verticals on this request yet.
-      </p>
-    )
-  }
-
-  return (
-    <div className="space-y-3">
-      {rows.map((row) => {
-        const automatic = isAutomaticFulfillmentVertical(row.vertical)
-        const status = statusByVertical[row.vertical] ?? ''
-        const comment = commentByVertical[row.vertical] ?? ''
-        const pending =
-          submitMutation.isPending && submitMutation.variables?.vertical === row.vertical
-        return (
-          <div
-            key={row.vertical}
-            className="space-y-2 rounded-md border border-line/80 bg-paper px-2.5 py-2"
-          >
-            <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <p className="text-[0.7rem] font-medium capitalize text-ink">{row.label}</p>
-              {automatic ? (
-                <Badge variant="default" className="normal-case tracking-normal">
-                  Automatic
-                </Badge>
-              ) : null}
-            </div>
-            {automatic ? (
-              <p className="text-[0.65rem] text-ink-soft">
-                Data fulfills automatically after Legal kickoff. No owner status to set.
-              </p>
-            ) : (
-              <>
-                <label className="flex flex-col gap-1 text-[0.65rem] text-ink-soft">
-                  Status
-                  <select
-                    className="rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
-                    value={status}
-                    onChange={(event) =>
-                      setStatusByVertical((previous) => ({
-                        ...previous,
-                        [row.vertical]: event.target.value as FulfillmentOwnerStatus | '',
-                      }))
-                    }
-                    disabled={!canSubmit || pending}
-                    aria-label={`${row.label} fulfillment status`}
-                    required
-                  >
-                    <option value="">Choose status</option>
-                    {OWNER_FULFILLMENT_STATUS_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <textarea
-                  className="min-h-[2.5rem] max-h-20 w-full resize-y rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
-                  value={comment}
-                  onChange={(event) =>
-                    setCommentByVertical((previous) => ({
-                      ...previous,
-                      [row.vertical]: event.target.value,
-                    }))
-                  }
-                  placeholder="Optional comment — stored as correspondence, not in audit."
-                  aria-label={`${row.label} fulfillment comment`}
-                  maxLength={2000}
-                  disabled={!canSubmit || pending}
-                />
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={!canSubmit || pending || !status}
-                  onClick={() => {
-                    if (!status) return
-                    submitMutation.mutate({
-                      vertical: row.vertical,
-                      status,
-                      comment: comment.trim() || undefined,
-                    })
-                  }}
-                >
-                  {pending ? 'Saving…' : 'Update status'}
-                </Button>
-              </>
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
 function InboxReviewPane({
   item,
   canReviewActions,
@@ -2353,13 +2151,9 @@ function InboxReviewPane({
               )
             }
           }}
-          title="Fulfill this match?"
-          description={
-            dataOwnerPersona
-              ? `Confirm the match result for ${item.request_id.slice(0, 8)}…`
-              : `Approve matching review for ${item.request_id.slice(0, 8)}… and set the CA DROP status result.`
-          }
-          confirmLabel="Fulfill"
+          title={matchingDispositionCopy(dataOwnerPersona ? 'data_owner' : legalPersona ? 'legal' : 'ops').confirmTitle}
+          description={matchingDispositionCopy(dataOwnerPersona ? 'data_owner' : legalPersona ? 'legal' : 'ops').confirmDescription(item.request_id.slice(0, 8))}
+          confirmLabel={matchingDispositionCopy(dataOwnerPersona ? 'data_owner' : legalPersona ? 'legal' : 'ops').confirmLabel}
           confirming={actionPending && confirmAction === 'fulfill'}
           confirmDisabled={fulfillStatus == null || !fulfillDwidsReady}
           onConfirm={() => {
@@ -2547,7 +2341,9 @@ function InboxReviewPane({
                       disabled={actionPending}
                       onClick={() => setConfirmAction('fulfill')}
                     >
-                      Fulfill
+                      {dataOwnerPersona
+                        ? matchingDispositionCopy('data_owner').confirmLabel
+                        : 'Fulfill'}
                     </Button>
                     <Button
                       type="button"
@@ -2861,7 +2657,7 @@ function InboxReviewPane({
 
 
 
-type InboxStackKind = 'batch' | 'type' | 'batch_type'
+type InboxStackKind = 'batch' | 'type' | 'batch_type' | 'status' | 'batch_status'
 
 type InboxRow =
   | {
@@ -2962,13 +2758,61 @@ function buildBatchTypeCrossRows(items: NeedsAttentionItem[]): InboxRow[] {
   return timed.map((entry) => entry.row)
 }
 
-/** Stack by batch, by type, or by batch×type when both toggles are on. */
+/** Batch × batch-status type — e.g. #42 · Single match, #42 · Multi-person. */
+function buildBatchStatusCrossRows(
+  items: NeedsAttentionItem[],
+  ownerLanguage = false,
+): InboxRow[] {
+  const groups = buildInboxBatchStatusCrossGroups(items, itemBatchParts, ownerLanguage)
+  return groups.map((group) => {
+    const sorted = [...group.items].sort((a, b) =>
+      (a.requested_at ?? '').localeCompare(b.requested_at ?? ''),
+    )
+    return {
+      kind: 'thread' as const,
+      stackKind: 'batch_status' as const,
+      batchKey: group.compositeKey,
+      batchLabel: `${group.batchLabel} · ${group.statusLabel}`,
+      items: sorted,
+    }
+  })
+}
+
+/** Stack by batch-status type only — Single match, Multi-person, Not found, DROP 3/4/5. */
+function buildStatusGroupedRows(
+  items: NeedsAttentionItem[],
+  ownerLanguage = false,
+): InboxRow[] {
+  const rows: InboxRow[] = []
+  for (const section of groupInboxItemsByBatchStatus(items, ownerLanguage)) {
+    const sorted = [...section.items].sort((a, b) =>
+      (a.requested_at ?? '').localeCompare(b.requested_at ?? ''),
+    )
+    rows.push({
+      kind: 'thread',
+      stackKind: 'status',
+      batchKey: `status:${section.key}`,
+      batchLabel: section.label,
+      items: sorted,
+    })
+  }
+  return rows
+}
+
+/** Stack by batch, type, status, or cross-products when multiple toggles are on. */
 function buildGroupedInboxRows(
   items: NeedsAttentionItem[],
-  options: { byBatch: boolean; byType: boolean },
+  options: { byBatch: boolean; byType: boolean; byStatus: boolean },
+  ownerLanguage = false,
 ): InboxRow[] {
+  if (options.byBatch && options.byStatus) {
+    return buildBatchStatusCrossRows(items, ownerLanguage)
+  }
   if (options.byBatch && options.byType) {
     return buildBatchTypeCrossRows(items)
+  }
+  if (options.byStatus) {
+    return buildStatusGroupedRows(items, ownerLanguage)
   }
   if (options.byType) {
     const rows: InboxRow[] = []
@@ -3206,14 +3050,24 @@ function ThreadReviewPane({
   }, null)
   const bucket = earliest ? dueBucket(earliest) : 'unknown'
   const exactMatchBatch =
-    (stackKind === 'batch' || stackKind === 'batch_type') &&
+    (stackKind === 'batch' ||
+      stackKind === 'batch_type' ||
+      stackKind === 'batch_status') &&
     threadIsExactMatchBatch(items)
   const showBulkMatchingActions = canReviewActions && exactMatchBatch
   const groupNoun =
-    stackKind === 'type' ? 'Type' : stackKind === 'batch_type' ? 'Batch · type' : 'Batch'
+    stackKind === 'type'
+      ? 'Type'
+      : stackKind === 'batch_type'
+        ? 'Batch · type'
+        : stackKind === 'status'
+          ? 'Status'
+          : stackKind === 'batch_status'
+            ? 'Batch · status'
+            : 'Batch'
 
   const bulkId =
-    stackKind === 'batch' || stackKind === 'batch_type'
+    stackKind === 'batch' || stackKind === 'batch_type' || stackKind === 'batch_status'
       ? sharedBulkProcessId(items)
       : null
 
@@ -3285,13 +3139,21 @@ function ThreadReviewPane({
           if (!open && !actionPending) setConfirm(null)
           if (open) setFulfillStatus(threadFulfillSuggestion)
         }}
-        title={`Bulk fulfill ${items.length} exact matches?`}
+        title={
+          dataOwnerPersona
+            ? `Confirm ${items.length} exact matches?`
+            : `Bulk fulfill ${items.length} exact matches?`
+        }
         description={
           dataOwnerPersona
             ? `Confirm the match result for all single-match requests from batch ${batchLabel}.`
             : `Approve matching review for all single-match requests from batch ${batchLabel} and set the CA DROP status result.`
         }
-        confirmLabel={`Fulfill ${items.length}`}
+        confirmLabel={
+          dataOwnerPersona
+            ? `Confirm ${items.length}`
+            : `Fulfill ${items.length}`
+        }
         confirming={actionPending && confirm === 'fulfill'}
         confirmDisabled={fulfillStatus == null}
         onConfirm={() => {
@@ -3334,7 +3196,11 @@ function ThreadReviewPane({
             ? 'Type stack'
             : stackKind === 'batch_type'
               ? 'Batch · type stack'
-              : 'Batch thread'}
+              : stackKind === 'status'
+                ? 'Status stack'
+                : stackKind === 'batch_status'
+                  ? 'Batch · status stack'
+                  : 'Batch thread'}
         </Micro>
         <h2 className="text-sm font-medium text-ink">
           {exactMatchBatch
@@ -3346,7 +3212,10 @@ function ThreadReviewPane({
             Group{' '}
             <span
               className={
-                stackKind === 'type' || stackKind === 'batch_type'
+                stackKind === 'type' ||
+                stackKind === 'batch_type' ||
+                stackKind === 'status' ||
+                stackKind === 'batch_status'
                   ? 'text-ink'
                   : 'font-mono text-ink'
               }
@@ -3412,6 +3281,18 @@ function ThreadReviewPane({
               These requests share work type <span className="text-ink">{batchLabel}</span>.
               Open a member below for full detail.
             </>
+          ) : stackKind === 'status' ? (
+            <>
+              These requests share batch-status type{' '}
+              <span className="text-ink">{batchLabel}</span>. Open a member below for full
+              detail.
+            </>
+          ) : stackKind === 'batch_status' ? (
+            <>
+              These requests share batch and status{' '}
+              <span className="text-ink">{batchLabel}</span>. Open a member below for full
+              detail.
+            </>
           ) : stackKind === 'batch_type' ? (
             <>
               These requests share batch and work type{' '}
@@ -3467,8 +3348,12 @@ function ThreadReviewPane({
           <div className="flex flex-wrap items-center gap-2">
             <Button size="sm" disabled={actionPending} onClick={() => setConfirm('fulfill')}>
               {actionPending && confirm === 'fulfill'
-                ? `Fulfilling ${items.length}…`
-                : `Bulk fulfill #${items.length}`}
+                ? dataOwnerPersona
+                  ? `Confirming ${items.length}…`
+                  : `Fulfilling ${items.length}…`
+                : dataOwnerPersona
+                  ? `Confirm ${items.length}`
+                  : `Bulk fulfill #${items.length}`}
             </Button>
             <Button
               size="sm"
@@ -3518,8 +3403,16 @@ export function NeedsAttentionPage() {
   const [inboxKind, setInboxKind] = useState<InboxKind>(
     () => (search.kind as InboxKind | undefined) ?? defaultKind,
   )
-  const showInboxConnectorGateBanner =
-    inboxConnectorGate != null &&
+  const inboxConnectorNotifGroups = useMemo(
+    () =>
+      groupInboxConnectorNotifications({
+        reminders: me?.connector_reminders,
+        gate: inboxConnectorGate,
+      }),
+    [me?.connector_reminders, inboxConnectorGate],
+  )
+  const showInboxConnectorNotifications =
+    inboxConnectorNotifGroups.length > 0 &&
     !legalPersona &&
     (inboxKind === 'matching' || inboxKind === 'all')
   const [matchFilter, setMatchFilter] = useState<MatchFilter>('all')
@@ -3530,13 +3423,14 @@ export function NeedsAttentionPage() {
   )
   const groupByBatch = groupByBatchOverride ?? !legalPersona
   const [groupByType, setGroupByType] = useState(false)
-  const groupingActive = groupByBatch || groupByType
+  const [groupByStatus, setGroupByStatus] = useState(dataOwnerPersona)
+  const groupingActive = groupByBatch || groupByType || groupByStatus
   const [page, setPage] = useState(1)
 
   useEffect(() => {
     // Collapsed stacks when grouping mode changes — avoids “stuck” expanded flat-looking lists.
     setExpandedThreads(new Set())
-  }, [groupByBatch, groupByType])
+  }, [groupByBatch, groupByType, groupByStatus])
 
   useEffect(() => {
     if (legalPersona) {
@@ -3597,15 +3491,53 @@ export function NeedsAttentionPage() {
     placeholderData: (previous) => previous,
   })
 
+  const ownerMatchingQuery = useQuery({
+    queryKey: [
+      'admin-api',
+      'ops',
+      'requests',
+      'needs-attention',
+      'data-owner',
+      'matching',
+      inboxFetchLimit,
+    ],
+    queryFn: () =>
+      getNeedsAttention({ limit: inboxFetchLimit, offset: 0, kind: 'matching' }),
+    enabled: dataOwnerPersona,
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  })
+
+  const ownerAssignedQuery = useQuery({
+    queryKey: [
+      'admin-api',
+      'ops',
+      'requests',
+      'needs-attention',
+      'data-owner',
+      'assigned-me',
+      inboxFetchLimit,
+    ],
+    queryFn: () =>
+      getNeedsAttention({
+        limit: inboxFetchLimit,
+        offset: 0,
+        kind: 'matching',
+        assignee: 'me',
+      }),
+    enabled: dataOwnerPersona,
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  })
+
   const attentionQuery = useQuery({
     queryKey: [
       'admin-api',
       'ops',
       'requests',
       'needs-attention',
-      legalPersona ? 'legal' : dataOwnerPersona ? 'data-owner' : 'ops',
+      legalPersona ? 'legal' : 'ops',
       search.assignee ?? null,
-      dataOwnerPersona && inboxKind === 'pending_tasks' ? 'pending_tasks' : null,
       inboxFetchLimit,
     ],
     queryFn: () => {
@@ -3620,17 +3552,9 @@ export function NeedsAttentionPage() {
       if (legalPersona) {
         return getLegalNeedsAttention({ limit: inboxFetchLimit, offset: 0 })
       }
-      if (dataOwnerPersona) {
-        return getNeedsAttention({
-          limit: inboxFetchLimit,
-          offset: 0,
-          kind: 'matching',
-          ...(inboxKind === 'pending_tasks' ? { assignee: 'me' } : {}),
-        })
-      }
       return getNeedsAttention({ limit: inboxFetchLimit, offset: 0 })
     },
-    enabled: !(dataOwnerPersona && inboxKind === 'fulfillment'),
+    enabled: !dataOwnerPersona,
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })
@@ -3684,11 +3608,25 @@ export function NeedsAttentionPage() {
   const items =
     dataOwnerPersona && inboxKind === 'fulfillment'
       ? (ownerFulfillmentQuery.data?.items ?? [])
-      : (attentionQuery.data?.items ?? [])
+      : dataOwnerPersona && inboxKind === 'pending_tasks'
+        ? (ownerAssignedQuery.data?.items ?? [])
+        : dataOwnerPersona
+          ? (ownerMatchingQuery.data?.items ?? [])
+          : (attentionQuery.data?.items ?? [])
   const ownerFulfillmentCount =
     ownerFulfillmentQuery.data?.total ?? ownerFulfillmentQuery.data?.items.length ?? 0
+  const ownerMatchingCount =
+    ownerMatchingQuery.data?.total ?? ownerMatchingQuery.data?.items.length ?? 0
+  const ownerAssignedCount =
+    ownerAssignedQuery.data?.total ?? ownerAssignedQuery.data?.items.length ?? 0
   const attentionListQuery =
-    dataOwnerPersona && inboxKind === 'fulfillment' ? ownerFulfillmentQuery : attentionQuery
+    dataOwnerPersona && inboxKind === 'fulfillment'
+      ? ownerFulfillmentQuery
+      : dataOwnerPersona && inboxKind === 'pending_tasks'
+        ? ownerAssignedQuery
+        : dataOwnerPersona
+          ? ownerMatchingQuery
+          : attentionQuery
 
   const operatorsQuery = useQuery({
     queryKey: ['admin-api', 'legal', 'operators'],
@@ -3733,16 +3671,23 @@ export function NeedsAttentionPage() {
     }
     return {
       all: items.length,
-      matching,
+      matching: dataOwnerPersona ? ownerMatchingCount : matching,
       triage,
       escalations,
       delivery,
       notice,
       communications,
       fulfillment: dataOwnerPersona ? ownerFulfillmentCount : fulfillment,
-      pending_tasks: pendingTasks,
+      pending_tasks: dataOwnerPersona ? ownerAssignedCount : pendingTasks,
     } satisfies Record<InboxKind, number>
-  }, [dataOwnerPersona, items, me?.email, ownerFulfillmentCount])
+  }, [
+    dataOwnerPersona,
+    items,
+    me?.email,
+    ownerAssignedCount,
+    ownerFulfillmentCount,
+    ownerMatchingCount,
+  ])
 
   const matchOptions = useMemo(() => {
     const pool = items.filter(isMatchingItem)
@@ -3831,13 +3776,18 @@ export function NeedsAttentionPage() {
   const inboxRows = useMemo(
     () =>
       coerceGroupedInboxRows(
-        buildGroupedInboxRows(filteredItems, {
-          byBatch: groupByBatch,
-          byType: groupByType,
-        }),
+        buildGroupedInboxRows(
+          filteredItems,
+          {
+            byBatch: groupByBatch,
+            byType: groupByType,
+            byStatus: groupByStatus,
+          },
+          dataOwnerPersona,
+        ),
         groupingActive,
       ),
-    [filteredItems, groupByBatch, groupByType, groupingActive],
+    [filteredItems, groupByBatch, groupByType, groupByStatus, groupingActive, dataOwnerPersona],
   )
 
   const stackCount = useMemo(() => countThreadStacks(inboxRows), [inboxRows])
@@ -3853,6 +3803,7 @@ export function NeedsAttentionPage() {
     dueFilter,
     groupByBatch,
     groupByType,
+    groupByStatus,
     bulkFilter,
     search.assignee,
   ])
@@ -4204,7 +4155,7 @@ export function NeedsAttentionPage() {
           if (!open && !bulkMutation.isPending) setBulkConfirm(null)
           if (open) setBulkFulfillStatus(bulkFulfillSuggestion)
         }}
-        title={`Fulfill ${allFilteredSelected ? filteredIds.length : selectedCount} request${
+        title={`${dataOwnerPersona ? 'Confirm' : 'Fulfill'} ${allFilteredSelected ? filteredIds.length : selectedCount} request${
           (allFilteredSelected ? filteredIds.length : selectedCount) === 1 ? '' : 's'
         }?`}
         description={
@@ -4212,7 +4163,7 @@ export function NeedsAttentionPage() {
             ? 'Confirm the match result for the selected items.'
             : 'Selected items leave matching review with the CA DROP status result you confirm below.'
         }
-        confirmLabel="Fulfill selected"
+        confirmLabel={dataOwnerPersona ? 'Confirm selected' : 'Fulfill selected'}
         confirming={bulkMutation.isPending && bulkConfirm === 'fulfill'}
         confirmDisabled={bulkFulfillStatus == null}
         onConfirm={() => {
@@ -4382,7 +4333,7 @@ export function NeedsAttentionPage() {
           ) : null}
         </div>
         <Link to="/requests" className="taste-btn text-xs">
-          All requests
+          {dataOwnerPersona ? 'Requests' : 'All requests'}
         </Link>
       </header>
 
@@ -4528,6 +4479,14 @@ export function NeedsAttentionPage() {
               titleOn="Type grouping on — click to show flat type rows"
               titleOff="Type grouping off — click to stack by work type"
             />
+            <InboxGroupSwitch
+              label="Status"
+              checked={groupByStatus}
+              onToggle={() => setGroupByStatus((previous) => !previous)}
+              ariaLabel="Group inbox by batch-status type"
+              titleOn="Status grouping on — click to show flat status rows"
+              titleOff="Status grouping off — click to stack by match result / DROP status"
+            />
           </div>
           {showMatchResultFilters ? (
             <>
@@ -4591,11 +4550,11 @@ export function NeedsAttentionPage() {
           ) : null}
         </div>
 
-        {showInboxConnectorGateBanner ? (
+        {showInboxConnectorNotifications ? (
           <div className="shrink-0 border-b border-line px-3 py-2">
-            <MatchingConnectorGateBanner
+            <InboxConnectorNotificationsPanel
+              reminders={me?.connector_reminders}
               gate={inboxConnectorGate}
-              compact
               showOwnerLink={dataOwnerPersona}
               connectorsVerticalId={
                 me?.connector_reminders?.find((reminder) => reminder.severity === 'overdue')
@@ -4706,11 +4665,15 @@ export function NeedsAttentionPage() {
                   #{filteredItems.length} loaded
                   {moreRowsToLoad ? ` (of ${rawInboxTotal} — page forward to load more)` : ''}
                   {groupingActive && stackCount > 0
-                    ? groupByBatch && groupByType
-                      ? ` · ${stackCount} batch×type stacks`
-                      : groupByBatch
-                        ? ` · ${stackCount} batch stacks`
-                        : ` · ${stackCount} type stacks`
+                    ? groupByBatch && groupByStatus
+                      ? ` · ${stackCount} batch×status stacks`
+                      : groupByBatch && groupByType
+                        ? ` · ${stackCount} batch×type stacks`
+                        : groupByBatch
+                          ? ` · ${stackCount} batch stacks`
+                          : groupByStatus
+                            ? ` · ${stackCount} status stacks`
+                            : ` · ${stackCount} type stacks`
                     : ''}
                 </span>
               )}
@@ -4813,7 +4776,7 @@ export function NeedsAttentionPage() {
 
             {!loading && !attentionListQuery.isError && filteredItems.length > 0 ? (
               <ul
-                key={`inbox-group-${groupByBatch ? 'b' : ''}${groupByType ? 't' : ''}-n`}
+                key={`inbox-group-${groupByBatch ? 'b' : ''}${groupByType ? 't' : ''}${groupByStatus ? 's' : ''}-n`}
                 className={cn(
                   groupingActive ? 'space-y-1 bg-canvas/40 p-1.5' : 'divide-y divide-line',
                 )}
@@ -4830,15 +4793,27 @@ export function NeedsAttentionPage() {
                     const expanded = expandedThreads.has(row.batchKey)
                     const earliest = row.items[0]!
                     const exactMatchBatch =
-                      (row.stackKind === 'batch' || row.stackKind === 'batch_type') &&
+                      (row.stackKind === 'batch' ||
+                        row.stackKind === 'batch_type' ||
+                        row.stackKind === 'batch_status') &&
                       threadIsExactMatchBatch(row.items)
                     const isTypeStack = row.stackKind === 'type'
                     const isCrossStack = row.stackKind === 'batch_type'
-                    const stackKindLabel = isCrossStack
-                      ? 'batch·type'
-                      : isTypeStack
-                        ? 'type'
-                        : 'batch'
+                    const isStatusStack = row.stackKind === 'status'
+                    const isBatchStatusStack = row.stackKind === 'batch_status'
+                    const statusSubtitle = inboxBatchStatusStackSubtitle(
+                      row.items,
+                      dataOwnerPersona,
+                    )
+                    const stackKindLabel = isBatchStatusStack
+                      ? 'batch·status'
+                      : isCrossStack
+                        ? 'batch·type'
+                        : isStatusStack
+                          ? 'status'
+                          : isTypeStack
+                            ? 'type'
+                            : 'batch'
                     const unbatched =
                       row.batchKey === UNKEYED_BATCH_KEY ||
                       row.batchKey.startsWith(`${UNKEYED_BATCH_KEY}::`)
@@ -4847,9 +4822,9 @@ export function NeedsAttentionPage() {
                         <div
                           className={cn(
                             'relative flex items-stretch gap-0 rounded-md border-2 bg-paper shadow-[0_1px_0_rgba(15,35,70,0.06),0_3px_0_-1px_rgba(15,35,70,0.05),0_6px_0_-2px_rgba(15,35,70,0.04)] transition-colors',
-                            isCrossStack
+                            isCrossStack || isBatchStatusStack
                               ? 'border-habeas-navy/45'
-                              : isTypeStack
+                              : isTypeStack || isStatusStack
                                 ? 'border-habeas-navy/30'
                                 : 'border-habeas-navy/40',
                             active
@@ -4862,9 +4837,9 @@ export function NeedsAttentionPage() {
                           <span
                             className={cn(
                               'w-1 shrink-0 rounded-l-md',
-                              isCrossStack
+                              isCrossStack || isBatchStatusStack
                                 ? 'bg-habeas-navy/80'
-                                : isTypeStack
+                                : isTypeStack || isStatusStack
                                   ? 'bg-habeas-navy/45'
                                   : 'bg-habeas-navy/70',
                             )}
@@ -4926,23 +4901,42 @@ export function NeedsAttentionPage() {
                                 <span
                                   className={cn(
                                     'text-[0.75rem] font-semibold text-ink',
-                                    isTypeStack || isCrossStack ? null : 'font-mono',
+                                    isTypeStack ||
+                                    isCrossStack ||
+                                    isStatusStack ||
+                                    isBatchStatusStack
+                                      ? null
+                                      : 'font-mono',
                                   )}
                                 >
                                   {row.batchLabel}
                                 </span>
                                 <span className="text-[0.7rem] text-mute">
-                                  {exactMatchBatch ? 'Exact 1:1 · ' : ''}
+                                  {statusSubtitle ? `${statusSubtitle} · ` : exactMatchBatch ? 'Exact 1:1 · ' : ''}
                                   {row.items.length} requests
                                 </span>
                               </div>
                               <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                                {exactMatchBatch ? (
+                                {statusSubtitle ? (
+                                  <Badge
+                                    variant="ok"
+                                    className="normal-case tracking-normal"
+                                  >
+                                    {statusSubtitle}
+                                  </Badge>
+                                ) : exactMatchBatch ? (
                                   <Badge
                                     variant="ok"
                                     className="normal-case tracking-normal"
                                   >
                                     single match
+                                  </Badge>
+                                ) : isStatusStack ? (
+                                  <Badge
+                                    variant="default"
+                                    className="normal-case tracking-normal"
+                                  >
+                                    {row.batchLabel}
                                   </Badge>
                                 ) : unbatched ? (
                                   <Badge

@@ -12,6 +12,7 @@ import {
   dropStatusPill,
   isAutomaticFulfillmentVertical,
   isOwnerFulfillmentItem,
+  ownerFulfillmentVerticalRows,
   matchTypeLabel,
   ownerMatchResultLabel,
   suggestedBulkFulfillStatus,
@@ -69,6 +70,44 @@ describe('owner fulfillment row helpers (AE30)', () => {
     expect(isAutomaticFulfillmentVertical('cassandra')).toBe(true)
     expect(isAutomaticFulfillmentVertical('communications')).toBe(false)
     expect(isAutomaticFulfillmentVertical('mailchimp')).toBe(false)
+  })
+
+  test('assigned-only SaaS is waiting on kickoff; cluster kicked_off stays true', () => {
+    const rows = ownerFulfillmentVerticalRows({
+      cluster: [
+        {
+          vertical: 'communications',
+          label: 'Communications',
+          live: true,
+          actionable: true,
+          matching_status: 'complete',
+          disposition_status: 3,
+          selected_dwid_count: 1,
+          kicked_off: true,
+          identity_required: false,
+          identity_verified: null,
+          fulfillment_status: 'in_progress',
+          fulfillment_steps: [],
+          blocker: null,
+        },
+      ],
+      assignedVerticals: ['communications', 'people_hr'],
+      assignedLabels: [
+        { vertical_id: 'people_hr', display_label: 'People / HR' },
+      ],
+    })
+    expect(rows).toEqual([
+      {
+        vertical: 'communications',
+        label: 'Communications',
+        kickedOff: true,
+      },
+      {
+        vertical: 'people_hr',
+        label: 'People / HR',
+        kickedOff: false,
+      },
+    ])
   })
 
   test('merge prefers request metadata when an approval also matched', () => {

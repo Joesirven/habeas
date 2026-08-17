@@ -14,7 +14,10 @@ import {
   matchingGateFromAttempts,
   matchingGateFromConnection,
   matchingGateFromReminder,
+  ownerAssignedVerticalSummary,
   ownerConnectorActionRequiredCount,
+  ownerHomeItemTitle,
+  ownerHomeQueueRows,
   overlayCalloutShowsOwnerCta,
   ownerConnectorsSearch,
   resolveMatchingConnectorGate,
@@ -459,5 +462,60 @@ describe('overlay connector callout (U19 / AE32)', () => {
   test('ownerConnectorsSearch omits vertical when unknown', () => {
     expect(ownerConnectorsSearch(null)).toEqual({})
     expect(ownerConnectorsSearch('  ')).toEqual({})
+  })
+
+  test('cassandra catalog id has no owner Connectors CTA', () => {
+    expect(overlayCalloutShowsOwnerCta('data_owner', 'cassandra')).toBe(false)
+    expect(overlayCalloutShowsOwnerCta('data_owner', 'data')).toBe(false)
+  })
+})
+
+describe('owner Home helpers (R62)', () => {
+  test('prefers catalog labels over raw vertical ids', () => {
+    expect(
+      ownerAssignedVerticalSummary(
+        [{ vertical_id: 'communications', display_label: 'Communications' }],
+        ['communications', 'data'],
+      ),
+    ).toBe('Communications')
+    expect(ownerAssignedVerticalSummary(undefined, ['people_hr'])).toBe('people hr')
+    expect(ownerAssignedVerticalSummary([], [])).toBe('No vertical assigned')
+  })
+
+  test('queue titles use owner match language and newest first', () => {
+    expect(ownerHomeItemTitle({ match_type: 'single_match' }, 'matching')).toBe(
+      'Confirm match',
+    )
+    expect(ownerHomeItemTitle({ match_type: 'not_found' }, 'matching')).toBe('Not a match')
+    expect(ownerHomeItemTitle({ match_type: 'single_match' }, 'fulfillment')).toBe(
+      'Fulfillment',
+    )
+    const rows = ownerHomeQueueRows({
+      matching: [
+        {
+          request_id: 'older-match',
+          reason: 'matching.review',
+          current_stage: 'review',
+          intake_source: 'drop',
+          received_at: '2026-08-01T00:00:00Z',
+          requested_at: '2026-08-01T00:00:00Z',
+          match_type: 'multi_match',
+        },
+      ],
+      fulfillment: [
+        {
+          request_id: 'newer-fulfill',
+          reason: 'fulfillment.owner',
+          current_stage: 'fulfillment',
+          intake_source: 'drop',
+          received_at: '2026-08-10T00:00:00Z',
+          requested_at: '2026-08-10T00:00:00Z',
+        },
+      ],
+      limit: 8,
+    })
+    expect(rows.map((row) => row.requestId)).toEqual(['newer-fulfill', 'older-match'])
+    expect(rows[0]?.title).toBe('Fulfillment')
+    expect(rows[1]?.title).toBe('Multi-person')
   })
 })

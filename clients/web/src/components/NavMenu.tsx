@@ -204,7 +204,7 @@ export function NavMenu() {
   const legalAdminNav = isLegalAdminPersona(role)
   const showOwnerConnectors =
     role === 'data_owner' || role === 'admin' || role === 'super_admin'
-  const homeLabel = legalAdminNav ? 'Home' : 'My work'
+  const homeLabel = legalAdminNav || role === 'data_owner' ? 'Home' : 'My work'
 
   const isLegalNav = legalAdminNav
   const isDataOwnerNav = role === 'data_owner'

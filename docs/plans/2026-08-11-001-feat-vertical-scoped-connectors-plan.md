@@ -94,7 +94,7 @@ Connections onboarding shipped a secure credential path per system, but mutation
 - KD32. (session-settled: user-directed 2026-08-13 — chosen over tour before connect+test) **Tour eligibility follows connection test** — tour is **not offered** until **Connect-step test passes** (Live `ok` or Upload `upload_ok` on the vertical-scoped row) **and** wizard Confirm succeeds; mode/cadence-only progress does not make tour eligible.
 - KD33. (session-settled: **Jose-confirmed 2026-08-13** — chosen over one-shot post-wizard-only tour) **Tour every login until complete** — once KD32-eligible, client offers tour **on each login** (after PostAuthSplash/welcome deferrals) while persistence is neither `completed` nor `skipped`; mid-chain exit without skip → re-offer next login. **super_admin `connections.wizard_reset`** clears tour state for affected vertical owners (align KTD8 `connections.wizard_reset`).
 - KD34. (session-settled: user-directed 2026-08-17 — chosen over exposing DROP codes as the primary owner control) **Post-match selector is owner language** — primary choices **Confirm match**, **Not a match**, **Multi-person**, plus **Assign to legal**. Map to CA DROP `response_status` 3 / 5 / 4 (multi-person → 4 Opted out for selected persons per KB KD29). Numeric codes and “Promote-to-raw” copy stay secondary or hidden for `data_owner`. DWID multi-select on Confirm / Multi-person unchanged (R39–R41).
-- KD35. (session-settled: user-directed 2026-08-17 — chosen over copying Legal Home Variation B onto My work) **Port legal/admin workbench patterns, not the Legal command center** — data owner keeps **My work · Requests · Inbox · Connectors**. Port: dual-pane Inbox, four-stage detail overlay, grouping/due chrome, command palette **Requests + Actions** (no People). Do **not** port Legal Home funnel/heatmap/pulse, Settings sheet, or Legal Inbox chips (Unassigned · Notice · Delivery · Pre-matching holds).
+- KD35. (session-settled: user-directed 2026-08-17 — chosen over copying Legal Home Variation B onto My work; **Home follow-up same day**) **Port legal/admin workbench patterns, not the Legal command center** — data owner keeps **Home · Requests · Inbox · Connectors**. Port: dual-pane Inbox, four-stage detail overlay, grouping/due chrome, command palette **Requests + Actions** (no People). Owner **Home** is a simpler vertical-scoped cousin of Legal Home (pulse + queue + connector reminders). Do **not** port Legal funnel/heatmap, Settings sheet, People, or Legal Inbox chips (Unassigned · Notice · Delivery · Pre-matching holds).
 - KD36. (session-settled: user-directed 2026-08-17 — chosen over owner-starts-fulfillment and over waiting for SaaS API automation) **Legal kickoff, then owner manual fulfillment for SaaS** — Legal still starts fulfillment (`fulfillment.kickoff`). **Data** vertical stays **automatic** (Cassandra/CEPI). **Communications, People/HR, Tech, BizDev** owners mark each owned vertical complete in Inbox via **comment + named status** (KD37). Does **not** invent new fulfillment workers this slice.
 - KD37. (session-settled: user-directed 2026-08-17 — chosen over comment-only and over reusing DROP 3/4/5 for fulfillment) **SaaS fulfillment status updater** — required named status plus optional comment. v1 statuses: **In progress**, **Done in source**, **Blocked**, **Assign to legal**. Writes the vertical’s fulfillment attempt + correspondence body (audit metadata only). **Done in source** closes that vertical’s fulfillment leg. DROP 3/4/5 stay matching-disposition-only.
 - KD38. (session-settled: user-directed 2026-08-17 — chosen over discarding the incomplete persona forks) **Merge incomplete data-owner forks into this slice** — (1) nav Inbox badge uses matching + fulfillment counts, not ops `kind=all`; (2) Tasks tab fetch matches the Tasks filter (not matching-only); (3) mount command palette for `data_owner` with Requests + Actions, **no People** (legal/admin KD18 preserved).
@@ -153,7 +153,7 @@ Connections onboarding shipped a secure credential path per system, but mutation
 - R59. **Post-match selector copy** — owner primary labels Confirm match / Not a match / Multi-person (KD34); map to DROP 3 / 5 / 4; hide “Promote-to-raw” and code-first chrome for `data_owner`.
 - R60. **Live down → Upload** — when Live test fails, is not set up, or is not permissioned, owner can switch to Upload or re-upload from Connectors **and** from an Inbox/detail **Needs refresh** callout (R8, KD18).
 - R61. **Owner Inbox tabs** — Matching · Fulfillment · Tasks (KD35). Default Matching. Fulfillment lists kicked-off SaaS legs for assigned verticals only.
-- R62. **Owner My work** — matching-review count, assigned-to-me count, fulfillment-waiting count, and connector action-required count. Not Legal Home Variation B.
+- R62. **Owner Home** — vertical-scoped pulse (Matching · Assigned · Fulfillment waiting · Connectors), recent queue (title first), and assigned-vertical connector reminders. Same three Inbox queries as My work counts; never `getLegalPortfolio`. Not Legal Home Variation B.
 - R63. **SaaS fulfillment after kickoff** — Legal `fulfillment.kickoff` required first (KD36). Owner then sets KD37 status + optional comment for owned SaaS verticals. **Data** cluster is read-only automatic.
 - R64. **Fulfillment comment** — body in correspondence / queue-as-table; audit metadata only (actor, timestamp, action, request id, vertical id). No PII in logs.
 - R65. **Command palette for owners** — mount ⌘K for `data_owner` with Requests + Actions; omit People (KD38).
@@ -315,7 +315,7 @@ flowchart TB
   | Step | Anchor | Route | Visible to | Popover explains (draft) |
   |------|--------|-------|------------|--------------------------|
   | 1 | **Connectors** | `/owner/connectors` | `data_owner`, `admin`, `super_admin` | Manage your vertical systems — mode, upload refresh, credential rotation, cadence. |
-  | 2 | **My work** | `/` | `data_owner` only (non-ops nav) | Home for your assigned connector and disposition work. |
+  | 2 | **Home** | `/` | `data_owner` only (non-ops nav) | Home for your assigned vertical — matching, fulfillment after Legal kickoff, and connectors. |
   | 2′ | **Pipeline** (ops) | `/ops/drop-pipeline` | `super_admin` / ops roles only | DROP pipeline health — deferred ops tour variant (OQ15); **not** in v1 owner chain. |
   | 3 | **Requests** | `/requests` | all authenticated | Open privacy requests; request detail holds the **journey workbench** (per-vertical matching/fulfillment) when that vertical is live. |
   | 4 | **Inbox** | `/requests/needs-attention` | all authenticated | Items needing attention — triage queue. |
@@ -909,9 +909,9 @@ Disjoint file ownership for up to 10 implementers — see Unit Index `files touc
 - **Verification:** targeted pytest on the new tests
 - **Dependencies:** U3; existing `fulfillment.kickoff`
 
-### U18. Owner Inbox Fulfillment + My work counts
+### U18. Owner Inbox Fulfillment + Home counts
 
-- **Goal:** Data-owner Inbox adds Fulfillment tab; My work shows matching, assigned, fulfillment-waiting, connector action-required (KD35).
+- **Goal:** Data-owner Inbox adds Fulfillment tab; Home shows matching, assigned, fulfillment-waiting, connector action-required (KD35 / R62).
 - **Requirements:** R61, R62, R68; KD35, KD36
 - **Files:** Modify `clients/web/src/routes/requests/needs-attention.tsx`, `clients/web/src/routes/index.tsx`; `DATA_OWNER_INBOX_KIND_TABS`
 - **Approach:** Tabs Matching · Fulfillment · Tasks. Fulfillment pane: KD37 status updater + comment composer (required status, optional comment). Data cluster read-only “Automatic”. Do not render Legal chips.

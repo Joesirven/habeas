@@ -84,6 +84,7 @@ import {
   AttemptRow,
   MatchedContactsUnavailableCallout,
   MatchingReviewPanel,
+  OwnerFulfillmentStatusPanel,
   fetchMatchingDetailOptional,
   formatMatchedContactsSummary,
   ownerDropStatusLabel,
@@ -1992,6 +1993,16 @@ export function RequestDetailBody({
   const journey = journeyQuery.data
   const matching = matchingQuery.data
   const attentionItem = attentionQuery.data
+
+  useEffect(() => {
+    if (
+      matchingPersona === 'data_owner' &&
+      matching?.review_status === 'pending' &&
+      Boolean(matching.approval_id)
+    ) {
+      setTab('matching')
+    }
+  }, [matchingPersona, matching?.review_status, matching?.approval_id])
   const intakeSource = journey?.intake_source ?? requestQuery.data?.intake_source ?? 'manual'
   const displayLabel = requestQuery.data?.display_label
   const requestType = requestQuery.data?.request_type ?? null
@@ -2219,58 +2230,71 @@ export function RequestDetailBody({
         </TabsContent>
         <TabsContent value="fulfillment" className="mt-0 px-4 py-4">
           <div className="space-y-4">
-            {workbench && (isSuperAdmin || isAdmin || legalAdmin) ? (
+            {matchingPersona === 'data_owner' ? (
+              <OwnerFulfillmentStatusPanel
+                requestId={requestId}
+                cluster={workbench?.fulfillment_cluster ?? []}
+                assignedVerticals={me?.verticals}
+                assignedLabels={me?.assigned_vertical_labels}
+                canSubmit={role === 'data_owner'}
+              />
+            ) : null}
+            {workbench && matchingPersona !== 'data_owner' && (isSuperAdmin || isAdmin || legalAdmin) ? (
               <FulfillmentGateControls
                 requestId={requestId}
                 rows={workbench.fulfillment_cluster}
                 onInvalidate={invalidateAll}
               />
             ) : null}
-            <AccessHandoffPanel
-              requestId={requestId}
-              artifact={artifactQuery.data}
-              isPending={artifactQuery.isPending}
-              isError={artifactQuery.isError}
-              canMutate={Boolean(isSuperAdmin || isAdmin)}
-              busy={deliveryMutation.isPending}
-              onCopyUrl={() => {
-                const url =
-                  artifactQuery.data?.shareable_url ??
-                  artifactQuery.data?.fulfillment_artifact_uri
-                if (!url) return
-                const copyUrl = () => {
-                  void navigator.clipboard.writeText(url).then(() => {
-                    actionToast.copied('Copied URL', copyUrl)
-                  })
-                }
-                copyUrl()
-              }}
-              onSetStatus={(status) => deliveryMutation.mutate(status)}
-            />
-            <div className="space-y-1">
-              <p className="taste-micro">Identity verification</p>
-              {identityQuery.data ? (
-                <p className="text-xs text-ink-soft">
-                  Status:{' '}
-                  <span className="capitalize text-ink">{identityQuery.data.status}</span>
-                  <span className="text-mute">
-                    {' '}
-                    · {formatTimestamp(identityQuery.data.verified_at)}
-                  </span>
-                  {identityQuery.data.method ? (
-                    <span className="text-mute">
-                      {' '}
-                      · {identityQuery.data.method}
-                    </span>
-                  ) : null}
-                </p>
-              ) : (
-                <p className="text-xs text-mute">
-                  None recorded — use Identity verified in stage actions when ready.
-                </p>
-              )}
-            </div>
-            <AccessDeliveryEmailCard requestId={requestId} />
+            {matchingPersona === 'data_owner' ? null : (
+              <>
+                <AccessHandoffPanel
+                  requestId={requestId}
+                  artifact={artifactQuery.data}
+                  isPending={artifactQuery.isPending}
+                  isError={artifactQuery.isError}
+                  canMutate={Boolean(isSuperAdmin || isAdmin)}
+                  busy={deliveryMutation.isPending}
+                  onCopyUrl={() => {
+                    const url =
+                      artifactQuery.data?.shareable_url ??
+                      artifactQuery.data?.fulfillment_artifact_uri
+                    if (!url) return
+                    const copyUrl = () => {
+                      void navigator.clipboard.writeText(url).then(() => {
+                        actionToast.copied('Copied URL', copyUrl)
+                      })
+                    }
+                    copyUrl()
+                  }}
+                  onSetStatus={(status) => deliveryMutation.mutate(status)}
+                />
+                <div className="space-y-1">
+                  <p className="taste-micro">Identity verification</p>
+                  {identityQuery.data ? (
+                    <p className="text-xs text-ink-soft">
+                      Status:{' '}
+                      <span className="capitalize text-ink">{identityQuery.data.status}</span>
+                      <span className="text-mute">
+                        {' '}
+                        · {formatTimestamp(identityQuery.data.verified_at)}
+                      </span>
+                      {identityQuery.data.method ? (
+                        <span className="text-mute">
+                          {' '}
+                          · {identityQuery.data.method}
+                        </span>
+                      ) : null}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-mute">
+                      None recorded — use Identity verified in stage actions when ready.
+                    </p>
+                  )}
+                </div>
+                <AccessDeliveryEmailCard requestId={requestId} />
+              </>
+            )}
           </div>
         </TabsContent>
         <TabsContent value="matching" className="mt-0 px-4 py-4">
@@ -2538,7 +2562,7 @@ export function RequestDetailOverlay({
             <RequestDetailBody
               requestId={requestId}
               variant="overlay"
-              defaultTab="fulfillment"
+              defaultTab={ownerLanguage ? 'matching' : 'fulfillment'}
               seedRequest={seedRequest}
             />
           </div>

@@ -5,6 +5,7 @@ import type {
   IntegrationSystemId,
   MatchingAttemptRow,
   MePayload,
+  NeedsAttentionItem,
 } from './api'
 
 /** Upload-only systems — no Live credential invite (KD14). */
@@ -121,6 +122,74 @@ const CONNECTOR_ACTION_REMINDER_CODES = new Set([
   'rotation_overdue',
   'wizard_incomplete',
 ])
+
+/** Assigned vertical labels for owner Home — catalog names first, then ids. */
+export function ownerAssignedVerticalSummary(
+  labels?: { vertical_id: string; display_label: string }[] | null,
+  verticals?: string[] | null,
+): string {
+  const named = (labels ?? [])
+    .map((entry) => entry.display_label.trim())
+    .filter(Boolean)
+  if (named.length) return named.join(' · ')
+  const ids = (verticals ?? [])
+    .map((id) => id.trim().replaceAll('_', ' '))
+    .filter(Boolean)
+  if (ids.length) return ids.join(' · ')
+  return 'No vertical assigned'
+}
+
+export type OwnerHomeQueueLane = 'matching' | 'fulfillment'
+
+export type OwnerHomeQueueRow = {
+  requestId: string
+  title: string
+  lane: OwnerHomeQueueLane
+  receivedAt: string | null
+}
+
+export function ownerHomeItemTitle(
+  item: Pick<NeedsAttentionItem, 'match_type'>,
+  lane: OwnerHomeQueueLane,
+): string {
+  if (lane === 'fulfillment') return 'Fulfillment'
+  if (item.match_type === 'single_match') return 'Confirm match'
+  if (item.match_type === 'multi_match') return 'Multi-person'
+  if (item.match_type === 'not_found') return 'Not a match'
+  return 'Matching review'
+}
+
+/** Recent matching + fulfillment rows for owner Home — title first, newest first. */
+export function ownerHomeQueueRows(options: {
+  matching: NeedsAttentionItem[]
+  fulfillment: NeedsAttentionItem[]
+  limit?: number
+}): OwnerHomeQueueRow[] {
+  const limit = options.limit ?? 8
+  const rows: OwnerHomeQueueRow[] = []
+  for (const item of options.matching) {
+    rows.push({
+      requestId: item.request_id,
+      title: ownerHomeItemTitle(item, 'matching'),
+      lane: 'matching',
+      receivedAt: item.received_at ?? item.requested_at,
+    })
+  }
+  for (const item of options.fulfillment) {
+    rows.push({
+      requestId: item.request_id,
+      title: ownerHomeItemTitle(item, 'fulfillment'),
+      lane: 'fulfillment',
+      receivedAt: item.received_at ?? item.requested_at,
+    })
+  }
+  rows.sort((left, right) => {
+    const leftTime = left.receivedAt ? Date.parse(left.receivedAt) : 0
+    const rightTime = right.receivedAt ? Date.parse(right.receivedAt) : 0
+    return rightTime - leftTime
+  })
+  return rows.slice(0, limit)
+}
 
 /** `/me` reminders + wizard flag — never invent a count when `me` is missing. */
 export function ownerConnectorActionRequiredCount(
@@ -390,7 +459,8 @@ export type OverlayConnectorCallout = {
 }
 
 export function isDataCatalogVertical(verticalId: string | null | undefined): boolean {
-  return (verticalId ?? '').trim().toLowerCase() === DATA_CATALOG_VERTICAL_ID
+  const id = (verticalId ?? '').trim().toLowerCase()
+  return id === DATA_CATALOG_VERTICAL_ID || id === 'cassandra'
 }
 
 export function ownerConnectorsSearch(

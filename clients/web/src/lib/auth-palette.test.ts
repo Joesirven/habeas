@@ -66,7 +66,7 @@ describe('owner command palette (R65 leftovers)', () => {
       'action-inbox-tasks',
       'action-connectors',
     ])
-    expect(labels).toContain('Go to My work')
+    expect(labels).toContain('Go to Home')
     expect(labels).not.toContain('Inbox · Unassigned')
     expect(labels).not.toContain('Inbox · Notice')
     expect(labels).not.toContain('Inbox · Delivery')
@@ -75,9 +75,9 @@ describe('owner command palette (R65 leftovers)', () => {
 
     const home = items.find((item) => item.id === 'action-home')
     home?.onSelect()
-    expect(navigate).toHaveBeenCalledWith({ to: '/' })
+    expect(navigate).toHaveBeenCalledWith({ to: '/', search: { tab: 'pipeline' } })
     expect(navigate).not.toHaveBeenCalledWith(
-      expect.objectContaining({ search: { tab: 'pipeline' } }),
+      expect.objectContaining({ to: '/ops/drop-pipeline' }),
     )
   })
 })

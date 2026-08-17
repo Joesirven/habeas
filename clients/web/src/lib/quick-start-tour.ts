@@ -42,20 +42,11 @@ const CONNECTORS_STEP: OwnerQuickStartTourStep = {
   exact: true,
 }
 
-const MY_WORK_STEP: OwnerQuickStartTourStep = {
-  id: 'my-work',
-  navLabel: 'My work',
-  title: 'My work',
-  body: 'Home for your assigned connector and disposition work.',
-  path: '/',
-  exact: true,
-}
-
 const HOME_STEP: OwnerQuickStartTourStep = {
   id: 'my-work',
   navLabel: 'Home',
   title: 'Home',
-  body: 'Home for your assigned connector and disposition work.',
+  body: 'Home for your assigned vertical — matching, fulfillment after Legal kickoff, and connectors.',
   path: '/',
   exact: true,
 }
@@ -104,10 +95,10 @@ const OPS_CONNECTIONS_STEP: OwnerQuickStartTourStep = {
   path: '/ops/connections',
 }
 
-/** F9 v1 owner chain (default): Connectors → My work → Requests → Inbox → Docs. */
+/** F9 v1 owner chain (default): Connectors → Home → Requests → Inbox → Docs. */
 export const OWNER_QUICK_START_TOUR_STEPS: readonly OwnerQuickStartTourStep[] = [
   CONNECTORS_STEP,
-  MY_WORK_STEP,
+  HOME_STEP,
   REQUESTS_STEP,
   INBOX_STEP,
   DOCS_STEP,
@@ -131,7 +122,7 @@ export function ownerQuickStartTourStepsForRole(
   }
 
   if (role === 'data_owner') {
-    steps.push(MY_WORK_STEP)
+    steps.push(HOME_STEP)
     steps.push(REQUESTS_STEP)
   } else if (isLegalAdminPersona(role)) {
     steps.push(HOME_STEP)

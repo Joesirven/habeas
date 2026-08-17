@@ -1321,7 +1321,7 @@ function OwnerConnectorsBody({
         </div>
         <Button asChild size="sm" variant="outline">
           <Link to="/" search={{ tab: 'pipeline' }}>
-            Back to My work
+            Back to Home
           </Link>
         </Button>
       </section>

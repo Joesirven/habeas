@@ -15,6 +15,7 @@ import {
   type RequestRecord,
 } from '@/lib/api'
 import { canAccessLegalSurfaces, canAccessOpsSurfaces, useMe } from '@/lib/auth'
+import type { LegalInboxFilter } from '@/router'
 
 /** Must match `OPEN_LEGAL_SETTINGS_EVENT` in LegalSettingsSheet (avoid importing that sheet here). */
 const OPEN_LEGAL_SETTINGS_EVENT = 'open-legal-settings'
@@ -69,14 +70,14 @@ export function staticActions(
     onClose()
   }
 
-  const legalInbox = (filter?: string) => {
+  const legalInbox = (filter?: LegalInboxFilter) => {
     navigate({
       to: '/requests/needs-attention',
       search: filter ? { filter } : {},
     })
   }
 
-  const ownerInbox = (kind?: string) => {
+  const ownerInbox = (kind?: 'matching' | 'fulfillment' | 'pending_tasks') => {
     navigate({
       to: '/requests/needs-attention',
       search: kind ? { kind } : {},
@@ -87,12 +88,8 @@ export function staticActions(
     {
       id: 'action-home',
       group: 'actions',
-      label: ownerSurfaces ? 'Go to My work' : 'Go to Home',
-      onSelect: finish(() =>
-        ownerSurfaces
-          ? navigate({ to: '/' })
-          : navigate({ to: '/', search: { tab: 'pipeline' } }),
-      ),
+      label: 'Go to Home',
+      onSelect: finish(() => navigate({ to: '/', search: { tab: 'pipeline' } })),
     },
     {
       id: 'action-requests',

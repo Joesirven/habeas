@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -15,15 +15,18 @@ import {
   DROP_RESPONSE_STATUS_OPTIONS,
   getDropMatchingResultDetail,
   listConnections,
+  patchFulfillmentOwnerStatus,
   suggestedDropResponseStatus,
   type ConnectorReminder,
   type DropResponseStatusCode,
   type FulfillmentArtifact,
+  type FulfillmentOwnerStatus,
   type JourneyStage,
   type MatchingAttemptRow,
   type MatchingResultDetail,
   type MatchedPersonContact,
   type RunTimelineStep,
+  type WorkbenchVerticalRow,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
 import {
@@ -37,6 +40,7 @@ import {
   type MatchingConnectorGate,
 } from '@/lib/connection-display'
 import { actionReasonLabel } from '@/lib/legalJourneyLabels'
+import { groupInboxConnectorNotifications } from '@/lib/inbox-batch-status'
 import { cn } from '@/lib/utils'
 
 /**
@@ -1171,6 +1175,73 @@ export function MatchingConnectorGateBanner({
   )
 }
 
+/** Grouped connector reminders + matching gate — one row per reminder code / gate status. */
+export function InboxConnectorNotificationsPanel({
+  reminders,
+  gate,
+  compact = true,
+  showOwnerLink = false,
+  connectorsVerticalId = null,
+}: {
+  reminders?: ConnectorReminder[] | null
+  gate?: MatchingConnectorGate | null
+  compact?: boolean
+  showOwnerLink?: boolean
+  connectorsVerticalId?: string | null
+}) {
+  const groups = useMemo(
+    () => groupInboxConnectorNotifications({ reminders, gate }),
+    [reminders, gate],
+  )
+  const showConnectorsCta =
+    showOwnerLink && overlayCalloutShowsOwnerCta('data_owner', connectorsVerticalId)
+
+  if (groups.length === 0) return null
+
+  return (
+    <div
+      className="space-y-2"
+      role="region"
+      aria-label="Inbox connector notifications"
+    >
+      {groups.map((group) => (
+        <div
+          key={group.key}
+          className={cn(
+            'rounded-md border border-red-300/80 bg-red-50/80',
+            compact ? 'px-2 py-1.5' : 'px-2.5 py-2',
+          )}
+          role="status"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={group.chipVariant} className="normal-case tracking-normal">
+              {group.chipLabel}
+            </Badge>
+            <span className="text-[0.7rem] font-medium text-red-950">{group.title}</span>
+            {group.reminders.length > 1 ? (
+              <span className="text-[0.65rem] tabular-nums text-red-900/80">
+                {group.reminders.length} verticals
+              </span>
+            ) : null}
+          </div>
+          <p className="mt-1 text-[0.65rem] leading-snug text-red-900/90">
+            {group.description}
+          </p>
+          {showConnectorsCta ? (
+            <Link
+              to="/owner/connectors"
+              search={ownerConnectorsSearch(connectorsVerticalId)}
+              className="mt-1 inline-block text-[0.65rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
+            >
+              Open connectors
+            </Link>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 /** Attempt audit first; ops connections or owner reminders when attempts lack gate fields. */
 export function useMatchingConnectorGate(options: {
   attempts?: MatchingAttemptRow[] | null
@@ -1684,6 +1755,230 @@ export function MatchingReviewPanel({
           </StatusAccordion>
         </>
       ) : null}
+    </div>
+  )
+}
+
+const AUTOMATIC_FULFILLMENT_VERTICALS = new Set(['data', 'cassandra'])
+
+const OWNER_FULFILLMENT_STATUS_OPTIONS: {
+  value: FulfillmentOwnerStatus
+  label: string
+}[] = [
+  { value: 'in_progress', label: 'In progress' },
+  { value: 'completed_in_source', label: 'Done in source' },
+  { value: 'blocked', label: 'Blocked' },
+  { value: 'assign_to_legal', label: 'Assign to legal' },
+]
+
+const OWNER_STATUS_SUCCESS_TITLE: Record<FulfillmentOwnerStatus, string> = {
+  in_progress: 'Fulfillment marked in progress',
+  completed_in_source: 'Marked done in source',
+  blocked: 'Fulfillment marked blocked',
+  assign_to_legal: 'Assigned to legal',
+}
+
+export function isAutomaticFulfillmentVertical(vertical: string | null | undefined): boolean {
+  return AUTOMATIC_FULFILLMENT_VERTICALS.has((vertical ?? '').trim().toLowerCase())
+}
+
+export function ownerStatusErrorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error ?? '')
+  if (/kickoff_not_approved/i.test(raw)) {
+    return 'Legal has not kicked off this vertical yet.'
+  }
+  if (/data_vertical_automatic/i.test(raw)) {
+    return 'The Data vertical fulfills automatically.'
+  }
+  if (/vertical access denied/i.test(raw)) {
+    return 'You are not assigned to this vertical.'
+  }
+  return actionToast.safeErrorMessage(error)
+}
+
+export function ownerFulfillmentVerticalRows(options: {
+  cluster: WorkbenchVerticalRow[]
+  assignedVerticals?: string[]
+  assignedLabels?: { vertical_id: string; display_label: string }[]
+}): { vertical: string; label: string; kickedOff: boolean }[] {
+  const byId = new Map<string, { vertical: string; label: string; kickedOff: boolean }>()
+  for (const row of options.cluster) {
+    const id = row.vertical.trim()
+    if (!id) continue
+    byId.set(id, {
+      vertical: id,
+      label: row.label || id.replaceAll('_', ' '),
+      kickedOff: row.kicked_off,
+    })
+  }
+  const labels = new Map(
+    (options.assignedLabels ?? []).map((entry) => [entry.vertical_id, entry.display_label]),
+  )
+  for (const vertical of options.assignedVerticals ?? []) {
+    const id = vertical.trim()
+    if (!id || byId.has(id)) continue
+    byId.set(id, {
+      vertical: id,
+      label: labels.get(id) || id.replaceAll('_', ' '),
+      kickedOff: false,
+    })
+  }
+  return [...byId.values()]
+}
+
+export function OwnerFulfillmentStatusPanel({
+  requestId,
+  cluster,
+  assignedVerticals,
+  assignedLabels,
+  canSubmit,
+}: {
+  requestId: string
+  cluster: WorkbenchVerticalRow[]
+  assignedVerticals?: string[]
+  assignedLabels?: { vertical_id: string; display_label: string }[]
+  canSubmit: boolean
+}) {
+  const queryClient = useQueryClient()
+  const rows = ownerFulfillmentVerticalRows({
+    cluster,
+    assignedVerticals,
+    assignedLabels,
+  })
+  const [statusByVertical, setStatusByVertical] = useState<
+    Record<string, FulfillmentOwnerStatus | ''>
+  >({})
+  const [commentByVertical, setCommentByVertical] = useState<Record<string, string>>({})
+
+  const submitMutation = useMutation({
+    mutationFn: (input: {
+      vertical: string
+      status: FulfillmentOwnerStatus
+      comment?: string
+    }) =>
+      patchFulfillmentOwnerStatus(requestId, input.vertical, {
+        status: input.status,
+        ...(input.comment ? { comment: input.comment } : {}),
+      }),
+    onSuccess: async (_data, variables) => {
+      setCommentByVertical((previous) => ({ ...previous, [variables.vertical]: '' }))
+      actionToast.success({ title: OWNER_STATUS_SUCCESS_TITLE[variables.status] })
+      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+    },
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Could not update fulfillment',
+        description: ownerStatusErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => submitMutation.mutate(variables),
+        },
+      })
+    },
+  })
+
+  if (rows.length === 0) {
+    return (
+      <p className="text-[0.7rem] text-ink-soft">
+        No owned fulfillment verticals on this request yet.
+      </p>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      {rows.map((row) => {
+        const automatic = isAutomaticFulfillmentVertical(row.vertical)
+        const waitingOnKickoff = !automatic && !row.kickedOff
+        const status = statusByVertical[row.vertical] ?? ''
+        const comment = commentByVertical[row.vertical] ?? ''
+        const pending =
+          submitMutation.isPending && submitMutation.variables?.vertical === row.vertical
+        const disabled = !canSubmit || pending || waitingOnKickoff
+        return (
+          <div
+            key={row.vertical}
+            className="space-y-2 rounded-md border border-line/80 bg-paper px-2.5 py-2"
+          >
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <p className="text-[0.7rem] font-medium capitalize text-ink">{row.label}</p>
+              {automatic ? (
+                <Badge variant="default" className="normal-case tracking-normal">
+                  Automatic
+                </Badge>
+              ) : waitingOnKickoff ? (
+                <Badge variant="wait" className="normal-case tracking-normal">
+                  Waiting on Legal
+                </Badge>
+              ) : null}
+            </div>
+            {automatic ? (
+              <p className="text-[0.65rem] text-ink-soft">
+                Data fulfills automatically after Legal kickoff. No owner status to set.
+              </p>
+            ) : waitingOnKickoff ? (
+              <p className="text-[0.65rem] text-ink-soft">
+                Legal has not kicked off this vertical yet.
+              </p>
+            ) : (
+              <>
+                <label className="flex flex-col gap-1 text-[0.65rem] text-ink-soft">
+                  Status
+                  <select
+                    className="rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
+                    value={status}
+                    onChange={(event) =>
+                      setStatusByVertical((previous) => ({
+                        ...previous,
+                        [row.vertical]: event.target.value as FulfillmentOwnerStatus | '',
+                      }))
+                    }
+                    disabled={disabled}
+                    aria-label={`${row.label} fulfillment status`}
+                    required
+                  >
+                    <option value="">Choose status</option>
+                    {OWNER_FULFILLMENT_STATUS_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <textarea
+                  className="min-h-[2.5rem] max-h-20 w-full resize-y rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
+                  value={comment}
+                  onChange={(event) =>
+                    setCommentByVertical((previous) => ({
+                      ...previous,
+                      [row.vertical]: event.target.value,
+                    }))
+                  }
+                  placeholder="Optional comment — stored as correspondence, not in audit."
+                  aria-label={`${row.label} fulfillment comment`}
+                  maxLength={2000}
+                  disabled={disabled}
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={disabled || !status}
+                  onClick={() => {
+                    if (!status) return
+                    submitMutation.mutate({
+                      vertical: row.vertical,
+                      status,
+                      comment: comment.trim() || undefined,
+                    })
+                  }}
+                >
+                  {pending ? 'Saving…' : 'Update status'}
+                </Button>
+              </>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
