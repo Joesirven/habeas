@@ -108,6 +108,11 @@ const REMINDER_CODE_COPY: Record<string, { title: string; description: string }>
     title: 'Credential rotation overdue',
     description: 'Live credentials are past the rotation window. Matching stays gated until you rotate.',
   },
+  sheets_refresh_stale: {
+    title: 'Google Sheet refresh needed',
+    description:
+      'A new intake batch arrived and this sheet is marked volatile. Refresh (at most every 12 hours) so matching can run. Login is not blocked.',
+  },
 }
 
 function fallbackReminderCopy(
@@ -412,6 +417,14 @@ export function cadenceDaysFromMetadata(
     if (Number.isFinite(parsed) && parsed >= 1) return parsed
   }
   return DEFAULT_OWNER_CADENCE_DAYS
+}
+
+export function refreshPolicyFromMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): 'static' | 'volatile' | null {
+  const raw = metadata?.refresh_policy
+  if (raw === 'static' || raw === 'volatile') return raw
+  return null
 }
 
 export function activeModeFromMetadata(

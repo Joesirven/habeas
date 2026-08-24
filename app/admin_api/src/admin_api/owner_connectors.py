@@ -57,7 +57,8 @@ class ModeBody(BaseModel):
 
 
 class CadenceBody(BaseModel):
-    cadence_days: int = Field(ge=1, le=3650)
+    cadence_days: int | None = Field(default=None, ge=1, le=3650)
+    refresh_policy: str | None = Field(default=None, max_length=16)
 
 
 class ConnectorSystemOut(BaseModel):
@@ -700,10 +701,22 @@ async def set_system_cadence(
             system=system,
             created_by=principal.email,
         )
+        patch: dict[str, Any] = {"vertical_id": vertical_id}
+        policy = (body.refresh_policy or "").strip().lower()
+        if policy:
+            if policy not in {"static", "volatile"}:
+                raise HTTPException(status_code=422, detail="invalid_refresh_policy")
+            patch["refresh_policy"] = policy
+            patch["min_refresh_interval_hours"] = 12 if policy == "volatile" else 0
+            patch["cadence_days"] = 1 if policy == "volatile" else 3650
+        elif body.cadence_days is not None:
+            patch["cadence_days"] = body.cadence_days
+        else:
+            raise HTTPException(status_code=422, detail="cadence_days required")
         updated = await _merge_metadata(
             conn,
             UUID(str(connection.id)),
-            {"cadence_days": body.cadence_days, "vertical_id": vertical_id},
+            patch,
         )
         if updated is None:
             raise HTTPException(status_code=404, detail="connection not found")

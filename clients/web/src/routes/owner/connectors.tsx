@@ -40,6 +40,7 @@ import {
   buildModeStepCards,
   buildReminderBannerItems,
   cadenceDaysFromMetadata,
+  refreshPolicyFromMetadata,
   delimiterValueFromKey,
   displayStatusChip,
   filterRemindersForOwnerConnectorsPage,
@@ -757,6 +758,9 @@ function ConnectorWizard({
   const [cadenceDays, setCadenceDays] = useState(
     String(cadenceDaysFromMetadata(connector.metadata)),
   )
+  const [refreshPolicy, setRefreshPolicy] = useState<'static' | 'volatile' | null>(
+    () => refreshPolicyFromMetadata(connector.metadata),
+  )
   const [file, setFile] = useState<File | null>(null)
   const [uploadOk, setUploadOk] = useState(false)
 
@@ -796,15 +800,17 @@ function ConnectorWizard({
   })
 
   const cadenceMutation = useMutation({
-    mutationFn: (days: number) =>
-      setOwnerConnectorCadence(verticalId, connector.system, {
-        cadence_days: days,
-      }),
-    onSuccess: () => {
+    mutationFn: (input: { cadence_days?: number; refresh_policy?: 'static' | 'volatile' }) =>
+      setOwnerConnectorCadence(verticalId, connector.system, input),
+    onSuccess: (_data, input) => {
       invalidate()
       actionToast.success({
         title: 'Cadence saved',
-        description: `Refresh every ${cadenceDays} days.`,
+        description: input.refresh_policy
+          ? input.refresh_policy === 'volatile'
+            ? 'Volatile sheet — matching may wait for a refresh (12 hour minimum).'
+            : 'Static sheet — hash index once unless you reconnect.'
+          : `Refresh every ${cadenceDays} days.`,
       })
       setStep('confirm')
     },
@@ -815,8 +821,12 @@ function ConnectorWizard({
         action: {
           label: 'Retry',
           onClick: () => {
+            if (connector.system === 'google_sheets' && refreshPolicy) {
+              cadenceMutation.mutate({ refresh_policy: refreshPolicy })
+              return
+            }
             const days = Number.parseInt(cadenceDays, 10)
-            if (Number.isFinite(days) && days >= 1) cadenceMutation.mutate(days)
+            if (Number.isFinite(days) && days >= 1) cadenceMutation.mutate({ cadence_days: days })
           },
         },
       })
@@ -1045,21 +1055,72 @@ function ConnectorWizard({
 
       {step === 'cadence' ? (
         <div className="space-y-3">
-          <p className="text-xs text-mute">
-            How often should Habeas expect a refresh for this system? Soft reminders
-            appear when approaching or past this window; matching hard-gates when stale.
-          </p>
-          <label className="block space-y-1 text-xs">
-            <span className="font-medium text-ink">Cadence (days)</span>
-            <input
-              type="number"
-              min={1}
-              max={3650}
-              className={FIELD_CLASS}
-              value={cadenceDays}
-              onChange={(event) => setCadenceDays(event.target.value)}
-            />
-          </label>
+          {connector.system === 'google_sheets' ? (
+            <>
+              <p className="text-xs text-mute">
+                How often does this sheet’s data change? Matching for this vertical waits
+                until a refresh when the policy requires it (minimum 12 hours between
+                required refreshes).
+              </p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => setRefreshPolicy('static')}
+                  className={cn(
+                    'rounded-md border p-3 text-left transition-colors',
+                    refreshPolicy === 'static'
+                      ? 'border-habeas-navy bg-canvas ring-1 ring-habeas-navy'
+                      : 'border-line hover:border-slate-300',
+                  )}
+                >
+                  <p className="text-sm font-medium text-ink">Static</p>
+                  <p className="mt-1 text-xs text-mute">
+                    Rarely or never changes. Connect and build the hash index once.
+                  </p>
+                  <Badge variant="ok" className="mt-2">
+                    Matching stays ready
+                  </Badge>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRefreshPolicy('volatile')}
+                  className={cn(
+                    'rounded-md border p-3 text-left transition-colors',
+                    refreshPolicy === 'volatile'
+                      ? 'border-habeas-navy bg-canvas ring-1 ring-habeas-navy'
+                      : 'border-line hover:border-slate-300',
+                  )}
+                >
+                  <p className="text-sm font-medium text-ink">Volatile</p>
+                  <p className="mt-1 text-xs text-mute">
+                    Can change (including daily). New intake batches may require a refresh
+                    before matching — not more often than every 12 hours.
+                  </p>
+                  <Badge variant="wait" className="mt-2">
+                    May block matching
+                  </Badge>
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="text-xs text-mute">
+                How often should Habeas expect a refresh for this system? Soft reminders
+                appear when approaching or past this window; matching hard-gates when stale.
+              </p>
+              <label className="block space-y-1 text-xs">
+                <span className="font-medium text-ink">Cadence (days)</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={3650}
+                  className={FIELD_CLASS}
+                  value={cadenceDays}
+                  onChange={(event) => setCadenceDays(event.target.value)}
+                />
+              </label>
+            </>
+          )}
           <div className="flex flex-wrap justify-between gap-2">
             <Button
               type="button"
@@ -1074,6 +1135,17 @@ function ConnectorWizard({
               size="sm"
               disabled={cadenceMutation.isPending}
               onClick={() => {
+                if (connector.system === 'google_sheets') {
+                  if (!refreshPolicy) {
+                    actionToast.warning({
+                      title: 'Choose a refresh policy',
+                      description: 'Pick Static or Volatile before continuing.',
+                    })
+                    return
+                  }
+                  cadenceMutation.mutate({ refresh_policy: refreshPolicy })
+                  return
+                }
                 const days = Number.parseInt(cadenceDays, 10)
                 if (!Number.isFinite(days) || days < 1) {
                   actionToast.warning({
@@ -1082,7 +1154,7 @@ function ConnectorWizard({
                   })
                   return
                 }
-                cadenceMutation.mutate(days)
+                cadenceMutation.mutate({ cadence_days: days })
               }}
             >
               {cadenceMutation.isPending ? 'Saving…' : 'Continue'}
@@ -1107,7 +1179,15 @@ function ConnectorWizard({
             ) : null}
             {' '}
             · Cadence:{' '}
-            <span className="font-medium text-ink">{cadenceDays} days</span>
+            <span className="font-medium text-ink">
+              {connector.system === 'google_sheets'
+                ? refreshPolicy === 'volatile'
+                  ? 'Volatile (12h floor)'
+                  : refreshPolicy === 'static'
+                    ? 'Static'
+                    : '—'
+                : `${cadenceDays} days`}
+            </span>
           </p>
           <div className="flex flex-wrap justify-between gap-2">
             <Button

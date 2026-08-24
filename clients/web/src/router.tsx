@@ -25,6 +25,7 @@ import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
 import { RequestsSlasPage } from '@/routes/requests/slas'
 import { DocsPage } from '@/routes/docs'
+import { SheetsCadenceLabPage } from '@/routes/dev/sheets-cadence-lab'
 import { HOME_WINDOWS, type HomeWindow } from '@/components/legal/home/DateToolbar'
 
 export const PIPELINE_TABS = [
@@ -626,6 +627,12 @@ const docsRoute = createRoute({
   component: DocsPage,
 })
 
+const sheetsCadenceLabRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/dev/sheets-cadence-lab',
+  component: SheetsCadenceLabPage,
+})
+
 const requestDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests/$requestId',
@@ -838,6 +845,7 @@ const routeTree = rootRoute.addChildren([
   requestsSlasRoute,
   manualRequestRoute,
   docsRoute,
+  sheetsCadenceLabRoute,
   requestDetailRoute,
   matchingReviewRoute,
   opsDashboardRoute,

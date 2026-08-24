@@ -367,3 +367,78 @@ class TestEvaluateConnectionReminder:
         }
         assert set(payload) == {"code", "system", "vertical_id", "severity"}
         assert "@" not in str(payload)
+
+
+def _sheets_conn(
+    *,
+    policy: str = "volatile",
+    last_refresh_hours_ago: float | None = 24,
+    intake_hours_ago: float | None = 1,
+    wizard_completed: bool = True,
+) -> _Conn:
+    metadata: dict[str, Any] = {
+        "active_mode": "live",
+        "refresh_policy": policy,
+        "min_refresh_interval_hours": 12,
+    }
+    if wizard_completed:
+        metadata["wizard_completed_at"] = (_NOW - timedelta(days=10)).isoformat()
+    if last_refresh_hours_ago is not None:
+        metadata["last_successful_refresh_at"] = (
+            _NOW - timedelta(hours=last_refresh_hours_ago)
+        ).isoformat()
+        metadata["credentials_rotated_at"] = metadata["last_successful_refresh_at"]
+    if intake_hours_ago is not None:
+        metadata["last_intake_batch_at"] = (
+            _NOW - timedelta(hours=intake_hours_ago)
+        ).isoformat()
+    return _Conn(
+        system="google_sheets",
+        status="connected",
+        last_test_ok=True,
+        metadata=metadata,
+    )
+
+
+class TestSheetsRefreshPolicy:
+    def test_volatile_stale_after_intake_when_refresh_older_than_12h(self) -> None:
+        gate = evaluate_connection_gate(
+            _sheets_conn(last_refresh_hours_ago=13, intake_hours_ago=1),
+            now=_NOW,
+        )
+        assert gate.allowed is False
+        assert gate.code == GateCode.SHEETS_REFRESH_STALE
+        assert gate.display_status == DisplayStatus.NEEDS_REFRESH
+
+    def test_same_day_second_batch_does_not_stale_within_12h(self) -> None:
+        from habeas_privacy_core.connections.freshness import should_stamp_intake_batch
+
+        meta = _sheets_conn(last_refresh_hours_ago=3, intake_hours_ago=None).metadata
+        assert should_stamp_intake_batch(meta, now=_NOW) is False
+        gate = evaluate_connection_gate(
+            _sheets_conn(last_refresh_hours_ago=3, intake_hours_ago=1),
+            now=_NOW,
+        )
+        assert gate.allowed is True
+        assert gate.code == GateCode.OK
+
+    def test_static_never_stales_on_intake(self) -> None:
+        from habeas_privacy_core.connections.freshness import should_stamp_intake_batch
+
+        conn = _sheets_conn(
+            policy="static",
+            last_refresh_hours_ago=48,
+            intake_hours_ago=1,
+        )
+        assert should_stamp_intake_batch(conn.metadata, now=_NOW) is False
+        gate = evaluate_connection_gate(conn, now=_NOW)
+        assert gate.allowed is True
+
+    def test_volatile_reminder_when_stale(self) -> None:
+        reminder = evaluate_connection_reminder(
+            _sheets_conn(last_refresh_hours_ago=14, intake_hours_ago=1),
+            vertical_id="bizdev",
+            now=_NOW,
+        )
+        assert reminder is not None
+        assert reminder.code == ReminderCode.SHEETS_REFRESH_STALE

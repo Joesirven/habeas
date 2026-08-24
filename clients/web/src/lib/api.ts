@@ -2653,7 +2653,7 @@ export function setOwnerConnectorMode(
 export function setOwnerConnectorCadence(
   verticalId: string,
   system: string,
-  body: { cadence_days: number },
+  body: { cadence_days?: number; refresh_policy?: 'static' | 'volatile' },
 ) {
   return fetchAdminApi<OwnerConnectorSystem>(
     `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/cadence`,
