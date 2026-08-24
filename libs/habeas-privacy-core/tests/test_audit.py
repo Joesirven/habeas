@@ -54,6 +54,27 @@ def test_redact_payload_scrubs_known_patterns():
     assert "[REDACTED]" in redacted["ssn"]
 
 
+def test_redact_payload_scrubs_comment_and_notes():
+    owner_comment = "done in Mailchimp for Jane Doe"
+    payload = {
+        "status": "completed_in_source",
+        "comment": owner_comment,
+        "notes": owner_comment,
+        "arguments": {
+            "query": {},
+            "body": {"status": "completed_in_source", "comment": owner_comment},
+        },
+    }
+    redacted = redact_payload(payload)
+    assert redacted["status"] == "completed_in_source"
+    assert redacted["comment"] == "[REDACTED]"
+    assert redacted["notes"] == "[REDACTED]"
+    assert redacted["arguments"]["body"] == "[REDACTED]"
+    dumped = json.dumps(redacted)
+    assert "Jane Doe" not in dumped
+    assert owner_comment not in dumped
+
+
 def test_redact_payload_scrubs_dwids_and_consumer_id():
     payload = {
         "dwids": ["1001", "1002"],

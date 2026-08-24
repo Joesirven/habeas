@@ -5,8 +5,7 @@ import type { SplashStageProps, SplashVariantModule } from '../types'
 import './art-02.css'
 
 const LINES = [
-  { key: 'brand', text: 'HABEAS', tone: 'brand' },
-  { key: 'mid', text: 'DATA PRIVACY', tone: 'mid' },
+  { key: 'brand', text: 'CATAPRIVACY', tone: 'brand' },
   { key: 'base', text: 'PLATFORM', tone: 'base' },
 ] as const
 

@@ -4,7 +4,7 @@ import {
   isLegalAdminPersona,
   useAuth,
 } from '@/lib/auth'
-import { getLegalNeedsAttention, getNeedsAttention } from '@/lib/api'
+import { getLegalNeedsAttention, getNeedsAttention, getOwnerFulfillmentNeedsAttention } from '@/lib/api'
 
 import { useQuery } from '@tanstack/react-query'
 import { Link, useRouterState } from '@tanstack/react-router'
@@ -202,22 +202,40 @@ export function NavMenu() {
   const { role, isLoading } = useAuth()
   const showOps = canAccessOpsSurfaces(role)
   const legalAdminNav = isLegalAdminPersona(role)
-  const homeLabel = legalAdminNav ? 'Home' : 'My work'
+  const showOwnerConnectors =
+    role === 'data_owner' || role === 'admin' || role === 'super_admin'
+  const homeLabel = legalAdminNav || role === 'data_owner' ? 'Home' : 'My work'
 
   const isLegalNav = legalAdminNav
+  const isDataOwnerNav = role === 'data_owner'
   const inboxQuery = useQuery({
     queryKey: [
       'admin-api',
       'ops',
       'requests',
       'needs-attention',
-      isLegalNav ? 'legal' : 'ops',
+      isLegalNav ? 'legal' : isDataOwnerNav ? 'data-owner' : 'ops',
       'nav',
     ],
-    queryFn: () =>
-      isLegalNav
-        ? getLegalNeedsAttention({ limit: 200 })
-        : getNeedsAttention({ limit: 200, kind: 'all' }),
+    queryFn: async () => {
+      if (isLegalNav) return getLegalNeedsAttention({ limit: 200 })
+      if (isDataOwnerNav) {
+        const [matching, fulfillment] = await Promise.all([
+          getNeedsAttention({ limit: 200, kind: 'matching' }),
+          getOwnerFulfillmentNeedsAttention({ limit: 200 }),
+        ])
+        const matchingTotal = matching.total ?? matching.items.length
+        const fulfillmentTotal = fulfillment.total ?? fulfillment.items.length
+        return {
+          items: matching.items,
+          kind: matching.kind,
+          total: matchingTotal + fulfillmentTotal,
+          limit: matching.limit,
+          offset: matching.offset,
+        }
+      }
+      return getNeedsAttention({ limit: 200, kind: 'all' })
+    },
     refetchInterval: 30_000,
     staleTime: 15_000,
   })
@@ -240,6 +258,9 @@ export function NavMenu() {
         count={inboxCount}
         search={isLegalNav ? { kind: 'triage' } : undefined}
       />
+      {showOwnerConnectors ? (
+        <NavLink to="/owner/connectors" label="Connectors" exact />
+      ) : null}
       <NavLink to="/docs" label="Docs" exact />
     </nav>
   )

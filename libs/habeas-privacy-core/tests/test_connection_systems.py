@@ -4,6 +4,22 @@ from __future__ import annotations
 
 import pytest
 
+from habeas_privacy_core.connections.catalog import (
+    APPROACH_LIVE,
+    APPROACH_UPLOAD,
+    CATALOG_BINDINGS,
+    CATALOG_VERTICALS,
+    UPLOAD_TEMPLATE_OPTIONAL_HEADERS,
+    UPLOAD_TEMPLATE_REQUIRED_HEADERS,
+    VERTICAL_BIZDEV,
+    VERTICAL_DATA,
+    VERTICAL_PEOPLE_HR,
+    get_bindings_for_system,
+    get_bindings_for_vertical,
+    get_vertical,
+    is_approach_allowed,
+    list_verticals,
+)
 from habeas_privacy_core.connections.systems import (
     SYSTEM_IDS,
     CredentialInputType,
@@ -18,7 +34,18 @@ _EXPECTED_ORDER = (
     "lever",
     "auth0",
     "google_sheets",
+    "bizdev_contacts",
+    "hr_alumni",
     "cassandra",
+)
+
+_INVITE_ALLOWED_SYSTEMS = frozenset(
+    {
+        "mailchimp",
+        "paylocity",
+        "lever",
+        "auth0",
+    }
 )
 
 
@@ -42,15 +69,99 @@ class TestCatalog:
             get_system("vertica")
 
 
+class TestVerticalCatalog:
+    def test_catalog_vertical_ids_match_seed(self) -> None:
+        assert [entry.vertical_id for entry in CATALOG_VERTICALS] == [
+            "communications",
+            "people_hr",
+            "tech",
+            "bizdev",
+            "data",
+        ]
+
+    def test_data_vertical_is_view_only(self) -> None:
+        data = get_vertical(VERTICAL_DATA)
+        assert data.view_only is True
+        assert data.display_label == "Data"
+
+    def test_people_hr_bindings(self) -> None:
+        bindings = {binding.system: binding for binding in get_bindings_for_vertical(VERTICAL_PEOPLE_HR)}
+        assert set(bindings) == {"paylocity", "lever", "hr_alumni"}
+        assert bindings["hr_alumni"].allowed_approaches == frozenset({APPROACH_UPLOAD})
+        assert bindings["paylocity"].allowed_approaches == frozenset({APPROACH_UPLOAD, APPROACH_LIVE})
+
+    def test_bizdev_upload_only_binding(self) -> None:
+        bindings = get_bindings_for_vertical(VERTICAL_BIZDEV)
+        assert len(bindings) == 1
+        assert bindings[0].system == "bizdev_contacts"
+        assert bindings[0].allowed_approaches == frozenset({APPROACH_UPLOAD})
+
+    def test_is_approach_allowed(self) -> None:
+        assert is_approach_allowed("tech", "auth0", APPROACH_LIVE) is True
+        assert is_approach_allowed("bizdev", "bizdev_contacts", APPROACH_LIVE) is False
+        assert is_approach_allowed("data", "cassandra", APPROACH_UPLOAD) is False
+
+    def test_get_bindings_for_system(self) -> None:
+        mailchimp_bindings = get_bindings_for_system("mailchimp")
+        assert len(mailchimp_bindings) == 1
+        assert mailchimp_bindings[0].vertical_id == "communications"
+
+    def test_list_verticals_sorted(self) -> None:
+        verticals = list_verticals()
+        assert [entry.sort_order for entry in verticals] == sorted(entry.sort_order for entry in verticals)
+
+    def test_catalog_bindings_count(self) -> None:
+        assert len(CATALOG_BINDINGS) == 7
+
+
+class TestUploadSystems:
+    def test_bizdev_contacts_upload_only(self) -> None:
+        system = get_system("bizdev_contacts")
+        assert system.invite_allowed is False
+        assert system.credential_fields == ()
+        assert "Upload mode only" in system.trust_copy
+
+    def test_hr_alumni_upload_only(self) -> None:
+        system = get_system("hr_alumni")
+        assert system.invite_allowed is False
+        assert system.credential_fields == ()
+        assert validate_credentials(system, {}) == {}
+
+    def test_upload_template_headers(self) -> None:
+        assert UPLOAD_TEMPLATE_REQUIRED_HEADERS["bizdev_contacts"] == (
+            "first_name",
+            "last_name",
+            "email",
+        )
+        assert "phone" in UPLOAD_TEMPLATE_OPTIONAL_HEADERS["hr_alumni"]
+        assert "employee_id" in UPLOAD_TEMPLATE_OPTIONAL_HEADERS["paylocity"]
+
+
 class TestInvitePolicy:
     def test_cassandra_disallows_invites(self) -> None:
         cassandra = get_system("cassandra")
         assert cassandra.invite_allowed is False
         assert cassandra.credential_fields == ()
 
-    @pytest.mark.parametrize("system_id", _EXPECTED_ORDER[:-1])
-    def test_saas_systems_allow_invites(self, system_id: str) -> None:
+    def test_google_sheets_invite_retired(self) -> None:
+        sheets = get_system("google_sheets")
+        assert sheets.invite_allowed is False
+
+    def test_upload_systems_disallow_invites(self) -> None:
+        assert get_system("bizdev_contacts").invite_allowed is False
+        assert get_system("hr_alumni").invite_allowed is False
+
+    @pytest.mark.parametrize("system_id", sorted(_INVITE_ALLOWED_SYSTEMS))
+    def test_invite_allowed_systems(self, system_id: str) -> None:
         assert get_system(system_id).invite_allowed is True
+
+    def test_lever_help_requires_users_read_list(self) -> None:
+        system = get_system("lever")
+        field = system.credential_fields[0]
+        assert field.help is not None
+        assert "Users read/list" in field.help
+        assert "Postings" in field.help
+        assert "Users read/list" in system.trust_copy
 
 
 class TestFieldSchemas:
@@ -60,6 +171,12 @@ class TestFieldSchemas:
         assert fields["client_secret"].input_type is CredentialInputType.PASSWORD
         assert fields["company_id"].input_type is CredentialInputType.TEXT
         assert fields["environment"].required is True
+
+    def test_paylocity_trust_copy_documents_upload_and_live(self) -> None:
+        copy = get_system("paylocity").trust_copy
+        assert "Upload mode" in copy
+        assert "Live mode" in copy
+        assert "SFTP" in copy
 
     def test_auth0_fields(self) -> None:
         fields = {field.id: field for field in get_system("auth0").credential_fields}
@@ -139,6 +256,12 @@ class TestValidateCredentials:
         assert validate_credentials(system, {}) == {}
         with pytest.raises(ValueError, match="does not accept credentials via invite"):
             validate_credentials(system, {"api_key": "nope"})
+
+    def test_upload_systems_reject_credentials(self) -> None:
+        for system_id in ("bizdev_contacts", "hr_alumni"):
+            system = get_system(system_id)
+            with pytest.raises(ValueError, match="does not accept credentials via invite"):
+                validate_credentials(system, {"api_key": "nope"})
 
     def test_non_string_value_rejected(self) -> None:
         system = get_system("mailchimp")

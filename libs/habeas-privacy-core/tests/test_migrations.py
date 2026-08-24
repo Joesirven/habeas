@@ -325,3 +325,21 @@ def test_integration_connections_migration_exists():
     assert "CREATE TABLE connection_invites" in content
     assert "migrate:up" in content
     assert "migrate:down" in content
+
+
+def test_vertical_scoped_connectors_migration_exists():
+    migration = (
+        migrations_dir() / "20260811170001_core_vertical_scoped_connectors.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+    assert "CREATE TABLE data_verticals" in content
+    assert "CREATE TABLE vertical_system_bindings" in content
+    assert "CREATE TABLE user_vertical_assignments" in content
+    assert "CREATE TABLE connection_mode_events" in content
+    assert "bizdev_contacts" in content
+    assert "hr_alumni" in content
+    assert "people_hr" in content
+    assert "REVOKE UPDATE, DELETE ON connection_mode_events FROM app_user" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content

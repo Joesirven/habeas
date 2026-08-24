@@ -37,6 +37,8 @@ _SENSITIVE_KEYS = frozenset(
         "raw_payload",
         "body",
         "message",
+        "comment",
+        "notes",
         "dwids",
         "selected_dwids",
         "consumer_id",

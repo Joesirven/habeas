@@ -39,7 +39,7 @@ function Stage({
         } as CSSProperties
       }
       role="status"
-      aria-label="CataPriv Platform loading"
+      aria-label="Habeas Platform loading"
     >
       {children}
     </div>
@@ -54,7 +54,7 @@ const BOOT_LINES = [
   'CONTROL PLANE .......... READY',
 ] as const
 
-const TITLE_LINE = 'CataPriv Platform (DPP)'
+const TITLE_LINE = 'Habeas Platform'
 
 /** v10 — Teletext / home-computer boot log → title line → logo. */
 function V10(props: SplashStageProps) {
@@ -127,7 +127,7 @@ function V10(props: SplashStageProps) {
 /** v11 — Typewriter “Habeas” then DPP with block cursor; small logo optional. */
 function V11(props: SplashStageProps) {
   const brand = 'Habeas'
-  const dpp = 'CataPriv Platform (DPP)'
+  const dpp = 'Habeas Platform'
   const [brandLen, setBrandLen] = useState(0)
   const [dppLen, setDppLen] = useState(0)
   const [phase, setTypePhase] = useState<'brand' | 'dpp' | 'done'>('brand')

@@ -8,7 +8,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { OPEN_LEGAL_SETTINGS_EVENT } from '@/components/LegalSettingsSheet'
 import {
   getLegalOperators,
   listRequests,
@@ -17,6 +16,15 @@ import {
 } from '@/lib/api'
 import { canAccessLegalSurfaces, canAccessOpsSurfaces, useMe } from '@/lib/auth'
 import type { LegalInboxFilter } from '@/router'
+
+/** Must match `OPEN_LEGAL_SETTINGS_EVENT` in LegalSettingsSheet (avoid importing that sheet here). */
+const OPEN_LEGAL_SETTINGS_EVENT = 'open-legal-settings'
+
+export function paletteSearchPlaceholder(showPeople: boolean): string {
+  return showPeople
+    ? 'Search requests, people, or actions…'
+    : 'Search requests or actions…'
+}
 
 const SOURCE_LABELS: Record<string, string> = {
   drop: 'CA DROP',
@@ -50,10 +58,11 @@ function operatorSublabel(operator: LegalOperator): string {
   return operator.kind
 }
 
-function staticActions(
+export function staticActions(
   navigate: ReturnType<typeof useNavigate>,
   showPeople: boolean,
   showOps: boolean,
+  ownerSurfaces: boolean,
   onClose: () => void,
 ): PaletteItem[] {
   const finish = (fn: () => void) => () => {
@@ -61,10 +70,17 @@ function staticActions(
     onClose()
   }
 
-  const inbox = (filter?: LegalInboxFilter) => {
+  const legalInbox = (filter?: LegalInboxFilter) => {
     navigate({
       to: '/requests/needs-attention',
       search: filter ? { filter } : {},
+    })
+  }
+
+  const ownerInbox = (kind?: 'matching' | 'fulfillment' | 'pending_tasks') => {
+    navigate({
+      to: '/requests/needs-attention',
+      search: kind ? { kind } : {},
     })
   }
 
@@ -78,14 +94,14 @@ function staticActions(
     {
       id: 'action-requests',
       group: 'actions',
-      label: 'Go to All requests',
+      label: ownerSurfaces ? 'Go to Requests' : 'Go to All requests',
       onSelect: finish(() => navigate({ to: '/requests' })),
     },
     {
       id: 'action-inbox',
       group: 'actions',
       label: 'Go to Inbox',
-      onSelect: finish(() => inbox()),
+      onSelect: finish(() => (ownerSurfaces ? ownerInbox() : legalInbox())),
     },
     {
       id: 'action-docs',
@@ -132,48 +148,78 @@ function staticActions(
     )
   }
 
+  if (ownerSurfaces) {
+    items.push(
+      {
+        id: 'action-inbox-matching',
+        group: 'actions',
+        label: 'Inbox · Matching',
+        onSelect: finish(() => ownerInbox('matching')),
+      },
+      {
+        id: 'action-inbox-fulfillment',
+        group: 'actions',
+        label: 'Inbox · Fulfillment',
+        onSelect: finish(() => ownerInbox('fulfillment')),
+      },
+      {
+        id: 'action-inbox-tasks',
+        group: 'actions',
+        label: 'Inbox · Tasks',
+        onSelect: finish(() => ownerInbox('pending_tasks')),
+      },
+      {
+        id: 'action-connectors',
+        group: 'actions',
+        label: 'Go to Connectors',
+        onSelect: finish(() => navigate({ to: '/owner/connectors' })),
+      },
+    )
+    return items
+  }
+
   items.push(
     {
       id: 'action-inbox-unassigned',
       group: 'actions',
       label: 'Inbox · Unassigned',
-      onSelect: finish(() => inbox('unassigned')),
+      onSelect: finish(() => legalInbox('unassigned')),
     },
     {
       id: 'action-inbox-assignment',
       group: 'actions',
       label: 'Inbox · Assignment to legal',
-      onSelect: finish(() => inbox('assignment_to_legal')),
+      onSelect: finish(() => legalInbox('assignment_to_legal')),
     },
     {
       id: 'action-inbox-fulfillment',
       group: 'actions',
       label: 'Inbox · Fulfillment',
-      onSelect: finish(() => inbox('fulfillment')),
+      onSelect: finish(() => legalInbox('fulfillment')),
     },
     {
       id: 'action-inbox-notice',
       group: 'actions',
       label: 'Inbox · Notice',
-      onSelect: finish(() => inbox('notice')),
+      onSelect: finish(() => legalInbox('notice')),
     },
     {
       id: 'action-inbox-delivery',
       group: 'actions',
       label: 'Inbox · Delivery',
-      onSelect: finish(() => inbox('delivery')),
+      onSelect: finish(() => legalInbox('delivery')),
     },
     {
       id: 'action-inbox-holds',
       group: 'actions',
       label: 'Inbox · Pre-matching holds',
-      onSelect: finish(() => inbox('pre_matching_holds')),
+      onSelect: finish(() => legalInbox('pre_matching_holds')),
     },
     {
       id: 'action-inbox-me',
       group: 'actions',
       label: 'Inbox · Assigned to me',
-      onSelect: finish(() => inbox('assigned_to_me')),
+      onSelect: finish(() => legalInbox('assigned_to_me')),
     },
     {
       id: 'action-upload',
@@ -206,8 +252,10 @@ type CommandPaletteProps = {
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useNavigate()
   const { role, me } = useMe()
+  // Owners mount ⌘K via AppShell `canAccessOwnerPalette`; People stays legal/admin only.
   const showPeople = canAccessLegalSurfaces(role)
   const showOps = canAccessOpsSurfaces(role)
+  const ownerSurfaces = role === 'data_owner'
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -291,7 +339,13 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
       }
     }
 
-    const actions = staticActions(navigate, showPeople, showOps, close).filter((item) => {
+    const actions = staticActions(
+      navigate,
+      showPeople,
+      showOps,
+      ownerSurfaces,
+      close,
+    ).filter((item) => {
       if (!needle) return true
       return item.label.toLowerCase().includes(needle)
     })
@@ -303,6 +357,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     me?.email,
     navigate,
     operatorsQuery.data,
+    ownerSurfaces,
     requestSearchEnabled,
     requestsQuery.data,
     showOps,
@@ -420,7 +475,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
               setActiveIndex(0)
             }}
             onKeyDown={onInputKeyDown}
-            placeholder="Search requests, people, or actions…"
+            placeholder={paletteSearchPlaceholder(showPeople)}
             className="w-full bg-transparent text-sm text-ink outline-none placeholder:text-mute"
             aria-label="Command palette search"
             autoComplete="off"

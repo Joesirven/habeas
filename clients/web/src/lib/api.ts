@@ -13,12 +13,36 @@ export const SIMULATE_ROLE_VALUES: UserRole[] = [
   'data_owner',
 ]
 
+export type ConnectorReminderSeverity = 'approaching' | 'overdue'
+
+export type ConnectorReminder = {
+  code: string
+  system: string
+  vertical_id: string
+  severity: ConnectorReminderSeverity
+}
+
+export type AssignedVerticalLabel = {
+  vertical_id: string
+  display_label: string
+}
+
 export type MePayload = {
   email: string
+  /** Google IAP given_name when present — safe for welcome copy (KD24). */
+  given_name?: string | null
   /** Effective role (after X-Dev-Simulate-Role when allowed). */
   role: UserRole
   /** Allowlist role before simulate override. */
   real_role: UserRole
+  /** Assigned KD20 vertical ids (empty when none). */
+  verticals?: string[]
+  /** Catalog display labels for assigned verticals (welcome copy). */
+  assigned_vertical_labels?: AssignedVerticalLabel[]
+  /** True when an assigned vertical still has incomplete connector wizard (KTD17). */
+  needs_connector_setup?: boolean
+  /** Soft connector reminders — never block login (KTD13). */
+  connector_reminders?: ConnectorReminder[]
 }
 
 export function getStoredSimulateRole(): UserRole | null {
@@ -67,7 +91,15 @@ export async function fetchAdminApi<T>(path: string, init?: RequestInit): Promis
     throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
   }
 
-  return response.json() as Promise<T>
+  // 204 No Content (e.g. DELETE assignment) — no JSON body.
+  if (response.status === 204) {
+    return undefined as T
+  }
+  const text = await response.text()
+  if (!text) {
+    return undefined as T
+  }
+  return JSON.parse(text) as T
 }
 
 export type HealthPayload = {
@@ -1652,6 +1684,126 @@ export function postFulfillmentKickoff(
   )
 }
 
+/** KD37 named statuses — SaaS owner Inbox after Legal kickoff (U17 / U18). */
+export type FulfillmentOwnerStatus =
+  | 'in_progress'
+  | 'completed_in_source'
+  | 'blocked'
+  | 'assign_to_legal'
+
+export type FulfillmentOwnerStatusBody = {
+  status: FulfillmentOwnerStatus
+  comment?: string
+}
+
+export type FulfillmentOwnerStatusResponse = {
+  request_id: string
+  vertical: string
+  owner_status: FulfillmentOwnerStatus
+  attempt_id: number
+  attempt_status: string
+  assigned_to_legal: boolean
+  comment_recorded: boolean
+}
+
+/** Assigned SaaS owner sets KD37 status after Legal kickoff. */
+export function patchFulfillmentOwnerStatus(
+  requestId: string,
+  vertical: string,
+  body: FulfillmentOwnerStatusBody,
+) {
+  return fetchAdminApi<FulfillmentOwnerStatusResponse>(
+    `/requests/${encodeURIComponent(requestId)}/fulfillment/${encodeURIComponent(vertical)}/owner-status`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+export function ownerFulfillmentItemFromRequest(record: RequestRecord): NeedsAttentionItem {
+  return {
+    request_id: record.id,
+    reason: 'fulfillment.owner',
+    current_stage: 'fulfillment',
+    intake_source: record.intake_source,
+    received_at: record.received_at,
+    requested_at: record.received_at,
+    requestor_state: record.requestor_state ?? null,
+  }
+}
+
+export function ownerFulfillmentItemFromApproval(
+  approval: ApprovalRecord,
+): NeedsAttentionItem {
+  return {
+    request_id: approval.request_id,
+    reason: 'fulfillment.kickoff',
+    current_stage: 'fulfillment',
+    intake_source: 'drop',
+    received_at: null,
+    requested_at: null,
+  }
+}
+
+/** Prefer list-request metadata; keep kickoff reason when an approval also matched. */
+export function mergeOwnerFulfillmentItems(
+  fromRequests: NeedsAttentionItem[],
+  fromApprovals: NeedsAttentionItem[],
+): NeedsAttentionItem[] {
+  const byId = new Map<string, NeedsAttentionItem>()
+  for (const item of fromApprovals) {
+    if (!item.request_id) continue
+    byId.set(item.request_id, item)
+  }
+  for (const item of fromRequests) {
+    if (!item.request_id) continue
+    const existing = byId.get(item.request_id)
+    byId.set(item.request_id, existing ? { ...existing, ...item } : item)
+  }
+  return [...byId.values()]
+}
+
+async function listApprovedFulfillmentKickoffs(limit: number): Promise<ApprovalRecord[]> {
+  const search = new URLSearchParams({
+    action_type: 'fulfillment.kickoff',
+    status: 'approved',
+    limit: String(Math.min(200, Math.max(1, limit))),
+  })
+  return fetchAdminApi<ApprovalRecord[]>(`/approvals?${search}`)
+}
+
+/**
+ * Owner-safe Fulfillment queue — do not call `getLegalNeedsAttention` (403).
+ * `getNeedsAttention` has no fulfillment kind; All-requests `stage=fulfillment`
+ * plus approved kickoff gates cover SaaS legs that have no open attempt yet.
+ */
+export async function getOwnerFulfillmentNeedsAttention(params?: {
+  limit?: number
+}): Promise<NeedsAttentionResponse> {
+  const limit = params?.limit ?? 200
+  const [page, approvals] = await Promise.all([
+    listRequests({ stage: 'fulfillment', limit, offset: 0 }),
+    listApprovedFulfillmentKickoffs(limit).catch((error: unknown) => {
+      if (error instanceof Error && /Admin API 403/.test(error.message)) {
+        return [] as ApprovalRecord[]
+      }
+      throw error
+    }),
+  ])
+  const items = mergeOwnerFulfillmentItems(
+    page.items.map(ownerFulfillmentItemFromRequest),
+    approvals.map(ownerFulfillmentItemFromApproval),
+  )
+  return {
+    items: items.slice(0, limit),
+    kind: 'all',
+    total: items.length,
+    limit,
+    offset: 0,
+  }
+}
+
 export function getNeedsAttention(
   limitOrParams?:
     | number
@@ -2132,7 +2284,16 @@ export type IntegrationSystemId =
   | 'lever'
   | 'auth0'
   | 'google_sheets'
+  | 'bizdev_contacts'
+  | 'hr_alumni'
   | 'cassandra'
+
+export type ConnectionDisplayStatus =
+  | 'needs_setup'
+  | 'action_required'
+  | 'needs_refresh'
+  | 'connected'
+  | 'view_only'
 
 export type ConnectionRecord = {
   id: string
@@ -2154,6 +2315,10 @@ export type ConnectionRecord = {
   created_at: string
   updated_at: string
   metadata: Record<string, unknown>
+  /** Gated matching UX status (KD18) — prefer over raw `status` for chips. */
+  display_status?: ConnectionDisplayStatus | string | null
+  gate_code?: string | null
+  gate_allowed?: boolean | null
 }
 
 export type ConnectionInviteCreateResponse = {
@@ -2210,7 +2375,10 @@ export type ConnectTestDetailCode =
   | 'lever_ok'
   | 'auth0_ok'
   | 'google_sheets_ok'
+  | 'upload_ok'
   | 'auth_failed'
+  | 'lever_unauthorized'
+  | 'lever_forbidden'
   | 'unreachable'
   | 'invalid_credentials'
   | 'invalid_config'
@@ -2219,6 +2387,9 @@ export type ConnectTestDetailCode =
   | 'infra_only'
   | 'unknown_error'
   | 'failed'
+  | 'upload_missing_headers'
+  | 'upload_no_usable_rows'
+  | 'upload_invalid_delimiter'
 
 const CONNECT_SYSTEM_LABELS: Record<IntegrationSystemId, string> = {
   mailchimp: 'Mailchimp',
@@ -2226,6 +2397,8 @@ const CONNECT_SYSTEM_LABELS: Record<IntegrationSystemId, string> = {
   lever: 'Lever',
   auth0: 'Auth0',
   google_sheets: 'Google Sheets',
+  bizdev_contacts: 'BizDev Contacts',
+  hr_alumni: 'HR Alumni List',
   cassandra: 'Cassandra',
 }
 
@@ -2235,12 +2408,17 @@ const CONNECT_TEST_SUCCESS_DESCRIPTIONS: Record<string, string> = {
   lever_ok: 'Lever API credentials were verified successfully.',
   auth0_ok: 'Auth0 credentials were verified successfully.',
   google_sheets_ok: 'Google Sheets connection was verified successfully.',
+  upload_ok: 'Upload file was validated successfully.',
   stub_ok: 'Connection test completed successfully.',
   ok: 'Connection test completed successfully.',
 }
 
 const CONNECT_TEST_FAILURE_MESSAGES: Record<string, string> = {
   auth_failed: 'Authentication failed. Check the credentials and try again.',
+  lever_unauthorized:
+    'Lever rejected the API key (unauthorized). Confirm you pasted the Lever API key — not your password and not the Postings API key — then try again.',
+  lever_forbidden:
+    'Lever accepted the key but denied Users access (forbidden). Enable Users read/list on the Lever API key (not Postings-only) and regenerate if permissions cannot be changed.',
   unreachable: 'Could not reach the service. Try again in a few minutes.',
   invalid_credentials: 'The credentials could not be verified. Check the values and try again.',
   invalid_config: 'The connection settings look incorrect. Check the fields and try again.',
@@ -2249,6 +2427,11 @@ const CONNECT_TEST_FAILURE_MESSAGES: Record<string, string> = {
   infra_only: 'This system is provisioned by Habeas Infrastructure, not through this form.',
   unknown_error: 'Connection test failed. Check the values and try again.',
   failed: 'Connection test failed. Check the values and try again.',
+  upload_missing_headers:
+    'Upload is missing required template headers. Download the Habeas CSV template and match the column names exactly.',
+  upload_no_usable_rows:
+    'Upload has no usable required identifiers. Check the multi-value delimiter and required columns, then try again.',
+  upload_invalid_delimiter: 'The multi-value delimiter is not supported. Choose None, ;, |, or ,.',
 }
 
 /** Human label for loading/success copy — prefers system id, falls back to display name. */
@@ -2343,6 +2526,246 @@ export function listConnectionOwnerCandidates() {
   return fetchAdminApi<{ owners: ConnectionOwnerCandidate[] }>(
     '/ops/connections/owner-candidates',
   )
+}
+
+export function forceConnectionMode(
+  connectionId: string,
+  body: { mode: 'live' | 'upload'; reason?: string | null },
+) {
+  return fetchAdminApi<ConnectionRecord>(
+    `/ops/connections/${encodeURIComponent(connectionId)}/mode`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+}
+
+export function overrideConnectionCadence(
+  connectionId: string,
+  body: { cadence_days_override: number | null },
+) {
+  return fetchAdminApi<ConnectionRecord>(
+    `/ops/connections/${encodeURIComponent(connectionId)}/cadence`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+}
+
+export function resetConnectionWizard(connectionId: string) {
+  return fetchAdminApi<ConnectionRecord>(
+    `/ops/connections/${encodeURIComponent(connectionId)}/wizard/reset`,
+    { method: 'POST', body: JSON.stringify({}) },
+  )
+}
+
+export type VerticalCatalogEntry = {
+  id: string
+  display_label: string
+  view_only: boolean
+  sort_order: number
+}
+
+export type VerticalAssignment = {
+  email: string
+  vertical_id: string
+  active: boolean
+  added_at?: string | null
+  added_by?: string | null
+}
+
+export type VerticalBinding = {
+  vertical_id: string
+  system: string
+  allowed_approaches: string[]
+  active?: boolean
+}
+
+export function listVerticalCatalog() {
+  return fetchAdminApi<VerticalCatalogEntry[]>('/ops/verticals')
+}
+
+export function listVerticalAssignments() {
+  return fetchAdminApi<VerticalAssignment[]>('/ops/verticals/assignments')
+}
+
+export function addVerticalAssignment(body: { email: string; vertical_id: string }) {
+  return fetchAdminApi<VerticalAssignment>('/ops/verticals/assignments', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function removeVerticalAssignment(verticalId: string, email: string) {
+  return fetchAdminApi<void>(
+    `/ops/verticals/assignments/${encodeURIComponent(verticalId)}/${encodeURIComponent(email)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export function listVerticalBindings(verticalId: string) {
+  return fetchAdminApi<VerticalBinding[]>(
+    `/ops/verticals/${encodeURIComponent(verticalId)}/bindings`,
+  )
+}
+
+export type OwnerConnectorSystem = {
+  system: string
+  display_name: string
+  allowed_approaches: string[]
+  connection_id: string | null
+  status: string | null
+  last_test_ok: boolean | null
+  metadata: Record<string, unknown>
+  display_status: string
+  gate_code: string
+  gate_allowed: boolean
+}
+
+export type OwnerConnectorList = {
+  vertical_id: string
+  display_label: string
+  view_only: boolean
+  connectors: OwnerConnectorSystem[]
+}
+
+export type OwnerUploadResult = {
+  ok: boolean
+  detail: string
+  connection_id: string
+  upload_row_count?: number | null
+  gcs_uri?: string | null
+}
+
+export function listOwnerConnectors(verticalId: string) {
+  return fetchAdminApi<OwnerConnectorList>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/connectors`,
+  )
+}
+
+export function setOwnerConnectorMode(
+  verticalId: string,
+  system: string,
+  body: { mode: 'live' | 'upload' },
+) {
+  return fetchAdminApi<OwnerConnectorSystem>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/mode`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+}
+
+export function setOwnerConnectorCadence(
+  verticalId: string,
+  system: string,
+  body: { cadence_days?: number; refresh_policy?: 'static' | 'volatile' },
+) {
+  return fetchAdminApi<OwnerConnectorSystem>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/cadence`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+}
+
+export function completeOwnerConnectorWizard(verticalId: string, system: string) {
+  return fetchAdminApi<OwnerConnectorSystem>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/wizard/complete`,
+    { method: 'POST', body: JSON.stringify({}) },
+  )
+}
+
+export type OwnerLiveConnectResult = {
+  ok: boolean
+  detail: string
+  connection_id: string
+}
+
+export type OwnerCredentialPreview = {
+  system: string
+  display_name: string
+  fields: Array<{
+    id: string
+    label: string
+    input_type: 'password' | 'text' | 'url'
+    required: boolean
+    help: string | null
+  }>
+  trust_copy: string
+}
+
+/** Credential fields + how-to copy for in-wizard Live connect (KD21). */
+export function getOwnerConnectorCredentialPreview(verticalId: string, system: string) {
+  return fetchAdminApi<OwnerCredentialPreview>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/credential-preview`,
+  )
+}
+
+/** In-wizard Live credentials submit + connection test (KTD15). */
+export function saveOwnerConnectorCredentials(
+  verticalId: string,
+  system: string,
+  credentials: Record<string, string>,
+) {
+  return fetchAdminApi<OwnerLiveConnectResult>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/credentials`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ credentials }),
+    },
+  )
+}
+
+/** Re-test stored Live credentials on the vertical-scoped row (retry without resubmit). */
+export function testOwnerConnector(verticalId: string, system: string) {
+  return fetchAdminApi<OwnerLiveConnectResult>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/test`,
+    { method: 'POST', body: JSON.stringify({}) },
+  )
+}
+
+export async function uploadOwnerConnectorCsv(
+  verticalId: string,
+  system: string,
+  file: File,
+  multiPiiDelimiter: string | null,
+): Promise<OwnerUploadResult> {
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  const simulateRole = getStoredSimulateRole()
+  if (simulateRole) {
+    headers['X-Dev-Simulate-Role'] = simulateRole
+  }
+  const form = new FormData()
+  form.append('file', file)
+  if (multiPiiDelimiter != null) {
+    form.append('multi_pii_delimiter', multiPiiDelimiter)
+  }
+  const response = await fetch(
+    `${API_BASE}/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/upload`,
+    { method: 'POST', headers, body: form },
+  )
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
+  }
+  return (await response.json()) as OwnerUploadResult
+}
+
+export async function downloadOwnerUploadTemplate(
+  verticalId: string,
+  system: string,
+): Promise<Blob> {
+  const headers: Record<string, string> = {}
+  const simulateRole = getStoredSimulateRole()
+  if (simulateRole) {
+    headers['X-Dev-Simulate-Role'] = simulateRole
+  }
+  const response = await fetch(
+    `${API_BASE}/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/upload-template`,
+    { headers },
+  )
+  if (!response.ok) {
+    const detail = await response.text()
+    throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
+  }
+  return response.blob()
+}
+
+export function listOwnerConnectorReminders() {
+  return fetchAdminApi<{ reminders: ConnectorReminder[] }>('/owner/connector-reminders')
 }
 
 export function getConnectPreview(token: string) {

@@ -66,7 +66,7 @@ function V9(props: SplashStageProps) {
         text="DPP"
         layers={12}
         className="art-05-mode-push"
-        sub="Habeas Data Privacy Platform"
+        sub="Habeas Platform"
       />
     </BadgeStage>
   )
@@ -83,7 +83,7 @@ function V10(props: SplashStageProps) {
         text="Habeas"
         layers={10}
         className="art-05-mode-sweep"
-        sub="Data Privacy Platform"
+        sub="Platform"
       />
     </BadgeStage>
   )

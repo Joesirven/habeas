@@ -50,6 +50,7 @@ from habeas_privacy_core.auth import (
 from habeas_privacy_core.audit.redaction import redact_error_text
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
+from admin_api.sheets_intake_refresh import stamp_volatile_sheets_after_intake
 from habeas_privacy_core.db.request_resolver import request_resolver
 from habeas_privacy_core.geo.state import InvalidStateAcronymError, normalize_state_acronym
 from habeas_privacy_core.models.intake import DropListType
@@ -1712,7 +1713,19 @@ async def drop_promote(
     # thin proxy to drop_ingestor; intake due_at belongs after ingest creates rows.
     url = f"{settings.drop_ingestor_url.rstrip('/')}/ingest/promote"
     payload = _model_dump_nonzero(body) if body is not None else {}
-    return await proxy_post(url, json_body=payload)
+    status_code, result = await proxy_post_payload(url, json_body=payload)
+    if status_code == 200:
+        try:
+            await stamp_volatile_sheets_after_intake()
+        except Exception as exc:
+            logger.warning(
+                "sheets_intake_stamp_failed",
+                extra={
+                    "event": "sheets_intake_stamp_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
+    return JSONResponse(content=result, status_code=status_code)
 
 
 @router.post("/dispatch")

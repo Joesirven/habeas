@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Link } from '@tanstack/react-router'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -12,17 +14,33 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   DROP_RESPONSE_STATUS_OPTIONS,
   getDropMatchingResultDetail,
+  listConnections,
+  patchFulfillmentOwnerStatus,
   suggestedDropResponseStatus,
+  type ConnectorReminder,
   type DropResponseStatusCode,
   type FulfillmentArtifact,
+  type FulfillmentOwnerStatus,
   type JourneyStage,
   type MatchingAttemptRow,
   type MatchingResultDetail,
   type MatchedPersonContact,
   type RunTimelineStep,
+  type WorkbenchVerticalRow,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
+import {
+  attemptIsGateBlocked,
+  matchingConnectorGateBannerCopy,
+  matchingConnectorGateChip,
+  matchingGateFromAttempts,
+  ownerConnectorsSearch,
+  overlayCalloutShowsOwnerCta,
+  resolveMatchingConnectorGate,
+  type MatchingConnectorGate,
+} from '@/lib/connection-display'
 import { actionReasonLabel } from '@/lib/legalJourneyLabels'
+import { groupInboxConnectorNotifications } from '@/lib/inbox-batch-status'
 import { cn } from '@/lib/utils'
 
 /**
@@ -35,6 +53,67 @@ import { cn } from '@/lib/utils'
  * - Promote/fulfill callbacks: `(status, dwids?) => void` — pass selected dwids for
  *   3/4, empty/`[]` for 5.
  */
+export const OWNER_RESPONSE_STATUS_OPTIONS: {
+  code: DropResponseStatusCode
+  label: string
+}[] = [
+  { code: 3, label: 'Confirm match' },
+  { code: 4, label: 'Multi-person' },
+  { code: 5, label: 'Not a match' },
+]
+
+export type DropResponseStatusPersona = 'data_owner' | 'legal' | 'ops'
+
+const LEGAL_OPS_HELPER =
+  'Confirm the response status code written to DROP (3 Deleted · 4 Opted out · 5 Not found). Distinct from ingest Promote-to-raw.'
+
+/** Persona chrome for Inbox fulfill confirm — AE29 owner language vs legal/ops codes. */
+export function dropResponseStatusPickerChrome(
+  persona?: DropResponseStatusPersona,
+) {
+  const ownerLanguage = persona === 'data_owner'
+  return {
+    ownerLanguage,
+    options: ownerLanguage
+      ? OWNER_RESPONSE_STATUS_OPTIONS
+      : DROP_RESPONSE_STATUS_OPTIONS,
+    legend: ownerLanguage ? 'Match result' : 'CA DROP status result',
+    helperText: ownerLanguage ? null : LEGAL_OPS_HELPER,
+    ariaLabel: ownerLanguage ? 'Match result' : 'DROP response status',
+    showCodes: !ownerLanguage,
+  }
+}
+
+export function ownerDropStatusLabel(code: number | null | undefined): string | null {
+  return (
+    OWNER_RESPONSE_STATUS_OPTIONS.find((row) => row.code === code)?.label ?? null
+  )
+}
+
+export function matchingDispositionCopy(persona?: DropResponseStatusPersona) {
+  const chrome = dropResponseStatusPickerChrome(persona)
+  if (chrome.ownerLanguage) {
+    return {
+      blurb:
+        'Matching disposition — Confirm the match result (Confirm match, Multi-person, or Not a match) and which selected people apply. Does not start Legal kickoff.',
+      confirmTitle: 'Confirm this match?',
+      confirmLabel: 'Confirm',
+      pendingLabel: 'Confirming…',
+      confirmDescription: (shortId: string) =>
+        `Confirm the match result for ${shortId}…. This cannot be undone from here.`,
+    }
+  }
+  return {
+    blurb:
+      'Matching disposition — Choose CA DROP status (3 Deleted · 4 Opted out · 5 Not found) and which matched people apply. Approves matching review for fulfillment readiness; does not start Legal kickoff.',
+    confirmTitle: 'Fulfill this match?',
+    confirmLabel: 'Fulfill',
+    pendingLabel: 'Fulfilling…',
+    confirmDescription: (shortId: string) =>
+      `Approve matching review for ${shortId}… and set the CA DROP status result. This cannot be undone from the inbox.`,
+  }
+}
+
 export function DropResponseStatusPicker({
   value,
   onChange,
@@ -43,6 +122,7 @@ export function DropResponseStatusPicker({
   contacts,
   selectedDwids,
   onSelectedDwidsChange,
+  persona,
 }: {
   value: DropResponseStatusCode | null
   onChange: (code: DropResponseStatusCode) => void
@@ -51,7 +131,10 @@ export function DropResponseStatusPicker({
   contacts?: MatchedPersonContact[]
   selectedDwids?: string[]
   onSelectedDwidsChange?: (dwids: string[]) => void
+  /** data_owner: Confirm match / Multi-person / Not a match. Legal/ops keep code+label chrome. */
+  persona?: DropResponseStatusPersona
 }) {
+  const chrome = dropResponseStatusPickerChrome(persona)
   const needsDwids = value === 3 || value === 4
   const showDwidSelect =
     needsDwids &&
@@ -62,14 +145,17 @@ export function DropResponseStatusPicker({
   return (
     <fieldset className="space-y-1.5" disabled={disabled}>
       <legend className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
-        CA DROP status result
+        {chrome.legend}
       </legend>
-      <p className="text-[0.65rem] text-ink-soft">
-        Confirm the response status code written to DROP (3 Deleted · 4 Opted out ·
-        5 Not found). Distinct from ingest Promote-to-raw.
-      </p>
-      <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="DROP response status">
-        {DROP_RESPONSE_STATUS_OPTIONS.map((option) => {
+      {chrome.helperText ? (
+        <p className="text-[0.65rem] text-ink-soft">{chrome.helperText}</p>
+      ) : null}
+      <div
+        className="flex flex-wrap gap-1.5"
+        role="radiogroup"
+        aria-label={chrome.ariaLabel}
+      >
+        {chrome.options.map((option) => {
           const selected = value === option.code
           const isSuggested = suggested === option.code
           return (
@@ -88,7 +174,9 @@ export function DropResponseStatusPicker({
                 disabled && 'opacity-50',
               )}
             >
-              <span className="font-mono tabular-nums">{option.code}</span>
+              {chrome.showCodes ? (
+                <span className="font-mono tabular-nums">{option.code}</span>
+              ) : null}
               <span>{option.label}</span>
               {isSuggested && !selected ? (
                 <span className="text-[0.55rem] text-mute">suggested</span>
@@ -108,7 +196,9 @@ export function DropResponseStatusPicker({
       ) : null}
       {value === 5 ? (
         <p className="text-[0.65rem] text-mute">
-          Not found — matched DWIDs are not sent (selection cleared).
+          {chrome.ownerLanguage
+            ? 'Not a match — selected people are not sent (selection cleared).'
+            : 'Not found — matched DWIDs are not sent (selection cleared).'}
         </p>
       ) : null}
     </fieldset>
@@ -215,12 +305,23 @@ function matchingResultsLabel(matching: MatchingResultDetail): string {
 
 function matchingProcessStripItems(
   matching: MatchingResultDetail,
+  connectorGate?: MatchingConnectorGate | null,
 ): { label: string; value: ReactNode; show?: boolean }[] {
   const latestAttempt =
     matching.attempts && matching.attempts.length > 0
       ? [...matching.attempts].sort((a, b) => b.attempt_number - a.attempt_number)[0]
       : null
+  const gateChip = connectorGate ? matchingConnectorGateChip(connectorGate) : null
   return [
+    {
+      label: 'Connector gate',
+      value: (
+        <Badge variant={gateChip?.variant ?? 'ok'} className="normal-case tracking-normal">
+          {gateChip?.label ?? 'Clear'}
+        </Badge>
+      ),
+      show: Boolean(connectorGate),
+    },
     {
       label: 'Matching results',
       value: matchingResultsLabel(matching),
@@ -341,12 +442,27 @@ function reviewStatusVariant(status: string): 'default' | 'ok' | 'fail' | 'wait'
   return 'default'
 }
 
-function attemptGlance(attempts: MatchingAttemptRow[]): {
+function attemptGlance(
+  attempts: MatchingAttemptRow[],
+  connectorGate?: MatchingConnectorGate | null,
+): {
   label: string
   tone: 'default' | 'ok' | 'fail' | 'wait' | 'run'
 } {
+  if (connectorGate) {
+    const chip = matchingConnectorGateChip(connectorGate)
+    return {
+      label: `${attempts.length} · ${chip.label}`,
+      tone: 'fail',
+    }
+  }
   if (attempts.length === 0) return { label: 'None', tone: 'default' }
   const latest = [...attempts].sort((a, b) => b.attempt_number - a.attempt_number)[0]!
+  const gateFromLatest = attemptIsGateBlocked(latest)
+  if (gateFromLatest) {
+    const chip = matchingConnectorGateChip(gateFromLatest)
+    return { label: `${attempts.length} · ${chip.label}`, tone: 'fail' }
+  }
   if (latest.status === 'success') {
     if (attemptIsUnmatchedSuccess(latest)) {
       return { label: `${attempts.length} · not found`, tone: 'wait' }
@@ -448,6 +564,11 @@ function attemptRowBadge(attempt: MatchingAttemptRow): {
   label: string
   tone: 'default' | 'ok' | 'fail' | 'wait' | 'run'
 } {
+  const gate = attemptIsGateBlocked(attempt)
+  if (gate) {
+    const chip = matchingConnectorGateChip(gate)
+    return { label: chip.label, tone: 'fail' }
+  }
   if (attempt.status === 'success') {
     const audit = coerceAuditObject(attempt.audit_payload)
     const matchCount = typeof audit.match_count === 'number' ? audit.match_count : null
@@ -504,6 +625,21 @@ export function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
       label: 'Error code',
       value: attempt.error_code ?? '—',
       show: Boolean(attempt.error_code),
+    },
+    {
+      label: 'Gate code',
+      value: auditFieldDisplay(audit, 'gate_code') ?? '—',
+      show: 'gate_code' in audit || attempt.error_code === 'gate_blocked',
+    },
+    {
+      label: 'Display status',
+      value: auditFieldDisplay(audit, 'display_status') ?? '—',
+      show: 'display_status' in audit,
+    },
+    {
+      label: 'Blocking system',
+      value: auditFieldDisplay(audit, 'blocking_system') ?? '—',
+      show: 'blocking_system' in audit,
     },
     {
       label: 'Matched',
@@ -992,6 +1128,151 @@ function MatchedContactsPanel({
 }
 
 /**
+ * R52 — banner when connector freshness gate blocks matching (KD18).
+ * Uses attempt audit when present; otherwise honest fallback from reminders/connections.
+ */
+export function MatchingConnectorGateBanner({
+  gate,
+  compact = false,
+  showOwnerLink = false,
+  connectorsVerticalId = null,
+}: {
+  gate: MatchingConnectorGate | null | undefined
+  compact?: boolean
+  showOwnerLink?: boolean
+  connectorsVerticalId?: string | null
+}) {
+  if (!gate?.blocked) return null
+  const chip = matchingConnectorGateChip(gate)
+  const copy = matchingConnectorGateBannerCopy(gate)
+  const showConnectorsCta =
+    showOwnerLink && overlayCalloutShowsOwnerCta('data_owner', connectorsVerticalId)
+  return (
+    <div
+      className={cn(
+        'rounded-md border border-red-300/80 bg-red-50/80',
+        compact ? 'px-2 py-1.5' : 'px-2.5 py-2',
+      )}
+      role="status"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={chip.variant} className="normal-case tracking-normal">
+          {chip.label}
+        </Badge>
+        <span className="text-[0.7rem] font-medium text-red-950">{copy.title}</span>
+      </div>
+      <p className="mt-1 text-[0.65rem] leading-snug text-red-900/90">{copy.description}</p>
+      {showConnectorsCta ? (
+        <Link
+          to="/owner/connectors"
+          search={ownerConnectorsSearch(connectorsVerticalId)}
+          className="mt-1 inline-block text-[0.65rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
+        >
+          Open connectors
+        </Link>
+      ) : null}
+    </div>
+  )
+}
+
+/** Grouped connector reminders + matching gate — one row per reminder code / gate status. */
+export function InboxConnectorNotificationsPanel({
+  reminders,
+  gate,
+  compact = true,
+  showOwnerLink = false,
+  connectorsVerticalId = null,
+}: {
+  reminders?: ConnectorReminder[] | null
+  gate?: MatchingConnectorGate | null
+  compact?: boolean
+  showOwnerLink?: boolean
+  connectorsVerticalId?: string | null
+}) {
+  const groups = useMemo(
+    () => groupInboxConnectorNotifications({ reminders, gate }),
+    [reminders, gate],
+  )
+  const showConnectorsCta =
+    showOwnerLink && overlayCalloutShowsOwnerCta('data_owner', connectorsVerticalId)
+
+  if (groups.length === 0) return null
+
+  return (
+    <div
+      className="space-y-2"
+      role="region"
+      aria-label="Inbox connector notifications"
+    >
+      {groups.map((group) => (
+        <div
+          key={group.key}
+          className={cn(
+            'rounded-md border border-red-300/80 bg-red-50/80',
+            compact ? 'px-2 py-1.5' : 'px-2.5 py-2',
+          )}
+          role="status"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={group.chipVariant} className="normal-case tracking-normal">
+              {group.chipLabel}
+            </Badge>
+            <span className="text-[0.7rem] font-medium text-red-950">{group.title}</span>
+            {group.reminders.length > 1 ? (
+              <span className="text-[0.65rem] tabular-nums text-red-900/80">
+                {group.reminders.length} verticals
+              </span>
+            ) : null}
+          </div>
+          <p className="mt-1 text-[0.65rem] leading-snug text-red-900/90">
+            {group.description}
+          </p>
+          {showConnectorsCta ? (
+            <Link
+              to="/owner/connectors"
+              search={ownerConnectorsSearch(connectorsVerticalId)}
+              className="mt-1 inline-block text-[0.65rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
+            >
+              Open connectors
+            </Link>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** Attempt audit first; ops connections or owner reminders when attempts lack gate fields. */
+export function useMatchingConnectorGate(options: {
+  attempts?: MatchingAttemptRow[] | null
+  reminders?: ConnectorReminder[] | null
+  fetchConnections?: boolean
+}) {
+  const fromAttempts = useMemo(
+    () => matchingGateFromAttempts(options.attempts),
+    [options.attempts],
+  )
+
+  const connectionsQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'connections', 'matching-gate'],
+    queryFn: async () => (await listConnections()).connections,
+    enabled: Boolean(options.fetchConnections && !fromAttempts),
+    staleTime: 60_000,
+    retry: false,
+  })
+
+  return useMemo(
+    () =>
+      resolveMatchingConnectorGate({
+        attempts: options.attempts,
+        connections: connectionsQuery.data,
+        reminders: options.reminders,
+      }),
+    [options.attempts, connectionsQuery.data, options.reminders],
+  )
+}
+
+/**
  * Matching review panel — fulfill/decline + attempt drill-down.
  *
  * E3 wire-up — `onPromote` / fulfill disposition:
@@ -1012,6 +1293,9 @@ export function MatchingReviewPanel({
   compact = false,
   layout = 'accordion',
   hideActions = false,
+  connectorReminders,
+  fetchConnectorConnections = false,
+  persona,
 }: {
   requestId: string
   matching: MatchingResultDetail | null | undefined
@@ -1028,6 +1312,12 @@ export function MatchingReviewPanel({
   layout?: 'accordion' | 'tabs'
   /** Hide fulfill/decline buttons (e.g. when inbox header owns actions). */
   hideActions?: boolean
+  /** Soft reminders from `/me` when matching payload lacks gate audit. */
+  connectorReminders?: ConnectorReminder[] | null
+  /** Ops/admin — load gated connections when attempts lack gate audit. */
+  fetchConnectorConnections?: boolean
+  /** Owner-language picker when `data_owner`; legal/ops keep code chrome. */
+  persona?: 'data_owner' | 'legal' | 'ops'
 }) {
   const [confirm, setConfirm] = useState<'fulfill' | 'decline' | null>(null)
   const suggestedStatus = suggestedDropResponseStatus(
@@ -1074,26 +1364,35 @@ export function MatchingReviewPanel({
   // empty [] would let the API default to the full matched set).
   const fulfillDwidsReady = !fulfillNeedsDwids || selectedDwids.length > 0
 
+  const connectorGate = useMatchingConnectorGate({
+    attempts: matching?.attempts,
+    reminders: connectorReminders,
+    fetchConnections: fetchConnectorConnections,
+  })
+
   const attempts = matching?.attempts ?? []
-  const attemptStatus = attemptGlance(attempts)
+  const attemptStatus = attemptGlance(attempts, connectorGate)
   const assignment = matching?.assignment?.assignee_identity
   const processStrip = matching ? (
     <ProcessContextStrip
       compact={compact}
-      items={matchingProcessStripItems(matching)}
+      items={matchingProcessStripItems(matching, connectorGate)}
     />
   ) : null
 
+  const dispositionCopy = matchingDispositionCopy(persona)
+  const ownerConnectorVertical =
+    connectorReminders?.find((reminder) => reminder.severity === 'overdue')
+      ?.vertical_id ?? connectorReminders?.[0]?.vertical_id ?? null
+
   const reviewActions = canReviewActions && !hideActions ? (
     <div className="space-y-1.5 pt-1">
-      <p className="text-[0.65rem] text-ink-soft">
-        <span className="font-medium text-ink">Matching disposition</span> — Choose CA DROP
-        status (3 Deleted · 4 Opted out · 5 Not found) and which matched people apply. Approves
-        matching review for fulfillment readiness; does not start Legal kickoff.
-      </p>
+      <p className="text-[0.65rem] text-ink-soft">{dispositionCopy.blurb}</p>
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" disabled={actionPending} onClick={() => setConfirm('fulfill')}>
-          {actionPending && confirm === 'fulfill' ? 'Fulfilling…' : 'Fulfill'}
+          {actionPending && confirm === 'fulfill'
+            ? dispositionCopy.pendingLabel
+            : dispositionCopy.confirmLabel}
         </Button>
         <Button
           size="sm"
@@ -1228,9 +1527,9 @@ export function MatchingReviewPanel({
         onOpenChange={(open) => {
           if (!open && !actionPending) setConfirm(null)
         }}
-        title="Fulfill this match?"
-        description={`Approve matching review for ${requestId.slice(0, 8)}… and set the CA DROP status result. This cannot be undone from the inbox.`}
-        confirmLabel="Fulfill"
+        title={dispositionCopy.confirmTitle}
+        description={dispositionCopy.confirmDescription(requestId.slice(0, 8))}
+        confirmLabel={dispositionCopy.confirmLabel}
         confirming={actionPending && confirm === 'fulfill'}
         confirmDisabled={fulfillStatus == null || !fulfillDwidsReady}
         onConfirm={() => {
@@ -1247,6 +1546,7 @@ export function MatchingReviewPanel({
           contacts={matching?.matched_contacts}
           selectedDwids={selectedDwids}
           onSelectedDwidsChange={setSelectedDwids}
+          persona={persona}
         />
       </ConfirmActionDialog>
       <ConfirmActionDialog
@@ -1278,6 +1578,12 @@ export function MatchingReviewPanel({
           </p>
         </div>
       ) : null}
+      <MatchingConnectorGateBanner
+        gate={connectorGate}
+        compact={compact}
+        showOwnerLink={persona === 'data_owner'}
+        connectorsVerticalId={ownerConnectorVertical}
+      />
       {processStrip}
       {matching && layout === 'tabs' ? tabsBody : null}
       {matching && layout !== 'tabs' ? (
@@ -1449,6 +1755,230 @@ export function MatchingReviewPanel({
           </StatusAccordion>
         </>
       ) : null}
+    </div>
+  )
+}
+
+const AUTOMATIC_FULFILLMENT_VERTICALS = new Set(['data', 'cassandra'])
+
+const OWNER_FULFILLMENT_STATUS_OPTIONS: {
+  value: FulfillmentOwnerStatus
+  label: string
+}[] = [
+  { value: 'in_progress', label: 'In progress' },
+  { value: 'completed_in_source', label: 'Done in source' },
+  { value: 'blocked', label: 'Blocked' },
+  { value: 'assign_to_legal', label: 'Assign to legal' },
+]
+
+const OWNER_STATUS_SUCCESS_TITLE: Record<FulfillmentOwnerStatus, string> = {
+  in_progress: 'Fulfillment marked in progress',
+  completed_in_source: 'Marked done in source',
+  blocked: 'Fulfillment marked blocked',
+  assign_to_legal: 'Assigned to legal',
+}
+
+export function isAutomaticFulfillmentVertical(vertical: string | null | undefined): boolean {
+  return AUTOMATIC_FULFILLMENT_VERTICALS.has((vertical ?? '').trim().toLowerCase())
+}
+
+export function ownerStatusErrorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error ?? '')
+  if (/kickoff_not_approved/i.test(raw)) {
+    return 'Legal has not kicked off this vertical yet.'
+  }
+  if (/data_vertical_automatic/i.test(raw)) {
+    return 'The Data vertical fulfills automatically.'
+  }
+  if (/vertical access denied/i.test(raw)) {
+    return 'You are not assigned to this vertical.'
+  }
+  return actionToast.safeErrorMessage(error)
+}
+
+export function ownerFulfillmentVerticalRows(options: {
+  cluster: WorkbenchVerticalRow[]
+  assignedVerticals?: string[]
+  assignedLabels?: { vertical_id: string; display_label: string }[]
+}): { vertical: string; label: string; kickedOff: boolean }[] {
+  const byId = new Map<string, { vertical: string; label: string; kickedOff: boolean }>()
+  for (const row of options.cluster) {
+    const id = row.vertical.trim()
+    if (!id) continue
+    byId.set(id, {
+      vertical: id,
+      label: row.label || id.replaceAll('_', ' '),
+      kickedOff: row.kicked_off,
+    })
+  }
+  const labels = new Map(
+    (options.assignedLabels ?? []).map((entry) => [entry.vertical_id, entry.display_label]),
+  )
+  for (const vertical of options.assignedVerticals ?? []) {
+    const id = vertical.trim()
+    if (!id || byId.has(id)) continue
+    byId.set(id, {
+      vertical: id,
+      label: labels.get(id) || id.replaceAll('_', ' '),
+      kickedOff: false,
+    })
+  }
+  return [...byId.values()]
+}
+
+export function OwnerFulfillmentStatusPanel({
+  requestId,
+  cluster,
+  assignedVerticals,
+  assignedLabels,
+  canSubmit,
+}: {
+  requestId: string
+  cluster: WorkbenchVerticalRow[]
+  assignedVerticals?: string[]
+  assignedLabels?: { vertical_id: string; display_label: string }[]
+  canSubmit: boolean
+}) {
+  const queryClient = useQueryClient()
+  const rows = ownerFulfillmentVerticalRows({
+    cluster,
+    assignedVerticals,
+    assignedLabels,
+  })
+  const [statusByVertical, setStatusByVertical] = useState<
+    Record<string, FulfillmentOwnerStatus | ''>
+  >({})
+  const [commentByVertical, setCommentByVertical] = useState<Record<string, string>>({})
+
+  const submitMutation = useMutation({
+    mutationFn: (input: {
+      vertical: string
+      status: FulfillmentOwnerStatus
+      comment?: string
+    }) =>
+      patchFulfillmentOwnerStatus(requestId, input.vertical, {
+        status: input.status,
+        ...(input.comment ? { comment: input.comment } : {}),
+      }),
+    onSuccess: async (_data, variables) => {
+      setCommentByVertical((previous) => ({ ...previous, [variables.vertical]: '' }))
+      actionToast.success({ title: OWNER_STATUS_SUCCESS_TITLE[variables.status] })
+      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+    },
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Could not update fulfillment',
+        description: ownerStatusErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => submitMutation.mutate(variables),
+        },
+      })
+    },
+  })
+
+  if (rows.length === 0) {
+    return (
+      <p className="text-[0.7rem] text-ink-soft">
+        No owned fulfillment verticals on this request yet.
+      </p>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      {rows.map((row) => {
+        const automatic = isAutomaticFulfillmentVertical(row.vertical)
+        const waitingOnKickoff = !automatic && !row.kickedOff
+        const status = statusByVertical[row.vertical] ?? ''
+        const comment = commentByVertical[row.vertical] ?? ''
+        const pending =
+          submitMutation.isPending && submitMutation.variables?.vertical === row.vertical
+        const disabled = !canSubmit || pending || waitingOnKickoff
+        return (
+          <div
+            key={row.vertical}
+            className="space-y-2 rounded-md border border-line/80 bg-paper px-2.5 py-2"
+          >
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <p className="text-[0.7rem] font-medium capitalize text-ink">{row.label}</p>
+              {automatic ? (
+                <Badge variant="default" className="normal-case tracking-normal">
+                  Automatic
+                </Badge>
+              ) : waitingOnKickoff ? (
+                <Badge variant="wait" className="normal-case tracking-normal">
+                  Waiting on Legal
+                </Badge>
+              ) : null}
+            </div>
+            {automatic ? (
+              <p className="text-[0.65rem] text-ink-soft">
+                Data fulfills automatically after Legal kickoff. No owner status to set.
+              </p>
+            ) : waitingOnKickoff ? (
+              <p className="text-[0.65rem] text-ink-soft">
+                Legal has not kicked off this vertical yet.
+              </p>
+            ) : (
+              <>
+                <label className="flex flex-col gap-1 text-[0.65rem] text-ink-soft">
+                  Status
+                  <select
+                    className="rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
+                    value={status}
+                    onChange={(event) =>
+                      setStatusByVertical((previous) => ({
+                        ...previous,
+                        [row.vertical]: event.target.value as FulfillmentOwnerStatus | '',
+                      }))
+                    }
+                    disabled={disabled}
+                    aria-label={`${row.label} fulfillment status`}
+                    required
+                  >
+                    <option value="">Choose status</option>
+                    {OWNER_FULFILLMENT_STATUS_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <textarea
+                  className="min-h-[2.5rem] max-h-20 w-full resize-y rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
+                  value={comment}
+                  onChange={(event) =>
+                    setCommentByVertical((previous) => ({
+                      ...previous,
+                      [row.vertical]: event.target.value,
+                    }))
+                  }
+                  placeholder="Optional comment — stored as correspondence, not in audit."
+                  aria-label={`${row.label} fulfillment comment`}
+                  maxLength={2000}
+                  disabled={disabled}
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={disabled || !status}
+                  onClick={() => {
+                    if (!status) return
+                    submitMutation.mutate({
+                      vertical: row.vertical,
+                      status,
+                      comment: comment.trim() || undefined,
+                    })
+                  }}
+                >
+                  {pending ? 'Saving…' : 'Update status'}
+                </Button>
+              </>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }

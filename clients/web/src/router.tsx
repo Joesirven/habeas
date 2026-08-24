@@ -14,6 +14,10 @@ import { WorkerQueuePage } from '@/routes/ops/workers/WorkerQueuePage'
 import { WorkersSettingsPage } from '@/routes/ops/workers/settings'
 import { ConnectionsPage } from '@/routes/ops/connections'
 import { ConnectTokenPage } from '@/routes/connect.$token'
+import {
+  OwnerConnectorsPage,
+  type OwnerConnectorsSearch,
+} from '@/routes/owner/connectors'
 import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
 import { RequestDetailPage } from '@/routes/requests/$requestId'
 import { NeedsAttentionPage } from '@/routes/requests/needs-attention'
@@ -21,6 +25,7 @@ import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
 import { RequestsSlasPage } from '@/routes/requests/slas'
 import { DocsPage } from '@/routes/docs'
+import { SheetsCadenceLabPage } from '@/routes/dev/sheets-cadence-lab'
 import { HOME_WINDOWS, type HomeWindow } from '@/components/legal/home/DateToolbar'
 
 export const PIPELINE_TABS = [
@@ -540,6 +545,7 @@ export const NEEDS_ATTENTION_KINDS = [
   'delivery',
   'notice',
   'communications',
+  'fulfillment',
   'pending_tasks',
 ] as const
 
@@ -621,6 +627,12 @@ const docsRoute = createRoute({
   component: DocsPage,
 })
 
+const sheetsCadenceLabRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/dev/sheets-cadence-lab',
+  component: SheetsCadenceLabPage,
+})
+
 const requestDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests/$requestId',
@@ -688,6 +700,27 @@ const connectTokenRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/connect/$token',
   component: ConnectTokenPage,
+})
+
+function parseOwnerConnectorsSearch(
+  search: Record<string, unknown>,
+): OwnerConnectorsSearch {
+  const parsed: OwnerConnectorsSearch = {}
+  if (typeof search.vertical === 'string' && search.vertical.trim()) {
+    parsed.vertical = search.vertical.trim()
+  }
+  return parsed
+}
+
+const ownerConnectorsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/owner/connectors',
+  validateSearch: (search: Record<string, unknown>) =>
+    parseOwnerConnectorsSearch(search),
+  component: function OwnerConnectorsRoute() {
+    const search = ownerConnectorsRoute.useSearch()
+    return <OwnerConnectorsPage search={search} />
+  },
 })
 
 const opsWorkersTrendsRoute = createRoute({
@@ -812,6 +845,7 @@ const routeTree = rootRoute.addChildren([
   requestsSlasRoute,
   manualRequestRoute,
   docsRoute,
+  sheetsCadenceLabRoute,
   requestDetailRoute,
   matchingReviewRoute,
   opsDashboardRoute,
@@ -822,6 +856,7 @@ const routeTree = rootRoute.addChildren([
   opsWorkersEscalationsRoute,
   opsConnectionsRoute,
   connectTokenRoute,
+  ownerConnectorsRoute,
   opsWorkersTrendsRoute,
   opsWorkerQueueRoute,
   opsWorkerDetailRoute,

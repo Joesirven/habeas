@@ -14,22 +14,21 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
   (Pipeline Errors = `severity=ERROR`; Logs = unfiltered). Severity filters push into
   SQL so ERROR/WARNING rows are not drowned by recent INFO audits. Planned Ops IA
   consolidation: `docs/plans/2026-07-30-005-feat-ops-command-center-ia-plan.md`.
-- Integration connections (shipped): `GET/POST/DELETE /ops/connections`, invites, test, revoke
-  (`connections_admin`); redeem `GET/POST /connect/{token}` (`connections_redeem`).
-  Live `test_connection` per system; allowlisted `detail` only; secrets to Secret Manager
-  (`dpra/connections/{system}/{connection_id}`); failed redeem does not burn invite.
-  Owner emails must be allowlisted (`owner-candidates`). Cassandra invites rejected.
-  `DELETE /ops/connections/{id}` (super_admin): hard-deletes the row; `connection_invites`
-  cascade via FK. v0 does **not** delete GSM secrets (or per-connection Sheets SAs) —
-  those may remain orphaned until a later cleanup path.
-  **Google Sheets:** on create, provision per-connection SA into `metadata` (confirm + loading
-  in web). Invite help must embed that email via `google_sheets_spreadsheet_url_help` —
-  never ship redeem with `help=None` / “from your invite page”. Habeas Workspace **blocks**
-  Share to `*.iam.gserviceaccount.com`; durable path is Workspace **domain-wide delegation**
-  (INF Super Admin authorizes Client IDs). Named SAs for INF: `dpra-sheets-bizdev@` /
-  `dpra-sheets-hr@` in `example-gcp-project` — see SirvenOS `External-Integrations` § Connections.
-  Plan: `docs/plans/2026-07-30-003-feat-connections-onboarding-plan.md`.
-  Connecting a system does **not** by itself enable matching/hash workers for that vertical.
+- Identity: `GET /me` — `given_name`, `needs_connector_setup`,
+  `assigned_vertical_labels`, `connector_reminders` (allowlisted codes; soft via
+  `evaluate_connection_reminder` — never block login).
+- Vertical-scoped connectors (shipped): super_admin `connections_admin` — catalog, assign
+  owners, mode/cadence, test, wizard reset, delete (`GET/POST/DELETE /ops/connections`,
+  `owner-candidates`). Owner wizard `owner_connectors` (`/owner/...`) — in-wizard creds+test,
+  upload templates. **Invite mint/redeem retired** — `POST .../invites`, revoke, and
+  `GET/POST /connect/{token}` return **410 Gone**; assignment is the grant.
+- Matching **hard-gated** when Upload stale, Live rotation overdue, or wizard incomplete
+  (`evaluate_connection_gate`); UX Needs refresh / Action required — not Connected.
+  Connecting ≠ matching/hash workers for that vertical.
+- Secrets to Secret Manager (`dpra/connections/{system}/{connection_id}`); allowlisted
+  `detail` only. Google Sheets SA in `metadata`. `data` vertical view-only in owner wizard.
+  `DELETE /ops/connections/{id}` does not delete GSM secrets. Plan:
+  `docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md`.
 - DROP ops: `GET /ops/drop/pipeline`, spine proxies, hash-index refresh enqueue /
   enqueue-all (USPS 50+DC) / process
 - Worker fleet discovery (shipped): `GET /ops/workers/fleet` — pull-based union of

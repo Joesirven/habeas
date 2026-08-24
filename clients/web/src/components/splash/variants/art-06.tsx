@@ -5,7 +5,7 @@ import type { SplashStageProps, SplashVariantModule } from '../types'
 import './art-06.css'
 
 const HERO = 'Habeas'
-const SUB = 'Data Privacy Platform'
+const SUB = 'Platform'
 
 /** Layered SVG neon tube — outline / glow / core. Motions differ via CSS. */
 function NeonLockup({ motion }: { motion: 'v11' | 'v12' }) {
