@@ -16,6 +16,7 @@ import {
   type VerticalCatalogEntry,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
+import { catalogSystemDisplayLabel } from '@/lib/legalJourneyLabels'
 
 const fieldClass =
   'w-full rounded-md border border-line bg-paper px-2.5 py-1.5 text-sm text-ink'
@@ -43,7 +44,11 @@ function VerticalBindingsTable({ bindings }: { bindings: VerticalBinding[] }) {
       <tbody>
         {bindings.map((binding) => (
           <tr key={`${binding.vertical_id}:${binding.system}`}>
-            <td className="font-mono text-xs">{binding.system}</td>
+            <td className="text-xs">
+              {catalogSystemDisplayLabel(binding.system, {
+                vertical: binding.vertical_id,
+              }) ?? '—'}
+            </td>
             <td className="text-xs text-ink-soft">
               {binding.allowed_approaches.length === 0
                 ? '—'
@@ -112,14 +117,14 @@ export function VerticalCatalogPanel() {
       void queryClient.invalidateQueries({ queryKey: ASSIGNMENTS_QUERY_KEY })
       setAssignEmail('')
       actionToast.success({
-        title: 'Owner assigned',
+        title: 'Assigned matching review',
         description: `${row.email} → ${row.vertical_id}`,
       })
     },
     onError: (err) => {
       actionToast.error({
-        title: 'Could not assign owner',
-        description: actionToast.safeErrorMessage(err, 'Could not add vertical assignment.'),
+        title: 'Could not assign matching review',
+        description: actionToast.safeErrorMessage(err, 'Could not assign this vertical’s matching review.'),
         action: {
           label: 'Retry',
           onClick: () => {
@@ -140,14 +145,14 @@ export function VerticalCatalogPanel() {
     onSuccess: (_void, row) => {
       void queryClient.invalidateQueries({ queryKey: ASSIGNMENTS_QUERY_KEY })
       actionToast.success({
-        title: 'Assignment removed',
+        title: 'Matching review assignment removed',
         description: `${row.email} removed from ${row.vertical_id}`,
       })
     },
     onError: (err, row) => {
       actionToast.error({
-        title: 'Could not remove assignment',
-        description: actionToast.safeErrorMessage(err, 'Could not remove vertical assignment.'),
+        title: 'Could not remove matching review assignment',
+        description: actionToast.safeErrorMessage(err, 'Could not remove this vertical’s matching review assignment.'),
         action: {
           label: 'Retry',
           onClick: () => removeMutation.mutate(row),
@@ -214,8 +219,8 @@ export function VerticalCatalogPanel() {
         <div>
           <p className="text-xs font-medium text-ink">KD20 vertical catalog</p>
           <p className="mt-1 text-xs text-ink-soft">
-            Department verticals, system bindings, and owner assignments. Data is view-only —
-            no owner invite or upload wizard.
+            Department verticals, system bindings, and who receives each vertical’s matching
+            review. Data is view-only — no owner invite or upload wizard.
           </p>
         </div>
         {renderCatalogBody(verticals)}
@@ -231,7 +236,7 @@ export function VerticalCatalogPanel() {
             {selected.view_only ? (
               <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
                 Data vertical is already connected via Infrastructure. No owner invite, Upload, or
-                credential wizard — Cassandra remains INF handoff.
+                credential wizard.
               </div>
             ) : null}
             {bindingsQuery.isPending && !bindingsQuery.data ? (
@@ -249,10 +254,16 @@ export function VerticalCatalogPanel() {
           </div>
 
           <div className="taste-panel space-y-3 p-4 sm:p-5">
-            <h3 className="text-sm font-medium text-ink">Owner assignments</h3>
+            <h3 className="text-sm font-medium text-ink">
+              Assign {selected.display_label} matching review
+            </h3>
+            <p className="text-xs text-ink-soft">
+              Send this vertical’s matches to the data owner. This is not Assign to legal.
+            </p>
             {selected.view_only ? (
               <p className="text-xs text-ink-soft">
-                Assignments are optional for visibility; owners do not get a Data connector wizard.
+                Matching-review owners are optional for visibility; they do not get a Data
+                connector wizard.
               </p>
             ) : null}
 
@@ -278,7 +289,9 @@ export function VerticalCatalogPanel() {
                 </Button>
               </div>
             ) : selectedAssignments.length === 0 ? (
-              <p className="text-xs text-ink-soft">No active assignments for this vertical.</p>
+              <p className="text-xs text-ink-soft">
+                No one is assigned this vertical’s matching review.
+              </p>
             ) : (
               <table className="taste-table">
                 <thead>
@@ -318,7 +331,9 @@ export function VerticalCatalogPanel() {
               }}
             >
               <label className="flex min-w-[14rem] flex-1 flex-col gap-1">
-                <span className="text-xs text-ink-soft">Assign owner email</span>
+                <span className="text-xs text-ink-soft">
+                  Assign {selected.display_label} matching review
+                </span>
                 {ownersQuery.data && ownersQuery.data.length > 0 ? (
                   <select
                     className={`${fieldClass} text-xs`}
@@ -346,7 +361,7 @@ export function VerticalCatalogPanel() {
                 )}
               </label>
               <Button type="submit" size="sm" disabled={busy || !assignEmail.trim()}>
-                {addMutation.isPending ? 'Adding…' : 'Add assignment'}
+                {addMutation.isPending ? 'Adding…' : 'Assign matching review'}
               </Button>
             </form>
           </div>

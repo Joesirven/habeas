@@ -5,6 +5,30 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+/** Matches admin-api `UUID(request_id)` validation for journey/detail routes. */
+const REQUEST_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+export function isRequestUuid(value: string | null | undefined): boolean {
+  if (value == null) return false
+  const trimmed = value.trim()
+  if (!trimmed || trimmed === 'undefined' || trimmed === 'null') return false
+  return REQUEST_UUID_RE.test(trimmed)
+}
+
+/** Deduped request ids that pass `isRequestUuid` — stable sort for apply payloads. */
+export function filterRequestUuids(ids: Iterable<string>): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const id of ids) {
+    const trimmed = id.trim()
+    if (!isRequestUuid(trimmed) || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    out.push(trimmed)
+  }
+  return out.sort()
+}
+
 /**
  * Resolve connection invite URLs for copy/mailto.
  * Admin-api may return a path (`/connect/...`) when `public_web_base_url` is unset;

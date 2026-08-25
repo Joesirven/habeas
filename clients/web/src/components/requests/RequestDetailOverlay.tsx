@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
+import { Link, useRouterState } from '@tanstack/react-router'
 import {
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  type ReactNode,
   type RefObject,
 } from 'react'
 
@@ -22,12 +23,13 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { isLegalAdminPersona, useMe } from '@/lib/auth'
+import { isLegalAdminPersona, isVerticalOperatorRole, useMe } from '@/lib/auth'
 import {
   NOTICE_APPROVAL,
   WORKBENCH_STAGE_ORDER,
   actionReasonLabel,
   deriveWorkbenchChromeFromOpsJourney,
+  isWorkbenchStageKey,
   opsStageToWorkbench,
   workbenchStageLabel,
   workbenchStatusLabel,
@@ -35,6 +37,7 @@ import {
   type WorkbenchStageKey,
 } from '@/lib/legalJourneyLabels'
 import { actionToast } from '@/lib/action-toast'
+import { matchingReviewPromoteToast } from '@/lib/inbox-status-lab'
 import {
   matchingConnectorGateChip,
   ownerConnectorsSearch,
@@ -48,10 +51,13 @@ import {
   getFulfillmentArtifact,
   getLatestIdentityVerification,
   getRequest,
+  getRequestComments,
   getRequestJourney,
   getRequestJourneyWorkbench,
   getRequestTimeline,
+  getAuth0MatchCandidates,
   getNeedsAttention,
+  getOwnerMatchingNeedsAttention,
   listRequestDocuments,
   patchAccessDeliveryStatus,
   postFulfillmentKickoff,
@@ -70,24 +76,28 @@ import {
   type MatchedPersonContact,
   type MatchingResultDetail,
   type NeedsAttentionItem,
+  type RequestComment,
   type RequestDocumentRecord,
   type RequestJourneyResponse,
   type RequestRecord,
   type RequesterContact,
   type TimelineEntry,
   type WorkbenchVerticalRow,
+  fetchOwnerVerticalMatchingDetailOptional,
 } from '@/lib/api'
-import { cn } from '@/lib/utils'
+import { cn, isRequestUuid } from '@/lib/utils'
 
 import {
   AccessHandoffPanel,
   AttemptRow,
+  MatchedContactsPanel,
   MatchedContactsUnavailableCallout,
   MatchingReviewPanel,
   OwnerFulfillmentStatusPanel,
   fetchMatchingDetailOptional,
   formatMatchedContactsSummary,
   ownerDropStatusLabel,
+  redactHashHex,
 } from '@/components/requests/RequestTriageDialog'
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -97,7 +107,70 @@ const SOURCE_LABELS: Record<string, string> = {
   manual: 'Manual',
 }
 
-export type RequestDetailTab = 'details' | 'fulfillment' | 'matching' | 'activity'
+export type RequestDetailTab =
+  | 'details'
+  | 'ingest'
+  | 'matching'
+  | 'fulfillment'
+  | 'notice'
+
+export const REQUEST_DETAIL_TAB_TRIGGER =
+  'h-7 rounded-md border border-transparent px-2.5 text-[0.7rem] data-[state=active]:border-habeas-navy/25 data-[state=active]:bg-white data-[state=active]:text-habeas-navy data-[state=active]:shadow-sm'
+
+type JourneyRailStage = {
+  stage: string
+  label: string
+  status: JourneyStageStatus
+  blocker: string | null
+}
+
+type JourneySubstepItem = {
+  key: string
+  label: string
+  status: JourneyStageStatus
+  blocker?: string | null
+  muted?: boolean
+  statusLabel?: string
+}
+
+function journeyItemsForStage(opts: {
+  stageKey: string
+  substeps?: DerivedWorkbenchSubstep[]
+  matchingCluster?: PipelineClusterRow[]
+  fulfillmentCluster?: PipelineClusterRow[]
+}): JourneySubstepItem[] {
+  const { stageKey, substeps, matchingCluster, fulfillmentCluster } = opts
+  if (stageKey === 'matching' && matchingCluster && matchingCluster.length > 0) {
+    return matchingCluster.map((row) => ({
+      key: `m-${row.vertical}`,
+      label: row.label,
+      status: row.matching_status,
+      blocker: row.blocker,
+      muted: !row.live,
+      statusLabel: row.live ? workbenchStatusLabel(row.matching_status) : 'Soon',
+    }))
+  }
+  if (stageKey === 'fulfillment' && fulfillmentCluster && fulfillmentCluster.length > 0) {
+    return fulfillmentCluster.map((row) => {
+      const status = row.fulfillment_status ?? ('not_started' as JourneyStageStatus)
+      return {
+        key: `f-${row.vertical}`,
+        label: row.label,
+        status,
+        blocker: row.blocker,
+        muted: !row.live,
+        statusLabel: row.live ? workbenchStatusLabel(status) : 'Soon',
+      }
+    })
+  }
+  return (substeps?.filter((step) => step.parent === stageKey) ?? []).map((step) => ({
+    key: step.key,
+    label: step.label,
+    status: step.status,
+    blocker: step.blocker,
+    statusLabel: step.statusLabel,
+  }))
+}
 
 export type RequestDetailOverlayProps = {
   requestId: string | null
@@ -107,20 +180,115 @@ export type RequestDetailOverlayProps = {
   returnFocusRef?: RefObject<HTMLElement | null>
   /** Optional list-row context — avoids refetch for display label. */
   seedRequest?: RequestRecord | null
+  /** Owner vertical-item review — required for the vertical matching-results path. */
+  vertical?: string | null
+  /** Catalog system on the opened inbox item / `?system=` — owner matching-results query. */
+  system?: string | null
+}
+
+function trimScopeId(value: string | null | undefined): string | null {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : null
+}
+
+export function isAuth0MatchingScope(
+  vertical?: string | null,
+  system?: string | null,
+): boolean {
+  const verticalId = trimScopeId(vertical)?.toLowerCase()
+  const systemId = trimScopeId(system)?.toLowerCase()
+  return verticalId === 'auth0' || systemId === 'auth0'
+}
+
+/** Compact Auth0 vendor-record list on the existing matching pane — no new route. */
+export function Auth0MatchCandidatesList({ requestId }: { requestId: string }) {
+  const ready = isRequestUuid(requestId)
+  const query = useQuery({
+    queryKey: [
+      'admin-api',
+      'requests',
+      requestId,
+      'verticals',
+      'auth0',
+      'match-candidates',
+    ],
+    queryFn: () => getAuth0MatchCandidates(requestId),
+    enabled: ready,
+  })
+  const candidates = query.data?.candidates ?? []
+  const matchCount = query.data?.match_count ?? candidates.length
+
+  return (
+    <div className="space-y-1.5 rounded-md border border-line bg-paper px-2.5 py-2">
+      <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+        Auth0 candidates
+        {query.isSuccess ? (
+          <span className="ml-1.5 font-normal tabular-nums normal-case tracking-normal">
+            {matchCount}
+          </span>
+        ) : null}
+      </p>
+      {query.isPending ? (
+        <p className="text-[0.7rem] text-mute">Loading candidates…</p>
+      ) : query.isError ? (
+        <p className="text-[0.7rem] text-ink-soft">Could not load Auth0 candidates.</p>
+      ) : candidates.length === 0 ? (
+        <p className="text-[0.7rem] text-mute">No Auth0 vendor records matched.</p>
+      ) : (
+        <ul className="space-y-1">
+          {candidates.map((candidate) => (
+            <li
+              key={candidate.vendor_record_id}
+              className="truncate font-mono text-[0.7rem] text-ink"
+            >
+              {candidate.vendor_record_id}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function systemFromAttentionItem(item: NeedsAttentionItem | null | undefined): string | null {
+  return trimScopeId(item?.system) ?? trimScopeId(item?.system_id)
+}
+
+/** Raw `?system=` even when a route's validateSearch omits the key. */
+function useLocationSystemParam(): string | null {
+  const href = useRouterState({ select: (state) => state.location.href })
+  try {
+    const queryIndex = href.indexOf('?')
+    if (queryIndex < 0) return null
+    return trimScopeId(new URLSearchParams(href.slice(queryIndex)).get('system'))
+  } catch {
+    return null
+  }
 }
 
 export function useRequestDetailOverlay() {
   const [open, setOpen] = useState(false)
   const [requestId, setRequestId] = useState<string | null>(null)
   const [seedRequest, setSeedRequest] = useState<RequestRecord | null>(null)
+  const [vertical, setVertical] = useState<string | null>(null)
+  const [system, setSystem] = useState<string | null>(null)
   const returnFocusRef = useRef<HTMLElement | null>(null)
 
   const openOverlay = useCallback(
-    (id: string, trigger?: HTMLElement | null, seed?: RequestRecord | null) => {
+    (
+      id: string,
+      trigger?: HTMLElement | null,
+      seed?: RequestRecord | null,
+      nextVertical?: string | null,
+      nextSystem?: string | null,
+    ) => {
+      if (!isRequestUuid(id)) return
       returnFocusRef.current =
         trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
       setRequestId(id)
       setSeedRequest(seed ?? null)
+      setVertical(trimScopeId(nextVertical))
+      setSystem(trimScopeId(nextSystem))
       setOpen(true)
     },
     [],
@@ -131,6 +299,8 @@ export function useRequestDetailOverlay() {
     if (!next) {
       setRequestId(null)
       setSeedRequest(null)
+      setVertical(null)
+      setSystem(null)
     }
   }, [])
 
@@ -138,10 +308,57 @@ export function useRequestDetailOverlay() {
     open,
     requestId,
     seedRequest,
+    vertical,
+    system,
     openOverlay,
     onOpenChange,
     returnFocusRef,
   }
+}
+
+function findOverlayAttentionItem(
+  items: NeedsAttentionItem[],
+  requestId: string,
+  vertical?: string | null,
+  system?: string | null,
+): NeedsAttentionItem | undefined {
+  const verticalNorm = trimScopeId(vertical)
+  const systemNorm = trimScopeId(system)?.toLowerCase() || null
+  const matchesSystem = (item: NeedsAttentionItem) => {
+    if (!systemNorm) return true
+    const itemSystem = systemFromAttentionItem(item)?.toLowerCase() || null
+    return itemSystem === systemNorm
+  }
+  const sameRequest = items.filter((item) => item.request_id === requestId)
+  if (verticalNorm) {
+    return (
+      sameRequest.find(
+        (item) => item.vertical === verticalNorm && matchesSystem(item),
+      ) ??
+      sameRequest.find((item) => item.vertical === verticalNorm) ??
+      sameRequest.find((item) => !item.vertical && matchesSystem(item))
+    )
+  }
+  return sameRequest.find((item) => matchesSystem(item)) ?? sameRequest[0]
+}
+
+async function fetchOverlayAttentionItem(
+  requestId: string,
+  options: { vertical?: string | null; system?: string | null; ownerPersona: boolean },
+): Promise<NeedsAttentionItem | undefined> {
+  const response = options.ownerPersona
+    ? await getOwnerMatchingNeedsAttention({
+        limit: 200,
+        ...(trimScopeId(options.vertical) ? { vertical: options.vertical!.trim() } : {}),
+        ...(trimScopeId(options.system) ? { system: options.system!.trim() } : {}),
+      })
+    : await getNeedsAttention({ limit: 200 })
+  return findOverlayAttentionItem(
+    response.items,
+    requestId,
+    options.vertical,
+    options.system,
+  )
 }
 
 export function requestDetailHeaderLabel(
@@ -190,20 +407,20 @@ function resolveDropStatusCode(opts: {
 }
 
 function matchingResultsLabel(matching: MatchingResultDetail): string {
-  const type = (matching.match_type ?? (matching.matched ? 'matched' : 'not matched')).replaceAll(
-    '_',
-    ' ',
-  )
-  return `${type} · ${matching.match_count}`
+  const type = String(
+    matching?.match_type ?? (matching?.matched ? 'matched' : 'not matched'),
+  ).replaceAll('_', ' ')
+  const count = typeof matching?.match_count === 'number' ? matching.match_count : 0
+  return `${type} · ${count}`
 }
 
-function matchingStatusLabel(reviewStatus: string): string {
-  const normalized = reviewStatus.trim().toLowerCase()
+function matchingStatusLabel(reviewStatus: string | null | undefined): string {
+  const normalized = (reviewStatus ?? '').trim().toLowerCase()
   if (normalized === 'pending') return 'Pending review'
   if (normalized === 'approved') return 'Approved'
   if (normalized === 'declined' || normalized === 'rejected') return 'Declined'
   if (normalized === 'none' || normalized === '') return 'None'
-  return reviewStatus.replaceAll('_', ' ')
+  return (reviewStatus ?? '').replaceAll('_', ' ')
 }
 
 function substepDotClass(status: JourneyStageStatus): string {
@@ -268,17 +485,6 @@ function stageIsActive(status: JourneyStageStatus): boolean {
   return status === 'in_progress' || status === 'waiting' || status === 'failed'
 }
 
-/** Same heuristic as `ThinJourneyPipeline`'s uncontrolled default — active, else latest complete. */
-function defaultExpandedFromRail(
-  rail: Array<{ stage: string; status: JourneyStageStatus }>,
-): string | null {
-  return (
-    rail.find((stage) => stageIsActive(stage.status))?.stage ??
-    rail.find((stage) => stage.status === 'complete')?.stage ??
-    null
-  )
-}
-
 function JourneySubstepList({
   items,
   compact,
@@ -324,9 +530,94 @@ function JourneySubstepList({
   )
 }
 
+export function journeyRailStages(
+  stages: JourneyRailStage[],
+): JourneyRailStage[] {
+  if (stages.length > 0) return stages
+  return WORKBENCH_STAGE_ORDER.map((key) => ({
+    stage: key,
+    label: workbenchStageLabel(key),
+    status: 'not_started' as JourneyStageStatus,
+    blocker: null,
+  }))
+}
+
+/** Substeps / vertical cluster for one high-level stage — lives inside that stage's tab. */
+export function JourneyStageSubsteps({
+  stages,
+  stageKey,
+  substeps,
+  matchingCluster,
+  fulfillmentCluster,
+  density = 'compact',
+}: {
+  stages: JourneyRailStage[]
+  stageKey: string
+  substeps?: DerivedWorkbenchSubstep[]
+  matchingCluster?: PipelineClusterRow[]
+  fulfillmentCluster?: PipelineClusterRow[]
+  density?: 'compact' | 'comfortable'
+}) {
+  const compact = density === 'compact'
+  const rail = journeyRailStages(stages)
+  const stage = rail.find((item) => item.stage === stageKey)
+  const items = journeyItemsForStage({
+    stageKey,
+    substeps,
+    matchingCluster,
+    fulfillmentCluster,
+  })
+  if (!stage && items.length === 0) {
+    return (
+      <p className={cn('text-mute', compact ? 'text-[0.65rem]' : 'text-[0.7rem]')}>
+        No substeps for this stage.
+      </p>
+    )
+  }
+  return (
+    <div
+      id={`journey-substeps-${stageKey}`}
+      className={cn(
+        'rounded-md border px-2 py-1.5 text-left',
+        stage ? stagePanelClass(stage.status) : 'border-line bg-canvas',
+      )}
+    >
+      {stage ? (
+        <>
+          <p
+            className={cn(
+              'truncate leading-tight',
+              compact ? 'text-[0.55rem]' : 'text-[0.65rem]',
+              stageLabelClass(stage.status),
+            )}
+          >
+            {stage.label}
+            <span className="ml-1.5 font-normal text-mute">
+              · {workbenchStatusLabel(stage.status)}
+            </span>
+          </p>
+          {stage.blocker ? (
+            <p className={cn('mt-0.5 text-mute', compact ? 'text-[0.5rem]' : 'text-[0.6rem]')}>
+              {stage.blocker}
+            </p>
+          ) : null}
+        </>
+      ) : null}
+      {items.length > 0 ? (
+        <JourneySubstepList items={items} compact={compact} />
+      ) : (
+        <p className={cn('mt-1 text-mute', compact ? 'text-[0.5rem]' : 'text-[0.6rem]')}>
+          No nested steps yet.
+        </p>
+      )}
+    </div>
+  )
+}
+
 /**
  * Four-panel journey chrome (Ingest → Matching → Fulfillment → Notice).
- * Click a stage panel to expand its substeps / vertical cluster underneath.
+ * Always-visible rail. Click a stage to open that stage's tab (selectMode)
+ * or expand substeps underneath (legacy).
  */
 export function ThinJourneyPipeline({
   stages,
@@ -337,27 +628,24 @@ export function ThinJourneyPipeline({
   density = 'comfortable',
   expandedStage: expandedStageControlled,
   onExpandedStageChange,
+  showSubsteps = true,
+  onStageActivate,
 }: {
-  stages: Array<{ stage: string; label: string; status: JourneyStageStatus; blocker: string | null }>
+  stages: JourneyRailStage[]
   substeps?: DerivedWorkbenchSubstep[]
   matchingCluster?: PipelineClusterRow[]
   fulfillmentCluster?: PipelineClusterRow[]
   splitPosture?: boolean
   density?: 'compact' | 'comfortable'
-  /** When provided (including `null`), expansion is controlled by the parent (page layout). */
+  /** When provided (including `null`), expansion/selection is controlled by the parent. */
   expandedStage?: string | null
   onExpandedStageChange?: (stage: string | null) => void
+  /** Hide the inline substep panel — stage tabs own those details. */
+  showSubsteps?: boolean
+  /** Click always activates the stage (opens its tab) instead of toggling expand. */
+  onStageActivate?: (stage: string) => void
 }) {
-  const rail =
-    stages.length > 0
-      ? stages
-      : WORKBENCH_STAGE_ORDER.map((key) => ({
-          stage: key,
-          label: workbenchStageLabel(key),
-          status: 'not_started' as JourneyStageStatus,
-          blocker: null,
-        }))
-
+  const rail = journeyRailStages(stages)
   const compact = density === 'compact'
 
   const defaultExpanded =
@@ -382,46 +670,22 @@ export function ThinJourneyPipeline({
 
   const railKey = rail.map((stage) => `${stage.stage}:${stage.status}`).join('|')
   useEffect(() => {
-    if (isControlled) return
+    if (isControlled || onStageActivate) return
     setExpandedStageUncontrolled(defaultExpanded)
     // Re-sync when stage statuses change for this request (not on every parent render).
     // eslint-disable-next-line react-hooks/exhaustive-deps -- railKey captures status shifts
-  }, [railKey, isControlled])
-
-  const contentForStage = (stageKey: string) => {
-    if (stageKey === 'matching' && matchingCluster && matchingCluster.length > 0) {
-      return matchingCluster.map((row) => ({
-        key: `m-${row.vertical}`,
-        label: row.label,
-        status: row.matching_status,
-        blocker: row.blocker,
-        muted: !row.live,
-        statusLabel: row.live ? workbenchStatusLabel(row.matching_status) : 'Soon',
-      }))
-    }
-    if (stageKey === 'fulfillment' && fulfillmentCluster && fulfillmentCluster.length > 0) {
-      return fulfillmentCluster.map((row) => {
-        const status = row.fulfillment_status ?? ('not_started' as JourneyStageStatus)
-        return {
-          key: `f-${row.vertical}`,
-          label: row.label,
-          status,
-          blocker: row.blocker,
-          muted: !row.live,
-          statusLabel: row.live ? workbenchStatusLabel(status) : 'Soon',
-        }
-      })
-    }
-    return (substeps?.filter((step) => step.parent === stageKey) ?? []).map((step) => ({
-      key: step.key,
-      label: step.label,
-      status: step.status,
-      blocker: step.blocker,
-    }))
-  }
+  }, [railKey, isControlled, onStageActivate])
 
   const expanded = expandedStage != null ? rail.find((stage) => stage.stage === expandedStage) : null
-  const expandedItems = expandedStage != null ? contentForStage(expandedStage) : []
+  const expandedItems =
+    showSubsteps && expandedStage != null
+      ? journeyItemsForStage({
+          stageKey: expandedStage,
+          substeps,
+          matchingCluster,
+          fulfillmentCluster,
+        })
+      : []
 
   return (
     <div
@@ -431,7 +695,7 @@ export function ThinJourneyPipeline({
     >
       <div className="flex items-stretch gap-1" role="list" aria-label="High-level journey">
         {rail.map((stage, index) => {
-          const isExpanded = expandedStage === stage.stage
+          const isSelected = expandedStage === stage.stage
           return (
             <div
               key={stage.stage}
@@ -444,18 +708,22 @@ export function ThinJourneyPipeline({
                   'min-w-0 flex-1 rounded-md border text-center transition-colors',
                   compact ? 'px-1 py-1' : 'px-1.5 py-1.5',
                   stagePanelClass(stage.status),
-                  isExpanded && 'ring-1 ring-habeas-navy/40',
+                  isSelected && 'ring-1 ring-habeas-navy/40',
                 )}
-                aria-expanded={isExpanded}
+                aria-pressed={isSelected}
                 aria-controls={`journey-substeps-${stage.stage}`}
                 title={`${stage.label}: ${workbenchStatusLabel(stage.status)}${
                   stage.blocker ? ` — ${stage.blocker}` : ''
-                }. Click to ${isExpanded ? 'hide' : 'show'} substeps.`}
-                onClick={() =>
+                }. Click to open ${stage.label}.`}
+                onClick={() => {
+                  if (onStageActivate) {
+                    onStageActivate(stage.stage)
+                    return
+                  }
                   setExpandedStage((current) =>
                     current === stage.stage ? null : stage.stage,
                   )
-                }
+                }}
               >
                 <div className="mx-auto mb-1 flex justify-center">
                   <span
@@ -504,34 +772,71 @@ export function ThinJourneyPipeline({
         </p>
       ) : null}
 
-      {expanded != null && expandedItems.length > 0 ? (
-        <div
-          id={`journey-substeps-${expanded.stage}`}
-          className={cn(
-            'rounded-md border px-2 py-1.5 text-left',
-            stagePanelClass(expanded.status),
-          )}
-        >
-          <p
-            className={cn(
-              'truncate leading-tight',
-              compact ? 'text-[0.55rem]' : 'text-[0.65rem]',
-              stageLabelClass(expanded.status),
-            )}
-          >
-            {expanded.label}
-            <span className="ml-1.5 font-normal text-mute">
-              · {workbenchStatusLabel(expanded.status)}
-            </span>
-          </p>
-          {expanded.blocker ? (
-            <p className={cn('mt-0.5 text-mute', compact ? 'text-[0.5rem]' : 'text-[0.6rem]')}>
-              {expanded.blocker}
-            </p>
-          ) : null}
-          <JourneySubstepList items={expandedItems} compact={compact} />
-        </div>
+      {showSubsteps && expanded != null && expandedItems.length > 0 ? (
+        <JourneyStageSubsteps
+          stages={rail}
+          stageKey={expanded.stage}
+          substeps={substeps}
+          matchingCluster={matchingCluster}
+          fulfillmentCluster={fulfillmentCluster}
+          density={density}
+        />
       ) : null}
+    </div>
+  )
+}
+
+/** Shared Inbox / lab / full-page card: left workbench + full-height activity column. */
+export function RequestDetailWorkbenchShell({
+  header,
+  rail,
+  children,
+  side,
+}: {
+  header?: ReactNode
+  rail?: ReactNode
+  children: ReactNode
+  side?: ReactNode
+}) {
+  return (
+    <div className="flex h-full min-h-0 min-w-0 flex-1 overflow-hidden">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        {header}
+        {rail != null ? (
+          <div className="shrink-0 border-b border-line px-3 py-1.5">{rail}</div>
+        ) : null}
+        {children}
+      </div>
+      {side ? (
+        <aside
+          className="flex h-full min-h-0 w-full shrink-0 flex-col overflow-hidden border-line max-md:max-h-[42%] max-md:border-t md:w-[17.5rem] md:border-l lg:w-[19rem]"
+          aria-label="Activity and comments"
+        >
+          {side}
+        </aside>
+      ) : null}
+    </div>
+  )
+}
+
+export function RequestDetailSideColumn({
+  activity,
+  comments,
+}: {
+  activity: ReactNode
+  comments: ReactNode
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <section className="min-h-0 flex-1 overflow-y-auto px-2.5 py-2" aria-label="Activity">
+        {activity}
+      </section>
+      <section
+        className="min-h-0 flex-1 overflow-y-auto border-t border-line px-2.5 py-2"
+        aria-label="Comments"
+      >
+        {comments}
+      </section>
     </div>
   )
 }
@@ -863,8 +1168,15 @@ function RequestStageActionBar({
 }
 
 function phoneSummaryFromMatched(contact: MatchedPersonContact): string | null {
-  if (!contact.phones?.length) return null
-  return contact.phones.map((phone) => `${phone.type}: ${phone.number}`).join(' · ')
+  const phones = Array.isArray(contact.phones) ? contact.phones : []
+  if (phones.length === 0) return null
+  return phones
+    .map((phone) => {
+      const type = typeof phone?.type === 'string' ? phone.type : 'phone'
+      const number = typeof phone?.number === 'string' ? redactHashHex(phone.number) : '—'
+      return `${type}: ${number}`
+    })
+    .join(' · ')
 }
 
 /** Requester contact for Details / Inbox Overview — DROP after match, else intake contact. */
@@ -910,7 +1222,9 @@ export function RequesterContactSection({
         </div>
       )
     }
-    if (matched.length === 0 || matching.match_count <= 0) {
+    const effectiveMatchCount =
+      typeof matching.match_count === 'number' ? matching.match_count : matched.length
+    if (matched.length === 0 || effectiveMatchCount <= 0) {
       return (
         <div className={cn('space-y-1.5', compact ? 'text-[0.7rem]' : 'text-xs')}>
           <p className="taste-micro">Requester contact</p>
@@ -922,16 +1236,18 @@ export function RequesterContactSection({
     if (personSummary && personSummary !== '—') {
       rows.push({ label: 'Matched', value: personSummary })
     }
-    if (primaryMatched?.email) rows.push({ label: 'Email', value: primaryMatched.email })
-    const phones = phoneSummaryFromMatched(primaryMatched!)
+    if (primaryMatched?.email) {
+      rows.push({ label: 'Email', value: redactHashHex(primaryMatched.email) })
+    }
+    const phones = primaryMatched ? phoneSummaryFromMatched(primaryMatched) : null
     if (phones) rows.push({ label: 'Phone', value: phones })
   } else {
     const name = requestContact?.name?.trim() || displayLabel?.trim() || null
     const email = requestContact?.email?.trim() || null
     const phone = requestContact?.phone?.trim() || null
     if (name) rows.push({ label: 'Name', value: name })
-    if (email) rows.push({ label: 'Email', value: email })
-    if (phone) rows.push({ label: 'Phone', value: phone })
+    if (email) rows.push({ label: 'Email', value: redactHashHex(email) })
+    if (phone) rows.push({ label: 'Phone', value: redactHashHex(phone) })
     if (rows.length === 0) {
       return (
         <div className={cn('space-y-1.5', compact ? 'text-[0.7rem]' : 'text-xs')}>
@@ -1040,13 +1356,17 @@ function RequestDetailsPanel({
 
   return (
     <div className="space-y-5 text-xs">
-      <RequesterContactSection
-        intakeSource={intakeSource}
-        displayLabel={displayLabel}
-        requestContact={requestContact}
-        matching={matching}
-        dropPreMatch={dropPreMatch}
-      />
+      {ownerLanguage && matching ? (
+        <MatchedContactsPanel matching={matching} />
+      ) : (
+        <RequesterContactSection
+          intakeSource={intakeSource}
+          displayLabel={displayLabel}
+          requestContact={requestContact}
+          matching={matching}
+          dropPreMatch={dropPreMatch}
+        />
+      )}
       <div className="space-y-3">
         <p className="taste-micro">Request details</p>
         <dl className="grid grid-cols-1 gap-x-6 gap-y-2.5 sm:grid-cols-2">
@@ -1139,6 +1459,7 @@ function ActivityPanel({
   selectable = false,
   selectedKey = null,
   onSelectEntry,
+  compact = false,
 }: {
   requestId: string
   entries: TimelineEntry[]
@@ -1147,6 +1468,7 @@ function ActivityPanel({
   selectable?: boolean
   selectedKey?: string | null
   onSelectEntry?: (entry: TimelineEntry, key: string) => void
+  compact?: boolean
 }) {
   const queryClient = useQueryClient()
   const [filter, setFilter] = useState<ActivityFilter>('all')
@@ -1195,7 +1517,7 @@ function ActivityPanel({
   ]
 
   return (
-    <div className="space-y-3 p-4">
+    <div className={cn(compact ? 'space-y-2 p-0' : 'space-y-3 p-4')}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="taste-micro">Activity</p>
         <div className="flex flex-wrap gap-1" role="group" aria-label="Activity filter">
@@ -1363,7 +1685,7 @@ function MatchingAttemptsUnderPipeline({
       </p>
     )
   }
-  const attempts = [...(matching?.attempts ?? [])].sort(
+  const attempts = [...(Array.isArray(matching?.attempts) ? matching.attempts : [])].sort(
     (a, b) => b.attempt_number - a.attempt_number,
   )
   return (
@@ -1426,11 +1748,11 @@ function StageActivityDetail({
       <p className="mt-1 text-ink-soft">{humanizeActivitySummary(entry.summary)}</p>
       {expandedStage === 'fulfillment' ? (
         <p className="mt-1 text-habeas-navy">
-          Open the Fulfillment tab for kickoff / delivery detail.
+          Fulfillment tab shows kickoff / delivery detail.
         </p>
       ) : expandedStage === 'notice' ? (
         <p className="mt-1 text-habeas-navy">
-          Open the Fulfillment tab for notice approval / delivery detail.
+          Notice tab shows approval / weekly-batch detail.
         </p>
       ) : null}
     </div>
@@ -1793,45 +2115,41 @@ export function RequestDetailBody({
   variant = 'overlay',
   defaultTab = 'fulfillment',
   seedRequest,
+  vertical = null,
+  system = null,
 }: {
   requestId: string
   variant?: 'overlay' | 'page'
   defaultTab?: RequestDetailTab
   seedRequest?: RequestRecord | null
+  vertical?: string | null
+  system?: string | null
 }) {
   const queryClient = useQueryClient()
-  const { isAdmin, isSuperAdmin, role, me } = useMe()
+  const { isAdmin, isSuperAdmin, role, me, isLoading: meLoading } = useMe()
   const legalAdmin = isLegalAdminPersona(role)
   const matchingPersona =
-    role === 'data_owner' ? 'data_owner' : legalAdmin ? 'legal' : 'ops'
+    isVerticalOperatorRole(role) ? 'data_owner' : legalAdmin ? 'legal' : 'ops'
+  const roleKnown = !meLoading && role != null
+  const requestIdReady = isRequestUuid(requestId)
   const [tab, setTab] = useState<RequestDetailTab>(defaultTab)
 
   useEffect(() => {
-    // Page layout has no Activity tab — coerce a deep-linked `activity` default.
-    const next = variant === 'page' && defaultTab === 'activity' ? 'fulfillment' : defaultTab
-    setTab(next)
-  }, [requestId, defaultTab, variant])
+    setTab(defaultTab)
+  }, [requestId, defaultTab])
 
-  // Page-only activity ↔ pipeline linkage — inert on the overlay (pipeline stays uncontrolled).
-  const [expandedStage, setExpandedStage] = useState<string | null>(null)
   const [selectedTimelineKey, setSelectedTimelineKey] = useState<string | null>(null)
   const [selectedTimelineEntry, setSelectedTimelineEntry] = useState<TimelineEntry | null>(null)
-  const selectedEntryRef = useRef<TimelineEntry | null>(null)
-  selectedEntryRef.current = selectedTimelineEntry
-  /** When the operator manually collapses the rail, skip auto-default until they expand or pick activity. */
-  const userCollapsedRef = useRef(false)
 
   useEffect(() => {
-    setExpandedStage(null)
     setSelectedTimelineKey(null)
     setSelectedTimelineEntry(null)
-    userCollapsedRef.current = false
   }, [requestId])
 
   const requestQuery = useQuery({
     queryKey: ['admin-api', 'requests', requestId],
     queryFn: () => getRequest(requestId),
-    enabled: Boolean(requestId),
+    enabled: requestIdReady,
     initialData: seedRequest ?? undefined,
     placeholderData: (previous) => previous,
   })
@@ -1839,6 +2157,7 @@ export function RequestDetailBody({
   const journeyQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', requestId, 'journey'],
     queryFn: () => getRequestJourney(requestId),
+    enabled: requestIdReady,
     refetchInterval: 15_000,
     placeholderData: (previous) => previous,
   })
@@ -1856,14 +2175,67 @@ export function RequestDetailBody({
         throw error
       }
     },
+    enabled: requestIdReady,
     refetchInterval: 15_000,
     placeholderData: (previous) => previous,
     retry: false,
   })
 
+  const locationSystem = useLocationSystemParam()
+  const ownerVertical =
+    matchingPersona === 'data_owner' ? trimScopeId(vertical) : null
+  const scopedSystem = trimScopeId(system) ?? locationSystem
+
+  const attentionQuery = useQuery({
+    queryKey: [
+      'admin-api',
+      'ops',
+      'requests',
+      'needs-attention',
+      'overlay',
+      requestId,
+      ownerVertical,
+      scopedSystem,
+      matchingPersona,
+    ],
+    queryFn: () =>
+      fetchOverlayAttentionItem(requestId, {
+        vertical: ownerVertical,
+        system: scopedSystem,
+        ownerPersona: matchingPersona === 'data_owner',
+      }),
+    enabled: requestIdReady,
+    staleTime: 10_000,
+  })
+
+  const matchingSystem =
+    scopedSystem ?? systemFromAttentionItem(attentionQuery.data)
   const matchingQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'drop', 'matching-results', requestId],
-    queryFn: () => fetchMatchingDetailOptional(requestId),
+    queryKey:
+      matchingPersona === 'data_owner'
+        ? [
+            'admin-api',
+            'ops',
+            'requests',
+            requestId,
+            'verticals',
+            ownerVertical,
+            'matching-results',
+            matchingSystem,
+          ]
+        : ['admin-api', 'ops', 'drop', 'matching-results', requestId],
+    queryFn: () =>
+      isVerticalOperatorRole(role)
+        ? fetchOwnerVerticalMatchingDetailOptional(
+            requestId,
+            ownerVertical as string,
+            matchingSystem ?? undefined,
+          )
+        : fetchMatchingDetailOptional(requestId),
+    enabled:
+      requestIdReady &&
+      roleKnown &&
+      (role !== 'data_owner' || Boolean(ownerVertical)),
     refetchInterval: 15_000,
     placeholderData: (previous) => previous,
   })
@@ -1871,6 +2243,7 @@ export function RequestDetailBody({
   const artifactQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', requestId],
     queryFn: () => getFulfillmentArtifact(requestId),
+    enabled: requestIdReady,
     refetchInterval: 15_000,
     retry: false,
   })
@@ -1878,26 +2251,45 @@ export function RequestDetailBody({
   const identityQuery = useQuery({
     queryKey: ['admin-api', 'requests', requestId, 'identity-verification'],
     queryFn: () => getLatestIdentityVerification(requestId),
+    enabled: requestIdReady,
     refetchInterval: 15_000,
   })
 
-  const attentionQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'overlay', requestId],
-    queryFn: async () => {
-      const response = await getNeedsAttention(200)
-      return response.items.find((item) => item.request_id === requestId)
-    },
-    staleTime: 10_000,
-  })
-
-  const timelineAlways = variant === 'page' || tab === 'activity'
   const timelineQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', requestId, 'timeline'],
     queryFn: () => getRequestTimeline(requestId),
-    enabled: timelineAlways,
-    refetchInterval: timelineAlways ? 15_000 : false,
+    enabled: requestIdReady,
+    refetchInterval: 15_000,
     placeholderData: (previous) => previous,
   })
+
+  const commentsQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', requestId, 'comments'],
+    queryFn: () => getRequestComments(requestId),
+    enabled: requestIdReady,
+    refetchInterval: 15_000,
+  })
+  const [commentDraft, setCommentDraft] = useState('')
+  const commentMutation = useMutation({
+    mutationFn: (body: string) => postRequestComment(requestId, body),
+    onSuccess: async () => {
+      setCommentDraft('')
+      actionToast.success({ title: 'Note posted', id: `request-comment-${requestId}` })
+      await queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'ops', 'requests', requestId, 'comments'],
+      })
+      await queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'ops', 'requests', requestId, 'timeline'],
+      })
+    },
+    onError: (err) => {
+      actionToast.error({
+        title: "Couldn't post note",
+        description: actionToast.safeErrorMessage(err),
+      })
+    },
+  })
+  const comments: RequestComment[] = commentsQuery.data ?? []
 
   const deliveryMutation = useMutation({
     mutationFn: (status: 'delivered' | 'failed' | 'recalled') =>
@@ -1942,27 +2334,44 @@ export function RequestDetailBody({
             : responseStatus === 3 || responseStatus === 4
               ? { dwids: dwids ?? [] }
               : {}),
+          ...(ownerVertical ? { vertical: ownerVertical } : {}),
+          ...(matchingSystem ? { system: matchingSystem } : {}),
         })
       }
-      return postDropMatchingResultDecline(requestId)
+      return postDropMatchingResultDecline(requestId, {
+        ...(ownerVertical ? { vertical: ownerVertical } : {}),
+        ...(matchingSystem ? { system: matchingSystem } : {}),
+      })
     },
     onSuccess: async (data, variables) => {
-      const dispositionRecorded =
-        data &&
-        typeof data === 'object' &&
-        'disposition' in data &&
-        (data as { disposition?: { recorded?: boolean } }).disposition?.recorded
-      if (variables.action === 'promote' && dispositionRecorded === false) {
-        actionToast.warning({
-          title: 'Matching approved — disposition not recorded',
-          description:
-            'Review was approved, but the vertical disposition write did not record. Check DWIDs and retry if needed.',
-          id: `request-matching-disposition-${requestId}`,
-        })
+      if (variables.action === 'promote') {
+        const copy = matchingReviewPromoteToast(
+          data && typeof data === 'object' ? data : {},
+        )
+        if (copy.variant === 'warning') {
+          actionToast.warning({
+            title: copy.title,
+            description: copy.description,
+            id: `request-matching-disposition-${requestId}`,
+          })
+        } else {
+          actionToast.success({
+            title: copy.title,
+            description: copy.description,
+            id: `request-matching-disposition-${requestId}`,
+          })
+        }
       } else {
+        const pending =
+          data &&
+          typeof data === 'object' &&
+          'review_status' in data &&
+          (data as { review_status?: string }).review_status === 'pending'
         actionToast.success({
-          title:
-            variables.action === 'promote' ? 'Matching approved' : 'Matching declined',
+          title: pending ? 'System declined' : 'Matching declined',
+          description: pending
+            ? 'Matching review stays open until remaining systems are decided.'
+            : undefined,
           id: `request-matching-disposition-${requestId}`,
         })
       }
@@ -2019,30 +2428,17 @@ export function RequestDetailBody({
   const railSubsteps = workbench ? undefined : derivedChrome?.substeps
   const splitPosture = workbench?.split_posture ?? derivedChrome?.split_posture ?? false
 
-  // Page rail: keep the pipeline expansion following the active stage while polling,
-  // unless the operator has an activity selected or manually collapsed the rail.
-  const railStatusKey = railStages.map((stage) => `${stage.stage}:${stage.status}`).join('|')
-  useEffect(() => {
-    if (variant !== 'page') return
-    if (selectedEntryRef.current != null) return
-    if (userCollapsedRef.current) return
-    if (railStatusKey === '') return
-    setExpandedStage(defaultExpandedFromRail(railStages))
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- railStatusKey captures status shifts
-  }, [variant, railStatusKey])
-
   const handleActivitySelect = (entry: TimelineEntry, key: string) => {
     if (selectedTimelineKey === key) {
       setSelectedTimelineKey(null)
       setSelectedTimelineEntry(null)
       return
     }
-    userCollapsedRef.current = false
     setSelectedTimelineKey(key)
     setSelectedTimelineEntry(entry)
     const workbenchStage = timelineEntryWorkbenchStage(entry)
     if (workbenchStage) {
-      setExpandedStage(workbenchStage)
+      setTab(workbenchStage)
     }
   }
 
@@ -2053,7 +2449,7 @@ export function RequestDetailBody({
     Boolean(matching.approval_id) &&
     (isSuperAdmin ||
       (legalAdmin && assignmentToLegal) ||
-      (role === 'data_owner' && !legalAdmin))
+      (isVerticalOperatorRole(role) && !legalAdmin))
 
   const dropPreMatch =
     intakeSource === 'drop' &&
@@ -2117,7 +2513,15 @@ export function RequestDetailBody({
     ],
   )
 
-  const loading = journeyQuery.isPending && !journey
+  const loading = requestIdReady && journeyQuery.isPending && !journey
+
+  if (!requestIdReady) {
+    return (
+      <div className="px-4 py-6 text-xs text-red-700">
+        Could not load request journey.
+      </div>
+    )
+  }
 
   if (loading) {
     return (
@@ -2135,308 +2539,338 @@ export function RequestDetailBody({
     )
   }
 
-  const currentRail =
-    railStages.find((step) => step.status === 'in_progress' || step.status === 'waiting') ??
-    railStages.find((step) => step.status === 'failed') ??
-    railStages[railStages.length - 1]
-
   const pipelineSubsteps = workbench
     ? derivedChrome?.substeps.filter(
         (step) => step.parent === 'ingest' || step.parent === 'notice',
       )
     : railSubsteps
 
-  const pipelineContent =
+  const selectedStage = isWorkbenchStageKey(tab) ? tab : null
+
+  const pipelineRail =
     workbenchQuery.isPending && !workbench && !derivedChrome ? (
       <p className="text-[0.7rem] text-mute">Loading stage rail…</p>
-    ) : railStages.length > 0 ? (
-      variant === 'page' ? (
-        <ThinJourneyPipeline
-          stages={railStages}
-          substeps={pipelineSubsteps}
-          matchingCluster={workbench?.matching_cluster}
-          fulfillmentCluster={workbench?.fulfillment_cluster}
-          splitPosture={splitPosture}
-          density="comfortable"
-          expandedStage={expandedStage}
-          onExpandedStageChange={(next) => {
-            setExpandedStage(next)
-            if (next == null) {
-              userCollapsedRef.current = true
-              setSelectedTimelineKey(null)
-              setSelectedTimelineEntry(null)
-            } else {
-              userCollapsedRef.current = false
-            }
-          }}
-        />
-      ) : (
-        <ThinJourneyPipeline
-          stages={railStages}
-          substeps={pipelineSubsteps}
-          matchingCluster={workbench?.matching_cluster}
-          fulfillmentCluster={workbench?.fulfillment_cluster}
-          splitPosture={splitPosture}
-          density="compact"
-        />
-      )
     ) : (
-      <p className="text-[0.7rem] text-mute">
-        {currentRail?.label ? `Stage: ${currentRail.label}` : 'No stage rail.'}
-      </p>
+      <ThinJourneyPipeline
+        stages={railStages}
+        substeps={pipelineSubsteps}
+        matchingCluster={workbench?.matching_cluster}
+        fulfillmentCluster={workbench?.fulfillment_cluster}
+        splitPosture={splitPosture}
+        density={variant === 'page' ? 'comfortable' : 'compact'}
+        showSubsteps={false}
+        expandedStage={selectedStage}
+        onStageActivate={(stage) => {
+          if (isWorkbenchStageKey(stage)) setTab(stage)
+        }}
+      />
     )
 
-  const tabsNode = (
-    <Tabs
-      value={tab}
-      onValueChange={(value) => setTab(value as RequestDetailTab)}
-      className="flex min-h-0 flex-1 flex-col overflow-hidden"
-    >
-      <div className="shrink-0 border-b border-line px-4 py-2">
-        <TabsList className="h-9 w-full justify-start gap-1 bg-canvas p-1">
-          <TabsTrigger value="details" className="h-7 px-3">
-            Details
-          </TabsTrigger>
-          <TabsTrigger value="fulfillment" className="h-7 px-3">
-            Fulfillment
-          </TabsTrigger>
-          <TabsTrigger value="matching" className="h-7 px-3">
-            Matching
-          </TabsTrigger>
-          {variant === 'overlay' ? (
-            <TabsTrigger value="activity" className="h-7 px-3">
-              Activity
-            </TabsTrigger>
-          ) : null}
-        </TabsList>
-      </div>
+  const stageSubsteps = (stageKey: WorkbenchStageKey) => (
+    <JourneyStageSubsteps
+      stages={railStages}
+      stageKey={stageKey}
+      substeps={pipelineSubsteps}
+      matchingCluster={workbench?.matching_cluster}
+      fulfillmentCluster={workbench?.fulfillment_cluster}
+      density={variant === 'page' ? 'comfortable' : 'compact'}
+    />
+  )
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <TabsContent value="details" className="mt-0 px-4 py-4">
-          <RequestDetailsPanel
-            requestId={requestId}
-            intakeSource={intakeSource}
-            displayLabel={displayLabel}
-            requestContact={requestQuery.data?.contact}
-            requestorState={requestQuery.data?.requestor_state}
-            identityStatus={identityQuery.data?.status}
-            matching={matching}
-            dropStatusCode={dropStatusCode}
-            dropStatusIsRecommended={dropStatusIsRecommended}
-            dropPreMatch={dropPreMatch}
-            ownerLanguage={matchingPersona === 'data_owner'}
-          />
-          <AttachmentsPanel requestId={requestId} />
-        </TabsContent>
-        <TabsContent value="fulfillment" className="mt-0 px-4 py-4">
-          <div className="space-y-4">
-            {matchingPersona === 'data_owner' ? (
-              <OwnerFulfillmentStatusPanel
-                requestId={requestId}
-                cluster={workbench?.fulfillment_cluster ?? []}
-                assignedVerticals={me?.verticals}
-                assignedLabels={me?.assigned_vertical_labels}
-                canSubmit={role === 'data_owner'}
-              />
-            ) : null}
-            {workbench && matchingPersona !== 'data_owner' && (isSuperAdmin || isAdmin || legalAdmin) ? (
-              <FulfillmentGateControls
-                requestId={requestId}
-                rows={workbench.fulfillment_cluster}
-                onInvalidate={invalidateAll}
-              />
-            ) : null}
-            {matchingPersona === 'data_owner' ? null : (
-              <>
-                <AccessHandoffPanel
-                  requestId={requestId}
-                  artifact={artifactQuery.data}
-                  isPending={artifactQuery.isPending}
-                  isError={artifactQuery.isError}
-                  canMutate={Boolean(isSuperAdmin || isAdmin)}
-                  busy={deliveryMutation.isPending}
-                  onCopyUrl={() => {
-                    const url =
-                      artifactQuery.data?.shareable_url ??
-                      artifactQuery.data?.fulfillment_artifact_uri
-                    if (!url) return
-                    const copyUrl = () => {
-                      void navigator.clipboard.writeText(url).then(() => {
-                        actionToast.copied('Copied URL', copyUrl)
-                      })
-                    }
-                    copyUrl()
-                  }}
-                  onSetStatus={(status) => deliveryMutation.mutate(status)}
-                />
-                <div className="space-y-1">
-                  <p className="taste-micro">Identity verification</p>
-                  {identityQuery.data ? (
-                    <p className="text-xs text-ink-soft">
-                      Status:{' '}
-                      <span className="capitalize text-ink">{identityQuery.data.status}</span>
-                      <span className="text-mute">
-                        {' '}
-                        · {formatTimestamp(identityQuery.data.verified_at)}
-                      </span>
-                      {identityQuery.data.method ? (
-                        <span className="text-mute">
-                          {' '}
-                          · {identityQuery.data.method}
-                        </span>
-                      ) : null}
-                    </p>
-                  ) : (
-                    <p className="text-xs text-mute">
-                      None recorded — use Identity verified in stage actions when ready.
-                    </p>
-                  )}
-                </div>
-                <AccessDeliveryEmailCard requestId={requestId} />
-              </>
-            )}
+  const selectedActivityDetail =
+    selectedTimelineEntry && selectedStage ? (
+      <div
+        id="pipeline-activity-detail"
+        role="region"
+        aria-label="Selected activity detail"
+        className="space-y-2 border-t border-line/70 pt-2"
+      >
+        <PipelineActivityDetail
+          entry={selectedTimelineEntry}
+          expandedStage={selectedStage}
+          matching={matching}
+          matchingPending={matchingQuery.isPending}
+          matchingError={matchingQuery.isError}
+        />
+      </div>
+    ) : null
+
+  const commentsColumn = (
+    <div className="flex min-h-0 flex-col space-y-2">
+      <p className="text-[0.6rem] font-medium uppercase tracking-wide text-mute">
+        Comments
+        {comments.length > 0 ? (
+          <span className="ml-1 tabular-nums opacity-70">({comments.length})</span>
+        ) : null}
+      </p>
+      <div className="min-h-0 flex-1 space-y-1">
+        {commentsQuery.isError ? (
+          <p className="text-[0.7rem] text-red-700">Could not load comments.</p>
+        ) : null}
+        {!commentsQuery.isPending && !commentsQuery.isError && comments.length === 0 ? (
+          <p className="text-[0.7rem] text-mute">No comments yet.</p>
+        ) : null}
+        {comments.map((comment) => (
+          <div key={comment.id} className="border-b border-line/70 py-1.5 last:border-0">
+            <div className="flex flex-wrap items-baseline justify-between gap-1">
+              <span className="text-[0.65rem] font-medium text-ink">{comment.actor}</span>
+              <span className="tabular-nums text-[0.6rem] text-mute">
+                {formatTimestamp(comment.occurred_at)}
+              </span>
+            </div>
+            <p className="whitespace-pre-wrap text-[0.7rem] text-ink-soft">{comment.body}</p>
           </div>
-        </TabsContent>
-        <TabsContent value="matching" className="mt-0 px-4 py-4">
-          {isSuperAdmin && canMatchingDisposition ? (
-            <p className="mb-2 text-[0.65rem] text-habeas-navy">
-              Ops override — you can set the CA DROP status and matched DWIDs, same as data owner.
-              This is not Legal kickoff or Fulfillment start.
-            </p>
-          ) : isSuperAdmin ? (
-            <p className="mb-2 text-[0.65rem] text-mute">
-              Ops override available when matching review is pending with an open approval.
-            </p>
-          ) : assignmentToLegal ? (
-            <p className="mb-2 text-[0.65rem] text-habeas-navy">
-              Assignment to legal — review matching context (disposition remains data-owner
-              canonical unless escalated here).
-            </p>
-          ) : legalAdmin ? (
-            <p className="mb-2 text-[0.65rem] text-mute">
-              Read-only for legal/admin — matching disposition is data-owner-owned (KTD11).
-            </p>
+        ))}
+      </div>
+      <div className="flex shrink-0 items-end gap-2 border-t border-line pt-2">
+        <textarea
+          className="min-h-[3.5rem] max-h-32 flex-1 resize-y rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
+          value={commentDraft}
+          onChange={(event) => setCommentDraft(event.currentTarget.value)}
+          placeholder="Add a review note…"
+          aria-label="Comment body"
+          maxLength={2000}
+        />
+        <Button
+          size="sm"
+          disabled={commentMutation.isPending || commentDraft.trim().length === 0}
+          onClick={() => commentMutation.mutate(commentDraft.trim())}
+        >
+          {commentMutation.isPending ? '…' : 'Post'}
+        </Button>
+      </div>
+    </div>
+  )
+
+  return (
+    <RequestDetailWorkbenchShell
+      header={
+        <>
+          <RequestStageActionBar actions={stageActions} onInvalidate={invalidateAll} />
+          {overlayCallout ? (
+            <div className="shrink-0 border-b border-line px-4 py-2">
+              <OverlayConnectorFreshnessCallout callout={overlayCallout} />
+            </div>
           ) : null}
-          <MatchingReviewPanel
-            requestId={requestId}
-            matching={matching}
-            isPending={matchingQuery.isPending}
-            isError={matchingQuery.isError}
-            canReviewActions={canMatchingDisposition}
-            actionPending={matchingDispositionMutation.isPending}
-            hideActions={!canMatchingDisposition}
-            layout="tabs"
-            compact
-            connectorReminders={me?.connector_reminders}
-            fetchConnectorConnections={Boolean(isAdmin || isSuperAdmin)}
-            persona={matchingPersona}
-            onPromote={(responseStatus, dwids) =>
-              matchingDispositionMutation.mutate({
-                action: 'promote',
-                responseStatus,
-                dwids,
-              })
-            }
-            onDecline={() => matchingDispositionMutation.mutate({ action: 'decline' })}
-          />
-        </TabsContent>
-        {variant === 'overlay' ? (
-          <TabsContent value="activity" className="mt-0">
+        </>
+      }
+      rail={pipelineRail}
+      side={
+        <RequestDetailSideColumn
+          activity={
             <ActivityPanel
               requestId={requestId}
               entries={timelineQuery.data?.entries ?? []}
               isPending={timelineQuery.isPending && !timelineQuery.data}
+              selectable
+              selectedKey={selectedTimelineKey}
+              onSelectEntry={handleActivitySelect}
+              compact
             />
-          </TabsContent>
-        ) : null}
-      </div>
-    </Tabs>
-  )
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <RequestStageActionBar actions={stageActions} onInvalidate={invalidateAll} />
-
-      {variant === 'page' ? (
-        /* PAGE: left = pipeline → attempt/activity detail → Activity feed; right = tabs */
-        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-          {/* LEFT / MAIN */}
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-            <div className="shrink-0 space-y-2 overflow-x-auto border-b border-line px-4 py-3">
-              {pipelineContent}
-              <div
-                id="pipeline-activity-detail"
-                role="region"
-                aria-label="Selected activity detail"
-                className="space-y-2 border-t border-line/70 pt-2"
-              >
-                <PipelineActivityDetail
-                  entry={selectedTimelineEntry}
-                  expandedStage={expandedStage}
-                  matching={matching}
-                  matchingPending={matchingQuery.isPending}
-                  matchingError={matchingQuery.isError}
-                />
-              </div>
-            </div>
-
-      <div
-        className="min-h-0 flex-1 overflow-y-auto"
-        role="region"
-        aria-label="Request activity"
-      >
-        <ActivityPanel
-          requestId={requestId}
-          entries={timelineQuery.data?.entries ?? []}
-          isPending={timelineQuery.isPending && !timelineQuery.data}
-          selectable
-          selectedKey={selectedTimelineKey}
-          onSelectEntry={handleActivitySelect}
+          }
+          comments={commentsColumn}
         />
-      </div>
-          </div>
-
-          {/* RIGHT: Details / Fulfillment / Matching */}
-          <aside
-            className="flex w-[min(26rem,45%)] shrink-0 flex-col overflow-hidden border-l border-line bg-canvas/30"
-            aria-label="Request details and workflow"
+      }
+    >
+      <Tabs
+        value={tab}
+        onValueChange={(value) => setTab(value as RequestDetailTab)}
+        className="flex min-h-0 flex-1 flex-col overflow-hidden"
+      >
+        <div className="shrink-0 border-b border-line px-3 py-1">
+          <TabsList
+            className="h-8 w-full justify-start gap-1 overflow-x-auto rounded-md border border-line bg-canvas p-0.5"
+            aria-label="Request detail sections"
           >
-            {tabsNode}
-          </aside>
+            <TabsTrigger value="details" className={REQUEST_DETAIL_TAB_TRIGGER}>
+              Overview
+            </TabsTrigger>
+            <TabsTrigger value="ingest" className={REQUEST_DETAIL_TAB_TRIGGER}>
+              Ingest
+            </TabsTrigger>
+            <TabsTrigger value="matching" className={REQUEST_DETAIL_TAB_TRIGGER}>
+              Matching
+            </TabsTrigger>
+            <TabsTrigger value="fulfillment" className={REQUEST_DETAIL_TAB_TRIGGER}>
+              Fulfillment
+            </TabsTrigger>
+            <TabsTrigger value="notice" className={REQUEST_DETAIL_TAB_TRIGGER}>
+              Notice
+            </TabsTrigger>
+          </TabsList>
         </div>
-      ) : (
-        /* OVERLAY: unchanged single column */
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <div className="shrink-0 space-y-2 overflow-x-auto border-b border-line px-4 py-2">
-            {overlayCallout ? (
-              <OverlayConnectorFreshnessCallout callout={overlayCallout} />
+
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <TabsContent value="details" className="mt-0 px-4 py-3">
+            <RequestDetailsPanel
+              requestId={requestId}
+              intakeSource={intakeSource}
+              displayLabel={displayLabel}
+              requestContact={requestQuery.data?.contact}
+              requestorState={requestQuery.data?.requestor_state}
+              identityStatus={identityQuery.data?.status}
+              matching={matching}
+              dropStatusCode={dropStatusCode}
+              dropStatusIsRecommended={dropStatusIsRecommended}
+              dropPreMatch={dropPreMatch}
+              ownerLanguage={matchingPersona === 'data_owner'}
+            />
+            <AttachmentsPanel requestId={requestId} />
+          </TabsContent>
+          <TabsContent value="ingest" className="mt-0 space-y-3 px-4 py-3">
+            {stageSubsteps('ingest')}
+            {selectedStage === 'ingest' ? selectedActivityDetail : null}
+          </TabsContent>
+          <TabsContent value="matching" className="mt-0 space-y-3 px-4 py-3">
+            {stageSubsteps('matching')}
+            {isAuth0MatchingScope(vertical, matchingSystem) ? (
+              <Auth0MatchCandidatesList requestId={requestId} />
             ) : null}
-            {pipelineContent}
-          </div>
-
-          {tabsNode}
-
-          <div className="flex shrink-0 flex-wrap gap-2 border-t border-line px-4 py-2">
+            {isSuperAdmin && canMatchingDisposition ? (
+              <p className="text-[0.65rem] text-habeas-navy">
+                Ops override — you can set the CA DROP status and matched DWIDs, same as data owner.
+                This is not Legal kickoff or Fulfillment start.
+              </p>
+            ) : isSuperAdmin ? (
+              <p className="text-[0.65rem] text-mute">
+                Ops override available when matching review is pending with an open approval.
+              </p>
+            ) : assignmentToLegal ? (
+              <p className="text-[0.65rem] text-habeas-navy">
+                Assignment to legal — review matching context (disposition remains data-owner
+                canonical unless escalated here).
+              </p>
+            ) : legalAdmin ? (
+              <p className="text-[0.65rem] text-mute">
+                Read-only for legal/admin — matching disposition is data-owner-owned (KTD11).
+              </p>
+            ) : null}
+            <MatchingReviewPanel
+              requestId={requestId}
+              matching={matching}
+              isPending={matchingQuery.isPending}
+              isError={matchingQuery.isError}
+              canReviewActions={canMatchingDisposition}
+              actionPending={matchingDispositionMutation.isPending}
+              hideActions={!canMatchingDisposition}
+              layout="tabs"
+              compact
+              connectorReminders={me?.connector_reminders}
+              fetchConnectorConnections={Boolean(isAdmin || isSuperAdmin)}
+              persona={matchingPersona}
+              onPromote={(responseStatus, dwids) =>
+                matchingDispositionMutation.mutate({
+                  action: 'promote',
+                  responseStatus,
+                  dwids,
+                })
+              }
+              onDecline={() => matchingDispositionMutation.mutate({ action: 'decline' })}
+            />
+            {selectedStage === 'matching' ? selectedActivityDetail : null}
+          </TabsContent>
+          <TabsContent value="fulfillment" className="mt-0 px-4 py-3">
+            <div className="space-y-4">
+              {stageSubsteps('fulfillment')}
+              {matchingPersona === 'data_owner' ? (
+                <OwnerFulfillmentStatusPanel
+                  requestId={requestId}
+                  cluster={workbench?.fulfillment_cluster ?? []}
+                  assignedVerticals={me?.verticals}
+                  assignedLabels={me?.assigned_vertical_labels}
+                  canSubmit={isVerticalOperatorRole(role)}
+                />
+              ) : null}
+              {workbench && matchingPersona !== 'data_owner' && (isSuperAdmin || isAdmin || legalAdmin) ? (
+                <FulfillmentGateControls
+                  requestId={requestId}
+                  rows={workbench.fulfillment_cluster}
+                  onInvalidate={invalidateAll}
+                />
+              ) : null}
+              {matchingPersona === 'data_owner' ? null : (
+                <>
+                  <AccessHandoffPanel
+                    requestId={requestId}
+                    artifact={artifactQuery.data}
+                    isPending={artifactQuery.isPending}
+                    isError={artifactQuery.isError}
+                    canMutate={Boolean(isSuperAdmin || isAdmin)}
+                    busy={deliveryMutation.isPending}
+                    onCopyUrl={() => {
+                      const url =
+                        artifactQuery.data?.shareable_url ??
+                        artifactQuery.data?.fulfillment_artifact_uri
+                      if (!url) return
+                      const copyUrl = () => {
+                        void navigator.clipboard.writeText(url).then(() => {
+                          actionToast.copied('Copied URL', copyUrl)
+                        })
+                      }
+                      copyUrl()
+                    }}
+                    onSetStatus={(status) => deliveryMutation.mutate(status)}
+                  />
+                  <div className="space-y-1">
+                    <p className="taste-micro">Identity verification</p>
+                    {identityQuery.data ? (
+                      <p className="text-xs text-ink-soft">
+                        Status:{' '}
+                        <span className="capitalize text-ink">{identityQuery.data.status}</span>
+                        <span className="text-mute">
+                          {' '}
+                          · {formatTimestamp(identityQuery.data.verified_at)}
+                        </span>
+                        {identityQuery.data.method ? (
+                          <span className="text-mute">
+                            {' '}
+                            · {identityQuery.data.method}
+                          </span>
+                        ) : null}
+                      </p>
+                    ) : (
+                      <p className="text-xs text-mute">
+                        None recorded — use Identity verified in stage actions when ready.
+                      </p>
+                    )}
+                  </div>
+                  <AccessDeliveryEmailCard requestId={requestId} />
+                </>
+              )}
+              {selectedStage === 'fulfillment' ? selectedActivityDetail : null}
+            </div>
+          </TabsContent>
+          <TabsContent value="notice" className="mt-0 space-y-3 px-4 py-3">
+            {stageSubsteps('notice')}
+            <p className="text-[0.75rem] text-ink-soft">
+              After approval, fulfilled DROP rows enter the next weekly upload batch
+              (America/Los_Angeles) — not a consumer delivery URL.
+            </p>
+            {selectedStage === 'notice' ? selectedActivityDetail : null}
+          </TabsContent>
+        </div>
+      </Tabs>
+      {variant === 'overlay' ? (
+        <div className="flex shrink-0 flex-wrap gap-2 border-t border-line px-4 py-2">
+          <Link
+            to="/requests/$requestId"
+            params={{ requestId }}
+            className="text-[0.7rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
+          >
+            Open full page →
+          </Link>
+          {isSuperAdmin ? (
             <Link
-              to="/requests/$requestId"
-              params={{ requestId }}
+              to="/ops/runs"
+              search={{ request_id: requestId }}
               className="text-[0.7rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
             >
-              Open full page →
+              Runs for request →
             </Link>
-            {isSuperAdmin ? (
-              <Link
-                to="/ops/runs"
-                search={{ request_id: requestId }}
-                className="text-[0.7rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
-              >
-                Runs for request →
-              </Link>
-            ) : null}
-          </div>
+          ) : null}
         </div>
-      )}
-    </div>
+      ) : null}
+    </RequestDetailWorkbenchShell>
   )
 }
 
@@ -2446,10 +2880,15 @@ export function RequestDetailOverlay({
   onOpenChange,
   returnFocusRef,
   seedRequest,
+  vertical = null,
+  system = null,
 }: RequestDetailOverlayProps) {
   const contentRef = useRef<HTMLDivElement>(null)
-  const { role } = useMe()
-  const ownerLanguage = role === 'data_owner'
+  const { role, isLoading: meLoading } = useMe()
+  const ownerLanguage = isVerticalOperatorRole(role)
+  const roleKnown = !meLoading && role != null
+  const locationSystem = useLocationSystemParam()
+  const overlaySystem = trimScopeId(system) ?? locationSystem
 
   useEffect(() => {
     if (!open) return
@@ -2462,29 +2901,68 @@ export function RequestDetailOverlay({
     return () => window.clearTimeout(timer)
   }, [open, requestId])
 
+  const overlayRequestIdReady = isRequestUuid(requestId)
+
   // Shared query keys with RequestDetailBody — cache hit, no extra network when body loads.
   const journeyQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', requestId, 'journey'],
     queryFn: () => getRequestJourney(requestId!),
-    enabled: open && Boolean(requestId),
+    enabled: open && overlayRequestIdReady,
     placeholderData: (previous) => previous,
   })
 
-  const matchingQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'drop', 'matching-results', requestId],
-    queryFn: () => fetchMatchingDetailOptional(requestId!),
-    enabled: open && Boolean(requestId),
-    placeholderData: (previous) => previous,
-  })
-
+  const ownerVertical = ownerLanguage ? trimScopeId(vertical) : null
   const attentionQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'overlay', requestId],
-    queryFn: async () => {
-      const response = await getNeedsAttention(200)
-      return response.items.find((item) => item.request_id === requestId)
-    },
-    enabled: open && Boolean(requestId),
+    queryKey: [
+      'admin-api',
+      'ops',
+      'requests',
+      'needs-attention',
+      'overlay',
+      requestId,
+      ownerVertical,
+      overlaySystem,
+      ownerLanguage ? 'data_owner' : 'ops',
+    ],
+    queryFn: () =>
+      fetchOverlayAttentionItem(requestId!, {
+        vertical: ownerVertical,
+        system: overlaySystem,
+        ownerPersona: ownerLanguage,
+      }),
+    enabled: open && overlayRequestIdReady,
     staleTime: 10_000,
+  })
+
+  const matchingSystem =
+    overlaySystem ?? systemFromAttentionItem(attentionQuery.data)
+  const matchingQuery = useQuery({
+    queryKey: ownerLanguage
+      ? [
+          'admin-api',
+          'ops',
+          'requests',
+          requestId,
+          'verticals',
+          ownerVertical,
+          'matching-results',
+          matchingSystem,
+        ]
+      : ['admin-api', 'ops', 'drop', 'matching-results', requestId],
+    queryFn: () =>
+      isVerticalOperatorRole(role)
+        ? fetchOwnerVerticalMatchingDetailOptional(
+            requestId!,
+            ownerVertical as string,
+            matchingSystem ?? undefined,
+          )
+        : fetchMatchingDetailOptional(requestId!),
+    enabled:
+      open &&
+      overlayRequestIdReady &&
+      roleKnown &&
+      (role !== 'data_owner' || Boolean(ownerVertical)),
+    placeholderData: (previous) => previous,
   })
 
   const intakeSource =
@@ -2557,13 +3035,15 @@ export function RequestDetailOverlay({
             Request detail overlay — fulfillment, matching, and activity.
           </DialogDescription>
         </DialogHeader>
-        {requestId && open ? (
+        {requestId && open && overlayRequestIdReady ? (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <RequestDetailBody
               requestId={requestId}
               variant="overlay"
               defaultTab={ownerLanguage ? 'matching' : 'fulfillment'}
               seedRequest={seedRequest}
+              vertical={vertical}
+              system={overlaySystem ?? matchingSystem}
             />
           </div>
         ) : null}

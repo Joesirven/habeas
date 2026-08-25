@@ -14,6 +14,16 @@ export const SIMULATE_ROLE_VALUES: UserRole[] = [
   'data_user',
 ]
 
+export const PENDING_SETTING_INVITE_USERS = 'invite_data_users'
+
+export type PendingSettingStatus = 'pending' | 'skipped' | 'done'
+
+export type PendingSetting = {
+  id: string
+  title: string
+  status: PendingSettingStatus
+}
+
 export type ConnectorReminderSeverity = 'approaching' | 'overdue'
 
 export type ConnectorReminder = {
@@ -44,6 +54,8 @@ export type MePayload = {
   needs_connector_setup?: boolean
   /** Soft connector reminders — never block login (KTD13). */
   connector_reminders?: ConnectorReminder[]
+  /** First-run / changed-settings walkthrough hooks. */
+  pending_settings?: PendingSetting[]
 }
 
 export function getStoredSimulateRole(): UserRole | null {
@@ -151,6 +163,34 @@ export async function getMe() {
     ...me,
     real_role: me.real_role ?? me.role,
   }
+}
+
+export type MeHomePayload = {
+  given_name: string
+  pending_attention_count: number
+  urgent_deadline_days: number | null
+  stage_counts_year: { ingest: number; matching: number; fulfillment: number; notice: number }
+  next_ca_drop: { next_run_at: string | null; cadence: string | null; schedule_utc?: string | null }
+  next_data_refresh: { system: string; label: string; next_at: string | null } | null
+  comments: Array<{ request_id: string; actor: string; occurred_at: string; body: string }>
+  notifications: Array<{
+    id: string
+    kind: 'comment' | 'batch'
+    title: string
+    occurred_at: string
+    request_id?: string
+  }>
+}
+
+export function getMeHome(): Promise<MeHomePayload> {
+  return fetchAdminApi<MeHomePayload>('/me/home')
+}
+
+export function patchPendingSetting(body: { id: string; status: 'skipped' | 'done' }) {
+  return fetchAdminApi<MePayload>('/me/pending-settings', {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
 }
 
 export function getHealth() {
@@ -408,6 +448,12 @@ export type MatchedPersonContact = {
   phones: MatchedPersonPhone[]
 }
 
+export type MatchedHash = {
+  kind: string
+  hash: string
+  matched_via?: string
+}
+
 export type MatchedContactsError = {
   message?: string | null
   code?: string | null
@@ -415,6 +461,8 @@ export type MatchedContactsError = {
   hint?: string | null
   exc_type?: string | null
 }
+
+export type MatchedChannel = 'email' | 'phone' | 'ndz'
 
 export type MatchingResultDetail = MatchingResultRow & {
   attempt_id: number | null
@@ -424,12 +472,31 @@ export type MatchingResultDetail = MatchingResultRow & {
   attempts?: MatchingAttemptRow[]
   assignment?: WorkflowAssignmentSummary | null
   matched_contacts?: MatchedPersonContact[]
-  matched_contacts_status?: 'ok' | 'none' | 'unavailable' | string
+  matched_contacts_status?: 'ok' | 'none' | 'unavailable' | 'not_live' | string
   matched_contacts_error?: MatchedContactsError | null
+  /** CA DROP lookup hashes — not emails/phones. Authorized reviewers only. */
+  matched_hashes?: MatchedHash[]
+  /** Non-hash match channels from matched_via / attempt list_type. */
+  matched_channels?: MatchedChannel[]
+  /** Owner vertical-item review — not request-level assignment. */
+  vertical?: string | null
+  vertical_label?: string | null
+  system?: string | null
+  system_label?: string | null
+  color_token?: string | null
+  /** `request` = legacy omitted-system Data URL; `system` = this inbox item. */
+  match_scope?: 'request' | 'system'
+  /** CA DROP keeps people/hashes; sheet/SaaS systems are catalog stubs. */
+  result_kind?: 'ca_drop' | 'sheet_stub' | 'saas_stub'
+  not_live_reason?: string | null
+  selected_dwids?: string[] | null
+  disposition_status?: number | null
 }
 
 export type BulkApproveMatchingResultsInput = {
   match_type: MatchTypeFilter
+  vertical: string
+  system: string
   decided_by?: string
   decision_reason?: string
 }
@@ -437,8 +504,12 @@ export type BulkApproveMatchingResultsInput = {
 export type BulkApproveMatchingResultsResult = {
   status: string
   match_type: MatchTypeFilter
+  vertical?: string
+  system?: string
   ensured_count?: number
   approved_count: number
+  decided_count?: number
+  pending_count?: number
   approval_ids: number[]
   request_ids: string[]
 }
@@ -959,6 +1030,61 @@ export function getDropMatchingResultDetail(requestId: string) {
   return fetchAdminApi<MatchingResultDetail>(`/ops/drop/matching-results/${requestId}`)
 }
 
+/** MDR person search — same BQ person/phones shape as matching-result contacts. */
+export type MdrPeopleSearchPayload = {
+  contacts: MatchedPersonContact[]
+}
+
+export function searchMdrPeople(q: string) {
+  const search = new URLSearchParams()
+  search.set('q', q)
+  return fetchAdminApi<MdrPeopleSearchPayload>(
+    `/ops/drop/matching-contacts/search?${search.toString()}`,
+  )
+}
+
+/**
+ * Owner vertical matching review — `GET /ops/requests/{id}/verticals/{vertical}/matching-results`.
+ * Optional `?system=` scopes a catalog system. Path stays request UUID + vertical
+ * segment — never concatenate system into the URL.
+ * Authorized via `user_vertical_assignments` (403 if the owner is not assigned that vertical).
+ * Do not use `getDropMatchingResultDetail` as the owner path.
+ */
+export function getOwnerVerticalMatchingResults(
+  requestId: string,
+  vertical: string,
+  system?: string,
+) {
+  const search = new URLSearchParams()
+  if (system?.trim()) search.set('system', system.trim())
+  const query = search.toString()
+  return fetchAdminApi<MatchingResultDetail>(
+    `/ops/requests/${encodeURIComponent(requestId)}/verticals/${encodeURIComponent(vertical)}/matching-results${query ? `?${query}` : ''}`,
+  )
+}
+
+/** Soft-fail missing/legacy owner vertical payloads — 403 stays visible. */
+export async function fetchOwnerVerticalMatchingDetailOptional(
+  requestId: string,
+  vertical: string,
+  system?: string,
+): Promise<MatchingResultDetail | null> {
+  try {
+    return await getOwnerVerticalMatchingResults(requestId, vertical, system)
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('404') ||
+        error.message.includes('500') ||
+        error.message.includes('502') ||
+        error.message.includes('503'))
+    ) {
+      return null
+    }
+    throw error
+  }
+}
+
 export function postDropMatchingResultsBulkApprove(body: BulkApproveMatchingResultsInput) {
   return fetchAdminApi<BulkApproveMatchingResultsResult>('/ops/drop/matching-results/bulk-approve', {
     method: 'POST',
@@ -1014,16 +1140,25 @@ export function dropResponseStatusLabel(code: number | null | undefined): string
 
 export function postDropMatchingResultPromote(
   requestId: string,
-  body?: { decision_reason?: string; response_status?: DropResponseStatusCode },
+  body?: {
+    decision_reason?: string
+    response_status?: DropResponseStatusCode
+    dwids?: string[]
+    vertical?: string | null
+    system?: string | null
+  },
 ) {
   return fetchAdminApi<{
     status: string
     request_id: string
+    vertical?: string
+    system?: string
     approval_id: number | null
+    review_status?: string
     response_status?: number
     response_status_set?: boolean
-    disposition?: { recorded?: boolean; reason?: string | null } | null
-  }>(`/ops/drop/matching-results/${requestId}/promote`, {
+    disposition?: { recorded?: boolean; reason?: string | null; vertical?: string } | null
+  }>(`/ops/drop/matching-results/${encodeURIComponent(requestId)}/promote`, {
     method: 'POST',
     body: JSON.stringify({
       decided_by: 'web-admin@habeas.com',
@@ -1031,24 +1166,33 @@ export function postDropMatchingResultPromote(
       ...(body?.response_status != null
         ? { response_status: body.response_status }
         : {}),
+      ...(body?.dwids != null ? { dwids: body.dwids } : {}),
+      ...(body?.vertical?.trim() ? { vertical: body.vertical.trim() } : {}),
+      ...(body?.system?.trim() ? { system: body.system.trim() } : {}),
     }),
   })
 }
 
 export function postDropMatchingResultDecline(
   requestId: string,
-  body?: { decision_reason?: string },
+  body?: { decision_reason?: string; vertical?: string | null; system?: string | null },
 ) {
-  return fetchAdminApi<{ status: string; request_id: string; approval_id: number | null }>(
-    `/ops/drop/matching-results/${requestId}/decline`,
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        decided_by: 'web-admin@habeas.com',
-        decision_reason: body?.decision_reason ?? 'decline — not fulfill-ready',
-      }),
-    },
-  )
+  return fetchAdminApi<{
+    status: string
+    request_id: string
+    vertical?: string
+    system?: string
+    approval_id: number | null
+    review_status?: string
+  }>(`/ops/drop/matching-results/${encodeURIComponent(requestId)}/decline`, {
+    method: 'POST',
+    body: JSON.stringify({
+      decided_by: 'web-admin@habeas.com',
+      decision_reason: body?.decision_reason ?? 'decline — not fulfill-ready',
+      ...(body?.vertical?.trim() ? { vertical: body.vertical.trim() } : {}),
+      ...(body?.system?.trim() ? { system: body.system.trim() } : {}),
+    }),
+  })
 }
 
 export function postDropWorkflowAssign(body: {
@@ -1537,10 +1681,40 @@ export type NeedsAttentionItem = {
   requestor_state?: string | null
   review_status?: string | null
   assignment?: NeedsAttentionAssignment | null
+  /** Per-vertical matching review scope (data_owner inbox) — not request ownership. */
+  vertical?: string | null
+  vertical_label?: string | null
+  system?: string
+  system_id?: string
+  system_label?: string
+  color_token?: string
+  /**
+   * Client coalesce (owner / lab-as-owner) — systems on this request.
+   * Never a POST key.
+   */
+  connections?: Array<{
+    system: string | null
+    system_label?: string | null
+    vertical?: string | null
+    color_token?: string | null
+    current_stage?: string | null
+    match_type?: string | null
+    kind?: string | null
+    matched_via?: string | null
+  }>
+  /** Client coalesce — unioned email/phone/ndz chips. */
+  channels?: Array<'email' | 'phone' | 'ndz'>
   /** drop_connector download attempt id — batch key for inbox threads */
   bulk_process_id?: number | null
   /** ZIP member name — fallback batch key when download ledger is missing */
   source_csv_filename?: string | null
+}
+
+export type NeedsAttentionFilterOption = {
+  id: string
+  label: string
+  vertical?: string
+  color_token?: string
 }
 
 export type NeedsAttentionResponse = {
@@ -1550,6 +1724,8 @@ export type NeedsAttentionResponse = {
   total?: number
   limit?: number
   offset?: number
+  filter_verticals?: NeedsAttentionFilterOption[]
+  filter_systems?: NeedsAttentionFilterOption[]
 }
 
 export type RequestComment = {
@@ -1814,6 +1990,10 @@ export function getNeedsAttention(
         offset?: number
         kind?: NeedsAttentionKind
         assignee?: string
+        vertical?: string
+        system?: string
+        source?: string
+        step?: string
       },
 ) {
   const params =
@@ -1825,10 +2005,49 @@ export function getNeedsAttention(
   if (params.offset != null) search.set('offset', String(params.offset))
   if (params.kind) search.set('kind', params.kind)
   if (params.assignee) search.set('assignee', params.assignee)
+  if (params.vertical?.trim()) search.set('vertical', params.vertical.trim())
+  if (params.system?.trim()) search.set('system', params.system.trim())
+  if (params.source?.trim()) search.set('source', params.source.trim())
+  if (params.step?.trim()) search.set('step', params.step.trim())
   const query = search.toString()
   return fetchAdminApi<NeedsAttentionResponse>(
     `/ops/requests/needs-attention${query ? `?${query}` : ''}`,
   )
+}
+
+/**
+ * Data-owner matching inbox — `GET /ops/requests/needs-attention?kind=matching`.
+ * Server uses `list_owner_matching_needs_attention` from `user_vertical_assignments`
+ * (one row per `(request_id, vertical, system)`). Do not send `assignee` — data-owner
+ * calls ignore `workflow.assignment`.
+ */
+export function getOwnerMatchingNeedsAttention(params?: {
+  limit?: number
+  offset?: number
+  vertical?: string
+  system?: string
+  source?: string
+  step?: string
+}) {
+  return getNeedsAttention({
+    limit: params?.limit,
+    offset: params?.offset,
+    kind: 'matching',
+    vertical: params?.vertical,
+    system: params?.system,
+    source: params?.source,
+    step: params?.step,
+  })
+}
+
+/** Tasks tab: `item.vertical ∈ me.verticals` — not `workflow.assignment`. */
+export function isOwnerVerticalTask(
+  item: Pick<NeedsAttentionItem, 'vertical'>,
+  verticals: readonly string[] | null | undefined,
+): boolean {
+  const vertical = item.vertical?.trim()
+  if (!vertical) return false
+  return (verticals ?? []).some((id) => id.trim() === vertical)
 }
 
 /** Legal case lanes only — excludes matching.review so ops volume cannot crowd Triage out. */
@@ -2281,16 +2500,15 @@ export async function deleteRequestDocument(
 }
 
 export type IntegrationSystemId =
-  | 'mailchimp'
   | 'paylocity'
   | 'lever'
   | 'auth0'
-    | 'google_sheets'
+  | 'google_sheets'
   | 'alumni_google_sheet'
   | 'contact_us_google_sheet'
   | 'bizdev_contacts'
   | 'hr_alumni'
-  | 'axios_hq'
+  | 'axios_headquarters'
   | 'cassandra'
 
 export type ConnectionDisplayStatus =
@@ -2375,12 +2593,13 @@ export type ConnectRedeemResponse = {
 export type ConnectTestDetailCode =
   | 'stub_ok'
   | 'ok'
-  | 'mailchimp_ok'
-  | 'axios_hq_ok'
   | 'paylocity_ok'
   | 'lever_ok'
   | 'auth0_ok'
   | 'google_sheets_ok'
+  | 'alumni_google_sheet_ok'
+  | 'contact_us_google_sheet_ok'
+  | 'axios_headquarters_ok'
   | 'upload_ok'
   | 'auth_failed'
   | 'lever_unauthorized'
@@ -2396,10 +2615,11 @@ export type ConnectTestDetailCode =
   | 'upload_missing_headers'
   | 'upload_needs_mapping'
   | 'upload_no_usable_rows'
+  | 'upload_rows_rejected'
+  | 'upload_invalid_format'
   | 'upload_invalid_delimiter'
 
 const CONNECT_SYSTEM_LABELS: Record<IntegrationSystemId, string> = {
-  mailchimp: 'Mailchimp',
   paylocity: 'Paylocity',
   lever: 'Lever',
   auth0: 'Auth0',
@@ -2408,19 +2628,18 @@ const CONNECT_SYSTEM_LABELS: Record<IntegrationSystemId, string> = {
   contact_us_google_sheet: 'Contact Us Google Sheet',
   bizdev_contacts: 'BizDev Contacts',
   hr_alumni: 'HR Alumni List',
-  axios_hq: 'Axios HQ',
-  cassandra: 'Cassandra',
+  axios_headquarters: 'Axios HQ',
+  cassandra: 'System A',
 }
 
 const CONNECT_TEST_SUCCESS_DESCRIPTIONS: Record<string, string> = {
-  mailchimp_ok: 'Mailchimp API credentials were verified successfully.',
-  axios_hq_ok: 'Axios HQ upload was validated successfully.',
   paylocity_ok: 'Paylocity API credentials were verified successfully.',
   lever_ok: 'Lever API credentials were verified successfully.',
   auth0_ok: 'Auth0 credentials were verified successfully.',
   google_sheets_ok: 'Google Sheets connection was verified successfully.',
   alumni_google_sheet_ok: 'HR alumni Google Sheet connection was verified successfully.',
   contact_us_google_sheet_ok: 'Contact Us Google Sheet connection was verified successfully.',
+  axios_headquarters_ok: 'Axios HQ upload was validated successfully.',
   upload_ok: 'Upload file was validated successfully.',
   stub_ok: 'Connection test completed successfully.',
   ok: 'Connection test completed successfully.',
@@ -2441,11 +2660,14 @@ const CONNECT_TEST_FAILURE_MESSAGES: Record<string, string> = {
   unknown_error: 'Connection test failed. Check the values and try again.',
   failed: 'Connection test failed. Check the values and try again.',
   upload_missing_headers:
-    'Upload is missing required columns. Map first name, last name, and email, or download the Habeas CSV template.',
+    'Upload is missing required template headers. Download the Habeas CSV template and match the column names exactly.',
   upload_needs_mapping:
-    'Map each required Habeas field to a column in your file, then upload again.',
+    'Column names do not match the Habeas template. Map first name, last name, and email, then upload again.',
   upload_no_usable_rows:
     'Upload has no usable required identifiers. Check the multi-value delimiter and required columns, then try again.',
+  upload_rows_rejected:
+    'Some rows failed the selected email or phone format. Clean those rows in the table and upload again.',
+  upload_invalid_format: 'The email or phone format setting is not supported.',
   upload_invalid_delimiter: 'The multi-value delimiter is not supported. Choose None, ;, |, or ,.',
 }
 
@@ -2620,6 +2842,56 @@ export function listVerticalBindings(verticalId: string) {
   )
 }
 
+export type VerticalMember = {
+  email: string
+  vertical_id: string
+  assignment_role: 'data_owner' | 'data_user' | string
+  active: boolean
+}
+
+export type MemberInvite = {
+  invite_id: string
+  vertical_id: string
+  expires_at: string
+  invite_url: string
+  raw_token: string
+}
+
+export type MemberInvitePreview = {
+  kind: 'data_user' | string
+  vertical_id: string
+  vertical_label: string
+  role: string
+  expires_at?: string | null
+}
+
+export function listVerticalMembers(verticalId: string) {
+  return fetchAdminApi<VerticalMember[]>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/members`,
+  )
+}
+
+export function mintVerticalMemberInvite(verticalId: string, email: string) {
+  return fetchAdminApi<MemberInvite>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/member-invites`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    },
+  )
+}
+
+export function getConnectInvitePreview(token: string) {
+  return fetchAdminApi<MemberInvitePreview>(`/connect/${encodeURIComponent(token)}`)
+}
+
+export function redeemConnectInvite(token: string) {
+  return fetchAdminApi<MemberInvitePreview>(`/connect/${encodeURIComponent(token)}`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  })
+}
+
 export type OwnerConnectorSystem = {
   system: string
   display_name: string
@@ -2640,16 +2912,23 @@ export type OwnerConnectorList = {
   connectors: OwnerConnectorSystem[]
 }
 
+export type OwnerRejectedUploadRow = {
+  row: number
+  codes: string[]
+}
+
 export type OwnerUploadResult = {
   ok: boolean
   detail: string
   connection_id: string
   upload_row_count?: number | null
-  gcs_uri?: string | null
   missing_count?: number | null
   detected_header_count?: number | null
   detected_headers?: string[] | null
   required_headers?: string[] | null
+  accepted_row_count?: number | null
+  rejected_row_count?: number | null
+  rejected_rows?: OwnerRejectedUploadRow[] | null
 }
 
 export function listOwnerConnectors(verticalId: string) {
@@ -2753,6 +3032,7 @@ export async function uploadOwnerConnectorCsv(
   file: File,
   multiPiiDelimiter: string | null,
   columnMapping?: Record<string, string> | null,
+  formats?: { emailFormat?: string; phoneFormat?: string },
 ): Promise<OwnerUploadResult> {
   const headers: Record<string, string> = { Accept: 'application/json' }
   const simulateRole = getStoredSimulateRole()
@@ -2766,6 +3046,12 @@ export async function uploadOwnerConnectorCsv(
   }
   if (columnMapping && Object.keys(columnMapping).length > 0) {
     form.append('column_mapping', JSON.stringify(columnMapping))
+  }
+  if (formats?.emailFormat) {
+    form.append('email_format', formats.emailFormat)
+  }
+  if (formats?.phoneFormat) {
+    form.append('phone_format', formats.phoneFormat)
   }
   const response = await fetch(
     `${API_BASE}/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/upload`,
@@ -2796,6 +3082,104 @@ export async function downloadOwnerUploadTemplate(
     throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
   }
   return response.blob()
+}
+
+/* --- Owner Sheets OAuth (hr_alumni / bizdev_contacts live connect) -------- */
+
+export type OwnerSheetsOauthStartBody = {
+  redirect_uri: string
+}
+
+export type OwnerSheetsOauthStartResponse = {
+  session_id: string
+  authorize_url: string
+  state: string
+}
+
+export type OwnerSheetsOauthRedeemBody = {
+  session_id: string
+  code: string
+  state: string
+}
+
+export type OwnerSheetsOauthRedeemResponse = {
+  ok: boolean
+  detail: string
+  connection_id?: string
+  google_email_domain?: string | null
+}
+
+export type OwnerSheetsOauthTab = {
+  title: string
+  sheet_id?: number | null
+}
+
+export type OwnerSheetsOauthFile = {
+  spreadsheet_id: string
+  name: string
+  tabs?: OwnerSheetsOauthTab[]
+}
+
+export type OwnerSheetsOauthFilesResponse = {
+  files: OwnerSheetsOauthFile[]
+}
+
+export type OwnerSheetsOauthExtractBody = {
+  spreadsheet_id: string
+  tab: string
+  multi_pii_delimiter?: string | null
+  column_mapping?: Record<string, string> | null
+  email_format?: string
+  phone_format?: string
+}
+
+function ownerSheetsOauthPath(verticalId: string, system: string, action: string) {
+  return `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/sheets-oauth/${action}`
+}
+
+export function ownerSheetsOauthStart(
+  verticalId: string,
+  system: string,
+  body: OwnerSheetsOauthStartBody,
+) {
+  return fetchAdminApi<OwnerSheetsOauthStartResponse>(
+    ownerSheetsOauthPath(verticalId, system, 'start'),
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+export function ownerSheetsOauthRedeem(
+  verticalId: string,
+  system: string,
+  body: OwnerSheetsOauthRedeemBody,
+) {
+  return fetchAdminApi<OwnerSheetsOauthRedeemResponse>(
+    ownerSheetsOauthPath(verticalId, system, 'redeem'),
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+export function ownerSheetsOauthFiles(verticalId: string, system: string) {
+  return fetchAdminApi<OwnerSheetsOauthFilesResponse>(
+    ownerSheetsOauthPath(verticalId, system, 'files'),
+  )
+}
+
+export function ownerSheetsOauthExtract(
+  verticalId: string,
+  system: string,
+  body: OwnerSheetsOauthExtractBody,
+) {
+  return fetchAdminApi<OwnerUploadResult>(ownerSheetsOauthPath(verticalId, system, 'extract'), {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
 }
 
 export function listOwnerConnectorReminders() {
@@ -2955,5 +3339,129 @@ export function getAttemptTableRows(
     `/ops/workers/attempt-tables/${encodeURIComponent(query.table_name)}/rows${
       qs ? `?${qs}` : ''
     }`,
+  )
+}
+
+/* --- Dev lab: Sheets owner OAuth ----------------------------------------- */
+
+export type SheetsOauthLabStatus = {
+  configured: boolean
+  actor_email: string
+  scopes: string[]
+  allowed_redirect_uris: string[]
+  secret_store: string
+  note: string
+}
+
+export type SheetsOauthLabStartResponse = {
+  lab_session_id: string
+  authorize_url: string
+  state: string
+}
+
+export type SheetsOauthLabRedeemResponse = {
+  ok: boolean
+  detail: string
+  google_email_domain: string | null
+  spreadsheet_id: string | null
+}
+
+export type SheetsOauthLabTestResponse = {
+  ok: boolean
+  detail: string
+  spreadsheet_id: string | null
+  sheet_count: number | null
+  step: string
+}
+
+export function getSheetsOauthLabStatus() {
+  return fetchAdminApi<SheetsOauthLabStatus>('/ops/lab/sheets-oauth/status')
+}
+
+export function sheetsOauthLabStart(body: {
+  spreadsheet_url: string
+  redirect_uri: string
+}) {
+  return fetchAdminApi<SheetsOauthLabStartResponse>('/ops/lab/sheets-oauth/start', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function sheetsOauthLabRedeem(body: {
+  lab_session_id: string
+  code: string
+  state: string
+}) {
+  return fetchAdminApi<SheetsOauthLabRedeemResponse>('/ops/lab/sheets-oauth/redeem', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function sheetsOauthLabTest(body: { lab_session_id: string }) {
+  return fetchAdminApi<SheetsOauthLabTestResponse>('/ops/lab/sheets-oauth/test', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+/* --- Auth0 match search / confirm (S09 APIs; design lab later) ----------- */
+
+export type Auth0MatchCandidate = {
+  vendor_record_id: string
+}
+
+export type Auth0MatchCandidatesResponse = {
+  match_count: number
+  candidates: Auth0MatchCandidate[]
+}
+
+export type Auth0MatchCandidatesStatus = {
+  snapshot_present: boolean
+  match_count: number
+}
+
+export type Auth0DispositionBody = {
+  status: DropResponseStatusCode
+  vendor_record_ids?: string[]
+  decision_reason?: string | null
+}
+
+export type Auth0Disposition = {
+  request_id: string
+  vertical: string
+  label: string
+  live: boolean
+  status: number
+  selected_dwids: string[]
+  selected_dwid_count: number
+  selected_vendor_record_ids: string[]
+  selected_vendor_record_id_count: number
+  decided_by: string
+  actor_role: string | null
+  decided_at: string
+  updated_at: string | null
+}
+
+export function getAuth0MatchCandidates(requestId: string) {
+  return fetchAdminApi<Auth0MatchCandidatesResponse>(
+    `/requests/${encodeURIComponent(requestId)}/verticals/auth0/match-candidates`,
+  )
+}
+
+export function getAuth0MatchCandidatesStatus(requestId: string) {
+  return fetchAdminApi<Auth0MatchCandidatesStatus>(
+    `/requests/${encodeURIComponent(requestId)}/verticals/auth0/match-candidates/status`,
+  )
+}
+
+export function putAuth0Disposition(requestId: string, body: Auth0DispositionBody) {
+  return fetchAdminApi<Auth0Disposition>(
+    `/requests/${encodeURIComponent(requestId)}/dispositions/auth0`,
+    {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    },
   )
 }

@@ -6,6 +6,7 @@ import {
   MULTI_PII_DELIMITER_OPTIONS,
   activeModeFromMetadata,
   allowsLive,
+  allowsOauth,
   allowsUpload,
   buildModeStepCards,
   buildReminderBannerItems,
@@ -15,9 +16,16 @@ import {
   cadenceOptionFromMetadata,
   cadenceOptionFromRefreshPolicy,
   HABEAS_PLATFORM_DISPLAY_NAME,
+  CADENCE_OPTION_IDS,
   CADENCE_OPTION_RARELY,
   CADENCE_OPTION_WEEKLY,
   CADENCE_OPTION_WITH_NEW_BATCHES,
+  cadenceOptionIdsForSystems,
+  SHEETS_CADENCE_OPTION_IDS,
+  SHEETS_CONNECT_METHODS,
+  SHEETS_OWNER_SYSTEM_IDS,
+  isSheetsOwnerSystem,
+  shouldIncludeSheetsMappingClean,
   disallowedModeReason,
   delimiterOptionFromKey,
   delimiterValueFromKey,
@@ -39,8 +47,13 @@ import {
   uploadMappingComplete,
   UPLOAD_SAMPLE_CSV,
   parseCsvHeaderRow,
+  parseCsvDocument,
+  serializeCsvDocument,
   isOwnerConnectorsHiddenSystem,
   isOwnerConnectorsHiddenVertical,
+  isOwnerWizardHiddenSystem,
+  filterOwnerWizardConnectors,
+  ownerConnectorDisplayName,
 } from './owner-connector-ui'
 
 describe('MULTI_PII_DELIMITER_OPTIONS (AE10 UI)', () => {
@@ -102,7 +115,7 @@ describe('reminder banners (R10 soft)', () => {
   const sample: ConnectorReminder[] = [
     {
       code: 'upload_stale',
-      system: 'axios_hq',
+      system: 'axios_headquarters',
       vertical_id: 'communications',
       severity: 'overdue',
     },
@@ -117,7 +130,7 @@ describe('reminder banners (R10 soft)', () => {
   test('builds non-blocking banner items from reminders', () => {
     const items = buildReminderBannerItems(sample)
     expect(items).toHaveLength(2)
-    expect(items[0].id).toBe('communications:axios_hq:upload_stale')
+    expect(items[0].id).toBe('communications:axios_headquarters:upload_stale')
     expect(items[0].severity).toBe('overdue')
     expect(items[0].title.toLowerCase()).toContain('overdue')
     expect(items[1].severity).toBe('approaching')
@@ -179,13 +192,13 @@ describe('reminder banners (R10 soft)', () => {
     const filtered = filterRemindersForOwnerConnectorsPage([
       {
         code: 'wizard_incomplete',
-        system: 'axios_hq',
+        system: 'axios_headquarters',
         vertical_id: 'communications',
         severity: 'overdue',
       },
       {
         code: 'upload_stale',
-        system: 'axios_hq',
+        system: 'axios_headquarters',
         vertical_id: 'communications',
         severity: 'overdue',
       },
@@ -196,11 +209,13 @@ describe('reminder banners (R10 soft)', () => {
 })
 
 describe('mode and cadence helpers', () => {
-  test('allowsUpload / allowsLive', () => {
+  test('allowsUpload / allowsLive / allowsOauth', () => {
     expect(allowsUpload(['live', 'upload'])).toBe(true)
     expect(allowsUpload(['live'])).toBe(false)
     expect(allowsLive(['live'])).toBe(true)
     expect(allowsLive([])).toBe(false)
+    expect(allowsOauth(['oauth', 'upload'])).toBe(true)
+    expect(allowsOauth(['upload'])).toBe(false)
   })
 
   test('cadenceDaysFromMetadata defaults and override', () => {
@@ -233,34 +248,61 @@ describe('mode and cadence helpers', () => {
 
   test('verticalWizardStepIndex finds dynamic step ids', () => {
     const steps = buildVerticalWizardSteps({
-      systems: [{ system: 'axios_hq', allowedApproaches: ['upload'] }],
+      systems: [{ system: 'axios_headquarters', allowedApproaches: ['upload'] }],
     })
-    expect(verticalWizardStepIndex(steps, 'axios_hq-howto-upload')).toBe(0)
+    expect(verticalWizardStepIndex(steps, 'axios_headquarters-howto-upload')).toBe(0)
     expect(verticalWizardStepIndex(steps, 'confirm')).toBe(steps.length - 1)
     expect(verticalWizardStepIndex(steps, 'missing')).toBe(-1)
   })
 })
 
 describe('vertical wizard steps', () => {
-  test('axios_hq upload-only vertical ends with cadence and confirm', () => {
+  test('axios_headquarters upload-only vertical ends with cadence and confirm', () => {
     const steps = buildVerticalWizardSteps({
-      systems: [{ system: 'axios_hq', allowedApproaches: ['upload'] }],
+      systems: [{ system: 'axios_headquarters', allowedApproaches: ['upload'] }],
     })
     expect(steps.map((step) => step.id)).toEqual([
-      'axios_hq-howto-upload',
-      'axios_hq-upload',
+      'axios_headquarters-howto-upload',
+      'axios_headquarters-upload',
       'cadence',
       'confirm',
     ])
   })
 
-  test('parses hr_alumni howto-upload as howto, not upload', () => {
+  test('parses hr_alumni howto-upload as howto-upload, not upload', () => {
     expect(parseVerticalWizardStepId('hr_alumni-howto-upload')).toEqual({
       kind: 'howto-upload',
       system: 'hr_alumni',
     })
     expect(parseVerticalWizardStepId('hr_alumni-upload')).toEqual({
       kind: 'upload',
+      system: 'hr_alumni',
+    })
+  })
+
+  test('parses sheets howto / connect / mapping-clean without colliding suffixes', () => {
+    expect(parseVerticalWizardStepId('hr_alumni-howto')).toEqual({
+      kind: 'howto',
+      system: 'hr_alumni',
+    })
+    expect(parseVerticalWizardStepId('hr_alumni-connect')).toEqual({
+      kind: 'connect',
+      system: 'hr_alumni',
+    })
+    expect(parseVerticalWizardStepId('bizdev_contacts-mapping-clean')).toEqual({
+      kind: 'mapping-clean',
+      system: 'bizdev_contacts',
+    })
+    expect(parseVerticalWizardStepId('hr_alumni-mapping')).toEqual({
+      kind: 'mapping',
+      system: 'hr_alumni',
+    })
+    expect(parseVerticalWizardStepId('hr_alumni-clean')).toEqual({
+      kind: 'clean',
+      system: 'hr_alumni',
+    })
+    expect(parseVerticalWizardStepId('hr_alumni-oauth')).toEqual({
+      kind: 'oauth',
       system: 'hr_alumni',
     })
   })
@@ -294,8 +336,9 @@ describe('vertical wizard steps', () => {
       'paylocity-upload',
       'lever-howto-live',
       'lever-live-creds',
-      'hr_alumni-howto-upload',
-      'hr_alumni-upload',
+      'hr_alumni-howto',
+      'hr_alumni-connect',
+      'hr_alumni-mapping-clean',
       'cadence',
       'confirm',
     ])
@@ -309,18 +352,89 @@ describe('vertical wizard steps', () => {
       ],
     })
     expect(steps.map((step) => step.id)).toEqual([
-      'bizdev_contacts-howto-upload',
-      'bizdev_contacts-upload',
+      'bizdev_contacts-howto',
+      'bizdev_contacts-connect',
+      'bizdev_contacts-mapping-clean',
       'cadence',
       'confirm',
     ])
+  })
+
+  test('hr_alumni / bizdev_contacts use howto → connect → mapping-clean', () => {
+    expect(SHEETS_OWNER_SYSTEM_IDS).toEqual(['hr_alumni', 'bizdev_contacts'])
+    expect(SHEETS_CONNECT_METHODS).toEqual(['oauth', 'upload'])
+    expect(isSheetsOwnerSystem('HR_Alumni')).toBe(true)
+    expect(isSheetsOwnerSystem('axios_headquarters')).toBe(false)
+
+    const alumni = buildVerticalWizardSteps({
+      systems: [{ system: 'hr_alumni', allowedApproaches: ['upload'] }],
+    })
+    expect(alumni.map((step) => step.id)).toEqual([
+      'hr_alumni-howto',
+      'hr_alumni-connect',
+      'hr_alumni-mapping-clean',
+      'cadence',
+      'confirm',
+    ])
+
+    const contacts = buildVerticalWizardSteps({
+      systems: [{ system: 'bizdev_contacts', allowedApproaches: [] }],
+    })
+    expect(contacts.map((step) => step.id)).toEqual([
+      'bizdev_contacts-howto',
+      'bizdev_contacts-connect',
+      'bizdev_contacts-mapping-clean',
+      'cadence',
+      'confirm',
+    ])
+  })
+
+  test('omits sheets mapping-clean when the caller says it is not needed', () => {
+    const steps = buildVerticalWizardSteps({
+      systems: [
+        {
+          system: 'hr_alumni',
+          allowedApproaches: ['oauth', 'upload'],
+          needsMappingClean: false,
+        },
+      ],
+    })
+    expect(steps.map((step) => step.id)).toEqual([
+      'hr_alumni-howto',
+      'hr_alumni-connect',
+      'cadence',
+      'confirm',
+    ])
+  })
+
+  test('shouldIncludeSheetsMappingClean is true until map is complete and rows are clean', () => {
+    expect(shouldIncludeSheetsMappingClean()).toBe(true)
+    expect(shouldIncludeSheetsMappingClean({ mappingComplete: false })).toBe(true)
+    expect(
+      shouldIncludeSheetsMappingClean({
+        mapping: { email: 'email' },
+        rejectedRowCount: 2,
+      }),
+    ).toBe(true)
+    expect(
+      shouldIncludeSheetsMappingClean({
+        mapping: { email: 'email' },
+        rejectedRowCount: 0,
+      }),
+    ).toBe(false)
+    expect(
+      shouldIncludeSheetsMappingClean({
+        mappingComplete: true,
+        rejectedRowCount: 0,
+      }),
+    ).toBe(false)
   })
 
   test('viewOnly vertical yields no steps', () => {
     expect(
       buildVerticalWizardSteps({
         viewOnly: true,
-        systems: [{ system: 'axios_hq', allowedApproaches: ['upload'] }],
+        systems: [{ system: 'axios_headquarters', allowedApproaches: ['upload'] }],
       }),
     ).toEqual([])
   })
@@ -388,13 +502,46 @@ describe('cadence option mapping', () => {
     expect(refreshCadenceFromCadenceOption(CADENCE_OPTION_WEEKLY)).toBe('weekly')
     expect(refreshCadenceFromCadenceOption(null)).toBeNull()
   })
+
+  test('sheets cadence options are rarely and with_new_batches only', () => {
+    expect(SHEETS_CADENCE_OPTION_IDS).toEqual([
+      CADENCE_OPTION_RARELY,
+      CADENCE_OPTION_WITH_NEW_BATCHES,
+    ])
+    expect(cadenceOptionIdsForSystems(['hr_alumni'])).toEqual(
+      SHEETS_CADENCE_OPTION_IDS,
+    )
+    expect(cadenceOptionIdsForSystems(['bizdev_contacts', 'hr_alumni'])).toEqual(
+      SHEETS_CADENCE_OPTION_IDS,
+    )
+    expect(cadenceOptionIdsForSystems(['hr_alumni'])).not.toContain(
+      CADENCE_OPTION_WEEKLY,
+    )
+    expect(cadenceOptionIdsForSystems(['axios_headquarters'])).toEqual(
+      CADENCE_OPTION_IDS,
+    )
+    expect(cadenceOptionIdsForSystems(['paylocity', 'hr_alumni'])).toEqual(
+      CADENCE_OPTION_IDS,
+    )
+  })
 })
 
 describe('SYSTEM_COPY', () => {
-  test('axios_hq upload how-to copy is CSV-only', () => {
-    expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).toContain('axios hq')
-    expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).not.toContain('mailchimp')
-    expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).toContain('csv')
+  test('axios_headquarters upload how-to copy is CSV-only', () => {
+    expect(SYSTEM_COPY.axios_headquarters.uploadHowto?.toLowerCase()).toContain('axios hq')
+    expect(SYSTEM_COPY.axios_headquarters.uploadHowto?.toLowerCase()).not.toContain('mailchimp')
+    expect(SYSTEM_COPY.axios_headquarters.uploadHowto?.toLowerCase()).toContain('csv')
+  })
+
+  test('sheets howto covers oauth or upload and does not mention service-account share', () => {
+    for (const system of SHEETS_OWNER_SYSTEM_IDS) {
+      const copy = SYSTEM_COPY[system]
+      expect(copy.howto?.toLowerCase()).toContain('google')
+      expect(copy.howto?.toLowerCase()).toContain('upload')
+      expect(copy.oauthHowto?.toLowerCase()).toContain('oauth')
+      expect(copy.oauthHowto?.toLowerCase()).not.toContain('service account')
+      expect(copy.uploadHowto?.toLowerCase()).toContain('csv')
+    }
   })
 })
 
@@ -424,6 +571,9 @@ describe('mode step explainer (KD25)', () => {
     expect(isModeAllowed('upload', ['live', 'upload'])).toBe(true)
     expect(isModeAllowed('live', ['upload'])).toBe(false)
     expect(isModeAllowed('live', ['live'])).toBe(true)
+    expect(isModeAllowed('live', ['oauth'])).toBe(true)
+    expect(isModeAllowed('live', ['upload'], 'hr_alumni')).toBe(true)
+    expect(isModeAllowed('upload', ['oauth'], 'bizdev_contacts')).toBe(true)
   })
 
   test('paylocity cards include per-system hints when both modes allowed', () => {
@@ -441,15 +591,29 @@ describe('mode step explainer (KD25)', () => {
 
   test('upload-only system greys Live with curated reason', () => {
     const cards = buildModeStepCards({
-      systemId: 'bizdev_contacts',
-      displayName: 'BizDev Contacts',
+      systemId: 'axios_headquarters',
+      displayName: 'Axios HQ',
       allowedApproaches: ['upload'],
     })
     const live = cards.find((card) => card.mode === 'live')
     expect(live?.allowed).toBe(false)
     expect(live?.hint).toBeNull()
-    expect(live?.disabledReason?.toLowerCase()).toContain('upload only')
+    expect(live?.disabledReason?.toLowerCase()).toContain('live is not available')
     expect(cards.find((card) => card.mode === 'upload')?.allowed).toBe(true)
+  })
+
+  test('sheets systems allow oauth (live) or upload', () => {
+    const cards = buildModeStepCards({
+      systemId: 'bizdev_contacts',
+      displayName: 'BizDev Contacts',
+      allowedApproaches: ['upload'],
+    })
+    expect(cards.every((card) => card.allowed)).toBe(true)
+    expect(cards.every((card) => card.disabledReason === null)).toBe(true)
+    expect(cards.find((card) => card.mode === 'live')?.hint?.toLowerCase()).toContain(
+      'oauth',
+    )
+    expect(disallowedModeReason('hr_alumni', 'live')).toBe('')
   })
 
   test('lever greys Upload with live-only reason', () => {
@@ -491,6 +655,55 @@ describe('owner connectors hide cassandra', () => {
     expect(isOwnerConnectorsHiddenSystem('hr_alumni')).toBe(false)
     expect(isOwnerConnectorsHiddenVertical('data')).toBe(true)
     expect(isOwnerConnectorsHiddenVertical('people_hr')).toBe(false)
+  })
+
+  test('isOwnerWizardHiddenSystem matches the infra slug only', () => {
+    expect(isOwnerWizardHiddenSystem('cassandra')).toBe(true)
+    expect(isOwnerWizardHiddenSystem('Cassandra')).toBe(true)
+    expect(isOwnerWizardHiddenSystem('hr_alumni')).toBe(false)
+  })
+
+  test('filterOwnerWizardConnectors removes cassandra cards', () => {
+    const visible = filterOwnerWizardConnectors([
+      {
+        system: 'cassandra',
+        display_name: 'Cassandra',
+        allowed_approaches: [],
+        connection_id: null,
+        status: null,
+        last_test_ok: null,
+        metadata: {},
+        display_status: 'view_only',
+        gate_code: '',
+        gate_allowed: true,
+      },
+      {
+        system: 'hr_alumni',
+        display_name: 'HR Alumni List',
+        allowed_approaches: ['upload'],
+        connection_id: null,
+        status: null,
+        last_test_ok: null,
+        metadata: {},
+        display_status: 'needs_setup',
+        gate_code: '',
+        gate_allowed: false,
+      },
+    ])
+    expect(visible.map((row) => row.system)).toEqual(['hr_alumni'])
+  })
+
+  test('ownerConnectorDisplayName uses System A / System B in test vertical', () => {
+    expect(ownerConnectorDisplayName('test', 'cassandra', 'Cassandra')).toBe('System A')
+    expect(ownerConnectorDisplayName('test', 'hr_alumni', 'HR Alumni List')).toBe(
+      'System B',
+    )
+    expect(ownerConnectorDisplayName('communications', 'axios_headquarters', 'Axios HQ')).toBe(
+      'Axios HQ',
+    )
+    expect(ownerConnectorDisplayName('data', 'cassandra', 'Cassandra')).not.toMatch(
+      /cassandra/i,
+    )
   })
 })
 
@@ -541,5 +754,13 @@ describe('upload column mapping', () => {
   test('failure with no identifier columns cannot auto-bind', () => {
     const headers = parseCsvHeaderRow(UPLOAD_SAMPLE_CSV.failure_no_identifier.body)
     expect(uploadMappingComplete(suggestUploadColumnMapping(headers))).toBe(false)
+  })
+
+  test('parse and serialize round-trip mixed corrupt sample', () => {
+    const doc = parseCsvDocument(UPLOAD_SAMPLE_CSV.mixed_good_and_corrupt.body)
+    expect(doc.headers).toEqual(['email', 'phone', 'first_name'])
+    expect(doc.rows).toHaveLength(3)
+    expect(doc.rows[1][0]).toBe('not-an-email')
+    expect(parseCsvDocument(serializeCsvDocument(doc)).rows).toEqual(doc.rows)
   })
 })

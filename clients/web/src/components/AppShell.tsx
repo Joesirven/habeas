@@ -1,9 +1,9 @@
 import { useQueryClient } from '@tanstack/react-query'
-import { useNavigate } from '@tanstack/react-router'
+import { Link, useNavigate } from '@tanstack/react-router'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 
 import { CommandPalette, useCommandPaletteShortcut } from '@/components/CommandPalette'
-import { NavMenu } from '@/components/NavMenu'
+import { InboxEntryPill, NavMenu } from '@/components/NavMenu'
 import { TourHost } from '@/components/onboarding/TourHost'
 import {
   KEYHOLE_SLOT_SLIDE_IN_ID,
@@ -23,6 +23,7 @@ import {
 import { Toaster } from '@/components/ui/sonner'
 import {
   getStoredSimulateRole,
+  PENDING_SETTING_INVITE_USERS,
   setStoredSimulateRole,
   SIMULATE_ROLE_VALUES,
   type MePayload,
@@ -117,11 +118,35 @@ function primarySetupVerticalLabel(me: MePayload, verticalId: string | undefined
   return verticalLabel(verticalId)
 }
 
-function shouldShowConnectorWelcome(me: MePayload | undefined): boolean {
+function pendingInviteUsers(me: MePayload | undefined) {
+  return me?.pending_settings?.find((row) => row.id === PENDING_SETTING_INVITE_USERS)
+}
+
+/** Invite is never a blocking post-auth prompt. */
+export function shouldShowPendingSettings(_me?: MePayload): boolean {
+  return false
+}
+
+/** Soft Settings → Connectors (#team) hint. Not a login modal. */
+export function shouldHintSettingsInvite(me: MePayload | undefined): boolean {
+  if (!me || me.role !== 'data_owner') return false
+  if (isConnectInvitePath()) return false
+  return pendingInviteUsers(me)?.status === 'pending'
+}
+
+export function shouldShowConnectorWelcome(me: MePayload | undefined): boolean {
   if (!me?.needs_connector_setup) return false
   if (isConnectInvitePath()) return false
   if (isConnectorWelcomeDismissed(me.email)) return false
   return true
+}
+
+/** Connector welcome only — invite lives on Settings/Connectors. */
+export function nextPostAuthPrompt(
+  me: MePayload | undefined,
+): 'connector_welcome' | null {
+  if (shouldShowConnectorWelcome(me)) return 'connector_welcome'
+  return null
 }
 
 function welcomeFirstName(me: MePayload): string {
@@ -276,7 +301,7 @@ function AppShellFrame({ children }: AppShellProps) {
   const splashTriggered = useRef(false)
 
   const maybeShowConnectorWelcome = useCallback((profile: MePayload) => {
-    if (shouldShowConnectorWelcome(profile)) {
+    if (nextPostAuthPrompt(profile) === 'connector_welcome') {
       setShowConnectorWelcome(true)
     }
   }, [])
@@ -318,25 +343,31 @@ function AppShellFrame({ children }: AppShellProps) {
 
   if (showPostAuthSplash) {
     return (
-      <PostAuthSplash
-        variant={KEYHOLE_SLOT_SLIDE_IN_ID}
-        autoFinish
-        onDone={() => {
-          markPostAuthSplashSeen()
-          setShowPostAuthSplash(false)
-          if (me) maybeShowConnectorWelcome(me)
-        }}
-      />
+      <>
+        <PostAuthSplash
+          variant={KEYHOLE_SLOT_SLIDE_IN_ID}
+          autoFinish
+          onDone={() => {
+            markPostAuthSplashSeen()
+            setShowPostAuthSplash(false)
+            if (me) maybeShowConnectorWelcome(me)
+          }}
+        />
+        <Toaster />
+      </>
     )
   }
 
   if (showConnectorWelcome && me) {
     return (
-      <ConnectorSetupWelcome
-        me={me}
-        onDismiss={dismissConnectorWelcome}
-        onGetStarted={startConnectorSetup}
-      />
+      <>
+        <ConnectorSetupWelcome
+          me={me}
+          onDismiss={dismissConnectorWelcome}
+          onGetStarted={startConnectorSetup}
+        />
+        <Toaster />
+      </>
     )
   }
 
@@ -344,8 +375,11 @@ function AppShellFrame({ children }: AppShellProps) {
     <div className="flex min-h-screen flex-col bg-paper">
       <header className="sticky top-0 z-40 overflow-visible border-b border-line bg-white/95 backdrop-blur-sm">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 overflow-visible px-4 py-2.5 sm:px-6">
-          <div className="min-w-0">
-            <h1 className="text-base font-semibold tracking-tight text-ink">{PLATFORM_NAME}</h1>
+          <div className="flex min-w-0 items-center gap-2.5">
+            <h1 className="truncate text-base font-semibold tracking-tight text-ink">
+              {PLATFORM_NAME}
+            </h1>
+            <InboxEntryPill />
           </div>
           <div className="relative z-50 flex items-center gap-3 overflow-visible">
             {showPalette ? (
@@ -361,13 +395,22 @@ function AppShellFrame({ children }: AppShellProps) {
                 </kbd>
               </button>
             ) : null}
+            {shouldHintSettingsInvite(me) ? (
+              <Link
+                to="/owner/connectors"
+                hash="team"
+                className="hidden text-[0.65rem] text-mute transition-colors hover:text-ink sm:inline"
+              >
+                Invite teammates
+              </Link>
+            ) : null}
             <NavMenu />
           </div>
         </div>
         <RoleStatusBanner />
       </header>
 
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-5 sm:px-6">{children}</main>
+      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-3 sm:px-6">{children}</main>
 
       {showPalette ? (
         <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />

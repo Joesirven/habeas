@@ -96,17 +96,18 @@ describe('connection-display (AE8 / KD18)', () => {
     ).toBe(false)
   })
 
-  test('create picker hides retired google_sheets', () => {
+  test('create picker hides retired google_sheets and infra cassandra', () => {
     expect(
       isCreatableConnectionSystem({ system_id: 'google_sheets', invite_allowed: false }),
     ).toBe(false)
     expect(
       isCreatableConnectionSystem({ system_id: 'cassandra', invite_allowed: false }),
-    ).toBe(true)
+    ).toBe(false)
     expect(
       isCreatableConnectionSystem({ system_id: 'bizdev_contacts', invite_allowed: true }),
     ).toBe(true)
     expect(isUploadOnlySystem('bizdev_contacts')).toBe(true)
+    expect(isUploadOnlySystem('axios_headquarters')).toBe(true)
     expect(isUploadOnlySystem('mailchimp')).toBe(false)
   })
 
@@ -500,6 +501,8 @@ describe('owner Home helpers (R62)', () => {
           received_at: '2026-08-01T00:00:00Z',
           requested_at: '2026-08-01T00:00:00Z',
           match_type: 'multi_match',
+          vertical: 'communications',
+          vertical_label: 'Communications',
         },
       ],
       fulfillment: [
@@ -510,12 +513,17 @@ describe('owner Home helpers (R62)', () => {
           intake_source: 'drop',
           received_at: '2026-08-10T00:00:00Z',
           requested_at: '2026-08-10T00:00:00Z',
+          vertical: 'people_hr',
+          vertical_label: 'People / HR',
         },
       ],
       limit: 8,
     })
     expect(rows.map((row) => row.requestId)).toEqual(['newer-fulfill', 'older-match'])
     expect(rows[0]?.title).toBe('Fulfillment')
+    expect(rows[0]?.verticalLabel).toBe('People / HR')
     expect(rows[1]?.title).toBe('Multi-person')
+    expect(rows[1]?.vertical).toBe('communications')
+    expect(rows[1]?.verticalLabel).toBe('Communications')
   })
 })

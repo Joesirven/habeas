@@ -1,21 +1,41 @@
 /**
- * Inbox batch-status grouping — match result / DROP disposition labels shared with
- * `/requests/needs-attention` Result chips and batch stacks.
+ * Inbox grouping — Batch stacks (date+source keys, default), optional system /
+ * status stacks, and matching-disposition / DROP labels for
+ * `/requests/needs-attention`.
+ *
+ * Match type and identifier type (`match_type`, `matched_via`, list type) are
+ * filters, not row identity. Batch and system stacks must not split phone vs
+ * email into separate groups. Group-by System uses catalog data-system labels,
+ * never intake source. Group-by Status is matching disposition, wizard block
+ * (needs connection / refresh), or confirmed DROP — not identifier surfaces.
  */
 
 import type {
   ConnectorReminder,
+  DropResponseStatusCode,
   NeedsAttentionItem,
 } from '@/lib/api'
+import { suggestedDropResponseStatus } from '@/lib/api'
 import {
   matchingConnectorGateBannerCopy,
   matchingConnectorGateChip,
   type MatchingConnectorGate,
 } from '@/lib/connection-display'
 import { buildReminderBannerItems } from '@/lib/owner-connector-ui'
+import {
+  catalogSystemDisplayLabel,
+  isWorkbenchStageKey,
+  opsStageToWorkbench,
+  TEST_VERTICAL_ID,
+  type WorkbenchStageKey,
+} from '@/lib/legalJourneyLabels'
+import { coalesceInboxReviewItems } from '@/lib/inbox-status-lab'
+import { filterRequestUuids } from '@/lib/utils'
 
-/** Status bucket for inbox stacks — mirrors Result filter + DROP codes 3/4/5. */
+/** Status bucket — matching disposition, wizard block, or confirmed DROP 3/4/5. */
 export type InboxBatchStatusKey =
+  | 'needs_connection'
+  | 'needs_refresh'
   | 'single_match'
   | 'multi_match'
   | 'not_found'
@@ -32,6 +52,8 @@ export type InboxBatchStatusKey =
   | 'other'
 
 export const INBOX_BATCH_STATUS_ORDER: InboxBatchStatusKey[] = [
+  'needs_connection',
+  'needs_refresh',
   'single_match',
   'drop_3',
   'multi_match',
@@ -48,6 +70,11 @@ export const INBOX_BATCH_STATUS_ORDER: InboxBatchStatusKey[] = [
   'other',
 ]
 
+export type InboxStatusKeyOptions = {
+  reminders?: ConnectorReminder[] | null
+  gate?: MatchingConnectorGate | null
+}
+
 const DROP_STATUS_LABELS: Record<number, string> = {
   3: 'Deleted',
   4: 'Opted out',
@@ -58,6 +85,236 @@ const OWNER_DROP_STATUS_LABELS: Record<number, string> = {
   3: 'Confirm match',
   4: 'Multi-person',
   5: 'Not a match',
+}
+
+const INTAKE_SOURCE_LABELS: Record<string, string> = {
+  drop: 'CA DROP',
+  webform: 'Gravity Forms',
+  csv: 'Authorized Agent',
+  manual: 'Manual',
+}
+
+const UNDATED_KEY = 'undated'
+const UNASSIGNED_SYSTEM_KEY = 'unassigned'
+
+export type InboxBatchParts = { key: string; label: string }
+
+function inboxItemLocalDate(
+  item: Pick<NeedsAttentionItem, 'requested_at' | 'received_at'>,
+): Date | null {
+  const raw = item.requested_at?.trim() || item.received_at?.trim() || ''
+  if (!raw) return null
+  const date = new Date(raw)
+  if (Number.isNaN(date.getTime())) return null
+  return date
+}
+
+/** Local calendar day `YYYY-MM-DD` — date only, stable on a given machine. */
+function inboxLocalDateKey(date: Date): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function inboxLocalDateLabel(date: Date): string {
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+export function inboxIntakeSourceLabel(source: string | null | undefined): string {
+  const trimmed = (source ?? '').trim()
+  if (!trimmed) return 'Unknown'
+  return INTAKE_SOURCE_LABELS[trimmed] ?? trimmed
+}
+
+/**
+ * Catalog system id — `system`, then `system_id`. Never a composite POST key.
+ * Not match type / identifier type.
+ */
+export function inboxItemSystemId(
+  item: Pick<NeedsAttentionItem, 'system' | 'system_id'>,
+): string | null {
+  return item.system?.trim() || item.system_id?.trim() || null
+}
+
+function inboxSystemStackKey(
+  item: Pick<NeedsAttentionItem, 'system' | 'system_id'>,
+): string {
+  return inboxItemSystemId(item) ?? UNASSIGNED_SYSTEM_KEY
+}
+
+function inboxSystemStackLabel(
+  item: Pick<NeedsAttentionItem, 'system' | 'system_id' | 'system_label' | 'vertical'>,
+): string {
+  return (
+    catalogSystemDisplayLabel(inboxItemSystemId(item), {
+      vertical: item.vertical,
+      systemLabel: item.system_label,
+    }) || 'Unassigned system'
+  )
+}
+
+/** Date + intake source key — not process id, match type, or identifier type. */
+export function inboxDateSourceKey(
+  item: Pick<NeedsAttentionItem, 'requested_at' | 'received_at' | 'intake_source'>,
+): string {
+  const date = inboxItemLocalDate(item)
+  const dateKey = date ? inboxLocalDateKey(date) : UNDATED_KEY
+  const source = (item.intake_source ?? '').trim() || 'unknown'
+  return `${dateKey}::${source}`
+}
+
+/** Visible Batch stack title — e.g. `Aug 21 · CA DROP`. Never `#42`. */
+export function inboxDateSourceLabel(
+  item: Pick<NeedsAttentionItem, 'requested_at' | 'received_at' | 'intake_source'>,
+): string {
+  const date = inboxItemLocalDate(item)
+  const dateLabel = date ? inboxLocalDateLabel(date) : 'Undated'
+  return `${dateLabel} · ${inboxIntakeSourceLabel(item.intake_source)}`
+}
+
+/** User-facing Batch stack title — same value as `inboxDateSourceLabel`. */
+export function inboxBatchLabel(
+  item: Pick<NeedsAttentionItem, 'requested_at' | 'received_at' | 'intake_source'>,
+): string {
+  return inboxDateSourceLabel(item)
+}
+
+/** Default stack identity for inbox grouping builders. */
+export function inboxDateSourceParts(
+  item: Pick<NeedsAttentionItem, 'requested_at' | 'received_at' | 'intake_source'>,
+): InboxBatchParts {
+  return { key: inboxDateSourceKey(item), label: inboxDateSourceLabel(item) }
+}
+
+export type InboxGroupingStack = {
+  key: string
+  label: string
+  items: NeedsAttentionItem[]
+}
+
+export type InboxGroupingOptions = {
+  byDateSource?: boolean
+  bySystem?: boolean
+  byStatus?: boolean
+  reminders?: ConnectorReminder[] | null
+  gate?: MatchingConnectorGate | null
+}
+
+function collectInboxGroupingStacks(
+  items: NeedsAttentionItem[],
+  partFor: (item: NeedsAttentionItem) => InboxBatchParts,
+): InboxGroupingStack[] {
+  const groups = new Map<string, InboxGroupingStack>()
+  for (const item of items) {
+    const parts = partFor(item)
+    const existing = groups.get(parts.key)
+    if (existing) {
+      existing.items.push(item)
+    } else {
+      groups.set(parts.key, { key: parts.key, label: parts.label, items: [item] })
+    }
+  }
+  return [...groups.values()].sort((left, right) => {
+    const leftTime = left.items[0]?.requested_at ?? left.items[0]?.received_at ?? ''
+    const rightTime = right.items[0]?.requested_at ?? right.items[0]?.received_at ?? ''
+    const byTime = leftTime.localeCompare(rightTime)
+    if (byTime !== 0) return byTime
+    return left.label.localeCompare(right.label)
+  })
+}
+
+/** One Batch stack per local calendar day + intake source. Does not split phone vs email. */
+export function groupInboxItemsByDateSource(
+  items: NeedsAttentionItem[],
+): InboxGroupingStack[] {
+  return collectInboxGroupingStacks(items, inboxDateSourceParts)
+}
+
+/**
+ * One stack per catalog data system (`system` then `system_id`).
+ * Label is `system_label` / system id — never intake source.
+ */
+export function groupInboxItemsBySystem(
+  items: NeedsAttentionItem[],
+): InboxGroupingStack[] {
+  return collectInboxGroupingStacks(items, (item) => ({
+    key: inboxSystemStackKey(item),
+    label: inboxSystemStackLabel(item),
+  }))
+}
+
+/** Four-stage workbench step from `current_stage` — ingest | matching | fulfillment | notice. */
+export function inboxItemStepKey(
+  item: Pick<NeedsAttentionItem, 'current_stage'>,
+): WorkbenchStageKey {
+  const stage = (item.current_stage ?? '').trim().toLowerCase()
+  if (isWorkbenchStageKey(stage)) return stage
+  return opsStageToWorkbench(stage) ?? 'ingest'
+}
+
+function inboxGroupingDimensionParts(
+  item: NeedsAttentionItem,
+  options: {
+    dateSource: boolean
+    system: boolean
+    status: boolean
+    statusContext?: InboxStatusKeyOptions
+  },
+  ownerLanguage: boolean,
+): InboxBatchParts {
+  const parts: InboxBatchParts[] = []
+  if (options.dateSource) parts.push(inboxDateSourceParts(item))
+  if (options.system) {
+    parts.push({ key: inboxSystemStackKey(item), label: inboxSystemStackLabel(item) })
+  }
+  if (options.status) {
+    const statusKey = inboxWorkStatusKey(item, options.statusContext)
+    parts.push({
+      key: statusKey,
+      label: inboxBatchStatusLabel(statusKey, ownerLanguage),
+    })
+  }
+  if (parts.length === 0) return inboxDateSourceParts(item)
+  return {
+    key: parts.map((part) => part.key).join('::'),
+    label: parts.map((part) => part.label).join(' · '),
+  }
+}
+
+/**
+ * Stacks the inbox page can render.
+ * Default is Batch (date+source keys). System and status are optional.
+ * Multi-select is SQL GROUP BY: one stack per unique combination of selected
+ * dimensions. Match type is a filter, not a grouping dimension.
+ */
+export function buildInboxGroupingStacks(
+  items: NeedsAttentionItem[],
+  options: InboxGroupingOptions = {},
+  ownerLanguage = false,
+): InboxGroupingStack[] {
+  const bySystem = options.bySystem === true
+  const byStatus = options.byStatus === true
+  const byDateSource = options.byDateSource === true || (!bySystem && !byStatus)
+  const statusContext: InboxStatusKeyOptions = {
+    reminders: options.reminders,
+    gate: options.gate,
+  }
+  if (byStatus && !byDateSource && !bySystem) {
+    return groupInboxItemsByBatchStatus(items, ownerLanguage, statusContext)
+  }
+  return collectInboxGroupingStacks(items, (item) =>
+    inboxGroupingDimensionParts(
+      item,
+      {
+        dateSource: byDateSource,
+        system: bySystem,
+        status: byStatus,
+        statusContext,
+      },
+      ownerLanguage,
+    ),
+  )
 }
 
 function workTypeFallbackKey(item: NeedsAttentionItem): InboxBatchStatusKey {
@@ -106,7 +363,7 @@ function workTypeFallbackKey(item: NeedsAttentionItem): InboxBatchStatusKey {
   return 'other'
 }
 
-/** Derive the batch-status bucket for an inbox row (match type or DROP 3/4/5). */
+/** Derive the matching-attempt or confirmed DROP bucket (no wizard block). */
 export function inboxBatchStatusKey(item: NeedsAttentionItem): InboxBatchStatusKey {
   if (item.intake_source === 'drop' && item.response_status != null) {
     if (item.response_status === 3) return 'drop_3'
@@ -132,12 +389,16 @@ export function inboxBatchStatusKey(item: NeedsAttentionItem): InboxBatchStatusK
   return workTypeFallbackKey(item)
 }
 
-/** Same labels as inbox Result chips / DROP status pills. */
+/** Same labels as inbox Status stacks / DROP status pills. */
 export function inboxBatchStatusLabel(
   key: InboxBatchStatusKey,
   ownerLanguage = false,
 ): string {
   switch (key) {
+    case 'needs_connection':
+      return 'Needs connection'
+    case 'needs_refresh':
+      return 'Needs refresh'
     case 'single_match':
       return ownerLanguage ? 'Confirm match' : 'Single match'
     case 'multi_match':
@@ -190,20 +451,87 @@ export function inboxBatchStatusStackSubtitle(
   return inboxBatchStatusLabel(key, ownerLanguage)
 }
 
+export function matchTypeLabel(
+  matchType: string | null | undefined,
+  ownerLanguage = false,
+): string {
+  if (!matchType) return 'No match data'
+  if (matchType === 'single_match') return ownerLanguage ? 'Confirm match' : 'Single match'
+  if (matchType === 'multi_match') return 'Multi-person'
+  if (matchType === 'not_found') return ownerLanguage ? 'Not a match' : 'Not found'
+  return matchType.replaceAll('_', ' ')
+}
+
+/** Bulk / thread default — multi → 4, not-found → 5, else 3 (never hardcode 3). */
+export function suggestedBulkFulfillStatus(
+  items: Array<Pick<NeedsAttentionItem, 'match_type' | 'match_count'>>,
+): DropResponseStatusCode {
+  if (items.length === 0) return 3
+  const suggestions = items.map((item) =>
+    suggestedDropResponseStatus(item.match_type, item.match_count),
+  )
+  if (suggestions.some((code) => code === 4)) return 4
+  if (suggestions.every((code) => code === 5)) return 5
+  return suggestions[0] ?? 3
+}
+
+/** Kicked-off fulfillment on the data-owner Inbox · Fulfillment lane (R61). */
+export function isOwnerFulfillmentItem(item: NeedsAttentionItem): boolean {
+  const kind = item.kind
+  if (
+    kind === 'triage' ||
+    item.assignment?.kind === 'triage' ||
+    item.current_stage === 'triage'
+  ) {
+    return false
+  }
+  if (
+    kind === 'notice' ||
+    item.reason === 'notice.review' ||
+    item.current_stage === 'notice'
+  ) {
+    return false
+  }
+  if (
+    kind === 'delivery' ||
+    item.reason === 'access.delivery' ||
+    item.reason === 'delivery.confirm' ||
+    item.current_stage === 'delivery'
+  ) {
+    return false
+  }
+  const isEscalation = kind === 'escalations' || item.assignment?.kind === 'escalate'
+  if (
+    isEscalation &&
+    (item.assignment?.target_role === 'legal' || kind === 'escalations')
+  ) {
+    return false
+  }
+  const stage = (item.current_stage ?? '').trim().toLowerCase()
+  const reason = (item.reason ?? '').trim().toLowerCase()
+  return (
+    stage === 'fulfillment' ||
+    stage === 'fulfill' ||
+    reason === 'fulfillment.kickoff' ||
+    reason === 'fulfillment.owner'
+  )
+}
+
 export type InboxBatchStatusSection = {
   key: InboxBatchStatusKey
   label: string
   items: NeedsAttentionItem[]
 }
 
-/** Group inbox items by batch-status type (stable sort order). */
+/** Group inbox items by work status (stable sort order). */
 export function groupInboxItemsByBatchStatus(
   items: NeedsAttentionItem[],
   ownerLanguage = false,
+  statusContext?: InboxStatusKeyOptions,
 ): InboxBatchStatusSection[] {
   const buckets = new Map<InboxBatchStatusKey, NeedsAttentionItem[]>()
   for (const item of items) {
-    const key = inboxBatchStatusKey(item)
+    const key = inboxWorkStatusKey(item, statusContext)
     const list = buckets.get(key) ?? []
     list.push(item)
     buckets.set(key, list)
@@ -323,7 +651,10 @@ export function groupInboxConnectorNotifications(options: {
   })
 }
 
-export type InboxBatchParts = { key: string; label: string }
+/** Pipeline step — matching result review vs fulfillment kickoff. */
+export type InboxBatchStep = 'matching' | 'fulfillment'
+
+export const UNKEYED_INBOX_BATCH_ID = 'u:none'
 
 export type InboxBatchStatusCrossGroup = {
   batchKey: string
@@ -334,7 +665,12 @@ export type InboxBatchStatusCrossGroup = {
   items: NeedsAttentionItem[]
 }
 
-/** One stack per (batch, batch-status type) — e.g. #42 · Single match. */
+export type InboxBatchStatusStepCrossGroup = InboxBatchStatusCrossGroup & {
+  step: InboxBatchStep
+  stepLabel: string
+}
+
+/** One stack per (date+source, result status) — e.g. Aug 21 · CA DROP · Single match. */
 export function buildInboxBatchStatusCrossGroups(
   items: NeedsAttentionItem[],
   batchParts: (item: NeedsAttentionItem) => InboxBatchParts,
@@ -375,4 +711,342 @@ export function buildInboxBatchStatusCrossGroups(
     if (byStatus !== 0) return byStatus
     return left.batchLabel.localeCompare(right.batchLabel)
   })
+}
+
+/** Prefer download attempt id; fall back to ZIP member name (seed/broker rows). */
+export function inboxBatchId(item: NeedsAttentionItem): string {
+  if (item.bulk_process_id != null) return `p:${item.bulk_process_id}`
+  if (item.source_csv_filename) return `c:${item.source_csv_filename}`
+  return UNKEYED_INBOX_BATCH_ID
+}
+
+/**
+ * Matching vs fulfillment lane — mirrors `/requests/needs-attention` kind filters
+ * (`isMatchingItem` / `isOwnerFulfillmentItem`). Fulfillment stage wins when both apply.
+ */
+export function inboxBatchStep(item: NeedsAttentionItem): InboxBatchStep {
+  const stage = (item.current_stage ?? '').trim().toLowerCase()
+  const reason = (item.reason ?? '').trim().toLowerCase()
+  if (
+    stage === 'fulfillment' ||
+    stage === 'fulfill' ||
+    reason === 'fulfillment.kickoff' ||
+    reason === 'fulfillment.owner'
+  ) {
+    return 'fulfillment'
+  }
+  return 'matching'
+}
+
+export function inboxBatchStepLabel(step: InboxBatchStep): string {
+  return step === 'fulfillment' ? 'Fulfillment' : 'Matching result'
+}
+
+export type InboxBatchStatusStepKey = {
+  batchId: string
+  matchStatus: InboxBatchStatusKey
+  step: InboxBatchStep
+}
+
+export type InboxBatchStatusStepGroup = {
+  key: InboxBatchStatusStepKey
+  compositeKey: string
+  batchId: string
+  matchStatus: InboxBatchStatusKey
+  matchStatusLabel: string
+  step: InboxBatchStep
+  items: NeedsAttentionItem[]
+}
+
+function inboxBatchStatusStepCompositeKey(key: InboxBatchStatusStepKey): string {
+  return `${key.batchId}::${key.matchStatus}::${key.step}`
+}
+
+/** One stack per (batch, match status, pipeline step). */
+export function groupInboxByBatchStatusStep(
+  items: NeedsAttentionItem[],
+  ownerLanguage = false,
+): InboxBatchStatusStepGroup[] {
+  const groups = new Map<string, InboxBatchStatusStepGroup>()
+
+  for (const item of items) {
+    const batchId = inboxBatchId(item)
+    const matchStatus = inboxBatchStatusKey(item)
+    const step = inboxBatchStep(item)
+    const key: InboxBatchStatusStepKey = { batchId, matchStatus, step }
+    const compositeKey = inboxBatchStatusStepCompositeKey(key)
+    const existing = groups.get(compositeKey)
+    if (existing) {
+      existing.items.push(item)
+    } else {
+      groups.set(compositeKey, {
+        key,
+        compositeKey,
+        batchId,
+        matchStatus,
+        matchStatusLabel: inboxBatchStatusLabel(matchStatus, ownerLanguage),
+        step,
+        items: [item],
+      })
+    }
+  }
+
+  const statusRank = new Map(
+    INBOX_BATCH_STATUS_ORDER.map((statusKey, index) => [statusKey, index] as const),
+  )
+  const stepRank: Record<InboxBatchStep, number> = { matching: 0, fulfillment: 1 }
+
+  return [...groups.values()].sort((left, right) => {
+    const leftTime = left.items[0]?.requested_at ?? ''
+    const rightTime = right.items[0]?.requested_at ?? ''
+    const byTime = leftTime.localeCompare(rightTime)
+    if (byTime !== 0) return byTime
+    const byStatus =
+      (statusRank.get(left.matchStatus) ?? 99) - (statusRank.get(right.matchStatus) ?? 99)
+    if (byStatus !== 0) return byStatus
+    const byStep = stepRank[left.step] - stepRank[right.step]
+    if (byStep !== 0) return byStep
+    return left.batchId.localeCompare(right.batchId)
+  })
+}
+
+const STEP_ORDER: InboxBatchStep[] = ['matching', 'fulfillment']
+
+/** One stack per (batch, match-result status, lane step) — status lab bulk grouping. */
+export function buildInboxBatchStatusStepCrossGroups(
+  items: NeedsAttentionItem[],
+  batchParts: (item: NeedsAttentionItem) => InboxBatchParts,
+  ownerLanguage = false,
+): InboxBatchStatusStepCrossGroup[] {
+  const groups = new Map<string, InboxBatchStatusStepCrossGroup>()
+
+  for (const item of items) {
+    const batch = batchParts(item)
+    const statusKey = inboxBatchStatusKey(item)
+    const step = inboxBatchStep(item)
+    const compositeKey = `${batch.key}::${statusKey}::${step}`
+    const existing = groups.get(compositeKey)
+    if (existing) {
+      existing.items.push(item)
+    } else {
+      groups.set(compositeKey, {
+        batchKey: batch.key,
+        batchLabel: batch.label,
+        statusKey,
+        statusLabel: inboxBatchStatusLabel(statusKey, ownerLanguage),
+        step,
+        stepLabel: inboxBatchStepLabel(step),
+        compositeKey,
+        items: [item],
+      })
+    }
+  }
+
+  const statusRank = new Map(
+    INBOX_BATCH_STATUS_ORDER.map((key, index) => [key, index] as const),
+  )
+  const stepRank = new Map(STEP_ORDER.map((key, index) => [key, index] as const))
+
+  return [...groups.values()].sort((left, right) => {
+    const leftTime = left.items[0]?.requested_at ?? ''
+    const rightTime = right.items[0]?.requested_at ?? ''
+    const byTime = leftTime.localeCompare(rightTime)
+    if (byTime !== 0) return byTime
+    const byStatus =
+      (statusRank.get(left.statusKey) ?? 99) - (statusRank.get(right.statusKey) ?? 99)
+    if (byStatus !== 0) return byStatus
+    const byStep = (stepRank.get(left.step) ?? 99) - (stepRank.get(right.step) ?? 99)
+    if (byStep !== 0) return byStep
+    return left.batchLabel.localeCompare(right.batchLabel)
+  })
+}
+
+/**
+ * All valid request UUIDs in a stack — Confirm / Decline / Assign-to-legal / status
+ * apply must use this list, never `compositeKey` (`p:42::single_match::matching`).
+ */
+export function stackRequestIds(
+  members: Array<Pick<NeedsAttentionItem, 'request_id'>>,
+): string[] {
+  return filterRequestUuids(members.map((member) => member.request_id))
+}
+
+/** Internal batch key for nav/inbox work units — never a visible CSV filename. */
+export function inboxPendingWorkBatchKey(
+  item: Pick<
+    NeedsAttentionItem,
+    | 'bulk_process_id'
+    | 'source_csv_filename'
+    | 'requested_at'
+    | 'received_at'
+    | 'intake_source'
+  >,
+): string | null {
+  if (item.bulk_process_id != null) return `p:${item.bulk_process_id}`
+  const date = inboxItemLocalDate(item)
+  const source = (item.intake_source ?? '').trim()
+  if (date && source) return inboxDateSourceKey(item)
+  const filename = item.source_csv_filename?.trim()
+  if (filename) return `c:${filename}`
+  return null
+}
+
+/**
+ * Standalone matching-result identity when the item has no batch.
+ * Test vertical fans out by system; other verticals group by request + vertical.
+ */
+export function inboxStandaloneResultKey(
+  item: Pick<NeedsAttentionItem, 'request_id' | 'vertical' | 'system' | 'system_id'>,
+): string {
+  const vertical = (item.vertical ?? '').trim()
+  const system = inboxItemSystemId(item) ?? ''
+  if (vertical === TEST_VERTICAL_ID && system) {
+    return `${item.request_id}::${system}`
+  }
+  if (vertical) return `${item.request_id}::${vertical}`
+  if (system) return `${item.request_id}::${system}`
+  return item.request_id
+}
+
+/**
+ * Status for a pending work unit / Group-by Status stack.
+ * Wizard block wins, then confirmed DROP disposition, then matching attempt.
+ * Not identifier surfaces (email/phone/ndz) and not catalog system.
+ */
+export function inboxWorkStatusKey(
+  item: NeedsAttentionItem,
+  options?: InboxStatusKeyOptions,
+): InboxBatchStatusKey {
+  const block = inboxItemConnectorBlock(item, options)
+  if (block) return block.kind
+  return inboxBatchStatusKey(item)
+}
+
+/**
+ * Badge work units: unique `(batch_key, status_key)` among pending items.
+ * `batch_key` is process id or dated date+source (same as today).
+ * `status_key` is matching disposition, needs connection / refresh, or confirmed.
+ * Identifier surfaces and people are not dimensions. A batch is not collapsed to 1.
+ */
+export function inboxPendingWorkUnitCount(
+  items: NeedsAttentionItem[],
+  options?: InboxStatusKeyOptions,
+): number {
+  const coalesced = coalesceInboxReviewItems(items)
+  const units = new Set<string>()
+  for (const item of coalesced) {
+    const batchKey = inboxPendingWorkBatchKey(item) ?? `s:${inboxStandaloneResultKey(item)}`
+    const statusKey = inboxWorkStatusKey(item, options)
+    units.add(`${batchKey}::${statusKey}`)
+  }
+  return units.size
+}
+
+export type InboxConnectorBlockKind = 'needs_connection' | 'needs_refresh'
+
+export type InboxConnectorBlock = {
+  kind: InboxConnectorBlockKind
+  label: string
+}
+
+const REFRESH_REMINDER_CODES = new Set([
+  'upload_stale',
+  'upload_approaching',
+  'rotation_overdue',
+  'rotation_approaching',
+])
+
+const CONNECTION_REMINDER_CODES = new Set(['wizard_incomplete'])
+
+export type InboxConnectorBlockDetail = {
+  result_kind?: string | null
+  matched_contacts_status?: string | null
+  system?: string | null
+}
+
+function itemHasConnectableSystem(
+  item: Pick<NeedsAttentionItem, 'system' | 'system_id' | 'system_label' | 'vertical'>,
+): boolean {
+  return Boolean(
+    catalogSystemDisplayLabel(inboxItemSystemId(item), {
+      vertical: item.vertical,
+      systemLabel: item.system_label,
+    }),
+  )
+}
+
+function reminderMatchesItem(
+  reminder: ConnectorReminder,
+  item: Pick<NeedsAttentionItem, 'system' | 'system_id' | 'vertical'>,
+): boolean {
+  const system = inboxItemSystemId(item)
+  if (system && reminder.system === system) return true
+  const vertical = (item.vertical ?? '').trim()
+  return Boolean(vertical && reminder.vertical_id === vertical && !system)
+}
+
+/**
+ * Owner-language gate when matching is blocked on connect or refresh.
+ * Labels are "Needs connection" / "Needs refresh" — never cassandra / CA DROP-as-system.
+ */
+export function inboxItemConnectorBlock(
+  item: Pick<NeedsAttentionItem, 'system' | 'system_id' | 'system_label' | 'vertical'>,
+  options?: {
+    reminders?: ConnectorReminder[] | null
+    gate?: MatchingConnectorGate | null
+    matchingDetail?: InboxConnectorBlockDetail | null
+  },
+): InboxConnectorBlock | null {
+  if (!itemHasConnectableSystem(item)) return null
+
+  const system = inboxItemSystemId(item)
+  const detail = options?.matchingDetail
+  const stub =
+    detail?.result_kind === 'sheet_stub' ||
+    detail?.result_kind === 'saas_stub' ||
+    detail?.matched_contacts_status === 'not_live'
+
+  const reminders = (options?.reminders ?? []).filter((reminder) =>
+    reminderMatchesItem(reminder, item),
+  )
+  if (reminders.some((reminder) => REFRESH_REMINDER_CODES.has(reminder.code))) {
+    return { kind: 'needs_refresh', label: 'Needs refresh' }
+  }
+  if (reminders.some((reminder) => CONNECTION_REMINDER_CODES.has(reminder.code))) {
+    return { kind: 'needs_connection', label: 'Needs connection' }
+  }
+
+  const gate = options?.gate
+  if (gate?.blocked && (!gate.system || !system || gate.system === system)) {
+    if (gate.displayStatus === 'needs_refresh' || gate.gateCode === 'upload_stale') {
+      return { kind: 'needs_refresh', label: 'Needs refresh' }
+    }
+    if (gate.displayStatus === 'needs_setup' || gate.gateCode === 'wizard_incomplete') {
+      return { kind: 'needs_connection', label: 'Needs connection' }
+    }
+    return { kind: 'needs_refresh', label: 'Needs refresh' }
+  }
+
+  if (stub) {
+    return { kind: 'needs_connection', label: 'Needs connection' }
+  }
+
+  return null
+}
+
+/** Worst connector block across a batch — connection first, then refresh. */
+export function inboxItemsConnectorBlock(
+  items: Array<Pick<NeedsAttentionItem, 'system' | 'system_id' | 'system_label' | 'vertical'>>,
+  options?: {
+    reminders?: ConnectorReminder[] | null
+    gate?: MatchingConnectorGate | null
+  },
+): InboxConnectorBlock | null {
+  let refresh: InboxConnectorBlock | null = null
+  for (const item of items) {
+    const block = inboxItemConnectorBlock(item, options)
+    if (block?.kind === 'needs_connection') return block
+    if (block?.kind === 'needs_refresh') refresh = block
+  }
+  return refresh
 }
