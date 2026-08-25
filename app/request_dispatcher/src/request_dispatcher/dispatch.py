@@ -2,20 +2,48 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+from uuid import UUID
 
 from habeas_privacy_core.db.requests import enqueue_matching
-from habeas_privacy_core.queue.constants import MATCHING_ATTEMPTS_TABLE
+from habeas_privacy_core.models.intake import DropListType
+from habeas_privacy_core.queue.constants import (
+    AUTH0_ATTEMPTS_TABLE,
+    GOOGLE_SHEETS_ATTEMPTS_TABLE,
+    MATCHING_ATTEMPTS_TABLE,
+    MATCHING_STEP,
+)
 from habeas_privacy_core.workflow.approval import (
+    INTAKE_ROUTE_TRIAGE_ACTION,
     WORKFLOW_ASSIGNMENT_ACTION,
     create_workflow_assignment,
-    has_pending_legal_triage,
+    eval_condition,
+    fetch_active_rule,
     should_route_to_legal_triage,
 )
 
+try:
+    from habeas_privacy_core.db.requests import enqueue_auth0_matching as _core_enqueue_auth0
+except ImportError:  # impl-10 helper not landed yet
+    _core_enqueue_auth0 = None
+
 # System actor for automatic route-to-triage assignments (no PII).
 _ROUTE_TRIAGE_ACTOR = "system:request_dispatcher"
+
+# One HTTP /dispatch call drains up to this many matching + Auth0 rows.
+_MAX_ENQUEUE_PER_CALL = 2_000_000
+_REQUEST_IDS_CAP = 20
+_DEFAULT_BATCH = 5_000
+_DRAIN_ALL_MIN_BATCH = 50_000
+# Legal hold is state-based; scan only when CA would be held or the rule
+# cannot be expressed in SQL. Set-based INSERT already excludes open triage.
+_TRIAGE_SCAN_LIMIT = 200
+_ROUTE_TRIAGE_PREDICATES = frozenset({"requestor_state_not_in", "state_in"})
+
+logger = logging.getLogger(__name__)
 
 
 class DbConnection(Protocol):
@@ -29,14 +57,258 @@ class DbConnection(Protocol):
 class DispatchCandidate:
     request_id: str
     requestor_state: str | None
+    list_type: str | None = None
 
 
 @dataclass
 class DispatchResult:
     request_ids: list[str] = field(default_factory=list)
     enqueued: int = 0
+    auth0_enqueued: int = 0
+    mailchimp_enqueued: int = 0
+    google_sheets_enqueued: int = 0
     held_for_triage: int = 0
     skipped_open_triage: int = 0
+
+
+@dataclass(frozen=True)
+class _LegalEnqueueFilter:
+    """SQL AND-clause so set-based INSERT skips rows Legal would hold."""
+
+    sql: str
+    params: tuple[Any, ...]
+    translatable: bool
+
+
+def _extend_request_ids(result: DispatchResult, ids: Any) -> None:
+    room = _REQUEST_IDS_CAP - len(result.request_ids)
+    if room <= 0 or not ids:
+        return
+    seen = set(result.request_ids)
+    for raw in ids:
+        text = str(raw)
+        if text in seen:
+            continue
+        result.request_ids.append(text)
+        seen.add(text)
+        room -= 1
+        if room <= 0:
+            return
+
+
+def _insert_count(row: Any) -> tuple[int, list[str]]:
+    if row is None:
+        return 0, []
+    n = int(row["n"] or 0)
+    raw_ids = row["request_ids"] or []
+    return n, [str(item) for item in raw_ids]
+
+
+def _rule_holds_context(rule: dict[str, Any] | None, context: dict[str, Any]) -> bool:
+    """Same hold decision as ``should_route_to_legal_triage``, no extra SQL."""
+    if not rule or not rule.get("requires_approval"):
+        return False
+    condition = rule.get("condition_jsonb")
+    if isinstance(condition, str):
+        condition = json.loads(condition)
+    if condition and not eval_condition(condition, context):
+        return False
+    return True
+
+
+def _legal_enqueue_filter(rule: dict[str, Any] | None) -> _LegalEnqueueFilter:
+    """Fail-closed: unknown predicates → set-base enqueue nothing."""
+    if not rule or not rule.get("requires_approval"):
+        return _LegalEnqueueFilter("", (), True)
+
+    condition = rule.get("condition_jsonb")
+    if isinstance(condition, str):
+        condition = json.loads(condition)
+    if not condition:
+        # Empty condition + requires_approval → eval_condition holds everyone.
+        return _LegalEnqueueFilter("AND FALSE", (), False)
+
+    keys = set(condition)
+    if keys - _ROUTE_TRIAGE_PREDICATES or len(keys & _ROUTE_TRIAGE_PREDICATES) != 1:
+        return _LegalEnqueueFilter("AND FALSE", (), False)
+
+    if "state_in" in condition:
+        raw_states = condition["state_in"]
+        if not isinstance(raw_states, list) or not raw_states:
+            return _LegalEnqueueFilter("AND FALSE", (), False)
+        states = [str(item).strip().upper() for item in raw_states]
+        # Hold when requestor_state is in the list; NULL is not held.
+        return _LegalEnqueueFilter(
+            "AND (r.requestor_state IS NULL "
+            "OR NOT (UPPER(TRIM(r.requestor_state)) = ANY($4::text[])))",
+            (states,),
+            True,
+        )
+    raw_states = condition["requestor_state_not_in"]
+    if not isinstance(raw_states, list) or not raw_states:
+        return _LegalEnqueueFilter("AND FALSE", (), False)
+    states = [str(item).strip().upper() for item in raw_states]
+    # Hold when requestor_state is missing or not in the allowlist.
+    return _LegalEnqueueFilter(
+        "AND UPPER(TRIM(r.requestor_state)) = ANY($4::text[])",
+        (states,),
+        True,
+    )
+
+
+def _matching_insert_sql(hold_sql: str) -> str:
+    return f"""
+        WITH inserted AS (
+            INSERT INTO {MATCHING_ATTEMPTS_TABLE}
+                (request_id, step, attempt_number, status)
+            SELECT r.id, $1, 1, 'pending'
+              FROM requests r
+             WHERE NOT EXISTS (
+                   SELECT 1
+                     FROM {MATCHING_ATTEMPTS_TABLE} ma
+                    WHERE ma.request_id = r.id
+                 )
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM approval_requests ar
+                    WHERE ar.request_id = r.id
+                      AND ar.action_type = $2
+                      AND ar.status = 'pending'
+                      AND ar.approver_role = 'legal'
+                      AND ar.context_jsonb->>'kind' = 'triage'
+                 )
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM drop_raw_requests blocked
+                    WHERE r.intake_source = 'drop'
+                      AND r.raw_record_id = blocked.id
+                      AND blocked.response_status IS NOT NULL
+                 )
+               {hold_sql}
+             ORDER BY r.received_at ASC
+             LIMIT $3
+            ON CONFLICT (request_id, step, attempt_number) DO NOTHING
+            RETURNING request_id
+        )
+        SELECT (SELECT count(*)::int FROM inserted) AS n,
+               COALESCE(
+                 (SELECT array_agg(id) FROM (
+                    SELECT request_id::text AS id FROM inserted LIMIT 20
+                  ) sampled),
+                 ARRAY[]::text[]
+               ) AS request_ids
+        """
+
+
+_AUTH0_INSERT_SQL = f"""
+        WITH inserted AS (
+            INSERT INTO {AUTH0_ATTEMPTS_TABLE}
+                (request_id, step, attempt_number, status)
+            SELECT r.id, $1::varchar, 1, 'pending'
+              FROM requests r
+              INNER JOIN drop_raw_requests drr
+                ON r.intake_source = 'drop'
+               AND r.raw_record_id = drr.id
+               AND drr.list_type = $3::varchar
+             WHERE EXISTS (
+                   SELECT 1
+                     FROM {MATCHING_ATTEMPTS_TABLE} ma
+                    WHERE ma.request_id = r.id
+                 )
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM {AUTH0_ATTEMPTS_TABLE} aa
+                    WHERE aa.request_id = r.id
+                      AND aa.step = $1::varchar
+                      AND aa.status IN ('pending', 'success')
+                 )
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM approval_requests ar
+                    WHERE ar.request_id = r.id
+                      AND ar.action_type = $2::varchar
+                      AND ar.status = 'pending'
+                      AND ar.approver_role = 'legal'
+                      AND ar.context_jsonb->>'kind' = 'triage'
+                 )
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM drop_raw_requests blocked
+                    WHERE r.intake_source = 'drop'
+                      AND r.raw_record_id = blocked.id
+                      AND blocked.response_status IS NOT NULL
+                 )
+             ORDER BY r.received_at ASC
+             LIMIT $4::int
+            ON CONFLICT (request_id, step, attempt_number) DO NOTHING
+            RETURNING request_id
+        )
+        SELECT (SELECT count(*)::int FROM inserted) AS n,
+               COALESCE(
+                 (SELECT array_agg(id) FROM (
+                    SELECT request_id::text AS id FROM inserted LIMIT 20
+                  ) sampled),
+                 ARRAY[]::text[]
+               ) AS request_ids
+        """
+
+
+def _email_vertical_insert_sql(table: str) -> str:
+    """DROP Email set-based enqueue — same shape as Auth0, including ::varchar casts."""
+    return f"""
+        WITH inserted AS (
+            INSERT INTO {table}
+                (request_id, step, attempt_number, status)
+            SELECT r.id, $1::varchar, 1, 'pending'
+              FROM requests r
+              INNER JOIN drop_raw_requests drr
+                ON r.intake_source = 'drop'
+               AND r.raw_record_id = drr.id
+               AND drr.list_type = $3::varchar
+             WHERE EXISTS (
+                   SELECT 1
+                     FROM {MATCHING_ATTEMPTS_TABLE} ma
+                    WHERE ma.request_id = r.id
+                 )
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM {table} va
+                    WHERE va.request_id = r.id
+                      AND va.step = $1::varchar
+                      AND va.status IN ('pending', 'success')
+                 )
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM approval_requests ar
+                    WHERE ar.request_id = r.id
+                      AND ar.action_type = $2::varchar
+                      AND ar.status = 'pending'
+                      AND ar.approver_role = 'legal'
+                      AND ar.context_jsonb->>'kind' = 'triage'
+                 )
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM drop_raw_requests blocked
+                    WHERE r.intake_source = 'drop'
+                      AND r.raw_record_id = blocked.id
+                      AND blocked.response_status IS NOT NULL
+                 )
+             ORDER BY r.received_at ASC
+             LIMIT $4::int
+            ON CONFLICT (request_id, step, attempt_number) DO NOTHING
+            RETURNING request_id
+        )
+        SELECT (SELECT count(*)::int FROM inserted) AS n,
+               COALESCE(
+                 (SELECT array_agg(id) FROM (
+                    SELECT request_id::text AS id FROM inserted LIMIT 20
+                  ) sampled),
+                 ARRAY[]::text[]
+               ) AS request_ids
+        """
+
+
+_GOOGLE_SHEETS_INSERT_SQL = _email_vertical_insert_sql(GOOGLE_SHEETS_ATTEMPTS_TABLE)
 
 
 async def find_requests_needing_matching(
@@ -48,8 +320,12 @@ async def find_requests_needing_matching(
     rows = await conn.fetch(
         f"""
         SELECT r.id::text AS id,
-               UPPER(TRIM(r.requestor_state)) AS requestor_state
+               UPPER(TRIM(r.requestor_state)) AS requestor_state,
+               drr.list_type AS list_type
           FROM requests r
+          LEFT JOIN drop_raw_requests drr
+            ON r.intake_source = 'drop'
+           AND r.raw_record_id = drr.id
          WHERE NOT EXISTS (
                SELECT 1
                  FROM {MATCHING_ATTEMPTS_TABLE} ma
@@ -67,10 +343,10 @@ async def find_requests_needing_matching(
            -- Legal Triage bulk-reject (or any prior DROP status) must not re-enter matching.
            AND NOT EXISTS (
                SELECT 1
-                 FROM drop_raw_requests drr
+                 FROM drop_raw_requests blocked
                 WHERE r.intake_source = 'drop'
-                  AND r.raw_record_id = drr.id
-                  AND drr.response_status IS NOT NULL
+                  AND r.raw_record_id = blocked.id
+                  AND blocked.response_status IS NOT NULL
              )
          ORDER BY r.received_at ASC
          LIMIT $1
@@ -82,31 +358,136 @@ async def find_requests_needing_matching(
         DispatchCandidate(
             request_id=str(row["id"]),
             requestor_state=row["requestor_state"],
+            list_type=row["list_type"] if "list_type" in row else None,
         )
         for row in rows
     ]
 
 
-async def run_dispatch(
+async def find_requests_needing_auth0_matching(
     conn: DbConnection,
     *,
     limit: int = 100,
-) -> DispatchResult:
-    """Enqueue matching for clear requests; hold condition hits in Legal Triage."""
+) -> list[DispatchCandidate]:
+    """Return DROP Email requests with matching_attempts but no Auth0 matching row.
+
+    Covers the split where ``enqueue_matching`` committed and Auth0 enqueue
+    failed — those rows never reappear in ``find_requests_needing_matching``.
+    Phone/NDZ are excluded. Only pending/success Auth0 matching attempts
+    count as already enqueued.
+    """
+    rows = await conn.fetch(
+        f"""
+        SELECT r.id::text AS id,
+               UPPER(TRIM(r.requestor_state)) AS requestor_state,
+               drr.list_type AS list_type
+          FROM requests r
+          INNER JOIN drop_raw_requests drr
+            ON r.intake_source = 'drop'
+           AND r.raw_record_id = drr.id
+           AND drr.list_type = $3
+         WHERE EXISTS (
+               SELECT 1
+                 FROM {MATCHING_ATTEMPTS_TABLE} ma
+                WHERE ma.request_id = r.id
+             )
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM {AUTH0_ATTEMPTS_TABLE} aa
+                WHERE aa.request_id = r.id
+                  AND aa.step = $4
+                  AND aa.status IN ('pending', 'success')
+             )
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM approval_requests ar
+                WHERE ar.request_id = r.id
+                  AND ar.action_type = $2
+                  AND ar.status = 'pending'
+                  AND ar.approver_role = 'legal'
+                  AND ar.context_jsonb->>'kind' = 'triage'
+             )
+           -- Legal Triage bulk-reject (or any prior DROP status) must not re-enter matching.
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM drop_raw_requests blocked
+                WHERE r.intake_source = 'drop'
+                  AND r.raw_record_id = blocked.id
+                  AND blocked.response_status IS NOT NULL
+             )
+         ORDER BY r.received_at ASC
+         LIMIT $1
+        """,
+        limit,
+        WORKFLOW_ASSIGNMENT_ACTION,
+        DropListType.EMAIL.value,
+        MATCHING_STEP,
+    )
+    return [
+        DispatchCandidate(
+            request_id=str(row["id"]),
+            requestor_state=row["requestor_state"],
+            list_type=row["list_type"] if "list_type" in row else None,
+        )
+        for row in rows
+    ]
+
+
+async def enqueue_auth0_matching(conn: DbConnection, request_id: str) -> None:
+    """Enqueue pending Auth0 matching (step=matching, attempt 1) if none exists."""
+    if _core_enqueue_auth0 is not None:
+        await _core_enqueue_auth0(conn, request_id)  # type: ignore[arg-type]
+        return
+    await conn.execute(
+        f"""
+        INSERT INTO {AUTH0_ATTEMPTS_TABLE} (request_id, step, attempt_number, status)
+        VALUES ($1, $2, 1, 'pending')
+        ON CONFLICT (request_id, step, attempt_number) DO NOTHING
+        """,
+        UUID(request_id),
+        MATCHING_STEP,
+    )
+
+
+async def enqueue_mailchimp_matching(_conn: DbConnection, _request_id: str) -> None:
+    """No-op: Mailchimp is retired. Do not insert ``mailchimp_attempts`` rows."""
+    return
+
+
+async def enqueue_google_sheets_matching(conn: DbConnection, request_id: str) -> None:
+    """Enqueue pending Google Sheets matching (step=matching, attempt 1) if none exists."""
+    await conn.execute(
+        f"""
+        INSERT INTO {GOOGLE_SHEETS_ATTEMPTS_TABLE} (request_id, step, attempt_number, status)
+        VALUES ($1, $2, 1, 'pending')
+        ON CONFLICT (request_id, step, attempt_number) DO NOTHING
+        """,
+        UUID(request_id),
+        MATCHING_STEP,
+    )
+
+
+async def _hold_legal_triage_candidates(
+    conn: DbConnection,
+    *,
+    limit: int,
+    result: DispatchResult,
+    translatable: bool,
+    rule: dict[str, Any] | None,
+) -> int:
+    """Create Legal assignments for a small candidate set before set-based enqueue.
+
+    Pending Legal triage is already excluded by ``find_requests_needing_matching``
+    and the set-based INSERT — no per-row ``has_pending_legal_triage``. Hold is
+    evaluated from the already-fetched rule. When the predicate cannot be
+    expressed in SQL, enqueue only rows the rule would not hold (fail-closed).
+    """
+    enqueued_here = 0
     candidates = await find_requests_needing_matching(conn, limit=limit)
-    result = DispatchResult()
     for candidate in candidates:
         request_id = candidate.request_id
-        result.request_ids.append(request_id)
-
-        # Defense in depth if SQL exclusion races with another worker.
-        if await has_pending_legal_triage(conn, request_id):  # type: ignore[arg-type]
-            result.skipped_open_triage += 1
-            continue
-
         context = {"requestor_state": candidate.requestor_state}
-        route = await should_route_to_legal_triage(conn, context)  # type: ignore[arg-type]
-        if route is not None:
+        if _rule_holds_context(rule, context):
             await create_workflow_assignment(
                 conn,  # type: ignore[arg-type]
                 request_id=request_id,
@@ -117,6 +498,162 @@ async def run_dispatch(
             result.held_for_triage += 1
             continue
 
+        if translatable:
+            continue
+
         await enqueue_matching(conn, request_id)  # type: ignore[arg-type]
         result.enqueued += 1
+        enqueued_here += 1
+        _extend_request_ids(result, [request_id])
+        if candidate.list_type == DropListType.EMAIL.value:
+            await enqueue_auth0_matching(conn, request_id)
+            result.auth0_enqueued += 1
+            await enqueue_google_sheets_matching(conn, request_id)
+            result.google_sheets_enqueued += 1
+    return enqueued_here
+
+
+async def _insert_matching_attempts(
+    conn: DbConnection,
+    *,
+    limit: int,
+    legal: _LegalEnqueueFilter,
+) -> tuple[int, list[str]]:
+    row = await conn.fetchrow(
+        _matching_insert_sql(legal.sql),
+        MATCHING_STEP,
+        WORKFLOW_ASSIGNMENT_ACTION,
+        limit,
+        *legal.params,
+    )
+    return _insert_count(row)
+
+
+async def _insert_auth0_attempts(
+    conn: DbConnection,
+    *,
+    limit: int,
+) -> tuple[int, list[str]]:
+    row = await conn.fetchrow(
+        _AUTH0_INSERT_SQL,
+        MATCHING_STEP,
+        WORKFLOW_ASSIGNMENT_ACTION,
+        DropListType.EMAIL.value,
+        limit,
+    )
+    return _insert_count(row)
+
+
+async def _insert_email_vertical_attempts(
+    conn: DbConnection,
+    *,
+    sql: str,
+    limit: int,
+) -> tuple[int, list[str]]:
+    row = await conn.fetchrow(
+        sql,
+        MATCHING_STEP,
+        WORKFLOW_ASSIGNMENT_ACTION,
+        DropListType.EMAIL.value,
+        limit,
+    )
+    return _insert_count(row)
+
+
+async def run_dispatch(
+    conn: DbConnection,
+    *,
+    limit: int = _DEFAULT_BATCH,
+    drain_all: bool = False,
+) -> DispatchResult:
+    """Set-based enqueue until idle or 2_000_000. ``limit`` is batch size."""
+    batch = min(max(int(limit), 1), _MAX_ENQUEUE_PER_CALL)
+    if drain_all:
+        batch = min(max(batch, _DRAIN_ALL_MIN_BATCH), _MAX_ENQUEUE_PER_CALL)
+
+    rule = await fetch_active_rule(conn, INTAKE_ROUTE_TRIAGE_ACTION)  # type: ignore[arg-type]
+    legal = _legal_enqueue_filter(rule)
+    # One routing resolve per HTTP call. Confirm is CA; if CA is not held and
+    # the predicate is in SQL, skip the 200-row scan and use the hold filter.
+    ca_hold = await should_route_to_legal_triage(
+        conn,  # type: ignore[arg-type]
+        {"requestor_state": "CA"},
+    )
+    scan_legal_holds = (not legal.translatable) or (ca_hold is not None)
+    result = DispatchResult()
+
+    while True:
+        matching_room = _MAX_ENQUEUE_PER_CALL - result.enqueued
+        auth0_room = _MAX_ENQUEUE_PER_CALL - result.auth0_enqueued
+        sheets_room = _MAX_ENQUEUE_PER_CALL - result.google_sheets_enqueued
+        if matching_room <= 0 and auth0_room <= 0 and sheets_room <= 0:
+            break
+
+        enqueued_before = result.enqueued
+        auth0_before = result.auth0_enqueued
+        sheets_before = result.google_sheets_enqueued
+
+        if scan_legal_holds:
+            await _hold_legal_triage_candidates(
+                conn,
+                limit=min(_TRIAGE_SCAN_LIMIT, batch),
+                result=result,
+                translatable=legal.translatable,
+                rule=rule,
+            )
+
+        if matching_room > 0:
+            n_match, match_ids = await _insert_matching_attempts(
+                conn,
+                limit=min(batch, matching_room),
+                legal=legal,
+            )
+            result.enqueued += n_match
+            _extend_request_ids(result, match_ids)
+        else:
+            n_match = 0
+
+        if auth0_room > 0:
+            n_auth0, auth0_ids = await _insert_auth0_attempts(
+                conn,
+                limit=min(batch, auth0_room),
+            )
+            result.auth0_enqueued += n_auth0
+            _extend_request_ids(result, auth0_ids)
+        else:
+            n_auth0 = 0
+
+        if sheets_room > 0:
+            n_sheets, sheets_ids = await _insert_email_vertical_attempts(
+                conn,
+                sql=_GOOGLE_SHEETS_INSERT_SQL,
+                limit=min(batch, sheets_room),
+            )
+            result.google_sheets_enqueued += n_sheets
+            _extend_request_ids(result, sheets_ids)
+        else:
+            n_sheets = 0
+
+        if (
+            result.enqueued == enqueued_before
+            and result.auth0_enqueued == auth0_before
+            and result.google_sheets_enqueued == sheets_before
+            and n_match == 0
+            and n_auth0 == 0
+            and n_sheets == 0
+        ):
+            break
+
+    logger.info(
+        "dispatch_complete",
+        extra={
+            "event": "dispatch_complete",
+            "enqueued": result.enqueued,
+            "auth0_enqueued": result.auth0_enqueued,
+            "mailchimp_enqueued": result.mailchimp_enqueued,
+            "google_sheets_enqueued": result.google_sheets_enqueued,
+            "held_for_triage": result.held_for_triage,
+            "skipped_open_triage": result.skipped_open_triage,
+        },
+    )
     return result

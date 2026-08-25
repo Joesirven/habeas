@@ -153,11 +153,11 @@ describe('legalJourneyLabels', () => {
     expect(isWorkbenchStageKey('activity')).toBe(false)
   })
 
-  test('verticalLabel maps live + coming-soon catalog entries', () => {
+  test('verticalLabel maps catalog entries', () => {
     expect(verticalLabel('communications')).toBe('Communications')
     expect(verticalLabel('people_hr')).toBe('People/HR')
     expect(verticalLabel('data')).toBe('Data')
-    expect(verticalLabel('axios_headquarters')).toBe('Axios HQ')
+    expect(verticalLabel('axios_hq')).toBe('Axios HQ')
     expect(verticalLabel('lever')).toBe('Lever')
     expect(verticalLabel('paylocity')).toBe('Paylocity')
     expect(verticalLabel('auth0')).toBe('Auth0')

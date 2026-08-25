@@ -1394,7 +1394,7 @@ async def _build_vertical_rows(
                 live=False,
                 actionable=False,
                 matching_status="not_started",
-                blocker="Coming soon",
+                blocker="Catalog-only — matching is not live",
             )
         )
 

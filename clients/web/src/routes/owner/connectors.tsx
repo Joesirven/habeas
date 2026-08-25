@@ -17,10 +17,6 @@ import {
   listOwnerConnectors,
   listVerticalMembers,
   mintVerticalMemberInvite,
-  ownerSheetsOauthExtract,
-  ownerSheetsOauthFiles,
-  ownerSheetsOauthRedeem,
-  ownerSheetsOauthStart,
   saveOwnerConnectorCredentials,
   setOwnerConnectorCadence,
   setOwnerConnectorMode,
@@ -31,7 +27,6 @@ import {
   type OwnerConnectorSystem,
   type OwnerCredentialPreview,
   type OwnerRejectedUploadRow,
-  type OwnerSheetsOauthFile,
   type OwnerUploadResult,
   type UserRole,
 } from '@/lib/api'
@@ -151,7 +146,7 @@ function wizardableConnectors(connectors: readonly OwnerConnectorSystem[]) {
   )
 }
 
-function cadenceSystemsUseSheetsCards(connectors: readonly OwnerConnectorSystem[]) {
+export function cadenceSystemsUseSheetsCards(connectors: readonly OwnerConnectorSystem[]) {
   return systemsNeedingCadence(connectors).some((connector) =>
     isSheetsOwnerSystem(connector.system),
   )
@@ -168,14 +163,14 @@ type StoredOwnerSheetsOauthSession = {
   redeemed?: boolean
 }
 
-function ownerSheetsOauthRedirectUri() {
+export function ownerSheetsOauthRedirectUri() {
   if (typeof window === 'undefined') {
     return `http://127.0.0.1:5173${OWNER_SHEETS_OAUTH_REDIRECT_PATH}`
   }
   return `${window.location.origin}${OWNER_SHEETS_OAUTH_REDIRECT_PATH}`
 }
 
-function readOwnerSheetsOauthSession(): StoredOwnerSheetsOauthSession | null {
+export function readOwnerSheetsOauthSession(): StoredOwnerSheetsOauthSession | null {
   try {
     const raw = sessionStorage.getItem(OWNER_SHEETS_OAUTH_SESSION_KEY)
     if (!raw) return null
@@ -189,7 +184,7 @@ function readOwnerSheetsOauthSession(): StoredOwnerSheetsOauthSession | null {
   }
 }
 
-function writeOwnerSheetsOauthSession(session: StoredOwnerSheetsOauthSession | null) {
+export function writeOwnerSheetsOauthSession(session: StoredOwnerSheetsOauthSession | null) {
   if (session == null) {
     sessionStorage.removeItem(OWNER_SHEETS_OAUTH_SESSION_KEY)
     return
@@ -197,7 +192,7 @@ function writeOwnerSheetsOauthSession(session: StoredOwnerSheetsOauthSession | n
   sessionStorage.setItem(OWNER_SHEETS_OAUTH_SESSION_KEY, JSON.stringify(session))
 }
 
-function readSheetsOauthReturnParams(search?: OwnerConnectorsSearch) {
+export function readSheetsOauthReturnParams(search?: OwnerConnectorsSearch) {
   const fromSearch = {
     code: search?.code?.trim() || undefined,
     state: search?.state?.trim() || undefined,
@@ -225,7 +220,7 @@ function csvTextFromUploadResult(result: OwnerUploadResult): string | null {
   return null
 }
 
-function tabKey(tab: { title: string; sheet_id?: number | null }) {
+export function tabKey(tab: { title: string; sheet_id?: number | null }) {
   return tab.sheet_id != null ? `${tab.sheet_id}:${tab.title}` : tab.title
 }
 
@@ -449,7 +444,7 @@ function UploadHowToPanel({
   )
 }
 
-function SheetsHowToPanel({
+export function SheetsHowToPanel({
   verticalId,
   connector,
   onContinue,
@@ -507,7 +502,7 @@ type SheetsConnectDraft = {
   uploadOk: boolean
 }
 
-function emptySheetsConnectDraft(): SheetsConnectDraft {
+export function emptySheetsConnectDraft(): SheetsConnectDraft {
   return {
     method: null,
     oauthRedeemed: false,
@@ -524,7 +519,7 @@ function emptySheetsConnectDraft(): SheetsConnectDraft {
   }
 }
 
-function MappingAndRejectedBlock({
+export function MappingAndRejectedBlock({
   csvHeaders,
   columnMapping,
   onColumnMappingChange,
@@ -691,10 +686,10 @@ function MappingAndRejectedBlock({
   )
 }
 
-function applyConnectResultToDraft(
+export function applyConnectResultToDraft(
   current: SheetsConnectDraft,
   result: OwnerUploadResult,
-  sourceFile?: File | null,
+  _sourceFile?: File | null,
 ): SheetsConnectDraft {
   if (result.ok) {
     return {
@@ -728,9 +723,6 @@ function applyConnectResultToDraft(
   }
   return { ...current, uploadOk: false }
 }
-
-void applyConnectResultToDraft
-void sourceFilePlaceholder
 
 function LiveHowToPanel({
   verticalId,
@@ -2515,6 +2507,9 @@ function OwnerConnectorsBody({ verticalFilter }: { verticalFilter?: string }) {
 
 export type OwnerConnectorsSearch = {
   vertical?: string
+  code?: string
+  state?: string
+  error?: string
 }
 
 export function OwnerConnectorsPage({ search }: { search?: OwnerConnectorsSearch }) {

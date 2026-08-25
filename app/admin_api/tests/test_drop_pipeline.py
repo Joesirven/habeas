@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -296,6 +298,71 @@ def test_land_proxy_forwards_attempt_id(monkeypatch: pytest.MonkeyPatch):
     assert response.status_code == 200
     assert captured["url"].endswith("/ingest/land")
     assert captured["json"] == {"land_attempt_id": 17}
+
+
+def test_land_and_promote_proxy_use_long_timeout(monkeypatch: pytest.MonkeyPatch):
+    """1.8M-row land/promote/dispatch exceed DEFAULT_PROXY_TIMEOUT (60s); must use ≥3300s."""
+    captured: dict[str, Any] = {"calls": []}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, Any]:
+            return {"status": "ok"}
+
+    class FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._timeout = kwargs.get("timeout")
+            captured["timeout"] = self._timeout
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url: str, json: Any = None, headers: Any = None) -> FakeResponse:
+            captured["calls"].append((url, self._timeout))
+            captured.setdefault("urls", []).append(url)
+            return FakeResponse()
+
+    from admin_api import main as admin_main
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(drop_pipeline, "auth_headers_for", lambda _url: {})
+    monkeypatch.setattr(
+        drop_pipeline, "stamp_volatile_sheets_after_intake", AsyncMock()
+    )
+    # Avoid lifespan create_pool when DATABASE_URL points at an unreachable host.
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
+
+    with TestClient(app) as client:
+        land = client.post("/ops/drop/land", json={"land_attempt_id": 17})
+        land_timeout = captured["timeout"]
+        promote = client.post("/ops/drop/promote")
+        promote_timeout = captured["timeout"]
+        dispatch = client.post("/ops/drop/dispatch")
+
+    dispatch_timeout = next(
+        timeout
+        for url, timeout in captured["calls"]
+        if str(url).endswith("/dispatch")
+    )
+    assert land.status_code == 200
+    assert promote.status_code == 200
+    assert dispatch.status_code == 200
+    assert land_timeout == drop_pipeline.LAND_PROXY_TIMEOUT
+    assert promote_timeout == drop_pipeline.PROMOTE_PROXY_TIMEOUT
+    assert dispatch_timeout == drop_pipeline.DISPATCH_PROXY_TIMEOUT
+    assert land_timeout >= 3300
+    assert promote_timeout >= 3300
+    assert dispatch_timeout >= 3300
+    assert land_timeout > drop_pipeline.DEFAULT_PROXY_TIMEOUT
+    assert promote_timeout > drop_pipeline.DEFAULT_PROXY_TIMEOUT
+    assert dispatch_timeout > drop_pipeline.DEFAULT_PROXY_TIMEOUT
+    assert drop_pipeline.DOWNLOAD_PROXY_TIMEOUT == 120.0
+    assert drop_pipeline.MATCHING_DRAIN_PROXY_TIMEOUT == 3300.0
+    assert drop_pipeline.DISPATCH_PROXY_TIMEOUT == 3300.0
 
 
 def test_fulfill_proxy_forwards_request_id(monkeypatch: pytest.MonkeyPatch):
@@ -1268,6 +1335,208 @@ def _fake_pool(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
     monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+
+
+_MDR_SEARCH_PATH = "/ops/drop/matching-contacts/search"
+_MDR_SEARCH_Q = "secretneedle42"
+_MDR_SEARCH_EMAIL = "mdr.search.probe@example.test"
+_LOG_RECORD_BUILTIN_KEYS = frozenset(
+    {
+        "name",
+        "msg",
+        "args",
+        "levelname",
+        "levelno",
+        "pathname",
+        "filename",
+        "module",
+        "exc_info",
+        "exc_text",
+        "stack_info",
+        "lineno",
+        "funcName",
+        "created",
+        "msecs",
+        "relativeCreated",
+        "thread",
+        "threadName",
+        "processName",
+        "process",
+        "message",
+        "asctime",
+        "taskName",
+    }
+)
+
+
+def _mdr_search_bq_row() -> _Row:
+    """Raw MDR person/phones columns — same mapping as `_fetch_person_contacts_from_bq`."""
+    return _Row(
+        dwid="9001",
+        state="CA",
+        firstname="Jane",
+        lastname="Doe",
+        birthdate="1990-01-15",
+        emailaddress=_MDR_SEARCH_EMAIL,
+        likely_cell_phone="5551234567",
+        likely_land_phone=None,
+    )
+
+
+def _patch_mdr_search_bq(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    rows: list[Any] | None = None,
+    error: Exception | None = None,
+) -> dict[str, Any]:
+    """Intercept BigQuery Client.query used by matching-contacts search."""
+    captured: dict[str, Any] = {}
+
+    class FakeClient:
+        def query(self, sql: str, job_config: Any = None) -> list[Any]:
+            captured["sql"] = sql
+            captured["job_config"] = job_config
+            if error is not None:
+                raise error
+            return list(rows if rows is not None else [_mdr_search_bq_row()])
+
+    def _client_factory(*_args: Any, **_kwargs: Any) -> FakeClient:
+        return FakeClient()
+
+    import google.cloud.bigquery as bq_mod
+
+    monkeypatch.setattr(bq_mod, "Client", _client_factory)
+    if hasattr(drop_pipeline, "bigquery"):
+        monkeypatch.setattr(drop_pipeline.bigquery, "Client", _client_factory)
+    return captured
+
+
+def _assert_no_search_pii_in_pipeline_logs(caplog: pytest.LogCaptureFixture) -> None:
+    secrets = (_MDR_SEARCH_Q, _MDR_SEARCH_EMAIL, "Jane", "Doe", "9001", "5551234567")
+    for record in caplog.records:
+        if record.name != "admin_api.drop_pipeline":
+            continue
+        message = record.getMessage()
+        extra = {
+            key: value
+            for key, value in record.__dict__.items()
+            if key not in _LOG_RECORD_BUILTIN_KEYS
+        }
+        blob = f"{message} {json.dumps(extra, default=str)}"
+        for secret in secrets:
+            assert secret not in blob
+            assert secret not in message
+
+
+def test_matching_contacts_search_rejects_empty_q(monkeypatch: pytest.MonkeyPatch):
+    _fake_pool(monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get(f"{_MDR_SEARCH_PATH}?q=&state=CA")
+
+    assert response.status_code == 422
+
+
+def test_matching_contacts_search_rejects_one_char_q(monkeypatch: pytest.MonkeyPatch):
+    _fake_pool(monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get(f"{_MDR_SEARCH_PATH}?q=j&state=CA")
+
+    assert response.status_code == 422
+
+
+def test_matching_contacts_search_rejects_missing_state(monkeypatch: pytest.MonkeyPatch):
+    _fake_pool(monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get(f"{_MDR_SEARCH_PATH}?q={_MDR_SEARCH_Q}")
+
+    assert response.status_code == 422
+
+
+def test_matching_contacts_search_rejects_invalid_state(monkeypatch: pytest.MonkeyPatch):
+    _fake_pool(monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get(f"{_MDR_SEARCH_PATH}?q={_MDR_SEARCH_Q}&state=XX")
+
+    assert response.status_code == 422
+
+
+def test_matching_contacts_search_maps_bq_rows_to_contacts(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _fake_pool(monkeypatch)
+    captured = _patch_mdr_search_bq(monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"{_MDR_SEARCH_PATH}?q={_MDR_SEARCH_Q}&state=ca&limit=5"
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "consumer_id" not in body
+    contacts = body["contacts"]
+    assert len(contacts) == 1
+    contact = contacts[0]
+    assert "consumer_id" not in contact
+    assert set(contact) >= {
+        "dwid",
+        "state",
+        "first_initial",
+        "last_initial",
+        "dob",
+        "email",
+        "phones",
+    }
+    assert contact["dwid"] == "9001"
+    assert contact["state"] == "CA"
+    assert contact["first_initial"] == "J"
+    assert contact["last_initial"] == "D"
+    assert contact["dob"] == "1990-01-15"
+    assert contact["email"] == _MDR_SEARCH_EMAIL
+    assert contact["phones"] == [{"type": "cell", "number": "5551234567"}]
+    sql = captured.get("sql") or ""
+    assert _MDR_SEARCH_Q not in sql
+    assert _MDR_SEARCH_EMAIL not in sql
+
+
+def test_matching_contacts_search_returns_503_when_bq_raises(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _fake_pool(monkeypatch)
+    _patch_mdr_search_bq(
+        monkeypatch,
+        error=RuntimeError(f"bq unavailable email={_MDR_SEARCH_EMAIL}"),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(f"{_MDR_SEARCH_PATH}?q={_MDR_SEARCH_Q}&state=CA")
+
+    assert response.status_code == 503
+    detail = json.dumps(response.json(), default=str)
+    assert _MDR_SEARCH_EMAIL not in detail
+    assert _MDR_SEARCH_Q not in detail
+
+
+def test_matching_contacts_search_does_not_log_query_or_email(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    _fake_pool(monkeypatch)
+    _patch_mdr_search_bq(monkeypatch)
+
+    with caplog.at_level(logging.DEBUG, logger="admin_api.drop_pipeline"):
+        with TestClient(app) as client:
+            response = client.get(
+                f"{_MDR_SEARCH_PATH}?q={_MDR_SEARCH_Q}&state=CA&limit=5"
+            )
+
+    assert response.status_code == 200
+    assert response.json()["contacts"][0]["email"] == _MDR_SEARCH_EMAIL
+    _assert_no_search_pii_in_pipeline_logs(caplog)
 
 
 def test_matching_results_bulk_approve_route(monkeypatch: pytest.MonkeyPatch):
@@ -2526,3 +2795,183 @@ def test_ops_health_and_workers_require_super_admin(
             json={"table_name": "matching_attempts", "max_attempts": 6},
         )
         assert patch_ok.status_code == 200
+
+
+def _reset_worker_health_cache() -> None:
+    drop_pipeline._worker_health_cache = None
+
+
+def _patch_worker_health_clock(
+    monkeypatch: pytest.MonkeyPatch, *, now: float = 1_800_000_000.0
+) -> dict[str, float]:
+    clock = {"now": now}
+    monkeypatch.setattr(drop_pipeline, "monotonic", lambda: clock["now"])
+    return clock
+
+
+class _HealthResponse:
+    def __init__(self, status_code: int, payload: Any = None, text: str = "") -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text
+
+    def json(self) -> Any:
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
+
+
+def _patch_readyz_httpx(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Any,
+) -> list[str]:
+    seen: list[str] = []
+
+    class FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def get(self, url: str, headers: Any = None) -> _HealthResponse:
+            seen.append(url)
+            return handler(url)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(drop_pipeline, "auth_headers_for", lambda _url: {})
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_admin_web_401_is_not_pipeline_blocking_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """admin-web IAP 401 is skipped or treated as a front door — not workers_down."""
+    from admin_api import worker_fleet
+
+    _reset_worker_health_cache()
+    _patch_worker_health_clock(monkeypatch)
+    monkeypatch.setattr(
+        worker_fleet,
+        "discovered_worker_probe_targets",
+        lambda: [
+            ("admin_web", "https://admin-web-prod.example.run.app"),
+            ("matching", "http://127.0.0.1:8084"),
+        ],
+    )
+    iap_html = "<!DOCTYPE html><html><body>" + ("iap-login" * 4000) + "</body></html>"
+
+    def handler(url: str) -> _HealthResponse:
+        if "admin-web" in url:
+            return _HealthResponse(401, payload=None, text=iap_html)
+        return _HealthResponse(200, payload={"status": "ok", "service": "matching"})
+
+    _patch_readyz_httpx(monkeypatch, handler)
+
+    probed = await drop_pipeline._probe_worker_health(
+        "admin_web", "https://admin-web-prod.example.run.app"
+    )
+    assert probed["ok"] is True
+    assert probed["status_code"] == 401
+
+    health = await drop_pipeline.collect_worker_health()
+    admin = health.get("admin_web")
+    assert admin is None or admin.get("ok") is True
+    assert health["matching"]["ok"] is True
+    workers_down = sum(1 for probe in health.values() if not probe.get("ok"))
+    assert workers_down == 0
+
+    async def fake_counts(conn: Any) -> dict[str, Any]:
+        return {"connector_attempts": []}
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "collect_pipeline_counts", fake_counts)
+    status = await drop_pipeline.get_pipeline_status()
+    public_admin = status["worker_health"].get("admin_web")
+    assert public_admin is None or public_admin.get("ok") is True
+    assert status["worker_health"]["matching"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_collect_worker_health_uses_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Second collect_worker_health / get_pipeline_status must not re-probe."""
+    from admin_api import worker_fleet
+
+    _reset_worker_health_cache()
+    clock = _patch_worker_health_clock(monkeypatch, now=1_000.0)
+    monkeypatch.setattr(
+        worker_fleet,
+        "discovered_worker_probe_targets",
+        lambda: [("matching", "http://127.0.0.1:8084")],
+    )
+
+    def handler(url: str) -> _HealthResponse:
+        return _HealthResponse(200, payload={"status": "ok", "service": "matching"})
+
+    seen = _patch_readyz_httpx(monkeypatch, handler)
+
+    first = await drop_pipeline.collect_worker_health()
+    assert first["matching"]["ok"] is True
+    assert len(seen) == 1
+
+    clock["now"] += 1.0
+    second = await drop_pipeline.collect_worker_health()
+    assert second == first
+    assert len(seen) == 1
+
+    async def fake_counts(conn: Any) -> dict[str, Any]:
+        return {"connector_attempts": []}
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "collect_pipeline_counts", fake_counts)
+    status = await drop_pipeline.get_pipeline_status()
+    assert status["worker_health"]["matching"]["ok"] is True
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_pipeline_worker_health_omits_huge_html_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Undeployed 404 HTML must not appear in pipeline worker_health."""
+    from admin_api import worker_fleet
+
+    _reset_worker_health_cache()
+    _patch_worker_health_clock(monkeypatch, now=2_000.0)
+    monkeypatch.setattr(
+        worker_fleet,
+        "discovered_worker_probe_targets",
+        lambda: [("data_fulfillment", "http://127.0.0.1:8085")],
+    )
+    huge_html = "<!DOCTYPE html><html><head><title>Error 404</title></head><body>" + (
+        "That’s an error. " * 2000
+    ) + "</body></html>"
+    assert len(huge_html) > 10_000
+
+    def handler(url: str) -> _HealthResponse:
+        return _HealthResponse(404, payload=None, text=huge_html)
+
+    _patch_readyz_httpx(monkeypatch, handler)
+
+    async def fake_counts(conn: Any) -> dict[str, Any]:
+        return {"connector_attempts": []}
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "collect_pipeline_counts", fake_counts)
+    status = await drop_pipeline.get_pipeline_status()
+    probe = status["worker_health"]["data_fulfillment"]
+    blob = json.dumps(probe)
+    assert huge_html not in blob
+    assert "<!DOCTYPE html>" not in blob
+    assert "That’s an error." not in blob
+    assert "raw" not in probe
+    assert "body" not in probe
+    assert len(blob) < 1_000
+    internal = await drop_pipeline.collect_worker_health()
+    internal_blob = json.dumps(internal["data_fulfillment"].get("body"))
+    assert huge_html not in internal_blob
+    assert len(internal_blob) < 200

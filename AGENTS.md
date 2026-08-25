@@ -76,6 +76,16 @@ If pre-merge → read [`.agent/modules/review-personas.md`](.agent/modules/revie
 
 ---
 
+## Prod scaffolding (2026-08-25)
+
+On `example-gcp-project`: Cloud SQL `dpra-prod`, Secret Manager `database-url-prod`, and Cloud Run `admin-api-prod`, `drop-ingestor-prod`, `request-dispatcher-prod`, and `matching-prod` are live. `drop-connector-prod` and Confirm (first DROP pull) are **not** ready. Cassandra stays off. No production writes without Jose.
+
+Integration branch is `master`; owner / Sheets cadence UI from the other worktree is on `origin/master` as of 2026-08-25 (`d2d9525` and later). This agent branch may still carry Auth0/prod scaffolding WIP.
+
+Runbook: [`infra/README.md`](infra/README.md) § Prod Cloud SQL + first DROP pull. Worker attach: [`app/AGENTS.md`](app/AGENTS.md).
+
+---
+
 ## Do not
 
 - Run raw SQL or `psql` in agent sessions — use Habeas CLI wrappers.

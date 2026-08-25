@@ -6,8 +6,10 @@ import type {
   DropResponseStatusCode,
   MatchedPersonContact,
   MatchingResultDetail,
+  MatchingResultRow,
   NeedsAttentionItem,
 } from '@/lib/api'
+import type { MatchingConnectorGate } from '@/lib/connection-display'
 import { catalogSystemDisplayLabel } from '@/lib/legalJourneyLabels'
 import { isRequestUuid } from '@/lib/utils'
 
@@ -92,6 +94,41 @@ export function matchingLabRequestId(value: string): string | null {
   return isRequestUuid(requestId) ? requestId : null
 }
 
+/** Pending-like review → matching.review; approved → matching.approved; else matching. */
+function matchingStageFromReviewStatus(reviewStatus: string): string {
+  const status = reviewStatus.trim().toLowerCase()
+  if (status === 'matching.review' || status === 'matching.approved' || status === 'matching') {
+    return status
+  }
+  if (status.includes('pending')) return 'matching.review'
+  if (status === 'approved' || status === 'review_approved' || status.startsWith('approved')) {
+    return 'matching.approved'
+  }
+  return 'matching'
+}
+
+/** Landed DROP Data matching_results row → inbox queue item. */
+export function matchingResultRowToInboxItem(row: MatchingResultRow): NeedsAttentionItem {
+  return {
+    request_id: row.request_id,
+    reason: 'matching_result',
+    kind: 'matching',
+    current_stage: matchingStageFromReviewStatus(row.review_status),
+    intake_source: 'drop',
+    received_at: row.recorded_at,
+    requested_at: row.recorded_at,
+    approval_id: row.approval_id,
+    matched: row.matched,
+    match_count: row.match_count,
+    match_type: row.match_type,
+    recommended_response_status: row.recommended_response_status,
+    matched_via: row.matched_via,
+    requestor_state: row.requestor_state ?? null,
+    review_status: row.review_status,
+    vertical: 'data',
+  }
+}
+
 export function dwidsForStatus(
   statusId: string | null,
   _contacts: MatchedPersonContact[],
@@ -160,11 +197,27 @@ export function matchingLabSystemKind(
   return 'other'
 }
 
+const CATALOG_ONLY_VERTICAL_IDS = new Set([
+  'axios_hq',
+  'lever',
+  'paylocity',
+  'cassandra',
+])
+
+/**
+ * Directory search source — vertical first.
+ * data → MDR; auth0 → Auth0; catalog-only (axios_hq / lever / paylocity / cassandra) → none.
+ * Cassandra system id is not MDR unless vertical is data.
+ */
 export function matchingLabPeopleSource(
   system: string | null | undefined,
+  vertical?: string | null,
 ): MatchingLabPeopleSource | null {
+  const verticalId = matchingLabNormalizeSystemId(vertical)
+  if (verticalId === 'data') return 'mdr'
+  if (verticalId === 'auth0') return 'auth0'
+  if (verticalId && CATALOG_ONLY_VERTICAL_IDS.has(verticalId)) return null
   const kind = matchingLabSystemKind(system)
-  if (kind === 'a') return 'mdr'
   if (kind === 'b') return 'auth0'
   return null
 }
@@ -186,7 +239,7 @@ export function matchingLabSystemDisplay(
 ): MatchingLabSystemDisplay {
   const systemId = matchingLabResolveSystemId(item, detail)
   const kind = matchingLabSystemKind(systemId)
-  const source = matchingLabPeopleSource(systemId)
+  const source = matchingLabPeopleSource(systemId, detail?.vertical ?? item?.vertical)
   const sourceLabel = source ? MATCHING_LAB_PEOPLE_SOURCE_LABEL[source] : null
   if (kind === 'a' || kind === 'b') {
     return {
@@ -283,7 +336,7 @@ export function filterMatchedPeople(
   return contacts.filter((contact) => matchedPersonSearchHaystack(contact).includes(needle))
 }
 
-/** Directory search for additional people (MDR on System A, Auth0 on System B). */
+/** Directory search for additional people (MDR on data, Auth0 on auth0). */
 export type SearchPeopleFn = (
   query: string,
 ) => MatchedPersonContact[] | Promise<MatchedPersonContact[]>
@@ -308,6 +361,10 @@ export type MatchingResultsViewProps = {
   onUseBatchDefaultChange: (useDefault: boolean) => void
   selectedCount: number
   onApplySelection: () => void
-  /** Search additional people. MDR for System A, Auth0 for System B. */
+  /** Search additional people. MDR for data, Auth0 for auth0. */
   onSearchPeople?: SearchPeopleFn
+  /** Matching refresh-cadence gate — disable search; never show Connected. */
+  peopleSearchBlocked?: MatchingConnectorGate | null
+  /** Catalog-only / not-live vertical — disable search with setup copy. */
+  peopleSearchPending?: { title: string; support: string } | null
 }

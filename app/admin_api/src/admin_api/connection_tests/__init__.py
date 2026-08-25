@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from admin_api.connection_tests import auth0, google_sheets, lever, mailchimp, paylocity
+from admin_api.connection_tests import auth0, google_sheets, lever, paylocity
 
 __all__ = [
     "auth0",
     "google_sheets",
     "lever",
-    "mailchimp",
     "paylocity",
 ]

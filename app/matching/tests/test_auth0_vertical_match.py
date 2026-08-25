@@ -175,7 +175,7 @@ def test_audit_payload_allowlists_auth0_keys_only():
 
 
 @pytest.mark.asyncio
-async def test_process_next_auth0_error_still_completes_drop(
+async def test_process_next_completes_drop_without_auth0(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from matching import main as worker
@@ -223,14 +223,6 @@ async def test_process_next_auth0_error_still_completes_drop(
         ),
         patch("matching.main.get_pipeline", return_value=pipeline),
         patch(
-            "matching.main.run_auth0_vertical_match",
-            new_callable=AsyncMock,
-            return_value={
-                "auth0_bq_dataset": "external_hash_index",
-                "auth0_error_code": "auth0_lookup_error",
-            },
-        ) as auth0,
-        patch(
             "matching.main.complete_attempt_success",
             new_callable=AsyncMock,
             return_value=42,
@@ -241,16 +233,18 @@ async def test_process_next_auth0_error_still_completes_drop(
 
     assert out["status"] == "ok"
     assert out["result_id"] == 42
-    auth0.assert_awaited_once()
+    assert not hasattr(worker, "run_auth0_vertical_match")
     complete.assert_awaited_once()
     err.assert_not_awaited()
     audit = complete.await_args.kwargs["audit_payload"]
-    assert audit["auth0_error_code"] == "auth0_lookup_error"
+    assert "auth0_error_code" not in audit
+    assert "auth0_match_count" not in audit
     assert audit["match_count"] == 1
 
 
 @pytest.mark.asyncio
-async def test_chunk_drain_auth0_error_still_completes_drop():
+async def test_chunk_drain_completes_drop_without_auth0():
+    from matching import chunk_drain as drain
     from matching.bq_lookup import LookupHit
     from matching.chunk_drain import process_matching_chunk
 
@@ -278,7 +272,6 @@ async def test_chunk_drain_auth0_error_still_completes_drop():
             new_callable=AsyncMock,
             return_value=claimed,
         ),
-        patch("matching.chunk_drain.extend_lease", new_callable=AsyncMock),
         patch(
             "matching.chunk_drain.load_request_row",
             new_callable=AsyncMock,
@@ -294,38 +287,33 @@ async def test_chunk_drain_auth0_error_still_completes_drop():
             return_value={_EMAIL_HASH: [LookupHit(dwid="dwid-1")]},
         ),
         patch(
-            "matching.chunk_drain.run_auth0_vertical_match",
+            "matching.chunk_drain._bulk_complete_successes",
             new_callable=AsyncMock,
-            return_value={
-                "auth0_bq_dataset": "external_hash_index",
-                "auth0_error_code": "auth0_invalid_hash",
-            },
-        ) as auth0,
+            return_value=1,
+        ) as bulk,
         patch(
-            "matching.chunk_drain.complete_attempt_success",
+            "matching.chunk_drain._bulk_complete_errors",
             new_callable=AsyncMock,
-        ) as complete,
-        patch(
-            "matching.chunk_drain.complete_attempt_error",
-            new_callable=AsyncMock,
+            return_value=0,
         ) as err,
     ):
         out = await process_matching_chunk(conn, worker_id="matching-drain-test")
 
     assert out["status"] == "ok"
     assert out["completed"] == 1
-    auth0.assert_awaited_once()
-    assert auth0.await_args.kwargs["email_hash"] == _EMAIL_HASH
-    assert auth0.await_args.kwargs["list_type"] == DropListType.EMAIL
-    complete.assert_awaited_once()
+    assert not hasattr(drain, "run_auth0_vertical_match")
+    assert not hasattr(drain, "extend_lease")
+    bulk.assert_awaited_once()
     err.assert_not_awaited()
-    audit = complete.await_args.kwargs["audit_payload"]
-    assert audit["auth0_error_code"] == "auth0_invalid_hash"
-    assert audit["match_count"] == 1
+    items = bulk.await_args.kwargs["items"]
+    assert len(items) == 1
+    assert items[0]["match_count"] == 1
+    assert items[0]["matched"] is True
+    assert "auth0" not in items[0]
 
 
 @pytest.mark.asyncio
-async def test_chunk_drain_skips_auth0_persist_when_pipeline_raises():
+async def test_chunk_drain_does_not_run_auth0_pipeline():
     from matching.bq_lookup import LookupHit
     from matching.chunk_drain import process_matching_chunk
 
@@ -356,7 +344,6 @@ async def test_chunk_drain_skips_auth0_persist_when_pipeline_raises():
             new_callable=AsyncMock,
             return_value=claimed,
         ),
-        patch("matching.chunk_drain.extend_lease", new_callable=AsyncMock),
         patch(
             "matching.chunk_drain.load_request_row",
             new_callable=AsyncMock,
@@ -380,19 +367,19 @@ async def test_chunk_drain_skips_auth0_persist_when_pipeline_raises():
             persist,
         ),
         patch(
-            "matching.chunk_drain.complete_attempt_success",
+            "matching.chunk_drain._bulk_complete_successes",
             new_callable=AsyncMock,
-        ) as complete,
+            return_value=1,
+        ) as bulk,
     ):
         out = await process_matching_chunk(conn, worker_id="matching-drain-test")
 
     assert out["status"] == "ok"
     assert out["completed"] == 1
     persist.assert_not_awaited()
-    complete.assert_awaited_once()
-    assert complete.await_args.kwargs["audit_payload"]["auth0_error_code"] == (
-        "auth0_lookup_error"
-    )
+    pipe.match_from_email_hash.assert_not_called()
+    bulk.assert_awaited_once()
+    assert "auth0_error_code" not in bulk.await_args.kwargs["items"][0]
 
 
 @pytest.mark.asyncio

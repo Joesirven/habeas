@@ -32,7 +32,6 @@ members = [
     "app/hash_index_refresh",
     "app/sla_monitor",
     # suppression (tier C — scaffold)
-    "app/mailchimp",
     "app/paylocity",
     "app/lever",
     "app/auth0",
@@ -55,7 +54,6 @@ root_packages = [
     "drop_ingestor",
     "drop_notice_dispatcher",
     "hash_index_refresh",
-    "mailchimp",
     "paylocity",
     "lever",
     "auth0",
@@ -79,7 +77,6 @@ source_modules = [
     "drop_ingestor",
     "drop_notice_dispatcher",
     "hash_index_refresh",
-    "mailchimp",
     "paylocity",
     "lever",
     "auth0",

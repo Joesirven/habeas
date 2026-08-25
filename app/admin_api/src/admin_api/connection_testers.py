@@ -12,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from admin_api.connection_tests import auth0, google_sheets, lever, mailchimp, paylocity, upload_csv
+from admin_api.connection_tests import auth0, google_sheets, lever, paylocity, upload_csv
 from habeas_privacy_core.connections.models import sanitize_test_detail
 from habeas_privacy_core.connections.systems import get_system, validate_credentials
 
@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 _SystemTester = Callable[..., Awaitable[tuple]]
 
 _SYSTEM_TESTERS: dict[str, _SystemTester] = {
-    "mailchimp": mailchimp.test_mailchimp,
     "paylocity": paylocity.test_paylocity,
     "lever": lever.test_lever,
     "auth0": auth0.test_auth0,

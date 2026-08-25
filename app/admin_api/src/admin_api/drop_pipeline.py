@@ -7,9 +7,52 @@ import json
 import logging
 import os
 from datetime import date, datetime, time, timedelta, timezone
+from time import monotonic
 from typing import Annotated, Any
 
 import httpx
+from habeas_privacy_core.audit.redaction import redact_error_text
+from habeas_privacy_core.auth import (
+    ROLE_ADMIN,
+    ROLE_DATA_OWNER,
+    ROLE_DATA_USER,
+    ROLE_LEGAL,
+    ROLE_SUPER_ADMIN,
+    UNKNOWN_ACTOR,
+    is_authenticated_actor,
+    resolve_actor,
+)
+from habeas_privacy_core.auth.roles import (
+    parse_email_allowlist,
+    resolve_role_from_allowlists,
+)
+from habeas_privacy_core.config import CoreSettings
+from habeas_privacy_core.db.pool import get_pool
+from habeas_privacy_core.db.request_resolver import request_resolver
+from habeas_privacy_core.db.vertical_matching import (
+    AUTH0_VERTICAL,
+    fetch_confirmed_vendor_record_ids,
+    fetch_vertical_matching_snapshot,
+)
+from habeas_privacy_core.fleet import (
+    CONTROL_PLANE_SERVICE_EXCLUDES,
+    is_excluded_service_slug,
+)
+from habeas_privacy_core.geo.state import InvalidStateAcronymError, normalize_state_acronym
+from habeas_privacy_core.models.intake import DropListType
+from habeas_privacy_core.models.request import IntakeSource
+from habeas_privacy_core.workflow.approval import (
+    MATCHING_REVIEW_ACTION,
+    assert_matching_promote_allowed_for_role,
+    ensure_pending_matching_review,
+    escalate_to_legal_with_fanout,
+    fetch_active_legal_team_emails,
+    fetch_intake_route_triage_rule,
+    has_assignment_to_legal,
+    is_legal_persona_for_promote_gate,
+    is_matching_review_approved,
+    version_intake_route_triage_rule,
+)
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -36,47 +79,10 @@ from admin_api.approvals import (
     send_legal_triage_to_matching,
 )
 from admin_api.cloud_run_auth import auth_headers_for
-from admin_api.roles import RolePrincipal, require_roles, settings as role_settings
-from admin_api.vertical_dispositions import normalize_dwids
-from habeas_privacy_core.auth import (
-    ROLE_ADMIN,
-    ROLE_DATA_OWNER,
-    ROLE_DATA_USER,
-    ROLE_LEGAL,
-    ROLE_SUPER_ADMIN,
-    UNKNOWN_ACTOR,
-    is_authenticated_actor,
-    resolve_actor,
-)
-from habeas_privacy_core.audit.redaction import redact_error_text
-from habeas_privacy_core.config import CoreSettings
-from habeas_privacy_core.db.pool import get_pool
+from admin_api.roles import RolePrincipal, require_roles
+from admin_api.roles import settings as role_settings
 from admin_api.sheets_intake_refresh import stamp_volatile_sheets_after_intake
-from habeas_privacy_core.db.request_resolver import request_resolver
-from habeas_privacy_core.db.vertical_matching import (
-    AUTH0_VERTICAL,
-    fetch_confirmed_vendor_record_ids,
-    fetch_vertical_matching_snapshot,
-)
-from habeas_privacy_core.geo.state import InvalidStateAcronymError, normalize_state_acronym
-from habeas_privacy_core.models.intake import DropListType
-from habeas_privacy_core.models.request import IntakeSource
-from habeas_privacy_core.auth.roles import (
-    parse_email_allowlist,
-    resolve_role_from_allowlists,
-)
-from habeas_privacy_core.workflow.approval import (
-    MATCHING_REVIEW_ACTION,
-    assert_matching_promote_allowed_for_role,
-    ensure_pending_matching_review,
-    escalate_to_legal_with_fanout,
-    fetch_active_legal_team_emails,
-    fetch_intake_route_triage_rule,
-    has_assignment_to_legal,
-    is_legal_persona_for_promote_gate,
-    is_matching_review_approved,
-    version_intake_route_triage_rule,
-)
+from admin_api.vertical_dispositions import normalize_dwids
 
 logger = logging.getLogger(__name__)
 
@@ -181,10 +187,16 @@ def next_scheduled_retrieval_utc(
 
 DEFAULT_PROXY_TIMEOUT = 60.0
 DOWNLOAD_PROXY_TIMEOUT = 120.0
+# Land/promote of a large DROP ZIP can run nearly an hour; keep under worker Cloud Run timeout.
+INGEST_PROXY_TIMEOUT = 3300.0
+LAND_PROXY_TIMEOUT = INGEST_PROXY_TIMEOUT
+PROMOTE_PROXY_TIMEOUT = INGEST_PROXY_TIMEOUT
 # dbt per-state builds can run nearly an hour; keep under worker Cloud Run timeout.
 HASH_INDEX_REFRESH_PROXY_TIMEOUT = 3300.0
 # Matching chunk drain can process many 10K BQ chunks per ensure-drain call.
 MATCHING_DRAIN_PROXY_TIMEOUT = 3300.0
+# First-pull dispatch of ~1.8M thin requests exceeds DEFAULT_PROXY_TIMEOUT (60s).
+DISPATCH_PROXY_TIMEOUT = 3300.0
 
 WORKER_KEYS = (
     ("drop_connector", "drop_connector_url"),
@@ -389,25 +401,115 @@ def _role_for_actor_email(email: str) -> str | None:
     )
 
 
+_WORKER_HEALTH_TTL_SECONDS = 15.0
+_CONTROL_PLANE_HEALTH_KEYS = frozenset(
+    {
+        *CONTROL_PLANE_SERVICE_EXCLUDES,
+        *(item.replace("-", "_") for item in CONTROL_PLANE_SERVICE_EXCLUDES),
+    }
+)
+_worker_health_cache: tuple[float, tuple[tuple[str, str], ...], dict[str, Any]] | None = (
+    None
+)
+_worker_health_refresh_lock: asyncio.Lock | None = None
+_worker_health_refresh_task: asyncio.Task[Any] | None = None
+
+
+def _is_control_plane_health_target(name: str, base_url: str = "") -> bool:
+    """True for admin-web / admin-api / ops-ia-web — not worker outages."""
+    key = (name or "").strip().lower()
+    if key in _CONTROL_PLANE_HEALTH_KEYS:
+        return True
+    slug = key.replace("_", "-")
+    if slug and is_excluded_service_slug(slug):
+        return True
+    haystack = f"{key} {(base_url or '').lower()}".replace("_", "-")
+    return any(excl in haystack for excl in CONTROL_PLANE_SERVICE_EXCLUDES)
+
+
+def _health_refresh_lock() -> asyncio.Lock:
+    global _worker_health_refresh_lock
+    if _worker_health_refresh_lock is None:
+        _worker_health_refresh_lock = asyncio.Lock()
+    return _worker_health_refresh_lock
+
+
+def _unpack_worker_health_cache(
+    cached: Any,
+) -> tuple[float, tuple[tuple[str, str], ...] | None, dict[str, Any]] | None:
+    if not cached:
+        return None
+    if len(cached) == 3:
+        return cached[0], cached[1], cached[2]
+    if len(cached) == 2:
+        return cached[0], None, cached[1]
+    return None
+
+
+def _worker_health_cache_hit(
+    targets: list[tuple[str, str]],
+    *,
+    now: float | None = None,
+) -> dict[str, Any] | None:
+    unpacked = _unpack_worker_health_cache(_worker_health_cache)
+    if unpacked is None:
+        return None
+    cached_at, cached_key, cached_result = unpacked
+    if cached_key is not None and cached_key != tuple(targets):
+        return None
+    stamp = now if now is not None else monotonic()
+    if stamp - cached_at >= _WORKER_HEALTH_TTL_SECONDS:
+        return None
+    return cached_result
+
+
+def _readyz_body_from_response(response: Any) -> Any:
+    """Keep status/service only — never serialize Cloud Run / IAP HTML bodies."""
+    headers = getattr(response, "headers", None)
+    content_type = ""
+    if headers is not None:
+        try:
+            content_type = str(
+                headers.get("content-type") or headers.get("Content-Type") or ""
+            )
+        except Exception:
+            content_type = ""
+    if content_type and "json" not in content_type.lower():
+        return {"status": "non_json"}
+    try:
+        payload = response.json()
+    except Exception:
+        return {"status": "non_json"}
+    if isinstance(payload, dict):
+        return {
+            "status": payload.get("status"),
+            "service": payload.get("service"),
+        }
+    return {"status": "unknown"}
+
+
 async def _probe_worker_health(name: str, base_url: str) -> dict[str, Any]:
     """Best-effort GET {base}/readyz — never raises.
 
     Prefer /readyz: Cloud Run's public edge often returns a Google HTML 404 for /healthz.
+    admin-web 401 is IAP on a live UI, not a worker outage.
     """
     url = f"{base_url.rstrip('/')}/readyz"
     try:
         headers = auth_headers_for(base_url)
         async with httpx.AsyncClient(timeout=3.0) as client:
             response = await client.get(url, headers=headers)
-            try:
-                body: Any = response.json()
-            except Exception:
-                body = {"raw": response.text[:500]}
+            status_code = response.status_code
+            body = _readyz_body_from_response(response)
+            ok = status_code == 200
+            if status_code == 401 and _is_control_plane_health_target(name, base_url):
+                ok = True
+                body = {"status": "iap_front_door", "service": name}
             return {
                 "name": name,
                 "url": base_url,
-                "ok": response.status_code == 200,
-                "status_code": response.status_code,
+                "ok": ok,
+                "status_code": status_code,
                 "body": body,
             }
     except httpx.RequestError as exc:
@@ -428,8 +530,7 @@ async def _probe_worker_health(name: str, base_url: str) -> dict[str, Any]:
         }
 
 
-async def collect_worker_health() -> dict[str, Any]:
-    """Probe /readyz for discovered fleet URLs; fall back to WORKER_KEYS."""
+def _worker_probe_targets() -> list[tuple[str, str]]:
     targets: list[tuple[str, str]] = []
     try:
         from admin_api.worker_fleet import discovered_worker_probe_targets
@@ -447,10 +548,139 @@ async def collect_worker_health() -> dict[str, Any]:
             for name, attr in WORKER_KEYS
             if getattr(settings, attr, None)
         ]
-    probes = await asyncio.gather(
-        *[_probe_worker_health(name, url) for name, url in targets]
-    )
-    return {probe["name"]: probe for probe in probes}
+    return [
+        (name, url)
+        for name, url in targets
+        if not _is_control_plane_health_target(name, url)
+    ]
+
+
+async def _refresh_worker_health_cache(
+    targets: list[tuple[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Fan-out /readyz probes and store the module-level snapshot."""
+    global _worker_health_cache
+    if targets is None:
+        targets = _worker_probe_targets()
+    key = tuple(targets)
+    async with _health_refresh_lock():
+        hit = _worker_health_cache_hit(targets)
+        if hit is not None:
+            return hit
+        if not targets:
+            result: dict[str, Any] = {}
+        else:
+            probes = await asyncio.gather(
+                *[_probe_worker_health(name, url) for name, url in targets]
+            )
+            result = {probe["name"]: probe for probe in probes}
+        _worker_health_cache = (monotonic(), key, result)
+        return result
+
+
+def _schedule_worker_health_refresh(
+    targets: list[tuple[str, str]] | None = None,
+) -> None:
+    """Refresh the 15s snapshot without blocking the current request."""
+    global _worker_health_refresh_task
+    task = _worker_health_refresh_task
+    if task is not None and not task.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def _run() -> None:
+        try:
+            await _refresh_worker_health_cache(targets)
+        except Exception:
+            logger.exception(
+                "worker_health_refresh_failed",
+                extra={"event": "worker_health_refresh_failed"},
+            )
+
+    _worker_health_refresh_task = loop.create_task(_run())
+
+
+async def collect_worker_health() -> dict[str, Any]:
+    """Return cached /readyz probes; fan-out at most once per ~15s.
+
+    Pipeline GET (polled ~5s) returns the module snapshot immediately when one
+    exists for the current fleet and never waits on the probe fan-out. A
+    background refresh runs when the snapshot is older than 15s. The first
+    call after process start (or a fleet membership change) still awaits probes.
+    """
+    targets = _worker_probe_targets()
+    unpacked = _unpack_worker_health_cache(_worker_health_cache)
+    if unpacked is not None:
+        cached_at, cached_key, cached_result = unpacked
+        if cached_key is None or cached_key == tuple(targets):
+            if monotonic() - cached_at >= _WORKER_HEALTH_TTL_SECONDS:
+                _schedule_worker_health_refresh(targets)
+            return cached_result
+    return await _refresh_worker_health_cache(targets)
+
+
+def _record_has(row: Any, key: str) -> bool:
+    """True when an asyncpg Record or mapping exposes ``key``."""
+    if row is None:
+        return False
+    try:
+        return key in row
+    except TypeError:
+        pass
+    try:
+        row[key]
+        return True
+    except (KeyError, TypeError, IndexError):
+        return False
+
+
+def _rollup_raw_request_groups(
+    rows: list[Any],
+) -> tuple[list[Any], list[Any] | None]:
+    """Split one ``list_type, response_status`` grouping into the two rollups.
+
+    Returns ``(list_type_rows, None)`` when rows already look like the
+    list_type-only mock/aggregate shape so the caller can fetch the
+    response_status query.
+    """
+    if not rows:
+        return [], []
+    sample = rows[0]
+    if _record_has(sample, "total") and not _record_has(sample, "count"):
+        return rows, None
+    by_list: dict[Any, dict[str, Any]] = {}
+    by_status: dict[Any, int] = {}
+    for row in rows:
+        list_type = row["list_type"]
+        status = row["response_status"]
+        n = int(row["count"])
+        bucket = by_list.setdefault(
+            list_type,
+            {
+                "list_type": list_type,
+                "total": 0,
+                "response_status_null": 0,
+                "response_status_set": 0,
+            },
+        )
+        bucket["total"] += n
+        if status is None:
+            bucket["response_status_null"] += n
+        else:
+            bucket["response_status_set"] += n
+        by_status[status] = by_status.get(status, 0) + n
+    list_rows = sorted(by_list.values(), key=lambda item: str(item["list_type"]))
+    status_rows = [
+        {"response_status": status, "count": count}
+        for status, count in sorted(
+            by_status.items(),
+            key=lambda item: (item[0] is not None, item[0] if item[0] is not None else 0),
+        )
+    ]
+    return list_rows, status_rows
 
 
 async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
@@ -471,66 +701,68 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
          ORDER BY step, status
         """
     )
-    raw_rows = await conn.fetch(
+    raw_grouped = await conn.fetch(
         """
         SELECT list_type,
-               COUNT(*)::int AS total,
-               COUNT(*) FILTER (WHERE response_status IS NULL)::int AS response_status_null,
-               COUNT(*) FILTER (WHERE response_status IS NOT NULL)::int AS response_status_set
+               response_status,
+               COUNT(*)::int AS count
           FROM drop_raw_requests
-         GROUP BY list_type
-         ORDER BY list_type
+         GROUP BY list_type, response_status
+         ORDER BY list_type, response_status NULLS FIRST
         """
     )
-    response_status_rows = await conn.fetch(
-        """
-        SELECT response_status, COUNT(*)::int AS count
-          FROM drop_raw_requests
-         GROUP BY response_status
-         ORDER BY response_status NULLS FIRST
-        """
-    )
+    raw_rows, response_status_rows = _rollup_raw_request_groups(raw_grouped)
+    if response_status_rows is None:
+        response_status_rows = await conn.fetch(
+            """
+            SELECT response_status, COUNT(*)::int AS count
+              FROM drop_raw_requests
+             GROUP BY response_status
+             ORDER BY response_status NULLS FIRST
+            """
+        )
     fulfillment_ready = await conn.fetchval(
         """
         SELECT COUNT(*)::int
-          FROM requests r
+          FROM approval_requests ar
+          JOIN requests r
+            ON r.id = ar.request_id
           JOIN drop_raw_requests drr
             ON drr.id = r.raw_record_id
-         WHERE r.intake_source = 'drop'
+         WHERE ar.action_type = $1
+           AND ar.status = 'approved'
+           AND ar.decided_at IS NOT NULL
+           AND r.intake_source = 'drop'
            AND drr.response_status IS NULL
            AND EXISTS (
                  SELECT 1
                    FROM matching_results mr
                   WHERE mr.request_id = r.id
                )
-           AND EXISTS (
-                 SELECT 1
-                   FROM approval_requests ar
-                  WHERE ar.request_id = r.id
-                    AND ar.action_type = $1
-                    AND ar.status = 'approved'
-                    AND ar.decided_at IS NOT NULL
-                    AND ar.decided_at >= (
-                          SELECT MAX(mr.recorded_at)
-                            FROM matching_results mr
-                           WHERE mr.request_id = r.id
-                        )
+           AND ar.decided_at >= (
+                 SELECT MAX(mr.recorded_at)
+                   FROM matching_results mr
+                  WHERE mr.request_id = r.id
                )
         """,
         MATCHING_REVIEW_ACTION,
     )
-    drop_request_count = await conn.fetchval(
-        "SELECT COUNT(*)::int FROM requests WHERE intake_source = 'drop'"
-    )
     recent_drop_requests = await conn.fetch(
         """
-        SELECT id::text AS id, received_at, raw_record_id
+        SELECT id::text AS id, received_at, raw_record_id,
+               COUNT(*) OVER () AS full_count
           FROM requests
          WHERE intake_source = 'drop'
          ORDER BY received_at DESC
          LIMIT 20
         """
     )
+    if recent_drop_requests and _record_has(recent_drop_requests[0], "full_count"):
+        drop_request_count = int(recent_drop_requests[0]["full_count"])
+    else:
+        drop_request_count = await conn.fetchval(
+            "SELECT COUNT(*)::int FROM requests WHERE intake_source = 'drop'"
+        )
     matching_attempt_rows = await conn.fetch(
         """
         SELECT ma.status, COUNT(*)::int AS count
@@ -1505,9 +1737,15 @@ async def get_pipeline_status() -> dict[str, Any]:
     """Full pipeline snapshot including best-effort worker health."""
     _require_database()
     pool = get_pool()
-    async with pool.acquire() as conn:
-        counts = await collect_pipeline_counts(conn)
-    worker_health = await collect_worker_health()
+
+    async def _counts() -> dict[str, Any]:
+        async with pool.acquire() as conn:
+            return await collect_pipeline_counts(conn)
+
+    counts, worker_health = await asyncio.gather(
+        _counts(),
+        collect_worker_health(),
+    )
     public_health = {
         name: _public_worker_health(probe) for name, probe in worker_health.items()
     }
@@ -1706,7 +1944,7 @@ async def drop_land(
 ):
     url = f"{settings.drop_ingestor_url.rstrip('/')}/ingest/land"
     payload = _model_dump_nonzero(body) if body is not None else {}
-    return await proxy_post(url, json_body=payload)
+    return await proxy_post(url, json_body=payload, timeout=LAND_PROXY_TIMEOUT)
 
 
 @router.post("/promote")
@@ -1719,7 +1957,9 @@ async def drop_promote(
     # thin proxy to drop_ingestor; intake due_at belongs after ingest creates rows.
     url = f"{settings.drop_ingestor_url.rstrip('/')}/ingest/promote"
     payload = _model_dump_nonzero(body) if body is not None else {}
-    status_code, result = await proxy_post_payload(url, json_body=payload)
+    status_code, result = await proxy_post_payload(
+        url, json_body=payload, timeout=PROMOTE_PROXY_TIMEOUT
+    )
     if status_code == 200:
         try:
             await stamp_volatile_sheets_after_intake()
@@ -1742,7 +1982,9 @@ async def drop_dispatch(
 ):
     url = f"{settings.request_dispatcher_url.rstrip('/')}/dispatch"
     payload = _model_dump_nonzero(body) if body is not None else {}
-    status_code, result = await proxy_post_payload(url, json_body=payload)
+    status_code, result = await proxy_post_payload(
+        url, json_body=payload, timeout=DISPATCH_PROXY_TIMEOUT
+    )
     if status_code == 200:
         try:
             drain_url = f"{settings.matching_url.rstrip('/')}/ensure-drain"
@@ -1947,6 +2189,9 @@ _HASH_TABLE_BY_LIST_TYPE = {
 }
 
 
+_MDR_SEARCH_LIMIT_MAX = 20
+
+
 def _initial_from_name(value: Any) -> str | None:
     if value is None:
         return None
@@ -1954,6 +2199,33 @@ def _initial_from_name(value: Any) -> str | None:
     if not text:
         return None
     return text[0].upper()
+
+
+def _phones_from_mdr_row(row: Any) -> list[dict[str, str]]:
+    phones: list[dict[str, str]] = []
+    cell = row.get("likely_cell_phone")
+    land = row.get("likely_land_phone")
+    if cell and str(cell).strip():
+        phones.append({"type": "cell", "number": str(cell).strip()})
+    if land and str(land).strip():
+        phones.append({"type": "land", "number": str(land).strip()})
+    return phones
+
+
+def _contact_from_mdr_row(row: Any) -> dict[str, Any]:
+    birthdate = row.get("birthdate")
+    dob = str(birthdate).strip() if birthdate is not None and str(birthdate).strip() else None
+    email_raw = row.get("emailaddress")
+    email = str(email_raw).strip() if email_raw is not None and str(email_raw).strip() else None
+    return {
+        "dwid": str(row["dwid"]),
+        "state": str(row["state"]).strip().upper(),
+        "first_initial": _initial_from_name(row.get("firstname")),
+        "last_initial": _initial_from_name(row.get("lastname")),
+        "dob": dob,
+        "email": email,
+        "phones": _phones_from_mdr_row(row),
+    }
 
 
 def _primary_hash_for_list_type(
@@ -2087,29 +2359,75 @@ def _fetch_person_contacts_from_bq(
 
     contacts: list[dict[str, Any]] = []
     for row in rows:
-        phones: list[dict[str, str]] = []
-        cell = row.get("likely_cell_phone")
-        land = row.get("likely_land_phone")
-        if cell and str(cell).strip():
-            phones.append({"type": "cell", "number": str(cell).strip()})
-        if land and str(land).strip():
-            phones.append({"type": "land", "number": str(land).strip()})
-        birthdate = row.get("birthdate")
-        dob = str(birthdate).strip() if birthdate is not None and str(birthdate).strip() else None
-        email_raw = row.get("emailaddress")
-        email = str(email_raw).strip() if email_raw is not None and str(email_raw).strip() else None
-        contacts.append(
-            {
-                "dwid": str(row["dwid"]),
-                "state": str(row["state"]).strip().upper(),
-                "first_initial": _initial_from_name(row.get("firstname")),
-                "last_initial": _initial_from_name(row.get("lastname")),
-                "dob": dob,
-                "email": email,
-                "phones": phones,
-            }
-        )
+        contacts.append(_contact_from_mdr_row(row))
     return contacts
+
+
+def _search_person_contacts_from_bq(
+    *,
+    q: str,
+    lookup_state: str,
+    limit: int,
+    client: Any | None = None,
+) -> list[dict[str, Any]]:
+    """State-scoped MDR directory search — parameterized BQ only; never log q."""
+    try:
+        from google.cloud import bigquery
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("google-cloud-bigquery is not installed") from exc
+
+    safe_limit = max(1, min(int(limit), _MDR_SEARCH_LIMIT_MAX))
+    name_prefix_enabled = len(q.split()) >= 2
+    sql = f"""
+        SELECT CAST(p.dwid AS STRING) AS dwid,
+               p.state,
+               p.firstname,
+               p.lastname,
+               CAST(p.birthdate AS STRING) AS birthdate,
+               p.emailaddress,
+               ph.likely_cell_phone,
+               ph.likely_land_phone
+          FROM {_MDR_PERSON_TABLE} p
+          LEFT JOIN {_MDR_PHONES_TABLE} ph
+            ON CAST(ph.dwid AS STRING) = CAST(p.dwid AS STRING)
+           AND ph.state = @lookup_state
+         WHERE p.state = @lookup_state
+           AND (
+                CAST(p.dwid AS STRING) = @q
+                OR LOWER(TRIM(p.emailaddress)) = LOWER(@q)
+                OR STARTS_WITH(LOWER(TRIM(p.lastname)), LOWER(@q))
+                OR (
+                    @name_prefix_enabled
+                    AND STARTS_WITH(
+                        LOWER(CONCAT(
+                            TRIM(COALESCE(p.firstname, '')),
+                            ' ',
+                            TRIM(COALESCE(p.lastname, ''))
+                        )),
+                        LOWER(@q)
+                    )
+                )
+           )
+         ORDER BY p.lastname, p.firstname, p.dwid
+         LIMIT @result_limit
+    """
+    bq_client = client or bigquery.Client()
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("q", "STRING", q),
+            bigquery.ScalarQueryParameter("lookup_state", "STRING", lookup_state),
+            bigquery.ScalarQueryParameter(
+                "name_prefix_enabled", "BOOL", name_prefix_enabled
+            ),
+            bigquery.ScalarQueryParameter("result_limit", "INT64", safe_limit),
+        ]
+    )
+    try:
+        rows = list(bq_client.query(sql, job_config=job_config))
+    except Exception as exc:
+        raise RuntimeError(redact_error_text(str(exc))) from exc
+
+    return [_contact_from_mdr_row(row) for row in rows]
 
 
 async def _resolve_matched_dwids(
@@ -2640,6 +2958,61 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
         )
         detail["auth0_vertical"] = empty_auth0_vertical_block()
     return detail
+
+
+@router.get("/matching-contacts/search")
+async def drop_matching_contacts_search(
+    _principal: MatchingReviewPrincipal,
+    q: str = Query(..., description="DWID, email, lastname prefix, or firstname lastname"),
+    state: str = Query(..., description="Required 2-letter requestor_state"),
+    limit: int = Query(default=20, description="Max contacts to return (1..20)"),
+):
+    """MDR person directory search (Data/MDR view-only — no owner cadence gate).
+
+    Returns the same contact dict shape as matching-result enrichment.
+    Never logs ``q``, names, emails, phones, or DWIDs.
+    """
+    q_norm = q.strip()
+    if len(q_norm) < 2:
+        raise HTTPException(status_code=422, detail="q must be at least 2 characters")
+    if not state or not str(state).strip():
+        raise HTTPException(status_code=422, detail="state is required")
+    try:
+        state_norm = normalize_state_acronym(state)
+    except InvalidStateAcronymError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if limit < 1 or limit > _MDR_SEARCH_LIMIT_MAX:
+        raise HTTPException(status_code=422, detail="limit must be 1..20")
+
+    try:
+        contacts = await asyncio.to_thread(
+            _search_person_contacts_from_bq,
+            q=q_norm,
+            lookup_state=state_norm,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.warning(
+            "matching_contacts_search_failed",
+            extra={
+                "event": "matching_contacts_search_failed",
+                "contact_count": 0,
+                "error": redact_error_text(str(exc)),
+            },
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=redact_error_text(str(exc)),
+        ) from exc
+
+    logger.info(
+        "matching_contacts_search",
+        extra={
+            "event": "matching_contacts_search",
+            "contact_count": len(contacts),
+        },
+    )
+    return {"contacts": contacts}
 
 
 @router.get("/matching-results")

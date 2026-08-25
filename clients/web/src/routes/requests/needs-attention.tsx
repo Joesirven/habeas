@@ -3748,8 +3748,11 @@ function batchClusterAsPipelineRows(rows: WorkbenchVerticalBatchRow[]) {
   })
 }
 
+/** API blocker on catalog-only / not-live workbench rows (`request_journey`). */
+export const CATALOG_ONLY_NOT_LIVE_LABEL = 'Catalog-only — matching is not live'
+
 /** Vertical cluster rows as countable substeps — never per-request match rows. */
-function batchClusterAsSubsteps(
+export function batchClusterAsSubsteps(
   rows: WorkbenchVerticalBatchRow[] | undefined,
   parent: 'matching' | 'fulfillment',
 ): DerivedWorkbenchSubstep[] {
@@ -3766,7 +3769,9 @@ function batchClusterAsSubsteps(
       status,
       parent,
       blocker: null,
-      statusLabel: countLabel || (row.live ? workbenchStatusLabel(status) : 'Soon'),
+      statusLabel:
+        countLabel ||
+        (row.live ? workbenchStatusLabel(status) : CATALOG_ONLY_NOT_LIVE_LABEL),
     }
   })
 }

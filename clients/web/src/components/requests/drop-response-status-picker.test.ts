@@ -7,6 +7,7 @@ import {
   OWNER_RESPONSE_STATUS_OPTIONS,
   dropResponseStatusPickerChrome,
   matchingDispositionCopy,
+  matchingNotLiveCalloutCopy,
   ownerDropStatusLabel,
 } from './RequestTriageDialog'
 
@@ -74,5 +75,48 @@ describe('DropResponseStatusPicker chrome (AE29)', () => {
     expect(copy.confirmDescription('abc12345')).not.toMatch(/CA DROP/)
     expect(copy.confirmLabel).toBe('Confirm')
     expect(matchingDispositionCopy('legal').confirmLabel).toBe('Fulfill')
+  })
+})
+
+describe('matching not-live callout (owner language)', () => {
+  test('sheet stub keeps confirm/decline without catalog-only or CA DROP people', () => {
+    const copy = matchingNotLiveCalloutCopy({
+      result_kind: 'sheet_stub',
+      system_label: 'People / HR',
+    })
+    expect(copy.title).toBe('Sheet matching not live')
+    expect(copy.reason).toBe(
+      'People / HR has no match result. Confirm or decline this inbox item.',
+    )
+    expect(copy.reason).toMatch(/Confirm or decline/)
+    expect(copy.reason).not.toMatch(/catalog-only/i)
+    expect(copy.reason).not.toMatch(/CA DROP/i)
+    expect(copy.reason).not.toMatch(/not this system/i)
+    expect(copy.reason).not.toMatch(/matching is not live/i)
+  })
+
+  test('saas stub keeps confirm/decline without invented matching claims', () => {
+    const copy = matchingNotLiveCalloutCopy({
+      result_kind: 'saas_stub',
+      system: 'mailchimp',
+      system_label: 'Mailchimp',
+    })
+    expect(copy.title).toBe('System matching not live')
+    expect(copy.reason).toBe(
+      'Mailchimp has no match result. Confirm or decline this inbox item.',
+    )
+    expect(copy.reason).toMatch(/Confirm or decline/)
+    expect(copy.reason).not.toMatch(/catalog-only/i)
+    expect(copy.reason).not.toMatch(/CA DROP/i)
+    expect(copy.reason).not.toMatch(/without CA DROP people/i)
+  })
+
+  test('prefers API not_live_reason when present', () => {
+    const copy = matchingNotLiveCalloutCopy({
+      result_kind: 'sheet_stub',
+      system_label: 'People / HR',
+      not_live_reason: 'Upload is stale.',
+    })
+    expect(copy.reason).toBe('Upload is stale.')
   })
 })

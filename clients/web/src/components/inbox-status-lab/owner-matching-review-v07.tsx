@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 
 import {
@@ -7,9 +7,6 @@ import {
 } from '@/components/matching-results-lab/matching-results-lab-types'
 import {
   applyNeedsPeople,
-  ResultContactPii,
-  ResultPeopleSearch,
-  ResultSystemLabel,
   resultViewEmpty,
 } from '@/components/matching-results-lab/ResultViewChrome'
 import {
@@ -170,6 +167,40 @@ function contactMatchesQuery(contact: MatchedPersonContact, query: string): bool
   return formatMatchedContactLabel(contact).toLowerCase().includes(needle)
 }
 
+/** Search chrome: Needs refresh / Needs connection — never Connected. */
+function peopleSearchNotice(
+  blocked?: MatchingConnectorGate | null,
+  pending?: { title: string; support: string } | null,
+): { title: string; support: string } | null {
+  if (blocked?.blocked) {
+    const refresh =
+      blocked.displayStatus === 'needs_refresh' || blocked.gateCode === 'upload_stale'
+    return {
+      title: refresh ? 'Needs refresh' : 'Needs connection',
+      support: pending?.support ?? '',
+    }
+  }
+  if (!pending) return null
+  const title = pending.title.trim() === 'Connected' ? 'Needs connection' : pending.title
+  return { title, support: pending.support }
+}
+
+function mergePeopleByDwid(
+  ...lists: Array<readonly MatchedPersonContact[] | undefined>
+): MatchedPersonContact[] {
+  const seen = new Set<string>()
+  const merged: MatchedPersonContact[] = []
+  for (const list of lists) {
+    for (const contact of list ?? []) {
+      const dwid = contact.dwid?.trim()
+      if (!dwid || seen.has(dwid)) continue
+      seen.add(dwid)
+      merged.push(contact)
+    }
+  }
+  return merged
+}
+
 /**
  * Owner matching-only. One question and two large actions lead; match people
  * sit in a collapsed secondary panel. No lifecycle rail.
@@ -189,10 +220,67 @@ export function OwnerMatchingReviewV07({
   pending,
   onApply,
   onDecline,
+  onSearchPeople,
+  peopleSearchBlocked,
+  peopleSearchPending,
 }: OwnerMatchingReviewV07Props) {
   const empty = resultViewEmpty(loading, Boolean(item))
   const [resultsOpen, setResultsOpen] = useState(false)
   const [addQuery, setAddQuery] = useState('')
+  const [extraContacts, setExtraContacts] = useState<MatchedPersonContact[]>([])
+  const [directoryHits, setDirectoryHits] = useState<MatchedPersonContact[]>([])
+  const [searchBusy, setSearchBusy] = useState(false)
+  const [searchFailed, setSearchFailed] = useState(false)
+  const searchRef = useRef(onSearchPeople)
+  searchRef.current = onSearchPeople
+
+  const connectorGate = matchingBlockedGate(detail)
+  const matchingGated = Boolean(connectorGate?.blocked)
+  const searchNotice = peopleSearchNotice(peopleSearchBlocked, peopleSearchPending)
+  const searchLocked = Boolean(disabled || pending || matchingGated || searchNotice)
+  const allContacts = useMemo(
+    () => mergePeopleByDwid(contacts, extraContacts),
+    [contacts, extraContacts],
+  )
+
+  useEffect(() => {
+    setExtraContacts([])
+    setAddQuery('')
+    setDirectoryHits([])
+  }, [item?.request_id])
+
+  useEffect(() => {
+    const needle = addQuery.trim()
+    if (searchLocked || !onSearchPeople || needle.length < 2) {
+      setDirectoryHits([])
+      setSearchBusy(false)
+      setSearchFailed(false)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setSearchBusy(true)
+        setSearchFailed(false)
+        try {
+          const result = await searchRef.current?.(needle)
+          if (!cancelled) setDirectoryHits(result ?? [])
+        } catch {
+          if (!cancelled) {
+            setDirectoryHits([])
+            setSearchFailed(true)
+          }
+        } finally {
+          if (!cancelled) setSearchBusy(false)
+        }
+      })()
+    }, 200)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [addQuery, onSearchPeople, searchLocked])
+
   if (empty) return empty
   if (!item) return empty
 
@@ -210,21 +298,26 @@ export function OwnerMatchingReviewV07({
   const confirmStatus = statusId ?? suggested
   const notFound = confirmStatus === '5'
   const confirmBlocked = applyNeedsPeople(confirmStatus, selectedDwids)
-  const connectorGate = matchingBlockedGate(detail)
-  const matchingGated = Boolean(connectorGate?.blocked)
   const gateChip = connectorGate ? matchingConnectorGateChip(connectorGate) : null
   const includedPeople = notFound
     ? []
-    : contacts.filter((contact) => Boolean(contact.dwid) && selectedDwids.includes(contact.dwid))
-  const addablePeople = contacts.filter(
+    : allContacts.filter((contact) => Boolean(contact.dwid) && selectedDwids.includes(contact.dwid))
+  const addablePeople = allContacts.filter(
     (contact) => Boolean(contact.dwid) && !selectedDwids.includes(contact.dwid),
   )
-  const addHits = addablePeople.filter((contact) => contactMatchesQuery(contact, addQuery))
+  const localHits = addablePeople.filter((contact) => contactMatchesQuery(contact, addQuery))
+  const addHits = mergePeopleByDwid(directoryHits, localHits).filter(
+    (contact) => Boolean(contact.dwid) && !selectedDwids.includes(contact.dwid),
+  )
+  const showAddSearch =
+    Boolean(onSearchPeople) ||
+    addablePeople.length > 0 ||
+    Boolean(searchNotice)
   const peopleLine = matchingGated
     ? 'Cannot confirm until this connector is ready.'
     : notFound
       ? 'No people will be applied.'
-      : formatMatchedContactsSummary(contacts, selectedDwids)
+      : formatMatchedContactsSummary(allContacts, selectedDwids)
   const showDecline = Boolean(onDecline) || !notFound
   const matchType = detail?.match_type ?? item.match_type
   const matchCount = detail?.match_count ?? item.match_count
@@ -243,7 +336,7 @@ export function OwnerMatchingReviewV07({
       return
     }
     if (selectedDwids.length === 0) {
-      onSelectedDwidsChange(contacts.map((contact) => contact.dwid).filter(Boolean))
+      onSelectedDwidsChange(allContacts.map((contact) => contact.dwid).filter(Boolean))
     }
   }
 
@@ -251,8 +344,12 @@ export function OwnerMatchingReviewV07({
     onSelectedDwidsChange(selectedDwids.filter((id) => id !== dwid))
   }
 
-  function addPerson(dwid: string) {
+  function addPerson(contact: MatchedPersonContact) {
+    const dwid = contact.dwid
     if (!dwid || selectedDwids.includes(dwid)) return
+    if (!allContacts.some((row) => row.dwid === dwid)) {
+      setExtraContacts((previous) => [...previous, contact])
+    }
     if (confirmStatus === '5') onStatusChange(suggested === '5' ? DISPOSITION_DELETE : suggested)
     onSelectedDwidsChange([...selectedDwids, dwid])
     setAddQuery('')
@@ -456,7 +553,7 @@ export function OwnerMatchingReviewV07({
                 </p>
               </fieldset>
 
-              {contacts.length === 0 ? (
+              {allContacts.length === 0 ? (
                 <p className="text-xs text-mute">
                   {notFound || matchType === 'not_found'
                     ? 'No people for this matching attempt.'
@@ -495,22 +592,38 @@ export function OwnerMatchingReviewV07({
                 </ul>
               )}
 
-              {addablePeople.length > 0 ? (
+              {showAddSearch ? (
                 <div className="space-y-1.5">
                   <label className="block">
                     <span className="sr-only">Add person by search</span>
                     <input
                       type="search"
                       value={addQuery}
-                      disabled={locked || matchingGated}
+                      disabled={searchLocked}
                       onChange={(event) => setAddQuery(event.target.value)}
-                      placeholder="Add person…"
+                      placeholder={searchNotice ? searchNotice.title : 'Add person…'}
                       className="h-8 w-full rounded-md border border-line bg-paper px-2 text-xs text-ink outline-none placeholder:text-mute focus-visible:ring-2 focus-visible:ring-habeas-mid disabled:opacity-50"
                       autoComplete="off"
                       spellCheck={false}
                     />
                   </label>
-                  {addHits.length > 0 ? (
+                  {searchNotice ? (
+                    <p className="text-[0.65rem] text-ink-soft" role="status">
+                      {searchNotice.title}
+                      {searchNotice.support ? ` — ${searchNotice.support}` : ''}
+                    </p>
+                  ) : null}
+                  {searchBusy ? (
+                    <p className="text-[0.65rem] text-mute" role="status">
+                      Searching…
+                    </p>
+                  ) : null}
+                  {searchFailed ? (
+                    <p className="text-[0.65rem] text-red-800">
+                      Could not search this system. Try again.
+                    </p>
+                  ) : null}
+                  {!searchNotice && addHits.length > 0 ? (
                     <ul className="space-y-1">
                       {addHits.map((contact) => {
                         const label = formatMatchedContactLabel(contact)
@@ -518,8 +631,8 @@ export function OwnerMatchingReviewV07({
                           <li key={contact.dwid}>
                             <button
                               type="button"
-                              disabled={locked || matchingGated || !contact.dwid}
-                              onClick={() => addPerson(contact.dwid)}
+                              disabled={searchLocked || !contact.dwid}
+                              onClick={() => addPerson(contact)}
                               className="flex w-full items-center justify-between gap-2 rounded-md px-1 py-1 text-left text-xs hover:bg-canvas disabled:opacity-50"
                             >
                               <span className="min-w-0 truncate text-ink-soft">{label}</span>
@@ -531,8 +644,12 @@ export function OwnerMatchingReviewV07({
                         )
                       })}
                     </ul>
-                  ) : addQuery.trim() ? (
-                    <p className="text-[0.65rem] text-mute">No matching people to add.</p>
+                  ) : !searchNotice && !searchBusy && !searchFailed && addQuery.trim() ? (
+                    <p className="text-[0.65rem] text-mute">
+                      {onSearchPeople && addQuery.trim().length < 2
+                        ? 'Type at least 2 characters to search.'
+                        : 'No matching people to add.'}
+                    </p>
                   ) : null}
                 </div>
               ) : null}

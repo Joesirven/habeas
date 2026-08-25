@@ -20,6 +20,7 @@ from habeas_privacy_core.connections.catalog import (
     is_approach_allowed,
     list_verticals,
 )
+from habeas_privacy_core.connections.models import ConnectionSystem
 from habeas_privacy_core.connections.systems import (
     SYSTEM_IDS,
     CredentialInputType,
@@ -29,7 +30,6 @@ from habeas_privacy_core.connections.systems import (
 )
 
 _EXPECTED_ORDER = (
-    "mailchimp",
     "paylocity",
     "lever",
     "auth0",
@@ -44,7 +44,6 @@ _EXPECTED_ORDER = (
 
 _INVITE_ALLOWED_SYSTEMS = frozenset(
     {
-        "mailchimp",
         "paylocity",
         "lever",
         "auth0",
@@ -61,15 +60,20 @@ class TestCatalog:
         assert [system.system_id for system in systems] == list(_EXPECTED_ORDER)
 
     def test_get_system_returns_definition(self) -> None:
-        system = get_system("mailchimp")
-        assert system.display_label == "Mailchimp"
-        assert system.invite_allowed is True
-        assert len(system.credential_fields) == 1
-        assert system.credential_fields[0].id == "api_key"
+        system = get_system("axios_hq")
+        assert system.display_label == "Axios HQ"
+        assert system.invite_allowed is False
+        assert system.credential_fields == ()
 
     def test_get_system_unknown_raises(self) -> None:
         with pytest.raises(ValueError, match="unknown connection system"):
             get_system("vertica")
+
+    def test_mailchimp_retired_from_catalog(self) -> None:
+        assert "mailchimp" not in SYSTEM_IDS
+        assert "mailchimp" not in {member.value for member in ConnectionSystem}
+        with pytest.raises(ValueError, match="unknown connection system"):
+            get_system("mailchimp")
 
 
 class TestVerticalCatalog:
@@ -239,10 +243,10 @@ class TestFieldSchemas:
         assert "Editor" in field.help
 
     def test_trust_copy_mentions_secret_manager(self) -> None:
-        mailchimp = get_system("mailchimp")
-        assert "Secret Manager" in mailchimp.trust_copy
-        assert "application database" in mailchimp.trust_copy.lower()
-        assert "72 hours" in mailchimp.trust_copy
+        paylocity = get_system("paylocity")
+        assert "Secret Manager" in paylocity.trust_copy
+        assert "application database" in paylocity.trust_copy.lower()
+        assert "72 hours" in paylocity.trust_copy
 
     def test_cassandra_trust_copy_is_inf_handoff(self) -> None:
         copy = get_system("cassandra").trust_copy
@@ -251,10 +255,10 @@ class TestFieldSchemas:
 
 
 class TestValidateCredentials:
-    def test_mailchimp_accepts_api_key(self) -> None:
-        system = get_system("mailchimp")
-        cleaned = validate_credentials(system, {"api_key": "  mc-key-123  "})
-        assert cleaned == {"api_key": "mc-key-123"}
+    def test_lever_accepts_api_key(self) -> None:
+        system = get_system("lever")
+        cleaned = validate_credentials(system, {"api_key": "  lever-key-123  "})
+        assert cleaned == {"api_key": "lever-key-123"}
 
     def test_paylocity_requires_auth_material(self) -> None:
         system = get_system("paylocity")
@@ -355,6 +359,6 @@ class TestValidateCredentials:
                 validate_credentials(system, {"api_key": "nope"})
 
     def test_non_string_value_rejected(self) -> None:
-        system = get_system("mailchimp")
+        system = get_system("lever")
         with pytest.raises(ValueError, match="must be a string"):
             validate_credentials(system, {"api_key": 123})  # type: ignore[arg-type]

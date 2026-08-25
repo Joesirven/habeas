@@ -22,6 +22,11 @@ from habeas_privacy_core.audit.redaction import redact_error_text
 from habeas_privacy_core.auth import ROLE_SUPER_ADMIN
 from habeas_privacy_core.db.pool import get_pool
 from habeas_privacy_core.queue.claim import _validate_table
+from habeas_privacy_core.queue.constants import (
+    AUTH0_ATTEMPTS_TABLE,
+    GOOGLE_SHEETS_ATTEMPTS_TABLE,
+    MAILCHIMP_ATTEMPTS_TABLE,
+)
 from habeas_privacy_core.queue.reap import ReapedTableConfig
 
 logger = logging.getLogger(__name__)
@@ -31,6 +36,39 @@ router = APIRouter(prefix="/ops/workers", tags=["ops-attempt-tables"])
 SuperAdminPrincipal = Annotated[
     RolePrincipal, Depends(require_roles(ROLE_SUPER_ADMIN))
 ]
+
+# Existing vertical queues — always in the browser catalog when present.
+BROWSER_VERTICAL_ATTEMPT_TABLES: frozenset[str] = frozenset(
+    {
+        AUTH0_ATTEMPTS_TABLE,
+        MAILCHIMP_ATTEMPTS_TABLE,
+        GOOGLE_SHEETS_ATTEMPTS_TABLE,
+    }
+)
+
+# Never project PII, hashes, or vendor identifiers (defense in depth).
+_NEVER_PROJECT_COLUMNS: frozenset[str] = frozenset(
+    {
+        "audit_payload",
+        "raw_request_payload",
+        "raw_response_payload",
+        "error_payload",
+        "matched_external_id",
+        "external_ref",
+        "suppression_ref",
+        "email",
+        "phone",
+        "name",
+        "first_name",
+        "last_name",
+        "email_hash",
+        "phone_hash",
+        "ndz_hash",
+        "dwid",
+        "dwids",
+        "consumer_id",
+    }
+)
 
 # Prefer habeas_privacy_core.fleet allowlists (single source of truth).
 try:
@@ -59,7 +97,9 @@ try:
         }
     )
     ATTEMPT_COLUMN_ALLOWLIST: frozenset[str] = (
-        frozenset(_FLEET_COLUMN_ALLOWLIST) - frozenset(_FLEET_FORBIDDEN) - {"external_ref"}
+        frozenset(_FLEET_COLUMN_ALLOWLIST)
+        - frozenset(_FLEET_FORBIDDEN)
+        - _NEVER_PROJECT_COLUMNS
     )
     ATTEMPT_COLUMN_REDACT: frozenset[str] = frozenset(_FLEET_COLUMN_REDACT)
     ATTEMPT_STATUS_ALLOWLIST: frozenset[str] = frozenset(_FLEET_STATUS_ALLOWLIST)
@@ -111,7 +151,7 @@ except ImportError:  # pragma: no cover — fleet package always present in work
             "state",
             "list_types",
         }
-    )
+    ) - _NEVER_PROJECT_COLUMNS
     ATTEMPT_COLUMN_REDACT = frozenset({"error_message"})
     ATTEMPT_STATUS_ALLOWLIST = frozenset(
         {
@@ -188,7 +228,11 @@ def projectable_columns(present: Sequence[str]) -> list[str]:
     """Intersect table columns with allowlist + redacted columns (stable order)."""
     present_set = set(present)
     ordered = sorted(ATTEMPT_COLUMN_ALLOWLIST | ATTEMPT_COLUMN_REDACT)
-    return [c for c in ordered if c in present_set]
+    return [
+        c
+        for c in ordered
+        if c in present_set and c not in _NEVER_PROJECT_COLUMNS
+    ]
 
 
 def supports_attempt_retry(table_name: str, present_columns: Sequence[str]) -> bool:
@@ -213,7 +257,7 @@ async def fetch_public_attempt_candidate_names(conn: Any) -> list[str]:
     names: list[str] = []
     for row in rows:
         name = str(row["table_name"])
-        if name in ATTEMPT_DENY_TABLES:
+        if name in ATTEMPT_DENY_TABLES and name not in BROWSER_VERTICAL_ATTEMPT_TABLES:
             continue
         try:
             _validate_table(name)
@@ -248,9 +292,15 @@ async def discover_attempt_tables(conn: Any) -> list[dict[str, Any]]:
     discovered: list[dict[str, Any]] = []
     for table_name in candidates:
         columns = await fetch_table_columns(conn, table_name)
-        if not passes_required_columns(columns):
-            continue
         projected = projectable_columns(columns)
+        # Vertical queues stay browsable even if a required-column check drifts;
+        # still require at least one counts/status column.
+        if not passes_required_columns(columns):
+            if (
+                table_name not in BROWSER_VERTICAL_ATTEMPT_TABLES
+                or not projected
+            ):
+                continue
         discovered.append(
             {
                 "table_name": table_name,
@@ -544,8 +594,11 @@ async def list_attempt_table_rows(
         # Hard deny: never leak non-allowlisted keys even if SELECT drifts.
         for forbidden in list(item):
             if (
-                forbidden not in ATTEMPT_COLUMN_ALLOWLIST
-                and forbidden not in ATTEMPT_COLUMN_REDACT
+                forbidden in _NEVER_PROJECT_COLUMNS
+                or (
+                    forbidden not in ATTEMPT_COLUMN_ALLOWLIST
+                    and forbidden not in ATTEMPT_COLUMN_REDACT
+                )
             ):
                 del item[forbidden]
         payload_rows.append(item)

@@ -1215,27 +1215,37 @@ export function matchingDetailIsNotLive(
   )
 }
 
+/** Owner-language stub callout — confirm/decline only; no catalog teasers or DROP people claims. */
+export function matchingNotLiveCalloutCopy(
+  matching?: Pick<
+    MatchingResultDetail,
+    'system_label' | 'system' | 'not_live_reason' | 'result_kind'
+  > | null,
+): { title: string; reason: string } {
+  const label = matching?.system_label || matching?.system || 'This system'
+  return {
+    title:
+      matching?.result_kind === 'sheet_stub'
+        ? 'Sheet matching not live'
+        : 'System matching not live',
+    reason:
+      matching?.not_live_reason?.trim() ||
+      `${label} has no match result. Confirm or decline this inbox item.`,
+  }
+}
+
 function MatchingSystemStubCallout({
   matching,
 }: {
   matching?: MatchingResultDetail
 }) {
-  const label = matching?.system_label || matching?.system || 'This system'
-  const reason =
-    matching?.not_live_reason?.trim() ||
-    (matching?.result_kind === 'sheet_stub'
-      ? `${label} is catalog-only — matching is not live. Confirm or decline this inbox item; CA DROP people are not this system.`
-      : `${label} matching is not live. Confirm or decline this inbox item without CA DROP people.`)
+  const { title, reason } = matchingNotLiveCalloutCopy(matching)
   return (
     <div
       className="rounded-md border border-line bg-panel/50 px-2.5 py-2"
       role="status"
     >
-      <p className="text-[0.7rem] font-medium text-ink">
-        {matching?.result_kind === 'sheet_stub'
-          ? 'Sheet matching not live'
-          : 'System matching not live'}
-      </p>
+      <p className="text-[0.7rem] font-medium text-ink">{title}</p>
       <p className="mt-0.5 text-[0.65rem] leading-snug text-ink-soft">{reason}</p>
     </div>
   )

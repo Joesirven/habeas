@@ -49,14 +49,14 @@ VERTICAL_DATA = "data"
 VERTICAL_AUTH0 = "auth0"
 LIVE_VERTICALS: tuple[str, ...] = (VERTICAL_DATA, VERTICAL_AUTH0)
 COMING_SOON_VERTICALS: tuple[str, ...] = (
-    "mailchimp",
+    "axios_hq",
     "lever",
     "paylocity",
     "cassandra",
 )
 VERTICAL_LABELS: dict[str, str] = {
     VERTICAL_DATA: "Data",
-    "mailchimp": "Mailchimp",
+    "axios_hq": "Axios HQ",
     "lever": "Lever",
     "paylocity": "Paylocity",
     "auth0": "Auth0",
@@ -106,7 +106,7 @@ class VerticalDisposition(BaseModel):
 
 
 class VerticalCatalogEntry(BaseModel):
-    """Coming-soon vertical — greyed, non-actionable, no disposition row (R2)."""
+    """Catalog-only vertical — greyed, non-actionable, no disposition row (R2)."""
 
     vertical: str
     label: str
@@ -464,7 +464,7 @@ async def list_vertical_dispositions(
     *,
     request_id: str,
 ) -> VerticalDispositionsResponse:
-    """Decided verticals plus the coming-soon catalog for a request."""
+    """Decided verticals plus the catalog-only verticals for a request."""
     exists = await conn.fetchval("SELECT 1 FROM requests WHERE id = $1", UUID(request_id))
     if exists is None:
         raise LookupError("request not found")
@@ -634,7 +634,7 @@ async def put_vertical_disposition(
     vertical_norm = normalize_vertical(vertical)
     if vertical_norm not in LIVE_VERTICALS:
         detail = (
-            f"vertical {vertical_norm!r} is coming soon — no disposition accepted"
+            f"vertical {vertical_norm!r} is not live yet — no disposition accepted"
             if vertical_norm in COMING_SOON_VERTICALS
             else f"unknown vertical {vertical_norm!r}"
         )

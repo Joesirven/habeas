@@ -109,13 +109,24 @@ describe('displayStatusChip (KD18)', () => {
       displayStatusChip('action_required', { gateAllowed: false }).label,
     ).toBe('Action required')
   })
+
+  test('blocked / gated chips never say Connected', () => {
+    for (const status of ['needs_refresh', 'action_required', 'needs_setup', 'connected']) {
+      const chip = displayStatusChip(status, { gateAllowed: false })
+      expect(chip.label).not.toBe('Connected')
+      expect(chip.label.toLowerCase()).not.toContain('connected')
+    }
+    expect(displayStatusChip('needs_setup', { gateAllowed: false }).label).toBe(
+      'Needs setup',
+    )
+  })
 })
 
 describe('reminder banners (R10 soft)', () => {
   const sample: ConnectorReminder[] = [
     {
       code: 'upload_stale',
-      system: 'axios_headquarters',
+      system: 'axios_hq',
       vertical_id: 'communications',
       severity: 'overdue',
     },
@@ -130,7 +141,7 @@ describe('reminder banners (R10 soft)', () => {
   test('builds non-blocking banner items from reminders', () => {
     const items = buildReminderBannerItems(sample)
     expect(items).toHaveLength(2)
-    expect(items[0].id).toBe('communications:axios_headquarters:upload_stale')
+    expect(items[0].id).toBe('communications:axios_hq:upload_stale')
     expect(items[0].severity).toBe('overdue')
     expect(items[0].title.toLowerCase()).toContain('overdue')
     expect(items[1].severity).toBe('approaching')
@@ -192,13 +203,13 @@ describe('reminder banners (R10 soft)', () => {
     const filtered = filterRemindersForOwnerConnectorsPage([
       {
         code: 'wizard_incomplete',
-        system: 'axios_headquarters',
+        system: 'axios_hq',
         vertical_id: 'communications',
         severity: 'overdue',
       },
       {
         code: 'upload_stale',
-        system: 'axios_headquarters',
+        system: 'axios_hq',
         vertical_id: 'communications',
         severity: 'overdue',
       },
@@ -248,22 +259,22 @@ describe('mode and cadence helpers', () => {
 
   test('verticalWizardStepIndex finds dynamic step ids', () => {
     const steps = buildVerticalWizardSteps({
-      systems: [{ system: 'axios_headquarters', allowedApproaches: ['upload'] }],
+      systems: [{ system: 'axios_hq', allowedApproaches: ['upload'] }],
     })
-    expect(verticalWizardStepIndex(steps, 'axios_headquarters-howto-upload')).toBe(0)
+    expect(verticalWizardStepIndex(steps, 'axios_hq-howto-upload')).toBe(0)
     expect(verticalWizardStepIndex(steps, 'confirm')).toBe(steps.length - 1)
     expect(verticalWizardStepIndex(steps, 'missing')).toBe(-1)
   })
 })
 
 describe('vertical wizard steps', () => {
-  test('axios_headquarters upload-only vertical ends with cadence and confirm', () => {
+  test('axios_hq upload-only vertical ends with cadence and confirm', () => {
     const steps = buildVerticalWizardSteps({
-      systems: [{ system: 'axios_headquarters', allowedApproaches: ['upload'] }],
+      systems: [{ system: 'axios_hq', allowedApproaches: ['upload'] }],
     })
     expect(steps.map((step) => step.id)).toEqual([
-      'axios_headquarters-howto-upload',
-      'axios_headquarters-upload',
+      'axios_hq-howto-upload',
+      'axios_hq-upload',
       'cadence',
       'confirm',
     ])
@@ -364,7 +375,7 @@ describe('vertical wizard steps', () => {
     expect(SHEETS_OWNER_SYSTEM_IDS).toEqual(['hr_alumni', 'bizdev_contacts'])
     expect(SHEETS_CONNECT_METHODS).toEqual(['oauth', 'upload'])
     expect(isSheetsOwnerSystem('HR_Alumni')).toBe(true)
-    expect(isSheetsOwnerSystem('axios_headquarters')).toBe(false)
+    expect(isSheetsOwnerSystem('axios_hq')).toBe(false)
 
     const alumni = buildVerticalWizardSteps({
       systems: [{ system: 'hr_alumni', allowedApproaches: ['upload'] }],
@@ -434,7 +445,7 @@ describe('vertical wizard steps', () => {
     expect(
       buildVerticalWizardSteps({
         viewOnly: true,
-        systems: [{ system: 'axios_headquarters', allowedApproaches: ['upload'] }],
+        systems: [{ system: 'axios_hq', allowedApproaches: ['upload'] }],
       }),
     ).toEqual([])
   })
@@ -517,7 +528,7 @@ describe('cadence option mapping', () => {
     expect(cadenceOptionIdsForSystems(['hr_alumni'])).not.toContain(
       CADENCE_OPTION_WEEKLY,
     )
-    expect(cadenceOptionIdsForSystems(['axios_headquarters'])).toEqual(
+    expect(cadenceOptionIdsForSystems(['axios_hq'])).toEqual(
       CADENCE_OPTION_IDS,
     )
     expect(cadenceOptionIdsForSystems(['paylocity', 'hr_alumni'])).toEqual(
@@ -527,10 +538,13 @@ describe('cadence option mapping', () => {
 })
 
 describe('SYSTEM_COPY', () => {
-  test('axios_headquarters upload how-to copy is CSV-only', () => {
-    expect(SYSTEM_COPY.axios_headquarters.uploadHowto?.toLowerCase()).toContain('axios hq')
-    expect(SYSTEM_COPY.axios_headquarters.uploadHowto?.toLowerCase()).not.toContain('mailchimp')
-    expect(SYSTEM_COPY.axios_headquarters.uploadHowto?.toLowerCase()).toContain('csv')
+  test('axios_hq upload how-to copy is CSV-only', () => {
+    expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).toContain('axios hq')
+    expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).not.toContain('mailchimp')
+    expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).toContain('csv')
+    expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).not.toContain(
+      'coming soon',
+    )
   })
 
   test('sheets howto covers oauth or upload and does not mention service-account share', () => {
@@ -591,7 +605,7 @@ describe('mode step explainer (KD25)', () => {
 
   test('upload-only system greys Live with curated reason', () => {
     const cards = buildModeStepCards({
-      systemId: 'axios_headquarters',
+      systemId: 'axios_hq',
       displayName: 'Axios HQ',
       allowedApproaches: ['upload'],
     })
@@ -599,7 +613,12 @@ describe('mode step explainer (KD25)', () => {
     expect(live?.allowed).toBe(false)
     expect(live?.hint).toBeNull()
     expect(live?.disabledReason?.toLowerCase()).toContain('live is not available')
+    expect(live?.definition.toLowerCase()).not.toContain('coming soon')
+    expect(live?.disabledReason?.toLowerCase()).not.toContain('coming soon')
     expect(cards.find((card) => card.mode === 'upload')?.allowed).toBe(true)
+    expect(
+      cards.find((card) => card.mode === 'upload')?.definition.toLowerCase(),
+    ).not.toContain('coming soon')
   })
 
   test('sheets systems allow oauth (live) or upload', () => {
@@ -628,7 +647,7 @@ describe('mode step explainer (KD25)', () => {
     expect(modeStepSystemHint('lever', 'live')).toContain('Users read/list')
   })
 
-  test('paylocity Live copy promises SFTP later, not API', () => {
+  test('paylocity Live copy promises SFTP, not API', () => {
     const cards = buildModeStepCards({
       systemId: 'paylocity',
       displayName: 'Paylocity',
@@ -637,15 +656,24 @@ describe('mode step explainer (KD25)', () => {
     const live = cards.find((card) => card.mode === 'live')
     expect(live?.definition.toLowerCase()).toContain('sftp')
     expect(live?.definition.toLowerCase()).toContain('not an api connection')
+    expect(live?.definition.toLowerCase()).toContain('upload today')
+    expect(live?.definition.toLowerCase()).not.toContain('coming soon')
     expect(live?.disabledReason?.toLowerCase()).toContain('sftp')
+    expect(live?.disabledReason?.toLowerCase()).toContain('upload')
+    expect(live?.disabledReason?.toLowerCase()).not.toContain('yet')
+    expect(live?.disabledReason?.toLowerCase()).not.toContain('coming soon')
+    expect(live?.disabledReason?.toLowerCase()).not.toContain('api')
     const liveAllowed = buildModeStepCards({
       systemId: 'paylocity',
       displayName: 'Paylocity',
       allowedApproaches: ['live', 'upload'],
     }).find((card) => card.mode === 'live')
     expect(liveAllowed?.definition.toLowerCase()).toContain('sftp')
+    expect(liveAllowed?.definition.toLowerCase()).toContain('upload today')
+    expect(liveAllowed?.definition.toLowerCase()).not.toContain('coming soon')
     expect(liveAllowed?.hint?.toLowerCase()).toContain('sftp')
     expect(liveAllowed?.hint?.toLowerCase()).toContain('not an api')
+    expect(liveAllowed?.hint?.toLowerCase()).not.toContain('coming soon')
   })
 })
 
@@ -698,7 +726,7 @@ describe('owner connectors hide cassandra', () => {
     expect(ownerConnectorDisplayName('test', 'hr_alumni', 'HR Alumni List')).toBe(
       'System B',
     )
-    expect(ownerConnectorDisplayName('communications', 'axios_headquarters', 'Axios HQ')).toBe(
+    expect(ownerConnectorDisplayName('communications', 'axios_hq', 'Axios HQ')).toBe(
       'Axios HQ',
     )
     expect(ownerConnectorDisplayName('data', 'cassandra', 'Cassandra')).not.toMatch(

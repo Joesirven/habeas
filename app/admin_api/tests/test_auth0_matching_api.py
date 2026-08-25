@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -12,6 +13,7 @@ from admin_api import auth0_matching, roles
 from admin_api import main as admin_main
 from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
+from habeas_privacy_core.connections.freshness import GateResult
 from habeas_privacy_core.models.intake import DropListType, DropMatchingPayload
 from habeas_privacy_core.models.request import IntakeSource
 from habeas_privacy_core.vertical_hash.bq_lookup import Auth0HashLookupError
@@ -21,6 +23,32 @@ REQUEST_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 VENDOR_A = "auth0|user-aaa"
 VENDOR_B = "auth0|user-bbb"
 EMAIL_HASH = "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/=="
+_LOG_STD_KEYS = frozenset(
+    {
+        "name",
+        "msg",
+        "args",
+        "levelname",
+        "levelno",
+        "pathname",
+        "filename",
+        "module",
+        "exc_info",
+        "exc_text",
+        "stack_info",
+        "lineno",
+        "funcName",
+        "created",
+        "msecs",
+        "relativeCreated",
+        "thread",
+        "threadName",
+        "processName",
+        "process",
+        "message",
+        "taskName",
+    }
+)
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +86,28 @@ def _drop_record(*, raw_record_id: int | None = 17) -> SimpleNamespace:
     )
 
 
+def _gate_allowed() -> GateResult:
+    return GateResult(allowed=True, code="ok", display_status="connected")
+
+
+def _gate_blocked() -> GateResult:
+    return GateResult(
+        allowed=False,
+        code="upload_stale",
+        display_status="needs_refresh",
+        blocking_system="auth0",
+    )
+
+
+def _install_matching_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    gate: GateResult | None = None,
+) -> AsyncMock:
+    mock = AsyncMock(return_value=gate if gate is not None else _gate_allowed())
+    monkeypatch.setattr(auth0_matching, "evaluate_vertical_matching_gate", mock)
+    return mock
+
+
 def _install_pool(monkeypatch: pytest.MonkeyPatch, conn: Any | None = None) -> Any:
     fake_conn = conn if conn is not None else AsyncMock()
     acquire = MagicMock()
@@ -68,7 +118,64 @@ def _install_pool(monkeypatch: pytest.MonkeyPatch, conn: Any | None = None) -> A
     monkeypatch.setattr(auth0_matching, "get_pool", lambda: pool)
     monkeypatch.setattr(auth0_matching.settings, "database_url", "postgres://local")
     monkeypatch.setattr(auth0_matching, "write_audit", AsyncMock())
+    _install_matching_gate(monkeypatch)
     return fake_conn
+
+
+def _error_detail(body: dict[str, Any]) -> dict[str, Any]:
+    detail = body.get("detail", body)
+    return detail if isinstance(detail, dict) else body
+
+
+def _vendor_id_lists(payload: Any) -> list[list[Any]]:
+    found: list[list[Any]] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key in {"candidates", "vendor_record_ids"} and isinstance(value, list):
+                found.append(value)
+            found.extend(_vendor_id_lists(value))
+    elif isinstance(payload, list):
+        for item in payload:
+            found.extend(_vendor_id_lists(item))
+    return found
+
+
+def _assert_no_vendor_record_id_list(payload: Any) -> None:
+    for items in _vendor_id_lists(payload):
+        assert items == []
+    dumped = str(payload)
+    assert VENDOR_A not in dumped
+    assert VENDOR_B not in dumped
+
+
+def _assert_no_emails_or_hashes(payload: Any) -> None:
+    dumped = str(payload)
+    assert EMAIL_HASH not in dumped
+    assert "@" not in dumped
+
+
+def _capture_audit(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    audits: list[dict[str, Any]] = []
+
+    async def _write(**kwargs: Any) -> int:
+        audits.append(kwargs)
+        return 1
+
+    monkeypatch.setattr(auth0_matching, "write_audit", _write)
+    return audits
+
+
+def _assert_audit_log_extras_have_no_pii(
+    audits: list[dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    for audit in audits:
+        _assert_no_emails_or_hashes(audit.get("arguments", {}))
+        _assert_no_emails_or_hashes(audit.get("result_summary", ""))
+    for record in caplog.records:
+        extra = {key: value for key, value in record.__dict__.items() if key not in _LOG_STD_KEYS}
+        _assert_no_emails_or_hashes(extra)
+        _assert_no_emails_or_hashes(record.getMessage())
 
 
 def _openapi_paths() -> set[str]:
@@ -173,6 +280,136 @@ def test_snapshot_returns_opaque_ids_only(monkeypatch: pytest.MonkeyPatch) -> No
     assert "vendor_record_id" not in str(audits[0]["arguments"])
     live.assert_not_called()
     assert conn is not None
+
+
+def test_match_candidates_gate_blocked_returns_409(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _install_pool(monkeypatch)
+    _install_matching_gate(monkeypatch, _gate_blocked())
+    monkeypatch.setattr(
+        auth0_matching,
+        "get_request",
+        AsyncMock(return_value=_drop_record()),
+    )
+    monkeypatch.setattr(
+        auth0_matching,
+        "fetch_auth0_snapshot",
+        AsyncMock(
+            return_value={
+                "match_count": 2,
+                "vendor_record_ids": [VENDOR_A, VENDOR_B],
+            }
+        ),
+    )
+    live = MagicMock(side_effect=AssertionError("live BQ must not run when gated"))
+    monkeypatch.setattr(auth0_matching, "lookup_auth0_vendor_ids_by_email_hash", live)
+    audits = _capture_audit(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="admin_api.auth0_matching"):
+        with TestClient(app) as client:
+            response = client.get(
+                f"/requests/{REQUEST_ID}/verticals/auth0/match-candidates",
+                headers=_owner_headers(),
+            )
+    assert response.status_code == 409
+    detail = _error_detail(response.json())
+    assert detail["code"] == "gate_blocked"
+    assert detail["display_status"]
+    _assert_no_vendor_record_id_list(response.json())
+    live.assert_not_called()
+    _assert_audit_log_extras_have_no_pii(audits, caplog)
+
+
+def test_match_candidates_gate_allowed_keeps_success_path(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _install_pool(monkeypatch)
+    gate = _install_matching_gate(monkeypatch, _gate_allowed())
+    monkeypatch.setattr(
+        auth0_matching,
+        "get_request",
+        AsyncMock(return_value=_drop_record()),
+    )
+    monkeypatch.setattr(
+        auth0_matching,
+        "fetch_auth0_snapshot",
+        AsyncMock(
+            return_value={
+                "match_count": 2,
+                "vendor_record_ids": [VENDOR_A, VENDOR_B],
+            }
+        ),
+    )
+    live = MagicMock(side_effect=AssertionError("live BQ must not run when snapshot exists"))
+    monkeypatch.setattr(auth0_matching, "lookup_auth0_vendor_ids_by_email_hash", live)
+    audits = _capture_audit(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="admin_api.auth0_matching"):
+        with TestClient(app) as client:
+            response = client.get(
+                f"/requests/{REQUEST_ID}/verticals/auth0/match-candidates",
+                headers=_owner_headers(),
+            )
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "request_id": REQUEST_ID,
+        "match_count": 2,
+        "candidates": [
+            {"vendor_record_id": VENDOR_A},
+            {"vendor_record_id": VENDOR_B},
+        ],
+        "source": "snapshot",
+    }
+    gate.assert_awaited()
+    live.assert_not_called()
+    _assert_audit_log_extras_have_no_pii(audits, caplog)
+    assert EMAIL_HASH not in str(body)
+
+
+def test_match_candidates_audit_extras_have_no_emails_or_hashes(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _install_pool(monkeypatch)
+    _install_matching_gate(monkeypatch, _gate_allowed())
+    monkeypatch.setattr(
+        auth0_matching,
+        "get_request",
+        AsyncMock(return_value=_drop_record()),
+    )
+    monkeypatch.setattr(auth0_matching, "fetch_auth0_snapshot", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        auth0_matching,
+        "request_resolver",
+        AsyncMock(
+            return_value=DropMatchingPayload(
+                drop_record_id="drop-1",
+                list_type=DropListType.EMAIL,
+                hash_fields={"hashed_email": EMAIL_HASH},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        auth0_matching,
+        "lookup_auth0_vendor_ids_by_email_hash",
+        MagicMock(return_value=[VENDOR_A]),
+    )
+    audits = _capture_audit(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="admin_api.auth0_matching"):
+        with TestClient(app) as client:
+            response = client.get(
+                f"/requests/{REQUEST_ID}/verticals/auth0/match-candidates",
+                headers=_legal_headers(),
+            )
+    assert response.status_code == 200
+    assert EMAIL_HASH not in response.text
+    _assert_audit_log_extras_have_no_pii(audits, caplog)
+    assert audits
 
 
 def test_missing_snapshot_live_lookup_from_drop_hash(
@@ -324,6 +561,7 @@ def test_status_snapshot_present(monkeypatch: pytest.MonkeyPatch) -> None:
         "request_id": REQUEST_ID,
         "snapshot_present": True,
         "match_count": 3,
+        "gated": False,
     }
     live.assert_not_called()
 
@@ -347,6 +585,7 @@ def test_status_snapshot_missing(monkeypatch: pytest.MonkeyPatch) -> None:
         "request_id": REQUEST_ID,
         "snapshot_present": False,
         "match_count": 0,
+        "gated": False,
     }
 
 

@@ -459,7 +459,7 @@ export type SystemWizardCopy = {
 
 /** Per-system how-to copy for upload / live / sheets wizard substeps. */
 export const SYSTEM_COPY: Record<string, SystemWizardCopy> = {
-  axios_headquarters: {
+  axios_hq: {
     uploadHowto:
       'Export a contact or subscriber list from Axios HQ as CSV. Upload the file, then map first name, last name, and email if the column names differ. Habeas does not connect to Axios HQ directly.',
   },
@@ -577,7 +577,7 @@ const MODE_SYSTEM_HINTS: Record<
     upload:
       'Upload a Paylocity export and map first name, last name, and email — no Developer Portal credentials needed.',
     live:
-      'Paylocity will deliver employee files through SFTP (coming soon) — not an API connection.',
+      'Paylocity will deliver employee files through SFTP — not an API connection.',
   },
   lever: {
     live:
@@ -610,7 +610,7 @@ const DISALLOWED_MODE_REASONS: Record<
     upload: 'Lever only supports Live — Habeas connects via the Lever API.',
   },
   paylocity: {
-    live: 'Paylocity Live (SFTP) is not available yet. Use Upload and map columns after the file is sent.',
+    live: 'Paylocity only supports Upload — Habeas receives employee files through SFTP.',
   },
 }
 
@@ -646,7 +646,7 @@ function modeDefinitionForSystem(
 ): string {
   const normalized = normalizeSystemId(systemId)
   if (normalized === 'paylocity' && mode === 'live') {
-    return `${PLATFORM_NAME} will receive Paylocity employee files through SFTP when Live is available (coming soon). This is not an API connection — use Upload today.`
+    return `${PLATFORM_NAME} will receive Paylocity employee files through SFTP. This is not an API connection — use Upload today.`
   }
   const card = MODE_DEFINITION_CARDS.find((entry) => entry.mode === mode)
   return card?.definition ?? ''

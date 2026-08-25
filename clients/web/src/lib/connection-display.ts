@@ -10,7 +10,7 @@ import type {
 
 /** Upload-only systems — no Live credential invite (KD14). */
 export const UPLOAD_ONLY_SYSTEMS: ReadonlySet<IntegrationSystemId> = new Set([
-  'axios_headquarters',
+  'axios_hq' as IntegrationSystemId,
   'bizdev_contacts',
   'hr_alumni',
 ])

@@ -8,6 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from matching.chunk_drain import (
+    DATA_DROP_LEASE_KEY,
+    _LOAD_CHUNK_HASHES_SQL,
+    _bulk_complete_errors,
+    _bulk_complete_successes,
+    _hash_fields_from_raw_payload,
+    _lease_call_kwargs,
     ensure_drain,
     job_task_worker_id,
     run_job_task,
@@ -105,3 +111,274 @@ async def test_start_drain_job_execution_posts_run(
     client.post.assert_awaited_once()
     url = client.post.await_args.args[0]
     assert url.endswith("/jobs/matching-drain-dev:run")
+
+
+def test_lease_call_kwargs_holder_only_when_api_has_no_key() -> None:
+    def acquire(*, holder: str, lease_minutes: int = 30) -> bool:
+        return True
+
+    assert _lease_call_kwargs(acquire, "matching-drain-job") == {
+        "holder": "matching-drain-job"
+    }
+
+
+def test_lease_call_kwargs_adds_data_drop_key_when_supported() -> None:
+    def acquire(*, holder: str, lease_key: str, lease_minutes: int = 30) -> bool:
+        return True
+
+    assert _lease_call_kwargs(acquire, "matching-drain-job") == {
+        "holder": "matching-drain-job",
+        "lease_key": DATA_DROP_LEASE_KEY,
+    }
+
+
+def _transactional_conn() -> MagicMock:
+    conn = MagicMock()
+    conn.execute = AsyncMock(return_value="UPDATE 2")
+    conn.fetch = AsyncMock(
+        return_value=[
+            {"id": 101, "attempt_id": 7},
+            {"id": 102, "attempt_id": 8},
+        ]
+    )
+    txn = AsyncMock()
+    txn.__aenter__ = AsyncMock(return_value=None)
+    txn.__aexit__ = AsyncMock(return_value=None)
+    conn.transaction = MagicMock(return_value=txn)
+    return conn
+
+
+@pytest.mark.asyncio
+async def test_bulk_complete_successes_uses_set_based_sql() -> None:
+    from datetime import datetime, timezone
+
+    conn = _transactional_conn()
+    started = datetime.now(timezone.utc)
+    items = [
+        {
+            "attempt_id": 7,
+            "request_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "attempt_number": 1,
+            "matched": True,
+            "matched_via": "drop_hash_email",
+            "consumer_id": None,
+            "confidence": 1.0,
+            "match_count": 1,
+        },
+        {
+            "attempt_id": 8,
+            "request_id": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+            "attempt_number": 1,
+            "matched": False,
+            "matched_via": "drop_hash_email",
+            "consumer_id": None,
+            "confidence": None,
+            "match_count": 0,
+        },
+    ]
+
+    with patch(
+        "matching.chunk_drain.check_approval_required",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        completed = await _bulk_complete_successes(
+            conn,
+            items=items,
+            started_at=started,
+            list_type_raw="Email",
+            requestor_state="CA",
+        )
+
+    assert completed == 2
+    insert_sql = conn.fetch.await_args.args[0]
+    update_sql = conn.execute.await_args.args[0]
+    assert "INSERT INTO matching_results" in insert_sql
+    assert "UNNEST(" in insert_sql
+    assert "UPDATE matching_attempts" in update_sql
+    assert "UNNEST(" in update_sql
+    assert "extend_lease" not in insert_sql
+    assert "extend_lease" not in update_sql
+
+
+@pytest.mark.asyncio
+async def test_bulk_complete_errors_uses_set_based_sql() -> None:
+    conn = MagicMock()
+    conn.execute = AsyncMock(return_value="UPDATE 2")
+
+    completed = await _bulk_complete_errors(
+        conn,
+        items=[
+            {
+                "attempt_id": 11,
+                "error_code": "bq_lookup_error",
+                "error_message": "timeout",
+                "audit_payload": {"error_code": "bq_lookup_error"},
+            },
+            {
+                "attempt_id": 12,
+                "error_code": "bq_lookup_error",
+                "error_message": "timeout",
+                "audit_payload": {"error_code": "bq_lookup_error"},
+            },
+        ],
+    )
+
+    assert completed == 2
+    sql = conn.execute.await_args.args[0]
+    assert "UPDATE matching_attempts" in sql
+    assert "UNNEST(" in sql
+    assert conn.execute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_process_matching_chunk_bulk_completes_without_per_row_lease() -> None:
+    from matching.bq_lookup import LookupHit
+    from matching.chunk_drain import process_matching_chunk
+
+    request_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    conn = MagicMock()
+    conn.fetch = AsyncMock(
+        return_value=[
+            {
+                "id": request_id,
+                "list_type": "Email",
+                "raw_payload": {"hashed_email": "abc"},
+            }
+        ]
+    )
+    claimed = [
+        {
+            "id": 1,
+            "request_id": request_id,
+            "attempt_number": 1,
+            "requestor_state": "CA",
+            "list_type": "Email",
+        }
+    ]
+
+    with (
+        patch(
+            "matching.chunk_drain.claim_matching_chunk",
+            new_callable=AsyncMock,
+            return_value=claimed,
+        ),
+        patch(
+            "matching.chunk_drain.lookup_dwids_by_hashes",
+            return_value={"abc": [LookupHit(dwid="dwid-1")]},
+        ),
+        patch(
+            "matching.chunk_drain._bulk_complete_successes",
+            new_callable=AsyncMock,
+            return_value=1,
+        ) as bulk,
+    ):
+        out = await process_matching_chunk(conn, worker_id="matching-drain-test")
+
+    assert out == {
+        "status": "ok",
+        "claimed": 1,
+        "completed": 1,
+        "list_type": "Email",
+        "requestor_state": "CA",
+    }
+    bulk.assert_awaited_once()
+    conn.fetch.assert_awaited_once()
+    sql = conn.fetch.await_args.args[0]
+    assert "SELECT r.id, drr.list_type, drr.raw_payload" in sql
+    assert "JOIN drop_raw_requests drr ON drr.id = r.raw_record_id" in sql
+    assert "WHERE r.id = ANY($1::uuid[])" in sql
+    import matching.chunk_drain as drain
+
+    assert not hasattr(drain, "extend_lease")
+    assert not hasattr(drain, "run_auth0_vertical_match")
+    assert not hasattr(drain, "load_request_row")
+    assert not hasattr(drain, "request_resolver")
+    assert not hasattr(drain, "build_match_request")
+
+
+@pytest.mark.asyncio
+async def test_process_matching_chunk_missing_hash_bulk_completes_error() -> None:
+    from matching.chunk_drain import process_matching_chunk
+
+    request_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    conn = MagicMock()
+    conn.fetch = AsyncMock(
+        return_value=[
+            {
+                "id": request_id,
+                "list_type": "Email",
+                "raw_payload": {"plain_field": "ignored"},
+            }
+        ]
+    )
+    claimed = [
+        {
+            "id": 9,
+            "request_id": request_id,
+            "attempt_number": 1,
+            "requestor_state": "CA",
+            "list_type": "Email",
+        }
+    ]
+
+    with (
+        patch(
+            "matching.chunk_drain.claim_matching_chunk",
+            new_callable=AsyncMock,
+            return_value=claimed,
+        ),
+        patch(
+            "matching.chunk_drain.lookup_dwids_by_hashes",
+        ) as lookup,
+        patch(
+            "matching.chunk_drain._bulk_complete_successes",
+            new_callable=AsyncMock,
+        ) as successes,
+        patch(
+            "matching.chunk_drain._bulk_complete_errors",
+            new_callable=AsyncMock,
+            return_value=1,
+        ) as errors,
+    ):
+        out = await process_matching_chunk(conn, worker_id="matching-drain-test")
+
+    assert out["status"] == "ok"
+    assert out["claimed"] == 1
+    assert out["completed"] == 0
+    lookup.assert_not_called()
+    successes.assert_not_awaited()
+    errors.assert_awaited_once()
+    items = errors.await_args.kwargs["items"]
+    assert len(items) == 1
+    assert items[0]["attempt_id"] == 9
+    assert items[0]["error_code"] == "hash_missing"
+    assert "hashed_email" not in str(items[0])
+    assert "abc" not in str(items[0])
+
+
+def test_hash_fields_from_raw_payload_keeps_drop_keys_only() -> None:
+    fields = _hash_fields_from_raw_payload(
+        {
+            "hashed_email": "abc",
+            "hashed_phone": "def",
+            "concatenated_hash": "ghi",
+            "email_hash": "jkl",
+            "phone_hash": "mno",
+            "pii_hash": "pqr",
+            "hash": "stu",
+            "plain_field": "ignored",
+        }
+    )
+    assert fields == {
+        "hashed_email": "abc",
+        "hashed_phone": "def",
+        "concatenated_hash": "ghi",
+        "email_hash": "jkl",
+        "phone_hash": "mno",
+        "pii_hash": "pqr",
+        "hash": "stu",
+    }
+    assert _LOAD_CHUNK_HASHES_SQL.strip().startswith(
+        "SELECT r.id, drr.list_type, drr.raw_payload"
+    )

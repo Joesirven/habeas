@@ -32,7 +32,7 @@
 ### Request journey workbench (detail-only)
 
 - High-level rail on **opened batch detail** and **individual request detail** only: **Ingest → Matching → Fulfillment → Notice**. Never on Inbox/All-requests list rows.
-- Matching and Fulfillment are **separate per-vertical clusters** (indicator, progress, short status). Coming-soon verticals greyed, non-actionable. Split in-progress when any vertical is still Matching and any has started Fulfillment.
+- Matching and Fulfillment are **separate per-vertical clusters** (indicator, progress, short status). Live verticals are `data` and `auth0`. Catalog-only verticals (Axios HQ / `axios_hq`, Lever, Paylocity, Cassandra) are greyed and non-actionable — workbench chrome is “catalog-only — matching is not live.” Mailchimp is retired. Split in-progress when any vertical is still Matching and any has started Fulfillment.
 - Substeps vary by request type / intake (CA DROP vs Access vs combined vs delete/opt-out).
 - Do not reintroduce six-label coarse rails (receive → … → delivery) as the primary detail chrome — those nest under the four stages.
 
@@ -74,3 +74,4 @@
 - Duplicate Matching review as a top-level nav item.
 - Put the four-stage journey strip on Inbox / list rows (detail and batch-selection workbench only).
 - Auto-start Fulfillment from matching approve alone — Legal kickoff (and Access identity-comment when applicable) gate start.
+- Call catalog-only verticals “coming soon,” or treat Auth0 / Mailchimp as coming soon (Auth0 is live; Mailchimp is retired).

@@ -1460,7 +1460,7 @@ async def test_workbench_coming_soon_verticals_not_actionable(
                 dispositions=[],
                 live_verticals=["data"],
                 coming_soon=[
-                    VerticalCatalogEntry(vertical="mailchimp", label="Mailchimp"),
+                    VerticalCatalogEntry(vertical="axios_hq", label="Axios HQ"),
                     VerticalCatalogEntry(vertical="lever", label="Lever"),
                 ],
                 matching_complete=False,
@@ -1475,9 +1475,13 @@ async def test_workbench_coming_soon_verticals_not_actionable(
     result = await build_request_journey_workbench(conn, request_id=_WORKBENCH_REQUEST_ID)
 
     coming_soon_rows = [row for row in result.matching_cluster if not row.live]
-    assert {row.vertical for row in coming_soon_rows} == {"mailchimp", "lever"}
+    assert {row.vertical for row in coming_soon_rows} == {"axios_hq", "lever"}
+    assert {row.label for row in coming_soon_rows} == {"Axios HQ", "Lever"}
     assert all(row.actionable is False for row in coming_soon_rows)
-    assert all(row.blocker == "Coming soon" for row in coming_soon_rows)
+    assert all(
+        row.blocker == "Catalog-only — matching is not live"
+        for row in coming_soon_rows
+    )
     # Coming-soon verticals never run fulfillment work (KD3).
     assert all(row.live for row in result.fulfillment_cluster)
     assert_no_pii_keys(result.model_dump())
@@ -1708,7 +1712,7 @@ async def test_fetch_vertical_matching_snapshot_missing_row_is_none() -> None:
 
 def _coming_soon_catalog() -> list[VerticalCatalogEntry]:
     return [
-        VerticalCatalogEntry(vertical="mailchimp", label="Mailchimp"),
+        VerticalCatalogEntry(vertical="axios_hq", label="Axios HQ"),
         VerticalCatalogEntry(vertical="lever", label="Lever"),
         VerticalCatalogEntry(vertical="paylocity", label="Paylocity"),
         VerticalCatalogEntry(vertical="auth0", label="Auth0"),
@@ -1717,10 +1721,10 @@ def _coming_soon_catalog() -> list[VerticalCatalogEntry]:
 
 
 @pytest.mark.asyncio
-async def test_workbench_auth0_is_live_mailchimp_remains_coming_soon(
+async def test_workbench_auth0_is_live_axios_hq_remains_coming_soon(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Auth0 is a live matching cluster row; other catalog verticals stay coming soon."""
+    """Auth0 is a live matching cluster row; Axios HQ and other catalog verticals stay coming soon."""
     ops = _ops_journey(
         [
             JourneyStage(stage="received", label="Received", status="complete"),
@@ -1777,12 +1781,15 @@ async def test_workbench_auth0_is_live_mailchimp_remains_coming_soon(
         decided=False,
         selected_vendor_record_ids=[],
     )
-    assert by_vertical["mailchimp"].live is False
-    assert by_vertical["mailchimp"].actionable is False
-    assert by_vertical["mailchimp"].blocker == "Coming soon"
+    assert by_vertical["axios_hq"].live is False
+    assert by_vertical["axios_hq"].actionable is False
+    assert by_vertical["axios_hq"].label == "Axios HQ"
+    assert by_vertical["axios_hq"].blocker == (
+        "Catalog-only — matching is not live"
+    )
     assert all(
         by_vertical[name].live is False
-        for name in ("mailchimp", "lever", "paylocity", "cassandra")
+        for name in ("axios_hq", "lever", "paylocity", "cassandra")
     )
     # Confirm-only this wave — Auth0 does not join the fulfillment cluster.
     assert all(row.vertical != "auth0" for row in result.fulfillment_cluster)

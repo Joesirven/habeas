@@ -1035,9 +1035,11 @@ export type MdrPeopleSearchPayload = {
   contacts: MatchedPersonContact[]
 }
 
-export function searchMdrPeople(q: string) {
+export function searchMdrPeople(q: string, opts: { state: string; limit?: number }) {
   const search = new URLSearchParams()
   search.set('q', q)
+  search.set('state', opts.state.trim())
+  if (opts.limit != null) search.set('limit', String(opts.limit))
   return fetchAdminApi<MdrPeopleSearchPayload>(
     `/ops/drop/matching-contacts/search?${search.toString()}`,
   )
@@ -2508,7 +2510,7 @@ export type IntegrationSystemId =
   | 'contact_us_google_sheet'
   | 'bizdev_contacts'
   | 'hr_alumni'
-  | 'axios_headquarters'
+  | 'axios_hq'
   | 'cassandra'
 
 export type ConnectionDisplayStatus =
@@ -2599,7 +2601,7 @@ export type ConnectTestDetailCode =
   | 'google_sheets_ok'
   | 'alumni_google_sheet_ok'
   | 'contact_us_google_sheet_ok'
-  | 'axios_headquarters_ok'
+  | 'axios_hq_ok'
   | 'upload_ok'
   | 'auth_failed'
   | 'lever_unauthorized'
@@ -2628,7 +2630,7 @@ const CONNECT_SYSTEM_LABELS: Record<IntegrationSystemId, string> = {
   contact_us_google_sheet: 'Contact Us Google Sheet',
   bizdev_contacts: 'BizDev Contacts',
   hr_alumni: 'HR Alumni List',
-  axios_headquarters: 'Axios HQ',
+  axios_hq: 'Axios HQ',
   cassandra: 'System A',
 }
 
@@ -2639,7 +2641,7 @@ const CONNECT_TEST_SUCCESS_DESCRIPTIONS: Record<string, string> = {
   google_sheets_ok: 'Google Sheets connection was verified successfully.',
   alumni_google_sheet_ok: 'HR alumni Google Sheet connection was verified successfully.',
   contact_us_google_sheet_ok: 'Contact Us Google Sheet connection was verified successfully.',
-  axios_headquarters_ok: 'Axios HQ upload was validated successfully.',
+  axios_hq_ok: 'Axios HQ upload was validated successfully.',
   upload_ok: 'Upload file was validated successfully.',
   stub_ok: 'Connection test completed successfully.',
   ok: 'Connection test completed successfully.',
@@ -3404,6 +3406,46 @@ export function sheetsOauthLabTest(body: { lab_session_id: string }) {
     method: 'POST',
     body: JSON.stringify(body),
   })
+}
+
+/* --- Dev lab: prod DROP cutover (impl-04 /ops/drop/prod/*) --------------- */
+
+export type DropProdApiKeySaveResult = {
+  status: string
+  configured: boolean
+}
+
+export type DropProdConfirmRunResult = {
+  status: string
+  process_id?: number | null
+  run_id?: string | null
+}
+
+export type DropProdRunStatus = {
+  status: string
+  configured?: boolean
+  process_id?: number | null
+  run_id?: string | null
+}
+
+/** Store prod X-API-KEY. Response never includes the key. */
+export function saveDropProdApiKey(body: { api_key: string }) {
+  return fetchAdminApi<DropProdApiKeySaveResult>('/ops/drop/prod/key', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+/** Confirm download → land → promote → dispatch → Data ensure-drain. */
+export function confirmDropProdRun(body: { confirm: true }) {
+  return fetchAdminApi<DropProdConfirmRunResult>('/ops/drop/prod/confirm-run', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function getDropProdRunStatus() {
+  return fetchAdminApi<DropProdRunStatus>('/ops/drop/prod/status')
 }
 
 /* --- Auth0 match search / confirm (S09 APIs; design lab later) ----------- */

@@ -1,9 +1,16 @@
+# Admin web IAP front door — same pattern as admin-web-dev.
+# Browser Google login via IAP; same-origin /api/*; nginx mints Cloud Run
+# invoker token and forwards X-Goog-Authenticated-User-* to admin-api.
 substitutions:
   _REGION: us-east4
   _PROJECT: example-gcp-project
   _SERVICE: admin-web-prod
   _TAG: latest
-  _VITE_ADMIN_API_URL: https://admin-api-prod-hsa55rg7ja-uk.a.run.app
+  # Same-origin /api — do not bake a cross-origin admin-api URL.
+  # Absolute VITE_ADMIN_API_URL makes the browser call admin-api-prod directly;
+  # Cloud Run/IAP hide that response and GET /me fails with "Failed to fetch".
+  _VITE_ADMIN_API_URL: ""
+  _ADMIN_API_UPSTREAM: https://admin-api-prod-hsa55rg7ja-uk.a.run.app
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -42,6 +49,7 @@ steps:
       - --memory=256Mi
       - --cpu=1
       - --max-instances=3
+      - --set-env-vars=ADMIN_API_UPSTREAM=${_ADMIN_API_UPSTREAM}
 
   - id: enable-iap
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
@@ -49,7 +57,7 @@ steps:
     args:
       - -c
       - |
-        gcloud components install beta --quiet
+        # cloud-sdk:slim already ships beta; do not run components install.
         gcloud beta run services update ${_SERVICE} --region=${_REGION} --project=${_PROJECT} --iap --quiet
         gcloud run services add-iam-policy-binding ${_SERVICE} --region=${_REGION} --project=${_PROJECT} \
           --member=serviceAccount:service-95660886550@gcp-sa-iap.iam.gserviceaccount.com \
@@ -59,6 +67,19 @@ steps:
         gcloud beta iap web add-iam-policy-binding --project=${_PROJECT} --region=${_REGION} \
           --resource-type=cloud-run --service=${_SERVICE} \
           --member=user:dev-owner-1@example.com --role=roles/iap.httpsResourceAccessor \
+          --condition=None --quiet || true
+        # Habeas Workspace domain — same operator login path as admin-web-dev.
+        gcloud beta iap web add-iam-policy-binding --project=${_PROJECT} --region=${_REGION} \
+          --resource-type=cloud-run --service=${_SERVICE} \
+          --member=domain:habeas.us --role=roles/iap.httpsResourceAccessor \
+          --condition=None --quiet || true
+        gcloud beta iap web add-iam-policy-binding --project=${_PROJECT} --region=${_REGION} \
+          --resource-type=cloud-run --service=${_SERVICE} \
+          --member=user:dev-owner-4@example.com --role=roles/iap.httpsResourceAccessor \
+          --condition=None --quiet || true
+        gcloud beta iap web add-iam-policy-binding --project=${_PROJECT} --region=${_REGION} \
+          --resource-type=cloud-run --service=${_SERVICE} \
+          --member=user:dev-owner-3@example.com --role=roles/iap.httpsResourceAccessor \
           --condition=None --quiet || true
 
 images:

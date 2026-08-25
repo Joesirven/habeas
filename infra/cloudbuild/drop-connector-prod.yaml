@@ -1,0 +1,71 @@
+# drop-connector-prod — twin of drop-connector-dev for first CA DROP production pull.
+# Requires production Cloud SQL + _DATABASE_URL substitution.
+# DROP_ENV=production → https://api.drop.privacy.ca.gov (never /sandbox).
+# DROP_API_KEY from GSM drop-prod-api-key via --set-secrets (not a Cloud Build
+# substitution). Do not commit a key.
+# Do not set DROP_ALLOW_DEFAULT_REQUESTOR_STATE on this service.
+# DROP_INTAKE_GCS_BUCKET: Jose/ops must set a real bucket at submit via
+# _DROP_INTAKE_GCS_BUCKET. Do not invent a name. Do not reuse
+# FULFILLMENT_GCS_BUCKET / privacy-fulfillment-dev. Empty → file://
+# (Confirm must refuse).
+substitutions:
+  _REGION: us-east4
+  _PROJECT: example-gcp-project
+  _SERVICE: drop-connector-prod
+  _TAG: latest
+  # Override at submit time when prod SQL is provisioned.
+  _CLOUDSQL_INSTANCE: example-gcp-project:us-east4:dpra-prod
+  # Ops-named ZIP intake bucket. Default empty — do not invent; set at submit.
+  _DROP_INTAKE_GCS_BUCKET: ""
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+      - -f
+      - app/drop_connector/Dockerfile
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
+      - --set-env-vars=SERVICE_NAME=drop-connector,WORKER_ID=drop-connector-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DROP_ENV=production,DROP_API_BASE_URL=https://api.drop.privacy.ca.gov,DATABASE_URL=${_DATABASE_URL},GCS_TRANSPORT=google,DROP_INTAKE_GCS_BUCKET=${_DROP_INTAKE_GCS_BUCKET}
+      - --set-secrets=DROP_API_KEY=drop-prod-api-key:latest
+
+  # admin-api runtime SA only — never user/IAP run.invoker on workers. Never allUsers.
+  - id: grant-admin-api-invoker
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - add-iam-policy-binding
+      - ${_SERVICE}
+      - --region=${_REGION}
+      - --member=serviceAccount:95660886550-compute@developer.gserviceaccount.com
+      - --role=roles/run.invoker
+      - --quiet
+
+images:
+  - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}

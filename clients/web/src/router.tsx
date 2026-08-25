@@ -31,6 +31,7 @@ import {
   type SheetsOauthLabSearch,
 } from '@/routes/dev/sheets-oauth'
 import { SheetsCadenceLabPage } from '@/routes/dev/sheets-cadence-lab'
+import { DropProdCutoverLabPage } from '@/routes/dev/drop-prod-cutover'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
 import { RequestsSlasPage } from '@/routes/requests/slas'
@@ -739,6 +740,12 @@ const pendingSettingsLabRoute = createRoute({
   component: PendingSettingsLabPage,
 })
 
+const dropProdCutoverLabRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/dev/drop-prod-cutover',
+  component: DropProdCutoverLabPage,
+})
+
 const requestsSlasRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests/slas',
@@ -847,6 +854,15 @@ function parseOwnerConnectorsSearch(
   const parsed: OwnerConnectorsSearch = {}
   if (typeof search.vertical === 'string' && search.vertical.trim()) {
     parsed.vertical = search.vertical.trim()
+  }
+  if (typeof search.code === 'string' && search.code.trim()) {
+    parsed.code = search.code.trim()
+  }
+  if (typeof search.state === 'string' && search.state.trim()) {
+    parsed.state = search.state.trim()
+  }
+  if (typeof search.error === 'string' && search.error.trim()) {
+    parsed.error = search.error.trim()
   }
   return parsed
 }
@@ -987,6 +1003,7 @@ const routeTree = rootRoute.addChildren([
   sheetsCadenceLabRoute,
   sheetsOauthLabRoute,
   pendingSettingsLabRoute,
+  dropProdCutoverLabRoute,
   requestsSlasRoute,
   manualRequestRoute,
   docsRoute,

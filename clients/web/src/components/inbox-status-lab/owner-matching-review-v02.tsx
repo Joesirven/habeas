@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 
@@ -18,7 +18,6 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import {
-  getDropMatchingResults,
   getRequest,
   listOwnerConnectors,
   suggestedDropResponseStatus,
@@ -258,25 +257,6 @@ function KpiStrip({ items }: { items: Kpi[] }) {
   )
 }
 
-function contactSearchText(contact: MatchedPersonContact): string {
-  return [
-    formatMatchedContactLabel(contact),
-    contact.state,
-    contact.first_initial,
-    contact.last_initial,
-    contact.last_name,
-    contact.email,
-  ]
-    .filter((value): value is string => Boolean(value && value.trim()))
-    .join(' ')
-    .toLowerCase()
-}
-
-function contactMatchesQuery(contact: MatchedPersonContact, query: string): boolean {
-  if (!query) return true
-  return contactSearchText(contact).includes(query)
-}
-
 function requestTypeEmphasis(requestType: string | null | undefined): {
   delete: boolean
   optIn: boolean
@@ -415,6 +395,9 @@ export function OwnerMatchingReviewV02({
   disabled,
   pending,
   onApply,
+  onSearchPeople,
+  peopleSearchBlocked,
+  peopleSearchPending,
 }: MatchingResultsViewProps) {
   const { me } = useMe()
   const requestUuid = item ? matchingLabRequestId(item.request_id) : null
@@ -426,6 +409,11 @@ export function OwnerMatchingReviewV02({
   const [removedDwids, setRemovedDwids] = useState<string[]>([])
   const [personActions, setPersonActions] = useState<Record<string, PersonAction>>({})
   const [searchQuery, setSearchQuery] = useState('')
+  const [searchHits, setSearchHits] = useState<MatchedPersonContact[]>([])
+  const [searchBusy, setSearchBusy] = useState(false)
+  const [searchFailed, setSearchFailed] = useState(false)
+  const searchFnRef = useRef(onSearchPeople)
+  searchFnRef.current = onSearchPeople
 
   const requestQuery = useQuery({
     queryKey: ['admin-api', 'requests', requestUuid, 'matching-review-v02'],
@@ -444,26 +432,6 @@ export function OwnerMatchingReviewV02({
   })
 
   const trimmedSearch = searchQuery.trim()
-  const systemSearchQuery = useQuery({
-    queryKey: [
-      'admin-api',
-      'ops',
-      'drop',
-      'matching-results',
-      'v02-system-search',
-      requestUuid,
-      trimmedSearch,
-    ],
-    queryFn: () =>
-      getDropMatchingResults({
-        q: trimmedSearch,
-        request_id: requestUuid ?? undefined,
-        limit: 8,
-      }),
-    enabled: trimmedSearch.length >= 2,
-    staleTime: 15_000,
-    retry: false,
-  })
 
   const empty = resultViewEmpty(loading, Boolean(item))
   const matchType = detail?.match_type ?? item?.match_type
@@ -478,6 +446,8 @@ export function OwnerMatchingReviewV02({
     setRemovedDwids([])
     setSearchQuery('')
     setPersonActions({})
+    setSearchHits([])
+    setSearchFailed(false)
   }, [item?.request_id, systemId, contactKey])
 
   useEffect(() => {
@@ -532,13 +502,18 @@ export function OwnerMatchingReviewV02({
     [detail?.attempts],
   )
 
-  const gate = gateMatchesSystem(attemptGate ?? connectorGate ?? reminderGate, systemId)
+  const localGate = gateMatchesSystem(attemptGate ?? connectorGate ?? reminderGate, systemId)
+  const gate = peopleSearchBlocked ?? localGate
   const needsConnection =
     !gate &&
     !catalogVertical &&
     matchingDetailIsNotLive(detail) &&
     !isHiddenSystemId(systemId)
   const matchingBlocked = Boolean(gate || needsConnection)
+  const searchGated = matchingBlocked
+  const searchPendingSetup = !searchGated && (Boolean(peopleSearchPending) || !onSearchPeople)
+  const directorySearchOpen =
+    Boolean(onSearchPeople) && !searchGated && !searchPendingSetup && !disabled && !pending
   const showConnectorsButton = matchingBlocked && !catalogVertical
 
   const peopleDirectory = useMemo(() => {
@@ -554,24 +529,37 @@ export function OwnerMatchingReviewV02({
     [peopleDirectory, removedDwids],
   )
 
-  const searchHits = useMemo(() => {
-    const query = trimmedSearch.toLowerCase()
-    if (query.length < 2) return []
-    const visible = new Set(rows.map((contact) => contact.dwid))
-    return peopleDirectory.filter(
-      (contact) =>
-        Boolean(contact.dwid) &&
-        !visible.has(contact.dwid) &&
-        contactMatchesQuery(contact, query),
-    )
-  }, [peopleDirectory, rows, trimmedSearch])
-
-  const directorySearchReady = systemSearchQuery.isFetched || systemSearchQuery.isError
-  const systemSearchEmpty =
-    trimmedSearch.length >= 2 &&
-    searchHits.length === 0 &&
-    (systemSearchQuery.data?.results.length ?? 0) === 0 &&
-    directorySearchReady
+  useEffect(() => {
+    const needle = trimmedSearch
+    if (!directorySearchOpen || needle.length < 2) {
+      setSearchHits([])
+      setSearchBusy(false)
+      setSearchFailed(false)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setSearchBusy(true)
+        setSearchFailed(false)
+        try {
+          const result = (await searchFnRef.current?.(needle)) ?? []
+          if (cancelled) return
+          setSearchHits(result)
+        } catch {
+          if (cancelled) return
+          setSearchHits([])
+          setSearchFailed(true)
+        } finally {
+          if (!cancelled) setSearchBusy(false)
+        }
+      })()
+    }, 200)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [directorySearchOpen, trimmedSearch])
 
   if (empty) return empty
   if (!item) return null
@@ -611,6 +599,14 @@ export function OwnerMatchingReviewV02({
     .filter((action): action is PersonAction => action === '3' || action === '4')
   const mixedActions = new Set(selectedActions).size > 1
   const blockedCopy = matchingBlocked ? blockedMatchingCopy(gate, needsConnection) : null
+  const visibleIds = new Set(rows.map((contact) => contact.dwid))
+  const addableHits = searchHits.filter(
+    (contact) => Boolean(contact.dwid) && !visibleIds.has(contact.dwid),
+  )
+  const pendingSearchCopy = peopleSearchPending ?? {
+    title: 'Needs connection',
+    support: 'This system is not connected for people search yet.',
+  }
 
   const kpis: Kpi[] = [
     {
@@ -823,15 +819,20 @@ export function OwnerMatchingReviewV02({
         <input
           type="search"
           value={searchQuery}
-          disabled={locked}
+          disabled={locked || searchGated || searchPendingSetup}
           placeholder="Search this system…"
           aria-label="Search people in this system"
           className={cn(statusSelectClass(), 'w-full max-w-md')}
           onChange={(event) => setSearchQuery(event.target.value)}
         />
-        {trimmedSearch.length >= 2 ? (
+        {searchGated ? null : searchPendingSetup ? (
+          <p className="text-[0.65rem] text-mute">
+            {pendingSearchCopy.title}
+            {pendingSearchCopy.support ? ` · ${pendingSearchCopy.support}` : ''}
+          </p>
+        ) : trimmedSearch.length >= 2 ? (
           <div className="space-y-1">
-            {searchHits.map((contact) => (
+            {addableHits.map((contact) => (
               <div
                 key={contact.dwid}
                 className="flex flex-wrap items-center justify-between gap-2 text-xs"
@@ -848,11 +849,15 @@ export function OwnerMatchingReviewV02({
                 </Button>
               </div>
             ))}
-            {searchHits.length === 0 && !systemSearchQuery.isFetching ? (
+            {searchBusy ? (
+              <p className="text-[0.65rem] text-mute">Searching this system…</p>
+            ) : null}
+            {searchFailed ? (
+              <p className="text-[0.65rem] text-mute">Could not search this system.</p>
+            ) : null}
+            {!searchBusy && !searchFailed && addableHits.length === 0 ? (
               <p className="text-[0.65rem] text-mute">
-                {systemSearchEmpty
-                  ? 'No directory search for this system yet.'
-                  : 'No people from this system match that search.'}
+                No people from this system match that search.
               </p>
             ) : null}
           </div>

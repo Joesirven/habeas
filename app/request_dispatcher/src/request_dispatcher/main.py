@@ -22,7 +22,8 @@ settings = RequestDispatcherSettings()
 
 
 class DispatchRequest(BaseModel):
-    limit: int = Field(default=100, ge=1, le=5000)
+    limit: int = Field(default=5_000, ge=1, le=2_000_000)
+    drain_all: bool = False
 
 
 @asynccontextmanager
@@ -78,18 +79,21 @@ async def dispatch(body: DispatchRequest | None = None):
     pool = get_pool()
     async with pool.acquire() as conn:
         try:
-            result = await run_dispatch(conn, limit=req.limit)
+            result = await run_dispatch(
+                conn, limit=req.limit, drain_all=req.drain_all
+            )
         except Exception:
             logger.exception("dispatch_failed", extra={"event": "dispatch_failed"})
             raise HTTPException(status_code=500, detail="dispatch failed") from None
 
-    busy = result.enqueued or result.held_for_triage
+    busy = result.enqueued or result.held_for_triage or result.auth0_enqueued
     return {
         "status": "ok" if busy else "idle",
         "enqueued": result.enqueued,
+        "auth0_enqueued": result.auth0_enqueued,
         "held_for_triage": result.held_for_triage,
         "skipped_open_triage": result.skipped_open_triage,
-        "request_ids": result.request_ids,
+        "request_ids": result.request_ids[:20],
     }
 
 

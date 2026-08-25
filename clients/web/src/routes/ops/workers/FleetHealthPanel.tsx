@@ -1,18 +1,73 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
-import { type ReactNode } from 'react'
+import { Link, useNavigate, useSearch } from '@tanstack/react-router'
+import { useMemo, type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import { actionToast } from '@/lib/action-toast'
-import { getFleetWorkers } from '@/lib/api'
+import { getFleetWorkers, type FleetWorkerRecord } from '@/lib/api'
 import {
   fleetHealthOk,
   fleetWorkerDisplayName,
+  orderedWorkers,
   workerKey,
 } from '@/lib/worker-fleet'
 
+type FleetHealthSearch = {
+  health?: 'ok' | 'down'
+  worker?: string
+  table?: string
+}
+
+const HEALTH_FILTERS = [
+  { value: undefined, label: 'All' },
+  { value: 'ok' as const, label: 'ok' },
+  { value: 'down' as const, label: 'down' },
+]
+
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
+}
+
+function parseFleetHealthSearch(
+  search: Record<string, unknown>,
+): FleetHealthSearch {
+  const parsed: FleetHealthSearch = {}
+  if (search.health === 'ok' || search.health === 'down') {
+    parsed.health = search.health
+  }
+  if (typeof search.worker === 'string' && search.worker.trim()) {
+    parsed.worker = search.worker.trim()
+  }
+  if (typeof search.table === 'string' && search.table.trim()) {
+    parsed.table = search.table.trim()
+  }
+  return parsed
+}
+
+function includesNormalized(
+  haystack: string | null | undefined,
+  needle: string,
+): boolean {
+  if (!needle) return true
+  return (haystack ?? '').toLowerCase().includes(needle.toLowerCase())
+}
+
+function workerMatchesFilters(
+  worker: FleetWorkerRecord,
+  filters: FleetHealthSearch,
+): boolean {
+  if (filters.health) {
+    const ok = fleetHealthOk(worker)
+    if (filters.health === 'ok' && ok !== true) return false
+    if (filters.health === 'down' && ok !== false) return false
+  }
+  if (filters.worker && !includesNormalized(workerKey(worker), filters.worker)) {
+    return false
+  }
+  if (filters.table && !includesNormalized(worker.attempt_table, filters.table)) {
+    return false
+  }
+  return true
 }
 
 function flagChip(on: boolean, labelOn: string, labelOff: string) {
@@ -30,6 +85,11 @@ function flagChip(on: boolean, labelOn: string, labelOff: string) {
 }
 
 export function FleetHealthPanel() {
+  const navigate = useNavigate()
+  const search = parseFleetHealthSearch(
+    useSearch({ strict: false }) as Record<string, unknown>,
+  )
+
   const fleetQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'fleet-workers'],
     queryFn: getFleetWorkers,
@@ -37,9 +97,27 @@ export function FleetHealthPanel() {
     placeholderData: (previous) => previous,
   })
 
-  const workers = fleetQuery.data?.workers ?? []
+  const workers = orderedWorkers(fleetQuery.data)
+  const visibleWorkers = useMemo(
+    () => workers.filter((worker) => workerMatchesFilters(worker, search)),
+    [workers, search.health, search.worker, search.table],
+  )
   const warnings = fleetQuery.data?.discovery_warnings ?? []
   const mode = fleetQuery.data?.discovery_mode
+  const filtersActive = Boolean(search.health || search.worker || search.table)
+
+  function patchSearch(patch: Partial<FleetHealthSearch>) {
+    const next: FleetHealthSearch = {
+      health: 'health' in patch ? patch.health : search.health,
+      worker: 'worker' in patch ? patch.worker : search.worker,
+      table: 'table' in patch ? patch.table : search.table,
+    }
+    void navigate({
+      to: '/ops/workers/settings',
+      search: next as never,
+      replace: true,
+    })
+  }
 
   return (
     <div className="taste-panel-soft flex flex-col gap-5 p-6 sm:p-7">
@@ -60,6 +138,89 @@ export function FleetHealthPanel() {
         {fleetQuery.isFetching && fleetQuery.data ? (
           <span className="taste-frost-chip">Refreshing</span>
         ) : null}
+      </div>
+
+      <div className="flex flex-wrap items-end gap-2 rounded-md border border-line bg-paper/60 px-3 py-2">
+        <div className="flex flex-col gap-1 text-xs text-ink-soft">
+          Health
+          <div className="flex gap-1">
+            {HEALTH_FILTERS.map((option) => {
+              const active = search.health === option.value
+              return (
+                <button
+                  key={option.label}
+                  type="button"
+                  className={active ? 'taste-btn-primary text-xs' : 'taste-btn text-xs'}
+                  onClick={() => patchSearch({ health: option.value })}
+                >
+                  {option.label}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+        <label className="flex flex-col gap-1 text-xs text-ink-soft">
+          Worker key
+          <input
+            type="search"
+            className="min-w-[10rem] rounded-md border border-line bg-paper px-2 py-1.5 font-mono text-xs text-ink"
+            value={search.worker ?? ''}
+            onChange={(event) =>
+              patchSearch({
+                worker: event.target.value.trim() || undefined,
+              })
+            }
+            placeholder="search key"
+            autoComplete="off"
+            list="fleet-worker-keys"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-ink-soft">
+          Attempt table
+          <input
+            type="search"
+            className="min-w-[10rem] rounded-md border border-line bg-paper px-2 py-1.5 font-mono text-xs text-ink"
+            value={search.table ?? ''}
+            onChange={(event) =>
+              patchSearch({
+                table: event.target.value.trim() || undefined,
+              })
+            }
+            placeholder="table name"
+            autoComplete="off"
+            list="fleet-attempt-tables"
+          />
+        </label>
+        {filtersActive ? (
+          <button
+            type="button"
+            className="taste-btn text-xs"
+            onClick={() =>
+              patchSearch({ health: undefined, worker: undefined, table: undefined })
+            }
+          >
+            Clear
+          </button>
+        ) : null}
+        {fleetQuery.data && workers.length > 0 ? (
+          <span className="ml-auto text-[0.65rem] text-mute tabular-nums">
+            {visibleWorkers.length}
+            {filtersActive ? ` / ${workers.length}` : ''} workers
+          </span>
+        ) : null}
+        <datalist id="fleet-worker-keys">
+          {workers.map((worker) => {
+            const key = workerKey(worker)
+            return key ? <option key={key} value={key} /> : null
+          })}
+        </datalist>
+        <datalist id="fleet-attempt-tables">
+          {workers.map((worker) =>
+            worker.attempt_table ? (
+              <option key={worker.attempt_table} value={worker.attempt_table} />
+            ) : null,
+          )}
+        </datalist>
       </div>
 
       {fleetQuery.isPending && !fleetQuery.data ? <SkeletonLines lines={5} /> : null}
@@ -104,6 +265,19 @@ export function FleetHealthPanel() {
           <p className="text-sm text-ink-soft">
             No workers discovered yet. They appear when Scheduler or Cloud Run discovery finds them.
           </p>
+        ) : visibleWorkers.length === 0 ? (
+          <p className="text-sm text-ink-soft">
+            No workers match the current filters.{' '}
+            <button
+              type="button"
+              className="underline"
+              onClick={() =>
+                patchSearch({ health: undefined, worker: undefined, table: undefined })
+              }
+            >
+              Clear
+            </button>
+          </p>
         ) : (
           <div className="overflow-x-auto">
             <table className="taste-table">
@@ -117,7 +291,7 @@ export function FleetHealthPanel() {
                 </tr>
               </thead>
               <tbody>
-                {workers.map((worker) => {
+                {visibleWorkers.map((worker) => {
                   const key = workerKey(worker)
                   const ok = fleetHealthOk(worker)
                   const statusCode = worker.health?.status_code ?? worker.status_code

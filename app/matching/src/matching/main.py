@@ -29,7 +29,6 @@ from matching.bq_lookup import DEFAULT_BQ_DATASET, DEFAULT_BQ_PROJECT, serving_t
 from matching.models import IntakeSource, MatchRequest
 from matching.results import complete_attempt_error, complete_attempt_success
 from matching.router import get_pipeline
-from matching.vertical_match import run_auth0_vertical_match
 
 logger = logging.getLogger(__name__)
 
@@ -218,24 +217,6 @@ async def process_next():
                     "reason": "bq_lookup_error",
                     "retry_after": retry_after.isoformat(),
                 }
-            auth0_audit: dict[str, Any] = {}
-            try:
-                auth0_audit = await run_auth0_vertical_match(
-                    conn,
-                    request_id=request_id,
-                    attempt_id=attempt_id,
-                    list_type=match_request.list_type,
-                    hash_fields=match_request.hash_fields,
-                )
-            except Exception as exc:
-                logger.error(
-                    "auth0_vertical_match_failed",
-                    extra={
-                        "event": "auth0_vertical_match_failed",
-                        "error_summary": redact_error_text(str(exc)),
-                    },
-                )
-                auth0_audit = {"auth0_error_code": "auth0_lookup_error"}
             audit = build_matching_audit_payload(
                 started_at=started_at,
                 attempt_number=attempt_number,
@@ -247,9 +228,6 @@ async def process_next():
                 match_count=result.match_count,
                 matched=result.matched,
                 matched_via=result.matched_via,
-                auth0_match_count=auth0_audit.get("auth0_match_count"),
-                auth0_bq_dataset=auth0_audit.get("auth0_bq_dataset"),
-                auth0_error_code=auth0_audit.get("auth0_error_code"),
             )
             result_id = await complete_attempt_success(
                 conn,

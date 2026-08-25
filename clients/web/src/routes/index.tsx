@@ -22,12 +22,18 @@ import {
   getDropPipeline,
   getHealth,
   getLegalPortfolio,
-  getMeHome,
   getNeedsAttention,
-  type MeHomePayload,
+  getOwnerFulfillmentNeedsAttention,
 } from '@/lib/api'
+import {
+  ownerAssignedVerticalSummary,
+  ownerConnectorActionRequiredCount,
+  ownerHomeQueueRows,
+} from '@/lib/connection-display'
+import { buildReminderBannerItems } from '@/lib/owner-connector-ui'
 import { cn, firstNameFromEmail } from '@/lib/utils'
 import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
+import { ownerVisibleInboxItems } from '@/routes/requests/needs-attention'
 
 function OperatorDashboardHome() {
   const { isAdmin } = useMe()
@@ -471,261 +477,205 @@ function welcomeFirstName(me: { given_name?: string | null; email?: string } | u
   return firstNameFromEmail(me?.email)
 }
 
-function shortRequestId(requestId: string): string {
-  return requestId.length > 8 ? `${requestId.slice(0, 8)}…` : requestId
+function OwnerPulseChip({
+  to,
+  search,
+  value,
+  label,
+  tone,
+}: {
+  to: '/requests/needs-attention' | '/owner/connectors'
+  search?: Record<string, string>
+  value: string
+  label: string
+  tone?: 'warning' | 'danger'
+}) {
+  return (
+    <Link
+      to={to}
+      search={search}
+      className="min-w-0 flex-1 shrink-0 rounded px-1 py-0.5 text-left transition-colors hover:bg-panel/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid sm:px-1.5"
+    >
+      <p
+        className={cn(
+          'font-display text-base font-medium tabular-nums leading-none sm:text-lg',
+          tone === 'warning' && 'text-amber-700',
+          tone === 'danger' && 'text-red-700',
+          !tone && 'text-ink',
+        )}
+      >
+        {value}
+      </p>
+      <p className="mt-0.5 truncate text-[0.6rem] leading-tight text-mute sm:text-[0.65rem]">
+        {label}
+      </p>
+    </Link>
+  )
 }
-
-function formatRelativeTime(value: string | null | undefined): string {
-  if (!value) return '—'
-  const date = new Date(value)
-  const diffMs = Date.now() - date.getTime()
-  if (Number.isNaN(diffMs)) return '—'
-  const diffSec = Math.floor(diffMs / 1000)
-  if (diffSec < 60) return 'just now'
-  const diffMin = Math.floor(diffSec / 60)
-  if (diffMin < 60) return `${diffMin}m ago`
-  const diffHr = Math.floor(diffMin / 60)
-  if (diffHr < 24) return `${diffHr}h ago`
-  const diffDay = Math.floor(diffHr / 24)
-  if (diffDay < 7) return `${diffDay}d ago`
-  return date.toLocaleDateString()
-}
-
-function formatWhen(value: string | null | undefined): string {
-  if (!value) return '—'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '—'
-  return date.toLocaleString()
-}
-
-/** API `urgent_deadline_days` is days into the soonest deadline (review or statutory). */
-function formatUrgentDeadline(daysInto: number | null): string {
-  if (daysInto == null || Number.isNaN(daysInto)) {
-    return '—'
-  }
-  const days = Math.trunc(daysInto)
-  return `${days} day${days === 1 ? '' : 's'} into deadline`
-}
-
-const YEAR_STAGES: Array<{ key: keyof MeHomePayload['stage_counts_year']; label: string }> = [
-  { key: 'ingest', label: 'Ingest' },
-  { key: 'matching', label: 'Matching' },
-  { key: 'fulfillment', label: 'Fulfillment' },
-  { key: 'notice', label: 'Notice' },
-]
 
 function DataOwnerHome() {
   const { me, role } = useMe()
-  const homeQuery = useQuery({
-    queryKey: ['admin-api', 'me', 'home'],
-    queryFn: getMeHome,
-    refetchInterval: 15_000,
-    retry: 2,
+  const attentionQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'do-home'],
+    queryFn: () => getNeedsAttention({ limit: 1000, kind: 'matching' }),
+    refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })
-  const home = homeQuery.data
-  const loading = homeQuery.isPending && !home
-  const loadError = homeQuery.isError && !home
-  const deadline = formatUrgentDeadline(home?.urgent_deadline_days ?? null)
-  const stages = home?.stage_counts_year ?? null
-  const eyebrow = role === 'data_user' ? 'Data user' : 'Data owner'
-  const firstName = welcomeFirstName({
-    given_name: home?.given_name || me?.given_name,
-    email: me?.email,
+  const fulfillmentQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'do-fulfillment'],
+    queryFn: () => getOwnerFulfillmentNeedsAttention({ limit: 1000 }),
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
   })
+  const matchingItems = attentionQuery.data?.items ?? []
+  const fulfillmentItems = fulfillmentQuery.data?.items ?? []
+  const assignedVerticals = new Set(
+    (me?.verticals ?? []).map((id) => id.trim()).filter(Boolean),
+  )
+  const visibleMatching = ownerVisibleInboxItems(matchingItems, me?.verticals)
+  const matchingCount = visibleMatching.length
+  const assignedCount = [...matchingItems, ...fulfillmentItems].filter((item) => {
+    const vertical = item.vertical?.trim()
+    if (!vertical) return false
+    return assignedVerticals.has(vertical)
+  }).length
+  const fulfillmentWaiting = fulfillmentQuery.data?.total ?? fulfillmentItems.length
+  const connectorCount = ownerConnectorActionRequiredCount(me)
+  const verticalSummary = ownerAssignedVerticalSummary(
+    me?.assigned_vertical_labels,
+    me?.verticals,
+  )
+  const reminderBanners = buildReminderBannerItems(
+    (me?.connector_reminders ?? []).filter(
+      (reminder) =>
+        assignedVerticals.size === 0 || assignedVerticals.has(reminder.vertical_id),
+    ),
+  )
+  const queue = ownerHomeQueueRows({
+    matching: visibleMatching,
+    fulfillment: fulfillmentItems,
+    limit: 8,
+  })
+  const loading =
+    (attentionQuery.isPending && !attentionQuery.data) ||
+    (fulfillmentQuery.isPending && !fulfillmentQuery.data)
+  const loadError = attentionQuery.isError || fulfillmentQuery.isError
+  const eyebrow = role === 'data_user' ? 'Data user' : 'Data owner'
+  const firstName = welcomeFirstName(me)
 
   return (
     <section className="space-y-4">
       <header>
-        <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">{eyebrow}</p>
-        <h2 className="mt-1 text-xl font-semibold tracking-tight text-ink">Home</h2>
+        <p className="taste-micro">{eyebrow}</p>
+        <h2 className="mt-1 font-display text-2xl font-medium tracking-tight text-ink">Home</h2>
         <p className="mt-1 text-sm text-ink-soft">Welcome {firstName}</p>
+        <p className="mt-1 text-sm font-medium text-ink">{verticalSummary}</p>
       </header>
 
       {loadError ? (
-        <p className="text-sm text-red-700">Could not load Home — retrying automatically.</p>
+        <p className="text-sm text-red-700">Could not load your queue — retrying automatically.</p>
       ) : null}
 
       {loading ? (
         <div className="rounded-lg border border-line bg-paper p-5">
-          <SkeletonLines lines={6} />
+          <SkeletonLines lines={5} />
         </div>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,20rem)]">
-          <div className="divide-y divide-line rounded-lg border border-line bg-paper">
-            <section className="grid gap-3 px-4 py-3 sm:grid-cols-2" aria-label="Attention">
-              <Link
+        <div className="divide-y divide-line rounded-lg border border-line">
+          <section className="px-4 py-2" aria-label="Owner pulse">
+            <div className="flex flex-nowrap items-stretch justify-between gap-0.5 overflow-x-auto">
+              <OwnerPulseChip
                 to="/requests/needs-attention"
-                className="rounded-md px-1 py-0.5 hover:bg-panel/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid"
-              >
-                <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
-                  Needs attention
-                </p>
-                <p
-                  className={cn(
-                    'mt-1 text-2xl font-semibold tabular-nums text-ink',
-                    (home?.pending_attention_count ?? 0) > 0 && 'text-amber-700',
-                  )}
-                >
-                  {home ? home.pending_attention_count.toLocaleString() : '—'}
-                </p>
-                <p className="mt-0.5 text-[0.65rem] text-ink-soft">
-                  Matching and fulfillment waiting now
-                </p>
-              </Link>
-              <div className="px-1 py-0.5">
-                <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
-                  Deadline
-                </p>
-                <p className="mt-1 text-2xl font-semibold tabular-nums text-ink">
-                  {deadline}
-                </p>
-                <p className="mt-0.5 text-[0.65rem] text-ink-soft">Most urgent open item</p>
-              </div>
-            </section>
+                search={{ kind: 'matching' }}
+                value={attentionQuery.data ? String(matchingCount) : '—'}
+                label="Matching"
+              />
+              <OwnerPulseChip
+                to="/requests/needs-attention"
+                search={{ kind: 'pending_tasks' }}
+                value={
+                  attentionQuery.data && fulfillmentQuery.data
+                    ? String(assignedCount)
+                    : '—'
+                }
+                label="Assigned"
+              />
+              <OwnerPulseChip
+                to="/requests/needs-attention"
+                search={{ kind: 'fulfillment' }}
+                value={fulfillmentQuery.data ? String(fulfillmentWaiting) : '—'}
+                label="Fulfillment waiting"
+                tone={fulfillmentWaiting > 0 ? 'warning' : undefined}
+              />
+              <OwnerPulseChip
+                to="/owner/connectors"
+                value={connectorCount == null ? '—' : String(connectorCount)}
+                label="Connectors"
+                tone={connectorCount != null && connectorCount > 0 ? 'danger' : undefined}
+              />
+            </div>
+          </section>
 
-            {stages ? (
-              <section className="px-4 py-3" aria-label="Requests this year">
-                <HomeModuleHeader
-                  compact
-                  title="This year"
-                  hint="Requests at each stage for your verticals."
-                />
-                <div className="grid grid-cols-4 gap-2">
-                  {YEAR_STAGES.map((stage) => (
-                    <div key={stage.key} className="min-w-0">
-                      <p className="truncate text-[0.65rem] text-mute">{stage.label}</p>
-                      <p className="mt-0.5 text-lg font-semibold tabular-nums text-ink">
-                        {stages[stage.key].toLocaleString()}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            ) : null}
-
-            <section className="grid gap-3 px-4 py-3 sm:grid-cols-2" aria-label="Upcoming">
-              <div>
-                <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
-                  Next California DROP
-                </p>
-                <p className="mt-1 text-sm font-semibold tabular-nums text-ink">
-                  {home ? formatWhen(home.next_ca_drop.next_run_at) : '—'}
-                </p>
-                {home?.next_ca_drop.cadence || home?.next_ca_drop.schedule_utc ? (
-                  <p className="mt-0.5 text-[0.65rem] text-ink-soft">
-                    {[home.next_ca_drop.cadence, home.next_ca_drop.schedule_utc]
-                      .filter(Boolean)
-                      .join(' · ')}
-                    {home.next_ca_drop.schedule_utc ? ' UTC' : ''}
-                  </p>
-                ) : null}
-              </div>
-              <div>
-                <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
-                  Next data refresh
-                </p>
-                <p className="mt-1 text-sm font-semibold tabular-nums text-ink">
-                  {home?.next_data_refresh
-                    ? formatWhen(home.next_data_refresh.next_at)
-                    : '—'}
-                </p>
-                {home?.next_data_refresh ? (
-                  <p className="mt-0.5 text-[0.65rem] text-ink-soft">
-                    {home.next_data_refresh.label || home.next_data_refresh.system}
-                  </p>
-                ) : home ? (
-                  <p className="mt-0.5 text-[0.65rem] text-ink-soft">
-                    No refresh scheduled for your systems
-                  </p>
-                ) : null}
-              </div>
-            </section>
-
-            <section className="px-4 py-3" aria-label="Comments">
-              <HomeModuleHeader compact title="Comments" hint="On requests in your verticals." />
-              {!home ? (
-                <p className="text-xs text-mute">—</p>
-              ) : home.comments.length === 0 ? (
-                <p className="text-xs text-mute">No comments yet.</p>
-              ) : (
-                <ul className="divide-y divide-line/80">
-                  {home.comments.map((comment, index) => (
-                    <li key={`${comment.request_id}:${comment.occurred_at}:${index}`}>
-                      <Link
-                        to="/requests/$requestId"
-                        params={{ requestId: comment.request_id }}
-                        className="block py-1.5 hover:bg-panel/40"
-                      >
-                        <p className="text-[0.65rem] text-mute">
-                          <span className="font-mono text-ink-soft">
-                            {shortRequestId(comment.request_id)}
-                          </span>
-                          {' · '}
-                          {comment.actor}
-                          {' · '}
-                          {formatRelativeTime(comment.occurred_at)}
-                        </p>
-                        <p className="mt-0.5 text-sm text-ink">{comment.body}</p>
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-          </div>
-
-          <aside className="rounded-lg border border-line bg-paper px-4 py-3">
+          <section className="px-4 py-2.5">
             <HomeModuleHeader
               compact
-              title="Notifications"
-              hint="Latest comments and new batches."
+              title="Queue"
+              hint="Recent matching and fulfillment for your assigned verticals."
             />
-            {!home ? (
-              <p className="text-xs text-mute">—</p>
-            ) : home.notifications.length === 0 ? (
-              <p className="text-xs text-mute">No updates.</p>
+            {queue.length === 0 ? (
+              <p className="text-xs text-mute">Nothing waiting in your verticals.</p>
             ) : (
               <ul className="divide-y divide-line/80">
-                {home.notifications.map((item) => {
-                  const kindLabel = item.kind === 'batch' ? 'Batch' : 'Comment'
-                  const body = (
-                    <>
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <Badge variant="default" className="normal-case tracking-normal">
-                          {kindLabel}
-                        </Badge>
-                        <span className="text-[0.65rem] tabular-nums text-mute">
-                          {formatRelativeTime(item.occurred_at)}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-sm text-ink">{item.title}</p>
-                      {item.request_id ? (
-                        <p className="mt-0.5 font-mono text-[0.65rem] text-ink-soft">
-                          {shortRequestId(item.request_id)}
-                        </p>
-                      ) : null}
-                    </>
-                  )
-                  return (
-                    <li key={item.id} className="py-2 first:pt-0">
-                      {item.request_id ? (
-                        <Link
-                          to="/requests/$requestId"
-                          params={{ requestId: item.request_id }}
-                          className="block hover:bg-panel/40"
-                        >
-                          {body}
-                        </Link>
-                      ) : (
-                        body
-                      )}
-                    </li>
-                  )
-                })}
+                {queue.map((row) => (
+                  <li key={`${row.lane}:${row.requestId}`}>
+                    <Link
+                      to="/requests/$requestId"
+                      params={{ requestId: row.requestId }}
+                      className="flex flex-wrap items-baseline justify-between gap-2 py-1.5 hover:bg-panel/40"
+                    >
+                      <span className="text-sm font-medium text-ink">{row.title}</span>
+                      <span className="text-[0.65rem] text-mute">
+                        {row.lane === 'matching' ? 'Matching' : 'Fulfillment'}
+                        {row.receivedAt
+                          ? ` · ${new Date(row.receivedAt).toLocaleDateString()}`
+                          : ''}
+                      </span>
+                    </Link>
+                  </li>
+                ))}
               </ul>
             )}
-          </aside>
+          </section>
+
+          <section className="px-4 py-2.5">
+            <HomeModuleHeader
+              compact
+              title="Connectors"
+              hint="Reminders for your assigned verticals only."
+            />
+            {reminderBanners.length === 0 ? (
+              <p className="text-xs text-mute">
+                {connectorCount === 0
+                  ? 'No connector reminders for your verticals.'
+                  : 'Open Connectors to finish setup or refresh.'}
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {reminderBanners.slice(0, 4).map((banner) => (
+                  <li key={banner.id}>
+                    <Link
+                      to="/owner/connectors"
+                      search={{ vertical: banner.verticalId }}
+                      className="block rounded-md border border-line/80 px-2.5 py-2 hover:bg-panel/40"
+                    >
+                      <p className="text-xs font-medium text-ink">{banner.title}</p>
+                      <p className="mt-0.5 text-[0.65rem] text-ink-soft">{banner.description}</p>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
         </div>
       )}
 

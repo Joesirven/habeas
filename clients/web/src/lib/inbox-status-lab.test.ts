@@ -191,9 +191,9 @@ describe('inboxReviewItemVerticalLabel', () => {
     expect(
       inboxReviewItemVerticalLabel({
         request_id: SAMPLE_UUID,
-        vertical: 'mailchimp',
+        vertical: 'auth0',
       }),
-    ).toBe('Mailchimp')
+    ).toBe('Auth0')
     expect(inboxReviewItemVerticalLabel({ request_id: SAMPLE_UUID })).toBeNull()
   })
 })
@@ -1085,13 +1085,14 @@ describe('Results lab Matching tab DWID toolbar', () => {
 })
 
 describe('Inbox individual matching DWID toolbar', () => {
-  test('needs-attention Matching tab mounts the 10-option selector', async () => {
+  test('needs-attention Matching tab pins two-tier and does not mount the 10-option selector', async () => {
     const inbox = await Bun.file(
       new URL('../routes/requests/needs-attention.tsx', import.meta.url),
     ).text()
-    expect(inbox).toContain('<MatchingResultsMethodToolbar')
-    expect(inbox).toContain('readMatchingResultLabMethod()')
+    expect(inbox).not.toContain('MatchingResultsMethodToolbar')
+    expect(inbox).not.toContain('readMatchingResultLabMethod')
     expect(inbox).toContain('<MatchingResultsLabView')
+    expect(inbox).toContain('method="two-tier"')
     expect(inbox).toContain('hideVertical={dataOwnerPersona}')
     expect(inbox).toContain('minmax(10rem,14rem)')
   })

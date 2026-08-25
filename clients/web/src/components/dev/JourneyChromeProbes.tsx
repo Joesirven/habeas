@@ -10,7 +10,7 @@ export const JOURNEY_CHROME_VARIANTS = [
     option: '2',
     name: 'Four-rail · nested substeps',
     blurb:
-      'Detail only: same 4 high-level stages. Current stage expands inline (Matching a/b + coming-soon verticals).',
+      'Detail only: same 4 high-level stages. Current stage expands inline (Matching a/b + verticals).',
   },
   {
     id: 'four-panel',
@@ -191,11 +191,11 @@ function FourRail({
             </li>
             <li className="flex items-center gap-2 text-mute">
               <span className={statusDot('soon')} />
-              Mailchimp · coming soon
+              Axios HQ
             </li>
             <li className="flex items-center gap-2 text-mute">
               <span className={statusDot('soon')} />
-              Lever · coming soon
+              Lever
             </li>
           </ul>
         </div>
@@ -212,8 +212,8 @@ function FourRail({
             <div className="flex flex-wrap gap-x-3 gap-y-1">
               <span className="text-emerald-800">a Auto-match ✓</span>
               <span className="font-medium text-amber-950">b DO status · now</span>
-              <span className="text-mute">Mailchimp soon</span>
-              <span className="text-mute">Lever soon</span>
+              <span className="text-mute">Axios HQ</span>
+              <span className="text-mute">Lever</span>
             </div>
           </div>
         </div>
@@ -256,7 +256,7 @@ function SixRail({ nested }: { nested: boolean }) {
             <li className="text-emerald-800">Auto-match complete · Data vertical</li>
             <li className="font-medium text-amber-950">Approve status · default 4 Opted out</li>
             <li>Assign to legal (optional)</li>
-            <li className="opacity-60">Other verticals · coming soon</li>
+            <li className="opacity-60">Other verticals</li>
           </ul>
           <p className="mt-2 text-[0.65rem] text-sky-900">Next: legal / pre-fulfillment</p>
         </div>

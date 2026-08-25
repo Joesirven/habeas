@@ -145,35 +145,6 @@ def _google_sheet_system(*, system_id: str, display_label: str) -> ConnectionSys
 
 
 _SYSTEMS: dict[str, ConnectionSystem] = {
-    "mailchimp": ConnectionSystem(
-        system_id="mailchimp",
-        display_label="Mailchimp",
-        invite_allowed=True,
-        credential_fields=(
-            CredentialField(
-                id="api_key",
-                label="API key",
-                input_type=CredentialInputType.PASSWORD,
-                required=True,
-                help=(
-                    "1. Sign in to Mailchimp (Manager or Admin role).\n"
-                    "2. Click your profile icon (top right) → Profile.\n"
-                    "3. Open Extras → API keys.\n"
-                    "4. Click Create A Key and name it “Habeas Privacy Automation”.\n"
-                    "5. Click Generate Key, then Copy Key to Clipboard (shown only once).\n"
-                    "6. Paste the full key here. It should end with your data center "
-                    "(example: …-us19).\n"
-                    "Do not paste your Mailchimp login password or an OAuth/Marketplace token."
-                ),
-            ),
-        ),
-        trust_copy=_saas_trust_copy(
-            extra=(
-                "Mailchimp: use a dedicated account API key for Habeas — not your login "
-                "password and not an OAuth Marketplace app."
-            ),
-        ),
-    ),
     "paylocity": ConnectionSystem(
         system_id="paylocity",
         display_label="Paylocity",
@@ -467,7 +438,6 @@ def list_systems() -> list[ConnectionSystem]:
 
 
 _SYSTEM_ORDER: Final[tuple[str, ...]] = (
-    "mailchimp",
     "paylocity",
     "lever",
     "auth0",

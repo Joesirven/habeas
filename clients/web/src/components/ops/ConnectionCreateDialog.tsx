@@ -26,7 +26,7 @@ const fieldClass =
   'w-full rounded-md border border-line bg-paper px-2.5 py-1.5 text-sm text-ink'
 
 const FALLBACK_SYSTEMS: ConnectionSystemOption[] = [
-  { system_id: 'axios_headquarters', display_label: 'Axios HQ', invite_allowed: false, credential_fields: [], trust_copy: '' },
+  { system_id: 'axios_hq', display_label: 'Axios HQ', invite_allowed: false, credential_fields: [], trust_copy: '' },
   { system_id: 'paylocity', display_label: 'Paylocity', invite_allowed: true, credential_fields: [], trust_copy: '' },
   { system_id: 'lever', display_label: 'Lever', invite_allowed: true, credential_fields: [], trust_copy: '' },
   { system_id: 'auth0', display_label: 'Auth0', invite_allowed: true, credential_fields: [], trust_copy: '' },
@@ -78,7 +78,7 @@ export function ConnectionCreateDialog({
   const [systems, setSystems] = useState<ConnectionSystemOption[]>(
     creatableSystems(FALLBACK_SYSTEMS),
   )
-  const [system, setSystem] = useState<IntegrationSystemId>('axios_headquarters')
+  const [system, setSystem] = useState<IntegrationSystemId>('axios_hq')
   const [displayName, setDisplayName] = useState('')
   const [phase, setPhase] = useState<DialogPhase>('form')
   const [submitting, setSubmitting] = useState(false)
@@ -90,7 +90,7 @@ export function ConnectionCreateDialog({
   const uploadOnly = isUploadOnlySystem(system)
 
   function resetForm() {
-    setSystem('axios_headquarters')
+    setSystem('axios_hq')
     setDisplayName('')
     setPhase('form')
     setSubmitting(false)
@@ -117,7 +117,7 @@ export function ConnectionCreateDialog({
         setSystem((current) =>
           next.some((entry) => entry.system_id === current)
             ? current
-            : (next[0]?.system_id ?? 'axios_headquarters'),
+            : (next[0]?.system_id ?? 'axios_hq'),
         )
       })
       .catch(() => {

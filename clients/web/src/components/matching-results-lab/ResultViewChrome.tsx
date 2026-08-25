@@ -4,6 +4,10 @@ import { redactHashHex } from '@/components/requests/RequestTriageDialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import type { MatchedChannel, MatchedPersonContact } from '@/lib/api'
+import {
+  matchingConnectorGateChip,
+  type MatchingConnectorGate,
+} from '@/lib/connection-display'
 import { matchTypeLabel } from '@/lib/inbox-batch-status'
 import { cn } from '@/lib/utils'
 
@@ -248,6 +252,18 @@ export function ResultContactPii({
   )
 }
 
+/** KD18 chip for gated search — Needs refresh / Action required, never Connected. */
+function peopleSearchBlockedChip(gate: MatchingConnectorGate): {
+  label: string
+  variant: 'ok' | 'fail' | 'run' | 'wait' | 'default'
+} {
+  const chip = matchingConnectorGateChip(gate)
+  if (chip.label === 'Connected') {
+    return { label: 'Action required', variant: 'fail' }
+  }
+  return chip
+}
+
 export function ResultPeopleSearch({
   onSearchPeople,
   localContacts,
@@ -256,6 +272,8 @@ export function ResultPeopleSearch({
   disabled,
   item,
   detail,
+  peopleSearchBlocked,
+  peopleSearchPending,
 }: {
   onSearchPeople?: SearchPeopleFn
   localContacts?: readonly MatchedPersonContact[]
@@ -264,6 +282,8 @@ export function ResultPeopleSearch({
   disabled?: boolean
   item?: MatchingResultsViewProps['item']
   detail?: MatchingResultsViewProps['detail']
+  peopleSearchBlocked?: MatchingConnectorGate | null
+  peopleSearchPending?: { title: string; support: string } | null
 }) {
   const inputId = useId()
   const searchRef = useRef(onSearchPeople)
@@ -277,11 +297,28 @@ export function ResultPeopleSearch({
   const source = system.sourceLabel
   const directory = source ?? 'this system'
   const excluded = new Set((excludeDwids ?? []).map((dwid) => dwid.trim()).filter(Boolean))
-  const canSearch = Boolean(onSearchPeople) || (localContacts?.length ?? 0) > 0
+  const blockedChip = peopleSearchBlocked ? peopleSearchBlockedChip(peopleSearchBlocked) : null
+  const pendingTitle = peopleSearchPending?.title.trim()
+  const pendingLabel =
+    pendingTitle && pendingTitle !== 'Connected' ? pendingTitle : 'Needs connection'
+  const pendingSupport = peopleSearchPending?.support.trim() || null
+  const pendingCopy = !blockedChip && peopleSearchPending
+    ? { title: pendingLabel, support: pendingSupport }
+    : null
+  const gated = Boolean(blockedChip) || Boolean(pendingCopy)
+  const canSearch = !gated && (Boolean(onSearchPeople) || (localContacts?.length ?? 0) > 0)
+  const searchDisabled = Boolean(disabled) || gated || !canSearch
+  const searchHint = blockedChip
+    ? blockedChip.label
+    : pendingCopy
+      ? pendingCopy.title
+      : canSearch
+        ? `Search ${directory}…`
+        : `Search not available for ${directory}`
 
   useEffect(() => {
     const needle = query.trim()
-    if (!needle) {
+    if (gated || !needle) {
       setHits([])
       setPending(false)
       setFailed(false)
@@ -312,7 +349,7 @@ export function ResultPeopleSearch({
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [query, localContacts])
+  }, [query, localContacts, gated])
 
   const addable = hits.filter((contact) => {
     const dwid = contact.dwid?.trim()
@@ -321,17 +358,37 @@ export function ResultPeopleSearch({
 
   return (
     <div className="space-y-1">
-      <label htmlFor={inputId} className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
-        {source ? `Add from ${source}` : 'Add a person'}
-      </label>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <label htmlFor={inputId} className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
+          {source ? `Add from ${source}` : 'Add a person'}
+        </label>
+        {blockedChip ? (
+          <Badge variant={blockedChip.variant} className="normal-case tracking-normal">
+            {blockedChip.label}
+          </Badge>
+        ) : null}
+        {pendingCopy ? (
+          <Badge variant="wait" className="normal-case tracking-normal">
+            {pendingCopy.title}
+          </Badge>
+        ) : null}
+      </div>
       <input
         id={inputId}
         type="search"
         className={statusSelectClass()}
         value={query}
-        disabled={disabled || !canSearch}
-        placeholder={canSearch ? `Search ${directory}…` : `Search not available for ${directory}`}
-        aria-label={canSearch ? `Search people in ${directory}` : `Search not available for ${directory}`}
+        disabled={searchDisabled}
+        placeholder={searchHint}
+        aria-label={
+          blockedChip
+            ? `People search gated — ${blockedChip.label}`
+            : pendingCopy
+              ? `People search unavailable — ${pendingCopy.title}`
+              : canSearch
+                ? `Search people in ${directory}`
+                : `Search not available for ${directory}`
+        }
         autoComplete="off"
         onFocus={() => setOpen(true)}
         onChange={(event) => {
@@ -339,7 +396,12 @@ export function ResultPeopleSearch({
           setQuery(event.target.value)
         }}
       />
-      {open && !disabled && canSearch ? (
+      {pendingCopy?.support ? (
+        <p className="text-[0.65rem] text-ink-soft" role="status">
+          {pendingCopy.support}
+        </p>
+      ) : null}
+      {open && !searchDisabled && canSearch ? (
         <div className="space-y-1" role="listbox" aria-label={`People in ${directory}`}>
           {pending ? (
             <p className="text-[0.65rem] text-mute" role="status">

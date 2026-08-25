@@ -57,6 +57,7 @@ const PIPELINE_GROUP: NavGroup = {
     { label: 'Settings', to: '/ops/workers/settings' },
     { label: 'Runs', to: '/ops/runs' },
     { label: 'Connections', to: '/ops/connections' },
+    { label: 'DROP prod cutover', to: '/dev/drop-prod-cutover', temp: true },
   ],
 }
 

@@ -70,13 +70,13 @@ _TABLE_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def service_suffix_from_prefix(prefix: str) -> str:
-    """Derive Cloud Run suffix from scheduler prefix (``dpra-dev`` → ``-dev``)."""
+    """Derive Cloud Run suffix from scheduler prefix (``dpra-dev`` → ``-dev``, ``dpra-prod`` → ``-prod``)."""
     text = (prefix or "").strip().lower()
     if text.endswith("-dev"):
         return "-dev"
-    if text.endswith("-prod") or text.endswith("-production"):
-        return ""
-    # Unknown prefix: no suffix stripping (prod-like).
+    if text.endswith("-prod"):
+        return "-prod"
+    # Unknown prefix / ``-production``: no suffix stripping.
     return ""
 
 

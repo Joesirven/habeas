@@ -19,7 +19,12 @@ from habeas_privacy_core.models.intake import (
     RequestRecord,
 )
 from habeas_privacy_core.models.request import IntakeSource
-from habeas_privacy_core.queue.constants import MATCHING_ATTEMPTS_TABLE, MATCHING_STEP
+from habeas_privacy_core.queue.constants import (
+    AUTH0_ATTEMPTS_TABLE,
+    MATCHING_ATTEMPTS_TABLE,
+    MATCHING_STEP,
+    STEP_MATCHING,
+)
 
 _REQUEST_SELECT = (
     "id, received_at, intake_source, raw_record_id, requestor_state, request_type"
@@ -131,6 +136,19 @@ async def enqueue_matching(conn: asyncpg.Connection, request_id: str) -> None:
         """,
         UUID(request_id),
         MATCHING_STEP,
+    )
+
+
+async def enqueue_auth0_matching(conn: asyncpg.Connection, request_id: str) -> None:
+    """Enqueue the first Auth0 matching attempt (ids/status only; no PII)."""
+    await conn.execute(
+        f"""
+        INSERT INTO {AUTH0_ATTEMPTS_TABLE} (request_id, step, attempt_number, status)
+        VALUES ($1, $2, 1, 'pending')
+        ON CONFLICT (request_id, step, attempt_number) DO NOTHING
+        """,
+        UUID(request_id),
+        STEP_MATCHING,
     )
 
 

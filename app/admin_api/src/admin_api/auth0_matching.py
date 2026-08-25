@@ -5,8 +5,12 @@ exists, derives the request's DROP email hash and calls the S02 mart lookup
 (read-only — does not persist). Confirm/assign is S08
 ``PUT /requests/{id}/dispositions/auth0``.
 
+Search is hard-gated by ``evaluate_vertical_matching_gate`` (system=auth0;
+catalog vertical resolved to ``tech``). Wizard incomplete, upload stale, or live rotation overdue
+blocks candidates: HTTP 409 ``gate_blocked`` (no vendor ids).
+
 Never returns raw email, hashes, or vendor ids in logs/audit. Audit arguments
-are ``request_id`` + counts only. No cadence / connection-gate checks.
+are ``request_id`` + counts only, plus ``gate_code`` when the gate blocks.
 """
 
 from __future__ import annotations
@@ -28,6 +32,10 @@ from habeas_privacy_core.auth import (
     resolve_actor,
 )
 from habeas_privacy_core.config import CoreSettings
+from habeas_privacy_core.connections.freshness import GateResult
+from habeas_privacy_core.connections.matching_gate import (
+    evaluate_vertical_matching_gate,
+)
 from habeas_privacy_core.db.pool import get_pool
 from habeas_privacy_core.db.request_resolver import request_resolver
 from habeas_privacy_core.db.requests import get_request
@@ -82,11 +90,12 @@ class Auth0MatchCandidatesResponse(BaseModel):
 
 
 class Auth0MatchCandidatesStatusResponse(BaseModel):
-    """Minimal lab probe — counts only."""
+    """Minimal lab probe — counts only; ``gated`` when matching freshness blocks."""
 
     request_id: str
     snapshot_present: bool
     match_count: int
+    gated: bool = False
 
 
 def _require_database() -> None:
@@ -194,6 +203,18 @@ def _candidates_payload(
     )
 
 
+def _gate_block_detail(gate: GateResult) -> dict[str, str]:
+    """HTTP 409 body — allowlisted codes only; no vendor ids or PII."""
+    detail: dict[str, str] = {
+        "code": "gate_blocked",
+        "gate_code": gate.code,
+        "display_status": gate.display_status,
+    }
+    if gate.blocking_system:
+        detail["blocking_system"] = gate.blocking_system
+    return detail
+
+
 async def _audit_candidates(
     *,
     request: Request,
@@ -202,21 +223,29 @@ async def _audit_candidates(
     match_count: int,
     candidate_count: int,
     conn: Any,
+    gate_code: str | None = None,
+    result_status: int = 200,
 ) -> None:
     actor = resolve_actor(request).email
     if not is_authenticated_actor(actor):
         actor = viewer.email or actor
+    arguments: dict[str, Any] = {
+        "request_id": request_id,
+        "match_count": match_count,
+        "candidate_count": candidate_count,
+    }
+    if gate_code is not None:
+        arguments["gate_code"] = gate_code
+    summary = (
+        "auth0 match candidates gated" if result_status == 409 else "auth0 match candidates"
+    )
     await write_audit(
         actor=actor,
         interface="admin-api",
         command=CANDIDATES_AUDIT_COMMAND,
-        arguments={
-            "request_id": request_id,
-            "match_count": match_count,
-            "candidate_count": candidate_count,
-        },
-        result_status=200,
-        result_summary="auth0 match candidates",
+        arguments=arguments,
+        result_status=result_status,
+        result_summary=summary,
         conn=conn,
     )
 
@@ -229,7 +258,7 @@ async def get_auth0_match_candidates_status(
     request_id: str,
     _viewer: Auth0MatchPrincipal,
 ) -> Auth0MatchCandidatesStatusResponse:
-    """Lab probe: snapshot present + count. No live BQ, no ids."""
+    """Lab probe: snapshot present + count + gated flag. No live BQ, no ids."""
     _require_database()
     _parse_request_id(request_id)
 
@@ -240,10 +269,12 @@ async def get_auth0_match_candidates_status(
             raise HTTPException(status_code=404, detail="request not found")
         snapshot = await fetch_auth0_snapshot(conn, request_id)
         match_count, _ids = _ids_from_snapshot(snapshot)
+        gate = await evaluate_vertical_matching_gate(conn, system="auth0")
     return Auth0MatchCandidatesStatusResponse(
         request_id=request_id,
         snapshot_present=snapshot is not None,
         match_count=match_count if snapshot is not None else 0,
+        gated=not gate.allowed,
     )
 
 
@@ -265,6 +296,30 @@ async def get_auth0_match_candidates(
         record = await get_request(conn, request_id)
         if record is None:
             raise HTTPException(status_code=404, detail="request not found")
+
+        gate = await evaluate_vertical_matching_gate(conn, system="auth0")
+        if not gate.allowed:
+            logger.info(
+                "auth0_match_candidates",
+                extra={
+                    "event": "auth0_match_candidates",
+                    "request_id": request_id,
+                    "match_count": 0,
+                    "candidate_count": 0,
+                    "gate_code": gate.code,
+                },
+            )
+            await _audit_candidates(
+                request=request,
+                viewer=viewer,
+                request_id=request_id,
+                match_count=0,
+                candidate_count=0,
+                conn=conn,
+                gate_code=gate.code,
+                result_status=409,
+            )
+            raise HTTPException(status_code=409, detail=_gate_block_detail(gate))
 
         snapshot = await fetch_auth0_snapshot(conn, request_id)
         if snapshot is not None:

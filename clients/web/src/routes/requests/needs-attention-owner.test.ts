@@ -8,6 +8,7 @@ import {
   mergeOwnerFulfillmentItems,
   ownerFulfillmentItemFromApproval,
   ownerFulfillmentItemFromRequest,
+  type MatchingResultRow,
   type NeedsAttentionItem,
 } from '../../lib/api'
 import {
@@ -20,6 +21,10 @@ import {
   selectedReviewTargets,
 } from '../../lib/inbox-status-lab'
 import { isRequestUuid } from '../../lib/utils'
+import {
+  matchingLabPeopleSource,
+  matchingResultRowToInboxItem,
+} from '../../components/matching-results-lab/matching-results-lab-types'
 import { matchingDetailIsNotLive } from '../../components/requests/RequestTriageDialog'
 import { isAuth0MatchingScope } from '../../components/requests/RequestDetailOverlay'
 import {
@@ -51,6 +56,8 @@ import {
   resolveInboxAssignCandidates,
   stackMatchingStatusSummary,
   suggestedBulkFulfillStatus,
+  batchClusterAsSubsteps,
+  CATALOG_ONLY_NOT_LIVE_LABEL,
 } from './needs-attention'
 
 function matchingItem(
@@ -955,6 +962,58 @@ describe('System / Group by wiring', () => {
   })
 })
 
+describe('matchingResultRowToInboxItem + people source by vertical', () => {
+  function landedRow(overrides: Partial<MatchingResultRow> = {}): MatchingResultRow {
+    return {
+      request_id: '11111111-1111-4111-8111-111111111111',
+      matched: true,
+      match_count: 1,
+      match_type: 'single_match',
+      matched_via: 'drop_hash_email',
+      recorded_at: '2026-08-25T12:00:00Z',
+      requestor_state: 'CA',
+      review_status: 'pending',
+      approval_id: null,
+      recommended_response_status: 3,
+      ...overrides,
+    }
+  }
+
+  test('maps landed matching_results row to matching inbox item on data', () => {
+    const row = landedRow()
+    const item = matchingResultRowToInboxItem(row)
+    expect(item.kind).toBe('matching')
+    expect(item.vertical).toBe('data')
+    expect(item.intake_source).toBe('drop')
+    expect(item.current_stage).toBe('matching.review')
+    expect(item.received_at).toBe(row.recorded_at)
+    expect(item.requested_at).toBe(row.recorded_at)
+    expect(item.request_id).toBe(row.request_id)
+    expect(item.match_type).toBe('single_match')
+    expect(item.reason).toBe('matching_result')
+  })
+
+  test('approved review_status becomes matching.approved', () => {
+    const item = matchingResultRowToInboxItem(landedRow({ review_status: 'approved' }))
+    expect(item.kind).toBe('matching')
+    expect(item.vertical).toBe('data')
+    expect(item.current_stage).toBe('matching.approved')
+  })
+
+  test('people source is vertical-first: data→mdr, auth0→auth0, lever→null', () => {
+    expect(matchingLabPeopleSource('cassandra', 'data')).toBe('mdr')
+    expect(matchingLabPeopleSource(null, 'data')).toBe('mdr')
+    expect(matchingLabPeopleSource('auth0', 'auth0')).toBe('auth0')
+    expect(matchingLabPeopleSource(null, 'auth0')).toBe('auth0')
+    expect(matchingLabPeopleSource('lever', 'lever')).toBeNull()
+    expect(matchingLabPeopleSource(null, 'lever')).toBeNull()
+    expect(matchingLabPeopleSource('cassandra', 'lever')).toBeNull()
+    expect(matchingLabPeopleSource('cassandra', null)).toBeNull()
+    expect(matchingLabPeopleSource('paylocity', 'paylocity')).toBeNull()
+    expect(matchingLabPeopleSource('axios_hq', 'axios_hq')).toBeNull()
+  })
+})
+
 describe('Auth0 matching scope', () => {
   test('treats auth0 vertical or system as in-scope', () => {
     expect(isAuth0MatchingScope('auth0', 'cassandra')).toBe(true)
@@ -1016,6 +1075,62 @@ describe('DuePill', () => {
     expect(html).toContain('>Overdue<')
     expect(html).not.toContain('·')
     expect(html).not.toMatch(/\d{1,2}:\d{2}/)
+  })
+})
+
+describe('batchClusterAsSubsteps not-live labels', () => {
+  test('live:false rows use catalog-only / not-live, not Soon', () => {
+    const steps = batchClusterAsSubsteps(
+      [
+        {
+          vertical: 'mailchimp',
+          label: 'Communications',
+          live: false,
+          actionable: false,
+          matching_status: 'not_started',
+          fulfillment_status: null,
+          member_status_counts: {},
+        },
+        {
+          vertical: 'data',
+          label: 'Data',
+          live: true,
+          actionable: true,
+          matching_status: 'in_progress',
+          fulfillment_status: null,
+          member_status_counts: {},
+        },
+      ],
+      'matching',
+    )
+    expect(steps.find((step) => step.key === 'matching-mailchimp')?.statusLabel).toBe(
+      CATALOG_ONLY_NOT_LIVE_LABEL,
+    )
+    expect(steps.find((step) => step.key === 'matching-mailchimp')?.statusLabel).not.toBe(
+      'Soon',
+    )
+    expect(steps.find((step) => step.key === 'matching-data')?.statusLabel).toBe(
+      'In progress',
+    )
+  })
+
+  test('member counts still win over the catalog-only label', () => {
+    const steps = batchClusterAsSubsteps(
+      [
+        {
+          vertical: 'mailchimp',
+          label: 'Communications',
+          live: false,
+          actionable: false,
+          matching_status: 'not_started',
+          fulfillment_status: null,
+          member_status_counts: { not_started: 2 },
+        },
+      ],
+      'matching',
+    )
+    expect(steps[0]?.statusLabel).toBe('2 not started')
+    expect(steps[0]?.statusLabel).not.toBe('Soon')
   })
 })
 

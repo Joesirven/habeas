@@ -11,8 +11,10 @@ recorded and kicked off again; open fulfillment attempts are abandoned, while
 succeeded attempts stay in the append-only ledger and are ignored by the
 dispatcher because readiness is measured from the newest kickoff decision.
 
-After kickoff, assigned SaaS owners may PATCH owner-status (U17 · KD36 / KD37).
-Data stays automatic — that path returns 422. Attempt rows for SaaS use
+After kickoff, assigned SaaS owners may PATCH owner-status (U17 · KD36 / KD37)
+for a live vertical only — Axios HQ / communications use the same live-only
+gate as kickoff HTTP. Data stays automatic — that path returns 422. Attempt
+rows for SaaS use
 ``step=interim_upload`` plus ``audit_payload.vertical`` so the Data dispatcher
 does not treat owner completion as a Data suppression/reproduction success.
 
@@ -187,7 +189,7 @@ def _require_live_vertical(vertical: str) -> str:
     if vertical_norm in LIVE_VERTICALS:
         return vertical_norm
     detail = (
-        f"vertical {vertical_norm!r} is coming soon — no fulfillment kickoff"
+        f"vertical {vertical_norm!r} is not live yet — no fulfillment kickoff"
         if vertical_norm in COMING_SOON_VERTICALS
         else f"unknown vertical {vertical_norm!r}"
     )
@@ -512,8 +514,9 @@ async def post_fulfillment_reopen(
 def _catalog_vertical_for_owner_path(vertical: str) -> tuple[str, str]:
     """Return ``(path_vertical, catalog_vertical)`` for a SaaS owner-status path.
 
-    Catalog ids (``communications``) and bound systems (``mailchimp``) are both
-    accepted. Data / Cassandra are automatic and rejected with 422.
+    Catalog ids (``communications``) and bound systems (``axios_hq``) are both
+    accepted for mapping. Writes still require a live vertical — Data /
+    Cassandra are automatic and rejected with 422.
     """
     path_vertical = normalize_vertical(vertical)
     if not path_vertical:
@@ -530,6 +533,27 @@ def _catalog_vertical_for_owner_path(vertical: str) -> tuple[str, str]:
         if catalog_id in SAAS_CATALOG_VERTICALS:
             return path_vertical, catalog_id
     raise HTTPException(status_code=400, detail=f"unknown vertical {path_vertical!r}")
+
+
+def _require_live_owner_status_vertical(
+    path_vertical: str, catalog_vertical: str
+) -> None:
+    """Same live-only gate as kickoff — Axios HQ / communications cannot write."""
+    candidates = {path_vertical, catalog_vertical}
+    candidates.update(
+        binding.system for binding in get_bindings_for_vertical(catalog_vertical)
+    )
+    if any(candidate in LIVE_VERTICALS for candidate in candidates):
+        return
+    shown = next(
+        (
+            candidate
+            for candidate in (path_vertical, catalog_vertical, *sorted(candidates))
+            if candidate in COMING_SOON_VERTICALS
+        ),
+        path_vertical,
+    )
+    _require_live_vertical(shown)
 
 
 async def _saas_kickoff_approved(
@@ -792,6 +816,7 @@ async def patch_fulfillment_owner_status(
     if body.status not in OWNER_STATUS_VALUES:
         raise HTTPException(status_code=400, detail="invalid status")
     path_vertical, catalog_vertical = _catalog_vertical_for_owner_path(vertical)
+    _require_live_owner_status_vertical(path_vertical, catalog_vertical)
     actor = _actor_email(request, viewer)
 
     pool = get_pool()

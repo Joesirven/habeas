@@ -108,7 +108,7 @@ const VERTICAL_LABELS: Record<string, string> = {
   bizdev: 'BizDev',
   data: 'Data',
   test: 'Test vertical',
-  axios_headquarters: 'Axios HQ',
+  axios_hq: 'Axios HQ',
   lever: 'Lever',
   paylocity: 'Paylocity',
   auth0: 'Auth0',
@@ -125,7 +125,7 @@ export function verticalLabel(vertical: string): string {
 
 /** Matching-review system titles — mirrors catalog MATCHING_SYSTEM_LABELS. */
 const SYSTEM_LABELS: Record<string, string> = {
-  axios_headquarters: 'Axios HQ',
+  axios_hq: 'Axios HQ',
   paylocity: 'Paylocity',
   lever: 'Lever',
   auth0: 'Auth0',

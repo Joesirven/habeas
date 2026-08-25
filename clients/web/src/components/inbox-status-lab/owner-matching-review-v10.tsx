@@ -63,6 +63,7 @@ import {
 import {
   matchingLabRequestId,
   type MatchingResultsViewProps,
+  type SearchPeopleFn,
 } from '../matching-results-lab/matching-results-lab-types'
 
 export const OWNER_MATCHING_REVIEW_V10_PHILOSOPHY =
@@ -246,6 +247,24 @@ function personSurfaces(
   return hits
 }
 
+/** Search chrome: Needs refresh / Needs connection — never Connected. */
+function peopleSearchNotice(
+  blocked?: MatchingConnectorGate | null,
+  pending?: { title: string; support: string } | null,
+): { title: string; support: string } | null {
+  if (blocked?.blocked) {
+    const refresh =
+      blocked.displayStatus === 'needs_refresh' || blocked.gateCode === 'upload_stale'
+    return {
+      title: refresh ? 'Needs refresh' : 'Needs connection',
+      support: pending?.support ?? '',
+    }
+  }
+  if (!pending) return null
+  const title = pending.title.trim() === 'Connected' ? 'Needs connection' : pending.title
+  return { title, support: pending.support }
+}
+
 function contactSearchHaystack(contact: MatchedPersonContact): string {
   const phones = (contact.phones ?? [])
     .map((phone) => phone?.number?.trim() ?? '')
@@ -360,8 +379,8 @@ function PeopleList({
   onRemovePerson,
   onAddPerson,
   searchableContacts,
-  searchPending,
-  searchError,
+  onSearchPeople,
+  searchNotice,
   systemStatus,
   selectable,
   disabled,
@@ -375,14 +394,20 @@ function PeopleList({
   onRemovePerson: (dwid: string) => void
   onAddPerson: (contact: MatchedPersonContact) => void
   searchableContacts: MatchedPersonContact[]
-  searchPending: boolean
-  searchError: boolean
+  onSearchPeople?: SearchPeopleFn
+  searchNotice: { title: string; support: string } | null
   systemStatus: string | null
   selectable: boolean
   disabled: boolean
 }) {
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
+  const [directoryHits, setDirectoryHits] = useState<MatchedPersonContact[]>([])
+  const [searchBusy, setSearchBusy] = useState(false)
+  const [searchFailed, setSearchFailed] = useState(false)
+  const searchRef = useRef(onSearchPeople)
+  searchRef.current = onSearchPeople
+  const searchLocked = Boolean(disabled || searchNotice)
   const people = useMemo(() => {
     const byDwid = new Map(
       safeMatchedContacts(contacts).map((contact) => [contact.dwid, contact] as const),
@@ -399,9 +424,43 @@ function PeopleList({
     typeof detail?.match_count === 'number' ? detail.match_count : people.length
   const visibleSet = new Set(visibleDwids)
   const needle = query.trim().toLowerCase()
-  const addable = searchableContacts.filter((contact) => {
+
+  useEffect(() => {
+    const text = query.trim()
+    if (searchLocked || !onSearchPeople || text.length < 2) {
+      setDirectoryHits([])
+      setSearchBusy(false)
+      setSearchFailed(false)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setSearchBusy(true)
+        setSearchFailed(false)
+        try {
+          const result = await searchRef.current?.(text)
+          if (!cancelled) setDirectoryHits(result ?? [])
+        } catch {
+          if (!cancelled) {
+            setDirectoryHits([])
+            setSearchFailed(true)
+          }
+        } finally {
+          if (!cancelled) setSearchBusy(false)
+        }
+      })()
+    }, 200)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [onSearchPeople, query, searchLocked])
+
+  const addable = mergeContactsByDwid(directoryHits, searchableContacts).filter((contact) => {
     const dwid = contact.dwid?.trim()
     if (!dwid || visibleSet.has(dwid)) return false
+    if (directoryHits.some((row) => row.dwid === dwid)) return true
     if (!needle) return true
     return contactSearchHaystack(contact).includes(needle)
   })
@@ -527,8 +586,8 @@ function PeopleList({
           type="search"
           className={statusSelectClass()}
           value={query}
-          disabled={disabled}
-          placeholder="Search this system…"
+          disabled={searchLocked}
+          placeholder={searchNotice ? searchNotice.title : 'Search this system…'}
           aria-label="Search people in this system"
           onFocus={() => setSearchOpen(true)}
           onChange={(event) => {
@@ -536,20 +595,28 @@ function PeopleList({
             setQuery(event.target.value)
           }}
         />
-        {searchOpen && !disabled ? (
+        {searchNotice ? (
+          <p className="text-[0.65rem] text-ink-soft" role="status">
+            {searchNotice.title}
+            {searchNotice.support ? ` — ${searchNotice.support}` : ''}
+          </p>
+        ) : null}
+        {searchOpen && !searchLocked ? (
           <div className="space-y-1" role="listbox" aria-label="People to add">
-            {searchPending ? (
+            {searchBusy ? (
               <p className="text-[0.65rem] text-mute">Searching this system…</p>
             ) : null}
-            {searchError ? (
+            {searchFailed ? (
               <p className="text-[0.65rem] text-red-800">
                 Could not search this system. Try again.
               </p>
             ) : null}
-            {addable.length === 0 && !searchPending ? (
+            {addable.length === 0 && !searchBusy ? (
               <p className="text-[0.65rem] text-mute">
                 {needle
-                  ? 'No people in this system match that search.'
+                  ? onSearchPeople && needle.length < 2
+                    ? 'Type at least 2 characters to search this system.'
+                    : 'No people in this system match that search.'
                   : 'No additional people to add. Removed matches appear here.'}
               </p>
             ) : (
@@ -652,6 +719,9 @@ export function OwnerMatchingReviewV10({
   onUseBatchDefaultChange,
   activeSystem,
   onSelectSystem,
+  onSearchPeople,
+  peopleSearchBlocked,
+  peopleSearchPending,
 }: OwnerMatchingReviewV10Props) {
   const empty = resultViewEmpty(loading, Boolean(item))
   const checkboxId = useId()
@@ -1083,8 +1153,8 @@ export function OwnerMatchingReviewV10({
                     onRemovePerson={handleRemovePerson}
                     onAddPerson={handleAddPerson}
                     searchableContacts={matchedPool}
-                    searchPending={peopleSearchQuery.isFetching}
-                    searchError={peopleSearchQuery.isError}
+                    onSearchPeople={onSearchPeople}
+                    searchNotice={peopleSearchNotice(peopleSearchBlocked, peopleSearchPending)}
                     systemStatus={effectiveStatus}
                     selectable={!peopleCleared}
                     disabled={sectionLocked || peopleCleared}

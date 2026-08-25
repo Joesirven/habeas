@@ -36,9 +36,20 @@ deployed admin-api; browser reaches admin-api through the ops-ia IAP front door 
 
 Plan: [`docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md`](../../docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md).
 
+## Per-vertical dispositions
+
+`request_vertical_dispositions` is the source of record for the gates fulfillment reads.
+
+| Surface | Endpoints |
+|---------|-----------|
+| List | `GET /requests/{request_id}/dispositions` |
+| Upsert | `PUT /requests/{request_id}/dispositions/{vertical}` (`status` 3/4/5, `dwids`, `vendor_record_ids`, `early_advance`) |
+
+Live verticals are `data` and `auth0`. Axios HQ (`axios_hq`), Lever, Paylocity, and Cassandra are catalog-only and rejected on write. Mailchimp is retired. Status 3/4 require a selection (`dwids` for `data`, defaulting to the matching result; `vendor_record_ids` for `auth0`); status 5 requires none. Matching promote upserts the `data` disposition and keeps `drop_raw_requests.response_status` in sync. Selected ids reach authorized callers only — audit records counts.
+
 ## Auth0 vertical
 
-Confirm-only owner search on **dev**: matching-dev writes `request_vertical_matching`; this API returns opaque `vendor_record_id`s and accepts Auth0 dispositions. Mailchimp / Lever / Paylocity / Cassandra stay coming soon.
+Confirm-only owner search on **dev**: matching-dev writes `request_vertical_matching`; this API returns opaque `vendor_record_id`s and accepts Auth0 dispositions. Auth0 is live alongside `data`.
 
 **Cadence is UNSET and out of scope.** These routes do **not** call `evaluate_connection_gate`, persist `refresh_policy`, or stamp `last_successful_refresh_at`. Matching runs with unset cadence.
 

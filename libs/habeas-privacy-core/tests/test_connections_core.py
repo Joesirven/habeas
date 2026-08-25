@@ -65,7 +65,7 @@ def test_sanitize_test_detail_allowlists_codes():
 
 def test_sanitize_test_detail_allowlists_live_success_codes():
     for code in (
-        "mailchimp_ok",
+        "axios_hq_ok",
         "paylocity_ok",
         "lever_ok",
         "auth0_ok",
@@ -107,7 +107,9 @@ def test_sanitize_test_detail_rejects_vendor_payloads():
         sanitize_test_detail('{"title":"Invalid API Key","status":401,"detail":"Bad key"}')
         == "unknown_error"
     )
-    assert sanitize_test_detail("mailchimp_ok but with extra vendor text") == "unknown_error"
+    assert sanitize_test_detail("axios_hq_ok but with extra vendor text") == "unknown_error"
+    assert "mailchimp_ok" not in ALLOWED_TEST_DETAIL_CODES
+    assert sanitize_test_detail("mailchimp_ok") == "unknown_error"
 
 
 def test_invite_ttl_constant():

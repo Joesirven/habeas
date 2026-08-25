@@ -396,19 +396,48 @@ async def test_kickoff_rejects_silent_status_change_after_kickoff():
 
 
 @pytest.mark.asyncio
-async def test_endpoint_rejects_coming_soon_vertical(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("vertical", ["lever", "axios_hq"])
+async def test_endpoint_rejects_coming_soon_vertical(
+    monkeypatch: pytest.MonkeyPatch,
+    vertical: str,
+):
+    """Catalog coming-soon ids (Lever, Axios HQ) share the not-live kickoff gate."""
     conn = FakeConn(disposition=_disposition_row())
     fake_pool(monkeypatch, conn)
 
     with pytest.raises(HTTPException) as exc:
         await fk.post_fulfillment_kickoff(
             REQUEST_ID,
-            fk.FulfillmentKickoffBody(vertical="mailchimp"),
+            fk.FulfillmentKickoffBody(vertical=vertical),
             _fake_request(),
             LEGAL,
         )
     assert exc.value.status_code == 400
-    assert "coming soon" in str(exc.value.detail)
+    assert "not live yet" in str(exc.value.detail)
+    assert conn.kickoff_contexts == []
+
+
+@pytest.mark.asyncio
+async def test_endpoint_rejects_retracted_axios_headquarters_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Retracted slug is unknown — catalog id axios_hq stays coming-soon."""
+    conn = FakeConn(disposition=_disposition_row())
+    fake_pool(monkeypatch, conn)
+
+    with pytest.raises(HTTPException) as exc:
+        await fk.post_fulfillment_kickoff(
+            REQUEST_ID,
+            fk.FulfillmentKickoffBody(vertical="axios_headquarters"),
+            _fake_request(),
+            LEGAL,
+        )
+    assert exc.value.status_code == 400
+    detail = str(exc.value.detail)
+    assert "unknown vertical" in detail
+    assert "axios_headquarters" in detail
+    assert "not live yet" not in detail
+    assert conn.kickoff_contexts == []
 
 
 @pytest.mark.asyncio
@@ -583,14 +612,14 @@ async def test_owner_status_completed_in_source_closes_attempt(
     """AE31 — Done in source closes the attempt; comment stays off the audit."""
     conn = FakeConn(
         kickoff_approved=True,
-        assigned_verticals=frozenset({"communications"}),
+        assigned_verticals=frozenset({"tech"}),
         open_owner_attempt={"id": 44, "status": "pending", "attempt_number": 1},
     )
     audited = fake_pool(monkeypatch, conn)
 
     result = await fk.patch_fulfillment_owner_status(
         REQUEST_ID,
-        "communications",
+        "auth0",
         fk.OwnerFulfillmentStatusBody(
             status="completed_in_source",
             comment=OWNER_COMMENT,
@@ -603,7 +632,7 @@ async def test_owner_status_completed_in_source_closes_attempt(
     assert result.attempt_id == 44
     assert result.attempt_status == "success"
     assert result.comment_recorded is True
-    assert result.vertical == "communications"
+    assert result.vertical == "tech"
     assert conn.updated_attempts
     assert conn.updated_attempts[0]["args"][1] == "success"
     assert conn.updated_attempts[0]["args"][2] == "completed_in_source"
@@ -631,13 +660,13 @@ async def test_owner_status_inserts_success_when_no_attempt(
 ):
     conn = FakeConn(
         kickoff_approved=True,
-        assigned_verticals=frozenset({"communications"}),
+        assigned_verticals=frozenset({"tech"}),
     )
     fake_pool(monkeypatch, conn)
 
     result = await fk.patch_fulfillment_owner_status(
         REQUEST_ID,
-        "mailchimp",
+        "auth0",
         fk.OwnerFulfillmentStatusBody(status="completed_in_source"),
         _fake_request(),
         DATA_OWNER,
@@ -645,12 +674,12 @@ async def test_owner_status_inserts_success_when_no_attempt(
 
     assert result.attempt_id == 901
     assert result.attempt_status == "success"
-    assert result.vertical == "communications"
+    assert result.vertical == "tech"
     assert result.comment_recorded is False
     assert conn.inserted_attempts[0]["status"] == "success"
     assert conn.inserted_attempts[0]["step"] == fk.OWNER_STATUS_ATTEMPT_STEP
     payload = json.loads(conn.inserted_attempts[0]["audit_payload"])
-    assert payload["vertical"] == "communications"
+    assert payload["vertical"] == "tech"
     assert payload["owner_status"] == "completed_in_source"
     assert "comment" not in payload
 
@@ -659,14 +688,14 @@ async def test_owner_status_inserts_success_when_no_attempt(
 async def test_owner_status_409_without_kickoff(monkeypatch: pytest.MonkeyPatch):
     conn = FakeConn(
         kickoff_approved=False,
-        assigned_verticals=frozenset({"communications"}),
+        assigned_verticals=frozenset({"tech"}),
     )
     fake_pool(monkeypatch, conn)
 
     with pytest.raises(HTTPException) as exc:
         await fk.patch_fulfillment_owner_status(
             REQUEST_ID,
-            "communications",
+            "auth0",
             fk.OwnerFulfillmentStatusBody(status="in_progress"),
             _fake_request(),
             DATA_OWNER,
@@ -698,14 +727,14 @@ async def test_owner_status_403_when_owner_not_assigned(
 ):
     conn = FakeConn(
         kickoff_approved=True,
-        assigned_verticals=frozenset({"tech"}),
+        assigned_verticals=frozenset({"communications"}),
     )
     fake_pool(monkeypatch, conn)
 
     with pytest.raises(HTTPException) as exc:
         await fk.patch_fulfillment_owner_status(
             REQUEST_ID,
-            "communications",
+            "auth0",
             fk.OwnerFulfillmentStatusBody(status="completed_in_source"),
             _fake_request(),
             DATA_OWNER,
@@ -720,7 +749,7 @@ async def test_owner_status_assign_to_legal_reuses_fanout(
 ):
     conn = FakeConn(
         kickoff_approved=True,
-        assigned_verticals=frozenset({"people_hr"}),
+        assigned_verticals=frozenset({"tech"}),
     )
     fake_pool(monkeypatch, conn)
     captured: dict[str, Any] = {}
@@ -736,7 +765,7 @@ async def test_owner_status_assign_to_legal_reuses_fanout(
 
     result = await fk.patch_fulfillment_owner_status(
         REQUEST_ID,
-        "paylocity",
+        "auth0",
         fk.OwnerFulfillmentStatusBody(status="assign_to_legal"),
         _fake_request(),
         DATA_OWNER,
@@ -751,7 +780,7 @@ async def test_owner_status_assign_to_legal_reuses_fanout(
 async def test_owner_status_invalid_status_is_400(monkeypatch: pytest.MonkeyPatch):
     conn = FakeConn(
         kickoff_approved=True,
-        assigned_verticals=frozenset({"communications"}),
+        assigned_verticals=frozenset({"tech"}),
     )
     fake_pool(monkeypatch, conn)
     body = fk.OwnerFulfillmentStatusBody.model_construct(status="not_a_status")
@@ -759,7 +788,7 @@ async def test_owner_status_invalid_status_is_400(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(HTTPException) as exc:
         await fk.patch_fulfillment_owner_status(
             REQUEST_ID,
-            "communications",
+            "auth0",
             body,
             _fake_request(),
             DATA_OWNER,
@@ -775,14 +804,14 @@ async def test_owner_status_unknown_request_is_404(monkeypatch: pytest.MonkeyPat
     conn = FakeConn(
         request_exists=False,
         kickoff_approved=True,
-        assigned_verticals=frozenset({"communications"}),
+        assigned_verticals=frozenset({"tech"}),
     )
     fake_pool(monkeypatch, conn)
 
     with pytest.raises(HTTPException) as exc:
         await fk.patch_fulfillment_owner_status(
             REQUEST_ID,
-            "communications",
+            "auth0",
             fk.OwnerFulfillmentStatusBody(status="in_progress"),
             _fake_request(),
             DATA_OWNER,
@@ -800,14 +829,14 @@ async def test_owner_status_keeps_attempt_open(
 ):
     conn = FakeConn(
         kickoff_approved=True,
-        assigned_verticals=frozenset({"communications"}),
+        assigned_verticals=frozenset({"tech"}),
         open_owner_attempt={"id": 55, "status": "pending", "attempt_number": 1},
     )
     audited = fake_pool(monkeypatch, conn)
 
     result = await fk.patch_fulfillment_owner_status(
         REQUEST_ID,
-        "communications",
+        "auth0",
         fk.OwnerFulfillmentStatusBody(status=owner_status, comment=OWNER_COMMENT),
         _fake_request(),
         DATA_OWNER,
@@ -839,7 +868,7 @@ async def test_owner_status_super_admin_overrides_unassigned_owner(
     with pytest.raises(HTTPException) as exc:
         await fk.patch_fulfillment_owner_status(
             REQUEST_ID,
-            "communications",
+            "auth0",
             fk.OwnerFulfillmentStatusBody(status="in_progress"),
             _fake_request(),
             DATA_OWNER,
@@ -852,7 +881,7 @@ async def test_owner_status_super_admin_overrides_unassigned_owner(
     )
     result = await fk.patch_fulfillment_owner_status(
         REQUEST_ID,
-        "communications",
+        "auth0",
         fk.OwnerFulfillmentStatusBody(status="in_progress"),
         _fake_request(),
         super_admin,
@@ -867,25 +896,32 @@ def test_catalog_vertical_for_owner_path_accepts_aliases():
         "communications",
         "communications",
     )
-    assert fk._catalog_vertical_for_owner_path("mailchimp") == (
-        "mailchimp",
+    assert fk._catalog_vertical_for_owner_path("axios_hq") == (
+        "axios_hq",
         "communications",
     )
-    assert fk._catalog_vertical_for_owner_path("Mailchimp") == (
-        "mailchimp",
+    assert fk._catalog_vertical_for_owner_path("Axios_hq") == (
+        "axios_hq",
         "communications",
     )
+    with pytest.raises(HTTPException) as exc:
+        fk._catalog_vertical_for_owner_path("axios_headquarters")
+    assert exc.value.status_code == 400
+    detail = str(exc.value.detail)
+    assert "unknown vertical" in detail
+    assert "axios_headquarters" in detail
+    assert "not live yet" not in detail
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path_vertical", ["communications", "mailchimp"])
-async def test_owner_status_accepts_catalog_and_system_aliases(
+@pytest.mark.parametrize("path_vertical", ["tech", "auth0"])
+async def test_owner_status_accepts_live_catalog_and_system_aliases(
     monkeypatch: pytest.MonkeyPatch,
     path_vertical: str,
 ):
     conn = FakeConn(
         kickoff_approved=True,
-        assigned_verticals=frozenset({"communications"}),
+        assigned_verticals=frozenset({"tech"}),
     )
     fake_pool(monkeypatch, conn)
 
@@ -896,5 +932,60 @@ async def test_owner_status_accepts_catalog_and_system_aliases(
         _fake_request(),
         DATA_OWNER,
     )
-    assert result.vertical == "communications"
+    assert result.vertical == "tech"
     assert result.attempt_status == "in_flight"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path_vertical", ["communications", "axios_hq"])
+async def test_owner_status_rejects_coming_soon_even_with_kickoff(
+    monkeypatch: pytest.MonkeyPatch,
+    path_vertical: str,
+):
+    """Axios HQ maps to communications, but neither is live — no attempt write."""
+    conn = FakeConn(
+        kickoff_approved=True,
+        assigned_verticals=frozenset({"communications"}),
+    )
+    fake_pool(monkeypatch, conn)
+
+    with pytest.raises(HTTPException) as exc:
+        await fk.patch_fulfillment_owner_status(
+            REQUEST_ID,
+            path_vertical,
+            fk.OwnerFulfillmentStatusBody(status="completed_in_source"),
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 400
+    assert "not live yet" in str(exc.value.detail)
+    assert conn.inserted_attempts == []
+    assert conn.updated_attempts == []
+
+
+@pytest.mark.asyncio
+async def test_owner_status_rejects_retracted_axios_headquarters_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Retracted slug is not an axios_hq / communications alias."""
+    conn = FakeConn(
+        kickoff_approved=True,
+        assigned_verticals=frozenset({"communications"}),
+    )
+    fake_pool(monkeypatch, conn)
+
+    with pytest.raises(HTTPException) as exc:
+        await fk.patch_fulfillment_owner_status(
+            REQUEST_ID,
+            "axios_headquarters",
+            fk.OwnerFulfillmentStatusBody(status="completed_in_source"),
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 400
+    detail = str(exc.value.detail)
+    assert "unknown vertical" in detail
+    assert "axios_headquarters" in detail
+    assert "not live yet" not in detail
+    assert conn.inserted_attempts == []
+    assert conn.updated_attempts == []

@@ -26,7 +26,10 @@ class TestPrefixAndJobNames:
         assert service_suffix_from_prefix("dpra-dev") == "-dev"
 
     def test_service_suffix_from_prod_prefix(self) -> None:
-        assert service_suffix_from_prefix("dpra-prod") == ""
+        assert service_suffix_from_prefix("dpra-prod") == "-prod"
+
+    def test_service_suffix_from_production_prefix(self) -> None:
+        assert service_suffix_from_prefix("dpra-production") == ""
 
     def test_job_key_round_trip(self) -> None:
         prefix = "dpra-dev"
@@ -49,8 +52,11 @@ class TestPrefixAndJobNames:
 class TestServiceAliasesAndExcludes:
     def test_exclude_admin_api(self) -> None:
         assert "admin-api" in CONTROL_PLANE_SERVICE_EXCLUDES
+        assert "admin-web" in CONTROL_PLANE_SERVICE_EXCLUDES
         assert is_excluded_service_slug("admin-api")
+        assert is_excluded_service_slug("admin-web")
         assert worker_key_from_service_slug("admin-api") is None
+        assert worker_key_from_service_slug("admin-web") is None
 
     def test_exclude_drain_services(self) -> None:
         assert is_excluded_service_slug("matching-drain")
@@ -72,6 +78,10 @@ class TestServiceAliasesAndExcludes:
     def test_strip_dev_suffix(self) -> None:
         assert service_slug_from_name("matching-dev", "-dev") == "matching"
         assert service_slug_from_name("matching", "") == "matching"
+
+    def test_strip_prod_suffix(self) -> None:
+        assert service_slug_from_name("drop-ingestor-prod", "-prod") == "drop-ingestor"
+        assert service_slug_from_name("drop-ingestor-prod", "") == "drop-ingestor-prod"
 
 
 class TestAttemptTables:

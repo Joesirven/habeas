@@ -25,12 +25,26 @@ Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStac
 - **Workers Settings** (`/ops/workers/settings`, Pipeline ▾ → Settings, console gear): fleet health (`GET /ops/workers/fleet`), Cloud Scheduler schedules, retry floors, attempt-table browser. Single edit surface — do not reintroduce a Pipeline Configurations tab.
 - Vertical connectors (shipped): super_admin `/ops/connections` — vertical catalog, assign
   owners, mode/cadence, retest, delete. Owners `/owner/connectors` wizard (Mode explainer,
-  in-wizard Live creds+test, Upload templates). **No invite mint/redeem** — `/connect/$token`
-  and invite APIs are 410 / retired.
+  in-wizard Live creds+test, Upload templates). **Connection owner invites** stay 410
+  (assignment is the grant). **`data_user` teammate invites are not live** —
+  handlers exist (`POST /owner/verticals/{id}/member-invites`,
+  `GET/POST /connect/$token`) but `owner_router` is not mounted on admin-api.
+  Owner Connectors Team members UI must not be described as shipped.
 - `/me`: `given_name`, `needs_connector_setup`, `assigned_vertical_labels`,
   `connector_reminders` (soft — never block login).
 - Matching hard-gated on stale upload / rotation overdue / wizard incomplete; surfaces
   **Needs refresh** / **Action required** (R52 on matching views). Connecting ≠ matching.
+  Owner-system people search uses the same gate (`resolveMatchingConnectorGate`).
+- Matching inventory (code-backed; do not invent APIs or routes):
+  - **Live:** `data`, `auth0`
+  - **Catalog-only / not live:** Axios HQ (`axios_hq`), Lever, Paylocity, Cassandra
+  - **Retired:** Mailchimp
+  - Copy: catalog-only / not live — never “coming soon”
+- Results lab (`/requests/matching-results-lab`): ops queue is landed
+  `GET /ops/drop/matching-results` (ids/counts). Add-person search by vertical:
+  `data` → MDR `GET /ops/drop/matching-contacts/search` (view-only — no owner
+  cadence gate); `auth0` → `GET /requests/{id}/verticals/auth0/match-candidates`;
+  catalog-only → **Needs connection** (search disabled).
 - `data` vertical view-only in owner wizard. Cassandra = infra card only.
 - First-login welcome + skippable tour (`localStorage`, `habeas-cli.tour.v1.*`). Secrets
   only in Secret Manager; `actionToast` + allowlisted test `detail` codes. Plan:

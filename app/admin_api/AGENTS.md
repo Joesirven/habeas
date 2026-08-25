@@ -20,11 +20,18 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
 - Vertical-scoped connectors (shipped): super_admin `connections_admin` — catalog, assign
   owners, mode/cadence, test, wizard reset, delete (`GET/POST/DELETE /ops/connections`,
   `owner-candidates`). Owner wizard `owner_connectors` (`/owner/...`) — in-wizard creds+test,
-  upload templates. **Invite mint/redeem retired** — `POST .../invites`, revoke, and
-  `GET/POST /connect/{token}` return **410 Gone**; assignment is the grant.
+  upload templates. **Connection-credential invite mint/redeem retired** —
+  `POST .../invites` and revoke return **410 Gone**; assignment remains the grant
+  for connection owners. `data_user` invite handlers exist
+  (`GET/POST /connect/{token}`, `mint_member_invite`) but **`owner_router` is not
+  mounted** — Team members mint is **not live** until that router is included.
+  Do not claim teammate invites shipped.
 - Matching **hard-gated** when Upload stale, Live rotation overdue, or wizard incomplete
-  (`evaluate_connection_gate`); UX Needs refresh / Action required — not Connected.
-  Connecting ≠ matching/hash workers for that vertical.
+  (`evaluate_connection_gate` / `evaluate_vertical_matching_gate`); UX Needs refresh /
+  Action required — not Connected. Connecting ≠ matching/hash workers for that vertical.
+  Auth0 `GET /requests/{request_id}/verticals/auth0/match-candidates` uses the same
+  `evaluate_vertical_matching_gate` as matching (409 `gate_blocked` when not allowed).
+  Audit counts + `gate_code` only.
 - Secrets to Secret Manager (`dpra/connections/{system}/{connection_id}`); allowlisted
   `detail` only. Google Sheets SA in `metadata`. `data` vertical view-only in owner wizard.
   `DELETE /ops/connections/{id}` does not delete GSM secrets. Plan:
@@ -60,18 +67,23 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
   `GET /ops/drop/matching-results/{request_id}` (detail + attempt audit drill-down),
   `POST .../bulk-approve` (bulk promote), `POST .../bulk-decline`,
   `POST .../{request_id}/promote`, `POST .../{request_id}/decline`
+- MDR people search: `GET /ops/drop/matching-contacts/search` (`q` min 2 chars, required
+  2-letter `state` — 422 if missing, `limit` 1..20) — MDR `person`/`phones` (same contact
+  shape as matching-result enrich). Role: `MatchingReviewPrincipal`. Data view-only —
+  no owner cadence gate. Never log `q`, names, emails, phones, or DWIDs.
 - Assign / escalate (U17): reuses `approval_requests` with `action_type=workflow.assignment`
   (no new migration) — `POST /ops/drop/workflow/assign`, `POST .../escalate`,
   `GET .../assignments`; targets `reviewer` | `legal` | `data_owner`; actor = IAP email
 - Per-vertical dispositions (U1): `request_vertical_dispositions` is the source of
   record for the gates fulfillment reads — `GET /requests/{request_id}/dispositions`,
   `PUT /requests/{request_id}/dispositions/{vertical}` (`status` 3/4/5, `dwids`,
-  `early_advance`). Live vertical is `data`; coming-soon verticals (Mailchimp, Lever,
-  Paylocity, Auth0, Cassandra) are catalog-only and rejected on write. Status 3/4
-  require a dwid selection (defaults to the matching result), status 5 requires none.
-  Matching promote upserts the `data` disposition and keeps
-  `drop_raw_requests.response_status` in sync. Selected dwids reach authorized
-  callers only — audit records counts.
+  `vendor_record_ids`, `early_advance`). Live verticals are `data` and `auth0`;
+  coming-soon verticals (Axios HQ / `axios_hq`, Lever, Paylocity,
+  Cassandra) are catalog-only and rejected on write. Status 3/4 require a
+  selection (`dwids` for `data`, defaulting to the matching result;
+  `vendor_record_ids` for `auth0`); status 5 requires none. Matching promote
+  upserts the `data` disposition and keeps `drop_raw_requests.response_status`
+  in sync. Selected ids reach authorized callers only — audit records counts.
 - Journey fulfillment gates (plan `2026-07-29-001`): do **not** enqueue
   fulfillment solely from `matching.review` — require **Legal kickoff** per
   approved vertical; Access packs/notice require identity status + **required

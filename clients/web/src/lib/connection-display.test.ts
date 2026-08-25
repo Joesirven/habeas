@@ -14,6 +14,7 @@ import {
   matchingGateFromAttempts,
   matchingGateFromConnection,
   matchingGateFromReminder,
+  isMatchingGateBlockedDisplayStatus,
   ownerAssignedVerticalSummary,
   ownerConnectorActionRequiredCount,
   ownerHomeItemTitle,
@@ -79,6 +80,7 @@ describe('connection-display (AE8 / KD18)', () => {
 
   test('invite rules for cassandra / upload-only / empty credentials', () => {
     expect(connectionInviteAllowed({ system: 'cassandra' })).toBe(false)
+    expect(connectionInviteAllowed({ system: 'axios_hq' })).toBe(false)
     expect(connectionInviteAllowed({ system: 'bizdev_contacts' })).toBe(false)
     expect(connectionInviteAllowed({ system: 'hr_alumni' })).toBe(false)
     expect(
@@ -106,8 +108,12 @@ describe('connection-display (AE8 / KD18)', () => {
     expect(
       isCreatableConnectionSystem({ system_id: 'bizdev_contacts', invite_allowed: true }),
     ).toBe(true)
+    expect(
+      isCreatableConnectionSystem({ system_id: 'axios_hq', invite_allowed: false }),
+    ).toBe(true)
     expect(isUploadOnlySystem('bizdev_contacts')).toBe(true)
-    expect(isUploadOnlySystem('axios_headquarters')).toBe(true)
+    expect(isUploadOnlySystem('axios_hq')).toBe(true)
+    expect(isUploadOnlySystem('axios_headquarters')).toBe(false)
     expect(isUploadOnlySystem('mailchimp')).toBe(false)
   })
 
@@ -259,6 +265,53 @@ describe('connection-display (AE8 / KD18)', () => {
     })
     expect(copy.title).toContain('Needs refresh')
     expect(copy.description).toContain('stale')
+  })
+
+  test('matchingConnectorGateChip never labels Connected when blocked (KD18)', () => {
+    const blockedStatuses = ['needs_refresh', 'action_required', 'needs_setup'] as const
+    for (const displayStatus of blockedStatuses) {
+      expect(isMatchingGateBlockedDisplayStatus(displayStatus)).toBe(true)
+      const chip = matchingConnectorGateChip({
+        blocked: true,
+        displayStatus,
+        gateCode: 'upload_stale',
+        system: 'auth0',
+        source: 'attempt',
+      })
+      expect(chip.label).not.toBe('Connected')
+      expect(chip.label.toLowerCase()).not.toContain('connected')
+    }
+    expect(isMatchingGateBlockedDisplayStatus('connected')).toBe(false)
+
+    const fromConnection = matchingGateFromConnection({
+      system: 'auth0',
+      status: 'connected',
+      display_status: 'needs_refresh',
+      gate_allowed: false,
+      gate_code: 'upload_stale',
+    })
+    expect(fromConnection?.blocked).toBe(true)
+    expect(matchingConnectorGateChip(fromConnection!).label).toBe('Needs refresh')
+    expect(matchingConnectorGateChip(fromConnection!).label).not.toBe('Connected')
+
+    const fromRotation = matchingGateFromConnection({
+      system: 'lever',
+      status: 'connected',
+      display_status: 'action_required',
+      gate_allowed: false,
+      gate_code: 'rotation_overdue',
+    })
+    expect(matchingConnectorGateChip(fromRotation!).label).toBe('Action required')
+    expect(matchingConnectorGateChip(fromRotation!).label).not.toBe('Connected')
+
+    const fromWizard = matchingGateFromReminder({
+      code: 'wizard_incomplete',
+      system: 'auth0',
+      vertical_id: 'auth0',
+      severity: 'overdue',
+    })
+    expect(matchingConnectorGateChip(fromWizard!).label).toBe('Action required')
+    expect(matchingConnectorGateChip(fromWizard!).label).not.toBe('Connected')
   })
 })
 

@@ -134,11 +134,15 @@ def test_auth0_is_live_other_catalog_verticals_remain_coming_soon():
     assert vd.is_live_vertical("auth0") is True
     assert vd.VERTICAL_AUTH0 not in vd.COMING_SOON_VERTICALS
     assert tuple(vd.COMING_SOON_VERTICALS) == (
-        "mailchimp",
+        "axios_hq",
         "lever",
         "paylocity",
         "cassandra",
     )
+    assert "mailchimp" not in vd.COMING_SOON_VERTICALS
+    assert "axios_headquarters" not in vd.COMING_SOON_VERTICALS
+    assert "axios_headquarters" not in vd.LIVE_VERTICALS
+    assert tuple(vd.LIVE_VERTICALS) == (vd.VERTICAL_DATA, vd.VERTICAL_AUTH0)
 
 
 def test_normalize_dwids_trims_and_dedupes_preserving_order():
@@ -192,7 +196,7 @@ async def test_upsert_rejects_coming_soon_vertical():
         await vd.upsert_vertical_disposition(
             conn,
             request_id=REQUEST_ID,
-            vertical="mailchimp",
+            vertical="axios_hq",
             status=3,
             dwids=["dwid-1"],
             decided_by="owner@example.com",
@@ -213,23 +217,23 @@ async def test_put_rejects_coming_soon_vertical(monkeypatch: pytest.MonkeyPatch)
             DATA_OWNER,
         )
     assert exc.value.status_code == 400
-    assert "coming soon" in str(exc.value.detail)
+    assert "not live yet" in str(exc.value.detail)
 
 
 @pytest.mark.asyncio
-async def test_put_mailchimp_still_rejected(monkeypatch: pytest.MonkeyPatch):
+async def test_put_axios_hq_still_rejected(monkeypatch: pytest.MonkeyPatch):
     conn = FakeConn()
     fake_pool(monkeypatch, conn)
     with pytest.raises(HTTPException) as exc:
         await vd.put_vertical_disposition(
             REQUEST_ID,
-            "mailchimp",
+            "axios_hq",
             vd.VerticalDispositionBody(status=4, vendor_record_ids=["usr_1"]),
             _fake_request(),
             DATA_OWNER,
         )
     assert exc.value.status_code == 400
-    assert "coming soon" in str(exc.value.detail)
+    assert "not live yet" in str(exc.value.detail)
     assert conn.upserts == []
 
 
@@ -348,6 +352,29 @@ async def test_put_rejects_unknown_vertical(monkeypatch: pytest.MonkeyPatch):
         )
     assert exc.value.status_code == 400
     assert "unknown vertical" in str(exc.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_put_rejects_retracted_axios_headquarters_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Retracted slug is unknown — catalog id axios_hq stays coming-soon."""
+    conn = FakeConn()
+    fake_pool(monkeypatch, conn)
+    with pytest.raises(HTTPException) as exc:
+        await vd.put_vertical_disposition(
+            REQUEST_ID,
+            "axios_headquarters",
+            vd.VerticalDispositionBody(status=5),
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 400
+    detail = str(exc.value.detail)
+    assert "unknown vertical" in detail
+    assert "axios_headquarters" in detail
+    assert "not live yet" not in detail
+    assert conn.upserts == []
 
 
 @pytest.mark.asyncio
@@ -517,7 +544,7 @@ async def test_get_lists_dispositions_with_coming_soon_catalog(
     assert response.dispositions[0].selected_dwid_count == 2
     assert response.live_verticals == ["data", "auth0"]
     assert [entry.vertical for entry in response.coming_soon] == [
-        "mailchimp",
+        "axios_hq",
         "lever",
         "paylocity",
         "cassandra",

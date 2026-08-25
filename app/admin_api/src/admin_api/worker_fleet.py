@@ -14,30 +14,32 @@ from typing import Annotated, Any, Protocol
 import google.auth
 import google.auth.transport.requests
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic_settings import SettingsConfigDict
-
-from admin_api.roles import RolePrincipal, require_roles
 from habeas_privacy_core.auth import ROLE_SUPER_ADMIN
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.fleet import (
+    CONTROL_PLANE_SERVICE_EXCLUDES,
     CloudRunServiceInput,
     DiscoveryWarning,
     FleetInventory,
     FleetWorkerHealth,
     SchedulerJobInput,
+    is_excluded_service_slug,
     merge_fleet_inventory,
     parse_worker_fleet_urls,
+    service_slug_from_name,
     service_suffix_from_prefix,
+    worker_key_from_service_slug,
 )
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic_settings import SettingsConfigDict
+
+from admin_api.roles import RolePrincipal, require_roles
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ops/workers", tags=["ops-worker-fleet"])
 
-SuperAdminActor = Annotated[
-    RolePrincipal, Depends(require_roles(ROLE_SUPER_ADMIN))
-]
+SuperAdminActor = Annotated[RolePrincipal, Depends(require_roles(ROLE_SUPER_ADMIN))]
 
 
 class FleetSettings(CoreSettings):
@@ -159,6 +161,32 @@ def _gcp_project() -> str:
         return settings.gcp_project
 
 
+def _is_prod_job_prefix(prefix: str) -> bool:
+    return prefix.strip().lower().endswith("-prod")
+
+
+def _prod_service_suffix(prefix: str) -> str:
+    """``dpra-prod`` → ``-prod`` Cloud Run filter (never empty / unsuffixed)."""
+    suffix = service_suffix_from_prefix(prefix)
+    if _is_prod_job_prefix(prefix):
+        return "-prod"
+    return suffix
+
+
+def _is_control_plane_slug(slug: str) -> bool:
+    """True for admin-api / admin-web / ops-ia-web, with or without env suffix."""
+    if is_excluded_service_slug(slug):
+        return True
+    for excluded in CONTROL_PLANE_SERVICE_EXCLUDES:
+        if slug == excluded or slug.startswith(f"{excluded}-"):
+            return True
+    return False
+
+
+def _is_control_plane_worker_key(worker_key: str) -> bool:
+    return _is_control_plane_slug(worker_key.replace("_", "-"))
+
+
 def env_url_map_from_settings() -> dict[str, str]:
     """Build worker_key → base_url from DropPipelineSettings ``*_url`` + WORKER_FLEET_URLS."""
     from admin_api.drop_pipeline import WORKER_KEYS
@@ -166,6 +194,8 @@ def env_url_map_from_settings() -> dict[str, str]:
 
     out: dict[str, str] = {}
     for worker_key, attr in WORKER_KEYS:
+        if _is_control_plane_worker_key(worker_key):
+            continue
         value = getattr(drop_settings, attr, None)
         if isinstance(value, str) and value.strip():
             out[worker_key] = value.rstrip("/")
@@ -176,14 +206,47 @@ def env_url_map_from_settings() -> dict[str, str]:
         if field_name == "database_url":
             continue
         worker_key = field_name[: -len("_url")]
-        if worker_key in out:
+        if worker_key in out or _is_control_plane_worker_key(worker_key):
             continue
         value = getattr(drop_settings, field_name, None)
         if isinstance(value, str) and value.strip():
             out[worker_key] = value.rstrip("/")
 
-    out.update(parse_worker_fleet_urls(settings.worker_fleet_urls))
+    for worker_key, url in parse_worker_fleet_urls(settings.worker_fleet_urls).items():
+        if _is_control_plane_worker_key(worker_key):
+            continue
+        out[worker_key] = url
     return out
+
+
+def _cloud_run_worker_keys(services: list[CloudRunServiceInput], *, env_suffix: str) -> set[str]:
+    keys: set[str] = set()
+    for svc in services:
+        slug = service_slug_from_name(svc.name, env_suffix)
+        if slug is None or _is_control_plane_slug(slug):
+            continue
+        worker_key = worker_key_from_service_slug(slug)
+        if worker_key:
+            keys.add(worker_key)
+    return keys
+
+
+def _env_urls_for_gcp_merge(
+    env_urls: dict[str, str],
+    *,
+    prefix: str,
+    env_suffix: str,
+    services: list[CloudRunServiceInput],
+) -> dict[str, str]:
+    """On prod, keep env URLs only as fill-in for discovered ``*-prod`` services.
+
+    Drops unsuffixed env twins (``drop_connector`` beside ``drop_connector_prod``)
+    and does not invent workers that exist only as settings URLs.
+    """
+    if not _is_prod_job_prefix(prefix):
+        return env_urls
+    discovered = _cloud_run_worker_keys(services, env_suffix=env_suffix)
+    return {key: url for key, url in env_urls.items() if key in discovered}
 
 
 def _list_scheduler_job_inputs(
@@ -236,8 +299,27 @@ def _list_scheduler_job_inputs(
         return [], warnings
 
 
+def _keep_cloud_run_basename(basename: str, *, env_suffix: str, job_prefix: str) -> bool:
+    """Filter Cloud Run names to the current env; drop control-plane UIs."""
+    if _is_prod_job_prefix(job_prefix):
+        if not basename.endswith("-prod"):
+            return False
+    elif env_suffix:
+        if not basename.endswith(env_suffix):
+            return False
+    elif basename.endswith("-dev"):
+        return False
+    slug_suffix = env_suffix if env_suffix else ("-prod" if _is_prod_job_prefix(job_prefix) else "")
+    slug = service_slug_from_name(basename, slug_suffix)
+    if slug is None:
+        return False
+    if _is_control_plane_slug(slug) or _is_control_plane_slug(basename):
+        return False
+    return True
+
+
 def _list_cloud_run_services(
-    *, env_suffix: str
+    *, env_suffix: str, job_prefix: str = ""
 ) -> tuple[list[CloudRunServiceInput], list[DiscoveryWarning]]:
     warnings: list[DiscoveryWarning] = []
     try:
@@ -275,12 +357,8 @@ def _list_cloud_run_services(
         if not name:
             continue
         basename = name.rsplit("/", 1)[-1]
-        # DEV: only *-dev. Prod (empty suffix): exclude *-dev so shared-project
-        # listing does not mix env fleets.
-        if env_suffix:
-            if not basename.endswith(env_suffix):
-                continue
-        elif basename.endswith("-dev"):
+        # DEV: only *-dev. Prod prefix: only *-prod (never unsuffixed twins).
+        if not _keep_cloud_run_basename(basename, env_suffix=env_suffix, job_prefix=job_prefix):
             continue
         uri = service.get("uri") or ""
         if not uri:
@@ -299,7 +377,7 @@ def _list_cloud_run_services(
 def build_fleet_inventory() -> FleetInventory:
     """Assemble fleet inventory without probing (sync-safe)."""
     prefix = _job_prefix()
-    env_suffix = service_suffix_from_prefix(prefix)
+    env_suffix = _prod_service_suffix(prefix)
     env_urls = env_url_map_from_settings()
     warnings: list[DiscoveryWarning] = []
 
@@ -314,10 +392,13 @@ def build_fleet_inventory() -> FleetInventory:
             service_suffix=env_suffix,
         )
 
-    services, run_warnings = _list_cloud_run_services(env_suffix=env_suffix)
+    services, run_warnings = _list_cloud_run_services(env_suffix=env_suffix, job_prefix=prefix)
     warnings.extend(run_warnings)
     jobs, sched_warnings = _list_scheduler_job_inputs(prefix=prefix)
     warnings.extend(sched_warnings)
+    env_urls = _env_urls_for_gcp_merge(
+        env_urls, prefix=prefix, env_suffix=env_suffix, services=services
+    )
 
     return merge_fleet_inventory(
         env_prefix=prefix,

@@ -4,6 +4,7 @@ const LABS = [
   { to: '/dev/sheets-oauth', label: 'Sheets OAuth lab' },
   { to: '/dev/sheets-cadence-lab', label: 'Sheets cadence lab' },
   { to: '/dev/pending-settings', label: 'Pending settings lab' },
+  { to: '/dev/drop-prod-cutover', label: 'DROP prod cutover lab' },
 ] as const
 
 export function DevLabsIndexPage() {

@@ -11,7 +11,6 @@ from admin_api import connection_testers
 from admin_api.connection_testers import test_connection
 
 _VALID_CREDENTIALS: dict[str, dict[str, str]] = {
-    "mailchimp": {"api_key": "mc-test-key-us19"},
     "paylocity": {
         "host": "sftp.example.com",
         "port": "22",
@@ -31,7 +30,6 @@ _VALID_CREDENTIALS: dict[str, dict[str, str]] = {
 }
 
 _EXPECTED_OK_DETAIL: dict[str, str] = {
-    "mailchimp": "mailchimp_ok",
     "paylocity": "paylocity_ok",
     "lever": "lever_ok",
     "auth0": "auth0_ok",
@@ -42,9 +40,6 @@ _EXPECTED_OK_DETAIL: dict[str, str] = {
 @pytest.fixture(autouse=True)
 def _stub_system_testers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Avoid live vendor calls in dispatcher unit tests."""
-
-    async def _ok_mailchimp(_credentials: dict[str, str]) -> tuple[bool, str, dict]:
-        return True, "mailchimp_ok", {"detail": "mailchimp_ok"}
 
     async def _ok_paylocity(_credentials: dict[str, str]) -> tuple[bool, str, dict]:
         return True, "paylocity_ok", {"detail": "paylocity_ok", "step": "sftp_listdir"}
@@ -63,7 +58,6 @@ def _stub_system_testers(monkeypatch: pytest.MonkeyPatch) -> None:
         _ = impersonate_email
         return True, "google_sheets_ok", {"detail": "google_sheets_ok"}
 
-    monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "mailchimp", _ok_mailchimp)
     monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "paylocity", _ok_paylocity)
     monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "lever", _ok_lever)
     monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "auth0", _ok_auth0)
@@ -120,12 +114,19 @@ async def test_unknown_system() -> None:
 
 
 @pytest.mark.asyncio
+async def test_retired_mailchimp_is_unknown_system() -> None:
+    ok, detail, _triage = await test_connection("mailchimp", {"api_key": "mc-test-key-us19"})
+    assert ok is False
+    assert detail == "unknown_system"
+
+
+@pytest.mark.asyncio
 async def test_logs_never_include_credential_values(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    secret = "super-secret-mailchimp-key-value-us19"
+    secret = "super-secret-lever-key-value"
     with caplog.at_level(logging.INFO, logger="admin_api.connection_testers"):
-        await test_connection("mailchimp", {"api_key": secret})
+        await test_connection("lever", {"api_key": secret})
 
     for record in caplog.records:
         assert secret not in record.getMessage()
@@ -136,8 +137,8 @@ async def test_request_error_maps_to_unreachable(monkeypatch: pytest.MonkeyPatch
     async def _boom(_credentials: dict[str, str]) -> tuple[bool, str, dict]:
         raise httpx.ConnectError("boom")
 
-    monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "mailchimp", _boom)
-    ok, detail, triage = await test_connection("mailchimp", _VALID_CREDENTIALS["mailchimp"])
+    monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "lever", _boom)
+    ok, detail, triage = await test_connection("lever", _VALID_CREDENTIALS["lever"])
     assert ok is False
     assert detail == "unreachable"
     assert triage.get("error_kind") == "connect_error"
@@ -148,8 +149,8 @@ async def test_timeout_maps_to_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _boom(_credentials: dict[str, str]) -> tuple[bool, str, dict]:
         raise httpx.ReadTimeout("slow")
 
-    monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "mailchimp", _boom)
-    ok, detail, triage = await test_connection("mailchimp", _VALID_CREDENTIALS["mailchimp"])
+    monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "lever", _boom)
+    ok, detail, triage = await test_connection("lever", _VALID_CREDENTIALS["lever"])
     assert ok is False
     assert detail == "timeout"
     assert triage.get("error_kind") == "timeout"
@@ -160,7 +161,7 @@ async def test_unexpected_error_maps_to_unknown_error(monkeypatch: pytest.Monkey
     async def _boom(_credentials: dict[str, str]) -> tuple[bool, str, dict]:
         raise RuntimeError("secret-must-not-leak")
 
-    monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "mailchimp", _boom)
-    ok, detail, _triage = await test_connection("mailchimp", _VALID_CREDENTIALS["mailchimp"])
+    monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "lever", _boom)
+    ok, detail, _triage = await test_connection("lever", _VALID_CREDENTIALS["lever"])
     assert ok is False
     assert detail == "unknown_error"

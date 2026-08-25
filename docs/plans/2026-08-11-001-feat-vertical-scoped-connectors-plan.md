@@ -542,7 +542,7 @@ Journey workbench today (`vertical_dispositions.py`) uses **system slugs** for c
 |----------------------------------------|----------------------|----------------------|------------------|
 | `data` (live) | **Data** | DROP hash / CEPI (INF) | View-only in catalog; disposition + kickoff today |
 | `cassandra` | **Data** | Cassandra / CEPI pipeline | Journey stub orients to Data vertical INF path — not owner onboarding (KD8) |
-| `mailchimp` | **Communications** | `mailchimp` | Live + Upload when vertical ships |
+| `axios_hq` | **Communications** | `axios_hq` | Axios HQ |
 | `lever` | **People/HR** | `lever` | Live when vertical ships |
 | `paylocity` | **People/HR** | `paylocity` | Upload v1; Live = SFTP (KD9) |
 | `auth0` | **Tech** | `auth0` | Live + Upload when vertical ships |

@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 
-import type { MatchingResultsViewProps } from '@/components/matching-results-lab/matching-results-lab-types'
+import type {
+  MatchingResultsViewProps,
+  SearchPeopleFn,
+} from '@/components/matching-results-lab/matching-results-lab-types'
 import {
   applyNeedsPeople,
-  ResultPeopleSearch,
-  ResultSystemLabel,
   resultViewEmpty,
 } from '@/components/matching-results-lab/ResultViewChrome'
 import { matchingDetailIsNotLive, redactHashHex, safeMatchedContacts } from '@/components/requests/RequestTriageDialog'
@@ -22,6 +23,7 @@ import {
   isMatchingGateBlockedDisplayStatus,
   matchingGateFromAttempts,
   ownerConnectorsSearch,
+  type MatchingConnectorGate,
 } from '@/lib/connection-display'
 import { inboxIntakeSourceLabel } from '@/lib/inbox-batch-status'
 import { catalogSystemDisplayLabel } from '@/lib/legalJourneyLabels'
@@ -113,6 +115,24 @@ function heroMatchingGate(detail: MatchingResultDetail | null): HeroGate | null 
     }
   }
   return null
+}
+
+/** Search chrome: Needs refresh / Needs connection — never Connected. */
+function peopleSearchNotice(
+  blocked?: MatchingConnectorGate | null,
+  pending?: { title: string; support: string } | null,
+): { title: string; support: string } | null {
+  if (blocked?.blocked) {
+    const refresh =
+      blocked.displayStatus === 'needs_refresh' || blocked.gateCode === 'upload_stale'
+    return {
+      title: refresh ? 'Needs refresh' : 'Needs connection',
+      support: pending?.support ?? '',
+    }
+  }
+  if (!pending) return null
+  const title = pending.title.trim() === 'Connected' ? 'Needs connection' : pending.title
+  return { title, support: pending.support }
 }
 
 function personInitials(contact: MatchedPersonContact): string {
@@ -529,34 +549,106 @@ function GateHero({
   )
 }
 
-/** Local match-set search — no system directory API exists in admin-api. */
+function mergeAddHits(
+  directoryHits: MatchedPersonContact[],
+  localHits: MatchedPersonContact[],
+): MatchedPersonContact[] {
+  const seen = new Set<string>()
+  const merged: MatchedPersonContact[] = []
+  for (const contact of [...directoryHits, ...localHits]) {
+    const dwid = contact.dwid?.trim()
+    if (!dwid || seen.has(dwid)) continue
+    seen.add(dwid)
+    merged.push(contact)
+  }
+  return merged
+}
+
+/** Directory search via onSearchPeople when live; local match-set as fallback. */
 function AddPersonCard({
   query,
   onQueryChange,
-  hits,
+  localHits,
+  onSearchPeople,
   locked,
+  gateNotice,
   onAdd,
 }: {
   query: string
   onQueryChange: (value: string) => void
-  hits: MatchedPersonContact[]
+  localHits: MatchedPersonContact[]
+  onSearchPeople?: SearchPeopleFn
   locked: boolean
+  gateNotice: { title: string; support: string } | null
   onAdd: (contact: MatchedPersonContact) => void
 }) {
+  const [directoryHits, setDirectoryHits] = useState<MatchedPersonContact[]>([])
+  const [searchBusy, setSearchBusy] = useState(false)
+  const [searchFailed, setSearchFailed] = useState(false)
+  const searchRef = useRef(onSearchPeople)
+  searchRef.current = onSearchPeople
   const q = query.trim()
+
+  useEffect(() => {
+    if (locked || !onSearchPeople || q.length < 2) {
+      setDirectoryHits([])
+      setSearchBusy(false)
+      setSearchFailed(false)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setSearchBusy(true)
+        setSearchFailed(false)
+        try {
+          const result = await searchRef.current?.(q)
+          if (!cancelled) setDirectoryHits(result ?? [])
+        } catch {
+          if (!cancelled) {
+            setDirectoryHits([])
+            setSearchFailed(true)
+          }
+        } finally {
+          if (!cancelled) setSearchBusy(false)
+        }
+      })()
+    }, 200)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [q, onSearchPeople, locked])
+
+  const hits = mergeAddHits(directoryHits, localHits)
+
   return (
     <div className="flex flex-col items-center gap-3 rounded-md border border-dashed border-line bg-paper px-5 py-6">
       <p className="text-sm font-medium text-ink">Add a person</p>
+      {gateNotice ? (
+        <p className="text-center text-sm text-mute" role="status">
+          <span className="font-medium text-ink">{gateNotice.title}</span>
+          {gateNotice.support ? ` — ${gateNotice.support}` : ''}
+        </p>
+      ) : null}
       <input
         type="search"
         value={query}
         disabled={locked}
         onChange={(event) => onQueryChange(event.target.value)}
-        placeholder="Search this system"
+        placeholder={gateNotice ? gateNotice.title : 'Search this system'}
         aria-label="Search this system"
         className="h-10 w-full rounded-md border border-line bg-paper px-3 text-sm text-ink outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid disabled:opacity-50"
       />
-      {q && hits.length > 0 ? (
+      {searchBusy ? (
+        <p className="text-center text-sm text-mute" role="status">
+          Searching this system…
+        </p>
+      ) : null}
+      {searchFailed ? (
+        <p className="text-center text-sm text-mute">Could not search this system. Try again.</p>
+      ) : null}
+      {q && hits.length > 0 && !gateNotice ? (
         <ul className="w-full space-y-1">
           {hits.map((contact) => (
             <li key={contact.dwid}>
@@ -572,8 +664,12 @@ function AddPersonCard({
           ))}
         </ul>
       ) : null}
-      {q && hits.length === 0 ? (
-        <p className="text-center text-sm text-mute">No directory search for this system yet</p>
+      {q && hits.length === 0 && !searchBusy && !searchFailed && !gateNotice ? (
+        <p className="text-center text-sm text-mute">
+          {onSearchPeople && q.length < 2
+            ? 'Type at least 2 characters to search this system.'
+            : 'No people match that search.'}
+        </p>
       ) : null}
     </div>
   )
@@ -598,25 +694,34 @@ export function OwnerMatchingReviewV08({
   disabled,
   pending,
   onApply,
+  onSearchPeople,
+  peopleSearchBlocked,
+  peopleSearchPending,
 }: MatchingResultsViewProps) {
-  const people = useMemo(() => unifyPeople(safeMatchedContacts(contacts)), [contacts])
+  const [extraContacts, setExtraContacts] = useState<MatchedPersonContact[]>([])
+  const people = useMemo(
+    () => unifyPeople(safeMatchedContacts([...contacts, ...extraContacts])),
+    [contacts, extraContacts],
+  )
   const [focusIndex, setFocusIndex] = useState(0)
   const [query, setQuery] = useState('')
   const [pendingFocusDwid, setPendingFocusDwid] = useState<string | null>(null)
-  const contactKey = people.map((row) => row.dwid).join('|')
+  const contactKey = `${item?.request_id ?? ''}:${contacts.map((row) => row.dwid).join('|')}`
 
   useEffect(() => {
     setFocusIndex(0)
     setQuery('')
     setPendingFocusDwid(null)
-    if (people.length > 0 && selectedDwids.length === 0 && statusId !== STATUS_NOT_A_MATCH) {
-      onSelectedDwidsChange(people.map((row) => row.dwid).filter(Boolean))
+    setExtraContacts([])
+    const seed = unifyPeople(safeMatchedContacts(contacts))
+    if (seed.length > 0 && selectedDwids.length === 0 && statusId !== STATUS_NOT_A_MATCH) {
+      onSelectedDwidsChange(seed.map((row) => row.dwid).filter(Boolean))
     }
-    if (people.length > 0 && (!statusId || statusId === STATUS_NOT_A_MATCH)) {
+    if (seed.length > 0 && (!statusId || statusId === STATUS_NOT_A_MATCH)) {
       const suggested = String(
         suggestedDropResponseStatus(
           detail?.match_type ?? item?.match_type,
-          people.length,
+          seed.length,
         ),
       )
       if (suggested === STATUS_DELETE || suggested === STATUS_OPT_IN) {
@@ -654,7 +759,8 @@ export function OwnerMatchingReviewV08({
   const empty = resultViewEmpty(loading, Boolean(item))
   if (empty) return empty
 
-  const locked = Boolean(disabled || pending)
+  const searchNotice = peopleSearchNotice(peopleSearchBlocked, peopleSearchPending)
+  const locked = Boolean(disabled || pending || searchNotice)
   const gate = heroMatchingGate(detail)
   const suggestedCode = suggestedDropResponseStatus(
     detail?.match_type ?? item?.match_type,
@@ -696,6 +802,11 @@ export function OwnerMatchingReviewV08({
 
   function addPerson(contact: MatchedPersonContact) {
     if (!contact.dwid) return
+    if (!people.some((row) => row.dwid === contact.dwid)) {
+      setExtraContacts((previous) =>
+        previous.some((row) => row.dwid === contact.dwid) ? previous : [...previous, contact],
+      )
+    }
     if (!selectedDwids.includes(contact.dwid)) {
       onSelectedDwidsChange([...selectedDwids, contact.dwid])
     }
@@ -722,8 +833,10 @@ export function OwnerMatchingReviewV08({
           <AddPersonCard
             query={query}
             onQueryChange={setQuery}
-            hits={searchHits}
+            localHits={searchHits}
+            onSearchPeople={onSearchPeople}
             locked={locked}
+            gateNotice={searchNotice}
             onAdd={addPerson}
           />
         </div>
@@ -741,8 +854,10 @@ export function OwnerMatchingReviewV08({
           <AddPersonCard
             query={query}
             onQueryChange={setQuery}
-            hits={searchHits}
+            localHits={searchHits}
+            onSearchPeople={onSearchPeople}
             locked={locked}
+            gateNotice={searchNotice}
             onAdd={addPerson}
           />
         </div>
@@ -764,8 +879,10 @@ export function OwnerMatchingReviewV08({
           <AddPersonCard
             query={query}
             onQueryChange={setQuery}
-            hits={searchHits}
+            localHits={searchHits}
+            onSearchPeople={onSearchPeople}
             locked={locked}
+            gateNotice={searchNotice}
             onAdd={addPerson}
           />
         </div>

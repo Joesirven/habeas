@@ -4,7 +4,7 @@
  * match people table right. Email / phone / NDZ are identifier surfaces on
  * people rows — not a left-pane Channel dimension (one matching attempt).
  */
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 
 import {
@@ -124,19 +124,6 @@ function neverShowInfraName(value: string): string {
   return value.replace(/cassandra/gi, 'this system')
 }
 
-function personSearchHaystack(
-  contact: MatchedPersonContact,
-  attemptSurfaces: InboxItemChannel[],
-): string {
-  const surfaces = contactSurfaces(contact, attemptSurfaces)
-    .map((surface) => SURFACE_LABELS[surface])
-    .join(' ')
-  return [formatMatchedContactLabel(contact), contact.state, contact.email, surfaces]
-    .filter((part) => typeof part === 'string' && part.trim())
-    .join(' ')
-    .toLowerCase()
-}
-
 function contactsKey(contacts: MatchedPersonContact[]): string {
   return contacts
     .map((contact) => contact.dwid)
@@ -159,6 +146,9 @@ export function OwnerMatchingReviewV03({
   disabled,
   pending,
   onApply,
+  onSearchPeople,
+  peopleSearchBlocked,
+  peopleSearchPending,
 }: MatchingResultsViewProps) {
   const { me } = useMe()
   const systemId = item ? inboxItemSystemId(item) : detail?.system ?? null
@@ -173,6 +163,12 @@ export function OwnerMatchingReviewV03({
   const [removedDwids, setRemovedDwids] = useState<string[]>([])
   const [dispositions, setDispositions] = useState<Record<string, PersonDisposition>>({})
   const [addQuery, setAddQuery] = useState('')
+  const [addedPeople, setAddedPeople] = useState<MatchedPersonContact[]>([])
+  const [searchHits, setSearchHits] = useState<MatchedPersonContact[]>([])
+  const [searchBusy, setSearchBusy] = useState(false)
+  const [searchFailed, setSearchFailed] = useState(false)
+  const searchFnRef = useRef(onSearchPeople)
+  searchFnRef.current = onSearchPeople
 
   const poolKey = contactsKey(contacts)
   const matchType = detail?.match_type ?? item?.match_type
@@ -180,6 +176,9 @@ export function OwnerMatchingReviewV03({
   useEffect(() => {
     setRemovedDwids([])
     setAddQuery('')
+    setAddedPeople([])
+    setSearchHits([])
+    setSearchFailed(false)
     const seed = seedDisposition(null, matchType, matchCount)
     const next: Record<string, PersonDisposition> = {}
     for (const dwid of poolKey.split('\0')) {
@@ -188,15 +187,54 @@ export function OwnerMatchingReviewV03({
     setDispositions(next)
   }, [matchCount, matchType, poolKey])
 
-  const empty = resultViewEmpty(loading, Boolean(item))
-  if (empty) return empty
-
-  const locked = Boolean(disabled || pending)
-  const gateForThisSystem =
+  const localGateForSystem =
     Boolean(gate?.blocked) &&
     !hideConnectorSurface &&
     !isOwnerWizardHiddenSystem(gate?.system) &&
     (!gate?.system || !systemId || gate.system === systemId)
+  const searchGate = peopleSearchBlocked ?? (localGateForSystem ? gate : null)
+  const searchGated = Boolean(searchGate)
+  const searchPendingSetup = !searchGated && (Boolean(peopleSearchPending) || !onSearchPeople)
+  const directorySearchOpen =
+    Boolean(onSearchPeople) && !searchGated && !searchPendingSetup && !disabled && !pending
+
+  useEffect(() => {
+    const needle = addQuery.trim()
+    if (!directorySearchOpen || needle.length < 2) {
+      setSearchHits([])
+      setSearchBusy(false)
+      setSearchFailed(false)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        setSearchBusy(true)
+        setSearchFailed(false)
+        try {
+          const result = (await searchFnRef.current?.(needle)) ?? []
+          if (cancelled) return
+          setSearchHits(result)
+        } catch {
+          if (cancelled) return
+          setSearchHits([])
+          setSearchFailed(true)
+        } finally {
+          if (!cancelled) setSearchBusy(false)
+        }
+      })()
+    }, 200)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [addQuery, directorySearchOpen])
+
+  const empty = resultViewEmpty(loading, Boolean(item))
+  if (empty) return empty
+
+  const locked = Boolean(disabled || pending)
+  const gateForThisSystem = searchGated
   const reviewLocked = locked || gateForThisSystem
   const notFound = statusId === '5'
   const systemName =
@@ -218,15 +256,22 @@ export function OwnerMatchingReviewV03({
         channels: item.channels,
       })
     : []
-  const pool = contacts.filter((contact) => Boolean(contact.dwid))
+  const pool = [
+    ...contacts,
+    ...addedPeople.filter(
+      (row) => row.dwid && !contacts.some((contact) => contact.dwid === row.dwid),
+    ),
+  ].filter((contact) => Boolean(contact.dwid))
   const removed = new Set(removedDwids)
   const visible = notFound ? [] : pool.filter((contact) => !removed.has(contact.dwid))
-  const query = addQuery.trim().toLowerCase()
-  const addCandidates = pool.filter((contact) => {
-    if (!removed.has(contact.dwid)) return false
-    if (!query) return true
-    return personSearchHaystack(contact, attemptSurfaces).includes(query)
-  })
+  const visibleIds = new Set(visible.map((contact) => contact.dwid))
+  const addCandidates = searchHits.filter(
+    (contact) => Boolean(contact.dwid) && !visibleIds.has(contact.dwid),
+  )
+  const pendingSearchCopy = peopleSearchPending ?? {
+    title: 'Needs connection',
+    support: 'This system is not connected for people search yet.',
+  }
   const dispositionSet = new Set(
     visible.map((contact) => dispositions[contact.dwid] ?? seedDisposition(statusId)),
   )
@@ -269,22 +314,34 @@ export function OwnerMatchingReviewV03({
     if (remaining.length === 0 && statusId !== '5') onStatusChange('5')
   }
 
-  function addPerson(dwid: string) {
-    const nextRemoved = removedDwids.filter((id) => id !== dwid)
+  function addPerson(contact: MatchedPersonContact) {
+    if (!contact.dwid) return
+    if (!pool.some((row) => row.dwid === contact.dwid)) {
+      setAddedPeople((current) =>
+        current.some((row) => row.dwid === contact.dwid) ? current : [...current, contact],
+      )
+    }
+    const nextRemoved = removedDwids.filter((id) => id !== contact.dwid)
     setRemovedDwids(nextRemoved)
-    const remaining = pool
-      .filter((contact) => !nextRemoved.includes(contact.dwid))
-      .map((contact) => contact.dwid)
-    if (statusId === '5') onStatusChange(dispositions[dwid] ?? seedDisposition(statusId))
+    const remaining = [...pool, contact]
+      .filter((row) => row.dwid && !nextRemoved.includes(row.dwid))
+      .map((row) => row.dwid)
+      .filter((id, index, ids) => ids.indexOf(id) === index)
+    const nextDisposition = dispositions[contact.dwid] ?? seedDisposition(statusId)
+    if (!dispositions[contact.dwid]) {
+      setDispositions((current) => ({ ...current, [contact.dwid]: nextDisposition }))
+    }
+    if (statusId === '5') onStatusChange(nextDisposition)
     onSelectedDwidsChange(remaining)
     setAddQuery('')
   }
 
-  const gateChip = gateForThisSystem && gate ? matchingConnectorGateChip(gate) : null
+  const activeGate = searchGate
+  const gateChip = gateForThisSystem && activeGate ? matchingConnectorGateChip(activeGate) : null
   const gateCopy =
-    gateForThisSystem && gate
+    gateForThisSystem && activeGate
       ? (() => {
-          const copy = matchingConnectorGateBannerCopy(gate)
+          const copy = matchingConnectorGateBannerCopy(activeGate)
           const fallback = systemName === '—' ? 'this system' : systemName
           return {
             title: neverShowInfraName(copy.title).replace(/this system/gi, fallback),
@@ -419,19 +476,28 @@ export function OwnerMatchingReviewV03({
               id="owner-matching-v03-add"
               type="search"
               value={addQuery}
-              disabled={reviewLocked || notFound || pool.length === 0}
+              disabled={reviewLocked || notFound || searchGated || searchPendingSetup}
               placeholder="Add person from this system…"
               onChange={(event) => setAddQuery(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key !== 'Enter') return
                 event.preventDefault()
                 const first = addCandidates[0]
-                if (first) addPerson(first.dwid)
+                if (first) addPerson(first)
               }}
               className="h-7 w-full rounded-md border border-line bg-canvas px-2 text-xs text-ink outline-none placeholder:text-mute focus-visible:ring-2 focus-visible:ring-habeas-mid disabled:opacity-50"
             />
-            {!notFound && removed.size > 0 ? (
-              addCandidates.length > 0 ? (
+            {searchGated ? null : searchPendingSetup ? (
+              <p className="text-[0.65rem] text-mute">
+                {pendingSearchCopy.title}
+                {pendingSearchCopy.support ? ` · ${pendingSearchCopy.support}` : ''}
+              </p>
+            ) : !notFound && addQuery.trim().length >= 2 ? (
+              searchBusy ? (
+                <p className="text-[0.65rem] text-mute">Searching this system…</p>
+              ) : searchFailed ? (
+                <p className="text-[0.65rem] text-mute">Could not search this system.</p>
+              ) : addCandidates.length > 0 ? (
                 <ul className="max-h-24 space-y-0.5 overflow-y-auto rounded-md border border-line bg-canvas px-1.5 py-1">
                   {addCandidates.map((contact) => (
                     <li key={contact.dwid} className="flex items-center justify-between gap-2">
@@ -443,7 +509,7 @@ export function OwnerMatchingReviewV03({
                         size="sm"
                         variant="ghost"
                         disabled={reviewLocked}
-                        onClick={() => addPerson(contact.dwid)}
+                        onClick={() => addPerson(contact)}
                       >
                         Add
                       </Button>
@@ -451,7 +517,7 @@ export function OwnerMatchingReviewV03({
                   ))}
                 </ul>
               ) : (
-                <p className="text-[0.65rem] text-mute">No removed people match this search.</p>
+                <p className="text-[0.65rem] text-mute">No people in this system match that search.</p>
               )
             ) : null}
           </div>

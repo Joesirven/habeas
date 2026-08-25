@@ -1534,6 +1534,7 @@ function BulkStageStrip({
   activeTab,
   onSelectTab,
   expanded,
+  summaryCurrentStage,
 }: {
   detail: BulkProcessDetail | undefined
   loading?: boolean
@@ -1542,6 +1543,8 @@ function BulkStageStrip({
   activeTab: PipelineStageTab
   onSelectTab: (tab: PipelineStageTab) => void
   expanded: boolean
+  /** List-summary current stage — paints compact chips before per-row detail. */
+  summaryCurrentStage?: string
 }) {
   return (
     <div
@@ -1550,7 +1553,8 @@ function BulkStageStrip({
       aria-label="Bulk process stages"
     >
       {BULK_CARD_STAGE_TABS.map((tab) => {
-        if (loading || !detail) {
+        const waitingOnDetail = !detail && (expanded || loading)
+        if (waitingOnDetail) {
           return (
             <div
               key={tab.key}
@@ -1565,7 +1569,9 @@ function BulkStageStrip({
           )
         }
         const counts = countsForStageTab(detail, tab)
-        const isCurrent = isStageTabCurrent(detail, tab)
+        const isCurrent = detail
+          ? isStageTabCurrent(detail, tab)
+          : tab.stages.some((stage) => stage.key === summaryCurrentStage)
         const selected = activeTab === tab.key
         const emphasize = expanded && selected
         const visual = stageVisualState(counts, isCurrent)
@@ -1942,7 +1948,7 @@ function BatchProcessExpandRow({
   const detailQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-processes', 'detail', row.process_id],
     queryFn: () => getDropBulkProcess(row.process_id),
-    enabled: true,
+    enabled: expanded || isActiveBulkSummary(row),
     refetchInterval:
       expanded || likelyNeedsReview || isActiveBulkSummary(row) ? 5_000 : 30_000,
     placeholderData: (previous) => previous,
@@ -2122,12 +2128,13 @@ function BatchProcessExpandRow({
         <div className="w-full pl-7">
           <BulkStageStrip
             detail={detail}
-            loading={detailQuery.isPending && !detail}
+            loading={detailQuery.isFetching && !detail}
             duration={duration}
             running={running || pending}
             activeTab={stageTab}
             onSelectTab={selectStage}
             expanded={expanded}
+            summaryCurrentStage={row.overall?.current_stage}
           />
         </div>
       </div>
@@ -3217,6 +3224,7 @@ function DropPipelinePageInner() {
   const trendsQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-workers', 'trends', '3m'],
     queryFn: () => getDropWorkerTrends('3m'),
+    enabled: pipelineQuery.isFetched && processesQuery.isFetched,
     refetchInterval: 60_000,
     placeholderData: (previous) => previous,
   })

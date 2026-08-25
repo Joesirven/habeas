@@ -133,6 +133,20 @@ type JourneySubstepItem = {
   statusLabel?: string
 }
 
+/** Workbench API copy for `live: false` cluster rows — not a launch teaser. */
+export const CATALOG_ONLY_NOT_LIVE_LABEL = 'Catalog-only — matching is not live'
+
+/** Visible cluster-row status. Catalog-only rows use API not-live copy, never Soon. */
+export function clusterRowStatusLabel(
+  row: Pick<PipelineClusterRow, 'live' | 'blocker'>,
+  liveStatus: JourneyStageStatus,
+): string {
+  if (row.live) return workbenchStatusLabel(liveStatus)
+  const fromApi = row.blocker?.trim()
+  if (fromApi && /catalog-only|not live/i.test(fromApi)) return fromApi
+  return CATALOG_ONLY_NOT_LIVE_LABEL
+}
+
 function journeyItemsForStage(opts: {
   stageKey: string
   substeps?: DerivedWorkbenchSubstep[]
@@ -147,7 +161,7 @@ function journeyItemsForStage(opts: {
       status: row.matching_status,
       blocker: row.blocker,
       muted: !row.live,
-      statusLabel: row.live ? workbenchStatusLabel(row.matching_status) : 'Soon',
+      statusLabel: clusterRowStatusLabel(row, row.matching_status),
     }))
   }
   if (stageKey === 'fulfillment' && fulfillmentCluster && fulfillmentCluster.length > 0) {
@@ -159,7 +173,7 @@ function journeyItemsForStage(opts: {
         status,
         blocker: row.blocker,
         muted: !row.live,
-        statusLabel: row.live ? workbenchStatusLabel(status) : 'Soon',
+        statusLabel: clusterRowStatusLabel(row, status),
       }
     })
   }
@@ -511,9 +525,11 @@ function JourneySubstepList({
             item.muted && 'opacity-50',
           )}
           title={
-            item.blocker
-              ? `${item.label}: ${workbenchStatusLabel(item.status)} — ${item.blocker}`
-              : `${item.label}: ${workbenchStatusLabel(item.status)}`
+            item.muted && item.statusLabel
+              ? `${item.label}: ${item.statusLabel}`
+              : item.blocker
+                ? `${item.label}: ${workbenchStatusLabel(item.status)} — ${item.blocker}`
+                : `${item.label}: ${workbenchStatusLabel(item.status)}`
           }
         >
           <span

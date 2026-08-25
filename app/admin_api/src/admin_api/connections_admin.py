@@ -363,19 +363,13 @@ def _hardcoded_systems_catalog() -> SystemsCatalogResponse:
     return SystemsCatalogResponse(
         systems=[
             SystemCatalogEntry(
-                system_id="mailchimp",
-                display_label="Mailchimp",
-                credential_fields=[
-                    SystemCredentialField(
-                        id="api_key",
-                        label="API key",
-                        input_type="password",
-                        required=True,
-                    )
-                ],
+                system_id="axios_hq",
+                display_label="Axios HQ",
+                invite_allowed=False,
+                credential_fields=[],
                 trust_copy=(
-                    "Paste a Mailchimp API key with list and member access. "
-                    "Do not use your personal login password."
+                    "Axios HQ uses Upload mode only. Export a contact or subscriber "
+                    "list as CSV and upload it. No API credentials are required."
                 ),
             ),
             SystemCatalogEntry(

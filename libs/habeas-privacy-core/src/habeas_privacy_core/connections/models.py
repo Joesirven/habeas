@@ -22,7 +22,6 @@ ALLOWED_TEST_DETAIL_CODES: Final[frozenset[str]] = frozenset(
         # success
         "stub_ok",
         "ok",
-        "mailchimp_ok",
         "axios_hq_ok",
         "paylocity_ok",
         "lever_ok",
@@ -58,7 +57,6 @@ ALLOWED_TEST_DETAIL_CODES: Final[frozenset[str]] = frozenset(
 class ConnectionSystem(StrEnum):
     """Supported integration systems for connections onboarding."""
 
-    MAILCHIMP = "mailchimp"
     AXIOS_HQ = "axios_hq"
     PAYLOCITY = "paylocity"
     LEVER = "lever"

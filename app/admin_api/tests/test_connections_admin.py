@@ -83,22 +83,35 @@ def test_systems_catalog_shape() -> None:
     body = response.json()
     assert "systems" in body
     systems = {entry["system_id"]: entry for entry in body["systems"]}
+    assert "mailchimp" not in systems
     assert set(systems) == {
-        "mailchimp",
         "paylocity",
         "lever",
         "auth0",
         "google_sheets",
+        "alumni_google_sheet",
+        "contact_us_google_sheet",
         "bizdev_contacts",
         "hr_alumni",
+        "axios_hq",
         "cassandra",
     }
-    assert systems["mailchimp"]["invite_allowed"] is True
-    assert systems["mailchimp"]["display_label"]
-    assert systems["mailchimp"]["credential_fields"]
+    assert systems["axios_hq"]["invite_allowed"] is False
+    assert systems["axios_hq"]["display_label"] == "Axios HQ"
+    assert systems["axios_hq"]["credential_fields"] == []
+    assert body["systems"][0]["system_id"] != "mailchimp"
     assert systems["cassandra"]["invite_allowed"] is False
     assert systems["cassandra"]["credential_fields"] == []
     assert systems["cassandra"]["trust_copy"]
+
+
+def test_hardcoded_systems_catalog_excludes_mailchimp() -> None:
+    catalog = connections_admin._hardcoded_systems_catalog()
+    ids = [entry.system_id for entry in catalog.systems]
+    assert "mailchimp" not in ids
+    assert ids[0] == "axios_hq"
+    assert catalog.systems[0].invite_allowed is False
+    assert catalog.systems[0].credential_fields == []
 
 
 def test_owner_candidates_union_of_role_allowlists() -> None:
@@ -237,17 +250,37 @@ async def test_create_connection_sets_infra_pending_for_cassandra(
 
 
 @pytest.mark.asyncio
-async def test_create_connection_without_owner_email_succeeds_for_mailchimp(
+async def test_create_connection_rejects_retired_mailchimp() -> None:
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await connections_admin.create_connection(
+            connections_admin.ConnectionCreateBody(
+                system="mailchimp",
+                display_name="Marketing list",
+            ),
+            principal,
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "invalid system"
+
+
+@pytest.mark.asyncio
+async def test_create_connection_without_owner_email_succeeds_for_axios_hq(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connection_id = uuid4()
     created = Connection(
         id=str(connection_id),
-        system="mailchimp",
-        display_name="Marketing list",
+        system="axios_hq",
+        display_name="Communications list",
         status="pending",
         owner_email=None,
-        secret_resource_name=f"dpra/connections/mailchimp/{connection_id}",
+        secret_resource_name=f"dpra/connections/axios_hq/{connection_id}",
         last_tested_at=None,
         last_test_ok=None,
         last_test_detail=None,
@@ -286,13 +319,13 @@ async def test_create_connection_without_owner_email_succeeds_for_mailchimp(
 
     result = await connections_admin.create_connection(
         connections_admin.ConnectionCreateBody(
-            system="mailchimp",
-            display_name="Marketing list",
+            system="axios_hq",
+            display_name="Communications list",
         ),
         principal,
     )
 
-    assert result.system == "mailchimp"
+    assert result.system == "axios_hq"
     assert result.status == "pending"
     assert result.owner_email is None
 
@@ -665,17 +698,17 @@ def test_create_connection_integration() -> None:
             "/ops/connections",
             headers={IAP_EMAIL_HEADER: "ops@example.com"},
             json={
-                "system": "mailchimp",
-                "display_name": "Marketing list",
+                "system": "axios_hq",
+                "display_name": "Communications list",
                 "owner_email": "owner@example.com",
             },
         )
 
     assert response.status_code == 201
     body = response.json()
-    assert body["system"] == "mailchimp"
+    assert body["system"] == "axios_hq"
     assert body["status"] == "pending"
-    assert body["secret_resource_name"].startswith("dpra/connections/mailchimp/")
+    assert body["secret_resource_name"].startswith("dpra/connections/axios_hq/")
 
 
 @pytest.mark.skipif(
@@ -690,7 +723,7 @@ def test_create_invite_integration() -> None:
             "/ops/connections",
             headers={IAP_EMAIL_HEADER: "ops@example.com"},
             json={
-                "system": "mailchimp",
+                "system": "axios_hq",
                 "display_name": "Invite flow",
                 "owner_email": "owner@example.com",
             },

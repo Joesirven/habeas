@@ -171,8 +171,8 @@ async def ingest_promote(body: PromoteRequest | None = None):
             raise HTTPException(status_code=500, detail="promote failed") from None
 
     return {
-        "status": "ok" if result.request_ids or result.promote_attempt_id else "idle",
-        "promoted": len(result.request_ids),
+        "status": "ok" if result.promoted or result.promote_attempt_id else "idle",
+        "promoted": result.promoted,
         "request_ids": result.request_ids,
         "raw_record_ids": result.raw_record_ids,
         "promote_attempt_id": result.promote_attempt_id,
