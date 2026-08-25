@@ -32,6 +32,9 @@ _ALLOWED_KEYS = frozenset(
         "error_class",
         "error_detail",
         "retry_scheduled",
+        "auth0_match_count",
+        "auth0_bq_dataset",
+        "auth0_error_code",
     }
 )
 
@@ -57,6 +60,9 @@ def build_matching_audit_payload(
     error_class: str | None = None,
     error_detail: str | None = None,
     retry_scheduled: bool | None = None,
+    auth0_match_count: int | None = None,
+    auth0_bq_dataset: str | None = None,
+    auth0_error_code: str | None = None,
 ) -> dict[str, Any]:
     """Build a redacted allowlisted audit dict for ``matching_attempts.audit_payload``."""
     finished = completed_at or datetime.now(timezone.utc)
@@ -89,5 +95,8 @@ def build_matching_audit_payload(
         "error_class": error_class,
         "error_detail": redact_error_text(error_detail) if error_detail else None,
         "retry_scheduled": retry_scheduled,
+        "auth0_match_count": auth0_match_count,
+        "auth0_bq_dataset": auth0_bq_dataset,
+        "auth0_error_code": auth0_error_code,
     }
     return {key: value for key, value in raw.items() if key in _ALLOWED_KEYS and value is not None}

@@ -1,5 +1,10 @@
 """Auth0 vendor adapters (Management API)."""
 
+from auth0.adapters.management import (
+    ManagementApiError,
+    ManagementCredentials,
+    ManagementExtractAdapter,
+)
 from auth0.adapters.stub import (
     MatchAdapter,
     MatchResult,
@@ -10,6 +15,9 @@ from auth0.adapters.stub import (
 )
 
 __all__ = [
+    "ManagementApiError",
+    "ManagementCredentials",
+    "ManagementExtractAdapter",
     "MatchAdapter",
     "MatchResult",
     "StubMatchAdapter",

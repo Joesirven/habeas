@@ -44,6 +44,26 @@ state-specific matching requirement is a new adapter class, not a new app.
    Today `example-gcp-project` has no prod SQL / matching-prod runtime — operational cutover is
    on `matching-dev` + `matching-drain-dev`.
 
+## Auth0 vertical
+
+After a successful **DROP email** match (v1; phone / NDZ skip this step), `matching-dev` and the local worker / chunk drain look up `example-gcp-project.external_hash_index.auth0_email_hash__build` (`system = 'auth0'`) and upsert `request_vertical_matching` (`vertical=auth0`, opaque `vendor_record_id`s, `match_count`). Same cycle as DROP — not a second `matching_attempts` row and not `app/auth0` stub `/matching/submit`.
+
+Auth0 lookup failure is **non-fatal** to the DROP attempt. Allowlisted audit keys only: `auth0_match_count`, `auth0_bq_dataset`, `auth0_error_code`. Never log hashes, vendor ids, or emails.
+
+**Cadence is UNSET and out of scope.** Matching does **not** call `evaluate_connection_gate` or block when owner refresh cadence is missing.
+
+**`auth0-dev` is not deployed.** The mart is filled by **local** Auth0 hash refresh — [`app/auth0/README.md`](../auth0/README.md) § Auth0 matching on dev. Do not invent a Cloud Run Auth0 worker.
+
+| Variable | Role |
+|----------|------|
+| `EXTERNAL_HASH_BQ_PROJECT` | BQ project for the Auth0 mart (default `example-gcp-project`) |
+| `EXTERNAL_HASH_BQ_DATASET` | Dataset (default `external_hash_index`) |
+| `GCP_PROJECT` | Already required for chunk drain |
+
+**IAM (Jose-gated):** matching-dev runtime SA needs project `roles/bigquery.jobUser` and **table-level** `roles/bigquery.dataViewer` on `external_hash_index.auth0_email_hash__build` — not dataset-wide write (Mailchimp shares `external_hash_index`). See [`infra/README.md`](../../infra/README.md) (matching-dev + Auth0 mart).
+
+Dev path: (1) local hash refresh until the mart has rows, (2) DROP dispatch / `/ops/drop/ensure-drain` on **matching-dev**, (3) SELECT `request_vertical_matching` (`vertical=auth0`), (4) owner GET / PUT on admin-api — [`app/admin_api/README.md`](../admin_api/README.md) § Auth0 vertical.
+
 ## Local
 
 ```bash
@@ -51,6 +71,8 @@ uv sync --package matching-worker
 uv run --package matching-worker uvicorn matching.main:app \
   --reload --app-dir app/matching/src --port 8084
 ```
+
+Local `/process` and `/ensure-drain` run the same Auth0 lookup when a DROP email attempt succeeds (needs ADC + mart IAM on the caller). Deployed wave uses **matching-dev**, not this process.
 
 Depends on [`habeas-privacy-core`](../../libs/habeas-privacy-core/).
 

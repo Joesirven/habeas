@@ -22,3 +22,28 @@ sources:
             description: Bounded context identifier (e.g. mailchimp)
           - name: extracted_at
             description: When the extract worker wrote this row
+      - name: auth0_hashed_raw
+        description: >
+          Auth0 Management hashed extract. Populated by the auth0
+          hash-refresh worker after in-memory standardize+hash (CPPA DROP v1.2.0).
+        columns:
+          - name: email_hash
+            description: Base64(SHA-256) of DROP-standardized email
+            tests:
+              - not_null
+          - name: vendor_record_id
+            description: Opaque Auth0 user id (user_id vocabulary stays in app)
+            tests:
+              - unique
+              - not_null
+          - name: system
+            description: Bounded context identifier (e.g. auth0)
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['auth0']
+          - name: extracted_at
+            description: When the extract worker wrote this row
+            tests:
+              - not_null

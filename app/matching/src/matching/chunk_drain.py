@@ -31,6 +31,7 @@ from matching.bq_lookup import (
     serving_table,
 )
 from matching.results import complete_attempt_error, complete_attempt_success
+from matching.vertical_match import run_auth0_vertical_match
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +246,24 @@ async def process_matching_chunk(
             hits = hits_by_hash.get(item["hash_value"], [])
             match_count = len(hits)
             consumer_id = hits[0].dwid if match_count == 1 else None
+            auth0_audit: dict[str, Any] = {}
+            try:
+                auth0_audit = await run_auth0_vertical_match(
+                    conn,
+                    request_id=item["request_id"],
+                    attempt_id=item["attempt_id"],
+                    list_type=list_type,
+                    email_hash=item["hash_value"],
+                )
+            except Exception as exc:
+                logger.error(
+                    "auth0_vertical_match_failed",
+                    extra={
+                        "event": "auth0_vertical_match_failed",
+                        "error_summary": redact_error_text(str(exc)),
+                    },
+                )
+                auth0_audit = {"auth0_error_code": "auth0_lookup_error"}
             audit = build_matching_audit_payload(
                 started_at=started_at,
                 attempt_number=item["attempt_number"],
@@ -254,6 +273,9 @@ async def process_matching_chunk(
                 bq_dataset=DEFAULT_BQ_DATASET,
                 bq_tables=[serving_table(list_type)],
                 match_count=match_count,
+                auth0_match_count=auth0_audit.get("auth0_match_count"),
+                auth0_bq_dataset=auth0_audit.get("auth0_bq_dataset"),
+                auth0_error_code=auth0_audit.get("auth0_error_code"),
             )
             await complete_attempt_success(
                 conn,

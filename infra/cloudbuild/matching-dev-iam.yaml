@@ -1,0 +1,34 @@
+# One-shot (Jose-gated, dev only): matching-dev runtime SA can run BQ jobs
+# and SELECT the Auth0 email-hash mart. Never dataset-wide on external_hash_index.
+# Never grant allUsers or user:* on workers.
+# Runtime SA email is the identity already set on matching-dev.yaml — do not invent one.
+substitutions:
+  _PROJECT: example-gcp-project
+  # Same identity matching-dev.yaml / matching-drain-dev already deploy as.
+  _MATCHING_RUNTIME_SA: 95660886550-compute@developer.gserviceaccount.com
+  _EXTERNAL_HASH_DATASET: external_hash_index
+  _AUTH0_EMAIL_HASH_TABLE: auth0_email_hash__build
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: grant-matching-bq-job-user
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - projects
+      - add-iam-policy-binding
+      - ${_PROJECT}
+      - --member=serviceAccount:${_MATCHING_RUNTIME_SA}
+      - --role=roles/bigquery.jobUser
+      - --quiet
+  - id: grant-matching-auth0-mart-data-viewer
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bq
+    args:
+      - add-iam-policy-binding
+      - --member=serviceAccount:${_MATCHING_RUNTIME_SA}
+      - --role=roles/bigquery.dataViewer
+      - --table=true
+      - ${_PROJECT}:${_EXTERNAL_HASH_DATASET}.${_AUTH0_EMAIL_HASH_TABLE}

@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import pytest
-
 from habeas_privacy_core.connections.models import (
     ALLOWED_TEST_DETAIL_CODES,
     sanitize_test_detail,
@@ -132,6 +131,27 @@ def test_secret_resource_name_format():
         secret_resource_name("mailchimp", "550e8400-e29b-41d4-a716-446655440000")
         == "dpra/connections/mailchimp/550e8400-e29b-41d4-a716-446655440000"
     )
+
+
+def test_get_secret_reader_is_public_export(monkeypatch: pytest.MonkeyPatch):
+    from habeas_privacy_core.connections import (
+        get_secret_reader,
+        reset_secret_reader_cache,
+    )
+
+    monkeypatch.delenv("GCP_PROJECT", raising=False)
+    monkeypatch.delenv("SECRET_READER", raising=False)
+    reset_secret_reader_cache()
+
+    assert callable(get_secret_reader)
+    reader = get_secret_reader()
+    assert isinstance(reader, InMemorySecretWriter)
+
+
+def test_write_hashed_raw_is_public_export():
+    from habeas_privacy_core.vertical_hash import write_hashed_raw
+
+    assert callable(write_hashed_raw)
 
 
 @pytest.fixture

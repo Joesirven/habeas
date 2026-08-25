@@ -168,12 +168,85 @@ logs `drop_promote_requestor_state_default` (no PII) with `sandbox_override=true
 |------|---------|
 | [`cloudbuild/hash-index-refresh-dev.yaml`](cloudbuild/hash-index-refresh-dev.yaml) | Build/push/deploy `hash-index-refresh-dev` |
 
-Runs dbt under `transform/drop_hash/` against BigQuery `drop_hash_index`. Needs `DATABASE_URL` + workload identity with BigQuery **jobUser** and dataset write on `example-gcp-project.drop_hash_index` (read on MDR source datasets). Matching SA remains **select-only** on the three serving marts (`email_hash`, `phone_hash`, `ndz_hash`).
+Runs dbt under `transform/drop_hash/` against BigQuery `drop_hash_index`. Needs `DATABASE_URL` + workload identity with BigQuery **jobUser** and dataset write on `example-gcp-project.drop_hash_index` (read on MDR source datasets). Matching remains **select-only** on the three DROP serving marts (`email_hash`, `phone_hash`, `ndz_hash`) plus table-level read on the Auth0 mart (below).
 
 ```bash
 gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
   --project=example-gcp-project \
   --substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@/postgres?host=/cloudsql/example-gcp-project:us-east4:dpra-dev-temp'
+```
+
+### auth0-dev hash refresh (ops follow-up — not automated)
+
+**`auth0-dev` Cloud Run is not deployed.** No Cloud Build YAML or Terraform in this repo. Local extract is uvicorn — see [`app/auth0/README.md`](../app/auth0/README.md). Fleet name `auth0-dev` is reserved only. Do not invent a service-account email.
+
+IAM below is an **ops follow-up** if/when that service exists (dedicated SA if missing — same gap as `hash-index-refresh`):
+
+| Grant | Resource |
+|-------|----------|
+| `roles/secretmanager.secretAccessor` | GSM secret id `dpra-connections-auth0-{connection_id}` (logical path `dpra/connections/auth0/{connection_id}`; slashes → hyphens — GSM ids cannot contain `/`. `{connection_id}` is `integration_connections.id`) |
+| `roles/bigquery.jobUser` | Project `example-gcp-project` (load + dbt jobs) |
+| `roles/bigquery.dataEditor` | **Table-level only:** `example-gcp-project.external_hash_index.auth0_hashed_raw` and `auth0_email_hash__build`. Do **not** grant dataset-wide `dataEditor` on `external_hash_index` — that dataset also holds Mailchimp hashed raw / marts; dataset-wide write can truncate sibling tables. |
+
+Empty `WRITE_TRUNCATE` of hashed raw is being removed in the writer (do not treat an empty extract as an acceptable full-replace of Auth0 or any sibling table).
+
+Invoker: admin-api runtime SA only — never user/IAP `run.invoker`. Hash refresh is **not** auto-scheduled (no admin-api/CLI enqueue yet; local path only).
+
+Worker extract + dbt runbook: [`app/auth0/README.md`](../app/auth0/README.md). dbt project: [`transform/external_hash/README.md`](../transform/external_hash/README.md).
+
+### matching-dev Auth0 mart read (Jose-gated, dev only)
+
+After DROP email match, `matching-dev` and Job `matching-drain-dev` SELECT
+`example-gcp-project.external_hash_index.auth0_email_hash__build`. They need project
+**jobUser** plus **table-level** `dataViewer` — not dataset-wide access, and not
+write on hashed raw.
+
+**Runtime identity:** do **not** invent a dedicated matching SA. Cloud Build still
+deploys `matching-dev` / `matching-drain-dev` as the compute SA already set in
+[`matching-dev.yaml`](cloudbuild/matching-dev.yaml)
+(`95660886550-compute@developer.gserviceaccount.com`). Resolve the live identity
+before apply; override `_MATCHING_RUNTIME_SA` only if that describe output differs.
+
+```bash
+gcloud run services describe matching-dev --region=us-east4 --project=example-gcp-project \
+  --format='value(spec.template.spec.serviceAccountName)'
+```
+
+| Grant | Resource |
+|-------|----------|
+| `roles/bigquery.jobUser` | Project `example-gcp-project` (query jobs) |
+| `roles/bigquery.dataViewer` | **Table-level only:** `example-gcp-project.external_hash_index.auth0_email_hash__build` |
+
+| Auth0 table | matching-dev |
+|-------------|--------------|
+| `auth0_email_hash__build` | **read** (`dataViewer`) — lookup target |
+| `auth0_hashed_raw` | **none** — writer path is `auth0-dev` / local extract |
+
+Do **not** grant dataset-wide `dataViewer` or `dataEditor` on `external_hash_index`
+(Mailchimp hashed raw / marts share that dataset). Do **not** apply these binds
+on prod. Mart table must exist (Auth0 hash refresh / dbt) before table IAM.
+
+| File | Purpose |
+|------|---------|
+| [`cloudbuild/matching-dev-iam.yaml`](cloudbuild/matching-dev-iam.yaml) | One-shot: jobUser + Auth0 mart `dataViewer` for the matching-dev runtime SA |
+
+**Jose-gated apply (dev only)** — ask Jose before submit (project IAM + table IAM):
+
+```bash
+gcloud builds submit --config=infra/cloudbuild/matching-dev-iam.yaml \
+  --project=example-gcp-project
+```
+
+Verify after bind:
+
+```bash
+gcloud projects get-iam-policy example-gcp-project \
+  --flatten='bindings[].members' \
+  --filter='bindings.role:roles/bigquery.jobUser AND bindings.members:serviceAccount:95660886550-compute@developer.gserviceaccount.com' \
+  --format='table(bindings.role)'
+
+bq get-iam-policy --table=true \
+  example-gcp-project:external_hash_index.auth0_email_hash__build
 ```
 
 ### Cloud Run auth (dev)
@@ -300,16 +373,19 @@ Non–super_admin browsers: use the ops-ia IAP front door, not the ADC Vite prox
 ```bash
 gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev-iam.yaml \
   --project=example-gcp-project
+# Auth0 mart read (Jose-gated, separate from invoker lock):
+# gcloud builds submit --config=infra/cloudbuild/matching-dev-iam.yaml --project=example-gcp-project
 ```
 
 #### Workload identity least privilege (hash-index vs matching) — go-live
 
 Cloud Build does **not** yet attach dedicated runtime service accounts (same gap as other workers besides `reaper`). Before production:
 
-| Workload | Runtime SA (create if missing) | BigQuery |
-|----------|--------------------------------|----------|
+| Workload | Runtime SA (create if missing) | BigQuery / secrets |
+|----------|--------------------------------|--------------------|
 | `hash-index-refresh` | dedicated SA | `roles/bigquery.jobUser` + dataset write on `drop_hash_index` + read on MDR sources |
-| `matching` | distinct SA | **select-only** on `email_hash` / `phone_hash` / `ndz_hash` (e.g. `roles/bigquery.dataViewer` at dataset or table) |
+| `matching` | distinct SA (today: compute SA on `matching-dev.yaml` — do not invent an email) | **select-only** on DROP `email_hash` / `phone_hash` / `ndz_hash`; **table-level** `roles/bigquery.dataViewer` on `external_hash_index.auth0_email_hash__build` + project `roles/bigquery.jobUser` (see matching-dev Auth0 mart read). Not dataset-wide on `external_hash_index`. |
+| `auth0` (`auth0-dev` — **not deployed**) | dedicated SA | **ops follow-up (not automated):** `roles/bigquery.jobUser` on project; **table-level** `roles/bigquery.dataEditor` on `auth0_hashed_raw` / `auth0_email_hash__build` only — **not** dataset-wide `external_hash_index` (Mailchimp shares that dataset); `roles/secretmanager.secretAccessor` on GSM id `dpra-connections-auth0-{connection_id}` (logical `dpra/connections/auth0/{connection_id}`) |
 
 Verify after bind:
 
@@ -419,7 +495,7 @@ CONFIRM=yes ENV=dev ./infra/scripts/upsert_worker_scheduler_jobs.sh
 # CONFIRM=yes ENV=prod ./infra/scripts/upsert_worker_scheduler_jobs.sh  # Jose only
 ```
 
-Hash-index refresh is **not** auto-scheduled (manual/ops enqueue).
+Hash-index refresh is **not** auto-scheduled (manual/ops enqueue). Auth0 hash refresh is also **not** auto-scheduled (see `auth0-dev` follow-up above).
 
 ### Fleet discovery naming conventions
 

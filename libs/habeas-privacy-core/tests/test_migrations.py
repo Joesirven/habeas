@@ -325,3 +325,28 @@ def test_integration_connections_migration_exists():
     assert "CREATE TABLE connection_invites" in content
     assert "migrate:up" in content
     assert "migrate:down" in content
+
+
+def test_matching_auth0_vertical_matching_migration_exists():
+    migration = (
+        migrations_dir() / "20260824200001_matching_auth0_vertical_matching.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+    assert "CREATE TABLE request_vertical_matching" in content
+    assert "request_id" in content
+    assert "vertical" in content
+    assert "match_count" in content
+    assert "vendor_record_ids" in content
+    assert "source_matching_attempt_id" in content
+    assert "recorded_at" in content
+    assert "request_vertical_matching_request_vertical_unique" in content
+    assert "UNIQUE (request_id, vertical)" in content
+    assert "ALTER TABLE request_vertical_dispositions" in content
+    assert "selected_vendor_record_ids" in content
+    assert "JSONB NOT NULL DEFAULT '[]'" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+    assert "CREATE TABLE drop_" not in content
+    assert "selected_dwids" not in content
+
