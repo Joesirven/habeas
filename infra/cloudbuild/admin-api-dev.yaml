@@ -11,6 +11,7 @@ substitutions:
   _DROP_CONNECTOR_URL: https://drop-connector-dev-hsa55rg7ja-uk.a.run.app
   _DROP_INGESTOR_URL: https://drop-ingestor-dev-hsa55rg7ja-uk.a.run.app
   _REQUEST_DISPATCHER_URL: https://request-dispatcher-dev-hsa55rg7ja-uk.a.run.app
+  # Target Cloud Run name is data-vertical-matching-dev; flip _MATCHING_URL after Jose cutover.
   _MATCHING_URL: https://matching-dev-hsa55rg7ja-uk.a.run.app
   _DATA_FULFILLMENT_URL: https://data-fulfillment-dispatcher-dev-hsa55rg7ja-uk.a.run.app
   _HASH_INDEX_REFRESH_URL: https://hash-index-refresh-dev-hsa55rg7ja-uk.a.run.app

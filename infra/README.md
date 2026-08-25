@@ -106,7 +106,7 @@ gcloud builds submit --config=infra/cloudbuild/reaper-dev.yaml \
   --project=example-gcp-project \
   --substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@/postgres?host=/cloudsql/example-gcp-project:us-east4:dpra-dev-temp'
 
-gcloud builds submit --config=infra/cloudbuild/matching-dev.yaml \
+gcloud builds submit --config=infra/cloudbuild/data-vertical-matching-dev.yaml \
   --project=example-gcp-project \
   --substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@/postgres?host=/cloudsql/example-gcp-project:us-east4:dpra-dev-temp'
 
@@ -189,7 +189,7 @@ gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
 |---------|---------|
 | `admin-api-dev` | Compute SA + allowlisted user invokers; Cloud Run **IAP off** (`--no-iap`); app-level `REQUIRE_IAP_IDENTITY` accepts IAP email header **or** verified Bearer Google ID token (ADC) |
 | `admin-web-dev` / `ops-ia-web-dev` | Public Cloud Run + browser IAP front door (see `admin-web-dev.yaml` / `ops-ia-web-dev.yaml`); prefer **ops-ia-web-dev** for DROP ops + owner connector flows |
-| Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`, `hash-index-refresh-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) — never user/IAP direct |
+| Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `data-vertical-matching-dev`, `hash-index-refresh-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) — never user/IAP direct |
 
 Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Operators never call workers directly — process/enqueue goes through admin-api. Localhost worker URLs skip auth.
 
@@ -269,7 +269,7 @@ Prerequisites Jose must keep granted:
 | `roles/run.admin` | Cloud Build executor (`95660886550-compute@…`) | project — so `admin-api-dev.yaml` `auth-front-door` can `run.services.setIamPolicy` (re-assert compute SA `run.invoker`, keep IAP off) |
 | `roles/run.invoker` | compute SA + allowlisted users (e.g. `user:jsirven@…`) | `admin-api-dev` (Cloud Run IAP **off**) |
 | `ADMIN_API_SUPER_ADMINS` / admins / data_owners env | operator emails | Cloud Run env on admin-api (Bearer ADC → super_admins only) |
-| Worker `roles/run.invoker` | **only** admin-api runtime SA | `hash-index-refresh-dev`, `matching-dev`, … |
+| Worker `roles/run.invoker` | **only** admin-api runtime SA | `hash-index-refresh-dev`, `data-vertical-matching-dev`, … |
 | `roles/cloudscheduler.admin` | admin-api runtime SA (`95660886550-compute@…`) | project (live schedule GET/PATCH) |
 | `roles/iam.serviceAccountAdmin` | admin-api runtime SA (`95660886550-compute@…`) | project — live **per-connection Google Sheets SA** create on connection create (`CONNECTIONS_SHEETS_SA_PROVISION=live`) |
 | `roles/iam.serviceAccountTokenCreator` | admin-api runtime SA | on each Sheets share SA (auto on provision; also on named `dpra-sheets-bizdev@` / `dpra-sheets-hr@` for DWD prep) |
@@ -316,7 +316,7 @@ Verify after bind:
 ```bash
 gcloud run services describe hash-index-refresh-dev --region=us-east4 --project=example-gcp-project \
   --format='value(spec.template.spec.serviceAccountName)'
-gcloud run services describe matching-dev --region=us-east4 --project=example-gcp-project \
+gcloud run services describe data-vertical-matching-dev --region=us-east4 --project=example-gcp-project \
   --format='value(spec.template.spec.serviceAccountName)'
 # Confirm invoker is admin-api SA only (no allUsers):
 gcloud run services get-iam-policy hash-index-refresh-dev --region=us-east4 --project=example-gcp-project
@@ -429,9 +429,9 @@ Pull-based inventory joins Cloud Scheduler ∪ Cloud Run (no worker heartbeat). 
 
 | Concept | Form | Examples |
 |---------|------|----------|
-| **worker_key** | `snake_case` stable app id | `matching`, `data_fulfillment`, `mailchimp`, `google_sheets` |
-| **Cloud Run service name** | `{service_slug}{-dev\|}` | `matching-dev`, `data-fulfillment-dispatcher-dev`, `google-sheets-dev` |
-| **worker_id** (runtime env) | `{service_slug}-dev` (dev) | `mailchimp-dev`, `admin-api-dev` |
+| **worker_key** | `snake_case` stable app id | `matching`, `data_fulfillment`, `auth0`, `google_sheets` |
+| **Cloud Run service name** | `{service_slug}{-dev\|}` | `data-vertical-matching-dev`, `data-fulfillment-dispatcher-dev`, `google-sheets-dev` |
+| **worker_id** (runtime env) | `{service_slug}-dev` (dev) | `auth0-dev`, `admin-api-dev` |
 | **Scheduler job id** | `dpra-{env}-{job_slug}` | `dpra-dev-matching`, `dpra-dev-drop-connector-download` |
 | **job_key** (admin-api) | `snake_case`; becomes job slug via `_` → `-` | `drop_connector_download` → `dpra-dev-drop-connector-download` |
 
@@ -452,7 +452,7 @@ Pull-based inventory joins Cloud Scheduler ∪ Cloud Run (no worker heartbeat). 
 
 **EXCLUDE_JOBS:** `test-probe-job`, any job not prefixed `dpra-dev-`.
 
-Do **not** treat Cloud Run **Jobs** (`matching-drain-dev`) as fleet workers; surface drain as metadata on `matching` if needed.
+Do **not** treat Cloud Run **Jobs** (`data-vertical-matching-drain-dev`) as fleet workers; surface drain as metadata on `matching` if needed.
 
 #### Service slug ↔ worker_key aliases
 
@@ -461,23 +461,26 @@ Do **not** treat Cloud Run **Jobs** (`matching-drain-dev`) as fleet workers; sur
 | `drop_connector` | `drop-connector-dev` | |
 | `drop_ingestor` | `drop-ingestor-dev` | two scheduler jobs (land / promote) |
 | `request_dispatcher` | `request-dispatcher-dev` | |
-| `matching` | `matching-dev` | drain is a Job, not a Scheduler upsert |
+| `matching` | `data-vertical-matching-dev` | app slug stays `matching`; drain is Job `data-vertical-matching-drain-dev`, not a Scheduler upsert |
 | `data_fulfillment` | `data-fulfillment-dispatcher-dev` | **alias:** strip `-dispatcher` before snake |
 | `hash_index_refresh` | `hash-index-refresh-dev` | not auto-scheduled |
 | `reaper` | `reaper-dev` | |
 | `intake_drop_poller` | `intake-drop-poller-dev` | discover-only until scheduled |
 | `drop_notice_dispatcher` | `drop-notice-dispatcher-dev` | not live yet |
 
+**Jose-gated cutover:** live traffic is still `matching-dev` (`https://matching-dev-hsa55rg7ja-uk.a.run.app`). `data-vertical-matching-dev` is deployed and Ready (`https://data-vertical-matching-dev-hsa55rg7ja-uk.a.run.app`, invoker = admin-api runtime SA only; drain Job `data-vertical-matching-drain-dev` Ready). Keep admin-api-dev `_MATCHING_URL` on `matching-dev` until Jose flips it to the described `data-vertical-matching-dev` URL. Do **not** submit `data-vertical-matching-prod.yaml` until Jose approves prod cutover.
+
 **Connection / vertical workers (lock before first Cloud Run create):**
 
 | worker_key | service_name (dev) |
 |------------|-------------------|
-| `mailchimp` | `mailchimp-dev` |
 | `paylocity` | `paylocity-dev` |
 | `lever` | `lever-dev` |
 | `auth0` | `auth0-dev` |
 | `google_sheets` | `google-sheets-dev` |
 | `cassandra` | `cassandra-dev` |
+
+Axios HQ Cloud Build yaml and worker live on the other checkout (`agent/connection-error-triage`) — do not first-create `axios-headquarters-dev` or `mailchimp-dev` from this tree.
 
 Rules: service name = kebab-case + `-dev`; `google_sheets` → `google-sheets-dev` (hyphen), worker_key stays underscore. Health probe path is always `GET {service_url}/readyz`.
 

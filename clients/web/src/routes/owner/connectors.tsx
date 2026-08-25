@@ -9,22 +9,30 @@ import { ConfirmActionDialog } from '@/components/ui/dialog'
 import { Spinner } from '@/components/ui/spinner'
 import {
   completeOwnerConnectorWizard,
-  connectRedeemSystemLabel,
   connectTestFailureMessage,
   connectTestSuccessDescription,
+  downloadOwnerUploadTemplate,
   getOwnerConnectorCredentialPreview,
   listOwnerConnectorReminders,
   listOwnerConnectors,
+  listVerticalMembers,
+  mintVerticalMemberInvite,
+  ownerSheetsOauthExtract,
+  ownerSheetsOauthFiles,
+  ownerSheetsOauthRedeem,
+  ownerSheetsOauthStart,
   saveOwnerConnectorCredentials,
   setOwnerConnectorCadence,
   setOwnerConnectorMode,
   testOwnerConnector,
   uploadOwnerConnectorCsv,
   type ConnectorReminder,
-  type IntegrationSystemId,
   type OwnerConnectorList,
   type OwnerConnectorSystem,
   type OwnerCredentialPreview,
+  type OwnerRejectedUploadRow,
+  type OwnerSheetsOauthFile,
+  type OwnerUploadResult,
   type UserRole,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
@@ -38,6 +46,7 @@ import {
   SYSTEM_COPY,
   activeModeFromMetadata,
   allowsLive,
+  allowsOauth,
   allowsUpload,
   buildReminderBannerItems,
   buildVerticalWizardSteps,
@@ -46,9 +55,12 @@ import {
   cadenceOptionFromMetadata,
   delimiterValueFromKey,
   displayStatusChip,
+  filterOwnerWizardConnectors,
   filterRemindersForOwnerConnectorsPage,
   isOwnerConnectorsHiddenSystem,
   isOwnerConnectorsHiddenVertical,
+  isSheetsOwnerSystem,
+  ownerConnectorDisplayName,
   liveConnectReady,
   modeStepSystemHint,
   refreshCadenceFromCadenceOption,
@@ -56,10 +68,17 @@ import {
   uploadMappingComplete,
   UPLOAD_IDENTIFIER_FIELDS,
   UPLOAD_SAMPLE_CSV,
+  EMAIL_FORMAT_OPTIONS,
+  PHONE_FORMAT_OPTIONS,
+  parseCsvDocument,
+  serializeCsvDocument,
+  rejectedRowCodeLabel,
   verticalWizardStepIndex,
   visibleReminderBanners,
   wizardProgressPercent,
   type CadenceOptionId,
+  type CsvDocument,
+  type SheetsConnectMethod,
 } from '@/lib/owner-connector-ui'
 import { cn } from '@/lib/utils'
 
@@ -100,9 +119,21 @@ function canConfigureOwnerConnectors(role: UserRole | undefined) {
   return role === 'data_owner' || role === 'super_admin' || role === 'admin'
 }
 
+function canInviteVerticalMembers(role: UserRole | undefined) {
+  return role === 'data_owner' || role === 'super_admin' || role === 'admin'
+}
+
+function connectorTitle(
+  verticalId: string,
+  connector: Pick<OwnerConnectorSystem, 'system' | 'display_name'>,
+) {
+  return ownerConnectorDisplayName(verticalId, connector.system, connector.display_name)
+}
+
 function systemsNeedingCadence(connectors: readonly OwnerConnectorSystem[]) {
   return connectors.filter(
     (connector) =>
+      isSheetsOwnerSystem(connector.system) ||
       allowsUpload(connector.allowed_approaches) ||
       connector.system === 'google_sheets' ||
       connector.system === 'alumni_google_sheet' ||
@@ -111,11 +142,99 @@ function systemsNeedingCadence(connectors: readonly OwnerConnectorSystem[]) {
 }
 
 function wizardableConnectors(connectors: readonly OwnerConnectorSystem[]) {
-  return connectors.filter(
+  return filterOwnerWizardConnectors(connectors).filter(
     (connector) =>
-      !isOwnerConnectorsHiddenSystem(connector.system) &&
-      (allowsUpload(connector.allowed_approaches) || allowsLive(connector.allowed_approaches)),
+      isSheetsOwnerSystem(connector.system) ||
+      allowsUpload(connector.allowed_approaches) ||
+      allowsLive(connector.allowed_approaches) ||
+      allowsOauth(connector.allowed_approaches),
   )
+}
+
+function cadenceSystemsUseSheetsCards(connectors: readonly OwnerConnectorSystem[]) {
+  return (
+    connectors.length > 0 &&
+    connectors.every((connector) => isSheetsOwnerSystem(connector.system))
+  )
+}
+
+const OWNER_SHEETS_OAUTH_SESSION_KEY = 'habeas-cli.owner.sheets-oauth.session'
+const OWNER_SHEETS_OAUTH_REDIRECT_PATH = '/owner/connectors'
+
+type StoredOwnerSheetsOauthSession = {
+  verticalId: string
+  system: string
+  state: string
+  session_id: string
+  redeemed?: boolean
+}
+
+function ownerSheetsOauthRedirectUri() {
+  if (typeof window === 'undefined') {
+    return `http://127.0.0.1:5173${OWNER_SHEETS_OAUTH_REDIRECT_PATH}`
+  }
+  return `${window.location.origin}${OWNER_SHEETS_OAUTH_REDIRECT_PATH}`
+}
+
+function readOwnerSheetsOauthSession(): StoredOwnerSheetsOauthSession | null {
+  try {
+    const raw = sessionStorage.getItem(OWNER_SHEETS_OAUTH_SESSION_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as StoredOwnerSheetsOauthSession
+    if (!parsed.verticalId || !parsed.system || !parsed.state || !parsed.session_id) {
+      return null
+    }
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function writeOwnerSheetsOauthSession(session: StoredOwnerSheetsOauthSession | null) {
+  if (session == null) {
+    sessionStorage.removeItem(OWNER_SHEETS_OAUTH_SESSION_KEY)
+    return
+  }
+  const persisted: StoredOwnerSheetsOauthSession = {
+    verticalId: session.verticalId,
+    system: session.system,
+    state: session.state,
+    session_id: session.session_id,
+  }
+  if (session.redeemed) persisted.redeemed = true
+  sessionStorage.setItem(OWNER_SHEETS_OAUTH_SESSION_KEY, JSON.stringify(persisted))
+}
+
+function readSheetsOauthReturnParams(search?: OwnerConnectorsSearch) {
+  const fromSearch = {
+    code: search?.code?.trim() || undefined,
+    state: search?.state?.trim() || undefined,
+    error: search?.error?.trim() || undefined,
+  }
+  if (fromSearch.code || fromSearch.state || fromSearch.error) return fromSearch
+  if (typeof window === 'undefined') return fromSearch
+  const params = new URLSearchParams(window.location.search)
+  return {
+    code: params.get('code')?.trim() || undefined,
+    state: params.get('state')?.trim() || undefined,
+    error: params.get('error')?.trim() || undefined,
+  }
+}
+
+function csvTextFromUploadResult(result: OwnerUploadResult): string | null {
+  const extra = result as OwnerUploadResult & {
+    csv?: unknown
+    extracted_csv?: unknown
+  }
+  if (typeof extra.csv === 'string' && extra.csv.trim()) return extra.csv
+  if (typeof extra.extracted_csv === 'string' && extra.extracted_csv.trim()) {
+    return extra.extracted_csv
+  }
+  return null
+}
+
+function tabKey(tab: { title: string; sheet_id?: number | null }) {
+  return tab.sheet_id != null ? `${tab.sheet_id}:${tab.title}` : tab.title
 }
 
 function initialCadenceOption(connectors: readonly OwnerConnectorSystem[]): CadenceOptionId | null {
@@ -127,8 +246,12 @@ function initialCadenceOption(connectors: readonly OwnerConnectorSystem[]): Cade
   return null
 }
 
-function cadenceLabel(option: CadenceOptionId | null): string {
+function cadenceLabel(option: CadenceOptionId | null, sheetsCards = false): string {
   if (!option) return '—'
+  if (sheetsCards) {
+    if (option === CADENCE_OPTION_RARELY) return 'Static'
+    if (option === CADENCE_OPTION_WITH_NEW_BATCHES) return 'Volatile'
+  }
   return CADENCE_OPTION_COPY[option].label
 }
 
@@ -295,6 +418,7 @@ function LiveTestOverlay({ systemLabel }: { systemLabel: string }) {
 }
 
 function UploadHowToPanel({
+  verticalId,
   connector,
   onContinue,
 }: {
@@ -309,7 +433,9 @@ function UploadHowToPanel({
   return (
     <div className="space-y-3">
       <div>
-        <h4 className="text-sm font-medium text-ink">{connector.display_name} · Upload how-to</h4>
+        <h4 className="text-sm font-medium text-ink">
+          {connectorTitle(verticalId, connector)} · Upload how-to
+        </h4>
         {copy ? <p className="mt-1 text-xs leading-relaxed text-ink-soft">{copy}</p> : null}
       </div>
 
@@ -330,6 +456,879 @@ function UploadHowToPanel({
         <Button type="button" size="sm" onClick={onContinue}>
           Continue
         </Button>
+      </div>
+    </div>
+  )
+}
+
+function SheetsHowToPanel({
+  verticalId,
+  connector,
+  onContinue,
+}: {
+  verticalId: string
+  connector: OwnerConnectorSystem
+  onContinue: () => void
+}) {
+  const copy =
+    SYSTEM_COPY[connector.system]?.howto ??
+    SYSTEM_COPY[connector.system]?.oauthHowto ??
+    SYSTEM_COPY[connector.system]?.uploadHowto
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <h4 className="text-sm font-medium text-ink">
+          {connectorTitle(verticalId, connector)} · Connect Google or upload
+        </h4>
+        {copy ? <p className="mt-1 text-xs leading-relaxed text-ink-soft">{copy}</p> : null}
+      </div>
+      <div className="rounded-md border border-line bg-white px-3 py-2.5 text-xs text-ink-soft">
+        <p className="font-medium text-ink">Connect Google</p>
+        <p className="mt-1">
+          Sign in with your Habeas Google account. After Google returns, pick one
+          spreadsheet and a tab, then extract. No service-account share.
+        </p>
+        <p className="mt-2 font-medium text-ink">Or upload a CSV</p>
+        <p className="mt-1">
+          Same mapping and rejected-row clean-up as any other upload. Email or phone alone is
+          enough.
+        </p>
+      </div>
+      <div className="flex justify-end">
+        <Button type="button" size="sm" onClick={onContinue}>
+          Continue
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+type SheetsConnectDraft = {
+  method: SheetsConnectMethod | null
+  oauthRedeemed: boolean
+  spreadsheetId: string
+  tab: string
+  csvHeaders: string[]
+  columnMapping: Record<string, string>
+  needsMapping: boolean
+  workingDoc: CsvDocument | null
+  rejectedRows: OwnerRejectedUploadRow[]
+  emailFormat: string
+  phoneFormat: string
+  uploadOk: boolean
+}
+
+function emptySheetsConnectDraft(): SheetsConnectDraft {
+  return {
+    method: null,
+    oauthRedeemed: false,
+    spreadsheetId: '',
+    tab: '',
+    csvHeaders: [],
+    columnMapping: {},
+    needsMapping: false,
+    workingDoc: null,
+    rejectedRows: [],
+    emailFormat: 'standard',
+    phoneFormat: 'us_10',
+    uploadOk: false,
+  }
+}
+
+function MappingAndRejectedBlock({
+  csvHeaders,
+  columnMapping,
+  onColumnMappingChange,
+  needsMapping,
+  workingDoc,
+  rejectedRows,
+  onWorkingDocChange,
+  onResubmitCleaned,
+  resubmitting,
+  fileName,
+}: {
+  csvHeaders: string[]
+  columnMapping: Record<string, string>
+  onColumnMappingChange: (next: Record<string, string>) => void
+  needsMapping: boolean
+  workingDoc: CsvDocument | null
+  rejectedRows: OwnerRejectedUploadRow[]
+  onWorkingDocChange: (next: CsvDocument) => void
+  onResubmitCleaned: (file: File) => void
+  resubmitting: boolean
+  fileName: string
+}) {
+  const mappingReady = uploadMappingComplete(columnMapping)
+
+  return (
+    <>
+      {needsMapping && csvHeaders.length > 0 ? (
+        <div className="space-y-2 rounded-md border border-line bg-canvas px-3 py-2">
+          <p className="text-xs font-medium text-ink">Column mapping</p>
+          {UPLOAD_IDENTIFIER_FIELDS.map((field) => (
+            <label key={field.id} className="block space-y-1 text-xs">
+              <span className="text-ink">{field.label}</span>
+              <select
+                className={FIELD_CLASS}
+                value={columnMapping[field.id] ?? ''}
+                onChange={(event) =>
+                  onColumnMappingChange({ ...columnMapping, [field.id]: event.target.value })
+                }
+                aria-label={`Map ${field.label} column`}
+              >
+                <option value="">Select a column…</option>
+                {csvHeaders.map((header) => (
+                  <option key={`${field.id}:${header}`} value={header}>
+                    {header}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+          {!mappingReady ? (
+            <p className="text-[11px] text-mute">
+              Map at least one identifier (email, phone, name, date of birth, or ZIP). Extra
+              columns are ignored.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {rejectedRows.length > 0 ? (
+        <div className="space-y-2 rounded-md border border-line bg-canvas px-3 py-2">
+          <p className="text-xs font-medium text-ink">Clean rejected rows</p>
+          <p className="text-[11px] text-mute">
+            {rejectedRows.length} row(s) failed validation.
+            {workingDoc
+              ? ' Edit the cells, then resubmit. The rest of the file is kept as-is.'
+              : ' Fix the flagged rows in the sheet, then extract again.'}
+          </p>
+          {workingDoc ? (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-xs">
+                  <thead>
+                    <tr>
+                      <th className="border-b border-line px-2 py-1 text-left font-medium text-mute">
+                        Row
+                      </th>
+                      <th className="border-b border-line px-2 py-1 text-left font-medium text-mute">
+                        Reason
+                      </th>
+                      {workingDoc.headers.map((header) => (
+                        <th
+                          key={header}
+                          className="border-b border-line px-2 py-1 text-left font-medium text-mute"
+                        >
+                          {header}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rejectedRows.map((rejected) => {
+                      const rowIndex = rejected.row - 1
+                      const cells = workingDoc.rows[rowIndex] ?? []
+                      return (
+                        <tr key={rejected.row}>
+                          <td className="px-2 py-1 align-top text-ink">{rejected.row}</td>
+                          <td className="px-2 py-1 align-top">
+                            <div className="flex flex-wrap gap-1">
+                              {rejected.codes.map((code) => (
+                                <Badge key={`${rejected.row}:${code}`} variant="fail">
+                                  {rejectedRowCodeLabel(code)}
+                                </Badge>
+                              ))}
+                            </div>
+                          </td>
+                          {workingDoc.headers.map((header, colIndex) => (
+                            <td key={`${rejected.row}:${header}`} className="px-1 py-1">
+                              <input
+                                className={FIELD_CLASS}
+                                value={cells[colIndex] ?? ''}
+                                aria-label={`Row ${rejected.row} ${header}`}
+                                onChange={(event) => {
+                                  const value = event.target.value
+                                  const rows = workingDoc.rows.map((row, index) =>
+                                    index === rowIndex
+                                      ? row.map((cell, cellIndex) =>
+                                          cellIndex === colIndex ? value : cell,
+                                        )
+                                      : row,
+                                  )
+                                  onWorkingDocChange({ ...workingDoc, rows })
+                                }}
+                              />
+                            </td>
+                          ))}
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={resubmitting}
+                onClick={() => {
+                  const next = new File([serializeCsvDocument(workingDoc)], fileName, {
+                    type: 'text/csv',
+                  })
+                  onResubmitCleaned(next)
+                }}
+              >
+                Resubmit cleaned rows
+              </Button>
+            </>
+          ) : (
+            <ul className="space-y-1 text-xs">
+              {rejectedRows.map((rejected) => (
+                <li key={rejected.row} className="flex flex-wrap items-center gap-1">
+                  <span className="text-ink">Row {rejected.row}</span>
+                  {rejected.codes.map((code) => (
+                    <Badge key={`${rejected.row}:${code}`} variant="fail">
+                      {rejectedRowCodeLabel(code)}
+                    </Badge>
+                  ))}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
+    </>
+  )
+}
+
+function applyConnectResultToDraft(
+  current: SheetsConnectDraft,
+  result: OwnerUploadResult,
+): SheetsConnectDraft {
+  if (result.ok) {
+    return {
+      ...current,
+      needsMapping: false,
+      workingDoc: null,
+      rejectedRows: [],
+      uploadOk: true,
+    }
+  }
+  if (result.detail === 'upload_needs_mapping') {
+    const headers = result.detected_headers?.filter((header) => header.trim()) ?? current.csvHeaders
+    return {
+      ...current,
+      csvHeaders: headers,
+      columnMapping: suggestUploadColumnMapping(headers),
+      needsMapping: true,
+      rejectedRows: [],
+      workingDoc: null,
+      uploadOk: false,
+    }
+  }
+  if (result.detail === 'upload_rows_rejected') {
+    const csvText = csvTextFromUploadResult(result)
+    return {
+      ...current,
+      rejectedRows: result.rejected_rows ?? [],
+      workingDoc: csvText ? parseCsvDocument(csvText) : current.workingDoc,
+      uploadOk: false,
+    }
+  }
+  return { ...current, uploadOk: false }
+}
+
+function toastConnectResult(result: OwnerUploadResult) {
+  if (result.ok) {
+    actionToast.success({
+      title: 'Extract validated',
+      description:
+        result.upload_row_count != null
+          ? `${result.upload_row_count} usable row(s). Continue when ready.`
+          : 'Rows accepted. Continue when ready.',
+    })
+    return
+  }
+  if (result.detail === 'upload_needs_mapping') {
+    actionToast.info({
+      title: 'Map your columns',
+      description:
+        'Match at least one identifier — email, phone, name, date of birth, or ZIP — to a column.',
+    })
+    return
+  }
+  if (result.detail === 'upload_rows_rejected') {
+    actionToast.warning({
+      title: 'Rows need cleaning',
+      description: connectTestFailureMessage(result.detail),
+    })
+    return
+  }
+  actionToast.error({
+    title: 'Extract failed',
+    description: connectTestFailureMessage(result.detail),
+  })
+}
+
+function SheetsConnectPanel({
+  verticalId,
+  connector,
+  delimiterKey,
+  onDelimiterChange,
+  draft,
+  onDraftChange,
+  onBack,
+  onContinue,
+  invalidate,
+}: {
+  verticalId: string
+  connector: OwnerConnectorSystem
+  delimiterKey: string
+  onDelimiterChange: (key: string) => void
+  draft: SheetsConnectDraft
+  onDraftChange: (next: SheetsConnectDraft) => void
+  onBack: () => void
+  onContinue: () => void
+  invalidate: () => void
+}) {
+  const systemLabel = connectorTitle(verticalId, connector)
+  const storedOauth = readOwnerSheetsOauthSession()
+  const oauthReady =
+    draft.oauthRedeemed ||
+    (storedOauth?.redeemed === true &&
+      storedOauth.verticalId === verticalId &&
+      storedOauth.system === connector.system)
+
+  const filesQuery = useQuery({
+    queryKey: ['admin-api', 'owner', 'sheets-oauth', 'files', verticalId, connector.system],
+    queryFn: () => ownerSheetsOauthFiles(verticalId, connector.system),
+    enabled: draft.method === 'oauth' && oauthReady,
+    staleTime: 15_000,
+  })
+
+  const files: OwnerSheetsOauthFile[] = filesQuery.data?.files ?? []
+  const selectedFile = files.find((file) => file.spreadsheet_id === draft.spreadsheetId)
+  const tabs = selectedFile?.tabs ?? []
+  const mappingReady = uploadMappingComplete(draft.columnMapping)
+
+  const startMutation = useMutation({
+    mutationFn: async () => {
+      await setOwnerConnectorMode(verticalId, connector.system, { mode: 'live' })
+      return ownerSheetsOauthStart(verticalId, connector.system, {
+        redirect_uri: ownerSheetsOauthRedirectUri(),
+      })
+    },
+    onSuccess: (data) => {
+      writeOwnerSheetsOauthSession({
+        verticalId,
+        system: connector.system,
+        state: data.state,
+        session_id: data.session_id,
+      })
+      window.location.assign(data.authorize_url)
+    },
+    onError: (error) => {
+      actionToast.error({
+        title: 'Could not start Google connect',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => startMutation.mutate(),
+        },
+      })
+    },
+  })
+
+  const extractMutation = useMutation({
+    mutationFn: async () => {
+      if (!draft.spreadsheetId || !draft.tab) {
+        throw new Error('Choose a spreadsheet and tab first.')
+      }
+      return ownerSheetsOauthExtract(verticalId, connector.system, {
+        spreadsheet_id: draft.spreadsheetId,
+        tab: draft.tab,
+        multi_pii_delimiter: delimiterValueFromKey(delimiterKey),
+        column_mapping: draft.needsMapping ? draft.columnMapping : null,
+        email_format: draft.emailFormat,
+        phone_format: draft.phoneFormat,
+      })
+    },
+    onSuccess: (result) => {
+      invalidate()
+      onDraftChange(applyConnectResultToDraft(draft, result))
+      toastConnectResult(result)
+    },
+    onError: (error) => {
+      onDraftChange({ ...draft, uploadOk: false })
+      actionToast.error({
+        title: 'Extract failed',
+        description: actionToast.safeErrorMessage(error, 'Check the sheet and try again.'),
+        action: {
+          label: 'Retry',
+          onClick: () => extractMutation.mutate(),
+        },
+      })
+    },
+  })
+
+  const cleanedUploadMutation = useMutation({
+    mutationFn: (file: File) =>
+      uploadOwnerConnectorCsv(
+        verticalId,
+        connector.system,
+        file,
+        delimiterValueFromKey(delimiterKey),
+        draft.needsMapping ? draft.columnMapping : null,
+        { emailFormat: draft.emailFormat, phoneFormat: draft.phoneFormat },
+      ),
+    onSuccess: (result) => {
+      invalidate()
+      onDraftChange(applyConnectResultToDraft(draft, result))
+      toastConnectResult(result)
+    },
+    onError: (error) => {
+      actionToast.error({
+        title: 'Upload failed',
+        description: actionToast.safeErrorMessage(error, 'Check the file and try again.'),
+      })
+    },
+  })
+
+  function selectMethod(method: SheetsConnectMethod) {
+    onDraftChange({
+      ...emptySheetsConnectDraft(),
+      method,
+      oauthRedeemed: method === 'oauth' ? oauthReady : false,
+    })
+  }
+
+  return (
+    <div className="space-y-3">
+      <h4 className="text-sm font-medium text-ink">{systemLabel} · Connect</h4>
+      <p className="text-xs text-mute">
+        Connect Google to pick a sheet, or upload a CSV. Mapping and rejected-row clean-up are
+        the same either way.
+      </p>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <button
+          type="button"
+          aria-pressed={draft.method === 'oauth'}
+          onClick={() => selectMethod('oauth')}
+          className={cn(
+            'rounded-md border p-3 text-left transition-colors',
+            draft.method === 'oauth'
+              ? 'border-habeas-navy bg-canvas ring-1 ring-habeas-navy'
+              : 'border-line hover:border-slate-300',
+          )}
+        >
+          <p className="text-sm font-medium text-ink">Connect Google</p>
+          <p className="mt-1 text-xs text-ink-soft">
+            Sign in, then choose one spreadsheet and a tab to extract.
+          </p>
+        </button>
+        <button
+          type="button"
+          aria-pressed={draft.method === 'upload'}
+          onClick={() => selectMethod('upload')}
+          className={cn(
+            'rounded-md border p-3 text-left transition-colors',
+            draft.method === 'upload'
+              ? 'border-habeas-navy bg-canvas ring-1 ring-habeas-navy'
+              : 'border-line hover:border-slate-300',
+          )}
+        >
+          <p className="text-sm font-medium text-ink">Upload CSV</p>
+          <p className="mt-1 text-xs text-ink-soft">
+            Use an existing export if you cannot grant sheet access.
+          </p>
+        </button>
+      </div>
+
+      {draft.method === 'oauth' ? (
+        <div className="space-y-3">
+          {!oauthReady ? (
+            <div className="space-y-2">
+              <p className="text-xs text-ink-soft">
+                Offline access, spreadsheets.readonly. Habeas stores a refresh token — values
+                never appear in this app.
+              </p>
+              <p className="font-mono text-[11px] text-mute break-all">
+                redirect_uri={ownerSheetsOauthRedirectUri()}
+              </p>
+              <Button
+                type="button"
+                size="sm"
+                disabled={startMutation.isPending}
+                onClick={() => startMutation.mutate()}
+              >
+                {startMutation.isPending ? 'Starting…' : 'Connect Google Sheets'}
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="ok">Google connected</Badge>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    writeOwnerSheetsOauthSession(null)
+                    onDraftChange({ ...draft, oauthRedeemed: false, uploadOk: false })
+                  }}
+                >
+                  Connect a different account
+                </Button>
+              </div>
+
+              {filesQuery.isPending ? <SkeletonLines lines={3} /> : null}
+              {filesQuery.isError ? (
+                <p className="text-xs text-red-800">
+                  Could not list spreadsheets.{' '}
+                  <button
+                    type="button"
+                    className="font-medium text-habeas-navy underline-offset-2 hover:underline"
+                    onClick={() => void filesQuery.refetch()}
+                  >
+                    Retry
+                  </button>
+                </p>
+              ) : null}
+
+              {filesQuery.isSuccess && files.length === 0 ? (
+                <p className="rounded-md border border-dashed border-line bg-canvas px-3 py-3 text-xs text-mute">
+                  No Drive spreadsheets found. Connect a different account or upload a CSV.
+                </p>
+              ) : null}
+
+              {files.length > 0 ? (
+                <fieldset className="space-y-2">
+                  <legend className="text-xs font-medium text-ink">Spreadsheets</legend>
+                  <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border border-line bg-white p-2">
+                    {files.map((file) => {
+                      const selected = draft.spreadsheetId === file.spreadsheet_id
+                      return (
+                        <label
+                          key={file.spreadsheet_id}
+                          className={cn(
+                            'flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-xs',
+                            selected ? 'bg-habeas-navy/5 text-ink' : 'text-ink-soft hover:bg-canvas',
+                          )}
+                        >
+                          <input
+                            type="radio"
+                            name={`sheets-file-${connector.system}`}
+                            className="mt-0.5"
+                            checked={selected}
+                            onChange={() =>
+                              onDraftChange({
+                                ...draft,
+                                spreadsheetId: file.spreadsheet_id,
+                                tab: file.tabs?.[0]?.title ?? '',
+                                uploadOk: false,
+                              })
+                            }
+                          />
+                          <span className="min-w-0">
+                            <span className="block font-medium text-ink">{file.name}</span>
+                            <span className="block text-[11px] text-mute">
+                              {file.tabs?.length
+                                ? `${file.tabs.length} tab(s)`
+                                : 'Spreadsheet'}
+                            </span>
+                          </span>
+                        </label>
+                      )
+                    })}
+                  </div>
+                </fieldset>
+              ) : null}
+
+              {draft.spreadsheetId ? (
+                <label className="block space-y-1 text-xs">
+                  <span className="font-medium text-ink">Tab</span>
+                  {tabs.length > 0 ? (
+                    <select
+                      className={FIELD_CLASS}
+                      value={draft.tab}
+                      onChange={(event) =>
+                        onDraftChange({ ...draft, tab: event.target.value, uploadOk: false })
+                      }
+                      aria-label="Sheet tab"
+                    >
+                      <option value="">Select a tab…</option>
+                      {tabs.map((tab) => (
+                        <option key={tabKey(tab)} value={tab.title}>
+                          {tab.title}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      className={FIELD_CLASS}
+                      value={draft.tab}
+                      onChange={(event) =>
+                        onDraftChange({ ...draft, tab: event.target.value, uploadOk: false })
+                      }
+                      aria-label="Sheet tab"
+                      placeholder="Tab name"
+                    />
+                  )}
+                </label>
+              ) : null}
+
+              <label className="block space-y-1 text-xs">
+                <span className="font-medium text-ink">Multi-PII delimiter</span>
+                <select
+                  className={FIELD_CLASS}
+                  value={delimiterKey}
+                  onChange={(event) => onDelimiterChange(event.target.value)}
+                  aria-label="Multi-PII delimiter"
+                >
+                  {MULTI_PII_DELIMITER_OPTIONS.map((opt) => (
+                    <option key={opt.key} value={opt.key}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="block space-y-1 text-xs">
+                <span className="font-medium text-ink">Email format</span>
+                <select
+                  className={FIELD_CLASS}
+                  value={draft.emailFormat}
+                  onChange={(event) =>
+                    onDraftChange({ ...draft, emailFormat: event.target.value, uploadOk: false })
+                  }
+                  aria-label="Email format"
+                >
+                  {EMAIL_FORMAT_OPTIONS.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="block space-y-1 text-xs">
+                <span className="font-medium text-ink">Phone format</span>
+                <select
+                  className={FIELD_CLASS}
+                  value={draft.phoneFormat}
+                  onChange={(event) =>
+                    onDraftChange({ ...draft, phoneFormat: event.target.value, uploadOk: false })
+                  }
+                  aria-label="Phone format"
+                >
+                  {PHONE_FORMAT_OPTIONS.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <MappingAndRejectedBlock
+                csvHeaders={draft.csvHeaders}
+                columnMapping={draft.columnMapping}
+                onColumnMappingChange={(next) =>
+                  onDraftChange({ ...draft, columnMapping: next, uploadOk: false })
+                }
+                needsMapping={draft.needsMapping}
+                workingDoc={draft.workingDoc}
+                rejectedRows={draft.rejectedRows}
+                onWorkingDocChange={(next) => onDraftChange({ ...draft, workingDoc: next })}
+                onResubmitCleaned={(file) => cleanedUploadMutation.mutate(file)}
+                resubmitting={cleanedUploadMutation.isPending || extractMutation.isPending}
+                fileName={`${connector.system}-cleaned.csv`}
+              />
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {draft.method === 'upload' ? (
+        <UploadConnectPanel
+          verticalId={verticalId}
+          connector={connector}
+          delimiterKey={delimiterKey}
+          onDelimiterChange={onDelimiterChange}
+          uploadOk={draft.uploadOk}
+          onUploadOkChange={(ok) => onDraftChange({ ...draft, uploadOk: ok })}
+          onBack={onBack}
+          onContinue={onContinue}
+          invalidate={invalidate}
+        />
+      ) : (
+        <div className="flex flex-wrap justify-between gap-2">
+          <Button type="button" size="sm" variant="ghost" onClick={onBack}>
+            Back
+          </Button>
+          <div className="flex gap-2">
+            {draft.method === 'oauth' && oauthReady ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={
+                  !draft.spreadsheetId ||
+                  !draft.tab ||
+                  extractMutation.isPending ||
+                  (draft.needsMapping && !mappingReady)
+                }
+                onClick={() => extractMutation.mutate()}
+              >
+                {extractMutation.isPending
+                  ? 'Extracting…'
+                  : draft.needsMapping
+                    ? 'Apply mapping & extract'
+                    : 'Extract & test'}
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              size="sm"
+              disabled={!draft.uploadOk || (filesQuery.isSuccess && files.length === 0)}
+              onClick={onContinue}
+            >
+              Continue
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SheetsMappingCleanPanel({
+  verticalId,
+  connector,
+  delimiterKey,
+  draft,
+  onDraftChange,
+  onBack,
+  onContinue,
+  invalidate,
+}: {
+  verticalId: string
+  connector: OwnerConnectorSystem
+  delimiterKey: string
+  draft: SheetsConnectDraft
+  onDraftChange: (next: SheetsConnectDraft) => void
+  onBack: () => void
+  onContinue: () => void
+  invalidate: () => void
+}) {
+  const mappingReady = uploadMappingComplete(draft.columnMapping)
+
+  const extractMutation = useMutation({
+    mutationFn: async (overrideFile?: File) => {
+      if (overrideFile) {
+        return uploadOwnerConnectorCsv(
+          verticalId,
+          connector.system,
+          overrideFile,
+          delimiterValueFromKey(delimiterKey),
+          draft.needsMapping ? draft.columnMapping : null,
+          { emailFormat: draft.emailFormat, phoneFormat: draft.phoneFormat },
+        )
+      }
+      if (!draft.spreadsheetId || !draft.tab) {
+        throw new Error('Choose a spreadsheet and tab first.')
+      }
+      return ownerSheetsOauthExtract(verticalId, connector.system, {
+        spreadsheet_id: draft.spreadsheetId,
+        tab: draft.tab,
+        multi_pii_delimiter: delimiterValueFromKey(delimiterKey),
+        column_mapping: draft.needsMapping ? draft.columnMapping : null,
+        email_format: draft.emailFormat,
+        phone_format: draft.phoneFormat,
+      })
+    },
+    onSuccess: (result) => {
+      invalidate()
+      onDraftChange(applyConnectResultToDraft(draft, result))
+      toastConnectResult(result)
+    },
+    onError: (error) => {
+      actionToast.error({
+        title: 'Could not apply mapping',
+        description: actionToast.safeErrorMessage(error, 'Try again.'),
+        action: {
+          label: 'Retry',
+          onClick: () => extractMutation.mutate(undefined),
+        },
+      })
+    },
+  })
+
+  if (draft.uploadOk && !draft.needsMapping && draft.rejectedRows.length === 0) {
+    return (
+      <div className="space-y-3">
+        <h4 className="text-sm font-medium text-ink">
+          {connectorTitle(verticalId, connector)} · Mapping
+        </h4>
+        <p className="text-xs text-mute">Columns already mapped. Continue to refresh cadence.</p>
+        <div className="flex justify-between gap-2">
+          <Button type="button" size="sm" variant="ghost" onClick={onBack}>
+            Back
+          </Button>
+          <Button type="button" size="sm" onClick={onContinue}>
+            Continue
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      <h4 className="text-sm font-medium text-ink">
+        {connectorTitle(verticalId, connector)} · Map and clean
+      </h4>
+      <p className="text-xs text-mute">
+        Same mapping and rejected-row clean-up as a CSV upload. No person names or emails in
+        toasts.
+      </p>
+      <MappingAndRejectedBlock
+        csvHeaders={draft.csvHeaders}
+        columnMapping={draft.columnMapping}
+        onColumnMappingChange={(next) =>
+          onDraftChange({ ...draft, columnMapping: next, uploadOk: false })
+        }
+        needsMapping={draft.needsMapping || draft.csvHeaders.length > 0}
+        workingDoc={draft.workingDoc}
+        rejectedRows={draft.rejectedRows}
+        onWorkingDocChange={(next) => onDraftChange({ ...draft, workingDoc: next })}
+        onResubmitCleaned={(file) => extractMutation.mutate(file)}
+        resubmitting={extractMutation.isPending}
+        fileName={`${connector.system}-cleaned.csv`}
+      />
+      <div className="flex flex-wrap justify-between gap-2">
+        <Button type="button" size="sm" variant="ghost" onClick={onBack}>
+          Back
+        </Button>
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={
+              extractMutation.isPending ||
+              ((draft.needsMapping || draft.csvHeaders.length > 0) && !mappingReady)
+            }
+            onClick={() => extractMutation.mutate(undefined)}
+          >
+            {extractMutation.isPending ? 'Applying…' : 'Apply mapping & test'}
+          </Button>
+          <Button type="button" size="sm" disabled={!draft.uploadOk} onClick={onContinue}>
+            Continue
+          </Button>
+        </div>
       </div>
     </div>
   )
@@ -363,7 +1362,9 @@ function LiveHowToPanel({
   return (
     <div className="space-y-3">
       <div>
-        <h4 className="text-sm font-medium text-ink">{connector.display_name} · Live how-to</h4>
+        <h4 className="text-sm font-medium text-ink">
+          {connectorTitle(verticalId, connector)} · Live how-to
+        </h4>
         {copy ? <p className="mt-1 text-xs leading-relaxed text-ink-soft">{copy}</p> : null}
       </div>
 
@@ -371,7 +1372,7 @@ function LiveHowToPanel({
 
       {previewQuery.isError ? (
         <p className="text-xs text-red-800">
-          Could not load Live credential instructions for {connector.display_name}.
+          Could not load Live credential instructions for {connectorTitle(verticalId, connector)}.
         </p>
       ) : null}
 
@@ -429,10 +1430,7 @@ function LiveConnectPanel({
   })
 
   const preview = previewQuery.data
-  const systemLabel = connectRedeemSystemLabel({
-    system: connector.system as IntegrationSystemId,
-    display_name: connector.display_name,
-  })
+  const systemLabel = connectorTitle(verticalId, connector)
 
   const [credentials, setCredentials] = useState<Record<string, string>>({})
   const [clientError, setClientError] = useState<string | null>(null)
@@ -473,7 +1471,7 @@ function LiveConnectPanel({
         setLiveTestOk(true)
         actionToast.success({
           title: 'Connection confirmed',
-          description: connectTestSuccessDescription(data.detail, connector.display_name),
+          description: connectTestSuccessDescription(data.detail, systemLabel),
         })
         return
       }
@@ -509,7 +1507,7 @@ function LiveConnectPanel({
         setLiveTestOk(true)
         actionToast.success({
           title: 'Connection confirmed',
-          description: connectTestSuccessDescription(data.detail, connector.display_name),
+          description: connectTestSuccessDescription(data.detail, systemLabel),
         })
         return
       }
@@ -595,7 +1593,7 @@ function LiveConnectPanel({
     return (
       <div className="space-y-3">
         <p className="text-xs text-red-800">
-          Could not load credential fields for {connector.display_name}.
+          Could not load credential fields for {systemLabel}.
         </p>
         <div className="flex gap-2">
           <Button type="button" size="sm" variant="ghost" onClick={onBack}>
@@ -623,7 +1621,7 @@ function LiveConnectPanel({
     <div className="relative space-y-3">
       {testing ? <LiveTestOverlay systemLabel={systemLabel} /> : null}
 
-      <h4 className="text-sm font-medium text-ink">{connector.display_name} · Live credentials</h4>
+      <h4 className="text-sm font-medium text-ink">{systemLabel} · Live credentials</h4>
       <p className="text-xs text-mute">
         Paste Live credentials below, then test the connection before continuing.
       </p>
@@ -649,7 +1647,7 @@ function LiveConnectPanel({
 
       <div className="space-y-2 rounded-md border border-line bg-white px-3 py-2.5 text-sm">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium text-ink">{connector.display_name}</span>
+          <span className="font-medium text-ink">{systemLabel}</span>
           <Badge
             variant={testing ? 'run' : testPassed ? 'ok' : testFailed ? 'fail' : 'wait'}
           >
@@ -668,7 +1666,7 @@ function LiveConnectPanel({
         >
           <p className="font-medium">Connection confirmed</p>
           <p className="mt-0.5">
-            {connectTestSuccessDescription(latestTest?.detail, connector.display_name)}
+            {connectTestSuccessDescription(latestTest?.detail, systemLabel)}
           </p>
         </div>
       ) : null}
@@ -799,24 +1797,70 @@ function UploadConnectPanel({
   const [csvHeaders, setCsvHeaders] = useState<string[]>([])
   const [columnMapping, setColumnMapping] = useState<Record<string, string>>({})
   const [needsMapping, setNeedsMapping] = useState(false)
+  const [emailFormat, setEmailFormat] = useState<string>('standard')
+  const [phoneFormat, setPhoneFormat] = useState<string>('us_10')
+  const [workingDoc, setWorkingDoc] = useState<ReturnType<typeof parseCsvDocument> | null>(null)
+  const [rejectedRows, setRejectedRows] = useState<OwnerRejectedUploadRow[]>([])
 
   const mappingReady = uploadMappingComplete(columnMapping)
 
+  const resetFileLocalState = () => {
+    setNeedsMapping(false)
+    setCsvHeaders([])
+    setColumnMapping({})
+    setWorkingDoc(null)
+    setRejectedRows([])
+    onUploadOkChange(false)
+  }
+
+  const templateMutation = useMutation({
+    mutationFn: () => downloadOwnerUploadTemplate(verticalId, connector.system),
+    onSuccess: (blob) => {
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `${connector.system}-upload-template.csv`
+      anchor.click()
+      URL.revokeObjectURL(url)
+      actionToast.success({
+        title: 'Template downloaded',
+        description: 'Optional Habeas headers. You can still upload an existing export and map columns.',
+      })
+    },
+    onError: (error) => {
+      actionToast.error({
+        title: 'Could not download template',
+        description: actionToast.safeErrorMessage(
+          error,
+          'Template may not be ready yet. Try again shortly.',
+        ),
+        action: {
+          label: 'Retry',
+          onClick: () => templateMutation.mutate(),
+        },
+      })
+    },
+  })
+
   const uploadMutation = useMutation({
-    mutationFn: async () => {
-      if (!file) throw new Error('Choose a CSV file first.')
+    mutationFn: async (overrideFile?: File) => {
+      const toUpload = overrideFile ?? file
+      if (!toUpload) throw new Error('Choose a CSV file first.')
       return uploadOwnerConnectorCsv(
         verticalId,
         connector.system,
-        file,
+        toUpload,
         delimiterValueFromKey(delimiterKey),
         needsMapping ? columnMapping : null,
+        { emailFormat, phoneFormat },
       )
     },
-    onSuccess: (result) => {
+    onSuccess: async (result, overrideFile) => {
       invalidate()
       if (result.ok) {
         setNeedsMapping(false)
+        setWorkingDoc(null)
+        setRejectedRows([])
         onUploadOkChange(true)
         actionToast.success({
           title: 'Upload validated',
@@ -834,6 +1878,8 @@ function UploadConnectPanel({
         setCsvHeaders(headers)
         setColumnMapping(suggestUploadColumnMapping(headers))
         setNeedsMapping(true)
+        setRejectedRows([])
+        setWorkingDoc(null)
         actionToast.info({
           title: 'Map your columns',
           description:
@@ -841,12 +1887,22 @@ function UploadConnectPanel({
         })
         return
       }
+      if (result.detail === 'upload_rows_rejected') {
+        const source = overrideFile ?? file
+        if (source) {
+          const text = await source.text()
+          setWorkingDoc(parseCsvDocument(text))
+        }
+        setRejectedRows(result.rejected_rows ?? [])
+        actionToast.warning({
+          title: 'Rows need cleaning',
+          description: connectTestFailureMessage(result.detail),
+        })
+        return
+      }
       actionToast.error({
         title: 'Upload test failed',
-        description: actionToast.safeErrorMessage(
-          new Error(result.detail || 'upload failed'),
-          'Check headers and delimiter, then try again.',
-        ),
+        description: connectTestFailureMessage(result.detail),
       })
     },
     onError: (error) => {
@@ -856,7 +1912,7 @@ function UploadConnectPanel({
         description: actionToast.safeErrorMessage(error, 'Check the file and try again.'),
         action: {
           label: 'Retry',
-          onClick: () => uploadMutation.mutate(),
+          onClick: () => uploadMutation.mutate(undefined),
         },
       })
     },
@@ -864,12 +1920,24 @@ function UploadConnectPanel({
 
   return (
     <div className="space-y-3">
-      <h4 className="text-sm font-medium text-ink">{connector.display_name} · Upload CSV</h4>
+      <h4 className="text-sm font-medium text-ink">
+        {connectorTitle(verticalId, connector)} · Upload CSV
+      </h4>
       <p className="text-xs text-mute">
         Upload your export as-is. Email alone or phone alone is enough. After upload, map columns
-        if the headers do not match.
+        if the headers do not match. Rows that fail the selected email or phone format stay in this
+        step so you can clean them and resubmit.
       </p>
       <div className="flex flex-wrap gap-1.5">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={templateMutation.isPending}
+          onClick={() => templateMutation.mutate()}
+        >
+          {templateMutation.isPending ? 'Downloading…' : 'Download template'}
+        </Button>
         {(Object.keys(UPLOAD_SAMPLE_CSV) as Array<keyof typeof UPLOAD_SAMPLE_CSV>).map((kind) => (
           <Button
             key={kind}
@@ -906,6 +1974,44 @@ function UploadConnectPanel({
       </label>
 
       <label className="block space-y-1 text-xs">
+        <span className="font-medium text-ink">Email format</span>
+        <select
+          className={FIELD_CLASS}
+          value={emailFormat}
+          onChange={(event) => {
+            setEmailFormat(event.target.value)
+            onUploadOkChange(false)
+          }}
+          aria-label="Email format"
+        >
+          {EMAIL_FORMAT_OPTIONS.map((opt) => (
+            <option key={opt.id} value={opt.id}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="block space-y-1 text-xs">
+        <span className="font-medium text-ink">Phone format</span>
+        <select
+          className={FIELD_CLASS}
+          value={phoneFormat}
+          onChange={(event) => {
+            setPhoneFormat(event.target.value)
+            onUploadOkChange(false)
+          }}
+          aria-label="Phone format"
+        >
+          {PHONE_FORMAT_OPTIONS.map((opt) => (
+            <option key={opt.id} value={opt.id}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="block space-y-1 text-xs">
         <span className="font-medium text-ink">CSV file</span>
         <input
           type="file"
@@ -913,10 +2019,7 @@ function UploadConnectPanel({
           className="block w-full text-xs text-ink file:mr-2 file:rounded file:border file:border-line file:bg-white file:px-2 file:py-1"
           onChange={(event) => {
             setFile(event.target.files?.[0] ?? null)
-            setNeedsMapping(false)
-            setCsvHeaders([])
-            setColumnMapping({})
-            onUploadOkChange(false)
+            resetFileLocalState()
           }}
         />
       </label>
@@ -955,6 +2058,99 @@ function UploadConnectPanel({
         </div>
       ) : null}
 
+      {workingDoc && rejectedRows.length > 0 ? (
+        <div className="space-y-2 rounded-md border border-line bg-canvas px-3 py-2">
+          <p className="text-xs font-medium text-ink">Clean rejected rows</p>
+          <p className="text-[11px] text-mute">
+            {rejectedRows.length} row(s) failed validation. Edit the cells, then resubmit. The
+            rest of the file is kept as-is.
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse text-xs">
+              <thead>
+                <tr>
+                  <th className="border-b border-line px-2 py-1 text-left font-medium text-mute">
+                    Row
+                  </th>
+                  <th className="border-b border-line px-2 py-1 text-left font-medium text-mute">
+                    Reason
+                  </th>
+                  {workingDoc.headers.map((header) => (
+                    <th
+                      key={header}
+                      className="border-b border-line px-2 py-1 text-left font-medium text-mute"
+                    >
+                      {header}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rejectedRows.map((rejected) => {
+                  const rowIndex = rejected.row - 1
+                  const cells = workingDoc.rows[rowIndex] ?? []
+                  return (
+                    <tr key={rejected.row}>
+                      <td className="px-2 py-1 align-top text-ink">{rejected.row}</td>
+                      <td className="px-2 py-1 align-top">
+                        <div className="flex flex-wrap gap-1">
+                          {rejected.codes.map((code) => (
+                            <Badge key={`${rejected.row}:${code}`} variant="fail">
+                              {rejectedRowCodeLabel(code)}
+                            </Badge>
+                          ))}
+                        </div>
+                      </td>
+                      {workingDoc.headers.map((header, colIndex) => (
+                        <td key={`${rejected.row}:${header}`} className="px-1 py-1">
+                          <input
+                            className={FIELD_CLASS}
+                            value={cells[colIndex] ?? ''}
+                            aria-label={`Row ${rejected.row} ${header}`}
+                            onChange={(event) => {
+                              const value = event.target.value
+                              setWorkingDoc((prev) => {
+                                if (!prev) return prev
+                                const rows = prev.rows.map((row, index) =>
+                                  index === rowIndex
+                                    ? row.map((cell, cellIndex) =>
+                                        cellIndex === colIndex ? value : cell,
+                                      )
+                                    : row,
+                                )
+                                return { ...prev, rows }
+                              })
+                            }}
+                          />
+                        </td>
+                      ))}
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={uploadMutation.isPending}
+            onClick={() => {
+              if (!workingDoc) return
+              const next = new File(
+                [serializeCsvDocument(workingDoc)],
+                file?.name ?? 'cleaned.csv',
+                { type: 'text/csv' },
+              )
+              setFile(next)
+              uploadMutation.mutate(next)
+            }}
+          >
+            Resubmit cleaned rows
+          </Button>
+        </div>
+      ) : null}
+
       <div className="flex flex-wrap justify-between gap-2">
         <Button type="button" size="sm" variant="ghost" onClick={onBack}>
           Back
@@ -969,7 +2165,7 @@ function UploadConnectPanel({
               uploadMutation.isPending ||
               (needsMapping && !mappingReady)
             }
-            onClick={() => uploadMutation.mutate()}
+            onClick={() => uploadMutation.mutate(undefined)}
           >
             {uploadMutation.isPending
               ? 'Uploading…'
@@ -987,6 +2183,7 @@ function UploadConnectPanel({
 }
 
 function CadenceStepPanel({
+  verticalId,
   connectors,
   cadenceOption,
   onCadenceChange,
@@ -994,6 +2191,7 @@ function CadenceStepPanel({
   onContinue,
   saving,
 }: {
+  verticalId: string
   connectors: readonly OwnerConnectorSystem[]
   cadenceOption: CadenceOptionId | null
   onCadenceChange: (option: CadenceOptionId) => void
@@ -1002,6 +2200,7 @@ function CadenceStepPanel({
   saving: boolean
 }) {
   const cadenceSystems = systemsNeedingCadence(connectors)
+  const sheetsCards = cadenceSystemsUseSheetsCards(connectors)
 
   if (!cadenceSystems.length) {
     return (
@@ -1028,33 +2227,83 @@ function CadenceStepPanel({
         <h4 className="text-sm font-medium text-ink">Refresh cadence</h4>
         <p className="mt-1 text-xs text-mute">
           Applies to upload and sheet sources in this vertical:{' '}
-          {cadenceSystems.map((connector) => connector.display_name).join(', ')}.
+          {cadenceSystems.map((connector) => connectorTitle(verticalId, connector)).join(', ')}.
         </p>
       </div>
 
-      <div className="space-y-2">
-        {CADENCE_OPTION_IDS.map((optionId) => {
-          const copy = CADENCE_OPTION_COPY[optionId]
-          const selected = cadenceOption === optionId
-          return (
+      {sheetsCards ? (
+        <div className="space-y-2">
+          <p className="text-xs text-ink-soft">
+            How often does this sheet’s data change? Matching for this vertical waits until a
+            refresh when the policy requires it (minimum 12 hours between required refreshes).
+          </p>
+          <div className="grid gap-2 sm:grid-cols-2">
             <button
-              key={optionId}
               type="button"
-              aria-pressed={selected}
-              onClick={() => onCadenceChange(optionId)}
+              aria-pressed={cadenceOption === CADENCE_OPTION_RARELY}
+              onClick={() => onCadenceChange(CADENCE_OPTION_RARELY)}
               className={cn(
-                'w-full rounded-md border p-3 text-left transition-colors',
-                selected
+                'rounded-md border p-3 text-left transition-colors',
+                cadenceOption === CADENCE_OPTION_RARELY
                   ? 'border-habeas-navy bg-canvas ring-1 ring-habeas-navy'
                   : 'border-line hover:border-slate-300',
               )}
             >
-              <p className="text-sm font-medium text-ink">{copy.label}</p>
-              <p className="mt-1 text-xs leading-relaxed text-mute">{copy.description}</p>
+              <p className="text-sm font-medium text-ink">Static</p>
+              <p className="mt-1 text-xs text-ink-soft">
+                Rarely or never changes. Connect and build the hash index once.
+              </p>
+              <Badge variant="ok" className="mt-2">
+                Matching stays ready
+              </Badge>
             </button>
-          )
-        })}
-      </div>
+            <button
+              type="button"
+              aria-pressed={cadenceOption === CADENCE_OPTION_WITH_NEW_BATCHES}
+              onClick={() => onCadenceChange(CADENCE_OPTION_WITH_NEW_BATCHES)}
+              className={cn(
+                'rounded-md border p-3 text-left transition-colors',
+                cadenceOption === CADENCE_OPTION_WITH_NEW_BATCHES
+                  ? 'border-habeas-navy bg-canvas ring-1 ring-habeas-navy'
+                  : 'border-line hover:border-slate-300',
+              )}
+            >
+              <p className="text-sm font-medium text-ink">Volatile</p>
+              <p className="mt-1 text-xs text-ink-soft">
+                Can change (including daily). New intake batches may require a refresh before
+                matching — not more often than every 12 hours.
+              </p>
+              <Badge variant="wait" className="mt-2">
+                May block matching
+              </Badge>
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {CADENCE_OPTION_IDS.map((optionId) => {
+            const copy = CADENCE_OPTION_COPY[optionId]
+            const selected = cadenceOption === optionId
+            return (
+              <button
+                key={optionId}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => onCadenceChange(optionId)}
+                className={cn(
+                  'w-full rounded-md border p-3 text-left transition-colors',
+                  selected
+                    ? 'border-habeas-navy bg-canvas ring-1 ring-habeas-navy'
+                    : 'border-line hover:border-slate-300',
+                )}
+              >
+                <p className="text-sm font-medium text-ink">{copy.label}</p>
+                <p className="mt-1 text-xs leading-relaxed text-mute">{copy.description}</p>
+              </button>
+            )
+          })}
+        </div>
+      )}
 
       <div className="flex flex-wrap justify-between gap-2">
         <Button type="button" size="sm" variant="ghost" onClick={onBack}>
@@ -1069,6 +2318,7 @@ function CadenceStepPanel({
 }
 
 function ConfirmStepPanel({
+  verticalId,
   connectors,
   cadenceOption,
   delimiterKeys,
@@ -1076,6 +2326,7 @@ function ConfirmStepPanel({
   onComplete,
   completing,
 }: {
+  verticalId: string
   connectors: readonly OwnerConnectorSystem[]
   cadenceOption: CadenceOptionId | null
   delimiterKeys: Record<string, string>
@@ -1101,7 +2352,7 @@ function ConfirmStepPanel({
             key={connector.system}
             className="rounded-md border border-line bg-white px-3 py-2 text-ink-soft"
           >
-            <span className="font-medium text-ink">{connector.display_name}</span>
+            <span className="font-medium text-ink">{connectorTitle(verticalId, connector)}</span>
             {allowsUpload(connector.allowed_approaches) ? (
               <span>
                 {' '}
@@ -1118,14 +2369,16 @@ function ConfirmStepPanel({
       {cadenceSystems.length ? (
         <p className="text-xs text-mute">
           Refresh cadence:{' '}
-          <span className="font-medium text-ink">{cadenceLabel(cadenceOption)}</span>
+          <span className="font-medium text-ink">
+            {cadenceLabel(cadenceOption, cadenceSystemsUseSheetsCards(connectors))}
+          </span>
         </p>
       ) : null}
 
       {liveSystems.length ? (
         <p className="rounded-md border border-line bg-white px-3 py-2 text-xs text-ink-soft">
           Live credentials must be rotated at least every <strong>180 days</strong> for:{' '}
-          {liveSystems.map((connector) => connector.display_name).join(', ')}. Matching may gate
+          {liveSystems.map((connector) => connectorTitle(verticalId, connector)).join(', ')}. Matching may gate
           when rotation is overdue.
         </p>
       ) : null}
@@ -1146,10 +2399,12 @@ function VerticalWizard({
   verticalId,
   list,
   onDone,
+  initialStepId,
 }: {
   verticalId: string
   list: OwnerConnectorList
   onDone: () => void
+  initialStepId?: string
 }) {
   const queryClient = useQueryClient()
   const connectors = wizardableConnectors(list.connectors)
@@ -1164,21 +2419,61 @@ function VerticalWizard({
         systems: list.connectors.map((connector) => ({
           system: connector.system,
           allowedApproaches: connector.allowed_approaches,
-          displayLabel: connector.display_name,
+          displayLabel: connectorTitle(verticalId, connector),
         })),
         viewOnly: list.view_only,
       }),
     [list.connectors, list.view_only],
   )
 
-  const [currentStepId, setCurrentStepId] = useState(() => steps[0]?.id ?? '')
+  const [currentStepId, setCurrentStepId] = useState(() => {
+    if (initialStepId && verticalWizardStepIndex(steps, initialStepId) >= 0) {
+      return initialStepId
+    }
+    const oauthSession = readOwnerSheetsOauthSession()
+    if (
+      oauthSession?.redeemed &&
+      oauthSession.verticalId === verticalId &&
+      isSheetsOwnerSystem(oauthSession.system)
+    ) {
+      const connectId = `${oauthSession.system}-connect`
+      if (verticalWizardStepIndex(steps, connectId) >= 0) return connectId
+    }
+    return steps[0]?.id ?? ''
+  })
   const [delimiterKeys, setDelimiterKeys] = useState<Record<string, string>>(() =>
     Object.fromEntries(connectors.map((connector) => [connector.system, 'none'])),
   )
   const [uploadOkBySystem, setUploadOkBySystem] = useState<Record<string, boolean>>({})
-  const [cadenceOption, setCadenceOption] = useState<CadenceOptionId | null>(() =>
-    initialCadenceOption(connectors),
-  )
+  const [sheetsDraftBySystem, setSheetsDraftBySystem] = useState<
+    Record<string, SheetsConnectDraft>
+  >(() => {
+    const oauthSession = readOwnerSheetsOauthSession()
+    const drafts: Record<string, SheetsConnectDraft> = {}
+    for (const connector of connectors) {
+      if (!isSheetsOwnerSystem(connector.system)) continue
+      const redeemed =
+        oauthSession?.redeemed === true &&
+        oauthSession.verticalId === verticalId &&
+        oauthSession.system === connector.system
+      drafts[connector.system] = {
+        ...emptySheetsConnectDraft(),
+        method: redeemed ? 'oauth' : null,
+        oauthRedeemed: redeemed,
+      }
+    }
+    return drafts
+  })
+  const [cadenceOption, setCadenceOption] = useState<CadenceOptionId | null>(() => {
+    const initial = initialCadenceOption(connectors)
+    if (
+      cadenceSystemsUseSheetsCards(connectors) &&
+      initial === CADENCE_OPTION_WEEKLY
+    ) {
+      return null
+    }
+    return initial
+  })
 
   const stepIndex = verticalWizardStepIndex(steps, currentStepId)
   const parsedStep = parseVerticalWizardStepId(currentStepId)
@@ -1226,7 +2521,11 @@ function VerticalWizard({
       invalidate()
       actionToast.success({
         title: 'Cadence saved',
-        description: CADENCE_OPTION_COPY[option].label,
+        description: cadenceSystemsUseSheetsCards(connectors)
+          ? option === CADENCE_OPTION_WITH_NEW_BATCHES
+            ? 'Volatile — matching may wait for a refresh.'
+            : 'Static — matching stays ready.'
+          : CADENCE_OPTION_COPY[option].label,
       })
       setCurrentStepId((currentId) => {
         const idx = verticalWizardStepIndex(steps, currentId)
@@ -1348,6 +2647,14 @@ function VerticalWizard({
     <div className="mt-3 rounded-md border border-line bg-canvas p-3 sm:p-4">
       <WizardProgressBar currentIndex={stepIndex} totalSteps={steps.length} />
 
+      {parsedStep.kind === 'howto' && connector ? (
+        <SheetsHowToPanel
+          verticalId={verticalId}
+          connector={connector}
+          onContinue={goNext}
+        />
+      ) : null}
+
       {parsedStep.kind === 'howto-upload' && connector ? (
         <UploadHowToPanel
           verticalId={verticalId}
@@ -1364,22 +2671,74 @@ function VerticalWizard({
         />
       ) : null}
 
-      {parsedStep.kind === 'upload' && connector ? (
-        <UploadConnectPanel
+      {(parsedStep.kind === 'connect' || parsedStep.kind === 'oauth') && connector ? (
+        <SheetsConnectPanel
           verticalId={verticalId}
           connector={connector}
           delimiterKey={delimiterKeys[connector.system] ?? 'none'}
           onDelimiterChange={(key) =>
             setDelimiterKeys((current) => ({ ...current, [connector.system]: key }))
           }
-          uploadOk={uploadOkBySystem[connector.system] === true}
-          onUploadOkChange={(ok) =>
-            setUploadOkBySystem((current) => ({ ...current, [connector.system]: ok }))
+          draft={sheetsDraftBySystem[connector.system] ?? emptySheetsConnectDraft()}
+          onDraftChange={(next) =>
+            setSheetsDraftBySystem((current) => ({ ...current, [connector.system]: next }))
           }
           onBack={goBack}
           onContinue={goNext}
           invalidate={invalidate}
         />
+      ) : null}
+
+      {(parsedStep.kind === 'mapping-clean' || parsedStep.kind === 'mapping' || parsedStep.kind === 'clean') &&
+      connector ? (
+        <SheetsMappingCleanPanel
+          verticalId={verticalId}
+          connector={connector}
+          delimiterKey={delimiterKeys[connector.system] ?? 'none'}
+          draft={sheetsDraftBySystem[connector.system] ?? emptySheetsConnectDraft()}
+          onDraftChange={(next) =>
+            setSheetsDraftBySystem((current) => ({ ...current, [connector.system]: next }))
+          }
+          onBack={goBack}
+          onContinue={goNext}
+          invalidate={invalidate}
+        />
+      ) : null}
+
+      {parsedStep.kind === 'upload' && connector ? (
+        isSheetsOwnerSystem(connector.system) ? (
+          <SheetsConnectPanel
+            verticalId={verticalId}
+            connector={connector}
+            delimiterKey={delimiterKeys[connector.system] ?? 'none'}
+            onDelimiterChange={(key) =>
+              setDelimiterKeys((current) => ({ ...current, [connector.system]: key }))
+            }
+            draft={sheetsDraftBySystem[connector.system] ?? emptySheetsConnectDraft()}
+            onDraftChange={(next) =>
+              setSheetsDraftBySystem((current) => ({ ...current, [connector.system]: next }))
+            }
+            onBack={goBack}
+            onContinue={goNext}
+            invalidate={invalidate}
+          />
+        ) : (
+          <UploadConnectPanel
+            verticalId={verticalId}
+            connector={connector}
+            delimiterKey={delimiterKeys[connector.system] ?? 'none'}
+            onDelimiterChange={(key) =>
+              setDelimiterKeys((current) => ({ ...current, [connector.system]: key }))
+            }
+            uploadOk={uploadOkBySystem[connector.system] === true}
+            onUploadOkChange={(ok) =>
+              setUploadOkBySystem((current) => ({ ...current, [connector.system]: ok }))
+            }
+            onBack={goBack}
+            onContinue={goNext}
+            invalidate={invalidate}
+          />
+        )
       ) : null}
 
       {parsedStep.kind === 'live-creds' && connector ? (
@@ -1399,6 +2758,7 @@ function VerticalWizard({
 
       {parsedStep.kind === 'cadence' ? (
         <CadenceStepPanel
+          verticalId={verticalId}
           connectors={connectors}
           cadenceOption={cadenceOption}
           onCadenceChange={setCadenceOption}
@@ -1410,6 +2770,7 @@ function VerticalWizard({
 
       {parsedStep.kind === 'confirm' ? (
         <ConfirmStepPanel
+          verticalId={verticalId}
           connectors={connectors}
           cadenceOption={cadenceOption}
           delimiterKeys={delimiterKeys}
@@ -1460,7 +2821,8 @@ function ReminderBanners({
             <p className="font-medium">{item.title}</p>
             <p className="text-xs opacity-90">{item.description}</p>
             <p className="text-[11px] opacity-70">
-              {item.system.replaceAll('_', ' ')} · {item.verticalId.replaceAll('_', '/')}
+              {ownerConnectorDisplayName(item.verticalId, item.system)} ·{' '}
+              {item.verticalId.replaceAll('_', '/')}
             </p>
           </div>
           <Button
@@ -1491,12 +2853,14 @@ function ViewOnlyCard({ list }: { list: OwnerConnectorList }) {
         <Badge variant="default">View only</Badge>
       </div>
       <ul className="mt-3 space-y-2">
-        {list.connectors.map((connector) => (
+        {filterOwnerWizardConnectors(list.connectors).map((connector) => (
           <li
             key={connector.system}
             className="flex flex-wrap items-center justify-between gap-2 rounded border border-line bg-canvas px-3 py-2 text-sm"
           >
-            <span className="font-medium text-ink">{connector.display_name}</span>
+            <span className="font-medium text-ink">
+              {connectorTitle(list.vertical_id, connector)}
+            </span>
             <DisplayStatusBadge
               displayStatus={connector.display_status}
               gateAllowed={connector.gate_allowed}
@@ -1508,14 +2872,20 @@ function ViewOnlyCard({ list }: { list: OwnerConnectorList }) {
   )
 }
 
-function ConnectorStatusRow({ connector }: { connector: OwnerConnectorSystem }) {
+function ConnectorStatusRow({
+  verticalId,
+  connector,
+}: {
+  verticalId: string
+  connector: OwnerConnectorSystem
+}) {
   const metaMode = activeModeFromMetadata(connector.metadata)
 
   return (
     <div className="rounded-md border border-line bg-white px-3 py-2.5">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 space-y-1">
-          <h4 className="text-sm font-medium text-ink">{connector.display_name}</h4>
+          <h4 className="text-sm font-medium text-ink">{connectorTitle(verticalId, connector)}</h4>
           <p className="text-[11px] text-mute">
             {connector.system.replaceAll('_', ' ')}
             {metaMode ? ` · ${metaMode}` : ''}
@@ -1537,10 +2907,14 @@ function VerticalConnectorsSection({
   verticalId,
   selected,
   onSelect,
+  forceWizardOpen,
+  initialStepId,
 }: {
   verticalId: string
   selected: boolean
   onSelect: () => void
+  forceWizardOpen?: boolean
+  initialStepId?: string
 }) {
   const { role } = useAuth()
   const listQuery = useQuery({
@@ -1560,11 +2934,11 @@ function VerticalConnectorsSection({
       ) ?? false,
     [list],
   )
-  const [wizardOpen, setWizardOpen] = useState(false)
+  const [wizardOpen, setWizardOpen] = useState(() => forceWizardOpen === true)
 
   useEffect(() => {
-    if (needsSetup) setWizardOpen(true)
-  }, [needsSetup])
+    if (needsSetup || forceWizardOpen) setWizardOpen(true)
+  }, [needsSetup, forceWizardOpen])
 
   if (listQuery.isPending) {
     return (
@@ -1593,9 +2967,7 @@ function VerticalConnectorsSection({
 
   if (!list) return null
 
-  const connectors = list.connectors.filter(
-    (connector) => !isOwnerConnectorsHiddenSystem(connector.system),
-  )
+  const connectors = filterOwnerWizardConnectors(list.connectors)
   if (connectors.length === 0) return null
 
   if (list.view_only) {
@@ -1630,7 +3002,11 @@ function VerticalConnectorsSection({
 
       <div className="space-y-2">
         {connectors.map((connector) => (
-          <ConnectorStatusRow key={connector.system} connector={connector} />
+          <ConnectorStatusRow
+            key={connector.system}
+            verticalId={verticalId}
+            connector={connector}
+          />
         ))}
       </div>
 
@@ -1639,16 +3015,224 @@ function VerticalConnectorsSection({
           verticalId={verticalId}
           list={{ ...list, connectors }}
           onDone={() => setWizardOpen(false)}
+          initialStepId={initialStepId}
         />
       ) : null}
     </section>
   )
 }
 
-function OwnerConnectorsBody({ verticalFilter }: { verticalFilter?: string }) {
+function TeamMembersSection({
+  verticalId,
+  canInvite,
+}: {
+  verticalId: string
+  canInvite: boolean
+}) {
+  const queryClient = useQueryClient()
+  const [email, setEmail] = useState('')
+  const membersQuery = useQuery({
+    queryKey: ['admin-api', 'owner', 'vertical-members', verticalId],
+    queryFn: () => listVerticalMembers(verticalId),
+    enabled: canInvite,
+  })
+  const inviteMutation = useMutation({
+    mutationFn: (inviteEmail: string) => mintVerticalMemberInvite(verticalId, inviteEmail),
+    onSuccess: (invite) => {
+      void queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'owner', 'vertical-members', verticalId],
+      })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'me'] })
+      setEmail('')
+      void navigator.clipboard.writeText(invite.invite_url).catch(() => undefined)
+      actionToast.success({
+        title: 'Invite created',
+        description: 'Link copied. Share it with your teammate.',
+        action: {
+          label: 'Copy again',
+          onClick: () => {
+            void navigator.clipboard.writeText(invite.invite_url)
+          },
+        },
+      })
+    },
+    onError: (error) => {
+      actionToast.error({
+        title: 'Could not create invite',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => inviteMutation.mutate(email.trim()),
+        },
+      })
+    },
+  })
+  if (!canInvite) return null
+  const members = membersQuery.data ?? []
+  return (
+    <section className="space-y-3 rounded-md border border-line bg-white px-4 py-3">
+      <header>
+        <h3 className="text-sm font-medium text-ink">Team members</h3>
+        <p className="mt-1 text-xs text-ink-soft">
+          Invite data users to this vertical. They can review matches, fulfill, and
+          refresh systems — not connector credentials or catalog settings.
+        </p>
+      </header>
+      {members.length > 0 ? (
+        <ul className="space-y-1 text-xs text-ink-soft">
+          {members.map((member) => (
+            <li key={`${member.email}:${member.assignment_role}`}>
+              <span className="text-ink">{member.email}</span>
+              {' · '}
+              {member.assignment_role === 'data_user' ? 'Data user' : 'Data owner'}
+              {member.active ? '' : ' · inactive'}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-xs text-mute">No additional team members yet.</p>
+      )}
+      <form
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={(event) => {
+          event.preventDefault()
+          const next = email.trim()
+          if (!next) return
+          inviteMutation.mutate(next)
+        }}
+      >
+        <label className="min-w-[12rem] flex-1 text-[0.65rem] text-mute">
+          Teammate email
+          <input
+            className={FIELD_CLASS}
+            type="email"
+            autoComplete="off"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            required
+          />
+        </label>
+        <Button type="submit" size="sm" disabled={inviteMutation.isPending}>
+          {inviteMutation.isPending ? 'Copying…' : 'Copy invite link'}
+        </Button>
+      </form>
+    </section>
+  )
+}
+
+function OwnerConnectorsBody({ search }: { search?: OwnerConnectorsSearch }) {
   const { me, role } = useAuth()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const verticalFilter = search?.vertical
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => new Set())
+  const [oauthResume, setOauthResume] = useState<{
+    verticalId: string
+    system: string
+  } | null>(() => {
+    const stored = readOwnerSheetsOauthSession()
+    if (stored?.redeemed) return { verticalId: stored.verticalId, system: stored.system }
+    return null
+  })
+  const [oauthReturn] = useState(() => readSheetsOauthReturnParams(search))
+
+  const redeemMutation = useMutation({
+    mutationFn: (input: StoredOwnerSheetsOauthSession & { code: string }) =>
+      ownerSheetsOauthRedeem(input.verticalId, input.system, {
+        session_id: input.session_id,
+        code: input.code,
+        state: input.state,
+      }),
+    onSuccess: (_data, input) => {
+      writeOwnerSheetsOauthSession({
+        verticalId: input.verticalId,
+        system: input.system,
+        state: input.state,
+        session_id: input.session_id,
+        redeemed: true,
+      })
+      setOauthResume({ verticalId: input.verticalId, system: input.system })
+      void queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'owner', 'connectors', input.verticalId],
+      })
+      actionToast.success({
+        title: 'Google connected',
+        description: 'Choose a spreadsheet and tab to extract.',
+      })
+      void navigate({
+        to: '/owner/connectors',
+        search: { vertical: input.verticalId },
+        replace: true,
+      })
+    },
+    onError: (error, input) => {
+      actionToast.error({
+        title: 'Google connect failed',
+        description: actionToast.safeErrorMessage(error, 'Start Connect Google again.'),
+        action: {
+          label: 'Dismiss',
+          onClick: () => undefined,
+        },
+      })
+      void navigate({
+        to: '/owner/connectors',
+        search: { vertical: input.verticalId },
+        replace: true,
+      })
+    },
+  })
+
+  useEffect(() => {
+    const returned = oauthReturn
+    if (returned.error) {
+      actionToast.error({
+        title: 'Google connect cancelled',
+        description: 'Start Connect Google again if you still want to link a sheet.',
+      })
+      void navigate({
+        to: '/owner/connectors',
+        search: verticalFilter ? { vertical: verticalFilter } : {},
+        replace: true,
+      })
+      return
+    }
+    if (!returned.code || !returned.state) return
+    const stored = readOwnerSheetsOauthSession()
+    if (!stored) {
+      actionToast.error({
+        title: 'Google connect expired',
+        description: 'Start Connect Google again from the wizard.',
+      })
+      void navigate({
+        to: '/owner/connectors',
+        search: verticalFilter ? { vertical: verticalFilter } : {},
+        replace: true,
+      })
+      return
+    }
+    if (stored.state !== returned.state) {
+      actionToast.error({
+        title: 'Google connect mismatch',
+        description: 'Start Connect Google again from the wizard.',
+      })
+      void navigate({
+        to: '/owner/connectors',
+        search: { vertical: stored.verticalId },
+        replace: true,
+      })
+      return
+    }
+    if (redeemMutation.isPending || redeemMutation.isSuccess) return
+    redeemMutation.mutate({ ...stored, code: returned.code })
+    // Redeem once from the first-paint callback capture.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (window.location.hash !== '#team') return
+    document.getElementById('team')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [role])
 
   const verticals = me?.verticals ?? []
   const visibleVerticals = useMemo(() => {
@@ -1680,7 +3264,7 @@ function OwnerConnectorsBody({ verticalFilter }: { verticalFilter?: string }) {
     return (
       <section className="space-y-6">
         <header>
-          <Micro>Data owner</Micro>
+          <Micro>{role === 'data_user' ? 'Data user' : 'Data owner'}</Micro>
           <h2 className="mt-2 font-display text-xl font-medium tracking-tight text-ink">
             Connectors
           </h2>
@@ -1705,13 +3289,18 @@ function OwnerConnectorsBody({ verticalFilter }: { verticalFilter?: string }) {
     <section className="space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <Micro>Data owner</Micro>
+          <Micro>{role === 'data_user' ? 'Data user' : 'Settings'}</Micro>
           <h2 className="mt-2 font-display text-xl font-medium tracking-tight text-ink">
             Connectors
           </h2>
           <p className="mt-2 max-w-xl text-sm text-ink-soft">
             Complete one setup wizard per vertical. Systems are sequential sections inside that
-            wizard. Soft reminders never block login.
+            wizard. Soft reminders never block login. Team invite stays on this page
+            {' '}
+            <a href="#team" className="font-medium text-habeas-navy underline-offset-2 hover:underline">
+              #team
+            </a>
+            — not a first-login gate.
           </p>
         </div>
         {verticalFilter ? (
@@ -1776,6 +3365,12 @@ function OwnerConnectorsBody({ verticalFilter }: { verticalFilter?: string }) {
             key={verticalId}
             verticalId={verticalId}
             selected={verticalFilter === verticalId}
+            forceWizardOpen={oauthResume?.verticalId === verticalId}
+            initialStepId={
+              oauthResume?.verticalId === verticalId
+                ? `${oauthResume.system}-connect`
+                : undefined
+            }
             onSelect={() =>
               void navigate({
                 to: '/owner/connectors',
@@ -1785,18 +3380,35 @@ function OwnerConnectorsBody({ verticalFilter }: { verticalFilter?: string }) {
           />
         ))}
       </div>
+
+      {role === 'data_owner' || canInviteVerticalMembers(role) ? (
+        <div id="team" className="space-y-4">
+          {(verticalFilter ? [verticalFilter] : visibleVerticals)
+            .filter((id) => !isOwnerConnectorsHiddenVertical(id) && verticals.includes(id))
+            .map((verticalId) => (
+              <TeamMembersSection
+                key={`team-${verticalId}`}
+                verticalId={verticalId}
+                canInvite
+              />
+            ))}
+        </div>
+      ) : null}
     </section>
   )
 }
 
 export type OwnerConnectorsSearch = {
   vertical?: string
+  code?: string
+  state?: string
+  error?: string
 }
 
 export function OwnerConnectorsPage({ search }: { search?: OwnerConnectorsSearch }) {
   return (
     <RoleGate allow={canAccessOwnerConnectors}>
-      <OwnerConnectorsBody verticalFilter={search?.vertical} />
+      <OwnerConnectorsBody search={search} />
     </RoleGate>
   )
 }

@@ -18,7 +18,7 @@ VERTICAL_HASH_REFRESH_RUNS_TABLE = "vertical_hash_refresh_runs"
 VERTICAL_HASH_REFRESH_STEP = "refresh"
 VERTICAL_HASH_REFRESH_SYSTEMS = frozenset(
     {
-        "mailchimp",
+        "axios_headquarters",
         "paylocity",
         "lever",
         "auth0",

@@ -363,22 +363,6 @@ def _hardcoded_systems_catalog() -> SystemsCatalogResponse:
     return SystemsCatalogResponse(
         systems=[
             SystemCatalogEntry(
-                system_id="mailchimp",
-                display_label="Mailchimp",
-                credential_fields=[
-                    SystemCredentialField(
-                        id="api_key",
-                        label="API key",
-                        input_type="password",
-                        required=True,
-                    )
-                ],
-                trust_copy=(
-                    "Paste a Mailchimp API key with list and member access. "
-                    "Do not use your personal login password."
-                ),
-            ),
-            SystemCatalogEntry(
                 system_id="paylocity",
                 display_label="Paylocity",
                 credential_fields=[

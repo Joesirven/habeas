@@ -24,7 +24,7 @@ data-privacy/
 │   ├── drop_ingestor/          # land (unzip) + promote to raw
 │   ├── hash_index_refresh/     # per-state dbt refresh + rematch enqueue
 │   ├── matching/               # hash + plaintext matching (all sources)
-│   ├── mailchimp/ …            # per-system automation apps
+│   ├── paylocity/ …            # per-system automation apps
 │   └── reaper/ …
 ├── clients/
 │   ├── web/                    # admin UI — Pipeline + Health Drop ops

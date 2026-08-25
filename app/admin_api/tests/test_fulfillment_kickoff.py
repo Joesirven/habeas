@@ -360,6 +360,60 @@ async def test_kickoff_status_5_needs_no_dwids():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [3, 4])
+@pytest.mark.parametrize("dwids", [None, [], ["", "  "]])
+async def test_kickoff_empty_dwids_status_3_4_is_400(
+    status: int, dwids: list[str] | None
+):
+    """Empty/missing DWIDs on 3/4 must 400 — never default to the matched set."""
+    conn = FakeConn(disposition=None, matched_consumer_id="would-select-all")
+
+    with pytest.raises(HTTPException) as exc:
+        await fk.kickoff_vertical_fulfillment(
+            conn,
+            request_id=REQUEST_ID,
+            vertical="data",
+            decided_by="legal@example.com",
+            actor_role=ROLE_LEGAL,
+            status=status,
+            dwids=dwids,
+        )
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "status 3/4 requires at least one dwid"
+    assert conn.upserts == []
+    assert conn.kickoff_contexts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [3, 4])
+@pytest.mark.parametrize("dwids", [None, [], ["", "  "]])
+async def test_endpoint_kickoff_empty_dwids_status_3_4_is_400(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    dwids: list[str] | None,
+):
+    """HTTP kickoff matches promote: empty/missing 3/4 DWIDs are 400."""
+    conn = FakeConn(disposition=None, matched_consumer_id="would-select-all")
+    fake_pool(monkeypatch, conn)
+    body = (
+        fk.FulfillmentKickoffBody(status=status)
+        if dwids is None
+        else fk.FulfillmentKickoffBody(status=status, dwids=dwids)
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await fk.post_fulfillment_kickoff(
+            REQUEST_ID,
+            body,
+            _fake_request(),
+            LEGAL,
+        )
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "status 3/4 requires at least one dwid"
+    assert conn.upserts == []
+
+
+@pytest.mark.asyncio
 async def test_re_kickoff_is_idempotent():
     conn = FakeConn(disposition=_disposition_row(status=3), kickoff_approved=True)
 
@@ -396,19 +450,19 @@ async def test_kickoff_rejects_silent_status_change_after_kickoff():
 
 
 @pytest.mark.asyncio
-async def test_endpoint_rejects_coming_soon_vertical(monkeypatch: pytest.MonkeyPatch):
+async def test_endpoint_rejects_unknown_vertical(monkeypatch: pytest.MonkeyPatch):
     conn = FakeConn(disposition=_disposition_row())
     fake_pool(monkeypatch, conn)
 
     with pytest.raises(HTTPException) as exc:
         await fk.post_fulfillment_kickoff(
             REQUEST_ID,
-            fk.FulfillmentKickoffBody(vertical="mailchimp"),
+            fk.FulfillmentKickoffBody(vertical="salesforce"),
             _fake_request(),
             LEGAL,
         )
     assert exc.value.status_code == 400
-    assert "coming soon" in str(exc.value.detail)
+    assert "unknown vertical" in str(exc.value.detail)
 
 
 @pytest.mark.asyncio
@@ -637,7 +691,7 @@ async def test_owner_status_inserts_success_when_no_attempt(
 
     result = await fk.patch_fulfillment_owner_status(
         REQUEST_ID,
-        "mailchimp",
+        "axios_headquarters",
         fk.OwnerFulfillmentStatusBody(status="completed_in_source"),
         _fake_request(),
         DATA_OWNER,
@@ -867,18 +921,18 @@ def test_catalog_vertical_for_owner_path_accepts_aliases():
         "communications",
         "communications",
     )
-    assert fk._catalog_vertical_for_owner_path("mailchimp") == (
-        "mailchimp",
+    assert fk._catalog_vertical_for_owner_path("axios_headquarters") == (
+        "axios_headquarters",
         "communications",
     )
-    assert fk._catalog_vertical_for_owner_path("Mailchimp") == (
-        "mailchimp",
+    assert fk._catalog_vertical_for_owner_path("Axios_Headquarters") == (
+        "axios_headquarters",
         "communications",
     )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path_vertical", ["communications", "mailchimp"])
+@pytest.mark.parametrize("path_vertical", ["communications", "axios_headquarters"])
 async def test_owner_status_accepts_catalog_and_system_aliases(
     monkeypatch: pytest.MonkeyPatch,
     path_vertical: str,

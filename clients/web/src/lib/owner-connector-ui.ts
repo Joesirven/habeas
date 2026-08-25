@@ -3,7 +3,8 @@
  * soft reminder banners (pure; no React).
  */
 
-import type { ConnectorReminder, ConnectionDisplayStatus } from '@/lib/api'
+import type { ConnectorReminder, ConnectionDisplayStatus, OwnerConnectorSystem } from '@/lib/api'
+import { catalogSystemDisplayLabel } from './legalJourneyLabels'
 import { PLATFORM_NAME } from './brand'
 
 /** AE10 / R19 — multi-PII delimiter choices for Upload. */
@@ -145,7 +146,7 @@ export function filterRemindersForOwnerConnectorsPage(
   return reminders.filter(
     (reminder) =>
       !OWNER_CONNECTORS_SUPPRESSED_REMINDER_CODES.has(reminder.code) &&
-      reminder.system !== 'cassandra',
+      !isOwnerWizardHiddenSystem(reminder.system),
   )
 }
 
@@ -195,6 +196,12 @@ export type VerticalWizardSystemInput = {
   system: string
   allowedApproaches: string[]
   displayLabel?: string
+  /**
+   * Sheets only — include the mapping/clean step after connect.
+   * Defaults to true for `hr_alumni` / `bizdev_contacts`. Pass false when
+   * columns already map and no rows need cleaning.
+   */
+  needsMappingClean?: boolean
 }
 
 export type BuildVerticalWizardStepsArgs = {
@@ -202,11 +209,48 @@ export type BuildVerticalWizardStepsArgs = {
   viewOnly?: boolean
 }
 
+/** Alumni / Contact Us Google Sheets — owner OAuth or upload, not SA-share. */
+export const SHEETS_OWNER_SYSTEM_IDS = ['hr_alumni', 'bizdev_contacts'] as const
+
+export type SheetsOwnerSystemId = (typeof SHEETS_OWNER_SYSTEM_IDS)[number]
+
+export const SHEETS_CONNECT_METHODS = ['oauth', 'upload'] as const
+
+export type SheetsConnectMethod = (typeof SHEETS_CONNECT_METHODS)[number]
+
+export function isSheetsOwnerSystem(system: string | null | undefined): boolean {
+  const normalized = normalizeSystemId(system ?? '')
+  return (
+    normalized === 'hr_alumni' ||
+    normalized === 'bizdev_contacts'
+  )
+}
+
+/** Whether mapping/clean should follow the sheets connect step. */
+export function shouldIncludeSheetsMappingClean(input?: {
+  mapping?: Record<string, string> | null
+  mappingComplete?: boolean
+  rejectedRowCount?: number
+}): boolean {
+  if (!input) return true
+  const complete =
+    input.mappingComplete ??
+    (input.mapping ? uploadMappingComplete(input.mapping) : false)
+  const rejects = input.rejectedRowCount ?? 0
+  return !complete || rejects > 0
+}
+
 const WIZARD_STEP_SUFFIXES = [
+  'mapping-clean',
   'howto-upload',
   'howto-live',
   'live-creds',
+  'connect',
+  'mapping',
   'upload',
+  'howto',
+  'oauth',
+  'clean',
 ] as const
 
 export type ParsedVerticalWizardStep =
@@ -232,13 +276,34 @@ export function parseVerticalWizardStepId(
   return null
 }
 
+function sheetsWizardSystemSteps(
+  system: string,
+  needsMappingClean: boolean,
+): VerticalWizardStep[] {
+  const steps: VerticalWizardStep[] = [
+    { id: `${system}-howto` },
+    { id: `${system}-connect` },
+  ]
+  if (needsMappingClean) {
+    steps.push({ id: `${system}-mapping-clean` })
+  }
+  return steps
+}
+
 function wizardSystemStepsForBinding(
   system: string,
   allowedApproaches: readonly string[],
+  options?: { needsMappingClean?: boolean },
 ): VerticalWizardStep[] {
   const normalized = normalizeSystemId(system)
+  if (isSheetsOwnerSystem(normalized)) {
+    return sheetsWizardSystemSteps(
+      normalized,
+      options?.needsMappingClean !== false,
+    )
+  }
   const steps: VerticalWizardStep[] = []
-  if (allowsLive(allowedApproaches)) {
+  if (allowsLive(allowedApproaches) || allowsOauth(allowedApproaches)) {
     steps.push({ id: `${normalized}-howto-live` })
     steps.push({ id: `${normalized}-live-creds` })
   }
@@ -253,9 +318,14 @@ function shouldIncludeWizardSystem(
   system: string,
   allowedApproaches: readonly string[],
 ): boolean {
-  if (normalizeSystemId(system) === 'cassandra') return false
+  if (isOwnerWizardHiddenSystem(system)) return false
+  if (isSheetsOwnerSystem(system)) return true
   if (!allowedApproaches.length) return false
-  return allowsUpload(allowedApproaches) || allowsLive(allowedApproaches)
+  return (
+    allowsUpload(allowedApproaches) ||
+    allowsLive(allowedApproaches) ||
+    allowsOauth(allowedApproaches)
+  )
 }
 
 /** Build per-vertical linear wizard steps (one cadence + confirm after all systems). */
@@ -266,7 +336,11 @@ export function buildVerticalWizardSteps(
   const steps: VerticalWizardStep[] = []
   for (const entry of args.systems) {
     if (!shouldIncludeWizardSystem(entry.system, entry.allowedApproaches)) continue
-    steps.push(...wizardSystemStepsForBinding(entry.system, entry.allowedApproaches))
+    steps.push(
+      ...wizardSystemStepsForBinding(entry.system, entry.allowedApproaches, {
+        needsMappingClean: entry.needsMappingClean,
+      }),
+    )
   }
   steps.push({ id: 'cadence' })
   steps.push({ id: 'confirm' })
@@ -300,6 +374,27 @@ export const CADENCE_OPTION_IDS = [
 ] as const
 
 export type CadenceOptionId = (typeof CADENCE_OPTION_IDS)[number]
+
+/** Sheets cadence is static (`rarely`) vs volatile (`with_new_batches`) only. */
+export const SHEETS_CADENCE_OPTION_IDS = [
+  CADENCE_OPTION_RARELY,
+  CADENCE_OPTION_WITH_NEW_BATCHES,
+] as const
+
+export type SheetsCadenceOptionId = (typeof SHEETS_CADENCE_OPTION_IDS)[number]
+
+/** Cadence ids for a wizard: sheets-only verticals omit weekly. */
+export function cadenceOptionIdsForSystems(
+  systems: readonly string[] | null | undefined,
+): readonly CadenceOptionId[] {
+  const ids = (systems ?? [])
+    .map((system) => normalizeSystemId(system))
+    .filter((system) => system.length > 0)
+  if (ids.length > 0 && ids.every((system) => isSheetsOwnerSystem(system))) {
+    return SHEETS_CADENCE_OPTION_IDS
+  }
+  return CADENCE_OPTION_IDS
+}
 
 /** Map persisted `refresh_policy` to owner-facing cadence option ids. */
 export function cadenceOptionFromRefreshPolicy(
@@ -357,25 +452,44 @@ export function cadenceOptionFromMetadata(
 export type SystemWizardCopy = {
   uploadHowto?: string
   liveHowto?: string
+  oauthHowto?: string
+  /** Combined howto for sheets connect (OAuth or upload). */
+  howto?: string
 }
 
-/** Per-system how-to copy for upload / live wizard substeps. */
+/** Per-system how-to copy for upload / live / sheets wizard substeps. */
 export const SYSTEM_COPY: Record<string, SystemWizardCopy> = {
-  axios_hq: {
+  axios_headquarters: {
     uploadHowto:
       'Export a contact or subscriber list from Axios HQ as CSV. Upload the file, then map first name, last name, and email if the column names differ. Habeas does not connect to Axios HQ directly.',
   },
+  hr_alumni: {
+    howto:
+      'Connect the Alumni Google Sheet with Google OAuth, or upload a CSV if you cannot grant sheet access. Map first name, last name, and email if the headers differ, then choose how often this list should stay current.',
+    oauthHowto:
+      'Sign in with Google (OAuth) to grant Habeas access to the Alumni sheet, then paste the spreadsheet URL. Habeas tests metadata access before you continue.',
+    uploadHowto:
+      'If Google OAuth is not available, upload the alumni list as CSV and map first name, last name, and email.',
+  },
+  bizdev_contacts: {
+    howto:
+      'Connect the Contact Us Google Sheet with Google OAuth, or upload a CSV if you cannot grant sheet access. Map first name, last name, and email if the headers differ, then choose how often this list should stay current.',
+    oauthHowto:
+      'Sign in with Google (OAuth) to grant Habeas access to the Contact Us sheet, then paste the spreadsheet URL. Habeas tests metadata access before you continue.',
+    uploadHowto:
+      'If Google OAuth is not available, upload Contact Us rows as CSV and map first name, last name, and email.',
+  },
   alumni_google_sheet: {
     liveHowto:
-      'Open the HR alumni Google Sheet, share it as Editor with the Habeas service account in the steps below, then paste the spreadsheet URL. Habeas tests access before you continue.',
+      'Sign in with Google to grant Habeas access to the Alumni sheet, then paste the spreadsheet URL. Sharing with a service account is not required.',
     uploadHowto:
-      'If the live sheet connection fails, upload the alumni list as CSV and map first name, last name, and email.',
+      'If Google OAuth is not available, upload the alumni list as CSV and map first name, last name, and email.',
   },
   contact_us_google_sheet: {
     liveHowto:
-      'Open the BizDev Contact Us Google Sheet, share it as Editor with the Habeas service account in the steps below, then paste the spreadsheet URL. Habeas tests access before you continue.',
+      'Sign in with Google to grant Habeas access to the Contact Us sheet, then paste the spreadsheet URL. Sharing with a service account is not required.',
     uploadHowto:
-      'If the live sheet connection fails, upload Contact Us rows as CSV and map first name, last name, and email.',
+      'If Google OAuth is not available, upload Contact Us rows as CSV and map first name, last name, and email.',
   },
   paylocity: {
     liveHowto:
@@ -403,6 +517,11 @@ export function allowsUpload(approaches: readonly string[] | null | undefined): 
 /** Whether Live approach is among allowed modes. */
 export function allowsLive(approaches: readonly string[] | null | undefined): boolean {
   return (approaches ?? []).includes('live')
+}
+
+/** Whether Google OAuth is among allowed modes (sheets connect). */
+export function allowsOauth(approaches: readonly string[] | null | undefined): boolean {
+  return (approaches ?? []).includes('oauth')
 }
 
 /** KD28 — user-facing product name for owner connector copy. */
@@ -472,10 +591,14 @@ const MODE_SYSTEM_HINTS: Record<
   bizdev_contacts: {
     upload:
       'Upload Contact Us contacts as CSV, then map first name, last name, and email.',
+    live:
+      'Connect the Contact Us Google Sheet with Google OAuth. Habeas does not use a service-account share.',
   },
   hr_alumni: {
     upload:
       'Upload your alumni list as CSV, then map first name, last name, and email.',
+    live:
+      'Connect the Alumni Google Sheet with Google OAuth. Habeas does not use a service-account share.',
   },
 }
 
@@ -483,12 +606,6 @@ const DISALLOWED_MODE_REASONS: Record<
   string,
   Partial<Record<ConnectorApproachMode, string>>
 > = {
-  bizdev_contacts: {
-    live: 'BizDev Contacts is Upload only — there is no Live connection for this system.',
-  },
-  hr_alumni: {
-    live: 'HR Alumni is Upload only — this is a static list, not a live feed.',
-  },
   lever: {
     upload: 'Lever only supports Live — Habeas connects via the Lever API.',
   },
@@ -511,9 +628,11 @@ function displayLabel(displayName: string | undefined, systemId: string): string
 export function isModeAllowed(
   mode: ConnectorApproachMode,
   allowedApproaches: readonly string[] | null | undefined,
+  systemId?: string | null,
 ): boolean {
+  if (systemId && isSheetsOwnerSystem(systemId)) return true
   if (mode === 'upload') return allowsUpload(allowedApproaches)
-  return allowsLive(allowedApproaches)
+  return allowsLive(allowedApproaches) || allowsOauth(allowedApproaches)
 }
 
 /** KD25 — Mode step intro for a system row. */
@@ -550,9 +669,13 @@ export function disallowedModeReason(
 ): string {
   const normalized = normalizeSystemId(systemId)
   const label = displayLabel(options?.displayName, normalized)
+  if (isSheetsOwnerSystem(normalized)) return ''
   const known = DISALLOWED_MODE_REASONS[normalized]?.[mode]
   if (known) return known
-  if (options?.allowedApproaches && isModeAllowed(mode, options.allowedApproaches)) {
+  if (
+    options?.allowedApproaches &&
+    isModeAllowed(mode, options.allowedApproaches, normalized)
+  ) {
     return ''
   }
   if (mode === 'upload') {
@@ -569,7 +692,7 @@ export function buildModeStepCards(input: {
 }): ModeStepCardState[] {
   const normalized = normalizeSystemId(input.systemId)
   return MODE_DEFINITION_CARDS.map((card) => {
-    const allowed = isModeAllowed(card.mode, input.allowedApproaches)
+    const allowed = isModeAllowed(card.mode, input.allowedApproaches, normalized)
     return {
       mode: card.mode,
       title: card.title,
@@ -641,12 +764,42 @@ export function liveConnectReady(input: {
 }
 
 /** Cassandra is infrastructure-only — never list it on the owner connectors page. */
+export const OWNER_WIZARD_HIDDEN_SYSTEM_ID = 'cassandra'
+
 export function isOwnerConnectorsHiddenSystem(system: string): boolean {
-  return normalizeSystemId(system) === 'cassandra'
+  return normalizeSystemId(system) === OWNER_WIZARD_HIDDEN_SYSTEM_ID
+}
+
+export function isOwnerWizardHiddenSystem(system: string | null | undefined): boolean {
+  return isOwnerConnectorsHiddenSystem(system ?? '')
 }
 
 export function isOwnerConnectorsHiddenVertical(verticalId: string): boolean {
   return verticalId.trim().toLowerCase() === 'data'
+}
+
+/** Drop leftover demo / infra systems that must not appear as wizard cards. */
+export function filterOwnerWizardConnectors(
+  connectors: readonly OwnerConnectorSystem[] | null | undefined,
+): OwnerConnectorSystem[] {
+  if (!connectors?.length) return []
+  return connectors.filter((connector) => !isOwnerWizardHiddenSystem(connector.system))
+}
+
+/** Owner-facing system title — Test vertical uses System A / System B; never "cassandra". */
+export function ownerConnectorDisplayName(
+  verticalId: string | null | undefined,
+  system: string,
+  displayName?: string | null,
+): string {
+  const labeled = catalogSystemDisplayLabel(system, {
+    vertical: verticalId,
+    systemLabel: displayName,
+  })
+  if (labeled && labeled.toLowerCase() !== OWNER_WIZARD_HIDDEN_SYSTEM_ID) return labeled
+  const trimmed = (displayName ?? '').trim()
+  if (trimmed && trimmed.toLowerCase() !== OWNER_WIZARD_HIDDEN_SYSTEM_ID) return trimmed
+  return 'System'
 }
 
 export const UPLOAD_IDENTIFIER_FIELDS = [
@@ -675,15 +828,52 @@ export function normalizeUploadHeader(raw: string): string {
 
 /** Parse the first CSV row as headers (quoted fields supported). */
 export function parseCsvHeaderRow(text: string): string[] {
-  const firstLine = text.replace(/^\uFEFF/, '').split(/\r?\n/, 1)[0] ?? ''
-  const headers: string[] = []
+  const first = parseCsvRecords(text.replace(/^\uFEFF/, ''))[0] ?? []
+  return first.map((h) => h.trim()).filter((h) => h.length > 0)
+}
+
+export type CsvDocument = {
+  headers: string[]
+  rows: string[][]
+}
+
+/** Parse a CSV into headers + data rows (quoted fields and newlines in quotes). */
+export function parseCsvDocument(text: string): CsvDocument {
+  const records = parseCsvRecords(text.replace(/^\uFEFF/, ''))
+  const headers = (records[0] ?? []).map((cell) => cell.trim())
+  const width = headers.length
+  const rows = records.slice(1).map((record) => {
+    const next = record.slice(0, width)
+    while (next.length < width) next.push('')
+    return next
+  })
+  return { headers, rows }
+}
+
+export function serializeCsvDocument(doc: CsvDocument): string {
+  const lines = [doc.headers, ...doc.rows].map((cells) =>
+    cells.map(csvEscapeField).join(','),
+  )
+  return `${lines.join('\n')}\n`
+}
+
+function csvEscapeField(value: string): string {
+  if (/[",\r\n]/.test(value)) {
+    return `"${value.replaceAll('"', '""')}"`
+  }
+  return value
+}
+
+function parseCsvRecords(text: string): string[][] {
+  const records: string[][] = []
+  let row: string[] = []
   let current = ''
   let inQuotes = false
-  for (let i = 0; i < firstLine.length; i += 1) {
-    const ch = firstLine[i]
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
     if (inQuotes) {
       if (ch === '"') {
-        if (firstLine[i + 1] === '"') {
+        if (text[i + 1] === '"') {
           current += '"'
           i += 1
         } else {
@@ -699,14 +889,27 @@ export function parseCsvHeaderRow(text: string): string[] {
       continue
     }
     if (ch === ',') {
-      headers.push(current.trim())
+      row.push(current)
       current = ''
+      continue
+    }
+    if (ch === '\n') {
+      row.push(current)
+      records.push(row)
+      row = []
+      current = ''
+      continue
+    }
+    if (ch === '\r') {
       continue
     }
     current += ch
   }
-  if (current.trim() || headers.length) headers.push(current.trim())
-  return headers.filter((h) => h.length > 0)
+  if (current.length > 0 || row.length > 0) {
+    row.push(current)
+    records.push(row)
+  }
+  return records
 }
 
 export function suggestUploadColumnMapping(
@@ -741,6 +944,28 @@ export function uploadMappingComplete(
   return targets.some((id) => Boolean(mapping[id]?.trim()))
 }
 
+export const EMAIL_FORMAT_OPTIONS = [
+  { id: 'loose', label: 'Loose — @ and a dot in the domain' },
+  { id: 'standard', label: 'Standard — one @ and a dotted domain' },
+  { id: 'strict', label: 'Strict — standard plus a 2+ letter TLD' },
+] as const
+
+export const PHONE_FORMAT_OPTIONS = [
+  { id: 'digits_10_plus', label: '10 or more digits' },
+  { id: 'us_10', label: 'US 10-digit (or 1 + 10 digits)' },
+  { id: 'e164', label: 'E.164 — leading +, 10–15 digits' },
+] as const
+
+export const REJECTED_ROW_CODE_LABELS: Record<string, string> = {
+  email_invalid: 'Email format',
+  phone_invalid: 'Phone format',
+  no_identifier: 'No identifier',
+}
+
+export function rejectedRowCodeLabel(code: string): string {
+  return REJECTED_ROW_CODE_LABELS[code] ?? 'Invalid value'
+}
+
 /** In-app samples matching admin_api tests/fixtures/upload_mapping/. */
 export const UPLOAD_SAMPLE_CSV: Record<
   | 'success'
@@ -749,7 +974,10 @@ export const UPLOAD_SAMPLE_CSV: Record<
   | 'autobind'
   | 'remap'
   | 'failure_no_identifier'
-  | 'failure_no_usable_rows',
+  | 'failure_no_usable_rows'
+  | 'corrupted_emails'
+  | 'corrupted_phones'
+  | 'mixed_good_and_corrupt',
   { filename: string; body: string; label: string }
 > = {
   success: {
@@ -786,6 +1014,21 @@ export const UPLOAD_SAMPLE_CSV: Record<
     filename: 'failure_no_usable_rows.csv',
     label: 'Fail (bad email/phone)',
     body: 'email,phone\nnot-an-email,123\n',
+  },
+  corrupted_emails: {
+    filename: 'corrupted_emails.csv',
+    label: 'Corrupt emails',
+    body: 'email\nnot-an-email\nuser@\n@nodomain.com\n',
+  },
+  corrupted_phones: {
+    filename: 'corrupted_phones.csv',
+    label: 'Corrupt phones',
+    body: 'phone\n123\nabc\n555-12\n',
+  },
+  mixed_good_and_corrupt: {
+    filename: 'mixed_good_and_corrupt.csv',
+    label: 'Mixed good + corrupt',
+    body: 'email,phone,first_name\nada@example.com,2025550100,Ada\nnot-an-email,2025550100,Bad\ngrace@example.com,123,Grace\n',
   },
 }
 

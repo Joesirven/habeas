@@ -66,7 +66,6 @@ from admin_api.vertical_dispositions import (
     STATUS_REQUIRING_DWIDS,
     VERTICAL_DATA,
     VerticalDisposition,
-    default_dwids_for_request,
     fetch_vertical_disposition,
     normalize_dwids,
     normalize_vertical,
@@ -222,8 +221,11 @@ async def kickoff_vertical_fulfillment(
 
     if status is not None:
         selected = normalize_dwids(dwids)
-        if not selected and status in STATUS_REQUIRING_DWIDS:
-            selected = await default_dwids_for_request(conn, request_id=request_id)
+        if status in STATUS_REQUIRING_DWIDS and not selected:
+            raise HTTPException(
+                status_code=400,
+                detail="status 3/4 requires at least one dwid",
+            )
         disposition = await upsert_vertical_disposition(
             conn,
             request_id=request_id,
@@ -512,7 +514,7 @@ async def post_fulfillment_reopen(
 def _catalog_vertical_for_owner_path(vertical: str) -> tuple[str, str]:
     """Return ``(path_vertical, catalog_vertical)`` for a SaaS owner-status path.
 
-    Catalog ids (``communications``) and bound systems (``mailchimp``) are both
+    Catalog ids (``communications``) and bound systems (``axios_headquarters``) are both
     accepted. Data / Cassandra are automatic and rejected with 422.
     """
     path_vertical = normalize_vertical(vertical)

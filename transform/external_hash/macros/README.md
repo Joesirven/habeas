@@ -3,10 +3,10 @@
 Per-system serving marts will mirror `transform/drop_hash/macros/swap_serving_tables.sql`:
 
 1. **Durable build tables** — mart models write to `*_hash__build` aliases (see
-   `mart_mailchimp_email_hash.sql` → `mailchimp_email_hash__build`).
+   `mart_auth0_email_hash.sql` → `auth0_email_hash__build`).
 2. **`perform_serving_swap()` on-run-end** — after a successful `dbt build` for one
    system, copy or merge the build into the shared serving table
-   (`mailchimp_email_hash`, `paylocity_email_hash`, …).
+   (`auth0_email_hash`, `axios_headquarters_email_hash`, `paylocity_email_hash`, …).
 3. **Per-system isolation** — unlike DROP’s state suffix, external verticals scope
    by `system` column and/or system-prefixed physical table names so parallel
    hash-refresh workers do not clobber each other.

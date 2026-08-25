@@ -24,6 +24,8 @@ import {
   type JourneyStage,
   type MatchingAttemptRow,
   type MatchingResultDetail,
+  type MatchedChannel,
+  type MatchedHash,
   type MatchedPersonContact,
   type RunTimelineStep,
   type WorkbenchVerticalRow,
@@ -39,16 +41,17 @@ import {
   resolveMatchingConnectorGate,
   type MatchingConnectorGate,
 } from '@/lib/connection-display'
-import { actionReasonLabel } from '@/lib/legalJourneyLabels'
+import { actionReasonLabel, systemLabel } from '@/lib/legalJourneyLabels'
 import { groupInboxConnectorNotifications } from '@/lib/inbox-batch-status'
 import { cn } from '@/lib/utils'
 
 /**
  * CA DROP response_status picker for Inbox fulfill confirms.
  *
- * E3 wire-up — optional DWID multi-select (status 3/4):
+ * E3 wire-up — DWID checklist (status 3/4) for both 1:1 and multi:
  * - `contacts` / `selectedDwids` / `onSelectedDwidsChange` — when `value` is 3 or 4,
- *   shows a checklist of matched contacts (parent should pre-select all dwids).
+ *   shows a checklist of matched contacts including a single 1:1 contact
+ *   (parent should pre-select all dwids).
  * - When `value` is 5, DWID list is hidden; parent should clear `selectedDwids`.
  * - Promote/fulfill callbacks: `(status, dwids?) => void` — pass selected dwids for
  *   3/4, empty/`[]` for 5.
@@ -114,12 +117,116 @@ export function matchingDispositionCopy(persona?: DropResponseStatusPersona) {
   }
 }
 
+const MATCH_CHANNEL_LABELS: Record<MatchedChannel, string> = {
+  email: 'Email',
+  phone: 'Phone',
+  ndz: 'NDZ',
+}
+
+/** 32+ hex chars — never render raw hash hex even if a field leaks. */
+const HASH_HEX_RE = /\b[a-fA-F0-9]{32,}\b/g
+
+function looksLikeHashHex(value: string): boolean {
+  const trimmed = value.trim()
+  return trimmed.length >= 32 && /^[a-fA-F0-9]+$/.test(trimmed)
+}
+
+/** Strip hash hex from operator-facing strings. Known method labels stay. */
+export function redactHashHex(value: string): string {
+  if (!value) return value
+  if (looksLikeHashHex(value)) return '—'
+  return value.replace(HASH_HEX_RE, '[redacted]')
+}
+
+function channelFromMatchedVia(value: unknown): MatchedChannel | null {
+  if (typeof value !== 'string') return null
+  const text = value.trim().toLowerCase()
+  if (text === 'email' || text.startsWith('drop_hash_email')) return 'email'
+  if (text === 'phone' || text.startsWith('drop_hash_phone')) return 'phone'
+  if (text === 'ndz' || text.startsWith('drop_hash_ndz')) return 'ndz'
+  if (text.includes('email') && !looksLikeHashHex(text)) return 'email'
+  if (text.includes('phone') && !looksLikeHashHex(text)) return 'phone'
+  if ((text.includes('ndz') || text.includes('name')) && !looksLikeHashHex(text)) {
+    return 'ndz'
+  }
+  return null
+}
+
+function channelFromListType(value: unknown): MatchedChannel | null {
+  if (typeof value !== 'string') return null
+  const text = value.trim().toLowerCase()
+  if (text === 'email' || text === 'phone' || text === 'ndz') return text
+  return null
+}
+
+function isAllowlistedChannel(value: unknown): value is MatchedChannel {
+  return value === 'email' || value === 'phone' || value === 'ndz'
+}
+
+export function safeMatchedContacts(
+  contacts: MatchedPersonContact[] | null | undefined,
+): MatchedPersonContact[] {
+  if (!Array.isArray(contacts)) return []
+  return contacts.filter((contact) => contact && typeof contact === 'object')
+}
+
+export function formatMatchedViaLabel(value: string | null | undefined): string {
+  if (value == null || !String(value).trim()) return '—'
+  const text = String(value).trim()
+  if (looksLikeHashHex(text)) return '—'
+  return redactHashHex(text)
+}
+
+/** Prefer payload `matched_channels`; infer email/phone/ndz from via / attempts for legacy. */
+export function matchedChannelsFromDetail(
+  matching: MatchingResultDetail | null | undefined,
+): MatchedChannel[] {
+  if (!matching || typeof matching !== 'object') return []
+  const seen = new Set<MatchedChannel>()
+  const add = (channel: MatchedChannel | null) => {
+    if (channel && !seen.has(channel)) seen.add(channel)
+  }
+  const fromPayload = matching.matched_channels
+  if (Array.isArray(fromPayload)) {
+    for (const entry of fromPayload) add(isAllowlistedChannel(entry) ? entry : null)
+  }
+  if (seen.size > 0) return [...seen]
+  add(channelFromMatchedVia(matching.matched_via))
+  const attempts = Array.isArray(matching.attempts) ? matching.attempts : []
+  for (const attempt of attempts) {
+    const audit = coerceAuditObject(attempt?.audit_payload)
+    add(channelFromListType(audit.list_type))
+    add(channelFromMatchedVia(audit.matched_via))
+  }
+  return [...seen]
+}
+
+function MatchChannelChips({ channels }: { channels: MatchedChannel[] }) {
+  if (channels.length === 0) {
+    return <span className="text-ink-soft">—</span>
+  }
+  return (
+    <span className="flex flex-wrap gap-1">
+      {channels.map((channel) => (
+        <Badge
+          key={channel}
+          variant="default"
+          className="normal-case tracking-normal"
+        >
+          {MATCH_CHANNEL_LABELS[channel]}
+        </Badge>
+      ))}
+    </span>
+  )
+}
+
 export function DropResponseStatusPicker({
   value,
   onChange,
   disabled,
   suggested,
   contacts,
+  matching,
   selectedDwids,
   onSelectedDwidsChange,
   persona,
@@ -129,6 +236,7 @@ export function DropResponseStatusPicker({
   disabled?: boolean
   suggested?: DropResponseStatusCode | null
   contacts?: MatchedPersonContact[]
+  matching?: MatchingResultDetail | null
   selectedDwids?: string[]
   onSelectedDwidsChange?: (dwids: string[]) => void
   /** data_owner: Confirm match / Multi-person / Not a match. Legal/ops keep code+label chrome. */
@@ -136,11 +244,9 @@ export function DropResponseStatusPicker({
 }) {
   const chrome = dropResponseStatusPickerChrome(persona)
   const needsDwids = value === 3 || value === 4
+  const pickerContacts = safeMatchedContacts(contacts ?? matching?.matched_contacts)
   const showDwidSelect =
-    needsDwids &&
-    contacts != null &&
-    contacts.length > 0 &&
-    onSelectedDwidsChange != null
+    needsDwids && pickerContacts.length > 0 && onSelectedDwidsChange != null
 
   return (
     <fieldset className="space-y-1.5" disabled={disabled}>
@@ -187,7 +293,8 @@ export function DropResponseStatusPicker({
       </div>
       {showDwidSelect ? (
         <MatchedContactsPanel
-          contacts={contacts}
+          matching={matching ?? undefined}
+          contacts={pickerContacts}
           selectable
           selectedDwids={selectedDwids ?? []}
           onSelectedDwidsChange={onSelectedDwidsChange}
@@ -214,11 +321,18 @@ function compactDob(dob: string): string {
 }
 
 /** Compact contact label: `{first_initial} {last_name} {state} {dob}`; initials fallback. */
-export function formatMatchedContactLabel(contact: MatchedPersonContact): string {
+export function formatMatchedContactLabel(contact: {
+  first_initial?: string | null
+  last_initial?: string | null
+  last_name?: string | null
+  state?: string | null
+  dob?: string | null
+}): string {
+  if (!contact || typeof contact !== 'object') return '—'
   const lastName = contact.last_name?.trim()
   const namePart = lastName
     ? [contact.first_initial?.trim() || null, lastName].filter(Boolean).join(' ')
-    : formatInitials(contact)
+    : `${contact.first_initial?.trim() || '·'}${contact.last_initial?.trim() || '·'}`
   const dob = contact.dob?.trim() ? compactDob(contact.dob) : null
   return [namePart, contact.state || null, dob].filter(Boolean).join(' ')
 }
@@ -228,12 +342,13 @@ export function formatMatchedContactsSummary(
   contacts: MatchedPersonContact[],
   selectedDwids?: string[],
 ): string {
-  if (contacts.length === 0) return '—'
+  const safe = safeMatchedContacts(contacts)
+  if (safe.length === 0) return '—'
   const selected =
     selectedDwids && selectedDwids.length > 0
-      ? contacts.filter((contact) => selectedDwids.includes(contact.dwid))
-      : contacts
-  const shown = selected.length > 0 ? selected : contacts
+      ? safe.filter((contact) => contact.dwid && selectedDwids.includes(contact.dwid))
+      : safe
+  const shown = selected.length > 0 ? selected : safe
   const firstLabel = formatMatchedContactLabel(shown[0]!)
   const rest = shown.length - 1
   return rest > 0 ? `${firstLabel} +${rest} more` : firstLabel
@@ -297,10 +412,16 @@ function matchingStatusLabel(reviewStatus: string | null | undefined): string {
 
 /** Compact "Matching results" value — type · count (overlay convention). */
 function matchingResultsLabel(matching: MatchingResultDetail): string {
-  const type = (
-    matching.match_type ?? (matching.matched ? 'matched' : 'not matched')
+  if (matchingDetailIsNotLive(matching)) {
+    return matching.result_kind === 'sheet_stub'
+      ? 'Sheet matching not live'
+      : 'System matching not live'
+  }
+  const type = String(
+    matching?.match_type ?? (matching?.matched ? 'matched' : 'not matched'),
   ).replaceAll('_', ' ')
-  return `${type} · ${matching.match_count}`
+  const count = typeof matching?.match_count === 'number' ? matching.match_count : 0
+  return `${type} · ${count}`
 }
 
 function matchingProcessStripItems(
@@ -312,6 +433,8 @@ function matchingProcessStripItems(
       ? [...matching.attempts].sort((a, b) => b.attempt_number - a.attempt_number)[0]
       : null
   const gateChip = connectorGate ? matchingConnectorGateChip(connectorGate) : null
+  const channels = matchedChannelsFromDetail(matching)
+  const systemId = matching.system?.trim() || null
   return [
     {
       label: 'Connector gate',
@@ -325,6 +448,21 @@ function matchingProcessStripItems(
     {
       label: 'Matching results',
       value: matchingResultsLabel(matching),
+    },
+    {
+      label: 'Channels',
+      value: <MatchChannelChips channels={channels} />,
+      show: channels.length > 0,
+    },
+    {
+      label: 'Via',
+      value: formatMatchedViaLabel(matching.matched_via),
+      show: Boolean(matching.matched_via),
+    },
+    {
+      label: 'System',
+      value: matching.system_label?.trim() || (systemId ? systemLabel(systemId) : '—'),
+      show: Boolean(systemId || matching.system_label),
     },
     {
       label: 'Matching status',
@@ -524,20 +662,48 @@ export function StatusAccordion({
   )
 }
 
+function isHashKeyedField(key: string): boolean {
+  const lowered = key.trim().toLowerCase()
+  return (
+    lowered === 'matched_hashes' ||
+    lowered.endsWith('_hash') ||
+    lowered.startsWith('hashed_') ||
+    lowered.includes('hash_value') ||
+    lowered === 'hash'
+  )
+}
+
 function auditFieldDisplay(
   payload: Record<string, unknown>,
   key: string,
 ): string | null {
   if (!(key in payload)) return null
+  if (isHashKeyedField(key)) return '—'
   const value = payload[key]
   if (value == null) return '—'
   if (typeof value === 'boolean' || typeof value === 'number') return String(value)
-  if (typeof value === 'string') return value || '—'
+  if (typeof value === 'string') return redactHashHex(value) || '—'
   try {
-    return JSON.stringify(value)
+    return redactHashHex(JSON.stringify(value))
   } catch {
     return '—'
   }
+}
+
+function redactAuditForDisplay(payload: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(payload)) {
+    if (isHashKeyedField(key)) {
+      out[key] = '[redacted]'
+      continue
+    }
+    if (typeof value === 'string') {
+      out[key] = redactHashHex(value)
+      continue
+    }
+    out[key] = value
+  }
+  return out
 }
 
 function coerceAuditObject(payload: unknown): Record<string, unknown> {
@@ -578,7 +744,7 @@ function attemptRowBadge(attempt: MatchingAttemptRow): {
       return {
         label:
           matchedVia && matchedVia.toLowerCase().includes('missing')
-            ? `success · ${matchedVia}`
+            ? `success · ${formatMatchedViaLabel(matchedVia)}`
             : 'success · not found',
         tone: 'wait',
       }
@@ -588,8 +754,8 @@ function attemptRowBadge(attempt: MatchingAttemptRow): {
     }
     return { label: 'success · matched', tone: 'ok' }
   }
-  if (attempt.error_code || attempt.status.includes('error')) {
-    return { label: attempt.error_code ?? attempt.status, tone: 'fail' }
+  if (attempt.error_code || (attempt.status ?? '').includes('error')) {
+    return { label: attempt.error_code ?? attempt.status ?? 'error', tone: 'fail' }
   }
   if (attempt.status === 'in_flight' || attempt.status === 'claimed') {
     return { label: attempt.status, tone: 'run' }
@@ -599,13 +765,18 @@ function attemptRowBadge(attempt: MatchingAttemptRow): {
 
 export function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
   const [open, setOpen] = useState(false)
-  const audit = coerceAuditObject(attempt.audit_payload)
-  const badge = attemptRowBadge(attempt)
-  const errorMessage = attempt.error_message ?? null
+  const safeAttempt = attempt && typeof attempt === 'object' ? attempt : ({} as MatchingAttemptRow)
+  const audit = coerceAuditObject(safeAttempt.audit_payload)
+  const displayAudit = redactAuditForDisplay(audit)
+  const badge = attemptRowBadge(safeAttempt)
+  const errorMessage =
+    typeof safeAttempt.error_message === 'string'
+      ? redactHashHex(safeAttempt.error_message)
+      : null
 
   const copyAttemptId = () => {
     void navigator.clipboard
-      .writeText(String(attempt.id))
+      .writeText(String(safeAttempt.id ?? ''))
       .then(() => {
         actionToast.copied('Copied attempt id', copyAttemptId)
       })
@@ -618,18 +789,18 @@ export function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
   }
 
   const summaryRows: { label: string; value: string; show?: boolean }[] = [
-    { label: 'Attempted', value: formatTimestamp(attempt.attempted_at) },
-    { label: 'Completed', value: formatTimestamp(attempt.completed_at) },
-    { label: 'Status', value: attempt.status },
+    { label: 'Attempted', value: formatTimestamp(safeAttempt.attempted_at) },
+    { label: 'Completed', value: formatTimestamp(safeAttempt.completed_at) },
+    { label: 'Status', value: safeAttempt.status ?? '—' },
     {
       label: 'Error code',
-      value: attempt.error_code ?? '—',
-      show: Boolean(attempt.error_code),
+      value: safeAttempt.error_code ?? '—',
+      show: Boolean(safeAttempt.error_code),
     },
     {
       label: 'Gate code',
       value: auditFieldDisplay(audit, 'gate_code') ?? '—',
-      show: 'gate_code' in audit || attempt.error_code === 'gate_blocked',
+      show: 'gate_code' in audit || safeAttempt.error_code === 'gate_blocked',
     },
     {
       label: 'Display status',
@@ -653,8 +824,13 @@ export function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
     },
     {
       label: 'Matched via',
-      value: auditFieldDisplay(audit, 'matched_via') ?? '—',
+      value: formatMatchedViaLabel(auditFieldDisplay(audit, 'matched_via')),
       show: 'matched_via' in audit,
+    },
+    {
+      label: 'List type',
+      value: auditFieldDisplay(audit, 'list_type') ?? '—',
+      show: 'list_type' in audit && !isHashKeyedField('list_type'),
     },
     {
       label: 'Lookup state',
@@ -685,9 +861,9 @@ export function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
 
   let auditJson = '—'
   try {
-    auditJson = JSON.stringify(audit, null, 2)
+    auditJson = redactHashHex(JSON.stringify(displayAudit, null, 2))
   } catch {
-    auditJson = String(audit)
+    auditJson = '—'
   }
 
   return (
@@ -699,7 +875,9 @@ export function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
             className="flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left text-[0.7rem] hover:bg-panel/40"
           >
             <span className="min-w-0 truncate">
-              <span className="font-medium text-ink">Attempt #{attempt.attempt_number}</span>
+              <span className="font-medium text-ink">
+                Attempt #{safeAttempt.attempt_number ?? '—'}
+              </span>
             </span>
             <span className="flex shrink-0 items-center gap-1.5">
               <Badge variant={badge.tone} className="normal-case tracking-normal">
@@ -715,7 +893,9 @@ export function AttemptRow({ attempt }: { attempt: MatchingAttemptRow }) {
           <div className="space-y-1.5 border-t border-line/60 px-2 py-1.5 text-[0.65rem]">
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="text-mute">Attempt id</span>
-              <span className="font-mono tabular-nums text-ink">{attempt.id}</span>
+              <span className="font-mono tabular-nums text-ink">
+                {safeAttempt.id ?? '—'}
+              </span>
               <Button
                 type="button"
                 size="sm"
@@ -924,27 +1104,55 @@ function MatchingDetailGrid({
 }
 
 function formatInitials(contact: MatchedPersonContact): string {
-  const first = contact.first_initial ?? '·'
-  const last = contact.last_initial ?? '·'
+  const first = contact?.first_initial?.trim() || '·'
+  const last = contact?.last_initial?.trim() || '·'
   return `${first}${last}`
 }
 
 function MatchedContactDetails({ contact }: { contact: MatchedPersonContact }) {
+  const phones = Array.isArray(contact.phones) ? contact.phones : []
   const phoneSummary =
-    contact.phones.length > 0
-      ? contact.phones.map((p) => `${p.type}: ${p.number}`).join(' · ')
+    phones.length > 0
+      ? phones
+          .map((phone) => {
+            const type = typeof phone?.type === 'string' ? phone.type : 'phone'
+            const number = typeof phone?.number === 'string' ? redactHashHex(phone.number) : '—'
+            return `${type}: ${number}`
+          })
+          .join(' · ')
       : '—'
+  const email =
+    typeof contact.email === 'string' && contact.email.trim()
+      ? redactHashHex(contact.email)
+      : '—'
+  const dob =
+    typeof contact.dob === 'string' && contact.dob.trim() ? contact.dob : '—'
   return (
     <MatchingDetailGrid
       rows={[
-        { label: 'DWID', value: <span className="font-mono tabular-nums">{contact.dwid}</span> },
-        { label: 'State', value: <span className="font-mono">{contact.state}</span> },
+        {
+          label: 'DWID',
+          value: (
+            <span className="font-mono tabular-nums">{contact.dwid || '—'}</span>
+          ),
+        },
+        {
+          label: 'State',
+          value: <span className="font-mono">{contact.state || '—'}</span>,
+        },
         {
           label: 'Initials',
           value: <span className="font-mono">{formatInitials(contact)}</span>,
         },
-        { label: 'DOB', value: contact.dob ?? '—' },
-        { label: 'Email', value: contact.email ?? '—' },
+        {
+          label: 'Name',
+          value:
+            [contact.first_initial, contact.last_name || contact.last_initial]
+              .filter((part) => typeof part === 'string' && part.trim())
+              .join(' ') || formatInitials(contact),
+        },
+        { label: 'DOB', value: dob },
+        { label: 'Email', value: email },
         { label: 'Phones', value: phoneSummary },
       ]}
     />
@@ -996,7 +1204,64 @@ export function MatchedContactsUnavailableCallout({
   )
 }
 
-function MatchedContactsPanel({
+export function matchingDetailIsNotLive(
+  matching?: Pick<MatchingResultDetail, 'matched_contacts_status' | 'result_kind'> | null,
+): boolean {
+  if (!matching) return false
+  return (
+    matching.matched_contacts_status === 'not_live' ||
+    matching.result_kind === 'sheet_stub' ||
+    matching.result_kind === 'saas_stub'
+  )
+}
+
+function MatchingSystemStubCallout({
+  matching,
+}: {
+  matching?: MatchingResultDetail
+}) {
+  const label = matching?.system_label || matching?.system || 'This system'
+  const reason =
+    matching?.not_live_reason?.trim() ||
+    (matching?.result_kind === 'sheet_stub'
+      ? `${label} is catalog-only — matching is not live. Confirm or decline this inbox item; CA DROP people are not this system.`
+      : `${label} matching is not live. Confirm or decline this inbox item without CA DROP people.`)
+  return (
+    <div
+      className="rounded-md border border-line bg-panel/50 px-2.5 py-2"
+      role="status"
+    >
+      <p className="text-[0.7rem] font-medium text-ink">
+        {matching?.result_kind === 'sheet_stub'
+          ? 'Sheet matching not live'
+          : 'System matching not live'}
+      </p>
+      <p className="mt-0.5 text-[0.65rem] leading-snug text-ink-soft">{reason}</p>
+    </div>
+  )
+}
+
+function MatchedHashChips({ hashes }: { hashes?: MatchedHash[] | null }) {
+  if (!hashes?.length) {
+    return <span className="text-ink-soft">—</span>
+  }
+  return (
+    <span className="flex flex-wrap gap-1">
+      {hashes.map((row, index) => (
+        <Badge
+          key={`${row.kind}-${row.matched_via ?? ''}-${index}`}
+          variant="default"
+          className="normal-case tracking-normal"
+        >
+          {row.kind}
+          {row.matched_via ? ` · ${formatMatchedViaLabel(row.matched_via)}` : ''}
+        </Badge>
+      ))}
+    </span>
+  )
+}
+
+export function MatchedContactsPanel({
   matching,
   contacts: contactsProp,
   selectable = false,
@@ -1011,118 +1276,184 @@ function MatchedContactsPanel({
   onSelectedDwidsChange?: (dwids: string[]) => void
   disabled?: boolean
 }) {
-  const contacts = contactsProp ?? matching?.matched_contacts ?? []
+  const contacts = safeMatchedContacts(contactsProp ?? matching?.matched_contacts)
   const status = matching?.matched_contacts_status
-  const matchCount = matching?.match_count ?? contacts.length
+  const matchCount =
+    typeof matching?.match_count === 'number' ? matching.match_count : contacts.length
+  const matchType = matching?.match_type ?? null
+  const selected = selectedDwids ?? []
+  const canSelect = Boolean(selectable && onSelectedDwidsChange)
+  const toggle = (dwid: string) => {
+    if (!dwid || !onSelectedDwidsChange) return
+    if (selected.includes(dwid)) {
+      onSelectedDwidsChange(selected.filter((id) => id !== dwid))
+    } else {
+      onSelectedDwidsChange([...selected, dwid])
+    }
+  }
 
-  if (!selectable && matchCount <= 0) return null
-  if (contacts.length === 0 && matchCount <= 0) return null
+  const emptyMeta = (
+    <MatchingEmptyResultMeta matching={matching} matchCount={matchCount} matchType={matchType} />
+  )
 
   if (status === 'unavailable' && contacts.length === 0) {
-    return <MatchedContactsUnavailableCallout matching={matching} />
+    return (
+      <div className="space-y-2">
+        <MatchedContactsUnavailableCallout matching={matching} />
+        {emptyMeta}
+      </div>
+    )
+  }
+
+  if (matchingDetailIsNotLive(matching)) {
+    return (
+      <div className="space-y-2">
+        <MatchingSystemStubCallout matching={matching} />
+        {emptyMeta}
+      </div>
+    )
   }
 
   if (contacts.length === 0) {
     return (
-      <p className="text-[0.7rem] text-mute">
-        No person records returned for the matched DWID(s).
-      </p>
+      <div className="space-y-2">
+        <p className="text-[0.7rem] text-mute">
+          {matchCount <= 0 || matchType === 'not_found'
+            ? 'No matched persons (not found).'
+            : 'No person records returned for the matched DWID(s).'}
+        </p>
+        {emptyMeta}
+      </div>
     )
   }
 
-  if (selectable && onSelectedDwidsChange) {
-    const selected = selectedDwids ?? []
-    const toggle = (dwid: string) => {
-      if (selected.includes(dwid)) {
-        onSelectedDwidsChange(selected.filter((id) => id !== dwid))
-      } else {
-        onSelectedDwidsChange([...selected, dwid])
-      }
-    }
-    return (
-      <div className="space-y-1.5">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
-            Matched DWIDs
-          </p>
-          <p className="min-w-0 truncate text-[0.65rem] text-ink-soft">
-            {formatMatchedContactsSummary(contacts, selected)}
-          </p>
-        </div>
-        <ul className="space-y-0.5 rounded-md border border-line/70 bg-paper/40 px-2 py-1.5">
-          {contacts.map((contact) => {
-            const checked = selected.includes(contact.dwid)
-            const inputId = `dwid-${contact.dwid}`
-            return (
-              <li key={contact.dwid}>
+  return (
+    <div className="space-y-2">
+      <MatchingContactsView
+        contacts={contacts}
+        matchType={matchType}
+        selected={selected}
+        canSelect={canSelect}
+        disabled={disabled}
+        onToggle={toggle}
+      />
+    </div>
+  )
+}
+
+function MatchingEmptyResultMeta({
+  matching,
+  matchCount,
+  matchType,
+}: {
+  matching?: MatchingResultDetail
+  matchCount: number
+  matchType: string | null
+}) {
+  const notLive = matchingDetailIsNotLive(matching)
+  return (
+    <div className="space-y-2">
+      <MatchingDetailGrid
+        rows={[
+          {
+            label: 'System',
+            value: matching?.system_label || matching?.system || '—',
+          },
+          {
+            label: 'Type',
+            value: notLive ? 'not live' : (matchType ?? 'none').replaceAll('_', ' '),
+          },
+          { label: 'Count', value: <span className="tabular-nums">{notLive ? 0 : matchCount}</span> },
+          {
+            label: 'Via',
+            value: notLive ? '—' : formatMatchedViaLabel(matching?.matched_via),
+          },
+          ...(notLive
+            ? []
+            : [
+                {
+                  label: 'Hashes',
+                  value: <MatchedHashChips hashes={matching?.matched_hashes} />,
+                },
+              ]),
+        ]}
+      />
+    </div>
+  )
+}
+
+/** Live two-tier analog (option 9) — summary + full rows with DWID checklist. Lab layouts stay on `/requests/matching-results-lab`. */
+function MatchingContactsView({
+  contacts,
+  matchType,
+  selected,
+  canSelect,
+  disabled,
+  onToggle,
+}: {
+  contacts: MatchedPersonContact[]
+  matchType: string | null
+  selected: string[]
+  canSelect: boolean
+  disabled: boolean
+  onToggle: (dwid: string) => void
+}) {
+  const heading =
+    matchType === 'single_match' || contacts.length === 1
+      ? 'Matched person'
+      : `Matched persons (${contacts.length})`
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">{heading}</p>
+        <p className="min-w-0 truncate text-[0.65rem] text-ink-soft">
+          {formatMatchedContactsSummary(contacts, canSelect ? selected : undefined)}
+        </p>
+      </div>
+      <ul className="space-y-1.5 rounded-md border border-line/70 bg-paper/40 px-2 py-1.5">
+        {contacts.map((contact, index) => {
+          const dwid = contact.dwid || `missing-${index}`
+          const checked = Boolean(contact.dwid) && selected.includes(contact.dwid)
+          return (
+            <li
+              key={dwid}
+              className="space-y-1 border-b border-line/50 pb-1.5 last:border-b-0 last:pb-0"
+            >
+              {canSelect ? (
                 <label
-                  htmlFor={inputId}
                   className={cn(
                     'flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-[0.7rem] hover:bg-panel/40',
                     disabled && 'cursor-not-allowed opacity-50',
                   )}
                 >
                   <input
-                    id={inputId}
                     type="checkbox"
                     className="size-3.5 shrink-0 accent-habeas-navy"
                     checked={checked}
-                    disabled={disabled}
-                    onChange={() => toggle(contact.dwid)}
+                    disabled={disabled || !contact.dwid}
+                    onChange={() => onToggle(contact.dwid)}
                   />
                   <span className="min-w-0 flex-1 truncate text-ink">
                     {formatMatchedContactLabel(contact)}
                   </span>
                   <span className="shrink-0 font-mono tabular-nums text-[0.6rem] text-mute">
-                    {contact.dwid}
+                    {contact.dwid || '—'}
                   </span>
                 </label>
-              </li>
-            )
-          })}
-        </ul>
-      </div>
-    )
-  }
-
-  if (matching?.match_type === 'single_match' && contacts.length === 1) {
-    return (
-      <div className="space-y-1.5">
-        <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
-          Matched person
-        </p>
-        <MatchedContactDetails contact={contacts[0]!} />
-      </div>
-    )
-  }
-
-  return (
-    <div className="space-y-1.5">
-      <p className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
-        Matched persons ({contacts.length})
-      </p>
-      <div className="space-y-1">
-        {contacts.map((contact) => (
-          <Collapsible key={contact.dwid}>
-            <div className="rounded-md border border-line/80 bg-paper/40">
-              <CollapsibleTrigger asChild>
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left text-[0.7rem] hover:bg-paper/60"
-                >
-                  <span className="min-w-0 truncate font-mono tabular-nums">{contact.dwid}</span>
-                  <span className="shrink-0 text-mute">
-                    {formatMatchedContactLabel(contact)}
-                  </span>
-                </button>
-              </CollapsibleTrigger>
-              <CollapsibleContent className="border-t border-line/60 px-2.5 py-2">
+              ) : (
+                <p className="flex items-center justify-between gap-2 text-[0.7rem]">
+                  <span>{formatMatchedContactLabel(contact)}</span>
+                  <span className="font-mono text-[0.6rem] text-mute">{contact.dwid || '—'}</span>
+                </p>
+              )}
+              <div className={canSelect ? 'pl-6' : undefined}>
                 <MatchedContactDetails contact={contact} />
-              </CollapsibleContent>
-            </div>
-          </Collapsible>
-        ))}
-      </div>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
     </div>
   )
 }
@@ -1324,7 +1655,9 @@ export function MatchingReviewPanel({
     matching?.match_type,
     matching?.match_count,
   )
-  const contactDwids = (matching?.matched_contacts ?? []).map((contact) => contact.dwid)
+  const contactDwids = safeMatchedContacts(matching?.matched_contacts)
+    .map((contact) => contact.dwid)
+    .filter((dwid): dwid is string => Boolean(dwid))
   const [fulfillStatus, setFulfillStatus] = useState<DropResponseStatusCode | null>(
     suggestedStatus,
   )
@@ -1343,7 +1676,9 @@ export function MatchingReviewPanel({
         matching?.match_count,
       )
       setFulfillStatus(next)
-      const dwids = (matching?.matched_contacts ?? []).map((contact) => contact.dwid)
+      const dwids = safeMatchedContacts(matching?.matched_contacts)
+        .map((contact) => contact.dwid)
+        .filter((dwid): dwid is string => Boolean(dwid))
       setSelectedDwids(next === 3 || next === 4 ? dwids : [])
     }
   }, [confirm, matching?.match_type, matching?.match_count, matching?.matched_contacts])
@@ -1355,7 +1690,11 @@ export function MatchingReviewPanel({
       return
     }
     if (code === 3 || code === 4) {
-      setSelectedDwids((matching?.matched_contacts ?? []).map((contact) => contact.dwid))
+      setSelectedDwids(
+        safeMatchedContacts(matching?.matched_contacts)
+          .map((contact) => contact.dwid)
+          .filter((dwid): dwid is string => Boolean(dwid)),
+      )
     }
   }
 
@@ -1370,7 +1709,7 @@ export function MatchingReviewPanel({
     fetchConnections: fetchConnectorConnections,
   })
 
-  const attempts = matching?.attempts ?? []
+  const attempts = Array.isArray(matching?.attempts) ? matching.attempts : []
   const attemptStatus = attemptGlance(attempts, connectorGate)
   const assignment = matching?.assignment?.assignee_identity
   const processStrip = matching ? (
@@ -1435,8 +1774,26 @@ export function MatchingReviewPanel({
                 value: matching.matched ? 'Yes' : 'No',
               },
               {
+                label: 'Channels',
+                value: matchingDetailIsNotLive(matching) ? (
+                  '—'
+                ) : (
+                  <MatchChannelChips channels={matchedChannelsFromDetail(matching)} />
+                ),
+              },
+              {
+                label: 'Hashes',
+                value: matchingDetailIsNotLive(matching) ? (
+                  '—'
+                ) : (
+                  <MatchedHashChips hashes={matching.matched_hashes} />
+                ),
+              },
+              {
                 label: 'Via',
-                value: matching.matched_via ?? '—',
+                value: matchingDetailIsNotLive(matching)
+                  ? '—'
+                  : formatMatchedViaLabel(matching.matched_via),
               },
               {
                 label: 'Recorded',
@@ -1452,7 +1809,12 @@ export function MatchingReviewPanel({
               },
             ]}
           />
-          <MatchedContactsPanel matching={matching} />
+          <MatchedContactsPanel
+            matching={matching}
+            selectable={canReviewActions}
+            selectedDwids={selectedDwids}
+            onSelectedDwidsChange={setSelectedDwids}
+          />
         </TabsContent>
         <TabsContent value="review" className="mt-2 space-y-3">
           <MatchingDetailGrid
@@ -1504,6 +1866,14 @@ export function MatchingReviewPanel({
               },
             ]}
           />
+          {persona === 'data_owner' ? (
+            <MatchedContactsPanel
+              matching={matching}
+              selectable={canReviewActions}
+              selectedDwids={selectedDwids}
+              onSelectedDwidsChange={setSelectedDwids}
+            />
+          ) : null}
           {reviewActions}
         </TabsContent>
         <TabsContent value="attempts" className="mt-2 space-y-1.5">
@@ -1543,7 +1913,8 @@ export function MatchingReviewPanel({
           onChange={handleFulfillStatusChange}
           disabled={actionPending}
           suggested={suggestedStatus}
-          contacts={matching?.matched_contacts}
+          matching={matching}
+          contacts={safeMatchedContacts(matching?.matched_contacts)}
           selectedDwids={selectedDwids}
           onSelectedDwidsChange={setSelectedDwids}
           persona={persona}
@@ -1609,7 +1980,7 @@ export function MatchingReviewPanel({
               </div>
               <div className="rounded-md border border-line/70 px-2 py-1">
                 <dt className="text-[0.6rem] text-mute">Count</dt>
-                <dd className="tabular-nums text-[0.7rem]">{matching.match_count}</dd>
+                <dd className="tabular-nums text-[0.7rem]">{matching.match_count ?? 0}</dd>
               </div>
               <div className="rounded-md border border-line/70 px-2 py-1">
                 <dt className="text-[0.6rem] text-mute">Type</dt>
@@ -1617,21 +1988,38 @@ export function MatchingReviewPanel({
                   {(matching.match_type ?? '—').replaceAll('_', ' ')}
                 </dd>
               </div>
+              <div className="col-span-3 rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Channels</dt>
+                <dd className="mt-0.5">
+                  <MatchChannelChips channels={matchedChannelsFromDetail(matching)} />
+                </dd>
+              </div>
             </dl>
             <div className="mt-2">
-              <MatchedContactsPanel matching={matching} />
+              <MatchedContactsPanel
+                matching={matching}
+                selectable={canReviewActions}
+                selectedDwids={selectedDwids}
+                onSelectedDwidsChange={setSelectedDwids}
+              />
             </div>
           </StatusAccordion>
 
           <StatusAccordion
             title="Match method"
-            glance={matching.matched_via ?? '—'}
+            glance={formatMatchedViaLabel(matching.matched_via)}
             tone={matching.matched_via ? 'ok' : 'default'}
           >
             <dl className="grid grid-cols-2 gap-1.5">
               <div className="rounded-md border border-line/70 px-2 py-1">
                 <dt className="text-[0.6rem] text-mute">Via</dt>
-                <dd className="text-[0.7rem]">{matching.matched_via ?? '—'}</dd>
+                <dd className="text-[0.7rem]">{formatMatchedViaLabel(matching.matched_via)}</dd>
+              </div>
+              <div className="rounded-md border border-line/70 px-2 py-1">
+                <dt className="text-[0.6rem] text-mute">Channels</dt>
+                <dd className="mt-0.5">
+                  <MatchChannelChips channels={matchedChannelsFromDetail(matching)} />
+                </dd>
               </div>
               <div className="rounded-md border border-line/70 px-2 py-1">
                 <dt className="text-[0.6rem] text-mute">Recorded</dt>

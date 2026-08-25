@@ -26,7 +26,7 @@ const fieldClass =
   'w-full rounded-md border border-line bg-paper px-2.5 py-1.5 text-sm text-ink'
 
 const FALLBACK_SYSTEMS: ConnectionSystemOption[] = [
-  { system_id: 'mailchimp', display_label: 'Mailchimp', invite_allowed: true, credential_fields: [], trust_copy: '' },
+  { system_id: 'axios_headquarters', display_label: 'Axios HQ', invite_allowed: false, credential_fields: [], trust_copy: '' },
   { system_id: 'paylocity', display_label: 'Paylocity', invite_allowed: true, credential_fields: [], trust_copy: '' },
   { system_id: 'lever', display_label: 'Lever', invite_allowed: true, credential_fields: [], trust_copy: '' },
   { system_id: 'auth0', display_label: 'Auth0', invite_allowed: true, credential_fields: [], trust_copy: '' },
@@ -44,7 +44,6 @@ const FALLBACK_SYSTEMS: ConnectionSystemOption[] = [
     credential_fields: [],
     trust_copy: '',
   },
-  { system_id: 'cassandra', display_label: 'Cassandra', invite_allowed: false, credential_fields: [], trust_copy: '' },
 ]
 
 function creatableSystems(systems: ConnectionSystemOption[]): ConnectionSystemOption[] {
@@ -65,9 +64,6 @@ export type ConnectionCreateDialogProps = {
 type DialogPhase = 'form' | 'success'
 
 function verticalAssignmentCopy(system: IntegrationSystemId): string {
-  if (system === 'cassandra') {
-    return 'Open an INF ticket for TLS, service accounts, and egress. Assign vertical owners on the Verticals tab when the connection is ready for owner setup.'
-  }
   if (isUploadOnlySystem(system)) {
     return 'Assign the owner on the Verticals tab. They refresh data via the vertical connector upload wizard.'
   }
@@ -82,7 +78,7 @@ export function ConnectionCreateDialog({
   const [systems, setSystems] = useState<ConnectionSystemOption[]>(
     creatableSystems(FALLBACK_SYSTEMS),
   )
-  const [system, setSystem] = useState<IntegrationSystemId>('mailchimp')
+  const [system, setSystem] = useState<IntegrationSystemId>('axios_headquarters')
   const [displayName, setDisplayName] = useState('')
   const [phase, setPhase] = useState<DialogPhase>('form')
   const [submitting, setSubmitting] = useState(false)
@@ -90,12 +86,11 @@ export function ConnectionCreateDialog({
   const [error, setError] = useState<string | null>(null)
   const [createdConnection, setCreatedConnection] = useState<ConnectionRecord | null>(null)
 
-  const isCassandra = system === 'cassandra'
   const isGoogleSheets = system === 'google_sheets'
   const uploadOnly = isUploadOnlySystem(system)
 
   function resetForm() {
-    setSystem('mailchimp')
+    setSystem('axios_headquarters')
     setDisplayName('')
     setPhase('form')
     setSubmitting(false)
@@ -122,7 +117,7 @@ export function ConnectionCreateDialog({
         setSystem((current) =>
           next.some((entry) => entry.system_id === current)
             ? current
-            : (next[0]?.system_id ?? 'mailchimp'),
+            : (next[0]?.system_id ?? 'axios_headquarters'),
         )
       })
       .catch(() => {
@@ -229,7 +224,7 @@ export function ConnectionCreateDialog({
                 <DialogTitle>New connection</DialogTitle>
                 <DialogDescription>
                   Register an integration connection. Owner access comes from vertical assignment on
-                  the Verticals tab — not invite links. Cassandra is provisioned by Infrastructure.
+                  the Verticals tab — not invite links.
                 </DialogDescription>
               </DialogHeader>
 
@@ -245,7 +240,6 @@ export function ConnectionCreateDialog({
                       <option key={entry.system_id} value={entry.system_id}>
                         {entry.display_label}
                         {isUploadOnlySystem(entry.system_id) ? ' (upload only)' : ''}
-                        {entry.system_id === 'cassandra' ? ' (infra)' : ''}
                       </option>
                     ))}
                   </select>
@@ -256,21 +250,14 @@ export function ConnectionCreateDialog({
                   <input
                     type="text"
                     className={fieldClass}
-                    placeholder="Production Mailchimp"
+                    placeholder="Production Axios HQ"
                     value={displayName}
                     onChange={(event) => setDisplayName(event.target.value)}
                     autoComplete="off"
                   />
                 </label>
 
-                {isCassandra ? (
-                  <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
-                    Cassandra connectivity is handled by Habeas Infrastructure (INF). Ops marks the
-                    connection <span className="font-medium text-ink">infra_pending</span> until INF
-                    confirms TLS, service accounts, and egress are live. Credentials are stored only in
-                    Google Cloud Secret Manager once setup completes.
-                  </div>
-                ) : uploadOnly ? (
+                {uploadOnly ? (
                   <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
                     Upload-only — registers the connection without owner credentials. After create,
                     assign the owner on the Verticals tab.
@@ -334,13 +321,11 @@ export function ConnectionCreateDialog({
               <DialogHeader>
                 <DialogTitle>Connection created</DialogTitle>
                 <DialogDescription>
-                  {isCassandra
-                    ? 'Infrastructure handoff — assign vertical owners when ready.'
-                    : uploadOnly
-                      ? 'Upload-only connection registered.'
-                      : isGoogleSheets
-                        ? 'Dedicated service account is ready.'
-                        : 'Next step: assign an owner on the Verticals tab.'}
+                  {uploadOnly
+                    ? 'Upload-only connection registered.'
+                    : isGoogleSheets
+                      ? 'Dedicated service account is ready.'
+                      : 'Next step: assign an owner on the Verticals tab.'}
                 </DialogDescription>
               </DialogHeader>
 
@@ -358,14 +343,7 @@ export function ConnectionCreateDialog({
               <div className="space-y-2 rounded-md border border-line bg-canvas p-3 text-xs text-ink-soft">
                 <p>
                   <span className="font-medium text-ink">{createdConnection?.display_name}</span>{' '}
-                  {isCassandra ? (
-                    <>
-                      is registered as Cassandra with status{' '}
-                      <span className="font-medium text-ink">infra_pending</span>.
-                    </>
-                  ) : (
-                    <>is registered and waiting for owner setup.</>
-                  )}
+                  is registered and waiting for owner setup.
                 </p>
                 <p>{verticalAssignmentCopy(system)}</p>
               </div>

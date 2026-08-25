@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -13,7 +14,7 @@ from fastapi.testclient import TestClient
 from admin_api import drop_pipeline
 from admin_api import roles
 from admin_api.main import app
-from habeas_privacy_core.auth import IAP_EMAIL_HEADER
+from habeas_privacy_core.auth import IAP_EMAIL_HEADER, ROLE_LEGAL
 
 
 def test_next_scheduled_retrieval_utc_rolls_forward():
@@ -988,7 +989,7 @@ async def test_get_matching_result_detail_shape(monkeypatch: pytest.MonkeyPatch)
                 attempted_at=recorded,
                 completed_at=recorded,
                 error_code=None,
-                audit_payload={"match_count": 4, "lookup_state": "CA"},
+                audit_payload={"match_count": 4, "lookup_state": "CA", "list_type": "Email"},
             )
         ]
     )
@@ -1024,6 +1025,8 @@ async def test_get_matching_result_detail_shape(monkeypatch: pytest.MonkeyPatch)
     assert detail["assignment"]["target_role"] == "legal"
     assert "consumer_id" not in detail
     assert "email" not in detail["attempts"][0]["audit_payload"]
+    assert detail["matched_channels"] == ["email"]
+    assert all(ch in {"email", "phone", "ndz"} for ch in detail["matched_channels"])
 
 
 @pytest.mark.asyncio
@@ -1081,6 +1084,183 @@ async def test_get_matching_result_detail_tolerates_list_audit_payload(
     )
     assert detail is not None
     assert detail["attempts"][0]["audit_payload"] == {}
+    assert detail["matched_channels"] == []
+
+
+def test_coerce_audit_payload_drops_hash_like_keys() -> None:
+    """Read-path re-allowlist must drop hash/dwid/email/phone even on legacy JSONB."""
+    raw = {
+        "matched": True,
+        "match_count": 2,
+        "matched_via": "drop_hash_email",
+        "list_type": "Email",
+        "lookup_state": "CA",
+        "duration_ms": 12,
+        "error_code": None,
+        "hash": "a1b2c3d4e5f678901234567890abcdef",
+        "hashed_email": "deadbeef",
+        "dwid": "1001",
+        "email": "jane@example.com",
+        "phone": "5551234567",
+        "phones": ["5551234567"],
+    }
+    out = drop_pipeline._coerce_audit_payload(raw)
+    assert out == {
+        "matched": True,
+        "match_count": 2,
+        "matched_via": "drop_hash_email",
+        "list_type": "Email",
+        "lookup_state": "CA",
+        "duration_ms": 12,
+    }
+    assert not {"hash", "hashed_email", "dwid", "email", "phone", "phones"} & out.keys()
+
+    encoded = drop_pipeline._coerce_audit_payload(
+        '{"matched": true, "hash": "abc", "email": "x@y.z"}'
+    )
+    assert encoded == {"matched": True}
+    assert "hash" not in encoded
+    assert "email" not in encoded
+
+
+def test_infer_matched_channels_from_via_and_list_type_never_includes_hash() -> None:
+    hex_hash = "a1b2c3d4e5f678901234567890abcdef"
+    channels = drop_pipeline.infer_matched_channels(
+        matched_via="drop_hash_email",
+        attempts=[
+            {
+                "audit_payload": {
+                    "list_type": "Phone",
+                    "matched_via": "drop_hash_ndz_composite",
+                    "lookup_state": "CA",
+                    "hash": hex_hash,
+                }
+            },
+            {"audit_payload": {"list_type": hex_hash, "matched_via": hex_hash}},
+        ],
+    )
+    assert channels == ["email", "phone", "ndz"]
+    dumped = json.dumps(channels)
+    assert hex_hash not in dumped
+    assert all(ch in {"email", "phone", "ndz"} for ch in channels)
+
+
+@pytest.mark.asyncio
+async def test_get_matching_result_detail_channels_omit_hash_hex(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import datetime, timezone
+
+    hex_hash = "deadbeefcafebabe0123456789abcdef"
+    recorded = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_Row(
+            request_id="00000000-0000-0000-0000-000000000002",
+            matched=True,
+            match_count=1,
+            matched_via="drop_hash_phone",
+            recorded_at=recorded,
+            requestor_state="CA",
+            attempt_id=99,
+            approval_id=11,
+            review_status="pending",
+            decided_by=None,
+            decided_at=None,
+            decision_reason=None,
+        )
+    )
+    conn.fetch = AsyncMock(
+        return_value=[
+            _Row(
+                id=99,
+                attempt_number=1,
+                status="success",
+                attempted_at=recorded,
+                completed_at=recorded,
+                error_code=None,
+                audit_payload={
+                    "list_type": "Phone",
+                    "matched_via": "drop_hash_phone",
+                    "lookup_state": "CA",
+                    "hash": hex_hash,
+                },
+            )
+        ]
+    )
+    monkeypatch.setattr(drop_pipeline, "get_current_assignment", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        drop_pipeline,
+        "enrich_matching_result_contacts",
+        AsyncMock(
+            return_value={"matched_contacts": [], "matched_contacts_status": "unavailable"}
+        ),
+    )
+    monkeypatch.setattr(
+        drop_pipeline,
+        "_matched_hashes_for_request",
+        AsyncMock(return_value=[]),
+    )
+    detail = await drop_pipeline.get_matching_result_detail(
+        conn, "00000000-0000-0000-0000-000000000002"
+    )
+    assert detail is not None
+    assert detail["matched_channels"] == ["phone"]
+    assert hex_hash not in json.dumps(detail["matched_channels"])
+    assert detail["matched_contacts_status"] == "unavailable"
+    assert "consumer_id" not in detail
+
+
+@pytest.mark.asyncio
+async def test_get_matching_result_detail_enrichment_failure_sets_structured_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import datetime, timezone
+
+    recorded = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(
+        return_value=_Row(
+            request_id="00000000-0000-0000-0000-000000000002",
+            matched=True,
+            match_count=1,
+            matched_via="drop_hash_email",
+            recorded_at=recorded,
+            requestor_state="CA",
+            attempt_id=7,
+            approval_id=11,
+            review_status="pending",
+            decided_by=None,
+            decided_at=None,
+            decision_reason=None,
+        )
+    )
+    conn.fetch = AsyncMock(return_value=[])
+    monkeypatch.setattr(drop_pipeline, "get_current_assignment", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        drop_pipeline,
+        "enrich_matching_result_contacts",
+        AsyncMock(side_effect=RuntimeError("bq lookup failed for jane@example.com")),
+    )
+    monkeypatch.setattr(
+        drop_pipeline,
+        "_matched_hashes_for_request",
+        AsyncMock(return_value=[]),
+    )
+    detail = await drop_pipeline.get_matching_result_detail(
+        conn, "00000000-0000-0000-0000-000000000002"
+    )
+    assert detail is not None
+    assert detail["matched_contacts"] == []
+    assert detail["matched_contacts_status"] == "unavailable"
+    error = detail["matched_contacts_error"]
+    assert error["code"] == "enrichment_failed"
+    assert error["stage"] == "enrich_matching_result_contacts"
+    assert error["exc_type"] == "RuntimeError"
+    dumped = json.dumps(error)
+    assert "jane@example.com" not in dumped
+    assert "consumer_id" not in dumped
+    assert detail["matched_channels"] == ["email"]
 
 
 @pytest.mark.asyncio
@@ -1106,6 +1286,7 @@ async def test_enrich_matching_result_contacts_single_uses_consumer_id(
                 "state": "CA",
                 "first_initial": "J",
                 "last_initial": "D",
+                "last_name": "Doe",
                 "dob": "1990-01-15",
                 "email": "jane@example.com",
                 "phones": [{"type": "cell", "number": "5551234567"}],
@@ -1120,6 +1301,7 @@ async def test_enrich_matching_result_contacts_single_uses_consumer_id(
     )
     assert payload["matched_contacts_status"] == "ok"
     assert payload["matched_contacts"][0]["first_initial"] == "J"
+    assert payload["matched_contacts"][0]["last_name"] == "Doe"
     assert payload["matched_contacts"][0]["email"] == "jane@example.com"
 
 
@@ -1177,6 +1359,87 @@ async def test_enrich_matching_result_contacts_multi_relooks_up_hash(
     assert payload["matched_contacts_status"] == "ok"
     assert len(payload["matched_contacts"]) == 2
     assert {c["dwid"] for c in payload["matched_contacts"]} == {"2001", "2002"}
+
+
+class _FakeBqClient:
+    """Records parameterized queries; returns preset dict rows."""
+
+    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
+        self.rows = rows or []
+        self.calls: list[tuple[str, Any]] = []
+
+    def query(self, sql: str, job_config: Any = None) -> list[dict[str, Any]]:
+        self.calls.append((sql, job_config))
+        return self.rows
+
+
+_MDR_CONTACT_ROW = {
+    "dwid": "1001",
+    "state": "CA",
+    "firstname": "Jane",
+    "lastname": "Doe",
+    "birthdate": "1990-01-15",
+    "emailaddress": "jane@example.com",
+    "likely_cell_phone": "5551234567",
+    "likely_land_phone": None,
+}
+
+
+def test_search_person_contacts_from_bq_parameterized_by_email() -> None:
+    client = _FakeBqClient(rows=[dict(_MDR_CONTACT_ROW)])
+    contacts = drop_pipeline._search_person_contacts_from_bq(
+        query="jane@example.com",
+        client=client,
+    )
+    assert len(client.calls) == 1
+    sql, job_config = client.calls[0]
+    assert drop_pipeline._MDR_PERSON_TABLE in sql
+    assert drop_pipeline._MDR_PHONES_TABLE in sql
+    assert "jane@example.com" not in sql
+    params = {p.name: p.value for p in job_config.query_parameters}
+    assert params["q"] == "jane@example.com"
+    assert params["name_first"] is None
+    assert params["name_last"] is None
+    assert params["limit"] == 20
+    assert contacts[0]["email"] == "jane@example.com"
+    assert contacts[0]["last_name"] == "Doe"
+    assert contacts[0]["phones"][0]["number"] == "5551234567"
+
+
+def test_search_person_contacts_from_bq_parameterized_by_dwid() -> None:
+    client = _FakeBqClient(rows=[dict(_MDR_CONTACT_ROW)])
+    drop_pipeline._search_person_contacts_from_bq(query="1001", client=client)
+    params = {p.name: p.value for p in client.calls[0][1].query_parameters}
+    assert params["q"] == "1001"
+    assert params["name_first"] is None
+    assert params["name_last"] is None
+
+
+def test_search_person_contacts_from_bq_parameterized_by_name() -> None:
+    client = _FakeBqClient(rows=[dict(_MDR_CONTACT_ROW)])
+    drop_pipeline._search_person_contacts_from_bq(query="Jane Doe", client=client)
+    sql, job_config = client.calls[0]
+    assert "Jane Doe" not in sql
+    params = {p.name: p.value for p in job_config.query_parameters}
+    assert params["q"] == "Jane Doe"
+    assert params["name_first"] == "jane"
+    assert params["name_last"] == "doe"
+
+
+def test_search_person_contacts_from_bq_redacts_bq_error() -> None:
+    class _Boom:
+        def query(self, sql: str, job_config: Any = None) -> list[dict[str, Any]]:
+            del sql, job_config
+            raise RuntimeError("lookup failed for jane@example.com dwid=1001")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        drop_pipeline._search_person_contacts_from_bq(
+            query="jane@example.com",
+            client=_Boom(),
+        )
+    dumped = str(exc_info.value)
+    assert "jane@example.com" not in dumped
+    assert "1001" not in dumped
 
 
 def test_matching_results_list_route(monkeypatch: pytest.MonkeyPatch):
@@ -1279,12 +1542,18 @@ def test_matching_results_bulk_approve_route(monkeypatch: pytest.MonkeyPatch):
         match_type: str,
         decided_by: str,
         decision_reason: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
     ) -> dict[str, Any]:
         captured["match_type"] = match_type
         captured["decided_by"] = decided_by
         captured["decision_reason"] = decision_reason
+        captured["vertical"] = vertical
+        captured["system"] = system
         return {
             "match_type": match_type,
+            "vertical": vertical,
+            "system": system,
             "approved_count": 2,
             "approval_ids": [1, 2],
             "request_ids": [
@@ -1304,6 +1573,8 @@ def test_matching_results_bulk_approve_route(monkeypatch: pytest.MonkeyPatch):
             "/ops/drop/matching-results/bulk-approve",
             json={
                 "match_type": "multi_match",
+                "vertical": "data",
+                "system": "cassandra",
                 "decided_by": "web-admin@habeas.com",
                 "decision_reason": "bulk approve match_type=multi_match",
             },
@@ -1316,6 +1587,8 @@ def test_matching_results_bulk_approve_route(monkeypatch: pytest.MonkeyPatch):
     assert body["match_type"] == "multi_match"
     assert captured["match_type"] == "multi_match"
     assert captured["decided_by"] == "web-admin@habeas.com"
+    assert captured["vertical"] == "data"
+    assert captured["system"] == "cassandra"
 
 
 def test_matching_results_bulk_approve_prefers_iap_actor(monkeypatch: pytest.MonkeyPatch):
@@ -1327,10 +1600,16 @@ def test_matching_results_bulk_approve_prefers_iap_actor(monkeypatch: pytest.Mon
         match_type: str,
         decided_by: str,
         decision_reason: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
     ) -> dict[str, Any]:
         captured["decided_by"] = decided_by
+        captured["vertical"] = vertical
+        captured["system"] = system
         return {
             "match_type": match_type,
+            "vertical": vertical,
+            "system": system,
             "approved_count": 1,
             "approval_ids": [9],
             "request_ids": ["00000000-0000-0000-0000-000000000009"],
@@ -1348,6 +1627,8 @@ def test_matching_results_bulk_approve_prefers_iap_actor(monkeypatch: pytest.Mon
             headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
             json={
                 "match_type": "multi_match",
+                "vertical": "data",
+                "system": "cassandra",
                 "decided_by": "spoofed@example.com",
             },
         )
@@ -1426,41 +1707,108 @@ def test_decided_by_for_mutation_helpers():
 
 
 @pytest.mark.asyncio
-async def test_bulk_approve_matching_review_sql_filters_status_4(monkeypatch: pytest.MonkeyPatch):
+async def test_bulk_approve_matching_review_requires_vertical_and_system():
+    from admin_api.approvals import bulk_approve_matching_review_by_match_type
+
+    with pytest.raises(ValueError, match="requires vertical and system"):
+        await bulk_approve_matching_review_by_match_type(
+            MagicMock(),
+            match_type="multi_match",
+            decided_by="ops@habeas.com",
+        )
+
+
+@pytest.mark.asyncio
+async def test_bulk_approve_matching_review_scopes_to_system(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Match-type sweep confirms one pair — it must not raw-approve the gate."""
     from admin_api import approvals as approvals_mod
     from admin_api.approvals import bulk_approve_matching_review_by_match_type
 
+    request_id = "00000000-0000-0000-0000-000000000007"
     conn = MagicMock()
-    # 1) ensure query (no missing gates)  2) approve UPDATE returning one row
     conn.fetch = AsyncMock(
         side_effect=[
             [],
-            [_Row(id=7, request_id="00000000-0000-0000-0000-000000000007")],
+            [_Row(request_id=request_id)],
         ]
     )
+    promoted: list[dict[str, Any]] = []
 
-    async def fail_create(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        raise AssertionError("ensure should not create when fetch returns empty")
+    async def fake_promote(
+        _conn: Any,
+        *,
+        request_id: str,
+        decided_by: str,
+        decision_reason: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        del _conn, kwargs
+        promoted.append(
+            {
+                "request_id": request_id,
+                "decided_by": decided_by,
+                "decision_reason": decision_reason,
+                "vertical": vertical,
+                "system": system,
+            }
+        )
+        return {
+            "request_id": request_id,
+            "review_status": "pending",
+            "approval_id": 7,
+            "vertical": vertical,
+            "system": system,
+        }
 
-    monkeypatch.setattr(approvals_mod, "create_matching_review_approval", fail_create)
+    monkeypatch.setattr(approvals_mod, "promote_matching_review_for_request", fake_promote)
 
     result = await bulk_approve_matching_review_by_match_type(
         conn,
         match_type="multi_match",
         decided_by="ops@habeas.com",
         decision_reason="bulk approve match_type=multi_match",
+        vertical="data",
+        system="cassandra",
     )
     assert result["ensured_count"] == 0
-    assert result["approved_count"] == 1
-    assert result["approval_ids"] == [7]
-    assert conn.fetch.await_count == 2
+    assert result["approved_count"] == 0
+    assert result["decided_count"] == 1
+    assert result["pending_count"] == 1
+    assert result["vertical"] == "data"
+    assert result["system"] == "cassandra"
+    assert result["request_ids"] == [request_id]
+    assert result["approval_ids"] == []
+    assert promoted == [
+        {
+            "request_id": request_id,
+            "decided_by": "ops@habeas.com",
+            "decision_reason": "bulk approve match_type=multi_match",
+            "vertical": "data",
+            "system": "cassandra",
+        }
+    ]
     ensure_sql = conn.fetch.await_args_list[0].args[0]
-    approve_sql = conn.fetch.await_args_list[1].args[0]
+    select_sql = conn.fetch.await_args_list[1].args[0]
     assert "match_count > 1" in ensure_sql
-    assert "match_count > 1" in approve_sql
-    assert "intake_source = 'drop'" in approve_sql
-    assert "status = 'pending'" in approve_sql
-    assert "matching.review" in str(conn.fetch.await_args_list[1].args)
+    assert "match_count > 1" in select_sql
+    assert "intake_source = 'drop'" in select_sql
+    assert "SET status = 'approved'" not in select_sql
+
+
+def test_matching_results_bulk_approve_requires_vertical_system_in_body(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _fake_pool(monkeypatch)
+    with TestClient(app) as client:
+        response = client.post(
+            "/ops/drop/matching-results/bulk-approve",
+            json={"match_type": "multi_match"},
+        )
+    assert response.status_code == 422
 
 
 def test_match_proxy_opens_matching_review_gate(monkeypatch: pytest.MonkeyPatch):
@@ -1541,12 +1889,16 @@ def test_matching_result_promote_and_decline_routes(monkeypatch: pytest.MonkeyPa
         response_status: int | None = None,
         dwids: list[str] | None = None,
         actor_role: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
     ) -> dict[str, Any]:
         captured["promote"] = {
             "request_id": request_id,
             "decided_by": decided_by,
             "decision_reason": decision_reason,
             "dwids": dwids,
+            "vertical": vertical,
+            "system": system,
         }
         return {"request_id": request_id, "review_status": "approved", "approval_id": 3}
 
@@ -1556,10 +1908,14 @@ def test_matching_result_promote_and_decline_routes(monkeypatch: pytest.MonkeyPa
         request_id: str,
         decided_by: str,
         decision_reason: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
     ) -> dict[str, Any]:
         captured["decline"] = {
             "request_id": request_id,
             "decided_by": decided_by,
+            "vertical": vertical,
+            "system": system,
         }
         return {"request_id": request_id, "review_status": "rejected", "approval_id": 4}
 
@@ -1591,19 +1947,446 @@ def test_matching_result_promote_and_decline_routes(monkeypatch: pytest.MonkeyPa
         promote = client.post(
             f"/ops/drop/matching-results/{rid}/promote",
             headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
-            json={"decision_reason": "promote to fulfillment"},
+            json={
+                "decision_reason": "promote to fulfillment",
+                "vertical": "communications",
+                "system": "cassandra",
+            },
         )
         decline = client.post(
             f"/ops/drop/matching-results/{rid}/decline",
             headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
-            json={},
+            json={"vertical": "communications", "system": "cassandra"},
+        )
+        composite = client.post(
+            f"/ops/drop/matching-results/{rid}::communications/promote",
+            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
+            json={"vertical": "communications"},
+        )
+        composite_system = client.post(
+            f"/ops/drop/matching-results/{rid}::data::cassandra/promote",
+            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
+            json={"vertical": "data", "system": "cassandra"},
         )
 
     assert promote.status_code == 200
     assert promote.json()["status"] == "ok"
+    assert promote.json()["system"] == "cassandra"
     assert captured["promote"]["decided_by"] == "ops@habeas.com"
+    assert captured["promote"]["vertical"] == "communications"
+    assert captured["promote"]["system"] == "cassandra"
     assert decline.status_code == 200
     assert decline.json()["approval_id"] == 4
+    assert decline.json()["system"] == "cassandra"
+    assert captured["decline"]["vertical"] == "communications"
+    assert captured["decline"]["system"] == "cassandra"
+    assert composite.status_code == 400
+    assert composite_system.status_code == 400
+
+
+def test_data_owner_promote_people_hr_forbidden_when_assigned_communications(
+    monkeypatch: pytest.MonkeyPatch,
+    _data_owner_headers: dict[str, str],
+) -> None:
+    """Communications-only owner cannot promote people_hr (API 403, not UI hide)."""
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "owner@example.com")
+    promoted: list[str] = []
+
+    async def fake_has_vertical(
+        conn: Any,
+        *,
+        email: str,
+        vertical_id: str,
+        role: str,
+    ) -> bool:
+        del conn, email, role
+        return vertical_id == "communications"
+
+    async def fake_promote(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        promoted.append("called")
+        return {"request_id": "x", "review_status": "approved", "approval_id": 1}
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(
+        "admin_api.vertical_assignments.principal_has_vertical",
+        fake_has_vertical,
+    )
+    monkeypatch.setattr(drop_pipeline, "promote_matching_review_for_request", fake_promote)
+
+    rid = "00000000-0000-0000-0000-000000000033"
+    with TestClient(app) as client:
+        response = client.post(
+            f"/ops/drop/matching-results/{rid}/promote",
+            headers=_data_owner_headers,
+            json={"vertical": "people_hr", "system": "lever"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "vertical access denied"
+    assert promoted == []
+
+
+def test_data_owner_promote_assigned_vertical_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+    _data_owner_headers: dict[str, str],
+) -> None:
+    """Assigned owner promote is not 403 when principal_has_vertical is true."""
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "owner@example.com")
+
+    async def fake_has_vertical(
+        conn: Any,
+        *,
+        email: str,
+        vertical_id: str,
+        role: str,
+    ) -> bool:
+        del conn, email, role
+        assert vertical_id == "communications"
+        return True
+
+    async def fake_promote(
+        conn: Any,
+        *,
+        request_id: str,
+        decided_by: str,
+        decision_reason: str | None = None,
+        response_status: int | None = None,
+        dwids: list[str] | None = None,
+        actor_role: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
+    ) -> dict[str, Any]:
+        del conn, decided_by, decision_reason, response_status, dwids, actor_role
+        return {
+            "request_id": request_id,
+            "review_status": "approved",
+            "approval_id": 8,
+            "vertical": vertical,
+            "system": system,
+        }
+
+    async def fake_legal_team(conn: Any) -> list[str]:
+        del conn
+        return []
+
+    async def fake_has_assignment(conn: Any, rid: str) -> bool:
+        del conn, rid
+        return True
+
+    async def fake_matching_approved(conn: Any, rid: str) -> bool:
+        del conn, rid
+        return False
+
+    async def fake_due_at(conn: Any, rid: str, *, stage: str) -> None:
+        del conn, rid, stage
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(
+        "admin_api.vertical_assignments.principal_has_vertical",
+        fake_has_vertical,
+    )
+    monkeypatch.setattr(drop_pipeline, "fetch_active_legal_team_emails", fake_legal_team)
+    monkeypatch.setattr(drop_pipeline, "has_assignment_to_legal", fake_has_assignment)
+    monkeypatch.setattr(drop_pipeline, "is_matching_review_approved", fake_matching_approved)
+    monkeypatch.setattr(
+        "admin_api.legal_sla.apply_request_due_at_for_stage",
+        fake_due_at,
+    )
+    monkeypatch.setattr(drop_pipeline, "promote_matching_review_for_request", fake_promote)
+
+    rid = "00000000-0000-0000-0000-000000000033"
+    with TestClient(app) as client:
+        response = client.post(
+            f"/ops/drop/matching-results/{rid}/promote",
+            headers=_data_owner_headers,
+            json={"vertical": "communications", "system": "axios_headquarters"},
+        )
+
+    assert response.status_code != 403
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+def test_promote_status_3_4_empty_dwids_is_400(monkeypatch: pytest.MonkeyPatch):
+    """Empty/missing DWIDs on 1:1 or multi (3/4) must 400 — never select all."""
+    promoted: list[str] = []
+
+    async def fake_promote(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        promoted.append("called")
+        return {"request_id": "x", "review_status": "approved", "approval_id": 1}
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "promote_matching_review_for_request", fake_promote)
+
+    rid = "00000000-0000-0000-0000-000000000033"
+    headers = {"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"}
+    with TestClient(app) as client:
+        missing = client.post(
+            f"/ops/drop/matching-results/{rid}/promote",
+            headers=headers,
+            json={"response_status": 3, "vertical": "communications", "system": "cassandra"},
+        )
+        empty = client.post(
+            f"/ops/drop/matching-results/{rid}/promote",
+            headers=headers,
+            json={
+                "response_status": 4,
+                "dwids": [],
+                "vertical": "communications",
+                "system": "cassandra",
+            },
+        )
+        blanks = client.post(
+            f"/ops/drop/matching-results/{rid}/promote",
+            headers=headers,
+            json={
+                "response_status": 3,
+                "dwids": ["", "  "],
+                "vertical": "communications",
+            },
+        )
+
+    assert missing.status_code == 400
+    assert empty.status_code == 400
+    assert blanks.status_code == 400
+    assert "requires at least one dwid" in missing.json()["detail"]
+    assert promoted == []
+
+
+def test_promote_status_5_and_decline_allow_empty_dwids(monkeypatch: pytest.MonkeyPatch):
+    """None/decline paths stay open without a DWID selection."""
+    captured: dict[str, Any] = {}
+
+    async def fake_promote(
+        conn: Any,
+        *,
+        request_id: str,
+        decided_by: str,
+        decision_reason: str | None = None,
+        response_status: int | None = None,
+        dwids: list[str] | None = None,
+        actor_role: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
+    ) -> dict[str, Any]:
+        captured["promote"] = {"response_status": response_status, "dwids": dwids}
+        del conn, decided_by, decision_reason, actor_role, vertical, system
+        return {"request_id": request_id, "review_status": "approved", "approval_id": 5}
+
+    async def fake_decline(
+        conn: Any,
+        *,
+        request_id: str,
+        decided_by: str,
+        decision_reason: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
+    ) -> dict[str, Any]:
+        captured["decline"] = request_id
+        del conn, decided_by, decision_reason, vertical, system
+        return {"request_id": request_id, "review_status": "rejected", "approval_id": 6}
+
+    async def fake_legal_team(conn: Any) -> list[str]:
+        del conn
+        return []
+
+    async def fake_has_assignment(conn: Any, rid: str) -> bool:
+        del conn, rid
+        return True
+
+    async def fake_matching_approved(conn: Any, rid: str) -> bool:
+        del conn, rid
+        return False
+
+    async def fake_due_at(conn: Any, rid: str, *, stage: str) -> None:
+        del conn, rid, stage
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "fetch_active_legal_team_emails", fake_legal_team)
+    monkeypatch.setattr(drop_pipeline, "has_assignment_to_legal", fake_has_assignment)
+    monkeypatch.setattr(drop_pipeline, "is_matching_review_approved", fake_matching_approved)
+    monkeypatch.setattr(
+        "admin_api.legal_sla.apply_request_due_at_for_stage",
+        fake_due_at,
+    )
+    monkeypatch.setattr(drop_pipeline, "promote_matching_review_for_request", fake_promote)
+    monkeypatch.setattr(drop_pipeline, "decline_matching_review_for_request", fake_decline)
+
+    rid = "00000000-0000-0000-0000-000000000033"
+    headers = {"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"}
+    with TestClient(app) as client:
+        none_status = client.post(
+            f"/ops/drop/matching-results/{rid}/promote",
+            headers=headers,
+            json={"response_status": 5, "dwids": [], "vertical": "communications"},
+        )
+        explicit = client.post(
+            f"/ops/drop/matching-results/{rid}/promote",
+            headers=headers,
+            json={
+                "response_status": 3,
+                "dwids": ["1001"],
+                "vertical": "communications",
+                "system": "cassandra",
+            },
+        )
+        decline = client.post(
+            f"/ops/drop/matching-results/{rid}/decline",
+            headers=headers,
+            json={"vertical": "communications", "system": "cassandra"},
+        )
+
+    assert none_status.status_code == 200
+    assert explicit.status_code == 200
+    assert decline.status_code == 200
+    assert captured["promote"]["response_status"] == 3
+    assert captured["promote"]["dwids"] == ["1001"]
+    assert captured["decline"] == rid
+
+
+def test_promote_skips_fulfillment_sla_while_sibling_systems_pending(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Data/CA DROP confirm must not start fulfillment SLA while review stays pending."""
+    sla_calls: list[dict[str, Any]] = []
+
+    async def fake_promote(
+        conn: Any,
+        *,
+        request_id: str,
+        decided_by: str,
+        decision_reason: str | None = None,
+        response_status: int | None = None,
+        dwids: list[str] | None = None,
+        actor_role: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
+    ) -> dict[str, Any]:
+        del conn, decided_by, decision_reason, actor_role
+        return {
+            "request_id": request_id,
+            "review_status": "pending",
+            "approval_id": 11,
+            "vertical": vertical,
+            "system": system,
+            "response_status": response_status,
+            "response_status_set": False,
+        }
+
+    async def fake_legal_team(conn: Any) -> list[str]:
+        del conn
+        return []
+
+    async def fake_has_assignment(conn: Any, rid: str) -> bool:
+        del conn, rid
+        return True
+
+    async def fake_matching_approved(conn: Any, rid: str) -> bool:
+        del conn, rid
+        return False
+
+    async def fake_due_at(conn: Any, rid: str, *, stage: str) -> None:
+        sla_calls.append({"request_id": rid, "stage": stage})
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "fetch_active_legal_team_emails", fake_legal_team)
+    monkeypatch.setattr(drop_pipeline, "has_assignment_to_legal", fake_has_assignment)
+    monkeypatch.setattr(drop_pipeline, "is_matching_review_approved", fake_matching_approved)
+    monkeypatch.setattr(
+        "admin_api.legal_sla.apply_request_due_at_for_stage",
+        fake_due_at,
+    )
+    monkeypatch.setattr(drop_pipeline, "promote_matching_review_for_request", fake_promote)
+
+    rid = "00000000-0000-0000-0000-000000000033"
+    with TestClient(app) as client:
+        pending = client.post(
+            f"/ops/drop/matching-results/{rid}/promote",
+            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
+            json={
+                "response_status": 3,
+                "dwids": ["1001"],
+                "vertical": "data",
+                "system": "cassandra",
+            },
+        )
+
+    assert pending.status_code == 200
+    assert pending.json()["review_status"] == "pending"
+    assert pending.json()["response_status_set"] is False
+    assert sla_calls == []
+
+
+def test_promote_applies_fulfillment_sla_only_when_gate_closes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sla_calls: list[dict[str, Any]] = []
+
+    async def fake_promote(
+        conn: Any,
+        *,
+        request_id: str,
+        decided_by: str,
+        decision_reason: str | None = None,
+        response_status: int | None = None,
+        dwids: list[str] | None = None,
+        actor_role: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
+    ) -> dict[str, Any]:
+        del conn, decided_by, decision_reason, actor_role, dwids
+        return {
+            "request_id": request_id,
+            "review_status": "approved",
+            "approval_id": 12,
+            "vertical": vertical,
+            "system": system,
+            "response_status": response_status,
+            "response_status_set": True,
+        }
+
+    async def fake_legal_team(conn: Any) -> list[str]:
+        del conn
+        return []
+
+    async def fake_has_assignment(conn: Any, rid: str) -> bool:
+        del conn, rid
+        return True
+
+    async def fake_matching_approved(conn: Any, rid: str) -> bool:
+        del conn, rid
+        return False
+
+    async def fake_due_at(conn: Any, rid: str, *, stage: str) -> None:
+        sla_calls.append({"request_id": rid, "stage": stage})
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "fetch_active_legal_team_emails", fake_legal_team)
+    monkeypatch.setattr(drop_pipeline, "has_assignment_to_legal", fake_has_assignment)
+    monkeypatch.setattr(drop_pipeline, "is_matching_review_approved", fake_matching_approved)
+    monkeypatch.setattr(
+        "admin_api.legal_sla.apply_request_due_at_for_stage",
+        fake_due_at,
+    )
+    monkeypatch.setattr(drop_pipeline, "promote_matching_review_for_request", fake_promote)
+
+    rid = "00000000-0000-0000-0000-000000000033"
+    with TestClient(app) as client:
+        closed = client.post(
+            f"/ops/drop/matching-results/{rid}/promote",
+            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
+            json={
+                "response_status": 5,
+                "vertical": "data",
+                "system": "cassandra",
+            },
+        )
+
+    assert closed.status_code == 200
+    assert closed.json()["review_status"] == "approved"
+    assert sla_calls == [{"request_id": rid, "stage": "fulfillment"}]
 
 
 def test_workflow_assign_escalate_and_list(monkeypatch: pytest.MonkeyPatch):
@@ -2134,7 +2917,7 @@ def test_drop_matching_results_bulk_approve_allowed_for_data_owner(
     monkeypatch: pytest.MonkeyPatch,
     _data_owner_headers: dict[str, str],
 ) -> None:
-    roles.settings.admin_api_data_owners = "owner@example.com"
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "owner@example.com")
 
     async def fake_bulk(
         conn: Any,
@@ -2142,15 +2925,33 @@ def test_drop_matching_results_bulk_approve_allowed_for_data_owner(
         match_type: str,
         decided_by: str,
         decision_reason: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
     ) -> dict[str, Any]:
         return {
             "match_type": match_type,
+            "vertical": vertical,
+            "system": system,
             "approved_count": 1,
             "approval_ids": [3],
             "request_ids": ["00000000-0000-0000-0000-000000000003"],
         }
 
+    async def fake_has_vertical(
+        conn: Any,
+        *,
+        email: str,
+        vertical_id: str,
+        role: str,
+    ) -> bool:
+        del conn, email, role
+        return vertical_id == "data"
+
     _fake_pool(monkeypatch)
+    monkeypatch.setattr(
+        "admin_api.vertical_assignments.principal_has_vertical",
+        fake_has_vertical,
+    )
     monkeypatch.setattr(
         "admin_api.drop_pipeline.bulk_approve_matching_review_by_match_type",
         fake_bulk,
@@ -2160,11 +2961,419 @@ def test_drop_matching_results_bulk_approve_allowed_for_data_owner(
         response = client.post(
             "/ops/drop/matching-results/bulk-approve",
             headers=_data_owner_headers,
-            json={"match_type": "single_match"},
+            json={
+                "match_type": "single_match",
+                "vertical": "data",
+                "system": "cassandra",
+            },
         )
 
     assert response.status_code == 200
     assert response.json()["approved_count"] == 1
+
+
+def test_drop_matching_result_detail_data_owner_forbidden_on_request_wide_url(
+    monkeypatch: pytest.MonkeyPatch,
+    _data_owner_headers: dict[str, str],
+) -> None:
+    """Owners must use the vertical URL — request-wide DROP PII is ops/admin only."""
+    roles.settings.admin_api_data_owners = "owner@example.com"
+    request_id = "00000000-0000-0000-0000-000000000099"
+
+    async def fake_detail(_conn: Any, rid: str) -> dict[str, Any] | None:
+        del _conn, rid
+        raise AssertionError("must not load request-wide matching PII for data_owner")
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "get_matching_result_detail", fake_detail)
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/ops/drop/matching-results/{request_id}",
+            headers=_data_owner_headers,
+        )
+
+    assert response.status_code == 403
+    assert "vertical" in response.json()["detail"]
+
+
+def test_matching_contacts_search_route(
+    monkeypatch: pytest.MonkeyPatch,
+    _admin_headers: dict[str, str],
+) -> None:
+    roles.settings.admin_api_admins = "admin@example.com"
+    captured: dict[str, Any] = {}
+
+    def fake_search(*, query: str, limit: int = 20, client: Any | None = None):
+        captured["query"] = query
+        captured["limit"] = limit
+        del client
+        return [
+            {
+                "dwid": "1001",
+                "state": "CA",
+                "first_initial": "J",
+                "last_initial": "D",
+                "last_name": "Doe",
+                "dob": "1990-01-15",
+                "email": "jane@example.com",
+                "phones": [{"type": "cell", "number": "5551234567"}],
+            }
+        ]
+
+    monkeypatch.setattr(drop_pipeline, "_search_person_contacts_from_bq", fake_search)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/drop/matching-contacts/search?q=jane@example.com",
+            headers=_admin_headers,
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["limit"] == 20
+    assert body["contacts"][0]["email"] == "jane@example.com"
+    assert captured["query"] == "jane@example.com"
+    assert captured["limit"] == 20
+
+
+def test_matching_contacts_search_data_owner_forbidden(
+    monkeypatch: pytest.MonkeyPatch,
+    _data_owner_headers: dict[str, str],
+) -> None:
+    roles.settings.admin_api_data_owners = "owner@example.com"
+
+    def fake_search(**kwargs: Any) -> list[dict[str, Any]]:
+        del kwargs
+        raise AssertionError("must not search request-wide matching PII for data_owner")
+
+    monkeypatch.setattr(drop_pipeline, "_search_person_contacts_from_bq", fake_search)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/drop/matching-contacts/search?q=jane@example.com",
+            headers=_data_owner_headers,
+        )
+
+    assert response.status_code == 403
+    assert "vertical" in response.json()["detail"]
+
+
+def test_matching_contacts_search_rejects_blank_q(
+    monkeypatch: pytest.MonkeyPatch,
+    _admin_headers: dict[str, str],
+) -> None:
+    roles.settings.admin_api_admins = "admin@example.com"
+
+    def fake_search(**kwargs: Any) -> list[dict[str, Any]]:
+        del kwargs
+        raise AssertionError("blank q must not query BigQuery")
+
+    monkeypatch.setattr(drop_pipeline, "_search_person_contacts_from_bq", fake_search)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/drop/matching-contacts/search?q=%20%20",
+            headers=_admin_headers,
+        )
+
+    assert response.status_code == 422
+
+
+def test_matching_contacts_search_failure_omits_pii_from_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    _admin_headers: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    roles.settings.admin_api_admins = "admin@example.com"
+
+    def fake_search(*, query: str, limit: int = 20, client: Any | None = None):
+        del query, limit, client
+        raise RuntimeError("lookup failed for jane@example.com")
+
+    monkeypatch.setattr(drop_pipeline, "_search_person_contacts_from_bq", fake_search)
+
+    with caplog.at_level("WARNING"), TestClient(app) as client:
+        response = client.get(
+            "/ops/drop/matching-contacts/search?q=jane@example.com",
+            headers=_admin_headers,
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "contact search failed"
+    dumped = " ".join(record.getMessage() for record in caplog.records)
+    extras = " ".join(str(getattr(record, "query", "")) for record in caplog.records)
+    assert "jane@example.com" not in dumped
+    assert "jane@example.com" not in extras
+    assert "jane@example.com" not in response.text
+
+
+def test_matched_contacts_detail_for_role_redacts_non_owner_roles() -> None:
+    detail = {
+        "request_id": "00000000-0000-0000-0000-000000000001",
+        "matched_contacts": [
+            {
+                "dwid": "1001",
+                "state": "CA",
+                "first_initial": "J",
+                "last_initial": "D",
+                "last_name": "Doe",
+                "dob": "1990-01-15",
+                "email": "jane@example.com",
+                "phones": [{"type": "cell", "number": "5551234567"}],
+            }
+        ],
+    }
+    redacted = drop_pipeline._matched_contacts_detail_for_role(
+        detail,
+        role=ROLE_LEGAL,
+    )
+    contact = redacted["matched_contacts"][0]
+    assert contact["dwid"] == "1001"
+    assert contact["last_name"] is None
+    assert contact["email"] is None
+    assert contact["phones"] == []
+
+
+_OWNER_MATCH_CONTACT = {
+    "dwid": "1001",
+    "state": "CA",
+    "first_initial": "J",
+    "last_initial": "D",
+    "last_name": "Doe",
+    "dob": "1990-01-15",
+    "email": "jane@example.com",
+    "phones": [{"type": "cell", "number": "5551234567"}],
+}
+
+
+def test_serialize_owner_vertical_matching_review_includes_dwid_and_pii() -> None:
+    """Authorized owner of a vertical item gets the individual-review contact fields."""
+    from habeas_privacy_core.auth import ROLE_DATA_OWNER
+
+    detail = {
+        "request_id": "00000000-0000-0000-0000-000000000001",
+        "matched": True,
+        "match_count": 1,
+        "match_type": "single_match",
+        "matched_contacts": [dict(_OWNER_MATCH_CONTACT)],
+        "matched_contacts_status": "ok",
+        "matched_channels": ["email"],
+        "assignment": {
+            "target_role": "reviewer",
+            "kind": "assign",
+            "assignee_identity": "legal-a@example.com",
+        },
+        "assigned_to": "legal-a@example.com",
+    }
+    payload = drop_pipeline.serialize_owner_vertical_matching_review(
+        detail,
+        vertical="data",
+        role=ROLE_DATA_OWNER,
+    )
+    contact = payload["matched_contacts"][0]
+    assert payload["vertical"] == "data"
+    assert payload["vertical_label"] == "Data"
+    assert payload["matched_channels"] == ["email"]
+    assert contact["dwid"] == "1001"
+    assert contact["last_name"] == "Doe"
+    assert contact["email"] == "jane@example.com"
+    assert contact["dob"] == "1990-01-15"
+    assert contact["phones"][0]["number"] == "5551234567"
+    assert payload["assignment"] is None
+    assert "assigned_to" not in payload
+    assert payload["selected_dwids"] == []
+    assert payload["disposition_status"] is None
+    assert payload["match_scope"] == "request"
+    assert payload["result_kind"] == "ca_drop"
+    assert payload["not_live_reason"] is None
+
+
+def test_serialize_owner_vertical_matching_review_includes_disposition_dwids() -> None:
+    from admin_api.vertical_dispositions import VerticalDisposition
+    from habeas_privacy_core.auth import ROLE_DATA_OWNER
+
+    disposition = VerticalDisposition(
+        request_id="00000000-0000-0000-0000-000000000001",
+        vertical="data",
+        label="Data",
+        status=3,
+        selected_dwids=["1001", "1002"],
+        selected_dwid_count=2,
+        decided_by="owner@example.com",
+        decided_at="2026-08-01T00:00:00+00:00",
+    )
+    payload = drop_pipeline.serialize_owner_vertical_matching_review(
+        {
+            "request_id": disposition.request_id,
+            "matched_contacts": [dict(_OWNER_MATCH_CONTACT)],
+            "matched_contacts_status": "ok",
+        },
+        vertical="data",
+        role=ROLE_DATA_OWNER,
+        disposition=disposition,
+    )
+    assert payload["selected_dwids"] == ["1001", "1002"]
+    assert payload["selected_dwid_count"] == 2
+    assert payload["disposition_status"] == 3
+    assert payload["matched_contacts"][0]["dwid"] == "1001"
+
+
+def test_serialize_matched_hashes_includes_primary_and_extra() -> None:
+    from habeas_privacy_core.models.intake import DropListType
+
+    hashes = drop_pipeline.serialize_matched_hashes(
+        list_type=DropListType.EMAIL,
+        hash_fields={"hashed_email": "abc123", "email_hash": "abc123", "pii_hash": "def456"},
+        matched_via="drop_hash_email",
+    )
+    assert hashes[0]["kind"] == "email"
+    assert hashes[0]["hash"] == "abc123"
+    assert {row["hash"] for row in hashes} == {"abc123", "def456"}
+
+
+def test_serialize_owner_vertical_matching_review_includes_system() -> None:
+    from habeas_privacy_core.auth import ROLE_DATA_OWNER
+
+    payload = drop_pipeline.serialize_owner_vertical_matching_review(
+        {
+            "request_id": "00000000-0000-0000-0000-000000000001",
+            "matched_contacts": [dict(_OWNER_MATCH_CONTACT)],
+            "matched_hashes": [{"kind": "email", "hash": "abc", "matched_via": "drop_hash_email"}],
+        },
+        vertical="people_hr",
+        role=ROLE_DATA_OWNER,
+        system="hr_alumni",
+    )
+    assert payload["system"] == "hr_alumni"
+    assert payload["system_label"] == "Alumni Google Sheet"
+    assert payload["result_kind"] == "sheet_stub"
+    assert payload["match_scope"] == "system"
+    assert payload["matched_contacts"] == []
+    assert payload["matched_hashes"] == []
+    assert payload["matched_contacts_status"] == "not_live"
+    assert "CA DROP" in (payload["not_live_reason"] or "")
+
+
+def test_serialize_owner_vertical_matching_review_keeps_drop_pii_for_cassandra() -> None:
+    from habeas_privacy_core.auth import ROLE_DATA_OWNER
+
+    payload = drop_pipeline.serialize_owner_vertical_matching_review(
+        {
+            "request_id": "00000000-0000-0000-0000-000000000001",
+            "matched": True,
+            "match_count": 1,
+            "match_type": "single_match",
+            "matched_contacts": [dict(_OWNER_MATCH_CONTACT)],
+            "matched_hashes": [{"kind": "email", "hash": "abc", "matched_via": "drop_hash_email"}],
+            "matched_channels": ["email"],
+        },
+        vertical="data",
+        role=ROLE_DATA_OWNER,
+        system="cassandra",
+    )
+    assert payload["result_kind"] == "ca_drop"
+    assert payload["match_scope"] == "system"
+    assert payload["matched_contacts"][0]["email"] == "jane@example.com"
+    assert payload["matched_hashes"][0]["kind"] == "email"
+    assert payload["matched_channels"] == ["email"]
+    assert payload["not_live_reason"] is None
+
+
+def test_serialize_owner_vertical_matching_review_strips_drop_pii_for_contact_us() -> None:
+    from habeas_privacy_core.auth import ROLE_DATA_OWNER
+
+    payload = drop_pipeline.serialize_owner_vertical_matching_review(
+        {
+            "request_id": "00000000-0000-0000-0000-000000000001",
+            "matched": True,
+            "match_count": 2,
+            "matched_contacts": [dict(_OWNER_MATCH_CONTACT)],
+            "matched_hashes": [{"kind": "email", "hash": "abc"}],
+            "matched_channels": ["email"],
+        },
+        vertical="bizdev",
+        role=ROLE_DATA_OWNER,
+        system="bizdev_contacts",
+    )
+    assert payload["result_kind"] == "sheet_stub"
+    assert payload["matched"] is False
+    assert payload["match_count"] == 0
+    assert payload["matched_contacts"] == []
+    assert payload["matched_hashes"] == []
+    assert payload["matched_channels"] == []
+    assert payload["system_label"] == "Contact Us Google Sheet"
+
+
+@pytest.mark.asyncio
+async def test_get_owner_vertical_matching_review_reuses_individual_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from habeas_privacy_core.auth import ROLE_DATA_OWNER
+
+    request_id = "00000000-0000-0000-0000-000000000099"
+
+    async def fake_detail(_conn: Any, rid: str) -> dict[str, Any]:
+        assert rid == request_id
+        return {
+            "request_id": request_id,
+            "matched": True,
+            "match_count": 1,
+            "matched_contacts": [dict(_OWNER_MATCH_CONTACT)],
+            "matched_contacts_status": "ok",
+            "assignment": {"target_role": "legal", "kind": "escalate"},
+        }
+
+    async def fake_disposition(_conn: Any, *, request_id: str, vertical: str):
+        del _conn, request_id
+        assert vertical == "data"
+        return None
+
+    monkeypatch.setattr(drop_pipeline, "get_matching_result_detail", fake_detail)
+    monkeypatch.setattr(drop_pipeline, "fetch_vertical_disposition", fake_disposition)
+
+    payload = await drop_pipeline.get_owner_vertical_matching_review(
+        MagicMock(),
+        request_id=request_id,
+        vertical="data",
+        role=ROLE_DATA_OWNER,
+    )
+    assert payload is not None
+    assert payload["vertical"] == "data"
+    assert payload["assignment"] is None
+    assert payload["matched_contacts"][0]["email"] == "jane@example.com"
+    assert payload["result_kind"] == "ca_drop"
+
+
+@pytest.mark.asyncio
+async def test_get_owner_vertical_matching_review_skips_drop_detail_for_sheet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from habeas_privacy_core.auth import ROLE_DATA_OWNER
+
+    async def fail_detail(_conn: Any, _rid: str) -> dict[str, Any]:
+        raise AssertionError("sheet systems must not load request-wide DROP PII")
+
+    async def fake_disposition(_conn: Any, *, request_id: str, vertical: str):
+        del _conn, request_id
+        assert vertical == "people_hr"
+        return None
+
+    monkeypatch.setattr(drop_pipeline, "get_matching_result_detail", fail_detail)
+    monkeypatch.setattr(drop_pipeline, "fetch_vertical_disposition", fake_disposition)
+
+    payload = await drop_pipeline.get_owner_vertical_matching_review(
+        MagicMock(),
+        request_id="00000000-0000-0000-0000-000000000099",
+        vertical="people_hr",
+        role=ROLE_DATA_OWNER,
+        system="hr_alumni",
+    )
+    assert payload is not None
+    assert payload["result_kind"] == "sheet_stub"
+    assert payload["matched_contacts"] == []
+    assert payload["matched_hashes"] == []
+    assert payload["match_scope"] == "system"
 
 
 def test_drop_spine_composes_super_admin_role_with_iap_actor(

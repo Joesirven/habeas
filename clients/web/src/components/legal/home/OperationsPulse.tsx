@@ -24,7 +24,7 @@ const CHIP_DRILL: Record<
 > = {
   assigned: {
     label: 'Open — you',
-    description: 'Assigned to you across all stages — oldest first.',
+    description: 'Legal items assigned to you across all stages — oldest first.',
     to: '/requests/needs-attention',
     search: { filter: 'assigned_to_me' },
   },

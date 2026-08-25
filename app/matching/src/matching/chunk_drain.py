@@ -245,6 +245,7 @@ async def process_matching_chunk(
             hits = hits_by_hash.get(item["hash_value"], [])
             match_count = len(hits)
             consumer_id = hits[0].dwid if match_count == 1 else None
+            # DROP-only: Auth0 matching lives on the auth0 worker, not matching-dev.
             audit = build_matching_audit_payload(
                 started_at=started_at,
                 attempt_number=item["attempt_number"],

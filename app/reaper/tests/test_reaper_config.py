@@ -9,6 +9,7 @@ _EXTERNAL_VERTICAL_ATTEMPT_TABLES = (
     "auth0_attempts",
     "google_sheets_attempts",
     "cassandra_attempts",
+    "axios_headquarters_attempts",
 )
 
 

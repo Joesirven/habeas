@@ -66,9 +66,13 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
 - Per-vertical dispositions (U1): `request_vertical_dispositions` is the source of
   record for the gates fulfillment reads — `GET /requests/{request_id}/dispositions`,
   `PUT /requests/{request_id}/dispositions/{vertical}` (`status` 3/4/5, `dwids`,
-  `early_advance`). Live vertical is `data`; coming-soon verticals (Mailchimp, Lever,
-  Paylocity, Auth0, Cassandra) are catalog-only and rejected on write. Status 3/4
-  require a dwid selection (defaults to the matching result), status 5 requires none.
+  `early_advance`). `LIVE_VERTICALS` is `data` + `auth0`. Coming-soon write
+  keys (**Axios HQ** `axios_headquarters`, `lever`, `paylocity`, `cassandra`,
+  `communications`, `people_hr`, `bizdev`) are catalog-only and rejected on
+  write. Mailchimp is retired from the catalog — not a coming-soon write
+  vertical. Historical `tech` is an Auth0 read alias, not a second live write
+  key. Status 3/4 require a dwid selection (defaults to the matching result),
+  status 5 requires none.
   Matching promote upserts the `data` disposition and keeps
   `drop_raw_requests.response_status` in sync. Selected dwids reach authorized
   callers only — audit records counts.

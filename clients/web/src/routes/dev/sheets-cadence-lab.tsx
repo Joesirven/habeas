@@ -257,7 +257,7 @@ export function SheetsCadenceLabPage() {
     <section className="mx-auto max-w-6xl space-y-4">
       <header className="space-y-1">
         <p className="text-xs font-medium uppercase tracking-[0.14em] text-slate-500">
-          Dev lab · port 5175 · pick one
+          Dev lab · http://127.0.0.1:5174 · pick one
         </p>
         <h1 className="text-xl font-semibold text-slate-900">
           Sheets wizard — refresh policy

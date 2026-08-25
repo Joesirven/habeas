@@ -8,6 +8,11 @@ from datetime import UTC, datetime, timedelta
 import asyncpg
 import pytest
 
+from habeas_privacy_core.connections.catalog import (
+    MATCHING_SYSTEM_COLOR_TOKENS,
+    MATCHING_SYSTEM_LABELS,
+    list_matching_review_systems,
+)
 from habeas_privacy_core.connections.models import (
     ALLOWED_TEST_DETAIL_CODES,
     sanitize_test_detail,
@@ -87,6 +92,8 @@ def test_sanitize_test_detail_allowlists_failure_codes():
         "upload_missing_headers",
         "upload_needs_mapping",
         "upload_no_usable_rows",
+        "upload_rows_rejected",
+        "upload_invalid_format",
         "upload_invalid_delimiter",
         "gate_blocked",
         "unknown_system",
@@ -135,6 +142,60 @@ def test_secret_resource_name_format():
         secret_resource_name("mailchimp", "550e8400-e29b-41d4-a716-446655440000")
         == "dpra/connections/mailchimp/550e8400-e29b-41d4-a716-446655440000"
     )
+
+
+def test_matching_review_systems_include_sheet_sources():
+    rows = list_matching_review_systems()
+    by_system = {row.system: row for row in rows}
+
+    assert "bizdev_contacts" in by_system
+    assert "hr_alumni" in by_system
+
+    contact_us = by_system["bizdev_contacts"]
+    alumni = by_system["hr_alumni"]
+    assert contact_us.system_label == "Contact Us Google Sheet"
+    assert alumni.system_label == "Alumni Google Sheet"
+    assert contact_us.system_label == MATCHING_SYSTEM_LABELS["bizdev_contacts"]
+    assert alumni.system_label == MATCHING_SYSTEM_LABELS["hr_alumni"]
+    assert contact_us.vertical_id == "bizdev"
+    assert alumni.vertical_id == "people_hr"
+
+    cassandra = by_system["cassandra"]
+    assert cassandra.vertical_id == "data"
+    assert cassandra.system_label == "CA DROP"
+    assert MATCHING_SYSTEM_LABELS["cassandra"] == "CA DROP"
+    assert all(row.vertical_id != "test" for row in rows)
+
+    for system in ("bizdev_contacts", "hr_alumni", "cassandra"):
+        assert system in MATCHING_SYSTEM_COLOR_TOKENS
+        assert by_system[system].color_token == MATCHING_SYSTEM_COLOR_TOKENS[system]
+        assert by_system[system].color_token
+
+    assert contact_us.color_token == "teal"
+    assert alumni.color_token == "slate"
+    assert alumni.color_token != "amber"
+
+    assert all(row.color_token for row in rows)
+
+
+def test_matching_review_systems_filter_bizdev_is_contact_us_only():
+    rows = list_matching_review_systems(vertical_ids=frozenset({"bizdev"}))
+    assert len(rows) == 1
+    assert rows[0].system == "bizdev_contacts"
+    assert rows[0].system_label == "Contact Us Google Sheet"
+    assert rows[0].vertical_id == "bizdev"
+    assert rows[0].vertical_label == "BizDev"
+
+
+def test_matching_review_systems_filter_test_includes_cassandra_and_alumni():
+    rows = list_matching_review_systems(vertical_ids=frozenset({"test"}))
+    assert {row.system for row in rows} == {"cassandra", "hr_alumni"}
+    assert {row.vertical_id for row in rows} == {"test"}
+    assert all(row.vertical_label == "Test vertical" for row in rows)
+    labels = {row.system: row.system_label for row in rows}
+    assert labels == {"cassandra": "System A", "hr_alumni": "System B"}
+    assert "CA DROP" not in labels.values()
+    assert "Alumni Google Sheet" not in labels.values()
 
 
 @pytest.fixture

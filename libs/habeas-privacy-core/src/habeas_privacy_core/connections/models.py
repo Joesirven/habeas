@@ -22,8 +22,10 @@ ALLOWED_TEST_DETAIL_CODES: Final[frozenset[str]] = frozenset(
         # success
         "stub_ok",
         "ok",
+        # Historical last_test_detail — keep so sanitize does not rewrite to unknown_error.
         "mailchimp_ok",
         "axios_hq_ok",
+        "axios_headquarters_ok",
         "paylocity_ok",
         "lever_ok",
         "auth0_ok",
@@ -46,6 +48,8 @@ ALLOWED_TEST_DETAIL_CODES: Final[frozenset[str]] = frozenset(
         "upload_missing_headers",
         "upload_needs_mapping",
         "upload_no_usable_rows",
+        "upload_rows_rejected",
+        "upload_invalid_format",
         "upload_invalid_delimiter",
         "gate_blocked",
     }
@@ -55,8 +59,9 @@ ALLOWED_TEST_DETAIL_CODES: Final[frozenset[str]] = frozenset(
 class ConnectionSystem(StrEnum):
     """Supported integration systems for connections onboarding."""
 
+    # Historical connection.system values still persist; not creatable.
     MAILCHIMP = "mailchimp"
-    AXIOS_HQ = "axios_hq"
+    AXIOS_HEADQUARTERS = "axios_headquarters"
     PAYLOCITY = "paylocity"
     LEVER = "lever"
     AUTH0 = "auth0"

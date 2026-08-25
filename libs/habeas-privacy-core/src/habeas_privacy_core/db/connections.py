@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -192,6 +192,33 @@ async def stamp_successful_extract_for_system(
         system,
         at.isoformat(),
     )
+
+
+async def stamp_intake_batch_on_connections(
+    conn: asyncpg.Connection,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Stamp ``last_intake_batch_at`` on ``with_new_batches`` rows past the 12h floor.
+
+    No-op when no rows qualify. Returns the number of rows stamped.
+    """
+    from habeas_privacy_core.connections.freshness import should_stamp_intake_batch
+
+    clock = now or datetime.now(UTC)
+    iso = clock.isoformat()
+    stamped = 0
+    for row in await list_connections(conn):
+        if not should_stamp_intake_batch(dict(row.metadata or {}), now=clock):
+            continue
+        updated = await merge_connection_metadata(
+            conn,
+            UUID(str(row.id)),
+            {"last_intake_batch_at": iso},
+        )
+        if updated is not None:
+            stamped += 1
+    return stamped
 
 
 async def insert_connection_mode_event(

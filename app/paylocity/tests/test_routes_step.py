@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from habeas_privacy_core.connections.freshness import GateResult
 from fastapi.testclient import TestClient
+from paylocity.vertical_match import VerticalMatchOutcome
 
 
 class _Acquire:
@@ -51,33 +52,43 @@ def test_matching_submit_claims_matching_step():
                     return_value=_gate_ok(),
                 ) as evaluate_gate:
                     with patch.object(
-                        main, "_complete_stub", new_callable=AsyncMock
-                    ) as complete_stub:
-                        claim_next.return_value = claim_row
-                        complete_stub.return_value = {
-                            "attempt_id": 42,
-                            "step": "matching",
-                            "status": "success",
-                        }
+                        main,
+                        "run_paylocity_vertical_match",
+                        new_callable=AsyncMock,
+                        return_value=VerticalMatchOutcome(ok=True, match_count=1),
+                    ) as run_match:
+                        with patch.object(
+                            main, "_complete_stub", new_callable=AsyncMock
+                        ) as complete_stub:
+                            claim_next.return_value = claim_row
 
-                        client = TestClient(main.app)
-                        response = client.post("/matching/submit")
+                            client = TestClient(main.app)
+                            response = client.post("/matching/submit")
 
-                        assert response.status_code == 200
-                        body = response.json()
-                        assert body["claimed"] is True
-                        assert body["step"] == "matching"
-                        assert body["status"] == "success"
+                            assert response.status_code == 200
+                            body = response.json()
+                            assert body["claimed"] is True
+                            assert body["step"] == "matching"
+                            assert body["status"] == "success"
+                            assert body["match_count"] == 1
 
-                        claim_next.assert_awaited_once()
-                        evaluate_gate.assert_awaited_once()
-                        assert evaluate_gate.await_args.kwargs["system"] == "paylocity"
-                        complete_stub.assert_awaited_once()
-                        _conn, table, step = claim_next.await_args.args
-                        assert table == main.ATTEMPTS_TABLE
-                        assert table == "paylocity_attempts"
-                        assert step == "matching"
-                        assert claim_next.await_args.kwargs["worker_id"] == main.settings.worker_id
+                            claim_next.assert_awaited_once()
+                            evaluate_gate.assert_awaited_once()
+                            assert evaluate_gate.await_args.kwargs["system"] == "paylocity"
+                            run_match.assert_awaited_once()
+                            assert run_match.await_args.kwargs["request_id"] == claim_row[
+                                "request_id"
+                            ]
+                            assert run_match.await_args.kwargs["attempt_id"] == 42
+                            complete_stub.assert_not_awaited()
+                            _conn, table, step = claim_next.await_args.args
+                            assert table == main.ATTEMPTS_TABLE
+                            assert table == "paylocity_attempts"
+                            assert step == "matching"
+                            assert (
+                                claim_next.await_args.kwargs["worker_id"]
+                                == main.settings.worker_id
+                            )
     finally:
         main.settings.database_url = original_db_url
 

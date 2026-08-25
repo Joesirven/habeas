@@ -36,6 +36,11 @@ deployed admin-api; browser reaches admin-api through the ops-ia IAP front door 
 
 Plan: [`docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md`](../../docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md).
 
+Remaining-ops routes `/ops/verticals/axios_headquarters/*` (and paylocity / lever /
+sheets) exist on this tree. First Cloud Run for those workers is Jose-gated. Do not
+create `app/axios_headquarters` here — that worker lives in another checkout. Worker
+URLs are settings-only; do not invent `*.run.app` hosts.
+
 ## Local
 
 ```bash

@@ -1,41 +1,17 @@
-"""Route tests — claim filters by table/step and matching freshness gate."""
+"""Route tests — claim filters by table and step."""
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from habeas_privacy_core.connections.freshness import GateResult
+from auth0.vertical_match import VerticalMatchOutcome
 from habeas_privacy_core.queue.constants import (
     AUTH0_ATTEMPTS_TABLE,
     STEP_MATCHING,
     STEP_SUPPRESSION,
 )
 from fastapi.testclient import TestClient
-
-
-class _Acquire:
-    def __init__(self, conn=None):
-        self._conn = conn or AsyncMock()
-
-    async def __aenter__(self):
-        return self._conn
-
-    async def __aexit__(self, *args):
-        return None
-
-
-class _FakePool:
-    def __init__(self, conn=None):
-        self._conn = conn or AsyncMock()
-
-    def acquire(self):
-        return _Acquire(self._conn)
-
-
-def _gate_ok() -> GateResult:
-    return GateResult(allowed=True, code="ok", display_status="connected")
 
 
 @pytest.fixture
@@ -48,24 +24,32 @@ def client(monkeypatch):
         yield test_client, main
 
 
+def _bind_pool(get_pool, conn) -> None:
+    pool = get_pool.return_value
+    pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
+    pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+
+
 def test_matching_submit_claims_matching_step(client):
-    test_client, main = client
+    test_client, _main = client
     claim_row = {"id": 42, "request_id": "11111111-2222-3333-4444-555555555555"}
+    conn = AsyncMock()
 
     with (
-        patch("auth0.main.claim_next", new_callable=AsyncMock, return_value=claim_row) as claim_next,
         patch(
-            "auth0.main.evaluate_vertical_matching_gate",
+            "auth0.main.claim_next",
             new_callable=AsyncMock,
-            return_value=_gate_ok(),
-        ) as evaluate_gate,
+            return_value=claim_row,
+        ) as claim_next,
         patch(
-            "auth0.main._complete_stub",
+            "auth0.main.run_auth0_vertical_match",
             new_callable=AsyncMock,
-            return_value={"attempt_id": 42, "step": STEP_MATCHING, "status": "success"},
-        ) as complete_stub,
-        patch("auth0.main.get_pool", return_value=_FakePool()),
+            return_value=VerticalMatchOutcome(ok=True, match_count=1),
+        ) as run_match,
+        patch("auth0.main.get_pool") as get_pool,
     ):
+        _bind_pool(get_pool, conn)
+
         response = test_client.post("/matching/submit")
 
     assert response.status_code == 200
@@ -73,13 +57,18 @@ def test_matching_submit_claims_matching_step(client):
     assert body["claimed"] is True
     assert body["attempt_id"] == 42
     assert body["status"] == "success"
+    assert body["match_count"] == 1
     claim_next.assert_awaited_once()
     args = claim_next.await_args.args
     assert args[1] == AUTH0_ATTEMPTS_TABLE
     assert args[2] == STEP_MATCHING
-    evaluate_gate.assert_awaited_once()
-    assert evaluate_gate.await_args.kwargs["system"] == "auth0"
-    complete_stub.assert_awaited_once()
+    run_match.assert_awaited_once()
+    assert run_match.await_args.kwargs["request_id"] == claim_row["request_id"]
+    assert run_match.await_args.kwargs["attempt_id"] == 42
+    conn.execute.assert_awaited()
+    complete_sql = conn.execute.await_args.args[0]
+    assert AUTH0_ATTEMPTS_TABLE in complete_sql
+    assert "claimed" in complete_sql
 
 
 def test_matching_submit_idle_when_no_claim(client):
@@ -87,146 +76,14 @@ def test_matching_submit_idle_when_no_claim(client):
 
     with (
         patch("auth0.main.claim_next", new_callable=AsyncMock, return_value=None),
-        patch("auth0.main.get_pool", return_value=_FakePool()),
+        patch("auth0.main.get_pool") as get_pool,
     ):
+        _bind_pool(get_pool, AsyncMock())
+
         response = test_client.post("/matching/submit")
 
     assert response.status_code == 200
     assert response.json() == {"claimed": False}
-
-
-def test_matching_submit_blocks_stale_upload(client):
-    """AE3: Upload past cadence → gate_blocked; no successful match."""
-    test_client, _main = client
-    claim_row = {"id": 42, "request_id": "11111111-2222-3333-4444-555555555555"}
-    blocked = GateResult(
-        allowed=False, code="upload_stale", display_status="needs_refresh"
-    )
-
-    with (
-        patch("auth0.main.claim_next", new_callable=AsyncMock, return_value=claim_row),
-        patch(
-            "auth0.main.evaluate_vertical_matching_gate",
-            new_callable=AsyncMock,
-            return_value=blocked,
-        ),
-        patch(
-            "auth0.main._complete_gate_blocked",
-            new_callable=AsyncMock,
-            return_value={
-                "attempt_id": 42,
-                "step": STEP_MATCHING,
-                "status": "gate_blocked",
-            },
-        ) as complete_gate,
-        patch("auth0.main._complete_stub", new_callable=AsyncMock) as complete_stub,
-        patch("auth0.main.get_pool", return_value=_FakePool()),
-    ):
-        response = test_client.post("/matching/submit")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["claimed"] is True
-    assert body["status"] == "gate_blocked"
-    complete_gate.assert_awaited_once_with(42, blocked)
-    complete_stub.assert_not_awaited()
-
-
-def test_matching_submit_blocks_rotation_overdue(client):
-    """AE4: Live credential rotation overdue → gate_blocked."""
-    test_client, _main = client
-    claim_row = {"id": 44, "request_id": "11111111-2222-3333-4444-555555555555"}
-    blocked = GateResult(
-        allowed=False, code="rotation_overdue", display_status="action_required"
-    )
-
-    with (
-        patch("auth0.main.claim_next", new_callable=AsyncMock, return_value=claim_row),
-        patch(
-            "auth0.main.evaluate_vertical_matching_gate",
-            new_callable=AsyncMock,
-            return_value=blocked,
-        ),
-        patch(
-            "auth0.main._complete_gate_blocked",
-            new_callable=AsyncMock,
-            return_value={
-                "attempt_id": 44,
-                "step": STEP_MATCHING,
-                "status": "gate_blocked",
-            },
-        ) as complete_gate,
-        patch("auth0.main._complete_stub", new_callable=AsyncMock) as complete_stub,
-        patch("auth0.main.get_pool", return_value=_FakePool()),
-    ):
-        response = test_client.post("/matching/submit")
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "gate_blocked"
-    complete_gate.assert_awaited_once()
-    complete_stub.assert_not_awaited()
-
-
-def test_matching_submit_blocks_wizard_incomplete(client):
-    test_client, _main = client
-    claim_row = {"id": 45, "request_id": "11111111-2222-3333-4444-555555555555"}
-    blocked = GateResult(
-        allowed=False, code="wizard_incomplete", display_status="action_required"
-    )
-
-    with (
-        patch("auth0.main.claim_next", new_callable=AsyncMock, return_value=claim_row),
-        patch(
-            "auth0.main.evaluate_vertical_matching_gate",
-            new_callable=AsyncMock,
-            return_value=blocked,
-        ),
-        patch(
-            "auth0.main._complete_gate_blocked",
-            new_callable=AsyncMock,
-            return_value={
-                "attempt_id": 45,
-                "step": STEP_MATCHING,
-                "status": "gate_blocked",
-            },
-        ) as complete_gate,
-        patch("auth0.main._complete_stub", new_callable=AsyncMock) as complete_stub,
-        patch("auth0.main.get_pool", return_value=_FakePool()),
-    ):
-        response = test_client.post("/matching/submit")
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "gate_blocked"
-    complete_stub.assert_not_awaited()
-    complete_gate.assert_awaited_once()
-
-
-async def test_complete_gate_blocked_writes_allowlisted_audit():
-    from auth0 import main
-
-    conn = AsyncMock()
-    gate = GateResult(
-        allowed=False, code="wizard_incomplete", display_status="action_required"
-    )
-
-    with patch.object(main, "get_pool", return_value=_FakePool(conn)):
-        result = await main._complete_gate_blocked(99, gate)
-
-    assert result == {
-        "attempt_id": 99,
-        "step": STEP_MATCHING,
-        "status": "gate_blocked",
-    }
-    conn.execute.assert_awaited_once()
-    args = conn.execute.await_args.args
-    assert args[1] == 99
-    assert args[2] == "submit_error"
-    audit = json.loads(args[3])
-    assert audit["event"] == "gate_blocked"
-    assert audit["system"] == "auth0"
-    assert audit["gate_code"] == "wizard_incomplete"
-    assert audit["display_status"] == "action_required"
-    assert audit["error_code"] == "gate_blocked"
 
 
 def test_suppression_submit_claims_suppression_step(client):
@@ -238,17 +95,20 @@ def test_suppression_submit_claims_suppression_step(client):
     }
 
     with (
-        patch("auth0.main.claim_next", new_callable=AsyncMock, return_value=claim_row) as claim_next,
+        patch(
+            "auth0.main.claim_next",
+            new_callable=AsyncMock,
+            return_value=claim_row,
+        ) as claim_next,
         patch(
             "auth0.main._complete_stub",
             new_callable=AsyncMock,
             return_value={"attempt_id": 7, "step": STEP_SUPPRESSION, "status": "success"},
         ),
-        patch("auth0.main.get_pool", return_value=_FakePool()),
-        patch(
-            "auth0.main.evaluate_vertical_matching_gate", new_callable=AsyncMock
-        ) as evaluate_gate,
+        patch("auth0.main.get_pool") as get_pool,
     ):
+        _bind_pool(get_pool, AsyncMock())
+
         response = test_client.post("/suppression/submit")
 
     assert response.status_code == 200
@@ -256,7 +116,6 @@ def test_suppression_submit_claims_suppression_step(client):
     args = claim_next.await_args.args
     assert args[1] == AUTH0_ATTEMPTS_TABLE
     assert args[2] == STEP_SUPPRESSION
-    evaluate_gate.assert_not_awaited()
 
 
 def test_matching_collect_returns_zero(client):

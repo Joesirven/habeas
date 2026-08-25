@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from typing import Any
 
 from habeas_privacy_core.connections.catalog import (
@@ -44,6 +45,23 @@ HEADER_ALIASES: dict[str, frozenset[str]] = {
     "dob": frozenset({"dob", "date_of_birth", "birth_date"}),
     "zip": frozenset({"zip", "zip_code", "postal", "postal_code"}),
 }
+
+EMAIL_FORMAT_LOOSE = "loose"
+EMAIL_FORMAT_STANDARD = "standard"
+EMAIL_FORMAT_STRICT = "strict"
+EMAIL_FORMATS: frozenset[str] = frozenset(
+    {EMAIL_FORMAT_LOOSE, EMAIL_FORMAT_STANDARD, EMAIL_FORMAT_STRICT}
+)
+
+PHONE_FORMAT_DIGITS_10_PLUS = "digits_10_plus"
+PHONE_FORMAT_US_10 = "us_10"
+PHONE_FORMAT_E164 = "e164"
+PHONE_FORMATS: frozenset[str] = frozenset(
+    {PHONE_FORMAT_DIGITS_10_PLUS, PHONE_FORMAT_US_10, PHONE_FORMAT_E164}
+)
+
+_STRICT_TLD = re.compile(r"^[A-Za-z]{2,}$")
+_MAX_REJECTED_ROWS = 100
 
 
 def template_csv_bytes(system: str) -> bytes:
@@ -123,16 +141,25 @@ def parse_upload_csv(
     content: bytes,
     multi_pii_delimiter: str | None,
     column_mapping: dict[str, str] | None = None,
+    email_format: str = EMAIL_FORMAT_STANDARD,
+    phone_format: str = PHONE_FORMAT_US_10,
 ) -> tuple[bool, str, dict[str, Any]]:
-    """Validate template headers and count usable required-identifier rows.
+    """Validate identifiers, optional email/phone formats, and count usable rows.
 
-    Returns ``(ok, detail_code, stats)`` where stats has ``row_count`` /
-    ``usable_identifier_count`` only — never raw PII values. Extra CSV columns
-    are ignored. ``column_mapping`` maps canonical template fields to CSV headers.
+    Returns ``(ok, detail_code, stats)``. Stats never include raw PII values.
+    Rejected rows are indexes + allowlisted reason codes so the UI can show the
+    matching lines from the local file for cleaning.
     """
     required = UPLOAD_TEMPLATE_REQUIRED_HEADERS.get(system)
     if required is None:
         return False, "unknown_system", {}
+
+    email_fmt = (email_format or EMAIL_FORMAT_STANDARD).strip().lower()
+    phone_fmt = (phone_format or PHONE_FORMAT_US_10).strip().lower()
+    if email_fmt not in EMAIL_FORMATS:
+        return False, "upload_invalid_format", {}
+    if phone_fmt not in PHONE_FORMATS:
+        return False, "upload_invalid_format", {}
 
     try:
         delimiter = parse_multi_pii_delimiter(multi_pii_delimiter)
@@ -168,13 +195,44 @@ def parse_upload_csv(
 
     usable = 0
     row_count = 0
+    accepted_rows = 0
+    rejected_tally = 0
+    rejected_rows: list[dict[str, Any]] = []
     for row in reader:
         row_count += 1
         normalized = {
             canonical: (row.get(source) or "").strip()
             for canonical, source in mapping.items()
         }
-        usable += _usable_identifier_count(normalized, delimiter)
+        codes = _row_reject_codes(
+            normalized,
+            delimiter=delimiter,
+            email_format=email_fmt,
+            phone_format=phone_fmt,
+        )
+        if not any(normalized.values()):
+            continue
+        if codes:
+            rejected_tally += 1
+            if len(rejected_rows) < _MAX_REJECTED_ROWS:
+                rejected_rows.append({"row": row_count, "codes": codes})
+            continue
+        accepted_rows += 1
+        usable += _usable_identifier_count(
+            normalized,
+            delimiter,
+            email_format=email_fmt,
+            phone_format=phone_fmt,
+        )
+
+    if rejected_tally:
+        return False, "upload_rows_rejected", {
+            "row_count": row_count,
+            "usable_identifier_count": usable,
+            "accepted_row_count": accepted_rows,
+            "rejected_row_count": rejected_tally,
+            "rejected_rows": rejected_rows,
+        }
 
     if usable < 1:
         return False, "upload_no_usable_rows", {"row_count": row_count}
@@ -182,6 +240,8 @@ def parse_upload_csv(
     return True, "upload_ok", {
         "row_count": row_count,
         "usable_identifier_count": usable,
+        "accepted_row_count": accepted_rows,
+        "rejected_row_count": 0,
     }
 
 
@@ -189,14 +249,77 @@ def _digit_count(value: str) -> int:
     return sum(ch.isdigit() for ch in value)
 
 
-def _usable_identifier_count(normalized: dict[str, str], delimiter: str | None) -> int:
+def _email_ok(value: str, email_format: str) -> bool:
+    text = value.strip()
+    if not text:
+        return True
+    if " " in text or text.count("@") != 1:
+        if email_format == EMAIL_FORMAT_LOOSE:
+            return "@" in text and "." in text.split("@", 1)[-1]
+        return False
+    local, _, domain = text.partition("@")
+    if email_format == EMAIL_FORMAT_LOOSE:
+        return bool(local) and "." in domain
+    if not local or "." not in domain or domain.startswith(".") or domain.endswith("."):
+        return False
+    if email_format == EMAIL_FORMAT_STANDARD:
+        return True
+    tld = domain.rsplit(".", 1)[-1]
+    return ".." not in text and bool(_STRICT_TLD.fullmatch(tld))
+
+
+def _phone_ok(value: str, phone_format: str) -> bool:
+    text = value.strip()
+    if not text:
+        return True
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if phone_format == PHONE_FORMAT_DIGITS_10_PLUS:
+        return len(digits) >= 10
+    if phone_format == PHONE_FORMAT_US_10:
+        return len(digits) == 10 or (len(digits) == 11 and digits.startswith("1"))
+    if phone_format == PHONE_FORMAT_E164:
+        return text.startswith("+") and 10 <= len(digits) <= 15
+    return False
+
+
+def _row_reject_codes(
+    normalized: dict[str, str],
+    *,
+    delimiter: str | None,
+    email_format: str,
+    phone_format: str,
+) -> list[str]:
+    codes: list[str] = []
+    emails = _split_list(normalized.get("email", ""), delimiter)
+    if emails and not all(_email_ok(item, email_format) for item in emails):
+        codes.append("email_invalid")
+    phones = _split_list(normalized.get("phone", ""), delimiter)
+    if phones and not all(_phone_ok(item, phone_format) for item in phones):
+        codes.append("phone_invalid")
+    if _usable_identifier_count(
+        normalized,
+        delimiter,
+        email_format=email_format,
+        phone_format=phone_format,
+    ) < 1 and not codes:
+        codes.append("no_identifier")
+    return codes
+
+
+def _usable_identifier_count(
+    normalized: dict[str, str],
+    delimiter: str | None,
+    *,
+    email_format: str = EMAIL_FORMAT_STANDARD,
+    phone_format: str = PHONE_FORMAT_US_10,
+) -> int:
     """Count email/phone/name/dob/zip pieces on one row — never returns raw values."""
     count = 0
     emails = _split_list(normalized.get("email", ""), delimiter)
-    good = [e for e in emails if "@" in e and "." in e.split("@", 1)[-1]]
+    good = [item for item in emails if _email_ok(item, email_format)]
     count += len(good)
     phones = _split_list(normalized.get("phone", ""), delimiter)
-    if any(_digit_count(p) >= 10 for p in phones):
+    if any(_phone_ok(item, phone_format) for item in phones):
         count += 1
     if normalized.get("first_name") or normalized.get("last_name"):
         count += 1
@@ -221,6 +344,8 @@ async def test_upload_csv(
     content: bytes,
     multi_pii_delimiter: str | None,
     column_mapping: dict[str, str] | None = None,
+    email_format: str = EMAIL_FORMAT_STANDARD,
+    phone_format: str = PHONE_FORMAT_US_10,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Connection-test entry for Upload-mode systems (logging owned by dispatcher)."""
     return parse_upload_csv(
@@ -228,4 +353,6 @@ async def test_upload_csv(
         content=content,
         multi_pii_delimiter=multi_pii_delimiter,
         column_mapping=column_mapping,
+        email_format=email_format,
+        phone_format=phone_format,
     )

@@ -6,12 +6,15 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
+from admin_api import main as admin_main
 from admin_api.main import app
 from admin_api import roles
 from habeas_privacy_core.auth import (
+    ALL_ROLES,
     IAP_EMAIL_HEADER,
     ROLE_ADMIN,
     ROLE_DATA_OWNER,
+    ROLE_DATA_USER,
     ROLE_LEGAL,
     ROLE_SUPER_ADMIN,
 )
@@ -25,9 +28,24 @@ def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
     monkeypatch.setattr(roles.settings, "admin_api_id_token_audience", "")
     monkeypatch.setattr(roles.settings, "require_iap_identity", False)
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
 
 
-def _me_payload(email: str, role: str, *, real_role: str | None = None) -> dict:
+def _invite_pending_setting(*, status: str = "pending") -> dict:
+    return {
+        "id": roles.PENDING_SETTING_INVITE_USERS,
+        "title": "Invite data users",
+        "status": status,
+    }
+
+
+def _me_payload(
+    email: str,
+    role: str,
+    *,
+    real_role: str | None = None,
+    pending_settings: list[dict] | None = None,
+) -> dict:
     local = email.split("@", 1)[0] if "@" in email else email
     return {
         "email": email,
@@ -38,6 +56,7 @@ def _me_payload(email: str, role: str, *, real_role: str | None = None) -> dict:
         "assigned_vertical_labels": [],
         "needs_connector_setup": False,
         "connector_reminders": [],
+        "pending_settings": pending_settings if pending_settings is not None else [],
     }
 
 
@@ -79,7 +98,11 @@ def test_me_data_owner_from_allowlist() -> None:
         response = client.get("/me", headers=headers)
 
     assert response.status_code == 200
-    assert response.json() == _me_payload("owner@example.com", ROLE_DATA_OWNER)
+    assert response.json() == _me_payload(
+        "owner@example.com",
+        ROLE_DATA_OWNER,
+        pending_settings=[_invite_pending_setting()],
+    )
 
 
 def test_me_legal_from_allowlist() -> None:
@@ -259,6 +282,29 @@ def test_simulate_role_as_super_admin_changes_effective_role() -> None:
         ROLE_ADMIN,
         real_role=ROLE_SUPER_ADMIN,
     )
+
+
+def test_simulate_role_data_user_as_super_admin() -> None:
+    roles.settings.admin_api_super_admins = "ops@example.com"
+    headers = {
+        IAP_EMAIL_HEADER: "ops@example.com",
+        roles.DEV_SIMULATE_ROLE_HEADER: ROLE_DATA_USER,
+    }
+
+    with TestClient(app) as client:
+        response = client.get("/me", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json() == _me_payload(
+        "ops@example.com",
+        ROLE_DATA_USER,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+
+
+def test_all_roles_includes_data_user() -> None:
+    assert ROLE_DATA_USER in ALL_ROLES
+    assert ROLE_DATA_USER in roles.ALL_ROLES
 
 
 def test_simulate_role_legal_as_super_admin() -> None:

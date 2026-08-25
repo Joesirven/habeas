@@ -10,7 +10,6 @@ from admin_api import connection_testers
 from admin_api.connection_testers import test_connection
 
 _VALID_CREDENTIALS: dict[str, dict[str, str]] = {
-    "mailchimp": {"api_key": "mc-test-key-us19"},
     "paylocity": {
         "client_id": "pay-client",
         "client_secret": "pay-secret",
@@ -29,7 +28,6 @@ _VALID_CREDENTIALS: dict[str, dict[str, str]] = {
 }
 
 _EXPECTED_OK_DETAIL: dict[str, str] = {
-    "mailchimp": "mailchimp_ok",
     "paylocity": "paylocity_ok",
     "lever": "lever_ok",
     "auth0": "auth0_ok",
@@ -40,9 +38,6 @@ _EXPECTED_OK_DETAIL: dict[str, str] = {
 @pytest.fixture(autouse=True)
 def _stub_system_testers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Avoid live vendor HTTP in dispatcher unit tests."""
-
-    async def _ok_mailchimp(_credentials: dict[str, str]) -> tuple[bool, str]:
-        return True, "mailchimp_ok"
 
     async def _ok_paylocity(_credentials: dict[str, str]) -> tuple[bool, str]:
         return True, "paylocity_ok"
@@ -56,7 +51,6 @@ def _stub_system_testers(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _ok_sheets(_credentials: dict[str, str]) -> tuple[bool, str]:
         return True, "google_sheets_ok"
 
-    monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "mailchimp", _ok_mailchimp)
     monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "paylocity", _ok_paylocity)
     monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "lever", _ok_lever)
     monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "auth0", _ok_auth0)
@@ -115,9 +109,9 @@ async def test_unknown_system() -> None:
 async def test_logs_never_include_credential_values(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    secret = "super-secret-mailchimp-key-value-us19"
+    secret = "super-secret-paylocity-client-secret"
     with caplog.at_level(logging.INFO, logger="admin_api.connection_testers"):
-        await test_connection("mailchimp", {"api_key": secret})
+        await test_connection("paylocity", {**_VALID_CREDENTIALS["paylocity"], "client_secret": secret})
 
     for record in caplog.records:
         assert secret not in record.getMessage()
@@ -128,8 +122,8 @@ async def test_request_error_maps_to_unreachable(monkeypatch: pytest.MonkeyPatch
     async def _boom(_credentials: dict[str, str]) -> tuple[bool, str]:
         raise httpx.ConnectError("boom")
 
-    monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "mailchimp", _boom)
-    ok, detail = await test_connection("mailchimp", _VALID_CREDENTIALS["mailchimp"])
+    monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "paylocity", _boom)
+    ok, detail = await test_connection("paylocity", _VALID_CREDENTIALS["paylocity"])
     assert ok is False
     assert detail == "unreachable"
 
@@ -139,7 +133,7 @@ async def test_unexpected_error_maps_to_unknown_error(monkeypatch: pytest.Monkey
     async def _boom(_credentials: dict[str, str]) -> tuple[bool, str]:
         raise RuntimeError("secret-must-not-leak")
 
-    monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "mailchimp", _boom)
-    ok, detail = await test_connection("mailchimp", _VALID_CREDENTIALS["mailchimp"])
+    monkeypatch.setitem(connection_testers._SYSTEM_TESTERS, "paylocity", _boom)
+    ok, detail = await test_connection("paylocity", _VALID_CREDENTIALS["paylocity"])
     assert ok is False
     assert detail == "unknown_error"

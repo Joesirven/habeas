@@ -145,35 +145,6 @@ def _google_sheet_system(*, system_id: str, display_label: str) -> ConnectionSys
 
 
 _SYSTEMS: dict[str, ConnectionSystem] = {
-    "mailchimp": ConnectionSystem(
-        system_id="mailchimp",
-        display_label="Mailchimp",
-        invite_allowed=True,
-        credential_fields=(
-            CredentialField(
-                id="api_key",
-                label="API key",
-                input_type=CredentialInputType.PASSWORD,
-                required=True,
-                help=(
-                    "1. Sign in to Mailchimp (Manager or Admin role).\n"
-                    "2. Click your profile icon (top right) → Profile.\n"
-                    "3. Open Extras → API keys.\n"
-                    "4. Click Create A Key and name it “Habeas Privacy Automation”.\n"
-                    "5. Click Generate Key, then Copy Key to Clipboard (shown only once).\n"
-                    "6. Paste the full key here. It should end with your data center "
-                    "(example: …-us19).\n"
-                    "Do not paste your Mailchimp login password or an OAuth/Marketplace token."
-                ),
-            ),
-        ),
-        trust_copy=_saas_trust_copy(
-            extra=(
-                "Mailchimp: use a dedicated account API key for Habeas — not your login "
-                "password and not an OAuth Marketplace app."
-            ),
-        ),
-    ),
     "paylocity": ConnectionSystem(
         system_id="paylocity",
         display_label="Paylocity",
@@ -342,10 +313,13 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
         credential_fields=(),
         trust_copy=_saas_trust_copy(
             extra=(
-                "BizDev Contacts uses Upload mode only. Download the Habeas CSV "
-                "template, reshape your Contact Us export to match the required "
-                "headers, select a multi-value delimiter if needed, and upload the "
-                "file. No API credentials or Google Sheets sharing is required."
+                "BizDev Contacts supports two approaches. Connect Google (owner "
+                "Google sign-in) to use the Contact Us sheet live — Habeas does "
+                "not ask you to share the file with a service account. Upload CSV "
+                "alternative: download the Habeas CSV template, reshape your "
+                "Contact Us export to match the required headers, select a "
+                "multi-value delimiter if needed, and upload the file. We never "
+                "ask for your Google password or a credentials JSON."
             ),
         ),
     ),
@@ -356,15 +330,18 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
         credential_fields=(),
         trust_copy=_saas_trust_copy(
             extra=(
-                "HR Alumni uses Upload mode only. Download the Habeas CSV template, "
-                "reshape your alumni list to match the required headers, select a "
-                "multi-value delimiter if needed, and upload the file. No API "
-                "credentials or Google Sheets sharing is required."
+                "HR Alumni supports two approaches. Connect Google (owner Google "
+                "sign-in) to use the Alumni sheet live — Habeas does not ask you "
+                "to share the file with a service account. Upload CSV alternative: "
+                "download the Habeas CSV template, reshape your alumni list to "
+                "match the required headers, select a multi-value delimiter if "
+                "needed, and upload the file. We never ask for your Google "
+                "password or a credentials JSON."
             ),
         ),
     ),
-    "axios_hq": ConnectionSystem(
-        system_id="axios_hq",
+    "axios_headquarters": ConnectionSystem(
+        system_id="axios_headquarters",
         display_label="Axios HQ",
         invite_allowed=False,
         credential_fields=(),
@@ -441,7 +418,6 @@ def list_systems() -> list[ConnectionSystem]:
 
 
 _SYSTEM_ORDER: Final[tuple[str, ...]] = (
-    "mailchimp",
     "paylocity",
     "lever",
     "auth0",
@@ -450,7 +426,7 @@ _SYSTEM_ORDER: Final[tuple[str, ...]] = (
     "contact_us_google_sheet",
     "bizdev_contacts",
     "hr_alumni",
-    "axios_hq",
+    "axios_headquarters",
     "cassandra",
 )
 

@@ -46,8 +46,6 @@ const SOURCE_OPTIONS: { value: '' | IntakeSource; label: string }[] = [
   { value: 'manual', label: 'Manual' },
 ]
 
-const VIEW_MODE_SESSION_KEY = 'requests-view-mode'
-
 const FLAT_REQUESTS_TABLE_CLASS =
   'taste-table table-fixed min-w-[720px] w-full text-xs leading-snug [&_th]:!px-2.5 [&_th]:!py-1.5 [&_th]:whitespace-nowrap [&_td]:!px-2.5 [&_td]:!py-1.5 [&_td]:whitespace-nowrap'
 
@@ -65,14 +63,6 @@ type RequestBatch = {
   /** Earliest `received_at` in the cluster — used to build the drill-in window. */
   receivedAtStart: string
   requests: RequestRecord[]
-}
-
-function readViewMode(): ViewMode {
-  try {
-    return sessionStorage.getItem(VIEW_MODE_SESSION_KEY) === 'batch' ? 'batch' : 'flat'
-  } catch {
-    return 'flat'
-  }
 }
 
 function requestRowLabel(request: RequestRecord): string {
@@ -888,17 +878,9 @@ export function RequestsPage() {
   const { role } = useMe()
   const legalAdmin = isLegalAdminPersona(role)
   const [ephemeralSearch, setEphemeralSearch] = useState('')
-  const [viewMode, setViewMode] = useState<ViewMode>(readViewMode)
+  const viewMode: ViewMode = search.view === 'batch' ? 'batch' : 'flat'
   const [page, setPage] = useState(1)
   const overlay = useRequestDetailOverlay()
-
-  useEffect(() => {
-    try {
-      sessionStorage.setItem(VIEW_MODE_SESSION_KEY, viewMode)
-    } catch {
-      // ignore storage failures
-    }
-  }, [viewMode])
 
   const listStage = search.stage
   const pageSize = viewMode === 'batch' ? BATCH_WINDOW_SIZE : REQUESTS_PAGE_SIZE
@@ -1049,13 +1031,18 @@ export function RequestsPage() {
         received_after: 'received_after' in patch ? patch.received_after : search.received_after,
         received_before:
           'received_before' in patch ? patch.received_before : search.received_before,
+        view: 'view' in patch ? patch.view : search.view,
       },
       replace: true,
     })
   }
 
   function clearFilters() {
-    void navigate({ to: '/requests', search: {}, replace: true })
+    void navigate({
+      to: '/requests',
+      search: search.view === 'batch' ? { view: 'batch' } : {},
+      replace: true,
+    })
   }
 
   function openTriage(requestId: string, trigger?: HTMLElement | null, request?: RequestRecord) {
@@ -1067,7 +1054,6 @@ export function RequestsPage() {
     // A stale name/id search combined with the new source + date-window filters would
     // otherwise filter the drilled-in list down to nothing.
     setEphemeralSearch('')
-    setViewMode('flat')
     void navigate({
       to: '/requests',
       search: {
@@ -1161,7 +1147,7 @@ export function RequestsPage() {
                   : 'Batch grouping off — click to group by intake batch'
               }
               onClick={() =>
-                setViewMode((current) => (current === 'batch' ? 'flat' : 'batch'))
+                patchSearch({ view: viewMode === 'batch' ? undefined : 'batch' })
               }
               className={cn(
                 'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors',
@@ -1275,9 +1261,8 @@ export function RequestsPage() {
             type="button"
             className="taste-link ml-auto text-[0.65rem]"
             onClick={() => {
-              clearFilters()
               setEphemeralSearch('')
-              setViewMode('batch')
+              void navigate({ to: '/requests', search: { view: 'batch' }, replace: true })
             }}
           >
             Back to batches

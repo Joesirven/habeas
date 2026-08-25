@@ -29,7 +29,16 @@ from habeas_privacy_core.auth import (
     ROLE_LEGAL,
     ROLE_SUPER_ADMIN,
     is_authenticated_actor,
+    is_vertical_operator_role,
     resolve_actor,
+)
+from habeas_privacy_core.connections.catalog import (
+    VERTICAL_BIZDEV,
+    VERTICAL_COMMUNICATIONS,
+    VERTICAL_PEOPLE_HR,
+    VERTICAL_TECH,
+    VERTICAL_TEST,
+    get_bindings_for_system,
 )
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
@@ -38,30 +47,73 @@ from habeas_privacy_core.workflow.approval import (
     is_vertical_kickoff_approved,
 )
 
-# Live vertical today is the CA DROP hash index. Coming-soon verticals are
-# catalog constants only — they never receive disposition rows (KTD3 / R6).
+# Live write keys: CA DROP (Data) and Auth0. Do not list ``tech`` here —
+# that catalog id is an Auth0 path alias, not a second live vertical.
+# ``test`` is assignment-scoped matching review only — not a global live vertical.
+# Request-level Matching / KD13 require Data always; Auth0 joins only when a
+# ``request_vertical_matching`` snapshot exists or a disposition was already
+# written — DROP-only / never-run Auth0 complete on Data alone.
 VERTICAL_DATA = "data"
-LIVE_VERTICALS: tuple[str, ...] = (VERTICAL_DATA,)
+VERTICAL_AUTH0 = "auth0"
+LIVE_VERTICALS: tuple[str, ...] = (VERTICAL_DATA, VERTICAL_AUTH0)
+MATCHING_WRITABLE_VERTICALS: frozenset[str] = frozenset({*LIVE_VERTICALS, VERTICAL_TEST})
+# Systems that still do not match. Catalog ids sit beside bound slugs so PUT
+# ``/communications`` (etc.) returns coming-soon, not unknown. Historical
+# ``axios_hq`` is a read alias only — not a live write key.
 COMING_SOON_VERTICALS: tuple[str, ...] = (
-    "mailchimp",
+    "axios_headquarters",
     "lever",
     "paylocity",
-    "auth0",
     "cassandra",
+    VERTICAL_COMMUNICATIONS,
+    VERTICAL_PEOPLE_HR,
+    VERTICAL_BIZDEV,
 )
+VENDOR_RECORD_ID_VERTICALS: frozenset[str] = frozenset(
+    {
+        VERTICAL_AUTH0,
+        VERTICAL_COMMUNICATIONS,
+        VERTICAL_PEOPLE_HR,
+        VERTICAL_BIZDEV,
+        VERTICAL_TECH,
+    }
+)
+# Owner path aliases → stored vertical. Historical ``axios_hq`` reads as
+# communications; it is never a live write key. Historical ``tech`` reads as
+# Auth0 for KD13 lookup only — ``tech`` is not a live write key.
+_DISPOSITION_SYSTEM_ALIASES: dict[str, str] = {
+    "axios_headquarters": VERTICAL_COMMUNICATIONS,
+    "axios_hq": VERTICAL_COMMUNICATIONS,
+    "paylocity": VERTICAL_PEOPLE_HR,
+    "lever": VERTICAL_PEOPLE_HR,
+    "hr_alumni": VERTICAL_PEOPLE_HR,
+    "bizdev_contacts": VERTICAL_BIZDEV,
+    VERTICAL_AUTH0: VERTICAL_AUTH0,
+    VERTICAL_TECH: VERTICAL_AUTH0,
+}
 VERTICAL_LABELS: dict[str, str] = {
     VERTICAL_DATA: "Data",
-    "mailchimp": "Mailchimp",
+    VERTICAL_TEST: "Test vertical",
+    "axios_hq": "Axios HQ",
+    "axios_headquarters": "Axios HQ",
     "lever": "Lever",
     "paylocity": "Paylocity",
     "auth0": "Auth0",
     "cassandra": "Cassandra",
+    "bizdev_contacts": "Contact Us Google Sheet",
+    "hr_alumni": "Alumni Google Sheet",
+    "communications": "Communications",
+    "people_hr": "People/HR",
+    "tech": "Tech",
+    "bizdev": "BizDev",
 }
 
-# 3 Deleted · 4 Opted out · 5 Not found. Statuses 3/4 require a dwid selection;
-# 5 (no match) must carry none (R7 / R8).
+# 3 Deleted · 4 Opted out · 5 Not found. Statuses 3/4 require a selection
+# (dwids for Data, vendor_record_ids for Auth0); 5 (no match) must carry none
+# (R7 / R8).
 DISPOSITION_STATUS_CODES = frozenset({3, 4, 5})
 STATUS_REQUIRING_DWIDS = frozenset({3, 4})
+STATUS_REQUIRING_VENDOR_RECORD_IDS = STATUS_REQUIRING_DWIDS
 
 DISPOSITION_UPSERT_COMMAND = "request.vertical_disposition"
 
@@ -90,6 +142,8 @@ class VerticalDisposition(BaseModel):
     status: int
     selected_dwids: list[str] = Field(default_factory=list)
     selected_dwid_count: int = 0
+    selected_vendor_record_ids: list[str] = Field(default_factory=list)
+    selected_vendor_record_id_count: int = 0
     decided_by: str
     actor_role: str | None = None
     decided_at: str
@@ -109,7 +163,7 @@ class VerticalDispositionsResponse(BaseModel):
     dispositions: list[VerticalDisposition] = Field(default_factory=list)
     live_verticals: list[str] = Field(default_factory=list)
     coming_soon: list[VerticalCatalogEntry] = Field(default_factory=list)
-    # Matching completes at request level only when every live vertical decided (R9).
+    # Matching completes when every in-scope live vertical is decided (R9).
     matching_complete: bool = False
 
 
@@ -118,6 +172,7 @@ class VerticalDispositionBody(BaseModel):
 
     status: int = Field(ge=3, le=5)
     dwids: list[str] | None = None
+    vendor_record_ids: list[str] | None = None
     early_advance: bool = False
     decision_reason: str | None = Field(default=None, max_length=2000)
 
@@ -139,17 +194,112 @@ def normalize_vertical(vertical: str) -> str:
     return vertical.strip().lower()
 
 
+def resolve_disposition_vertical(vertical: str) -> str:
+    """Map an owner path (catalog id or bound system) to the stored vertical.
+
+    Catalog ids (``communications``) stay as-is. Bound systems
+    (``axios_headquarters``; historical ``axios_hq``) resolve to their catalog
+    vertical. Tech / Auth0 store as ``auth0`` so snapshots and dispositions
+    share one key. Cassandra stays ``cassandra`` (Data CA DROP writes go
+    through ``data``).
+    """
+    path = normalize_vertical(vertical)
+    if not path:
+        return path
+    if path == VERTICAL_TECH:
+        return VERTICAL_AUTH0
+    if is_matching_writable_vertical(path):
+        return path
+    aliased = _DISPOSITION_SYSTEM_ALIASES.get(path)
+    if aliased:
+        return aliased
+    bindings = get_bindings_for_system(path)
+    if not bindings:
+        return path
+    catalog_id = bindings[0].vertical_id
+    if catalog_id == VERTICAL_TECH:
+        return VERTICAL_AUTH0
+    if catalog_id == VERTICAL_DATA:
+        return path
+    if is_matching_writable_vertical(catalog_id):
+        return catalog_id
+    return path
+
+
+def assignment_vertical_for_disposition(vertical: str) -> str:
+    """Catalog vertical used for owner assignment checks."""
+    path = normalize_vertical(vertical)
+    resolved = resolve_disposition_vertical(path)
+    if resolved == VERTICAL_AUTH0:
+        bindings = get_bindings_for_system(VERTICAL_AUTH0)
+        if bindings:
+            return bindings[0].vertical_id
+        return VERTICAL_TECH
+    return resolved
+
+
+def matching_snapshot_lookup_keys(
+    *,
+    vertical: str,
+    system: str | None = None,
+) -> tuple[str, ...]:
+    """Candidate ``request_vertical_matching.vertical`` keys for one inbox item."""
+    keys: list[str] = []
+    system_norm = system.strip().lower() if system and str(system).strip() else None
+    for raw in (system_norm, normalize_vertical(vertical), resolve_disposition_vertical(vertical)):
+        if raw and raw not in keys:
+            keys.append(raw)
+    if resolve_disposition_vertical(vertical) == VERTICAL_COMMUNICATIONS:
+        for extra in ("axios_headquarters", "axios_hq"):
+            if extra not in keys:
+                keys.append(extra)
+    if resolve_disposition_vertical(vertical) == VERTICAL_AUTH0:
+        for extra in (VERTICAL_AUTH0, VERTICAL_TECH):
+            if extra not in keys:
+                keys.append(extra)
+    return tuple(keys)
+
+
+def _live_disposition_lookup_keys() -> list[str]:
+    """LIVE_VERTICALS plus historical slugs that stored the same vertical."""
+    keys = list(LIVE_VERTICALS)
+    for alias, target in _DISPOSITION_SYSTEM_ALIASES.items():
+        if target in LIVE_VERTICALS and alias not in keys:
+            keys.append(alias)
+    return keys
+
+
+def uses_vendor_record_ids(vertical: str) -> bool:
+    """True for SaaS / sheet / Auth0 verticals — opaque vendor ids, not dwids."""
+    return resolve_disposition_vertical(vertical) in VENDOR_RECORD_ID_VERTICALS
+
+
 def is_live_vertical(vertical: str) -> bool:
-    return normalize_vertical(vertical) in LIVE_VERTICALS
+    return resolve_disposition_vertical(vertical) in LIVE_VERTICALS
+
+
+def is_matching_writable_vertical(vertical: str) -> bool:
+    """LIVE_VERTICALS plus assigned-owner test vertical."""
+    return normalize_vertical(vertical) in MATCHING_WRITABLE_VERTICALS
 
 
 def normalize_dwids(dwids: list[str] | None) -> list[str]:
     """Trim, drop blanks, de-duplicate while preserving selection order."""
-    if not dwids:
+    return _normalize_opaque_ids(dwids)
+
+
+def normalize_vendor_record_ids(vendor_record_ids: list[str] | None) -> list[str]:
+    """Trim, drop blanks, de-duplicate while preserving selection order."""
+    return _normalize_opaque_ids(vendor_record_ids)
+
+
+def _normalize_opaque_ids(values: list[str] | None) -> list[str]:
+    """Trim, drop blanks, de-duplicate while preserving selection order."""
+    if not values:
         return []
     seen: set[str] = set()
     out: list[str] = []
-    for raw in dwids:
+    for raw in values:
         if raw is None:
             continue
         value = str(raw).strip()
@@ -172,6 +322,18 @@ def assert_disposition_valid(status: int, dwids: list[str]) -> None:
         raise ValueError("status 5 (Not found) must not carry dwids")
 
 
+def assert_vendor_disposition_valid(status: int, vendor_record_ids: list[str]) -> None:
+    """Auth0: status 3/4 need a vendor id; status 5 must carry none (R7 / R8)."""
+    if status not in DISPOSITION_STATUS_CODES:
+        raise ValueError(
+            "disposition status must be 3 (Deleted), 4 (Opted out), or 5 (Not found)"
+        )
+    if status in STATUS_REQUIRING_VENDOR_RECORD_IDS and not vendor_record_ids:
+        raise ValueError(f"status {status} requires at least one vendor_record_id")
+    if status == 5 and vendor_record_ids:
+        raise ValueError("status 5 (Not found) must not carry vendor_record_ids")
+
+
 def _parse_dwids(raw: Any) -> list[str]:
     if raw is None:
         return []
@@ -182,9 +344,18 @@ def _parse_dwids(raw: Any) -> list[str]:
     return [str(item) for item in raw]
 
 
+def _row_field(row: Any, key: str, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
+
+
 def _row_to_disposition(row: Any) -> VerticalDisposition:
-    vertical = str(row["vertical"])
-    dwids = _parse_dwids(row["selected_dwids"])
+    stored = str(row["vertical"])
+    vertical = resolve_disposition_vertical(stored)
+    dwids = _parse_dwids(_row_field(row, "selected_dwids"))
+    vendor_ids = _parse_dwids(_row_field(row, "selected_vendor_record_ids"))
     return VerticalDisposition(
         request_id=str(row["request_id"]),
         vertical=vertical,
@@ -193,6 +364,8 @@ def _row_to_disposition(row: Any) -> VerticalDisposition:
         status=int(row["status"]),
         selected_dwids=dwids,
         selected_dwid_count=len(dwids),
+        selected_vendor_record_ids=vendor_ids,
+        selected_vendor_record_id_count=len(vendor_ids),
         decided_by=str(row["decided_by"]),
         actor_role=row["actor_role"],
         decided_at=_iso(row["decided_at"]) or "",
@@ -274,18 +447,32 @@ async def upsert_vertical_disposition(
     decided_by: str,
     actor_role: str | None = None,
     sync_drop_response_status: bool = True,
+    vendor_record_ids: list[str] | None = None,
 ) -> VerticalDisposition:
-    """Write the disposition for one live vertical and keep DROP status in sync.
+    """Write the disposition for one live vertical.
 
-    Raises ``ValueError`` for a non-live vertical, an invalid status/dwid
+    Data keeps ``drop_raw_requests.response_status`` in sync. Auth0 and other
+    SaaS / sheet verticals persist ``selected_vendor_record_ids`` only — they
+    never mirror DROP status.
+
+    Raises ``ValueError`` for a non-writable vertical, an invalid status/id
     combination, or an overwrite attempt after Legal kickoff (KTD5).
     """
-    vertical_norm = normalize_vertical(vertical)
-    if vertical_norm not in LIVE_VERTICALS:
+    vertical_norm = resolve_disposition_vertical(vertical)
+    if not is_matching_writable_vertical(vertical_norm):
         raise ValueError(f"vertical {vertical_norm!r} is not live yet")
 
     selected = normalize_dwids(dwids)
-    assert_disposition_valid(status, selected)
+    selected_vendor_ids = normalize_vendor_record_ids(vendor_record_ids)
+    if uses_vendor_record_ids(vertical_norm):
+        if not selected_vendor_ids and selected:
+            selected_vendor_ids = selected
+        assert_vendor_disposition_valid(status, selected_vendor_ids)
+        selected = []
+    else:
+        assert_disposition_valid(status, selected)
+        if vertical_norm == VERTICAL_DATA:
+            selected_vendor_ids = []
 
     exists = await conn.fetchval("SELECT 1 FROM requests WHERE id = $1", UUID(request_id))
     if exists is None:
@@ -293,7 +480,7 @@ async def upsert_vertical_disposition(
 
     existing = await conn.fetchrow(
         """
-        SELECT status, selected_dwids
+        SELECT status, selected_dwids, selected_vendor_record_ids
           FROM request_vertical_dispositions
          WHERE request_id = $1
            AND vertical = $2
@@ -304,7 +491,9 @@ async def upsert_vertical_disposition(
     if existing is not None:
         changed = (
             int(existing["status"]) != status
-            or _parse_dwids(existing["selected_dwids"]) != selected
+            or _parse_dwids(_row_field(existing, "selected_dwids")) != selected
+            or _parse_dwids(_row_field(existing, "selected_vendor_record_ids"))
+            != selected_vendor_ids
         )
         if changed and await is_vertical_kickoff_locked(
             conn, request_id=request_id, vertical=vertical_norm
@@ -317,22 +506,26 @@ async def upsert_vertical_disposition(
     row = await conn.fetchrow(
         """
         INSERT INTO request_vertical_dispositions (
-            request_id, vertical, status, selected_dwids, decided_by, actor_role
-        ) VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+            request_id, vertical, status, selected_dwids,
+            selected_vendor_record_ids, decided_by, actor_role
+        ) VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7)
         ON CONFLICT (request_id, vertical) DO UPDATE
            SET status = EXCLUDED.status,
                selected_dwids = EXCLUDED.selected_dwids,
+               selected_vendor_record_ids = EXCLUDED.selected_vendor_record_ids,
                decided_by = EXCLUDED.decided_by,
                actor_role = EXCLUDED.actor_role,
                decided_at = NOW(),
                updated_at = NOW()
-        RETURNING request_id, vertical, status, selected_dwids, decided_by,
+        RETURNING request_id, vertical, status, selected_dwids,
+                  selected_vendor_record_ids, decided_by,
                   actor_role, decided_at, updated_at
         """,
         UUID(request_id),
         vertical_norm,
         status,
         json.dumps(selected),
+        json.dumps(selected_vendor_ids),
         decided_by[:200],
         actor_role,
     )
@@ -353,16 +546,63 @@ async def fetch_vertical_disposition(
     """One decided vertical, or None when it has no disposition yet."""
     row = await conn.fetchrow(
         """
-        SELECT request_id, vertical, status, selected_dwids, decided_by,
+        SELECT request_id, vertical, status, selected_dwids,
+               selected_vendor_record_ids, decided_by,
                actor_role, decided_at, updated_at
           FROM request_vertical_dispositions
          WHERE request_id = $1
            AND vertical = $2
         """,
         UUID(request_id),
-        normalize_vertical(vertical),
+        resolve_disposition_vertical(vertical),
     )
     return _row_to_disposition(row) if row is not None else None
+
+
+async def _matching_snapshot_exists(conn: Any, request_id: str, vertical: str) -> bool:
+    """True when matching persisted a ``request_vertical_matching`` row.
+
+    Workers store system slugs (``auth0``, ``axios_headquarters``), not only
+    catalog ids — look up every candidate from ``matching_snapshot_lookup_keys``.
+    """
+    keys = matching_snapshot_lookup_keys(vertical=vertical)
+    if not keys:
+        return False
+    found = await conn.fetchval(
+        """
+        SELECT 1
+          FROM request_vertical_matching
+         WHERE request_id = $1
+           AND vertical = ANY($2::text[])
+         LIMIT 1
+        """,
+        UUID(request_id),
+        list(keys),
+    )
+    return found is not None
+
+
+async def in_scope_live_verticals(
+    conn: Any,
+    *,
+    request_id: str,
+    decided_verticals: set[str] | None = None,
+) -> tuple[str, ...]:
+    """Live verticals that count toward Matching-complete and KD13.
+
+    Data is always required. Sibling live verticals join only after a matching
+    snapshot or a disposition already exists — never invent a status-5 row.
+    """
+    decided = decided_verticals or set()
+    scoped: list[str] = [VERTICAL_DATA]
+    for vertical in LIVE_VERTICALS:
+        if vertical == VERTICAL_DATA or vertical in scoped:
+            continue
+        if vertical in decided or await _matching_snapshot_exists(
+            conn, request_id, vertical
+        ):
+            scoped.append(vertical)
+    return tuple(scoped)
 
 
 async def list_vertical_dispositions(
@@ -377,7 +617,8 @@ async def list_vertical_dispositions(
 
     rows = await conn.fetch(
         """
-        SELECT request_id, vertical, status, selected_dwids, decided_by,
+        SELECT request_id, vertical, status, selected_dwids,
+               selected_vendor_record_ids, decided_by,
                actor_role, decided_at, updated_at
           FROM request_vertical_dispositions
          WHERE request_id = $1
@@ -387,6 +628,9 @@ async def list_vertical_dispositions(
     )
     dispositions = [_row_to_disposition(row) for row in rows]
     decided = {item.vertical for item in dispositions}
+    scoped = await in_scope_live_verticals(
+        conn, request_id=request_id, decided_verticals=decided
+    )
     return VerticalDispositionsResponse(
         request_id=request_id,
         dispositions=dispositions,
@@ -398,7 +642,7 @@ async def list_vertical_dispositions(
             )
             for vertical in COMING_SOON_VERTICALS
         ],
-        matching_complete=all(vertical in decided for vertical in LIVE_VERTICALS),
+        matching_complete=all(vertical in decided for vertical in scoped),
     )
 
 
@@ -420,10 +664,13 @@ async def all_live_verticals_disposed(conn: Any, request_id: str) -> bool:
            AND vertical = ANY($2::text[])
         """,
         UUID(request_id),
-        list(LIVE_VERTICALS),
+        _live_disposition_lookup_keys(),
     )
-    disposed = {str(row["vertical"]) for row in rows}
-    return all(vertical in disposed for vertical in LIVE_VERTICALS)
+    disposed = {resolve_disposition_vertical(str(row["vertical"])) for row in rows}
+    scoped = await in_scope_live_verticals(
+        conn, request_id=request_id, decided_verticals=disposed
+    )
+    return all(vertical in disposed for vertical in scoped)
 
 
 async def access_packs_ready_for_notice(conn: Any, request_id: str) -> bool:
@@ -442,12 +689,19 @@ async def access_packs_ready_for_notice(conn: Any, request_id: str) -> bool:
            AND vertical = ANY($2::text[])
         """,
         UUID(request_id),
-        list(LIVE_VERTICALS),
+        _live_disposition_lookup_keys(),
     )
-    by_vertical = {str(row["vertical"]): int(row["status"]) for row in rows}
-    if not all(vertical in by_vertical for vertical in LIVE_VERTICALS):
+    by_vertical = {
+        resolve_disposition_vertical(str(row["vertical"])): int(row["status"])
+        for row in rows
+    }
+    scoped = await in_scope_live_verticals(
+        conn, request_id=request_id, decided_verticals=set(by_vertical)
+    )
+    if not all(vertical in by_vertical for vertical in scoped):
         return False
-    needs_pack = any(status in STATUS_REQUIRING_DWIDS for status in by_vertical.values())
+    data_status = by_vertical.get(VERTICAL_DATA)
+    needs_pack = data_status in STATUS_REQUIRING_DWIDS
     if not needs_pack:
         return True
     uris = await _successful_access_gcs_uris(conn, request_id)
@@ -525,12 +779,17 @@ async def put_vertical_disposition(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="invalid request_id") from exc
 
-    vertical_norm = normalize_vertical(vertical)
-    if vertical_norm not in LIVE_VERTICALS:
+    path_vertical = normalize_vertical(vertical)
+    vertical_norm = resolve_disposition_vertical(path_vertical)
+    if not is_matching_writable_vertical(vertical_norm):
+        coming_soon = (
+            path_vertical in COMING_SOON_VERTICALS
+            or vertical_norm in COMING_SOON_VERTICALS
+        )
         detail = (
-            f"vertical {vertical_norm!r} is coming soon — no disposition accepted"
-            if vertical_norm in COMING_SOON_VERTICALS
-            else f"unknown vertical {vertical_norm!r}"
+            f"vertical {path_vertical!r} is coming soon — no disposition accepted"
+            if coming_soon
+            else f"unknown vertical {path_vertical!r}"
         )
         raise HTTPException(status_code=400, detail=detail)
 
@@ -541,8 +800,30 @@ async def put_vertical_disposition(
     pool = get_pool()
     async with pool.acquire() as conn:
         dwids = normalize_dwids(body.dwids)
-        if not dwids and body.status in STATUS_REQUIRING_DWIDS:
-            dwids = await default_dwids_for_request(conn, request_id=request_id)
+        vendor_record_ids = normalize_vendor_record_ids(body.vendor_record_ids)
+        if body.status in STATUS_REQUIRING_DWIDS:
+            if uses_vendor_record_ids(vertical_norm):
+                if not vendor_record_ids and not dwids:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="status 3/4 requires at least one vendor_record_id",
+                    )
+            elif not dwids:
+                raise HTTPException(
+                    status_code=400,
+                    detail="status 3/4 requires at least one dwid",
+                )
+        if is_vertical_operator_role(viewer.role):
+            from admin_api.vertical_assignments import principal_has_vertical
+
+            allowed = await principal_has_vertical(
+                conn,
+                email=viewer.email,
+                vertical_id=assignment_vertical_for_disposition(path_vertical),
+                role=viewer.role,
+            )
+            if not allowed:
+                raise HTTPException(status_code=403, detail="vertical access denied")
         try:
             disposition = await upsert_vertical_disposition(
                 conn,
@@ -552,6 +833,7 @@ async def put_vertical_disposition(
                 dwids=dwids,
                 decided_by=actor,
                 actor_role=viewer.role,
+                vendor_record_ids=vendor_record_ids,
             )
             await write_audit(
                 actor=actor,
@@ -562,6 +844,9 @@ async def put_vertical_disposition(
                     "vertical": vertical_norm,
                     "status": body.status,
                     "selected_dwid_count": disposition.selected_dwid_count,
+                    "selected_vendor_record_id_count": (
+                        disposition.selected_vendor_record_id_count
+                    ),
                     "early_advance": body.early_advance,
                     "actor_role": disposition.actor_role,
                 },
@@ -582,7 +867,11 @@ __all__ = [
     "DISPOSITION_UPSERT_COMMAND",
     "FULFILLMENT_KICKOFF_ACTION",
     "LIVE_VERTICALS",
+    "MATCHING_WRITABLE_VERTICALS",
     "STATUS_REQUIRING_DWIDS",
+    "STATUS_REQUIRING_VENDOR_RECORD_IDS",
+    "VENDOR_RECORD_ID_VERTICALS",
+    "VERTICAL_AUTH0",
     "VERTICAL_DATA",
     "VERTICAL_LABELS",
     "VerticalDisposition",
@@ -591,16 +880,24 @@ __all__ = [
     "all_live_verticals_disposed",
     "access_packs_ready_for_notice",
     "assert_disposition_valid",
+    "assert_vendor_disposition_valid",
+    "assignment_vertical_for_disposition",
     "collect_access_shareable_urls",
     "default_dwids_for_request",
     "fetch_vertical_disposition",
     "is_identity_cleared",
+    "in_scope_live_verticals",
     "is_kd13_satisfied",
     "is_live_vertical",
+    "is_matching_writable_vertical",
     "is_vertical_kickoff_locked",
     "list_vertical_dispositions",
+    "matching_snapshot_lookup_keys",
     "normalize_dwids",
+    "normalize_vendor_record_ids",
     "normalize_vertical",
+    "resolve_disposition_vertical",
     "router",
     "upsert_vertical_disposition",
+    "uses_vendor_record_ids",
 ]

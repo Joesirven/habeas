@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 
 import httpx
 
-from admin_api.connection_tests import auth0, google_sheets, lever, mailchimp, paylocity, upload_csv
+from admin_api.connection_tests import auth0, google_sheets, lever, paylocity, upload_csv
 from habeas_privacy_core.connections.models import sanitize_test_detail
 from habeas_privacy_core.connections.systems import get_system, validate_credentials
 
@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 _SystemTester = Callable[[dict[str, str]], Awaitable[tuple[bool, str]]]
 
 _SYSTEM_TESTERS: dict[str, _SystemTester] = {
-    "mailchimp": mailchimp.test_mailchimp,
     "paylocity": paylocity.test_paylocity,
     "lever": lever.test_lever,
     "auth0": auth0.test_auth0,
@@ -100,6 +99,8 @@ async def test_upload_connection(
     content: bytes,
     multi_pii_delimiter: str | None,
     column_mapping: dict[str, str] | None = None,
+    email_format: str | None = None,
+    phone_format: str | None = None,
 ) -> tuple[bool, str]:
     """Run an upload CSV connection test without Live credential validation."""
     logger.info("connection_test_started system=%s mode=upload", system)
@@ -117,6 +118,8 @@ async def test_upload_connection(
             content=content,
             multi_pii_delimiter=multi_pii_delimiter,
             column_mapping=column_mapping,
+            email_format=email_format,
+            phone_format=phone_format,
         )
     except Exception:
         logger.info(

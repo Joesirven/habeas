@@ -31,7 +31,6 @@ members = [
     "google-sheets-worker",
     "hash-index-refresh",
     "lever-worker",
-    "mailchimp-worker",
     "matching-worker",
     "paylocity-worker",
     "reaper",
@@ -213,14 +212,18 @@ version = "0.1.0"
 source = { editable = "app/auth0" }
 dependencies = [
     { name = "habeas-privacy-core" },
+    { name = "dbt-bigquery" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "dbt-bigquery", specifier = ">=1.8" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 
@@ -314,6 +317,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "email-validator" },
     { name = "google-auth" },
+    { name = "google-cloud-secret-manager" },
     { name = "google-cloud-storage" },
     { name = "httpx" },
     { name = "opentelemetry-api" },
@@ -330,6 +334,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "email-validator", specifier = ">=2.0" },
     { name = "google-auth", specifier = ">=2.36" },
+    { name = "google-cloud-secret-manager", specifier = ">=2.20" },
     { name = "google-cloud-storage", specifier = ">=2.18" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "opentelemetry-api", specifier = ">=1.29" },
@@ -1092,6 +1097,23 @@ wheels = [
 ]
 
 [[package]]
+name = "google-cloud-secret-manager"
+version = "2.30.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core", extra = ["grpc"] },
+    { name = "google-auth" },
+    { name = "grpc-google-iam-v1" },
+    { name = "grpcio" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/33/4a/7acb616b316c91969f7abf5f3719cb61cc4a97af86411e683ddb11147aa1/google_cloud_secret_manager-2.30.0.tar.gz", hash = "sha256:26ec87737731b483f7f95c26a8c7ab79e22cb66317c95006e7f6985dbc43c8a2", size = 286034, upload-time = "2026-07-16T20:36:23.29Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/18/8b/9347282b7f6828511d8cf927f3ab62b4b849aaa46aa12ae79e2f6da6cb0b/google_cloud_secret_manager-2.30.0-py3-none-any.whl", hash = "sha256:0f285e77d09a73700e3fca9abbc77f844a50276989bf76d64a76b6e2b871e396", size = 229181, upload-time = "2026-07-16T20:36:01.125Z" },
+]
+
+[[package]]
 name = "google-cloud-storage"
 version = "3.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1561,6 +1583,7 @@ source = { editable = "app/lever" }
 dependencies = [
     { name = "habeas-privacy-core" },
     { name = "fastapi" },
+    { name = "google-cloud-bigquery" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1568,6 +1591,7 @@ dependencies = [
 requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "google-cloud-bigquery", specifier = ">=3.25" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 
@@ -1631,23 +1655,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/0c/99/6203ce619dee940d6bfbe099ec3fe4be00a68e9d60f70abf906cf124fe66/librt-0.13.0-cp314-cp314t-win32.whl", hash = "sha256:5fdcf34f86de8fb66d7dc7589f96ba91c4aa46671200d400e6fd6f109a483f18", size = 104357, upload-time = "2026-07-08T12:26:09.828Z" },
     { url = "https://files.pythonhosted.org/packages/52/dd/843b6314087c41657c7036d7914d8f294bdf9b580aa8513ea0588c8e9a3d/librt-0.13.0-cp314-cp314t-win_amd64.whl", hash = "sha256:260c33e92263fa629b4f6d3c51967a1c2158fe6c33237aaa3ebeac586b085259", size = 126998, upload-time = "2026-07-08T12:26:10.975Z" },
     { url = "https://files.pythonhosted.org/packages/5f/5d/3dcec2884ba1b0806d1408612555c38dd5d68e90156b59f75f6e36435c3a/librt-0.13.0-cp314-cp314t-win_arm64.whl", hash = "sha256:2f281549a4c52ac7bb97997f14353f8bd0e53a34ca0dad1c905cfd0b4a58ae99", size = 110771, upload-time = "2026-07-08T12:26:12.303Z" },
-]
-
-[[package]]
-name = "mailchimp-worker"
-version = "0.1.0"
-source = { editable = "app/mailchimp" }
-dependencies = [
-    { name = "habeas-privacy-core" },
-    { name = "fastapi" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 
 [[package]]

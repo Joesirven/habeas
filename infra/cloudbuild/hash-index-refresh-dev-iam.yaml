@@ -1,5 +1,5 @@
 # One-shot: grant admin-api runtime SA invoker on hash-index-refresh-dev
-# and matching-dev. Never grant allUsers or user:* on workers.
+# and data-vertical-matching-dev. Never grant allUsers or user:* on workers.
 # Requires Cloud Build SA run.services.setIamPolicy.
 substitutions:
   _REGION: us-east4
@@ -29,7 +29,7 @@ steps:
       - run
       - services
       - add-iam-policy-binding
-      - matching-dev
+      - data-vertical-matching-dev
       - --region=${_REGION}
       - --member=serviceAccount:${_ADMIN_API_RUNTIME_SA}
       - --role=roles/run.invoker

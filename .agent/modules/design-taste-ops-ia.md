@@ -4,6 +4,18 @@
 
 **Inherits:** [`design-taste.md`](design-taste.md) (shadcn + Habeas). This file only adds ops composition recipes.
 
+## Vocabulary
+
+- **request** — one privacy request.
+- **source** — intake origin. **CA DROP** is a source (also access portal / authorized agent / manual). Never a connection.
+- **system** (connection) — a data system in a vertical. Owner verifies matching **per system** (separate matching-review rows).
+- **vertical** — org slice that owns systems. **Test vertical** systems display as **System A** / **System B**; other verticals use the real connection name.
+- **batch** — date + source grouping (e.g. `Aug 21 · CA DROP`).
+- **matching-review item** — one review row for a request in one system.
+- **data owner** / **data user** — owner configures connections; user reviews and fulfills.
+
+Source filter = DROP vs other intake. System filter = catalog connections (Alumni, Mailchimp, …). Do not put CA DROP next to Alumni as a system chip.
+
 ## Composition recipes
 
 ### Requests list
@@ -20,7 +32,8 @@
 - Legal / data-owner persona: Home / My work (not pipeline Dashboard); hide Workers; Triage bulk Reject `2` / Send to matching; Escalations resolve via fulfill path + comments; DO approve uses recommended `3`/`4`/`5`. DO **Tasks** = `assignee=me` (My work Assigned card → `?kind=pending_tasks`).
 - Legal **Conditions** (`/requests/conditions`): version `intake.route_triage` via allowlist (`requestor_state_not_in`) or explicit Triage list (`state_in`); save closes active rule and inserts replacement.
 - Legal **Notice**: fulfilled DROP rows (`response_status` set + `notice_review_status=pending`); bulk/detail **Approve notice**. **Delivery**: `communication_attempts` purpose `access_delivery` awaiting status; Legal **Mark delivered / failed / recalled** via `PATCH …/workflow/delivery/{id}/status` (shareable URL when access packs land).
-- Queue rows: human title first, then source · lane · id, blocker/due — not id-first mono soup. **No journey strip on list rows** — chrome lives on opened detail only.
+- Queue rows: human title first, then source · lane · id, blocker/due — not id-first mono soup. **No journey strip on list rows** — chrome lives on opened detail only. No `#N loaded (of M) · K groups` status in the Inbox / Results lab top bar.
+- **Source** vs **system**: source is intake (CA DROP). System chips and Group-by System are catalog connections only. Test vertical chips read System A / System B. Owner inbox = one matching-review row per system.
 - Detail pane (opened request): title + meta strip, **four-panel journey workbench** (Ingest · Matching · Fulfillment · Notice), focused Matching / Delivery / Notice body, comments footer. Product contract: `docs/plans/2026-07-29-001-feat-request-journey-workbench-plan.md`.
 - **Batch selection** in the review pane shows the **same workbench with aggregate** Matching/Fulfillment vertical posture (not a thin chip strip).
 - Delivery: shareable URL, Copy URL, **Draft outbound** (template with URL in body), delivery status.
@@ -74,3 +87,4 @@
 - Duplicate Matching review as a top-level nav item.
 - Put the four-stage journey strip on Inbox / list rows (detail and batch-selection workbench only).
 - Auto-start Fulfillment from matching approve alone — Legal kickoff (and Access identity-comment when applicable) gate start.
+- Label CA DROP as a system or connection chip (including next to Alumni). CA DROP is source-only; Test vertical uses System A / System B.

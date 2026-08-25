@@ -8,8 +8,48 @@ import logging
 import os
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Any
+from uuid import UUID
 
 import httpx
+from habeas_privacy_core.audit.redaction import redact_error_text
+from habeas_privacy_core.auth import (
+    ROLE_ADMIN,
+    ROLE_DATA_OWNER,
+    ROLE_DATA_USER,
+    ROLE_LEGAL,
+    ROLE_SUPER_ADMIN,
+    UNKNOWN_ACTOR,
+    is_authenticated_actor,
+    is_vertical_operator_role,
+    resolve_actor,
+)
+from habeas_privacy_core.auth.roles import (
+    parse_email_allowlist,
+    resolve_role_from_allowlists,
+)
+from habeas_privacy_core.config import CoreSettings
+from habeas_privacy_core.db.pool import get_pool
+from habeas_privacy_core.db.request_resolver import request_resolver
+from habeas_privacy_core.db.vertical_matching import (
+    AUTH0_VERTICAL,
+    fetch_confirmed_vendor_record_ids,
+    fetch_vertical_matching_snapshot,
+)
+from habeas_privacy_core.geo.state import InvalidStateAcronymError, normalize_state_acronym
+from habeas_privacy_core.models.intake import DropListType
+from habeas_privacy_core.models.request import IntakeSource
+from habeas_privacy_core.workflow.approval import (
+    MATCHING_REVIEW_ACTION,
+    assert_matching_promote_allowed_for_role,
+    ensure_pending_matching_review,
+    escalate_to_legal_with_fanout,
+    fetch_active_legal_team_emails,
+    fetch_intake_route_triage_rule,
+    has_assignment_to_legal,
+    is_legal_persona_for_promote_gate,
+    is_matching_review_approved,
+    version_intake_route_triage_rule,
+)
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -36,41 +76,15 @@ from admin_api.approvals import (
     send_legal_triage_to_matching,
 )
 from admin_api.cloud_run_auth import auth_headers_for
-from admin_api.roles import RolePrincipal, require_roles, settings as role_settings
-from admin_api.vertical_dispositions import normalize_dwids
-from habeas_privacy_core.auth import (
-    ROLE_ADMIN,
-    ROLE_DATA_OWNER,
-    ROLE_DATA_USER,
-    ROLE_LEGAL,
-    ROLE_SUPER_ADMIN,
-    UNKNOWN_ACTOR,
-    is_authenticated_actor,
-    resolve_actor,
-)
-from habeas_privacy_core.audit.redaction import redact_error_text
-from habeas_privacy_core.config import CoreSettings
-from habeas_privacy_core.db.pool import get_pool
-from admin_api.sheets_intake_refresh import stamp_volatile_sheets_after_intake
-from habeas_privacy_core.db.request_resolver import request_resolver
-from habeas_privacy_core.geo.state import InvalidStateAcronymError, normalize_state_acronym
-from habeas_privacy_core.models.intake import DropListType
-from habeas_privacy_core.models.request import IntakeSource
-from habeas_privacy_core.auth.roles import (
-    parse_email_allowlist,
-    resolve_role_from_allowlists,
-)
-from habeas_privacy_core.workflow.approval import (
-    MATCHING_REVIEW_ACTION,
-    assert_matching_promote_allowed_for_role,
-    ensure_pending_matching_review,
-    escalate_to_legal_with_fanout,
-    fetch_active_legal_team_emails,
-    fetch_intake_route_triage_rule,
-    has_assignment_to_legal,
-    is_legal_persona_for_promote_gate,
-    is_matching_review_approved,
-    version_intake_route_triage_rule,
+from admin_api.roles import RolePrincipal, require_roles
+from admin_api.roles import settings as role_settings
+from admin_api.vertical_dispositions import (
+    VERTICAL_DATA,
+    VERTICAL_LABELS,
+    fetch_vertical_disposition,
+    matching_snapshot_lookup_keys,
+    normalize_dwids,
+    normalize_vertical,
 )
 
 logger = logging.getLogger(__name__)
@@ -234,27 +248,37 @@ class HashIndexRefreshEnqueueAllBody(BaseModel):
 
 
 class BulkApproveMatchingResultsBody(BaseModel):
-    """Clear matching.review for DROP results filtered by match type."""
+    """Clear one ``(vertical, system)`` matching-review item per match type.
+
+    Path stays request UUID on single-item routes. This batch body carries
+    vertical + system so a match-type sweep cannot close sibling systems.
+    """
 
     match_type: MatchTypeFilter
     # Client hint only — overwritten by IAP identity when the header is present.
     decided_by: str = "web-admin@habeas.com"
     decision_reason: str | None = None
+    vertical: str = Field(min_length=1, max_length=50)
+    system: str = Field(min_length=1, max_length=50)
 
 
 class MatchingReviewDecisionBody(BaseModel):
     """Promote (approve) or decline (reject) a single matching.review gate.
 
     Optional ``response_status`` (CPPA DROP codes 3/4/5) sets the DROP result
-    when promoting — Inbox fulfill confirms the status result. ``dwids`` is the
-    reviewer's selection for status 3/4; omit it to accept the matching-result
-    default (R8).
+    when promoting — Inbox fulfill confirms the status result. Status 3/4
+    require an explicit ``dwids`` selection (empty/missing is 400). Status 5
+    and decline carry no dwids.
     """
 
     decided_by: str | None = None
     decision_reason: str | None = None
     response_status: int | None = Field(default=None, ge=3, le=5)
     dwids: list[str] | None = None
+    # Matching-results review item for this vertical — not the whole request.
+    vertical: str | None = Field(default=None, max_length=50)
+    # Inbox identity for one system inside the vertical — disposition stays vertical.
+    system: str | None = Field(default=None, max_length=50)
 
 
 class AssignBody(BaseModel):
@@ -1714,19 +1738,7 @@ async def drop_promote(
     # thin proxy to drop_ingestor; intake due_at belongs after ingest creates rows.
     url = f"{settings.drop_ingestor_url.rstrip('/')}/ingest/promote"
     payload = _model_dump_nonzero(body) if body is not None else {}
-    status_code, result = await proxy_post_payload(url, json_body=payload)
-    if status_code == 200:
-        try:
-            await stamp_volatile_sheets_after_intake()
-        except Exception as exc:
-            logger.warning(
-                "sheets_intake_stamp_failed",
-                extra={
-                    "event": "sheets_intake_stamp_failed",
-                    "error_type": type(exc).__name__,
-                },
-            )
-    return JSONResponse(content=result, status_code=status_code)
+    return await proxy_post(url, json_body=payload)
 
 
 @router.post("/dispatch")
@@ -1916,30 +1928,179 @@ async def hash_index_refresh_process(
     return JSONResponse(content=payload, status_code=status_code)
 
 
+# Matching-attempt audit keys (write-path allowlist in matching/audit_payload.py).
+# Re-applied on read so legacy/buggy JSONB never returns hash/dwid/email/phone.
+_ATTEMPT_AUDIT_ALLOWED_KEYS = frozenset(
+    {
+        "adapter",
+        "pipeline",
+        "code_version",
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "attempt_number",
+        "list_type",
+        "lookup_state",
+        "bq_project",
+        "bq_dataset",
+        "bq_tables",
+        "match_count",
+        "matched",
+        "matched_via",
+        "result_id",
+        "error_code",
+        "error_class",
+        "error_detail",
+        "retry_scheduled",
+    }
+)
+
+
 def _coerce_audit_payload(value: Any) -> dict[str, Any]:
-    """Normalize JSONB audit_payload to a dict (legacy rows may be list/str/null)."""
+    """Normalize JSONB audit_payload and re-allowlist keys (no hash/dwid/PII)."""
     if value is None:
         return {}
+    raw: dict[str, Any] | None = None
     if isinstance(value, dict):
-        return dict(value)
-    if isinstance(value, str):
+        raw = value
+    elif isinstance(value, str):
         try:
             parsed = json.loads(value)
         except (TypeError, ValueError, json.JSONDecodeError):
             return {}
-        return dict(parsed) if isinstance(parsed, dict) else {}
-    return {}
+        raw = parsed if isinstance(parsed, dict) else None
+    if raw is None:
+        return {}
+    return {
+        key: item
+        for key, item in raw.items()
+        if key in _ATTEMPT_AUDIT_ALLOWED_KEYS and item is not None
+    }
+
+
+_MATCH_CHANNELS = frozenset({"email", "phone", "ndz"})
+_LIST_TYPE_TO_CHANNEL = {
+    "email": "email",
+    "phone": "phone",
+    "ndz": "ndz",
+}
+
+
+def _channel_from_list_type(value: Any) -> str | None:
+    """Map allowlisted DROP list_type to a non-hash match channel."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    return _LIST_TYPE_TO_CHANNEL.get(text)
+
+
+def _channel_from_matched_via(value: Any) -> str | None:
+    """Infer email/phone/ndz from known matched_via labels — never from hash hex."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text or text in _MATCH_CHANNELS:
+        return text if text in _MATCH_CHANNELS else None
+    # Known worker labels: drop_hash_email, drop_hash_phone, drop_hash_ndz_composite.
+    if text.startswith("drop_hash_email"):
+        return "email"
+    if text.startswith("drop_hash_phone"):
+        return "phone"
+    if text.startswith("drop_hash_ndz"):
+        return "ndz"
+    return None
+
+
+def infer_matched_channels(
+    *,
+    matched_via: Any = None,
+    attempts: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Non-hash match channels for CA DROP detail — email / phone / ndz only."""
+    channels: list[str] = []
+    seen: set[str] = set()
+
+    def _add(channel: str | None) -> None:
+        if channel in _MATCH_CHANNELS and channel not in seen:
+            seen.add(channel)
+            channels.append(channel)
+
+    _add(_channel_from_matched_via(matched_via))
+    for attempt in attempts or []:
+        payload = attempt.get("audit_payload") if isinstance(attempt, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        _add(_channel_from_list_type(payload.get("list_type")))
+        _add(_channel_from_matched_via(payload.get("matched_via")))
+    return channels
+
+
+def _matched_contacts_error(
+    *,
+    code: str,
+    message: str,
+    stage: str,
+    hint: str | None = None,
+    exc_type: str | None = None,
+) -> dict[str, str]:
+    """Structured contact-enrichment error — codes/messages only, never PII."""
+    error: dict[str, str] = {"code": code, "message": message, "stage": stage}
+    if hint:
+        error["hint"] = hint
+    if exc_type:
+        error["exc_type"] = exc_type
+    return error
+
+
+def _matched_contacts_error_from_exc(exc: BaseException) -> dict[str, str]:
+    name = type(exc).__name__
+    lowered = name.lower()
+    if name in {"ImportError", "ModuleNotFoundError"} or "bigquery" in lowered:
+        return _matched_contacts_error(
+            code="bq_not_configured",
+            message="BigQuery client is not configured",
+            stage="enrich_matching_result_contacts",
+            hint="contact lookup requires BigQuery",
+            exc_type=name,
+        )
+    return _matched_contacts_error(
+        code="enrichment_failed",
+        message="matched contact lookup failed",
+        stage="enrich_matching_result_contacts",
+        exc_type=name,
+    )
+
+
+def _echo_matching_review_system(
+    payload: dict[str, Any],
+    system: str | None,
+) -> dict[str, Any]:
+    """Echo inbox system on promote/decline JSON when the client sent one."""
+    if system is None:
+        return payload
+    text = str(system).strip().lower()
+    if text:
+        payload["system"] = text
+    return payload
 
 
 _DEFAULT_BQ_PROJECT = "example-gcp-project"
 _DEFAULT_BQ_DATASET = "drop_hash_index"
 _MDR_PERSON_TABLE = "`example-gcp-project.person_db.person`"
 _MDR_PHONES_TABLE = "`example-gcp-project.person_db.phones`"
+_MATCHING_CONTACTS_SEARCH_LIMIT = 20
 _HASH_TABLE_BY_LIST_TYPE = {
     DropListType.EMAIL: "email_hash",
     DropListType.PHONE: "phone_hash",
     DropListType.NDZ: "ndz_hash",
 }
+
+
+def _normalize_person_name(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _initial_from_name(value: Any) -> str | None:
@@ -1949,6 +2110,42 @@ def _initial_from_name(value: Any) -> str | None:
     if not text:
         return None
     return text[0].upper()
+
+
+def _contact_from_mdr_row(row: Any) -> dict[str, Any]:
+    """Map one MDR person (+ phones) row to the matching-review contact shape."""
+    phones: list[dict[str, str]] = []
+    cell = row.get("likely_cell_phone")
+    land = row.get("likely_land_phone")
+    if cell and str(cell).strip():
+        phones.append({"type": "cell", "number": str(cell).strip()})
+    if land and str(land).strip():
+        phones.append({"type": "land", "number": str(land).strip()})
+    birthdate = row.get("birthdate")
+    dob = str(birthdate).strip() if birthdate is not None and str(birthdate).strip() else None
+    email_raw = row.get("emailaddress")
+    email = str(email_raw).strip() if email_raw is not None and str(email_raw).strip() else None
+    return {
+        "dwid": str(row["dwid"]),
+        "state": str(row["state"]).strip().upper(),
+        "first_initial": _initial_from_name(row.get("firstname")),
+        "last_initial": _initial_from_name(row.get("lastname")),
+        "last_name": _normalize_person_name(row.get("lastname")),
+        "dob": dob,
+        "email": email,
+        "phones": phones,
+    }
+
+
+def _contact_search_name_parts(query: str) -> tuple[str | None, str | None]:
+    """Split a non-email, non-dwid query into first / last name prefixes."""
+    text = query.strip()
+    if not text or "@" in text or text.isdigit():
+        return None, None
+    parts = text.split()
+    first = parts[0].lower()
+    last = parts[-1].lower() if len(parts) >= 2 else None
+    return first, last
 
 
 def _primary_hash_for_list_type(
@@ -2080,31 +2277,76 @@ def _fetch_person_contacts_from_bq(
     except Exception as exc:
         raise RuntimeError(redact_error_text(str(exc))) from exc
 
-    contacts: list[dict[str, Any]] = []
-    for row in rows:
-        phones: list[dict[str, str]] = []
-        cell = row.get("likely_cell_phone")
-        land = row.get("likely_land_phone")
-        if cell and str(cell).strip():
-            phones.append({"type": "cell", "number": str(cell).strip()})
-        if land and str(land).strip():
-            phones.append({"type": "land", "number": str(land).strip()})
-        birthdate = row.get("birthdate")
-        dob = str(birthdate).strip() if birthdate is not None and str(birthdate).strip() else None
-        email_raw = row.get("emailaddress")
-        email = str(email_raw).strip() if email_raw is not None and str(email_raw).strip() else None
-        contacts.append(
-            {
-                "dwid": str(row["dwid"]),
-                "state": str(row["state"]).strip().upper(),
-                "first_initial": _initial_from_name(row.get("firstname")),
-                "last_initial": _initial_from_name(row.get("lastname")),
-                "dob": dob,
-                "email": email,
-                "phones": phones,
-            }
-        )
-    return contacts
+    return [_contact_from_mdr_row(row) for row in rows]
+
+
+def _search_person_contacts_from_bq(
+    *,
+    query: str,
+    limit: int = _MATCHING_CONTACTS_SEARCH_LIMIT,
+    client: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Parameterized MDR person/phones search by email, dwid, or name.
+
+    Same tables as ``_fetch_person_contacts_from_bq``. Never log ``query``.
+    """
+    text = query.strip()
+    if not text:
+        return []
+    capped = min(max(int(limit), 1), _MATCHING_CONTACTS_SEARCH_LIMIT)
+    name_first, name_last = _contact_search_name_parts(text)
+
+    try:
+        from google.cloud import bigquery
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("google-cloud-bigquery is not installed") from exc
+
+    sql = f"""
+        SELECT CAST(p.dwid AS STRING) AS dwid,
+               p.state,
+               p.firstname,
+               p.lastname,
+               CAST(p.birthdate AS STRING) AS birthdate,
+               p.emailaddress,
+               ph.likely_cell_phone,
+               ph.likely_land_phone
+          FROM {_MDR_PERSON_TABLE} p
+          LEFT JOIN {_MDR_PHONES_TABLE} ph
+            ON CAST(ph.dwid AS STRING) = CAST(p.dwid AS STRING)
+           AND ph.state = p.state
+         WHERE CAST(p.dwid AS STRING) = @q
+            OR LOWER(TRIM(IFNULL(p.emailaddress, ''))) = LOWER(@q)
+            OR (
+                @name_first IS NOT NULL
+                AND STARTS_WITH(LOWER(TRIM(IFNULL(p.firstname, ''))), @name_first)
+                AND (
+                    @name_last IS NULL
+                    OR STARTS_WITH(LOWER(TRIM(IFNULL(p.lastname, ''))), @name_last)
+                )
+            )
+            OR (
+                @name_first IS NOT NULL
+                AND @name_last IS NULL
+                AND STARTS_WITH(LOWER(TRIM(IFNULL(p.lastname, ''))), @name_first)
+            )
+         ORDER BY p.lastname, p.firstname, p.dwid
+         LIMIT @limit
+    """
+    bq_client = client or bigquery.Client()
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("q", "STRING", text),
+            bigquery.ScalarQueryParameter("name_first", "STRING", name_first),
+            bigquery.ScalarQueryParameter("name_last", "STRING", name_last),
+            bigquery.ScalarQueryParameter("limit", "INT64", capped),
+        ]
+    )
+    try:
+        rows = list(bq_client.query(sql, job_config=job_config))
+    except Exception as exc:
+        raise RuntimeError(redact_error_text(str(exc))) from exc
+
+    return [_contact_from_mdr_row(row) for row in rows]
 
 
 async def _resolve_matched_dwids(
@@ -2164,6 +2406,104 @@ async def _resolve_matched_dwids(
     return dwids, normalized_state
 
 
+def _hash_kind_for_list_type(list_type: DropListType) -> str:
+    if list_type == DropListType.EMAIL:
+        return "email"
+    if list_type == DropListType.PHONE:
+        return "phone"
+    if list_type == DropListType.NDZ:
+        return "ndz"
+    return list_type.value
+
+
+def serialize_matched_hashes(
+    *,
+    list_type: DropListType,
+    hash_fields: dict[str, Any],
+    matched_via: str | None,
+) -> list[dict[str, str]]:
+    """CA DROP hashes that were looked up — hashes are not emails/phones.
+
+    Never log this list; authorized matching-results reads may return it.
+    """
+    hashes: list[dict[str, str]] = []
+    seen: set[str] = set()
+    primary, via = _primary_hash_for_list_type(list_type, hash_fields)
+    kind = _hash_kind_for_list_type(list_type)
+    if primary:
+        seen.add(primary)
+        hashes.append(
+            {
+                "kind": kind,
+                "hash": primary,
+                "matched_via": str(matched_via or via),
+            }
+        )
+    for key, raw in hash_fields.items():
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        field_kind = kind
+        lowered = key.lower()
+        if "email" in lowered:
+            field_kind = "email"
+        elif "phone" in lowered:
+            field_kind = "phone"
+        elif "ndz" in lowered or "concat" in lowered:
+            field_kind = "ndz"
+        hashes.append(
+            {
+                "kind": field_kind,
+                "hash": value,
+                "matched_via": str(matched_via or via),
+            }
+        )
+    return hashes
+
+
+async def _matched_hashes_for_request(
+    conn: Any,
+    *,
+    request_id: str,
+    matched_via: str | None,
+) -> list[dict[str, str]]:
+    """Best-effort DROP hash strings for CA DROP matching-results detail."""
+    row = await conn.fetchrow(
+        """
+        SELECT r.raw_record_id, r.intake_source
+          FROM matching_results mr
+          JOIN requests r ON r.id = mr.request_id
+         WHERE mr.request_id = $1::uuid
+         ORDER BY mr.recorded_at DESC
+         LIMIT 1
+        """,
+        request_id,
+    )
+    if row is None:
+        return []
+    try:
+        intake = row["intake_source"]
+        raw_record_id = row["raw_record_id"]
+    except (KeyError, TypeError, IndexError):
+        return []
+    if intake != IntakeSource.DROP.value or raw_record_id is None:
+        return []
+    try:
+        payload = await request_resolver(
+            conn, IntakeSource.DROP, int(row["raw_record_id"])
+        )
+    except (LookupError, ValueError, NotImplementedError):
+        return []
+    return serialize_matched_hashes(
+        list_type=payload.list_type,
+        hash_fields=payload.hash_fields,
+        matched_via=matched_via,
+    )
+
+
 async def _dwids_for_promote(
     conn: Any,
     *,
@@ -2171,49 +2511,17 @@ async def _dwids_for_promote(
     response_status: int | None,
     client_dwids: list[str] | None,
 ) -> list[str] | None:
-    """Reviewer dwid selection for a promote, defaulting to the matched set (R8).
+    """Reviewer dwid selection for a promote — never default 3/4 to the full set.
 
-    Status 5 (Not found) carries no dwids. Status 3/4 without a client selection
-    falls back to the matching result — single match resolves from the stored
-    consumer id, multi match re-looks up the DROP hash. Resolution is
-    best-effort: promote must not fail because the hash mart is unreachable, so
-    an unresolved selection leaves the disposition for the reviewer to set.
+    Status 5 (Not found) carries no dwids. Status 3/4 require an explicit client
+    selection; empty or missing returns None so the HTTP layer can 400. Do not
+    look up matching-result dwids here — that used to treat empty as “all”.
     """
+    del conn, request_id
     selected = normalize_dwids(client_dwids)
-    if selected or response_status not in (3, 4):
-        return selected or None
-
-    match_count = await conn.fetchval(
-        """
-        SELECT match_count
-          FROM matching_results
-         WHERE request_id = $1::uuid
-         ORDER BY recorded_at DESC
-         LIMIT 1
-        """,
-        request_id,
-    )
-    if match_count is None:
+    if response_status in (3, 4) and not selected:
         return None
-    try:
-        dwids, _state = await _resolve_matched_dwids(
-            conn,
-            request_id=request_id,
-            match_count=int(match_count),
-            requestor_state=None,
-        )
-    except Exception as exc:
-        logger.warning(
-            "promote_dwid_resolution_failed",
-            extra={
-                "event": "promote_dwid_resolution_failed",
-                "request_id": request_id,
-                "match_count": int(match_count),
-                "error": redact_error_text(str(exc)),
-            },
-        )
-        return None
-    return normalize_dwids(dwids) or None
+    return selected or None
 
 
 async def enrich_matching_result_contacts(
@@ -2234,8 +2542,26 @@ async def enrich_matching_result_contacts(
         match_count=match_count,
         requestor_state=detail.get("requestor_state"),
     )
-    if not dwids or not lookup_state:
-        return {"matched_contacts": [], "matched_contacts_status": "unavailable"}
+    if not lookup_state:
+        return {
+            "matched_contacts": [],
+            "matched_contacts_status": "unavailable",
+            "matched_contacts_error": _matched_contacts_error(
+                code="no_lookup_state",
+                message="no requestor state for contact lookup",
+                stage="resolve_dwids",
+            ),
+        }
+    if not dwids:
+        return {
+            "matched_contacts": [],
+            "matched_contacts_status": "unavailable",
+            "matched_contacts_error": _matched_contacts_error(
+                code="no_dwids",
+                message="no matched dwids to enrich",
+                stage="resolve_dwids",
+            ),
+        }
 
     contacts = await asyncio.to_thread(
         _fetch_person_contacts_from_bq,
@@ -2427,6 +2753,92 @@ async def collect_matching_results(
     }
 
 
+def empty_auth0_vertical_block() -> dict[str, Any]:
+    """Counts-only Auth0 candidate/confirm stub — no vendor ids."""
+    return {
+        "match_count": 0,
+        "disposition_status": None,
+        "selected_vendor_record_id_count": 0,
+    }
+
+
+async def fetch_auth0_disposition_status(conn: Any, request_id: str) -> int | None:
+    """Auth0 confirm status (3/4/5), or None when no disposition row."""
+    row = await conn.fetchrow(
+        """
+        SELECT status
+          FROM request_vertical_dispositions
+         WHERE request_id = $1::uuid
+           AND vertical = $2
+        """,
+        request_id,
+        AUTH0_VERTICAL,
+    )
+    if row is None:
+        return None
+    try:
+        status = row["status"]
+    except (KeyError, TypeError):
+        return None
+    if status is None:
+        return None
+    return int(status)
+
+
+async def build_auth0_vertical_block(conn: Any, request_id: str) -> dict[str, Any]:
+    """Auth0 candidate (S03 snapshot) + confirm counts for matching-results.
+
+    Never includes raw ``vendor_record_ids`` — those stay on the search API.
+    """
+    block = empty_auth0_vertical_block()
+    try:
+        snapshot = await fetch_vertical_matching_snapshot(
+            conn, request_id=request_id, vertical=AUTH0_VERTICAL
+        )
+    except Exception as exc:
+        logger.warning(
+            "auth0_vertical_snapshot_failed",
+            extra={
+                "event": "auth0_vertical_snapshot_failed",
+                "request_id": request_id,
+                "error_type": type(exc).__name__,
+            },
+        )
+        snapshot = None
+    if snapshot is not None:
+        block["match_count"] = int(snapshot.match_count)
+
+    try:
+        confirmed = await fetch_confirmed_vendor_record_ids(
+            conn, request_id=request_id, vertical=AUTH0_VERTICAL
+        )
+        block["selected_vendor_record_id_count"] = len(confirmed)
+    except Exception as exc:
+        logger.warning(
+            "auth0_vertical_confirm_failed",
+            extra={
+                "event": "auth0_vertical_confirm_failed",
+                "request_id": request_id,
+                "error_type": type(exc).__name__,
+            },
+        )
+
+    try:
+        block["disposition_status"] = await fetch_auth0_disposition_status(
+            conn, request_id
+        )
+    except Exception as exc:
+        logger.warning(
+            "auth0_vertical_disposition_failed",
+            extra={
+                "event": "auth0_vertical_disposition_failed",
+                "request_id": request_id,
+                "error_type": type(exc).__name__,
+            },
+        )
+    return block
+
+
 async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, Any] | None:
     """Single DROP matching result detail (latest row + review gate)."""
     row = await conn.fetchrow(
@@ -2513,6 +2925,10 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
         for a in attempt_rows
     ]
     detail["assignment"] = await get_current_assignment(conn, request_id)
+    detail["matched_channels"] = infer_matched_channels(
+        matched_via=detail.get("matched_via"),
+        attempts=detail["attempts"],
+    )
     if int(detail.get("match_count") or 0) > 0:
         try:
             detail.update(
@@ -2533,9 +2949,38 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
             )
             detail["matched_contacts"] = []
             detail["matched_contacts_status"] = "unavailable"
+            detail["matched_contacts_error"] = _matched_contacts_error_from_exc(exc)
     else:
         detail["matched_contacts"] = []
         detail["matched_contacts_status"] = "none"
+    try:
+        detail["matched_hashes"] = await _matched_hashes_for_request(
+            conn,
+            request_id=request_id,
+            matched_via=detail.get("matched_via"),
+        )
+    except Exception as exc:
+        logger.warning(
+            "matching_hashes_enrichment_failed",
+            extra={
+                "event": "matching_hashes_enrichment_failed",
+                "request_id": request_id,
+                "error_type": type(exc).__name__,
+            },
+        )
+        detail["matched_hashes"] = []
+    try:
+        detail["auth0_vertical"] = await build_auth0_vertical_block(conn, request_id)
+    except Exception as exc:
+        logger.warning(
+            "auth0_vertical_block_failed",
+            extra={
+                "event": "auth0_vertical_block_failed",
+                "request_id": request_id,
+                "error_type": type(exc).__name__,
+            },
+        )
+        detail["auth0_vertical"] = empty_auth0_vertical_block()
     return detail
 
 
@@ -2614,69 +3059,156 @@ async def drop_matching_results(
 
 @router.post("/matching-results/bulk-approve")
 async def drop_matching_results_bulk_approve(
-    _principal: MatchingReviewPrincipal,
+    principal: MatchingReviewPrincipal,
     body: BulkApproveMatchingResultsBody,
     actor: DropMutationActor,
 ):
-    """Bulk-promote: approve pending matching.review filtered by match type."""
+    """Bulk-promote one ``(vertical, system)`` item per match-type request."""
     _require_database()
     if body.match_type not in MATCH_TYPE_FILTERS:
         raise HTTPException(status_code=422, detail=f"invalid match_type: {body.match_type}")
     decided_by = decided_by_for_mutation(actor, body.decided_by)
     pool = get_pool()
     async with pool.acquire() as conn:
-        result = await bulk_approve_matching_review_by_match_type(
-            conn,
-            match_type=body.match_type,
-            decided_by=decided_by,
-            decision_reason=body.decision_reason,
-        )
+        try:
+            await _require_matching_review_vertical_access(
+                conn,
+                principal=principal,
+                vertical=body.vertical,
+                system=body.system,
+            )
+            result = await bulk_approve_matching_review_by_match_type(
+                conn,
+                match_type=body.match_type,
+                decided_by=decided_by,
+                decision_reason=body.decision_reason,
+                vertical=body.vertical,
+                system=body.system,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": "ok", **result}
 
 
 @router.post("/matching-results/bulk-decline")
 async def drop_matching_results_bulk_decline(
+    principal: MatchingReviewPrincipal,
     body: BulkApproveMatchingResultsBody,
     actor: DropMutationActor,
 ):
-    """Bulk-decline: reject pending matching.review filtered by match type."""
+    """Bulk-decline one ``(vertical, system)`` item per match-type request."""
     _require_database()
     if body.match_type not in MATCH_TYPE_FILTERS:
         raise HTTPException(status_code=422, detail=f"invalid match_type: {body.match_type}")
     decided_by = decided_by_for_mutation(actor, body.decided_by)
     pool = get_pool()
     async with pool.acquire() as conn:
-        result = await bulk_decline_matching_review_by_match_type(
-            conn,
-            match_type=body.match_type,
-            decided_by=decided_by,
-            decision_reason=body.decision_reason,
-        )
+        try:
+            await _require_matching_review_vertical_access(
+                conn,
+                principal=principal,
+                vertical=body.vertical,
+                system=body.system,
+            )
+            result = await bulk_decline_matching_review_by_match_type(
+                conn,
+                match_type=body.match_type,
+                decided_by=decided_by,
+                decision_reason=body.decision_reason,
+                vertical=body.vertical,
+                system=body.system,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": "ok", **result}
+
+
+def _matching_review_access_vertical(
+    vertical: str | None,
+    system: str | None = None,
+) -> str | None:
+    """Body vertical, or the unique catalog vertical for ``system``."""
+    if vertical is not None and str(vertical).strip():
+        return normalize_vertical(vertical)
+    if system is None or not str(system).strip():
+        return None
+    from habeas_privacy_core.connections.catalog import get_bindings_for_system
+
+    bindings = get_bindings_for_system(str(system).strip().lower())
+    vertical_ids = {binding.vertical_id for binding in bindings}
+    if len(vertical_ids) == 1:
+        return next(iter(vertical_ids))
+    from admin_api.vertical_dispositions import LIVE_VERTICALS
+
+    live = vertical_ids & set(LIVE_VERTICALS)
+    if len(live) == 1:
+        return next(iter(live))
+    return None
+
+
+async def _require_matching_review_vertical_access(
+    conn: Any,
+    *,
+    principal: RolePrincipal,
+    vertical: str | None,
+    system: str | None = None,
+) -> None:
+    """Data owners may mutate only assigned verticals. Missing/unassigned → 403."""
+    vertical_id = _matching_review_access_vertical(vertical, system)
+    if is_vertical_operator_role(principal.role) and not vertical_id:
+        raise HTTPException(status_code=403, detail="vertical access denied")
+    if not vertical_id:
+        return
+    from admin_api.vertical_assignments import principal_has_vertical
+
+    allowed = await principal_has_vertical(
+        conn,
+        email=principal.email,
+        vertical_id=vertical_id,
+        role=principal.role,
+    )
+    if not allowed:
+        raise HTTPException(status_code=403, detail="vertical access denied")
 
 
 @router.post("/matching-results/{request_id}/promote")
 async def drop_matching_result_promote(
     request_id: str,
     body: MatchingReviewDecisionBody,
+    principal: MatchingReviewPrincipal,
     actor: DropMutationActor,
 ):
-    """Promote one request to fulfillment (approve matching.review).
+    """Promote one vertical matching-review item (approve when all live are done).
 
     When ``response_status`` is set (3 Deleted / 4 Opted out / 5 Not found),
-    also record the Data vertical disposition (source of record) and write the
-    DROP status result on ``drop_raw_requests``.
+    record that vertical's disposition (source of record). DROP status on
+    ``drop_raw_requests`` is mirrored only for the Data vertical.
     """
     _require_database()
+    try:
+        UUID(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid request_id") from exc
     if body.response_status is not None and body.response_status not in (3, 4, 5):
         raise HTTPException(
             status_code=422,
             detail="response_status must be 3 (Deleted), 4 (Opted out), or 5 (Not found)",
         )
+    if body.response_status in (3, 4) and not normalize_dwids(body.dwids):
+        raise HTTPException(
+            status_code=400,
+            detail="status 3/4 requires at least one dwid",
+        )
     decided_by = decided_by_for_mutation(actor, body.decided_by)
     pool = get_pool()
     async with pool.acquire() as conn:
         try:
+            await _require_matching_review_vertical_access(
+                conn,
+                principal=principal,
+                vertical=body.vertical,
+                system=body.system,
+            )
             actor_role = _role_for_actor_email(decided_by)
             dwids = await _dwids_for_promote(
                 conn,
@@ -2705,57 +3237,423 @@ async def drop_matching_result_promote(
                 response_status=body.response_status,
                 dwids=dwids,
                 actor_role=actor_role,
+                vertical=body.vertical,
+                system=body.system,
             )
-            from admin_api.legal_sla import SLA_STAGE_FULFILLMENT, apply_request_due_at_for_stage
+            # matching.review must not start fulfillment. Apply the fulfillment
+            # SLA clock only when the request-wide gate actually closed — never
+            # while sibling catalog systems are still pending.
+            if result.get("review_status") == "approved":
+                from admin_api.legal_sla import (
+                    SLA_STAGE_FULFILLMENT,
+                    apply_request_due_at_for_stage,
+                )
 
-            await apply_request_due_at_for_stage(
-                conn,
-                request_id,
-                stage=SLA_STAGE_FULFILLMENT,
-            )
+                await apply_request_due_at_for_stage(
+                    conn,
+                    request_id,
+                    stage=SLA_STAGE_FULFILLMENT,
+                )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"status": "ok", **result}
+    return _echo_matching_review_system({"status": "ok", **result}, body.system)
 
 
 @router.post("/matching-results/{request_id}/decline")
 async def drop_matching_result_decline(
     request_id: str,
     body: MatchingReviewDecisionBody,
+    principal: MatchingReviewPrincipal,
     actor: DropMutationActor,
 ):
-    """Decline one request (reject matching.review — not fulfill-ready)."""
+    """Decline one vertical matching-review item (not fulfill-ready)."""
     _require_database()
+    try:
+        UUID(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid request_id") from exc
     decided_by = decided_by_for_mutation(actor, body.decided_by)
     pool = get_pool()
     async with pool.acquire() as conn:
         try:
+            await _require_matching_review_vertical_access(
+                conn,
+                principal=principal,
+                vertical=body.vertical,
+                system=body.system,
+            )
             result = await decline_matching_review_for_request(
                 conn,
                 request_id=request_id,
                 decided_by=decided_by,
                 decision_reason=body.decision_reason,
+                vertical=body.vertical,
+                system=body.system,
             )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"status": "ok", **result}
+    return _echo_matching_review_system({"status": "ok", **result}, body.system)
+
+
+def _matched_contacts_detail_for_role(
+    detail: dict[str, Any],
+    *,
+    role: str,
+) -> dict[str, Any]:
+    """Full matched person fields for disposition reviewers; redact for other roles."""
+    if role in (ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_DATA_OWNER, ROLE_DATA_USER):
+        return detail
+    contacts = detail.get("matched_contacts")
+    if not contacts:
+        return detail
+    redacted: list[dict[str, Any]] = []
+    for contact in contacts:
+        redacted.append(
+            {
+                "dwid": contact["dwid"],
+                "state": contact["state"],
+                "first_initial": contact.get("first_initial"),
+                "last_initial": contact.get("last_initial"),
+                "last_name": None,
+                "dob": None,
+                "email": None,
+                "phones": [],
+            }
+        )
+    out = dict(detail)
+    out["matched_contacts"] = redacted
+    return out
+
+
+CA_DROP_SYSTEM = "cassandra"
+MATCH_SCOPE_REQUEST = "request"
+MATCH_SCOPE_SYSTEM = "system"
+RESULT_KIND_CA_DROP = "ca_drop"
+RESULT_KIND_SHEET_STUB = "sheet_stub"
+RESULT_KIND_SAAS_STUB = "saas_stub"
+
+
+def uses_drop_match_detail(*, vertical: str, system: str | None) -> bool:
+    """True only for CA DROP (cassandra) or the legacy omitted-system Data URL."""
+    system_norm = system.strip().lower() if system and str(system).strip() else None
+    vertical_norm = normalize_vertical(vertical)
+    if system_norm == CA_DROP_SYSTEM:
+        return True
+    return system_norm is None and vertical_norm == VERTICAL_DATA
+
+
+def matching_result_kind(*, vertical: str, system: str | None) -> str:
+    """ca_drop keeps hashed/person detail; sheet/SaaS systems stay catalog stubs."""
+    from habeas_privacy_core.connections.catalog import (
+        SHEET_SYSTEMS,
+        UPLOAD_ONLY_SYSTEMS,
+    )
+
+    if uses_drop_match_detail(vertical=vertical, system=system):
+        return RESULT_KIND_CA_DROP
+    system_norm = system.strip().lower() if system and str(system).strip() else None
+    # Alumni / Contact Us (and google_sheets) are SHEET_SYSTEMS, not upload-only.
+    # Axios HQ stays upload-only and still renders as a sheet stub.
+    if system_norm in SHEET_SYSTEMS or system_norm in UPLOAD_ONLY_SYSTEMS:
+        return RESULT_KIND_SHEET_STUB
+    return RESULT_KIND_SAAS_STUB
+
+
+def _not_live_match_reason(kind: str, system_label: str) -> str:
+    if kind == RESULT_KIND_SHEET_STUB:
+        return (
+            f"{system_label} is catalog-only — matching is not live. "
+            "Confirm or decline this inbox item; CA DROP people are not this system."
+        )
+    return (
+        f"{system_label} matching is not live. "
+        "Confirm or decline this inbox item without CA DROP people."
+    )
+
+
+def _apply_non_drop_match_stub(
+    payload: dict[str, Any],
+    *,
+    kind: str,
+    system_label: str,
+) -> dict[str, Any]:
+    """Strip request-wide DROP PII so sheet/SaaS items cannot inherit CA DROP people."""
+    payload["matched"] = False
+    payload["match_count"] = 0
+    payload["match_type"] = None
+    payload["matched_via"] = None
+    payload["matched_contacts"] = []
+    payload["matched_contacts_status"] = "not_live"
+    payload.pop("matched_contacts_error", None)
+    payload["matched_hashes"] = []
+    payload["matched_channels"] = []
+    payload["attempts"] = []
+    payload["not_live_reason"] = _not_live_match_reason(kind, system_label)
+    payload["vendor_record_ids"] = []
+    return payload
+
+
+def _ids_from_vertical_snapshot(snapshot: Any) -> tuple[int, list[str]]:
+    """Opaque vendor ids + count from a ``request_vertical_matching`` snapshot."""
+    if snapshot is None:
+        return 0, []
+    if isinstance(snapshot, dict):
+        raw_ids = snapshot.get("vendor_record_ids")
+        raw_count = snapshot.get("match_count")
+    else:
+        raw_ids = getattr(snapshot, "vendor_record_ids", None)
+        raw_count = getattr(snapshot, "match_count", None)
+    ids: list[str] = []
+    if isinstance(raw_ids, list):
+        seen: set[str] = set()
+        for item in raw_ids:
+            if item is None:
+                continue
+            value = str(item).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            ids.append(value)
+    match_count = int(raw_count) if raw_count is not None else len(ids)
+    return match_count, ids
+
+
+def _apply_vertical_matching_snapshot(
+    payload: dict[str, Any],
+    *,
+    snapshot: Any,
+) -> dict[str, Any]:
+    """Replace the not-live stub with opaque vendor ids and counts (no PII)."""
+    match_count, vendor_ids = _ids_from_vertical_snapshot(snapshot)
+    payload["matched"] = match_count > 0
+    payload["match_count"] = match_count
+    payload["match_type"] = None
+    payload["matched_via"] = None
+    payload["matched_contacts"] = []
+    payload["matched_contacts_status"] = "ok" if match_count else "none"
+    payload.pop("matched_contacts_error", None)
+    payload["matched_hashes"] = []
+    payload["matched_channels"] = []
+    payload["attempts"] = []
+    payload["not_live_reason"] = None
+    payload["vendor_record_ids"] = vendor_ids
+    return payload
+
+
+async def _fetch_owner_matching_snapshot(
+    conn: Any,
+    *,
+    request_id: str,
+    vertical: str,
+    system: str | None,
+) -> Any | None:
+    """First ``request_vertical_matching`` hit for catalog or bound-system keys."""
+    for key in matching_snapshot_lookup_keys(vertical=vertical, system=system):
+        try:
+            snapshot = await fetch_vertical_matching_snapshot(
+                conn, request_id=request_id, vertical=key
+            )
+        except Exception:
+            continue
+        if snapshot is not None:
+            return snapshot
+    return None
+
+
+def serialize_owner_vertical_matching_review(
+    detail: dict[str, Any],
+    *,
+    vertical: str,
+    role: str,
+    disposition: Any | None = None,
+    system: str | None = None,
+    snapshot: Any | None = None,
+) -> dict[str, Any]:
+    """Individual-review match fields for one owner vertical item.
+
+    CA DROP (``cassandra``, or legacy omitted-system Data) reuses
+    ``_matched_contacts_detail_for_role`` so authorized owners receive the same
+    DWID + identifier PII as ops/admin individual review. Sheet and SaaS
+    systems must not inherit request-wide DROP people or hashes. When a
+    ``request_vertical_matching`` snapshot exists, owners get opaque vendor
+    ids and counts — not the catalog ``not_live`` stub. Request-level
+    ``assignment`` / ``assigned_to`` are stripped — owner scope is
+    ``user_vertical_assignments``. Never log or audit this dict.
+    """
+    from habeas_privacy_core.connections.catalog import (
+        matching_system_color_token,
+        matching_system_label,
+    )
+
+    vertical_norm = normalize_vertical(vertical)
+    system_norm = system.strip().lower() if system and str(system).strip() else None
+    kind = matching_result_kind(vertical=vertical_norm, system=system_norm)
+    payload = dict(_matched_contacts_detail_for_role(detail, role=role))
+    payload["vertical"] = vertical_norm
+    payload["vertical_label"] = VERTICAL_LABELS.get(vertical_norm, vertical_norm)
+    system_label = vertical_norm
+    if system_norm:
+        payload["system"] = system_norm
+        payload["system_id"] = system_norm
+        system_label = matching_system_label(system_norm, vertical_id=vertical_norm)
+        payload["system_label"] = system_label
+        payload["color_token"] = matching_system_color_token(system_norm)
+    if kind == RESULT_KIND_CA_DROP:
+        payload.setdefault("matched_hashes", list(detail.get("matched_hashes") or []))
+        payload["match_scope"] = (
+            MATCH_SCOPE_SYSTEM if system_norm == CA_DROP_SYSTEM else MATCH_SCOPE_REQUEST
+        )
+        payload["not_live_reason"] = None
+    else:
+        _apply_non_drop_match_stub(payload, kind=kind, system_label=system_label)
+        payload["match_scope"] = MATCH_SCOPE_SYSTEM
+        if snapshot is not None:
+            _apply_vertical_matching_snapshot(payload, snapshot=snapshot)
+    payload["result_kind"] = kind
+    payload["assignment"] = None
+    payload.pop("assigned_to", None)
+    if disposition is not None:
+        payload["selected_dwids"] = list(disposition.selected_dwids)
+        payload["selected_dwid_count"] = int(disposition.selected_dwid_count)
+        payload["selected_vendor_record_ids"] = list(
+            getattr(disposition, "selected_vendor_record_ids", None) or []
+        )
+        payload["selected_vendor_record_id_count"] = int(
+            getattr(disposition, "selected_vendor_record_id_count", 0) or 0
+        )
+        payload["disposition_status"] = disposition.status
+    else:
+        payload["selected_dwids"] = []
+        payload["selected_dwid_count"] = 0
+        payload["selected_vendor_record_ids"] = []
+        payload["selected_vendor_record_id_count"] = 0
+        payload["disposition_status"] = None
+    return payload
+
+
+async def get_owner_vertical_matching_review(
+    conn: Any,
+    *,
+    request_id: str,
+    vertical: str,
+    role: str,
+    system: str | None = None,
+) -> dict[str, Any] | None:
+    """Load match detail for one ``(request, vertical, system)`` inbox item.
+
+    Sheet/SaaS skip DROP enrichment so CA DROP PII cannot leak onto a
+    Contact Us / Alumni / SaaS URL. A vertical matching snapshot replaces
+    the not-live stub with opaque vendor ids and counts. CA DROP still 404s
+    when no DROP result.
+    """
+    disposition = await fetch_vertical_disposition(
+        conn, request_id=request_id, vertical=vertical
+    )
+    if not uses_drop_match_detail(vertical=vertical, system=system):
+        snapshot = await _fetch_owner_matching_snapshot(
+            conn, request_id=request_id, vertical=vertical, system=system
+        )
+        return serialize_owner_vertical_matching_review(
+            {
+                "request_id": request_id,
+                "matched": False,
+                "match_count": 0,
+                "match_type": None,
+                "matched_contacts": [],
+                "matched_contacts_status": "not_live",
+                "matched_hashes": [],
+                "matched_channels": [],
+                "attempts": [],
+            },
+            vertical=vertical,
+            role=role,
+            disposition=disposition,
+            system=system,
+            snapshot=snapshot,
+        )
+    detail = await get_matching_result_detail(conn, request_id)
+    if detail is None:
+        return None
+    return serialize_owner_vertical_matching_review(
+        detail,
+        vertical=vertical,
+        role=role,
+        disposition=disposition,
+        system=system,
+    )
+
+
+@router.get("/matching-contacts/search")
+async def drop_matching_contacts_search(
+    principal: MatchingReviewPrincipal,
+    q: str = Query(..., min_length=1, description="Email, dwid, or name"),
+    limit: int = Query(
+        default=_MATCHING_CONTACTS_SEARCH_LIMIT,
+        ge=1,
+        le=_MATCHING_CONTACTS_SEARCH_LIMIT,
+    ),
+):
+    """Search MDR person/phones by email, dwid, or name (review PII roles).
+
+    Same BigQuery tables as matching-results contact enrichment. Request-wide
+    PII — vertical operators use the per-vertical matching-results URL.
+    Never log ``q``.
+    """
+    if is_vertical_operator_role(principal.role):
+        raise HTTPException(
+            status_code=403,
+            detail="use the vertical matching-results URL",
+        )
+    query = q.strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="q is required")
+    try:
+        contacts = await asyncio.to_thread(
+            _search_person_contacts_from_bq,
+            query=query,
+            limit=limit,
+        )
+    except RuntimeError:
+        logger.warning(
+            "matching_contacts_search_failed",
+            extra={
+                "event": "matching_contacts_search_failed",
+                "error_type": "RuntimeError",
+                "query_len": len(query),
+            },
+        )
+        raise HTTPException(status_code=503, detail="contact search failed") from None
+    gated = _matched_contacts_detail_for_role(
+        {"matched_contacts": contacts},
+        role=principal.role,
+    )
+    return {"contacts": gated["matched_contacts"], "limit": limit}
 
 
 @router.get("/matching-results/{request_id}")
 async def drop_matching_result_detail(
     request_id: str,
-    _principal: MatchingReviewPrincipal,
+    principal: MatchingReviewPrincipal,
 ):
-    """Detail pane payload for one DROP matching result (includes matched person PII)."""
+    """Detail pane payload for one DROP matching result (includes matched person PII).
+
+    Data owners must use the vertical matching-results URL — this request-wide
+    path is ops/admin only so an owner cannot read another vertical's PII.
+    """
     _require_database()
+    if is_vertical_operator_role(principal.role):
+        raise HTTPException(
+            status_code=403,
+            detail="use the vertical matching-results URL",
+        )
     pool = get_pool()
     async with pool.acquire() as conn:
         detail = await get_matching_result_detail(conn, request_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="matching result not found")
-    return detail
+    return _matched_contacts_detail_for_role(detail, role=principal.role)
 
 
 @router.post("/workflow/assign")

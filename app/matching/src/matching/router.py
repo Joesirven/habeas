@@ -1,8 +1,9 @@
-"""Dispatch a MatchRequest to the right MatchingPipeline adapter by intake source.
+"""Data Vertical Matching: dispatch a MatchRequest to the adapter for its intake source.
 
-Adding a new intake source, or a future state-specific matching requirement, means adding
-one adapter class + one router entry here — never a new app or service
-(ADR-21 Addendum, 2026-07-13).
+DROP uses DropHashPipeline (hash-index). Webform, CSV, and manual use
+PlaintextMatchPipeline against MDR (lookup not wired; do not invent an MDR client).
+A new data-vertical intake source is one adapter class plus one router entry in this
+app — never a new matching service (ADR-21 Addendum, 2026-07-13).
 """
 
 from __future__ import annotations

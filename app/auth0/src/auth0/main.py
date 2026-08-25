@@ -2,22 +2,15 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
+import subprocess
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, HTTPException
-from pydantic_settings import SettingsConfigDict
-
-from habeas_privacy_core.config import CoreSettings
-from habeas_privacy_core.connections.freshness import GateResult
-from habeas_privacy_core.connections.matching_gate import (
-    evaluate_vertical_matching_gate,
-    gate_block_audit,
-    vertical_id_from_attempt_row,
-)
+from habeas_privacy_core.audit.redaction import redact_error_text
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
 from habeas_privacy_core.db.vertical_hash_refresh import (
     claim_vertical_hash_refresh,
@@ -35,21 +28,17 @@ from habeas_privacy_core.queue.constants import (
     VERTICAL_HASH_REFRESH_ATTEMPTS_TABLE,
 )
 from habeas_privacy_core.vertical_hash.audit import build_vertical_audit_payload
+from fastapi import FastAPI, HTTPException
+
+from auth0.config import settings
+from auth0.credentials import load_auth0_credentials
+from auth0.dbt_runner import run_external_hash_dbt_build
+from auth0.hash_extract import run_hash_extract
+from auth0.vertical_match import ADAPTER, VerticalMatchOutcome, run_auth0_vertical_match
 
 logger = logging.getLogger(__name__)
 
 SYSTEM = "auth0"
-
-
-class Settings(CoreSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
-    service_name: str = "auth0"
-    port: int = 8080
-    worker_id: str = "auth0-dev"
-
-
-settings = Settings()
 
 
 @asynccontextmanager
@@ -137,41 +126,51 @@ async def _complete_stub(
     return {"attempt_id": attempt_id, "step": step, "status": status}
 
 
-async def _complete_gate_blocked(
+async def _complete_matching(
+    conn: Any,
     attempt_id: int,
-    gate: GateResult,
+    outcome: VerticalMatchOutcome,
 ) -> dict[str, Any]:
-    """Terminal non-match when the matching freshness gate blocks this system."""
-    pool = get_pool()
-    step = STEP_MATCHING
-    # CHECK constraint allows submit_error (not skipped); gate_blocked lives in audit.
-    db_status = "submit_error"
+    """Terminal matching transition — count-only audit, never hashes or vendor ids."""
+    status = "success" if outcome.ok else "submit_error"
+    error_detail = outcome.error_detail
     audit = json.dumps(
-        {
-            **build_vertical_audit_payload(
-                adapter="stub",
-                step=step,
-                system=SYSTEM,
-                error_code="gate_blocked",
-            ),
-            **gate_block_audit(system=SYSTEM, gate=gate),
-        }
-    )
-    async with pool.acquire() as conn:
-        await conn.execute(
-            f"""
-            UPDATE {AUTH0_ATTEMPTS_TABLE}
-               SET status = $2,
-                   completed_at = NOW(),
-                   error_code = 'gate_blocked',
-                   audit_payload = COALESCE(audit_payload, '{{}}'::jsonb) || $3::jsonb
-             WHERE id = $1 AND status = 'claimed'
-            """,
-            attempt_id,
-            db_status,
-            audit,
+        build_vertical_audit_payload(
+            adapter=ADAPTER,
+            step=STEP_MATCHING,
+            system=SYSTEM,
+            matched=outcome.ok and outcome.match_count > 0,
+            error_code=outcome.error_code,
+            error_class=outcome.error_class,
+            error_detail=error_detail,
         )
-    return {"attempt_id": attempt_id, "step": step, "status": "gate_blocked"}
+    )
+    await conn.execute(
+        f"""
+        UPDATE {AUTH0_ATTEMPTS_TABLE}
+           SET status = $2,
+               completed_at = NOW(),
+               error_code = $4,
+               error_message = $5,
+               audit_payload = COALESCE(audit_payload, '{{}}'::jsonb) || $3::jsonb
+         WHERE id = $1 AND status = 'claimed'
+        """,
+        attempt_id,
+        status,
+        audit,
+        outcome.error_code,
+        redact_error_text(error_detail) if error_detail else None,
+    )
+    payload: dict[str, Any] = {
+        "attempt_id": attempt_id,
+        "step": STEP_MATCHING,
+        "status": status,
+    }
+    if outcome.ok:
+        payload["match_count"] = outcome.match_count
+    elif outcome.error_code is not None:
+        payload["reason"] = outcome.error_code
+    return payload
 
 
 @app.post("/matching/submit")
@@ -181,26 +180,32 @@ async def matching_submit():
     row = await _claim(STEP_MATCHING)
     if row is None:
         return {"claimed": False}
+
+    attempt_id = int(row["id"])
+    request_id = str(row["request_id"])
     pool = get_pool()
     async with pool.acquire() as conn:
-        gate = await evaluate_vertical_matching_gate(
-            conn,
-            system=SYSTEM,
-            vertical_id=vertical_id_from_attempt_row(row),
-        )
-    if not gate.allowed:
-        result = await _complete_gate_blocked(int(row["id"]), gate)
-        return {"claimed": True, **result}
-    from auth0.adapters.stub import StubMatchAdapter
-
-    request_id = str(row["request_id"])
-    match = await StubMatchAdapter().match(request_id)
-    result = await _complete_stub(
-        int(row["id"]),
-        STEP_MATCHING,
-        matched=match.matched,
-        matched_external_id=match.auth0_user_id,
-    )
+        try:
+            outcome = await run_auth0_vertical_match(
+                conn,
+                request_id=request_id,
+                attempt_id=attempt_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "auth0_matching_submit_failed",
+                extra={
+                    "event": "auth0_matching_submit_failed",
+                    "error_summary": redact_error_text(str(exc)),
+                },
+            )
+            outcome = VerticalMatchOutcome(
+                ok=False,
+                error_code="auth0_lookup_error",
+                error_class=type(exc).__name__,
+                error_detail=redact_error_text(str(exc)),
+            )
+        result = await _complete_matching(conn, attempt_id, outcome)
     return {"claimed": True, **result}
 
 
@@ -235,9 +240,62 @@ async def suppression_collect():
     return {"collected": 0}
 
 
+class _HashRefreshFailed(Exception):
+    """Pipeline refused success. Message is an allowlisted error_code only."""
+
+    def __init__(self, code: str, *, rows_written: int = 0) -> None:
+        self.code = code
+        self.rows_written = rows_written
+        super().__init__(code)
+
+
+async def _await_if_needed(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _run_hash_refresh_pipeline() -> int:
+    """Credentials → hash extract → optional external_hash dbt. Returns rows written."""
+    credentials = await _await_if_needed(
+        load_auth0_credentials(settings.auth0_connection_id or None)
+    )
+    rows_written = await _await_if_needed(
+        run_hash_extract(credentials, bq_table=settings.hashed_raw_table)
+    )
+    count = int(rows_written)
+    if count <= 0:
+        raise _HashRefreshFailed("empty_extract", rows_written=count)
+
+    if settings.skip_external_hash_dbt:
+        return count
+
+    try:
+        dbt_result = await _await_if_needed(
+            run_external_hash_dbt_build(
+                dbt_dir=settings.external_hash_dbt_dir,
+                timeout_seconds=settings.dbt_timeout_seconds,
+            )
+        )
+    except subprocess.TimeoutExpired:
+        raise _HashRefreshFailed("dbt_timeout", rows_written=count) from None
+    if not getattr(dbt_result, "ok", False):
+        raise _HashRefreshFailed("dbt_failed", rows_written=count)
+    return count
+
+
+def _hash_refresh_error_code(exc: BaseException) -> str:
+    if isinstance(exc, _HashRefreshFailed):
+        return exc.code
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "dbt_timeout"
+    name = type(exc).__name__
+    return name[:50]
+
+
 @app.post("/hash-refresh/process")
 async def hash_refresh_process():
-    """Claim vertical_hash_refresh for auth0; stub extract (no plaintext persist)."""
+    """Claim vertical_hash_refresh for auth0; extract hashes then optional dbt."""
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
 
@@ -247,36 +305,76 @@ async def hash_refresh_process():
             conn,
             system=SYSTEM,
             worker_id=settings.worker_id,
-            lease_minutes=10,
+            lease_minutes=settings.hash_refresh_lease_minutes,
         )
         if claim is None:
             return {"processed": False, "reason": "idle"}
 
         attempt_id = int(claim["id"])
-        started_at = datetime.now(timezone.utc)
         await mark_vertical_hash_refresh_in_flight(conn, attempt_id)
-        finished_at = datetime.now(timezone.utc)
+
+    started_at = datetime.now(timezone.utc)
+    rows_written = 0
+    status = "success"
+    error_code: str | None = None
+    error_message: str | None = None
+
+    try:
+        rows_written = await _run_hash_refresh_pipeline()
+    except _HashRefreshFailed as exc:
+        status = "submit_error"
+        error_code = exc.code
+        rows_written = exc.rows_written
+        error_message = redact_error_text(exc.code)
+        logger.error(
+            "hash refresh failed attempt_id=%s error_code=%s rows_written=%s",
+            attempt_id,
+            error_code,
+            rows_written,
+        )
+    except Exception as exc:
+        status = "submit_error"
+        error_code = _hash_refresh_error_code(exc)
+        error_message = redact_error_text(f"{error_code}: {type(exc).__name__}")
+        logger.error(
+            "hash refresh failed attempt_id=%s error_code=%s",
+            attempt_id,
+            error_code,
+        )
+
+    finished_at = datetime.now(timezone.utc)
+    async with pool.acquire() as conn:
         await record_vertical_hash_refresh_run(
             conn,
             attempt_id=attempt_id,
-            status="success",
+            status=status,
             started_at=started_at,
             finished_at=finished_at,
-            rows_written=0,
+            rows_written=rows_written,
+            error_message=error_message,
         )
         await conn.execute(
             f"""
             UPDATE {VERTICAL_HASH_REFRESH_ATTEMPTS_TABLE}
-               SET status = 'success',
-                   completed_at = NOW()
+               SET status = $2,
+                   completed_at = NOW(),
+                   error_code = $3,
+                   error_message = $4
              WHERE id = $1 AND status = 'in_flight'
             """,
             attempt_id,
+            status,
+            error_code,
+            error_message,
         )
 
-    return {
+    payload: dict[str, Any] = {
         "processed": True,
         "attempt_id": attempt_id,
         "system": SYSTEM,
-        "adapter": "stub",
+        "status": status,
+        "rows_written": rows_written,
     }
+    if error_code is not None:
+        payload["reason"] = error_code
+    return payload

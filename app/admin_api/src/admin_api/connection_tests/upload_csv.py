@@ -18,15 +18,23 @@ async def test_upload_system(
     content: bytes,
     multi_pii_delimiter: str | None,
     column_mapping: dict[str, str] | None = None,
+    email_format: str | None = None,
+    phone_format: str | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Run the upload CSV test for *system*."""
     if system not in UPLOAD_SYSTEMS:
         return False, "unknown_system", {}
+    kwargs: dict[str, Any] = {}
+    if email_format is not None:
+        kwargs["email_format"] = email_format
+    if phone_format is not None:
+        kwargs["phone_format"] = phone_format
     return await test_upload_csv(
         system=system,
         content=content,
         multi_pii_delimiter=multi_pii_delimiter,
         column_mapping=column_mapping,
+        **kwargs,
     )
 
 

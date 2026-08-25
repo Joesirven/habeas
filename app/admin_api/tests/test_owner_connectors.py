@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from admin_api import lab_sheets_oauth
 from admin_api import main as admin_main
 from admin_api import owner_connectors, roles
 from admin_api.main import app
-from habeas_privacy_core.auth import IAP_EMAIL_HEADER
+from habeas_privacy_core.auth import IAP_EMAIL_HEADER, ROLE_DATA_USER
 from habeas_privacy_core.connections.catalog import (
     VERTICAL_BIZDEV,
     VERTICAL_COMMUNICATIONS,
@@ -47,12 +50,24 @@ def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(roles.settings, "database_url", "")
     monkeypatch.setattr(admin_main, "create_pool", AsyncMock())
     monkeypatch.setattr(admin_main, "close_pool", AsyncMock())
+    monkeypatch.setattr(lab_sheets_oauth.settings, "sheets_lab_oauth_client_id", "")
+    monkeypatch.setattr(lab_sheets_oauth.settings, "sheets_lab_oauth_client_secret", "")
     owner_connectors.set_upload_object_writer(None)
+    owner_connectors._clear_oauth_sessions_for_tests()
 
 
 def _owner_headers(email: str = "hr-owner@example.com") -> dict[str, str]:
     roles.settings.admin_api_data_owners = email
     return {IAP_EMAIL_HEADER: email}
+
+
+def _data_user_headers(email: str = "ops@example.com") -> dict[str, str]:
+    """Super_admin + simulate header — same pattern as test_auth_me / test_roles."""
+    roles.settings.admin_api_super_admins = email
+    return {
+        IAP_EMAIL_HEADER: email,
+        roles.DEV_SIMULATE_ROLE_HEADER: ROLE_DATA_USER,
+    }
 
 
 def _fake_pool(conn: AsyncMock) -> MagicMock:
@@ -187,6 +202,7 @@ def test_happy_people_hr_paylocity_upload_wizard_complete(
         assert upload.status_code == 200
         body = upload.json()
         assert body["ok"] is True
+        assert "gcs_uri" not in body
         assert "last_successful_upload_at" in meta
         assert meta["active_mode"] == "upload"
         assert meta.get("upload_row_count", 0) >= 1
@@ -212,23 +228,10 @@ def test_happy_people_hr_paylocity_upload_wizard_complete(
     assert gate.code == "ok"
 
 
-@pytest.mark.parametrize(
-    ("system", "vertical", "owner_email"),
-    [
-        ("hr_alumni", VERTICAL_PEOPLE_HR, "hr-owner@example.com"),
-        ("bizdev_contacts", VERTICAL_BIZDEV, "biz-owner@example.com"),
-        ("axios_hq", VERTICAL_COMMUNICATIONS, "comm-owner@example.com"),
-    ],
-)
-def test_ae5_upload_only_rejects_live_mode(
-    monkeypatch: pytest.MonkeyPatch,
-    system: str,
-    vertical: str,
-    owner_email: str,
-) -> None:
+def test_ae5_upload_only_rejects_live_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     current = _connection(
-        system=system,
-        metadata={"vertical_id": vertical},
+        system="axios_headquarters",
+        metadata={"vertical_id": VERTICAL_COMMUNICATIONS},
     )
     _patch_owner_access(monkeypatch, connection=current)
     monkeypatch.setattr(
@@ -239,14 +242,53 @@ def test_ae5_upload_only_rejects_live_mode(
 
     with TestClient(app) as client:
         response = client.post(
-            f"/owner/verticals/{vertical}/systems/{system}/mode",
-            headers=_owner_headers(owner_email),
+            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/axios_headquarters/mode",
+            headers=_owner_headers("comm-owner@example.com"),
             json={"mode": "live"},
         )
     assert response.status_code == 422
     assert "live" in response.json()["detail"].lower() or "not allowed" in response.json()[
         "detail"
     ].lower()
+
+
+@pytest.mark.parametrize(
+    ("system", "vertical", "owner_email"),
+    [
+        ("hr_alumni", VERTICAL_PEOPLE_HR, "hr-owner@example.com"),
+        ("bizdev_contacts", VERTICAL_BIZDEV, "biz-owner@example.com"),
+    ],
+)
+def test_sheet_systems_accept_live_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    system: str,
+    vertical: str,
+    owner_email: str,
+) -> None:
+    meta: dict = {"vertical_id": vertical}
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    current = _connection(system=system, metadata=meta)
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "insert_connection_mode_event",
+        AsyncMock(return_value=1),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{vertical}/systems/{system}/mode",
+            headers=_owner_headers(owner_email),
+            json={"mode": "live"},
+        )
+    assert response.status_code == 200
+    assert meta["active_mode"] == "live"
 
 
 def test_ae3_stale_or_missing_upload_blocks_gate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -767,33 +809,9 @@ def test_cadence_validation_rejects_junk(
 @pytest.mark.parametrize(
     ("refresh_cadence", "expected"),
     [
-        (
-            "rarely",
-            {
-                "refresh_cadence": "rarely",
-                "refresh_policy": "static",
-                "min_refresh_interval_hours": 0,
-                "cadence_days": 3650,
-            },
-        ),
-        (
-            "with_new_batches",
-            {
-                "refresh_cadence": "with_new_batches",
-                "refresh_policy": "volatile",
-                "min_refresh_interval_hours": 12,
-                "cadence_days": 1,
-            },
-        ),
-        (
-            "weekly",
-            {
-                "refresh_cadence": "weekly",
-                "refresh_policy": "volatile",
-                "min_refresh_interval_hours": 0,
-                "cadence_days": 7,
-            },
-        ),
+        ("rarely", {"refresh_cadence": "rarely"}),
+        ("with_new_batches", {"refresh_cadence": "with_new_batches"}),
+        ("weekly", {"refresh_cadence": "weekly"}),
     ],
 )
 def test_refresh_cadence_persists_canonical_metadata(
@@ -821,6 +839,9 @@ def test_refresh_cadence_persists_canonical_metadata(
     assert response.status_code == 200
     for key, value in expected.items():
         assert meta[key] == value
+    assert "refresh_policy" not in meta
+    assert "cadence_days" not in meta
+    assert "min_refresh_interval_hours" not in meta
 
 
 @pytest.mark.parametrize(
@@ -854,13 +875,30 @@ def test_legacy_refresh_policy_maps_to_refresh_cadence(
         )
     assert response.status_code == 200
     assert meta["refresh_cadence"] == expected_cadence
-    assert meta["refresh_policy"] == refresh_policy
+    assert "refresh_policy" not in meta
 
 
 def test_communications_binding_uses_catalog_upload_system() -> None:
     bindings = get_bindings_for_vertical(VERTICAL_COMMUNICATIONS)
     assert len(bindings) == 1
-    assert bindings[0].system == "axios_hq"
+    assert bindings[0].system == "axios_headquarters"
+
+
+def test_upload_rejects_over_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    current = _connection(metadata={"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "upload"})
+    _patch_owner_access(monkeypatch, connection=current)
+    oversized = b"x" * (owner_connectors.MAX_OWNER_UPLOAD_BYTES + 1)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/upload",
+            headers=_owner_headers(),
+            data={"multi_pii_delimiter": ""},
+            files={"file": ("too-big.csv", oversized, "text/csv")},
+        )
+    assert response.status_code == 413
+    assert response.json()["detail"] == "upload_too_large"
+    assert "gcs_uri" not in response.json()
 
 
 def test_wizard_complete_accepts_refresh_cadence_body(
@@ -889,5 +927,506 @@ def test_wizard_complete_accepts_refresh_cadence_body(
         )
     assert response.status_code == 200
     assert meta["refresh_cadence"] == "weekly"
-    assert meta["cadence_days"] == 7
+    assert "cadence_days" not in meta
     assert meta.get("wizard_completed_at")
+
+
+@pytest.mark.parametrize(
+    ("path", "request_kwargs"),
+    [
+        (
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/mode",
+            {"json": {"mode": "upload"}},
+        ),
+        (
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/cadence",
+            {"json": {"cadence_days": 30}},
+        ),
+        (
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/upload",
+            {
+                "data": {"multi_pii_delimiter": ""},
+                "files": {"file": ("paylocity.csv", PAYLOCITY_CSV, "text/csv")},
+            },
+        ),
+        (
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/credentials",
+            {"json": {"credentials": {"api_key": "lever-test-key"}}},
+        ),
+        (
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/wizard/complete",
+            {},
+        ),
+        (
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/hr_alumni/sheets-oauth/start",
+            {"json": {"redirect_uri": "http://127.0.0.1:5173/owner/connectors"}},
+        ),
+    ],
+    ids=["mode", "cadence", "upload", "credentials", "wizard-complete", "sheets-oauth-start"],
+)
+def test_data_user_config_mutations_forbidden(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    request_kwargs: dict,
+) -> None:
+    """data_user may reach owner routes but cannot mutate connector config."""
+    helpers = _patch_owner_access(monkeypatch)
+    resolve_mock = owner_connectors._resolve_connection
+    writer = owner_connectors.get_secret_writer()
+    put_secret = MagicMock()
+    monkeypatch.setattr(writer, "put_secret", put_secret)
+
+    with TestClient(app) as client:
+        response = client.post(path, headers=_data_user_headers(), **request_kwargs)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "insufficient role"
+    helpers["merge"].assert_not_awaited()
+    resolve_mock.assert_not_awaited()
+    put_secret.assert_not_called()
+
+
+_OWNER_REDIRECT = "http://127.0.0.1:5173/owner/connectors"
+_ALUMNI_OAUTH_PATH = f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/hr_alumni/sheets-oauth"
+_ALUMNI_CSV = (
+    b"first_name,last_name,email\n"
+    b"Ada,Lovelace,ada@example.com\n"
+)
+
+
+def _configure_sheets_oauth(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        lab_sheets_oauth.settings,
+        "sheets_lab_oauth_client_id",
+        "owner-client.apps.googleusercontent.com",
+    )
+    monkeypatch.setattr(
+        lab_sheets_oauth.settings,
+        "sheets_lab_oauth_client_secret",
+        "owner-secret",
+    )
+
+
+class _FakeHttpResponse:
+    def __init__(self, status_code: int, payload: dict):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _FakeTokenClient:
+    def __init__(self, *args, **kwargs):  # noqa: ANN002
+        _ = args, kwargs
+
+    async def __aenter__(self) -> _FakeTokenClient:
+        return self
+
+    async def __aexit__(self, *args) -> None:  # noqa: ANN002
+        _ = args
+
+    async def post(self, url: str, data: dict | None = None):
+        _ = data
+        if url.endswith("/token"):
+            if data and data.get("grant_type") == "authorization_code":
+                return _FakeHttpResponse(
+                    200,
+                    {"access_token": "access-1", "refresh_token": "refresh-owner-1"},
+                )
+            return _FakeHttpResponse(200, {"access_token": "access-2"})
+        raise AssertionError(url)
+
+    async def get(self, url: str, headers: dict | None = None):
+        _ = headers
+        if "userinfo" in url:
+            return _FakeHttpResponse(200, {"email": "hr-owner@example.com"})
+        raise AssertionError(url)
+
+
+def test_sheets_oauth_start_requires_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    current = _connection(system="hr_alumni", metadata={"vertical_id": VERTICAL_PEOPLE_HR})
+    _patch_owner_access(monkeypatch, connection=current)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"{_ALUMNI_OAUTH_PATH}/start",
+            headers=_owner_headers(),
+            json={"redirect_uri": _OWNER_REDIRECT},
+        )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "sheets_oauth_not_configured"
+
+
+def test_sheets_oauth_start_rejects_other_systems(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_sheets_oauth(monkeypatch)
+    current = _connection(metadata={"vertical_id": VERTICAL_PEOPLE_HR})
+    _patch_owner_access(monkeypatch, connection=current)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/sheets-oauth/start",
+            headers=_owner_headers(),
+            json={"redirect_uri": _OWNER_REDIRECT},
+        )
+    assert response.status_code == 422
+    assert "sheets oauth" in response.json()["detail"].lower()
+
+
+def test_sheets_oauth_start_builds_pkce_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_sheets_oauth(monkeypatch)
+    current = _connection(system="hr_alumni", metadata={"vertical_id": VERTICAL_PEOPLE_HR})
+    _patch_owner_access(monkeypatch, connection=current)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"{_ALUMNI_OAUTH_PATH}/start",
+            headers=_owner_headers(),
+            json={"redirect_uri": _OWNER_REDIRECT},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session_id"]
+    assert body["state"]
+    assert "accounts.google.com" in body["authorize_url"]
+    assert "code_challenge=" in body["authorize_url"]
+    assert "spreadsheets.readonly" in body["authorize_url"]
+    assert "drive.readonly" in body["authorize_url"]
+    assert "drive.metadata.readonly" not in body["authorize_url"]
+    assert "owner%2Fconnectors" in body["authorize_url"]
+
+
+def test_sheets_oauth_start_rejects_lab_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure_sheets_oauth(monkeypatch)
+    current = _connection(system="hr_alumni", metadata={"vertical_id": VERTICAL_PEOPLE_HR})
+    _patch_owner_access(monkeypatch, connection=current)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"{_ALUMNI_OAUTH_PATH}/start",
+            headers=_owner_headers(),
+            json={"redirect_uri": "http://127.0.0.1:5173/dev/sheets-oauth"},
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "redirect_uri_not_allowed"
+
+
+def test_sheets_oauth_redeem_stores_refresh_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_sheets_oauth(monkeypatch)
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR}
+    current = _connection(system="hr_alumni", metadata=meta)
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeTokenClient)
+    update_status = AsyncMock(return_value=current)
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "update_connection_status",
+        update_status,
+    )
+    writer = owner_connectors.get_secret_writer()
+
+    with TestClient(app) as client:
+        start = client.post(
+            f"{_ALUMNI_OAUTH_PATH}/start",
+            headers=_owner_headers(),
+            json={"redirect_uri": _OWNER_REDIRECT},
+        )
+        assert start.status_code == 200
+        redeem = client.post(
+            f"{_ALUMNI_OAUTH_PATH}/redeem",
+            headers=_owner_headers(),
+            json={
+                "session_id": start.json()["session_id"],
+                "code": "auth-code",
+                "state": start.json()["state"],
+            },
+        )
+    assert redeem.status_code == 200
+    body = redeem.json()
+    assert body["ok"] is True
+    assert body["detail"] == "refresh_token_stored"
+    assert body["google_email_domain"] == "habeas.us"
+    assert body["connection_id"] == str(CONNECTION_ID)
+    secret_name = connections_db.secret_resource_name("hr_alumni", str(CONNECTION_ID))
+    stored = json.loads(writer.get_secret(secret_name) or "")
+    assert stored["auth_mode"] == "oauth"
+    assert stored["refresh_token"] == "refresh-owner-1"
+    assert secret_name.startswith("dpra/connections/hr_alumni/")
+    assert meta["active_mode"] == "live"
+    assert meta.get("credentials_rotated_at")
+    update_status.assert_awaited()
+    assert update_status.await_args.kwargs["secret_resource_name"] == secret_name
+
+
+def test_sheets_oauth_redeem_rejects_non_habeas_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_sheets_oauth(monkeypatch)
+    current = _connection(system="hr_alumni", metadata={"vertical_id": VERTICAL_PEOPLE_HR})
+    _patch_owner_access(monkeypatch, connection=current)
+
+    class _OutsideClient(_FakeTokenClient):
+        async def get(self, url: str, headers: dict | None = None):
+            _ = headers
+            if "userinfo" in url:
+                return _FakeHttpResponse(200, {"email": "outsider@gmail.com"})
+            raise AssertionError(url)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _OutsideClient)
+
+    with TestClient(app) as client:
+        start = client.post(
+            f"{_ALUMNI_OAUTH_PATH}/start",
+            headers=_owner_headers(),
+            json={"redirect_uri": _OWNER_REDIRECT},
+        )
+        redeem = client.post(
+            f"{_ALUMNI_OAUTH_PATH}/redeem",
+            headers=_owner_headers(),
+            json={
+                "session_id": start.json()["session_id"],
+                "code": "auth-code",
+                "state": start.json()["state"],
+            },
+        )
+    assert redeem.status_code == 403
+    assert redeem.json()["detail"] == "google_email_domain_not_allowed"
+
+
+def test_sheets_oauth_files_lists_spreadsheets(monkeypatch: pytest.MonkeyPatch) -> None:
+    current = _connection(
+        system="hr_alumni",
+        metadata={"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "live"},
+    )
+    secret_name = connections_db.secret_resource_name("hr_alumni", str(CONNECTION_ID))
+    current = current.model_copy(update={"secret_resource_name": secret_name})
+    owner_connectors.get_secret_writer().put_secret(
+        secret_name,
+        json.dumps({"auth_mode": "oauth", "refresh_token": "refresh-owner-1"}),
+    )
+    _patch_owner_access(monkeypatch, connection=current)
+    monkeypatch.setattr(
+        owner_connectors,
+        "_access_token_from_refresh",
+        AsyncMock(return_value="access-files"),
+    )
+    monkeypatch.setattr(
+        owner_connectors,
+        "list_drive_spreadsheets",
+        AsyncMock(
+            return_value=(
+                True,
+                "google_sheets_ok",
+                [{"id": "sheet-1", "name": "Alumni"}],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        owner_connectors,
+        "list_spreadsheet_tabs",
+        AsyncMock(
+            return_value=(
+                True,
+                "google_sheets_ok",
+                [{"title": "Sheet1", "sheet_id": 0, "index": 0}],
+            )
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"{_ALUMNI_OAUTH_PATH}/files",
+            headers=_owner_headers(),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["files"] == [
+        {
+            "spreadsheet_id": "sheet-1",
+            "name": "Alumni",
+            "tabs": [{"title": "Sheet1", "sheet_id": 0}],
+        }
+    ]
+
+
+def test_sheets_oauth_extract_persists_like_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meta: dict = {
+        "vertical_id": VERTICAL_PEOPLE_HR,
+        "active_mode": "live",
+        "credentials_rotated_at": NOW.isoformat(),
+    }
+    current = _connection(system="hr_alumni", metadata=meta, status="invited")
+    secret_name = connections_db.secret_resource_name("hr_alumni", str(CONNECTION_ID))
+    current = current.model_copy(update={"secret_resource_name": secret_name})
+    owner_connectors.get_secret_writer().put_secret(
+        secret_name,
+        json.dumps({"auth_mode": "oauth", "refresh_token": "refresh-owner-1"}),
+    )
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    monkeypatch.setattr(
+        owner_connectors,
+        "_access_token_from_refresh",
+        AsyncMock(return_value="access-extract"),
+    )
+    extract = AsyncMock(return_value=(True, "google_sheets_ok", _ALUMNI_CSV))
+    monkeypatch.setattr(owner_connectors, "extract_sheet_values_csv", extract)
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "set_test_result",
+        AsyncMock(return_value=current),
+    )
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "update_connection_status",
+        AsyncMock(return_value=current),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"{_ALUMNI_OAUTH_PATH}/extract",
+            headers=_owner_headers(),
+            json={"spreadsheet_id": "sheet-1", "tab": "Sheet1"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert "gcs_uri" not in body
+    assert body["upload_row_count"] >= 1
+    assert meta.get("last_successful_upload_at")
+    assert meta.get("last_successful_refresh_at")
+    assert meta.get("gcs_uri")
+    assert meta["spreadsheet_id"] == "sheet-1"
+    assert meta["active_mode"] == "live"
+    extract.assert_awaited_once()
+    assert extract.await_args.args[1] == "sheet-1"
+    assert extract.await_args.args[2] == "Sheet1"
+
+
+def test_sheets_oauth_extract_returns_mapping_like_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = _connection(
+        system="hr_alumni",
+        metadata={"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "live"},
+    )
+    secret_name = connections_db.secret_resource_name("hr_alumni", str(CONNECTION_ID))
+    current = current.model_copy(update={"secret_resource_name": secret_name})
+    owner_connectors.get_secret_writer().put_secret(
+        secret_name,
+        json.dumps({"auth_mode": "oauth", "refresh_token": "refresh-owner-1"}),
+    )
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    monkeypatch.setattr(
+        owner_connectors,
+        "_access_token_from_refresh",
+        AsyncMock(return_value="access-extract"),
+    )
+    monkeypatch.setattr(
+        owner_connectors,
+        "extract_sheet_values_csv",
+        AsyncMock(
+            return_value=(
+                True,
+                "google_sheets_ok",
+                b"Given,Family,Work Email\nAda,Lovelace,ada@example.com\n",
+            )
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"{_ALUMNI_OAUTH_PATH}/extract",
+            headers=_owner_headers(),
+            json={"spreadsheet_id": "sheet-1", "tab": "Sheet1"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["detail"] == "upload_needs_mapping"
+    assert body["detected_headers"]
+    helpers["merge"].assert_not_awaited()
+
+
+def test_sheets_oauth_cross_vertical_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    from admin_api import vertical_assignments
+
+    monkeypatch.setattr(owner_connectors, "_require_database", lambda: None)
+    monkeypatch.setattr(owner_connectors, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(vertical_assignments, "_require_database", lambda: None)
+    monkeypatch.setattr(vertical_assignments, "get_pool", lambda: FakePool())
+    _configure_sheets_oauth(monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"{_ALUMNI_OAUTH_PATH}/start",
+            headers=_owner_headers("outsider@example.com"),
+            json={"redirect_uri": _OWNER_REDIRECT},
+        )
+    assert response.status_code == 403
+
+
+def test_sheets_oauth_does_not_log_email(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _configure_sheets_oauth(monkeypatch)
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR}
+    current = _connection(system="hr_alumni", metadata=meta)
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeTokenClient)
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "update_connection_status",
+        AsyncMock(return_value=current),
+    )
+
+    with TestClient(app) as client:
+        start = client.post(
+            f"{_ALUMNI_OAUTH_PATH}/start",
+            headers=_owner_headers(),
+            json={"redirect_uri": _OWNER_REDIRECT},
+        )
+        client.post(
+            f"{_ALUMNI_OAUTH_PATH}/redeem",
+            headers=_owner_headers(),
+            json={
+                "session_id": start.json()["session_id"],
+                "code": "auth-code",
+                "state": start.json()["state"],
+            },
+        )
+    joined = " ".join(record.getMessage() for record in caplog.records)
+    assert "refresh-owner-1" not in joined
+    assert "hr-owner@example.com" not in joined

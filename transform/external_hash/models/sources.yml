@@ -9,16 +9,81 @@ sources:
       column is either an opaque vendor id, a DROP-compatible Base64 hash, or
       metadata — never plaintext email, phone, name, DOB, or ZIP.
     tables:
-      - name: mailchimp_hashed_raw
+      - name: auth0_hashed_raw
         description: >
-          Mailchimp Marketing hashed extract. Populated by the mailchimp
+          Auth0 Management API hashed extract. Populated by the auth0
           hash-refresh worker after in-memory standardize+hash (CPPA DROP v1.2.0).
         columns:
           - name: email_hash
             description: Base64(SHA-256) of DROP-standardized email
           - name: vendor_record_id
-            description: Opaque Mailchimp member id (mc_user_id vocabulary stays in app)
+            description: Opaque Auth0 user id
           - name: system
-            description: Bounded context identifier (e.g. mailchimp)
+            description: Bounded context identifier (auth0)
+          - name: extracted_at
+            description: When the extract worker wrote this row
+      - name: axios_headquarters_hashed_raw
+        description: >
+          Axios Headquarters hashed extract. Populated by the communications
+          hash-refresh worker after in-memory standardize+hash (CPPA DROP v1.2.0).
+        columns:
+          - name: email_hash
+            description: Base64(SHA-256) of DROP-standardized email
+          - name: vendor_record_id
+            description: Opaque Axios Headquarters row id
+          - name: system
+            description: Bounded context identifier (axios_headquarters)
+          - name: extracted_at
+            description: When the extract worker wrote this row
+      - name: paylocity_hashed_raw
+        description: >
+          Paylocity hashed extract. Populated by the paylocity hash-refresh
+          worker after in-memory standardize+hash (CPPA DROP v1.2.0).
+        columns:
+          - name: email_hash
+            description: Base64(SHA-256) of DROP-standardized email
+          - name: vendor_record_id
+            description: Opaque Paylocity employee id
+          - name: system
+            description: Bounded context identifier (paylocity)
+          - name: extracted_at
+            description: When the extract worker wrote this row
+      - name: lever_hashed_raw
+        description: >
+          Lever hashed extract. Populated by the lever hash-refresh worker
+          after in-memory standardize+hash (CPPA DROP v1.2.0).
+        columns:
+          - name: email_hash
+            description: Base64(SHA-256) of DROP-standardized email
+          - name: vendor_record_id
+            description: Opaque Lever candidate id
+          - name: system
+            description: Bounded context identifier (lever)
+          - name: extracted_at
+            description: When the extract worker wrote this row
+      - name: hr_alumni_hashed_raw
+        description: >
+          Alumni Google Sheet hashed extract. Populated by the sheets
+          hash-refresh worker after in-memory standardize+hash (CPPA DROP v1.2.0).
+        columns:
+          - name: email_hash
+            description: Base64(SHA-256) of DROP-standardized email
+          - name: vendor_record_id
+            description: Opaque Alumni sheet row id
+          - name: system
+            description: Bounded context identifier (hr_alumni)
+          - name: extracted_at
+            description: When the extract worker wrote this row
+      - name: bizdev_contacts_hashed_raw
+        description: >
+          Contact Us Google Sheet hashed extract. Populated by the sheets
+          hash-refresh worker after in-memory standardize+hash (CPPA DROP v1.2.0).
+        columns:
+          - name: email_hash
+            description: Base64(SHA-256) of DROP-standardized email
+          - name: vendor_record_id
+            description: Opaque Contact Us sheet row id
+          - name: system
+            description: Bounded context identifier (bizdev_contacts)
           - name: extracted_at
             description: When the extract worker wrote this row

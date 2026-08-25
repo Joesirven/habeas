@@ -1,18 +1,22 @@
-"""Paylocity Cloud Run worker — matching + suppression."""
+"""Paylocity Cloud Run worker — matching + suppression + hash refresh."""
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
+import os
+import subprocess
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import Any, AsyncIterator
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import asyncpg
-from fastapi import FastAPI, HTTPException
-from pydantic_settings import SettingsConfigDict
-
+from habeas_privacy_core.audit.redaction import redact_error_text
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.connections.freshness import GateResult
 from habeas_privacy_core.connections.matching_gate import (
@@ -36,14 +40,26 @@ from habeas_privacy_core.queue.constants import (
     STEP_SUPPRESSION,
     VERTICAL_HASH_REFRESH_ATTEMPTS_TABLE,
 )
-from habeas_privacy_core.workflow.approval import fetch_active_rule
 from habeas_privacy_core.vertical_hash.audit import build_vertical_audit_payload
+from habeas_privacy_core.workflow.approval import fetch_active_rule
+from fastapi import FastAPI, HTTPException
+from pydantic_settings import SettingsConfigDict
+
+from paylocity.hash_extract import run_hash_extract
+from paylocity.vertical_match import (
+    ADAPTER,
+    VerticalMatchOutcome,
+    run_paylocity_vertical_match,
+)
 
 logger = logging.getLogger(__name__)
 
 SYSTEM = "paylocity"
 ATTEMPTS_TABLE = PAYLOCITY_ATTEMPTS_TABLE
 SUPPRESS_PAYLOCITY_ACTION = "suppress.paylocity"
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_DEFAULT_EXTERNAL_HASH_DBT_DIR = _REPO_ROOT / "transform" / "external_hash"
+PAYLOCITY_DBT_SELECT = ("stg_paylocity_hashed", "mart_paylocity_email_hash")
 
 
 class Settings(CoreSettings):
@@ -52,6 +68,13 @@ class Settings(CoreSettings):
     service_name: str = "paylocity"
     port: int = 8080
     worker_id: str = "paylocity-dev"
+
+    paylocity_connection_id: str | None = None
+    external_hash_dbt_dir: str = str(_DEFAULT_EXTERNAL_HASH_DBT_DIR)
+    hashed_raw_table: str = "paylocity_hashed_raw"
+    dbt_timeout_seconds: int = 3600
+    skip_external_hash_dbt: bool = False
+    hash_refresh_lease_minutes: int = 60
 
 
 settings = Settings()
@@ -142,7 +165,7 @@ async def _complete_stub(
     *,
     success: bool = True,
 ) -> dict[str, Any]:
-    """Stub terminal transition — real adapters land later."""
+    """Stub terminal transition — suppression still uses the stub adapter."""
     pool = get_pool()
     status = "success" if success else "submit_error"
     audit = json.dumps(
@@ -162,6 +185,53 @@ async def _complete_stub(
             audit,
         )
     return {"attempt_id": attempt_id, "step": step, "status": status}
+
+
+async def _complete_matching(
+    conn: Any,
+    attempt_id: int,
+    outcome: VerticalMatchOutcome,
+) -> dict[str, Any]:
+    """Terminal matching transition — count-only audit, never hashes or vendor ids."""
+    status = "success" if outcome.ok else "submit_error"
+    error_detail = outcome.error_detail
+    audit = json.dumps(
+        build_vertical_audit_payload(
+            adapter=ADAPTER,
+            step=STEP_MATCHING,
+            system=SYSTEM,
+            matched=outcome.ok and outcome.match_count > 0,
+            error_code=outcome.error_code,
+            error_class=outcome.error_class,
+            error_detail=error_detail,
+        )
+    )
+    await conn.execute(
+        f"""
+        UPDATE {ATTEMPTS_TABLE}
+           SET status = $2,
+               completed_at = NOW(),
+               error_code = $4,
+               error_message = $5,
+               audit_payload = COALESCE(audit_payload, '{{}}'::jsonb) || $3::jsonb
+         WHERE id = $1 AND status = 'claimed'
+        """,
+        attempt_id,
+        status,
+        audit,
+        outcome.error_code,
+        redact_error_text(error_detail) if error_detail else None,
+    )
+    payload: dict[str, Any] = {
+        "attempt_id": attempt_id,
+        "step": STEP_MATCHING,
+        "status": status,
+    }
+    if outcome.ok:
+        payload["match_count"] = outcome.match_count
+    elif outcome.error_code is not None:
+        payload["reason"] = outcome.error_code
+    return payload
 
 
 async def _complete_gate_blocked(
@@ -208,6 +278,9 @@ async def matching_submit():
     row = await _claim(STEP_MATCHING)
     if row is None:
         return {"claimed": False}
+
+    attempt_id = int(row["id"])
+    request_id = str(row["request_id"])
     pool = get_pool()
     async with pool.acquire() as conn:
         gate = await evaluate_vertical_matching_gate(
@@ -216,9 +289,31 @@ async def matching_submit():
             vertical_id=vertical_id_from_attempt_row(row),
         )
     if not gate.allowed:
-        result = await _complete_gate_blocked(int(row["id"]), gate)
+        result = await _complete_gate_blocked(attempt_id, gate)
         return {"claimed": True, **result}
-    result = await _complete_stub(int(row["id"]), STEP_MATCHING)
+
+    async with pool.acquire() as conn:
+        try:
+            outcome = await run_paylocity_vertical_match(
+                conn,
+                request_id=request_id,
+                attempt_id=attempt_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "paylocity_matching_submit_failed",
+                extra={
+                    "event": "paylocity_matching_submit_failed",
+                    "error_summary": redact_error_text(str(exc)),
+                },
+            )
+            outcome = VerticalMatchOutcome(
+                ok=False,
+                error_code="paylocity_lookup_error",
+                error_class=type(exc).__name__,
+                error_detail=redact_error_text(str(exc)),
+            )
+        result = await _complete_matching(conn, attempt_id, outcome)
     return {"claimed": True, **result}
 
 
@@ -264,9 +359,102 @@ async def suppression_collect():
     return {"collected": 0}
 
 
+@dataclass(frozen=True)
+class DbtRunResult:
+    ok: bool
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+class _HashRefreshFailed(Exception):
+    """Pipeline refused success. Message is an allowlisted error_code only."""
+
+    def __init__(self, code: str, *, rows_written: int = 0) -> None:
+        self.code = code
+        self.rows_written = rows_written
+        super().__init__(code)
+
+
+async def _await_if_needed(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def run_external_hash_dbt_build(
+    *,
+    dbt_dir: str | Path,
+    timeout_seconds: int,
+) -> DbtRunResult:
+    """Run ``dbt build`` for Paylocity staging + email-hash mart."""
+    cwd = Path(dbt_dir)
+    cmd = ["dbt", "build", "--select", *PAYLOCITY_DBT_SELECT]
+    env = {
+        **os.environ,
+        "DBT_PROFILES_DIR": os.environ.get("DBT_PROFILES_DIR", str(cwd)),
+    }
+    completed = subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+        env=env,
+    )
+    return DbtRunResult(
+        ok=completed.returncode == 0,
+        returncode=completed.returncode,
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
+    )
+
+
+async def _run_hash_refresh_pipeline() -> int:
+    """Upload GCS → hash extract → optional external_hash dbt. Returns rows written."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows_written = await _await_if_needed(
+            run_hash_extract(
+                conn=conn,
+                connection_id=settings.paylocity_connection_id or None,
+                bq_table=settings.hashed_raw_table,
+            )
+        )
+    count = int(rows_written)
+    if count <= 0:
+        raise _HashRefreshFailed("empty_extract", rows_written=count)
+
+    if settings.skip_external_hash_dbt:
+        return count
+
+    try:
+        dbt_result = await _await_if_needed(
+            run_external_hash_dbt_build(
+                dbt_dir=settings.external_hash_dbt_dir,
+                timeout_seconds=settings.dbt_timeout_seconds,
+            )
+        )
+    except subprocess.TimeoutExpired:
+        raise _HashRefreshFailed("dbt_timeout", rows_written=count) from None
+    if not getattr(dbt_result, "ok", False):
+        raise _HashRefreshFailed("dbt_failed", rows_written=count)
+    return count
+
+
+def _hash_refresh_error_code(exc: BaseException) -> str:
+    if isinstance(exc, _HashRefreshFailed):
+        return exc.code
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "dbt_timeout"
+    name = type(exc).__name__
+    return name[:50]
+
+
 @app.post("/hash-refresh/process")
 async def hash_refresh_process():
-    """Claim vertical_hash_refresh for Paylocity; stub extract (no plaintext persist)."""
+    """Claim vertical_hash_refresh for Paylocity; hash upload then optional dbt."""
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
 
@@ -276,36 +464,79 @@ async def hash_refresh_process():
             conn,
             system=SYSTEM,
             worker_id=settings.worker_id,
+            lease_minutes=settings.hash_refresh_lease_minutes,
         )
         if claim is None:
             return {"processed": False, "reason": "idle"}
 
         attempt_id = int(claim["id"])
-        started_at = datetime.now(timezone.utc)
         await mark_vertical_hash_refresh_in_flight(conn, attempt_id)
 
-        # Stub extract path: hash in memory only; no plaintext BQ write in scaffold.
-        finished_at = datetime.now(timezone.utc)
+    started_at = datetime.now(UTC)
+    rows_written = 0
+    status = "success"
+    error_code: str | None = None
+    error_message: str | None = None
+
+    try:
+        rows_written = await _run_hash_refresh_pipeline()
+    except _HashRefreshFailed as exc:
+        status = "submit_error"
+        error_code = exc.code
+        rows_written = exc.rows_written
+        error_message = redact_error_text(exc.code)
+        logger.error(
+            "hash refresh failed attempt_id=%s error_code=%s rows_written=%s",
+            attempt_id,
+            error_code,
+            rows_written,
+        )
+    except Exception as exc:
+        status = "submit_error"
+        error_code = _hash_refresh_error_code(exc)
+        error_message = redact_error_text(f"{error_code}: {type(exc).__name__}")
+        logger.error(
+            "hash refresh failed attempt_id=%s error_code=%s",
+            attempt_id,
+            error_code,
+        )
+
+    finished_at = datetime.now(UTC)
+    async with pool.acquire() as conn:
         await record_vertical_hash_refresh_run(
             conn,
             attempt_id=attempt_id,
-            status="success",
+            status=status,
             started_at=started_at,
             finished_at=finished_at,
-            rows_written=0,
+            rows_written=rows_written,
+            error_message=error_message,
         )
         await conn.execute(
             f"""
             UPDATE {VERTICAL_HASH_REFRESH_ATTEMPTS_TABLE}
-               SET status = 'success',
-                   completed_at = NOW()
-             WHERE id = $1
-               AND status = 'in_flight'
+               SET status = $2,
+                   completed_at = NOW(),
+                   error_code = $3,
+                   error_message = $4
+             WHERE id = $1 AND status = 'in_flight'
             """,
             attempt_id,
+            status,
+            error_code,
+            error_message,
         )
 
-    return {"processed": True, "attempt_id": attempt_id, "status": "success"}
+    payload: dict[str, Any] = {
+        "processed": True,
+        "attempt_id": attempt_id,
+        "system": SYSTEM,
+        "status": status,
+        "rows_written": rows_written,
+    }
+    if error_code is not None:
+        payload["reason"] = error_code
+    return payload
 
 
 def run() -> None:

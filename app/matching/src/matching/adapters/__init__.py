@@ -5,7 +5,8 @@ Vendor/source adapter code lives here, inside app/matching, per repo convention
 Manager) — no source-routing or matching logic there.
 """
 
+from matching.adapters.auth0_hash import Auth0HashPipeline
 from matching.adapters.drop_hash import DropHashPipeline
 from matching.adapters.plaintext import PlaintextMatchPipeline
 
-__all__ = ["DropHashPipeline", "PlaintextMatchPipeline"]
+__all__ = ["Auth0HashPipeline", "DropHashPipeline", "PlaintextMatchPipeline"]

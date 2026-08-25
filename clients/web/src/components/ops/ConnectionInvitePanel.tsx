@@ -457,7 +457,7 @@ export function ConnectionInvitePanel({
       <div className="space-y-3 text-sm">
         {statusBlock}
         <div className="rounded-md border border-line bg-canvas px-3 py-2 text-xs text-ink-soft">
-          Cassandra connectivity is handled by Habeas Infrastructure (INF). No owner onboarding
+          This connection is handled by Habeas Infrastructure. No owner onboarding
           flow — ops marks the connection{' '}
           <span className="font-medium text-ink">infra_pending</span> until INF confirms TLS,
           service accounts, and egress are live. Credentials are stored only in Google Cloud Secret

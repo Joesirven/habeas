@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import Any, AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 import asyncpg
-from fastapi import FastAPI, HTTPException
-from pydantic_settings import SettingsConfigDict
-
+from habeas_privacy_core.audit.redaction import redact_error_text
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.connections.freshness import GateResult
 from habeas_privacy_core.connections.matching_gate import (
@@ -36,8 +35,12 @@ from habeas_privacy_core.queue.constants import (
     STEP_SUPPRESSION,
     VERTICAL_HASH_REFRESH_ATTEMPTS_TABLE,
 )
-from habeas_privacy_core.workflow.approval import fetch_active_rule
 from habeas_privacy_core.vertical_hash.audit import build_vertical_audit_payload
+from habeas_privacy_core.workflow.approval import fetch_active_rule
+from fastapi import FastAPI, HTTPException
+from pydantic_settings import SettingsConfigDict
+
+from lever.vertical_match import ADAPTER, VerticalMatchOutcome, run_lever_vertical_match
 
 logger = logging.getLogger(__name__)
 
@@ -144,9 +147,7 @@ async def _complete_stub(
     """Stub terminal transition — real adapters land later."""
     pool = get_pool()
     status = "success" if success else "submit_error"
-    audit = json.dumps(
-        build_vertical_audit_payload(adapter="stub", step=step, system=SYSTEM)
-    )
+    audit = json.dumps(build_vertical_audit_payload(adapter="stub", step=step, system=SYSTEM))
     async with pool.acquire() as conn:
         await conn.execute(
             f"""
@@ -200,6 +201,53 @@ async def _complete_gate_blocked(
     return {"attempt_id": attempt_id, "step": step, "status": "gate_blocked"}
 
 
+async def _complete_matching(
+    conn: asyncpg.Connection,
+    attempt_id: int,
+    outcome: VerticalMatchOutcome,
+) -> dict[str, Any]:
+    """Terminal matching transition — count-only audit, never hashes or vendor ids."""
+    status = "success" if outcome.ok else "submit_error"
+    error_detail = outcome.error_detail
+    audit = json.dumps(
+        build_vertical_audit_payload(
+            adapter=ADAPTER,
+            step=STEP_MATCHING,
+            system=SYSTEM,
+            matched=outcome.ok and outcome.match_count > 0,
+            error_code=outcome.error_code,
+            error_class=outcome.error_class,
+            error_detail=error_detail,
+        )
+    )
+    await conn.execute(
+        f"""
+        UPDATE {ATTEMPTS_TABLE}
+           SET status = $2,
+               completed_at = NOW(),
+               error_code = $4,
+               error_message = $5,
+               audit_payload = COALESCE(audit_payload, '{{}}'::jsonb) || $3::jsonb
+         WHERE id = $1 AND status = 'claimed'
+        """,
+        attempt_id,
+        status,
+        audit,
+        outcome.error_code,
+        redact_error_text(error_detail) if error_detail else None,
+    )
+    payload: dict[str, Any] = {
+        "attempt_id": attempt_id,
+        "step": STEP_MATCHING,
+        "status": status,
+    }
+    if outcome.ok:
+        payload["match_count"] = outcome.match_count
+    elif outcome.error_code is not None:
+        payload["reason"] = outcome.error_code
+    return payload
+
+
 @app.post("/matching/submit")
 async def matching_submit():
     if not settings.database_url:
@@ -207,6 +255,9 @@ async def matching_submit():
     row = await _claim(STEP_MATCHING)
     if row is None:
         return {"claimed": False}
+
+    attempt_id = int(row["id"])
+    request_id = str(row["request_id"])
     pool = get_pool()
     async with pool.acquire() as conn:
         gate = await evaluate_vertical_matching_gate(
@@ -215,9 +266,31 @@ async def matching_submit():
             vertical_id=vertical_id_from_attempt_row(row),
         )
     if not gate.allowed:
-        result = await _complete_gate_blocked(int(row["id"]), gate)
+        result = await _complete_gate_blocked(attempt_id, gate)
         return {"claimed": True, **result}
-    result = await _complete_stub(int(row["id"]), STEP_MATCHING)
+
+    async with pool.acquire() as conn:
+        try:
+            outcome = await run_lever_vertical_match(
+                conn,
+                request_id=request_id,
+                attempt_id=attempt_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "lever_matching_submit_failed",
+                extra={
+                    "event": "lever_matching_submit_failed",
+                    "error_summary": redact_error_text(str(exc)),
+                },
+            )
+            outcome = VerticalMatchOutcome(
+                ok=False,
+                error_code="lever_lookup_error",
+                error_class=type(exc).__name__,
+                error_detail=redact_error_text(str(exc)),
+            )
+        result = await _complete_matching(conn, attempt_id, outcome)
     return {"claimed": True, **result}
 
 
@@ -261,9 +334,18 @@ async def suppression_collect():
     return {"collected": 0}
 
 
+EXTRACT_NOT_CONFIGURED = "extract_not_configured"
+
+
 @app.post("/hash-refresh/process")
 async def hash_refresh_process():
-    """Claim vertical_hash_refresh for Lever; stub extract (no plaintext persist)."""
+    """Claim vertical_hash_refresh for Lever; live extract is not configured.
+
+    The onboarding tester only probes ``GET /v1/users?limit=1``. Opportunity /
+    candidate email extract is not wired, so this route fails closed with
+    ``extract_not_configured`` instead of a silent stub success. Matching still
+    looks up ``lever_email_hash__build``.
+    """
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
 
@@ -278,31 +360,51 @@ async def hash_refresh_process():
             return {"processed": False, "reason": "idle"}
 
         attempt_id = int(claim["id"])
-        started_at = datetime.now(timezone.utc)
+        started_at = datetime.now(UTC)
         await mark_vertical_hash_refresh_in_flight(conn, attempt_id)
 
-        # Stub extract path: hash in memory only; no plaintext BQ write in scaffold.
-        finished_at = datetime.now(timezone.utc)
+        finished_at = datetime.now(UTC)
+        error_code = EXTRACT_NOT_CONFIGURED
+        error_message = redact_error_text(error_code)
+        logger.error(
+            "hash refresh failed attempt_id=%s error_code=%s rows_written=%s",
+            attempt_id,
+            error_code,
+            0,
+        )
         await record_vertical_hash_refresh_run(
             conn,
             attempt_id=attempt_id,
-            status="success",
+            status="submit_error",
             started_at=started_at,
             finished_at=finished_at,
             rows_written=0,
+            error_message=error_message,
         )
         await conn.execute(
             f"""
             UPDATE {VERTICAL_HASH_REFRESH_ATTEMPTS_TABLE}
-               SET status = 'success',
-                   completed_at = NOW()
+               SET status = $2,
+                   completed_at = NOW(),
+                   error_code = $3,
+                   error_message = $4
              WHERE id = $1
                AND status = 'in_flight'
             """,
             attempt_id,
+            "submit_error",
+            error_code,
+            error_message,
         )
 
-    return {"processed": True, "attempt_id": attempt_id, "status": "success"}
+    return {
+        "processed": True,
+        "attempt_id": attempt_id,
+        "system": SYSTEM,
+        "status": "submit_error",
+        "rows_written": 0,
+        "reason": EXTRACT_NOT_CONFIGURED,
+    }
 
 
 def run() -> None:
