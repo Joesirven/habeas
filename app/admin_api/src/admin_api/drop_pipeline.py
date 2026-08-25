@@ -51,6 +51,11 @@ from habeas_privacy_core.audit.redaction import redact_error_text
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
 from habeas_privacy_core.db.request_resolver import request_resolver
+from habeas_privacy_core.db.vertical_matching import (
+    AUTH0_VERTICAL,
+    fetch_confirmed_vendor_record_ids,
+    fetch_vertical_matching_snapshot,
+)
 from habeas_privacy_core.geo.state import InvalidStateAcronymError, normalize_state_acronym
 from habeas_privacy_core.models.intake import DropListType
 from habeas_privacy_core.models.request import IntakeSource
@@ -2413,6 +2418,92 @@ async def collect_matching_results(
     }
 
 
+def empty_auth0_vertical_block() -> dict[str, Any]:
+    """Counts-only Auth0 candidate/confirm stub — no vendor ids."""
+    return {
+        "match_count": 0,
+        "disposition_status": None,
+        "selected_vendor_record_id_count": 0,
+    }
+
+
+async def fetch_auth0_disposition_status(conn: Any, request_id: str) -> int | None:
+    """Auth0 confirm status (3/4/5), or None when no disposition row."""
+    row = await conn.fetchrow(
+        """
+        SELECT status
+          FROM request_vertical_dispositions
+         WHERE request_id = $1::uuid
+           AND vertical = $2
+        """,
+        request_id,
+        AUTH0_VERTICAL,
+    )
+    if row is None:
+        return None
+    try:
+        status = row["status"]
+    except (KeyError, TypeError):
+        return None
+    if status is None:
+        return None
+    return int(status)
+
+
+async def build_auth0_vertical_block(conn: Any, request_id: str) -> dict[str, Any]:
+    """Auth0 candidate (S03 snapshot) + confirm counts for matching-results.
+
+    Never includes raw ``vendor_record_ids`` — those stay on the search API.
+    """
+    block = empty_auth0_vertical_block()
+    try:
+        snapshot = await fetch_vertical_matching_snapshot(
+            conn, request_id=request_id, vertical=AUTH0_VERTICAL
+        )
+    except Exception as exc:
+        logger.warning(
+            "auth0_vertical_snapshot_failed",
+            extra={
+                "event": "auth0_vertical_snapshot_failed",
+                "request_id": request_id,
+                "error_type": type(exc).__name__,
+            },
+        )
+        snapshot = None
+    if snapshot is not None:
+        block["match_count"] = int(snapshot.match_count)
+
+    try:
+        confirmed = await fetch_confirmed_vendor_record_ids(
+            conn, request_id=request_id, vertical=AUTH0_VERTICAL
+        )
+        block["selected_vendor_record_id_count"] = len(confirmed)
+    except Exception as exc:
+        logger.warning(
+            "auth0_vertical_confirm_failed",
+            extra={
+                "event": "auth0_vertical_confirm_failed",
+                "request_id": request_id,
+                "error_type": type(exc).__name__,
+            },
+        )
+
+    try:
+        block["disposition_status"] = await fetch_auth0_disposition_status(
+            conn, request_id
+        )
+    except Exception as exc:
+        logger.warning(
+            "auth0_vertical_disposition_failed",
+            extra={
+                "event": "auth0_vertical_disposition_failed",
+                "request_id": request_id,
+                "error_type": type(exc).__name__,
+            },
+        )
+    return block
+
+
 async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, Any] | None:
     """Single DROP matching result detail (latest row + review gate)."""
     row = await conn.fetchrow(
@@ -2522,6 +2613,18 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
     else:
         detail["matched_contacts"] = []
         detail["matched_contacts_status"] = "none"
+    try:
+        detail["auth0_vertical"] = await build_auth0_vertical_block(conn, request_id)
+    except Exception as exc:
+        logger.warning(
+            "auth0_vertical_block_failed",
+            extra={
+                "event": "auth0_vertical_block_failed",
+                "request_id": request_id,
+                "error_type": type(exc).__name__,
+            },
+        )
+        detail["auth0_vertical"] = empty_auth0_vertical_block()
     return detail
 
 

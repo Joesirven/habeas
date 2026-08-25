@@ -51,6 +51,8 @@ from admin_api.vertical_dispositions import (
     list_vertical_dispositions,
 )
 
+AUTH0_VERTICAL = "auth0"
+
 NeedsAttentionItemKind = Literal[
     "matching",
     "triage",
@@ -913,6 +915,20 @@ class WorkbenchStepAttempts(BaseModel):
     error_code: str | None = None
 
 
+class WorkbenchVerticalMatchingSummary(BaseModel):
+    """Snapshot counts for one vertical — no emails, hashes, or candidate ids."""
+
+    match_count: int | None = None
+
+
+class WorkbenchVerticalDispositionSummary(BaseModel):
+    """Owner confirm state. ``selected_vendor_record_ids`` are opaque vendor ids."""
+
+    status: int | None = None
+    decided: bool = False
+    selected_vendor_record_ids: list[str] = Field(default_factory=list)
+
+
 class WorkbenchVerticalRow(BaseModel):
     """One vertical's posture inside the Matching or Fulfillment cluster (R2)."""
 
@@ -929,6 +945,8 @@ class WorkbenchVerticalRow(BaseModel):
     fulfillment_status: StageStatus | None = None
     fulfillment_steps: list[WorkbenchStepAttempts] = Field(default_factory=list)
     blocker: str | None = None
+    matching: WorkbenchVerticalMatchingSummary | None = None
+    disposition: WorkbenchVerticalDispositionSummary | None = None
 
 
 class WorkbenchNoticeSummary(BaseModel):
@@ -1057,6 +1075,99 @@ async def _access_identity_verified(conn: Any, *, request_id: str) -> bool:
     return row["status"] == "verified" and bool(notes and str(notes).strip())
 
 
+def _parse_opaque_ids(raw: Any) -> list[str]:
+    """Parse JSONB/list opaque ids — never log the values."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        value = str(item).strip() if item is not None else ""
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _journey_live_verticals() -> tuple[str, ...]:
+    """Auth0 is live on the journey rail even if disposition catalog lags."""
+    seen: list[str] = []
+    for vertical in (*LIVE_VERTICALS, AUTH0_VERTICAL):
+        if vertical not in seen:
+            seen.append(vertical)
+    return tuple(seen)
+
+
+def _vertical_affects_stage_rollup(row: WorkbenchVerticalRow) -> bool:
+    """Auth0 joins matching rollup only after a snapshot or owner confirm exists.
+
+    Requests without an Auth0 lookup must not stall a completed DROP rail.
+    """
+    if not row.live:
+        return False
+    if row.vertical != AUTH0_VERTICAL:
+        return True
+    decided = row.disposition is not None and row.disposition.decided
+    has_snapshot = row.matching is not None and row.matching.match_count is not None
+    return decided or has_snapshot
+
+
+async def fetch_vertical_matching_snapshot(
+    conn: Any, *, request_id: str, vertical: str = AUTH0_VERTICAL
+) -> dict[str, Any] | None:
+    """Read ``request_vertical_matching`` counts + opaque ids, or None."""
+    row = await conn.fetchrow(
+        """
+        SELECT match_count, vendor_record_ids
+          FROM request_vertical_matching
+         WHERE request_id = $1
+           AND vertical = $2
+        """,
+        UUID(request_id),
+        vertical,
+    )
+    if row is None:
+        return None
+    try:
+        match_count = row["match_count"]
+    except (KeyError, TypeError):
+        return None
+    if match_count is None:
+        return None
+    try:
+        vendor_record_ids = _parse_opaque_ids(row["vendor_record_ids"])
+    except (KeyError, TypeError):
+        vendor_record_ids = []
+    return {"match_count": int(match_count), "vendor_record_ids": vendor_record_ids}
+
+
+async def fetch_selected_vendor_record_ids(
+    conn: Any, *, request_id: str, vertical: str = AUTH0_VERTICAL
+) -> list[str]:
+    """Confirmed opaque vendor ids on the disposition row (empty if none)."""
+    row = await conn.fetchrow(
+        """
+        SELECT selected_vendor_record_ids
+          FROM request_vertical_dispositions
+         WHERE request_id = $1
+           AND vertical = $2
+        """,
+        UUID(request_id),
+        vertical,
+    )
+    if row is None:
+        return []
+    try:
+        return _parse_opaque_ids(row["selected_vendor_record_ids"])
+    except (KeyError, TypeError):
+        return []
+
+
 async def _build_vertical_rows(
     conn: Any,
     *,
@@ -1080,8 +1191,14 @@ async def _build_vertical_rows(
 
     matching_cluster: list[WorkbenchVerticalRow] = []
     fulfillment_cluster: list[WorkbenchVerticalRow] = []
+    auth0_snapshot = await fetch_vertical_matching_snapshot(
+        conn, request_id=request_id, vertical=AUTH0_VERTICAL
+    )
+    auth0_vendor_ids = await fetch_selected_vendor_record_ids(
+        conn, request_id=request_id, vertical=AUTH0_VERTICAL
+    )
 
-    for vertical in LIVE_VERTICALS:
+    for vertical in _journey_live_verticals():
         disposition = disposed_by_vertical.get(vertical)
         label = VERTICAL_LABELS.get(vertical, vertical.title())
         # Legacy DROP path often has ops review/fulfill complete + response_status
@@ -1091,11 +1208,30 @@ async def _build_vertical_rows(
             if disposition is None
             and intake_source == "drop"
             and response_status is not None
+            and vertical != AUTH0_VERTICAL
             else None
         )
 
-        if disposition is not None:
-            matching_status: StageStatus = "complete"
+        if vertical == AUTH0_VERTICAL:
+            if disposition is not None:
+                matching_status: StageStatus = "complete"
+                matching_blocker = None
+            elif auth0_snapshot is not None:
+                matching_status = "waiting"
+                matching_blocker = "Pending Data Owner Review"
+            else:
+                match = ops_by_stage.get("match")
+                if match is not None and match.status == "failed":
+                    matching_status = "failed"
+                    matching_blocker = match.blocker
+                elif match is not None and match.status == "in_progress":
+                    matching_status = "in_progress"
+                    matching_blocker = None
+                else:
+                    matching_status = "not_started"
+                    matching_blocker = None
+        elif disposition is not None:
+            matching_status = "complete"
             matching_blocker = None
         else:
             review = ops_by_stage.get("review")
@@ -1125,6 +1261,22 @@ async def _build_vertical_rows(
                 matching_status = "not_started"
                 matching_blocker = None
 
+        matching_summary = None
+        disposition_summary = None
+        if vertical == AUTH0_VERTICAL:
+            matching_summary = WorkbenchVerticalMatchingSummary(
+                match_count=(
+                    int(auth0_snapshot["match_count"])
+                    if auth0_snapshot is not None
+                    else None
+                )
+            )
+            disposition_summary = WorkbenchVerticalDispositionSummary(
+                status=disposition.status if disposition is not None else None,
+                decided=disposition is not None,
+                selected_vendor_record_ids=auth0_vendor_ids,
+            )
+
         matching_cluster.append(
             WorkbenchVerticalRow(
                 vertical=vertical,
@@ -1139,8 +1291,14 @@ async def _build_vertical_rows(
                     disposition.selected_dwid_count if disposition else None
                 ),
                 blocker=matching_blocker,
+                matching=matching_summary,
+                disposition=disposition_summary,
             )
         )
+
+        # Auth0 is confirm-only this wave — matching cluster only, no fulfillment worker.
+        if vertical == AUTH0_VERTICAL:
+            continue
 
         # Fulfillment cluster — only live verticals ever run fulfillment (KD3).
         kicked_off = await is_vertical_kickoff_approved(
@@ -1226,6 +1384,8 @@ async def _build_vertical_rows(
         )
 
     for entry in dispositions.coming_soon:
+        if entry.vertical == AUTH0_VERTICAL:
+            continue
         matching_cluster.append(
             WorkbenchVerticalRow(
                 vertical=entry.vertical,
@@ -1359,18 +1519,25 @@ async def build_request_journey_workbench(
     )
 
     matching_status = _rollup_status(
-        [row_.matching_status for row_ in matching_cluster if row_.live]
+        [
+            row_.matching_status
+            for row_ in matching_cluster
+            if _vertical_affects_stage_rollup(row_)
+        ]
     )
     fulfillment_status = _rollup_status(
         [
             row_.fulfillment_status
             for row_ in fulfillment_cluster
             if row_.fulfillment_status is not None
+            and _vertical_affects_stage_rollup(row_)
         ]
     )
 
     matching_incomplete = any(
-        row_.matching_status != "complete" for row_ in matching_cluster if row_.live
+        row_.matching_status != "complete"
+        for row_ in matching_cluster
+        if _vertical_affects_stage_rollup(row_)
     )
     fulfillment_started = any(
         row_.kicked_off
@@ -1407,7 +1574,7 @@ async def build_request_journey_workbench(
                 (
                     row_.blocker
                     for row_ in matching_cluster
-                    if row_.live and row_.blocker
+                    if _vertical_affects_stage_rollup(row_) and row_.blocker
                 ),
                 None,
             ),

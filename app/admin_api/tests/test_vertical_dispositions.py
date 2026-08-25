@@ -43,6 +43,7 @@ class FakeConn:
         matched_consumer_id: str | None = None,
         match_count: int | None = None,
         fulfillment_attempts: list[dict[str, Any]] | None = None,
+        auth0_snapshot_present: bool = False,
     ) -> None:
         self.rows = rows if rows is not None else []
         self.request_exists = request_exists
@@ -50,10 +51,13 @@ class FakeConn:
         self.matched_consumer_id = matched_consumer_id
         self.match_count = match_count
         self.fulfillment_attempts = fulfillment_attempts if fulfillment_attempts is not None else []
+        self.auth0_snapshot_present = auth0_snapshot_present
         self.upserts: list[dict[str, Any]] = []
         self.drop_syncs: list[int] = []
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
+        if "FROM request_vertical_matching" in sql:
+            return 1 if self.auth0_snapshot_present else None
         if "FROM requests WHERE id" in sql:
             return 1 if self.request_exists else None
         if "FROM approval_requests" in sql:
@@ -78,8 +82,9 @@ class FakeConn:
                 "vertical": args[1],
                 "status": args[2],
                 "selected_dwids": args[3],
-                "decided_by": args[4],
-                "actor_role": args[5],
+                "selected_vendor_record_ids": args[4] if len(args) > 6 else "[]",
+                "decided_by": args[5] if len(args) > 6 else args[4],
+                "actor_role": args[6] if len(args) > 6 else args[5],
                 "decided_at": datetime.now(UTC),
                 "updated_at": datetime.now(UTC),
             }
@@ -124,9 +129,29 @@ def fake_pool(monkeypatch: pytest.MonkeyPatch, conn: FakeConn) -> None:
     monkeypatch.setattr(vd, "get_pool", lambda: FakePool())
 
 
+def test_auth0_is_live_other_catalog_verticals_remain_coming_soon():
+    assert vd.VERTICAL_AUTH0 in vd.LIVE_VERTICALS
+    assert vd.is_live_vertical("auth0") is True
+    assert vd.VERTICAL_AUTH0 not in vd.COMING_SOON_VERTICALS
+    assert tuple(vd.COMING_SOON_VERTICALS) == (
+        "mailchimp",
+        "lever",
+        "paylocity",
+        "cassandra",
+    )
+
+
 def test_normalize_dwids_trims_and_dedupes_preserving_order():
     assert vd.normalize_dwids([" d2 ", "d1", "d2", "", None]) == ["d2", "d1"]  # type: ignore[list-item]
     assert vd.normalize_dwids(None) == []
+
+
+def test_normalize_vendor_record_ids_trims_and_dedupes_preserving_order():
+    assert vd.normalize_vendor_record_ids([" usr_2 ", "usr_1", "usr_2", "", None]) == [  # type: ignore[list-item]
+        "usr_2",
+        "usr_1",
+    ]
+    assert vd.normalize_vendor_record_ids(None) == []
 
 
 def test_status_5_requires_empty_dwids():
@@ -145,6 +170,19 @@ def test_status_3_and_4_require_dwids(status: int):
 def test_invalid_status_rejected():
     with pytest.raises(ValueError, match="disposition status must be"):
         vd.assert_disposition_valid(2, [])
+
+
+def test_status_5_requires_empty_vendor_record_ids():
+    vd.assert_vendor_disposition_valid(5, [])
+    with pytest.raises(ValueError, match="must not carry vendor_record_ids"):
+        vd.assert_vendor_disposition_valid(5, ["usr_1"])
+
+
+@pytest.mark.parametrize("status", [3, 4])
+def test_status_3_and_4_require_vendor_record_ids(status: int):
+    with pytest.raises(ValueError, match="requires at least one vendor_record_id"):
+        vd.assert_vendor_disposition_valid(status, [])
+    vd.assert_vendor_disposition_valid(status, ["usr_1"])
 
 
 @pytest.mark.asyncio
@@ -176,6 +214,125 @@ async def test_put_rejects_coming_soon_vertical(monkeypatch: pytest.MonkeyPatch)
         )
     assert exc.value.status_code == 400
     assert "coming soon" in str(exc.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_put_mailchimp_still_rejected(monkeypatch: pytest.MonkeyPatch):
+    conn = FakeConn()
+    fake_pool(monkeypatch, conn)
+    with pytest.raises(HTTPException) as exc:
+        await vd.put_vertical_disposition(
+            REQUEST_ID,
+            "mailchimp",
+            vd.VerticalDispositionBody(status=4, vendor_record_ids=["usr_1"]),
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 400
+    assert "coming soon" in str(exc.value.detail)
+    assert conn.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_put_auth0_accepted_persists_vendor_ids_without_drop_sync(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = FakeConn()
+    fake_pool(monkeypatch, conn)
+    captured: dict[str, Any] = {}
+
+    async def _audit(**kwargs: Any) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(vd, "write_audit", _audit)
+
+    result = await vd.put_vertical_disposition(
+        REQUEST_ID,
+        "auth0",
+        vd.VerticalDispositionBody(
+            status=4,
+            vendor_record_ids=[" usr_1 ", "usr_1", "usr_2"],
+        ),
+        _fake_request(),
+        DATA_OWNER,
+    )
+    assert result.vertical == "auth0"
+    assert result.live is True
+    assert result.status == 4
+    assert result.selected_vendor_record_ids == ["usr_1", "usr_2"]
+    assert result.selected_vendor_record_id_count == 2
+    assert result.selected_dwids == []
+    assert result.selected_dwid_count == 0
+    assert conn.drop_syncs == []
+    assert json.loads(conn.upserts[0]["selected_vendor_record_ids"]) == ["usr_1", "usr_2"]
+    assert json.loads(conn.upserts[0]["selected_dwids"]) == []
+    arguments = captured["arguments"]
+    assert arguments["vertical"] == "auth0"
+    assert arguments["status"] == 4
+    assert arguments["selected_vendor_record_id_count"] == 2
+    assert arguments["selected_dwid_count"] == 0
+    assert "usr_1" not in json.dumps(arguments)
+    assert "vendor_record_ids" not in arguments
+    assert "selected_vendor_record_ids" not in arguments
+
+
+@pytest.mark.asyncio
+async def test_put_auth0_status_5_rejects_vendor_ids(monkeypatch: pytest.MonkeyPatch):
+    conn = FakeConn()
+    fake_pool(monkeypatch, conn)
+    monkeypatch.setattr(vd, "write_audit", _noop_audit())
+    with pytest.raises(HTTPException) as exc:
+        await vd.put_vertical_disposition(
+            REQUEST_ID,
+            "auth0",
+            vd.VerticalDispositionBody(status=5, vendor_record_ids=["usr_1"]),
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 400
+    assert "must not carry vendor_record_ids" in str(exc.value.detail)
+    assert conn.upserts == []
+    assert conn.drop_syncs == []
+
+
+@pytest.mark.asyncio
+async def test_put_auth0_status_3_requires_vendor_id(monkeypatch: pytest.MonkeyPatch):
+    conn = FakeConn()
+    fake_pool(monkeypatch, conn)
+    monkeypatch.setattr(vd, "write_audit", _noop_audit())
+    with pytest.raises(HTTPException) as exc:
+        await vd.put_vertical_disposition(
+            REQUEST_ID,
+            "auth0",
+            vd.VerticalDispositionBody(status=3),
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 400
+    assert "requires at least one vendor_record_id" in str(exc.value.detail)
+    assert conn.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_put_auth0_status_5_records_without_vendor_ids(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = FakeConn()
+    fake_pool(monkeypatch, conn)
+    monkeypatch.setattr(vd, "write_audit", _noop_audit())
+
+    result = await vd.put_vertical_disposition(
+        REQUEST_ID,
+        "auth0",
+        vd.VerticalDispositionBody(status=5),
+        _fake_request(),
+        DATA_OWNER,
+    )
+    assert result.status == 5
+    assert result.selected_vendor_record_ids == []
+    assert result.selected_vendor_record_id_count == 0
+    assert conn.drop_syncs == []
 
 
 @pytest.mark.asyncio
@@ -358,15 +515,51 @@ async def test_get_lists_dispositions_with_coming_soon_catalog(
     assert [item.vertical for item in response.dispositions] == ["data"]
     assert response.dispositions[0].label == "Data"
     assert response.dispositions[0].selected_dwid_count == 2
-    assert response.live_verticals == ["data"]
+    assert response.live_verticals == ["data", "auth0"]
     assert [entry.vertical for entry in response.coming_soon] == [
         "mailchimp",
         "lever",
         "paylocity",
-        "auth0",
         "cassandra",
     ]
     assert all(entry.live is False for entry in response.coming_soon)
+    assert "auth0" not in {entry.vertical for entry in response.coming_soon}
+    # Data-only + no Auth0 snapshot: Matching completes without an Auth0 row.
+    assert response.matching_complete is True
+
+
+@pytest.mark.asyncio
+async def test_matching_complete_true_without_auth0_snapshot_or_disposition(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Fails if Matching still requires Auth0 on DROP-only / never-run requests."""
+    conn = FakeConn(rows=[_disposition_row(4)], auth0_snapshot_present=False)
+    fake_pool(monkeypatch, conn)
+    response = await vd.get_vertical_dispositions(REQUEST_ID, DATA_OWNER)
+    assert [item.vertical for item in response.dispositions] == ["data"]
+    assert response.matching_complete is True
+    assert await vd.all_live_verticals_disposed(conn, REQUEST_ID) is True
+
+
+@pytest.mark.asyncio
+async def test_matching_complete_false_when_auth0_snapshot_pending(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = FakeConn(rows=[_disposition_row(4)], auth0_snapshot_present=True)
+    fake_pool(monkeypatch, conn)
+    response = await vd.get_vertical_dispositions(REQUEST_ID, DATA_OWNER)
+    assert response.matching_complete is False
+    assert await vd.all_live_verticals_disposed(conn, REQUEST_ID) is False
+
+
+@pytest.mark.asyncio
+async def test_get_matching_complete_when_data_and_auth0_decided(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    conn = FakeConn(rows=_live_disposition_rows(data_status=4, auth0_status=4))
+    fake_pool(monkeypatch, conn)
+    response = await vd.get_vertical_dispositions(REQUEST_ID, DATA_OWNER)
+    assert {item.vertical for item in response.dispositions} == {"data", "auth0"}
     assert response.matching_complete is True
 
 
@@ -576,17 +769,27 @@ async def test_promote_dwid_default_skipped_for_status_5():
 # --- KD13 / KTD8: Access Notice pack-readiness helpers ----------------------
 
 
-def _disposition_row(status: int) -> dict[str, Any]:
+def _disposition_row(status: int, *, vertical: str = "data") -> dict[str, Any]:
+    selected = ["dwid-1"] if vertical == "data" and status in (3, 4) else []
+    vendor_ids = ["usr_1"] if vertical == "auth0" and status in (3, 4) else []
     return {
         "request_id": REQUEST_ID,
-        "vertical": "data",
+        "vertical": vertical,
         "status": status,
-        "selected_dwids": json.dumps(["dwid-1"] if status in (3, 4) else []),
+        "selected_dwids": json.dumps(selected),
+        "selected_vendor_record_ids": json.dumps(vendor_ids),
         "decided_by": "owner@example.com",
         "actor_role": ROLE_DATA_OWNER,
         "decided_at": datetime.now(UTC),
         "updated_at": datetime.now(UTC),
     }
+
+
+def _live_disposition_rows(*, data_status: int, auth0_status: int = 5) -> list[dict[str, Any]]:
+    return [
+        _disposition_row(data_status, vertical="data"),
+        _disposition_row(auth0_status, vertical="auth0"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -596,27 +799,57 @@ async def test_all_live_verticals_disposed_false_without_rows():
 
 
 @pytest.mark.asyncio
-async def test_all_live_verticals_disposed_true_once_data_decided():
+async def test_all_live_verticals_disposed_true_when_only_data_decided():
     conn = FakeConn(rows=[_disposition_row(5)])
     assert await vd.all_live_verticals_disposed(conn, REQUEST_ID) is True
 
 
 @pytest.mark.asyncio
+async def test_all_live_verticals_disposed_false_when_auth0_snapshot_undecided():
+    conn = FakeConn(rows=[_disposition_row(5)], auth0_snapshot_present=True)
+    assert await vd.all_live_verticals_disposed(conn, REQUEST_ID) is False
+
+
+@pytest.mark.asyncio
+async def test_all_live_verticals_disposed_true_once_data_and_auth0_decided():
+    conn = FakeConn(rows=_live_disposition_rows(data_status=5), auth0_snapshot_present=True)
+    assert await vd.all_live_verticals_disposed(conn, REQUEST_ID) is True
+
+
+@pytest.mark.asyncio
+async def test_access_packs_ready_data_only_without_auth0_snapshot():
+    conn = FakeConn(rows=[_disposition_row(5)], auth0_snapshot_present=False)
+    assert await vd.access_packs_ready_for_notice(conn, REQUEST_ID) is True
+
+
+@pytest.mark.asyncio
+async def test_access_packs_ready_false_when_auth0_snapshot_undecided():
+    conn = FakeConn(rows=[_disposition_row(5)], auth0_snapshot_present=True)
+    assert await vd.access_packs_ready_for_notice(conn, REQUEST_ID) is False
+
+
+@pytest.mark.asyncio
 async def test_access_packs_ready_status_5_needs_no_pack():
-    conn = FakeConn(rows=[_disposition_row(5)])
+    conn = FakeConn(rows=_live_disposition_rows(data_status=5))
+    assert await vd.access_packs_ready_for_notice(conn, REQUEST_ID) is True
+
+
+@pytest.mark.asyncio
+async def test_access_packs_ready_auth0_confirm_needs_no_pack():
+    conn = FakeConn(rows=_live_disposition_rows(data_status=5, auth0_status=3))
     assert await vd.access_packs_ready_for_notice(conn, REQUEST_ID) is True
 
 
 @pytest.mark.asyncio
 async def test_access_packs_ready_status_3_blocks_without_gcs_uri():
-    conn = FakeConn(rows=[_disposition_row(3)])
+    conn = FakeConn(rows=_live_disposition_rows(data_status=3))
     assert await vd.access_packs_ready_for_notice(conn, REQUEST_ID) is False
 
 
 @pytest.mark.asyncio
 async def test_access_packs_ready_status_4_true_with_successful_pack():
     conn = FakeConn(
-        rows=[_disposition_row(4)],
+        rows=_live_disposition_rows(data_status=4),
         fulfillment_attempts=[
             {"gcs_uri": "gs://bucket/bulk-run/p/request/r/", "status": "success"}
         ],
@@ -650,21 +883,34 @@ async def test_collect_access_shareable_urls_empty_without_attempts():
 
 
 @pytest.mark.asyncio
+async def test_is_kd13_satisfied_true_for_data_not_found_without_auth0():
+    """DROP/Access must not invent a dummy Auth0 status-5 to clear KD13."""
+    conn = FakeConn(rows=[_disposition_row(5)], auth0_snapshot_present=False)
+    assert await vd.is_kd13_satisfied(conn, REQUEST_ID) is True
+
+
+@pytest.mark.asyncio
+async def test_is_kd13_satisfied_false_when_auth0_snapshot_undecided():
+    conn = FakeConn(rows=[_disposition_row(5)], auth0_snapshot_present=True)
+    assert await vd.is_kd13_satisfied(conn, REQUEST_ID) is False
+
+
+@pytest.mark.asyncio
 async def test_is_kd13_satisfied_true_for_not_found():
-    conn = FakeConn(rows=[_disposition_row(5)])
+    conn = FakeConn(rows=_live_disposition_rows(data_status=5))
     assert await vd.is_kd13_satisfied(conn, REQUEST_ID) is True
 
 
 @pytest.mark.asyncio
 async def test_is_kd13_satisfied_false_without_pack():
-    conn = FakeConn(rows=[_disposition_row(3)])
+    conn = FakeConn(rows=_live_disposition_rows(data_status=3))
     assert await vd.is_kd13_satisfied(conn, REQUEST_ID) is False
 
 
 @pytest.mark.asyncio
 async def test_is_kd13_satisfied_true_with_pack_present():
     conn = FakeConn(
-        rows=[_disposition_row(3)],
+        rows=_live_disposition_rows(data_status=3),
         fulfillment_attempts=[
             {"gcs_uri": "gs://bucket/bulk-run/p/request/r/", "status": "success"}
         ],
@@ -739,6 +985,23 @@ async def test_disposition_upsert_is_unique_per_request_vertical(pool):
 
         listed = await vd.list_vertical_dispositions(conn, request_id=request_id)
         assert [item.vertical for item in listed.dispositions] == ["data"]
+        assert listed.matching_complete is True
+
+        auth0 = await vd.upsert_vertical_disposition(
+            conn,
+            request_id=request_id,
+            vertical="auth0",
+            status=4,
+            dwids=[],
+            decided_by="owner@example.com",
+            actor_role=ROLE_DATA_OWNER,
+            vendor_record_ids=["usr_opaque_1"],
+        )
+        assert auth0.selected_vendor_record_ids == ["usr_opaque_1"]
+        assert auth0.selected_dwids == []
+
+        listed = await vd.list_vertical_dispositions(conn, request_id=request_id)
+        assert {item.vertical for item in listed.dispositions} == {"data", "auth0"}
         assert listed.matching_complete is True
 
 

@@ -2566,3 +2566,127 @@ export function getAttemptTableRows(
     }`,
   )
 }
+
+/* --- Dev lab: Sheets owner OAuth ----------------------------------------- */
+
+export type SheetsOauthLabStatus = {
+  configured: boolean
+  actor_email: string
+  scopes: string[]
+  allowed_redirect_uris: string[]
+  secret_store: string
+  note: string
+}
+
+export type SheetsOauthLabStartResponse = {
+  lab_session_id: string
+  authorize_url: string
+  state: string
+}
+
+export type SheetsOauthLabRedeemResponse = {
+  ok: boolean
+  detail: string
+  google_email_domain: string | null
+  spreadsheet_id: string | null
+}
+
+export type SheetsOauthLabTestResponse = {
+  ok: boolean
+  detail: string
+  spreadsheet_id: string | null
+  sheet_count: number | null
+  step: string
+}
+
+export function getSheetsOauthLabStatus() {
+  return fetchAdminApi<SheetsOauthLabStatus>('/ops/lab/sheets-oauth/status')
+}
+
+export function sheetsOauthLabStart(body: {
+  spreadsheet_url: string
+  redirect_uri: string
+}) {
+  return fetchAdminApi<SheetsOauthLabStartResponse>('/ops/lab/sheets-oauth/start', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function sheetsOauthLabRedeem(body: {
+  lab_session_id: string
+  code: string
+  state: string
+}) {
+  return fetchAdminApi<SheetsOauthLabRedeemResponse>('/ops/lab/sheets-oauth/redeem', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function sheetsOauthLabTest(body: { lab_session_id: string }) {
+  return fetchAdminApi<SheetsOauthLabTestResponse>('/ops/lab/sheets-oauth/test', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+/* --- Auth0 match search / confirm (S09 APIs; design lab later) ----------- */
+
+export type Auth0MatchCandidate = {
+  vendor_record_id: string
+}
+
+export type Auth0MatchCandidatesResponse = {
+  match_count: number
+  candidates: Auth0MatchCandidate[]
+}
+
+export type Auth0MatchCandidatesStatus = {
+  snapshot_present: boolean
+  match_count: number
+}
+
+export type Auth0DispositionBody = {
+  status: DropResponseStatusCode
+  vendor_record_ids?: string[]
+  decision_reason?: string | null
+}
+
+export type Auth0Disposition = {
+  request_id: string
+  vertical: string
+  label: string
+  live: boolean
+  status: number
+  selected_dwids: string[]
+  selected_dwid_count: number
+  selected_vendor_record_ids: string[]
+  selected_vendor_record_id_count: number
+  decided_by: string
+  actor_role: string | null
+  decided_at: string
+  updated_at: string | null
+}
+
+export function getAuth0MatchCandidates(requestId: string) {
+  return fetchAdminApi<Auth0MatchCandidatesResponse>(
+    `/requests/${encodeURIComponent(requestId)}/verticals/auth0/match-candidates`,
+  )
+}
+
+export function getAuth0MatchCandidatesStatus(requestId: string) {
+  return fetchAdminApi<Auth0MatchCandidatesStatus>(
+    `/requests/${encodeURIComponent(requestId)}/verticals/auth0/match-candidates/status`,
+  )
+}
+
+export function putAuth0Disposition(requestId: string, body: Auth0DispositionBody) {
+  return fetchAdminApi<Auth0Disposition>(
+    `/requests/${encodeURIComponent(requestId)}/dispositions/auth0`,
+    {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    },
+  )
+}

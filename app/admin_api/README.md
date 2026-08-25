@@ -36,6 +36,34 @@ deployed admin-api; browser reaches admin-api through the ops-ia IAP front door 
 
 Plan: [`docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md`](../../docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md).
 
+## Auth0 vertical
+
+Confirm-only owner search on **dev**: matching-dev writes `request_vertical_matching`; this API returns opaque `vendor_record_id`s and accepts Auth0 dispositions. Mailchimp / Lever / Paylocity / Cassandra stay coming soon.
+
+**Cadence is UNSET and out of scope.** These routes do **not** call `evaluate_connection_gate`, persist `refresh_policy`, or stamp `last_successful_refresh_at`. Matching runs with unset cadence.
+
+**`auth0-dev` is not deployed.** Hash-refresh **process** proxies to `AUTH0_WORKER_URL` (default `http://127.0.0.1:8080`) — local uvicorn only. Do not set a fabricated `*.run.app` Auth0 URL. Enqueue against admin-api-dev still writes Postgres; process on that service cannot reach a laptop worker — curl `http://127.0.0.1:8080/hash-refresh/process` after enqueue. Worker runbook: [`app/auth0/README.md`](../auth0/README.md) § Auth0 matching on dev. matching-dev IAM: [`infra/README.md`](../../infra/README.md).
+
+| Surface | Endpoints | Role |
+|---------|-----------|------|
+| Hash refresh (mart prerequisite) | `POST /ops/verticals/auth0/hash-refresh/enqueue`, `POST .../process` | `super_admin` |
+| Match candidates | `GET /requests/{request_id}/verticals/auth0/match-candidates` | `data_owner`, `admin`, `legal`, `super_admin` |
+| Lab probe | `GET .../match-candidates/status` | same |
+| Confirm | `PUT /requests/{request_id}/dispositions/auth0` | same as other dispositions |
+| Matching-results detail | `GET /ops/drop/matching-results/{request_id}` includes `auth0_vertical` | matching-results readers |
+
+| Variable | Role |
+|----------|------|
+| `AUTH0_WORKER_URL` | Process proxy target (default `http://127.0.0.1:8080`) |
+
+There is **no** Habeas CLI wrapper for Auth0 hash refresh (`habeas-cli drop hash-index-refresh` is DROP only).
+
+Candidates: `{ match_count, candidates: [{ vendor_record_id }] }` from the snapshot; if missing, derive the request email hash and read the mart (read-only). Audit arguments: request id + counts — no email or hash. Status probe: `{ snapshot_present, match_count }`.
+
+Disposition body may include `vendor_record_ids`. Status 3/4 require ≥1 vendor id; status 5 requires none. Auth0 does **not** sync `drop_raw_requests.response_status`. Audit: `selected_vendor_record_id_count` only.
+
+Numbered dev path: (1) hash-refresh enqueue / process, (2) DROP dispatch / ensure-drain on matching-dev, (3) verify `request_vertical_matching`, (4) GET candidates + PUT disposition. See [`app/matching/README.md`](../matching/README.md) § Auth0 vertical.
+
 ## Local
 
 ```bash
