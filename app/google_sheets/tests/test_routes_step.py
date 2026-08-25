@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from habeas_privacy_core.connections.freshness import GateResult
+
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch):
@@ -19,6 +21,13 @@ def test_matching_submit_claims_matching_step(client: TestClient):
 
     with (
         patch.object(main, "_claim", new_callable=AsyncMock, return_value={"id": 7}) as mock_claim,
+        patch.object(main, "get_pool") as mock_pool,
+        patch.object(
+            main,
+            "evaluate_vertical_matching_gate",
+            new_callable=AsyncMock,
+            return_value=GateResult(allowed=True, code="ok", display_status="connected"),
+        ),
         patch.object(
             main,
             "_complete_stub",
@@ -26,6 +35,16 @@ def test_matching_submit_claims_matching_step(client: TestClient):
             return_value={"attempt_id": 7, "step": "matching", "status": "success"},
         ),
     ):
+        class _Acquire:
+            async def __aenter__(self):
+                return AsyncMock()
+
+            async def __aexit__(self, *args):
+                return None
+
+        pool = AsyncMock()
+        pool.acquire = lambda: _Acquire()
+        mock_pool.return_value = pool
         response = client.post("/matching/submit")
 
     assert response.status_code == 200
@@ -81,6 +100,7 @@ def test_hash_refresh_process_claims_google_sheets_system(client: TestClient):
         ) as mock_claim,
         patch.object(main, "mark_vertical_hash_refresh_in_flight", new_callable=AsyncMock),
         patch.object(main, "record_vertical_hash_refresh_run", new_callable=AsyncMock),
+        patch.object(main, "stamp_successful_extract_for_system", new_callable=AsyncMock),
     ):
         conn = AsyncMock()
         conn.execute = AsyncMock()

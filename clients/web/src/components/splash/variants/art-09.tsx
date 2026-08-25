@@ -88,7 +88,7 @@ function ArcTypeSeal({ mode }: { mode: Mode }) {
       {/* Arc type — Data Privacy Platform (mid bottom) */}
       <text className="art-09-type art-09-type-platform">
         <textPath href={`#${midId}`} startOffset="50%" textAnchor="middle">
-          Data Privacy Platform
+          Platform
         </textPath>
       </text>
 

@@ -11,21 +11,55 @@ recorded and kicked off again; open fulfillment attempts are abandoned, while
 succeeded attempts stay in the append-only ledger and are ignored by the
 dispatcher because readiness is measured from the newest kickoff decision.
 
-Audit payloads carry ids, statuses, and counts only — never dwids or contact
-details.
+After kickoff, assigned SaaS owners may PATCH owner-status (U17 · KD36 / KD37).
+Data stays automatic — that path returns 422. Attempt rows for SaaS use
+``step=interim_upload`` plus ``audit_payload.vertical`` so the Data dispatcher
+does not treat owner completion as a Data suppression/reproduction success.
+
+Audit payloads carry ids, statuses, and counts only — never dwids, comments,
+or contact details.
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+import json
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
+from habeas_privacy_core.audit.writer import write_audit
+from habeas_privacy_core.auth import (
+    ROLE_ADMIN,
+    ROLE_LEGAL,
+    ROLE_SUPER_ADMIN,
+    is_authenticated_actor,
+    resolve_actor,
+)
+from habeas_privacy_core.config import CoreSettings
+from habeas_privacy_core.connections.catalog import (
+    VERTICAL_BIZDEV,
+    VERTICAL_COMMUNICATIONS,
+    VERTICAL_PEOPLE_HR,
+    VERTICAL_TECH,
+    get_bindings_for_system,
+    get_bindings_for_vertical,
+)
+from habeas_privacy_core.db.pool import get_pool
+from habeas_privacy_core.workflow.approval import (
+    NOTICE_REVIEW_ACTION,
+    ensure_pending_fulfillment_kickoff,
+    escalate_to_legal_with_fanout,
+    is_vertical_kickoff_approved,
+    pending_vertical_kickoff_id,
+    supersede_vertical_kickoffs,
+)
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
 
 from admin_api.approvals import decide_approval
+from admin_api.fulfillment_ops import DataOwnerFulfillmentMutator
 from admin_api.roles import RolePrincipal, require_roles
+from admin_api.vertical_assignments import principal_has_vertical
 from admin_api.vertical_dispositions import (
     COMING_SOON_VERTICALS,
     LIVE_VERTICALS,
@@ -38,29 +72,33 @@ from admin_api.vertical_dispositions import (
     normalize_vertical,
     upsert_vertical_disposition,
 )
-from habeas_privacy_core.audit.writer import write_audit
-from habeas_privacy_core.auth import (
-    ROLE_ADMIN,
-    ROLE_LEGAL,
-    ROLE_SUPER_ADMIN,
-    is_authenticated_actor,
-    resolve_actor,
-)
-from habeas_privacy_core.config import CoreSettings
-from habeas_privacy_core.db.pool import get_pool
-from habeas_privacy_core.workflow.approval import (
-    NOTICE_REVIEW_ACTION,
-    ensure_pending_fulfillment_kickoff,
-    is_vertical_kickoff_approved,
-    pending_vertical_kickoff_id,
-    supersede_vertical_kickoffs,
-)
 
 KICKOFF_COMMAND = "request.fulfillment_kickoff"
 REOPEN_COMMAND = "request.fulfillment_reopen"
+OWNER_STATUS_COMMAND = "request.fulfillment_owner_status"
 
 REOPEN_ERROR_CODE = "kickoff_reopened"
 OPEN_ATTEMPT_STATUSES = ("pending", "claimed", "in_flight")
+
+# CHECK-safe step the Data dispatcher does not treat as Data fulfillment.
+OWNER_STATUS_ATTEMPT_STEP = "interim_upload"
+OWNER_STATUS_PURPOSE = "fulfillment_owner"
+
+OwnerStatusValue = Literal[
+    "in_progress", "completed_in_source", "blocked", "assign_to_legal"
+]
+OWNER_STATUS_VALUES = frozenset(
+    {"in_progress", "completed_in_source", "blocked", "assign_to_legal"}
+)
+SAAS_CATALOG_VERTICALS = frozenset(
+    {
+        VERTICAL_COMMUNICATIONS,
+        VERTICAL_PEOPLE_HR,
+        VERTICAL_TECH,
+        VERTICAL_BIZDEV,
+    }
+)
+DATA_AUTOMATIC_VERTICALS = frozenset({VERTICAL_DATA, "cassandra"})
 
 
 class FulfillmentKickoffSettings(CoreSettings):
@@ -113,6 +151,23 @@ class FulfillmentReopenResponse(BaseModel):
     # what makes the dispatcher ignore them.
     succeeded_attempt_count: int = 0
     superseded_notice_review_ids: list[int] = Field(default_factory=list)
+
+
+class OwnerFulfillmentStatusBody(BaseModel):
+    """KD37 named status plus optional correspondence comment (R64)."""
+
+    status: OwnerStatusValue
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class OwnerFulfillmentStatusResponse(BaseModel):
+    request_id: str
+    vertical: str
+    owner_status: OwnerStatusValue
+    attempt_id: int
+    attempt_status: str
+    assigned_to_legal: bool = False
+    comment_recorded: bool = False
 
 
 def _require_database() -> None:
@@ -454,14 +509,355 @@ async def post_fulfillment_reopen(
     return result
 
 
+def _catalog_vertical_for_owner_path(vertical: str) -> tuple[str, str]:
+    """Return ``(path_vertical, catalog_vertical)`` for a SaaS owner-status path.
+
+    Catalog ids (``communications``) and bound systems (``mailchimp``) are both
+    accepted. Data / Cassandra are automatic and rejected with 422.
+    """
+    path_vertical = normalize_vertical(vertical)
+    if not path_vertical:
+        raise HTTPException(status_code=400, detail="invalid vertical")
+    if path_vertical in DATA_AUTOMATIC_VERTICALS:
+        raise HTTPException(status_code=422, detail="data_vertical_automatic")
+    if path_vertical in SAAS_CATALOG_VERTICALS:
+        return path_vertical, path_vertical
+    bindings = get_bindings_for_system(path_vertical)
+    if bindings:
+        catalog_id = bindings[0].vertical_id
+        if catalog_id in DATA_AUTOMATIC_VERTICALS:
+            raise HTTPException(status_code=422, detail="data_vertical_automatic")
+        if catalog_id in SAAS_CATALOG_VERTICALS:
+            return path_vertical, catalog_id
+    raise HTTPException(status_code=400, detail=f"unknown vertical {path_vertical!r}")
+
+
+async def _saas_kickoff_approved(
+    conn: Any,
+    *,
+    request_id: str,
+    path_vertical: str,
+    catalog_vertical: str,
+) -> bool:
+    """True when Legal kickoff is approved for the catalog vertical or a bound system."""
+    candidates = {path_vertical, catalog_vertical}
+    for binding in get_bindings_for_vertical(catalog_vertical):
+        candidates.add(binding.system)
+    for candidate in candidates:
+        if await is_vertical_kickoff_approved(
+            conn, request_id=request_id, vertical=candidate
+        ):
+            return True
+    return False
+
+
+def _owner_status_audit_payload(
+    *,
+    catalog_vertical: str,
+    owner_status: str,
+) -> dict[str, str]:
+    """Allowlisted attempt metadata — vertical id and status code only."""
+    return {
+        "vertical": catalog_vertical,
+        "owner_status": owner_status,
+        "source": "owner_status",
+    }
+
+
+async def _latest_open_owner_attempt(
+    conn: Any,
+    *,
+    request_id: str,
+    catalog_vertical: str,
+) -> dict[str, Any] | None:
+    row = await conn.fetchrow(
+        """
+        SELECT id, status, attempt_number
+          FROM data_fulfillment_attempts
+         WHERE request_id = $1
+           AND audit_payload->>'vertical' = $2
+           AND status = ANY($3::text[])
+         ORDER BY attempted_at DESC
+         LIMIT 1
+        """,
+        UUID(request_id),
+        catalog_vertical,
+        list(OPEN_ATTEMPT_STATUSES),
+    )
+    return dict(row) if row else None
+
+
+async def _next_owner_attempt_number(conn: Any, *, request_id: str) -> int:
+    current = await conn.fetchval(
+        """
+        SELECT COALESCE(MAX(attempt_number), 0)
+          FROM data_fulfillment_attempts
+         WHERE request_id = $1 AND step = $2
+        """,
+        UUID(request_id),
+        OWNER_STATUS_ATTEMPT_STEP,
+    )
+    return int(current or 0) + 1
+
+
+async def _insert_owner_attempt(
+    conn: Any,
+    *,
+    request_id: str,
+    attempt_status: str,
+    owner_status: str,
+    catalog_vertical: str,
+) -> int:
+    attempt_number = await _next_owner_attempt_number(conn, request_id=request_id)
+    payload = _owner_status_audit_payload(
+        catalog_vertical=catalog_vertical, owner_status=owner_status
+    )
+    if attempt_status == "success":
+        attempt_id = await conn.fetchval(
+            """
+            INSERT INTO data_fulfillment_attempts (
+                request_id, step, attempt_number, status,
+                error_code, error_message, audit_payload, completed_at
+            ) VALUES ($1, $2, $3, $4, $5, $5, $6::jsonb, NOW())
+            RETURNING id
+            """,
+            UUID(request_id),
+            OWNER_STATUS_ATTEMPT_STEP,
+            attempt_number,
+            attempt_status,
+            owner_status,
+            json.dumps(payload),
+        )
+    else:
+        attempt_id = await conn.fetchval(
+            """
+            INSERT INTO data_fulfillment_attempts (
+                request_id, step, attempt_number, status,
+                error_code, error_message, audit_payload
+            ) VALUES ($1, $2, $3, $4, $5, $5, $6::jsonb)
+            RETURNING id
+            """,
+            UUID(request_id),
+            OWNER_STATUS_ATTEMPT_STEP,
+            attempt_number,
+            attempt_status,
+            owner_status,
+            json.dumps(payload),
+        )
+    return int(attempt_id)
+
+
+async def _update_owner_attempt(
+    conn: Any,
+    *,
+    attempt_id: int,
+    attempt_status: str,
+    owner_status: str,
+    catalog_vertical: str,
+) -> None:
+    payload = _owner_status_audit_payload(
+        catalog_vertical=catalog_vertical, owner_status=owner_status
+    )
+    if attempt_status == "success":
+        await conn.execute(
+            """
+            UPDATE data_fulfillment_attempts
+               SET status = $2,
+                   completed_at = NOW(),
+                   error_code = $3,
+                   error_message = $3,
+                   audit_payload = $4::jsonb
+             WHERE id = $1
+               AND status = ANY($5::text[])
+            """,
+            attempt_id,
+            attempt_status,
+            owner_status,
+            json.dumps(payload),
+            list(OPEN_ATTEMPT_STATUSES),
+        )
+        return
+    await conn.execute(
+        """
+        UPDATE data_fulfillment_attempts
+           SET status = $2,
+               error_code = $3,
+               error_message = $3,
+               audit_payload = $4::jsonb
+         WHERE id = $1
+           AND status = ANY($5::text[])
+        """,
+        attempt_id,
+        attempt_status,
+        owner_status,
+        json.dumps(payload),
+        list(OPEN_ATTEMPT_STATUSES),
+    )
+
+
+async def _record_owner_comment(
+    conn: Any,
+    *,
+    request_id: str,
+    actor: str,
+    comment: str,
+) -> None:
+    await conn.execute(
+        """
+        INSERT INTO communication_attempts (
+            request_id, direction, method, purpose, status, contacted_by, notes
+        ) VALUES ($1, 'outbound', 'manual', $2, 'recorded', $3, $4)
+        """,
+        UUID(request_id),
+        OWNER_STATUS_PURPOSE,
+        actor[:200],
+        comment,
+    )
+
+
+async def apply_owner_fulfillment_status(
+    conn: Any,
+    *,
+    request_id: str,
+    catalog_vertical: str,
+    status: OwnerStatusValue,
+    comment: str | None,
+    actor: str,
+) -> OwnerFulfillmentStatusResponse:
+    """Write the SaaS owner-status onto the attempt ledger + optional comment."""
+    assigned_to_legal = False
+    if status == "assign_to_legal":
+        try:
+            created = await escalate_to_legal_with_fanout(
+                conn, request_id=request_id, decided_by=actor
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        assigned_to_legal = bool(created)
+
+    attempt_status = "success" if status == "completed_in_source" else "in_flight"
+    existing = await _latest_open_owner_attempt(
+        conn, request_id=request_id, catalog_vertical=catalog_vertical
+    )
+    if existing is not None:
+        attempt_id = int(existing["id"])
+        await _update_owner_attempt(
+            conn,
+            attempt_id=attempt_id,
+            attempt_status=attempt_status,
+            owner_status=status,
+            catalog_vertical=catalog_vertical,
+        )
+    else:
+        attempt_id = await _insert_owner_attempt(
+            conn,
+            request_id=request_id,
+            attempt_status=attempt_status,
+            owner_status=status,
+            catalog_vertical=catalog_vertical,
+        )
+
+    comment_text = (comment or "").strip()
+    comment_recorded = bool(comment_text)
+    if comment_recorded:
+        await _record_owner_comment(
+            conn, request_id=request_id, actor=actor, comment=comment_text
+        )
+
+    return OwnerFulfillmentStatusResponse(
+        request_id=request_id,
+        vertical=catalog_vertical,
+        owner_status=status,
+        attempt_id=attempt_id,
+        attempt_status=attempt_status,
+        assigned_to_legal=assigned_to_legal,
+        comment_recorded=comment_recorded,
+    )
+
+
+@router.patch(
+    "/{request_id}/fulfillment/{vertical}/owner-status",
+    response_model=OwnerFulfillmentStatusResponse,
+)
+async def patch_fulfillment_owner_status(
+    request_id: str,
+    vertical: str,
+    body: OwnerFulfillmentStatusBody,
+    request: Request,
+    viewer: DataOwnerFulfillmentMutator,
+) -> OwnerFulfillmentStatusResponse:
+    """Assigned SaaS owner sets KD37 status after Legal kickoff (KTD22)."""
+    _require_database()
+    _require_request_uuid(request_id)
+    if body.status not in OWNER_STATUS_VALUES:
+        raise HTTPException(status_code=400, detail="invalid status")
+    path_vertical, catalog_vertical = _catalog_vertical_for_owner_path(vertical)
+    actor = _actor_email(request, viewer)
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT 1 FROM requests WHERE id = $1", UUID(request_id)
+        )
+        if exists is None:
+            raise HTTPException(status_code=404, detail="request not found")
+        allowed = await principal_has_vertical(
+            conn,
+            email=viewer.email,
+            vertical_id=catalog_vertical,
+            role=viewer.role,
+        )
+        if not allowed:
+            raise HTTPException(status_code=403, detail="vertical access denied")
+        if not await _saas_kickoff_approved(
+            conn,
+            request_id=request_id,
+            path_vertical=path_vertical,
+            catalog_vertical=catalog_vertical,
+        ):
+            raise HTTPException(status_code=409, detail="kickoff_not_approved")
+        result = await apply_owner_fulfillment_status(
+            conn,
+            request_id=request_id,
+            catalog_vertical=catalog_vertical,
+            status=body.status,
+            comment=body.comment,
+            actor=actor,
+        )
+        await write_audit(
+            actor=actor,
+            interface="admin-api",
+            command=OWNER_STATUS_COMMAND,
+            arguments={
+                "request_id": request_id,
+                "vertical": catalog_vertical,
+                "owner_status": result.owner_status,
+                "attempt_id": result.attempt_id,
+                "attempt_status": result.attempt_status,
+                "assigned_to_legal": result.assigned_to_legal,
+                "comment_recorded": result.comment_recorded,
+                "actor_role": viewer.role,
+            },
+            result_status=200,
+            result_summary="fulfillment owner status recorded",
+            conn=conn,
+        )
+    return result
+
+
 __all__ = [
     "KICKOFF_COMMAND",
+    "OWNER_STATUS_COMMAND",
     "REOPEN_COMMAND",
     "FulfillmentKickoffBody",
     "FulfillmentKickoffResponse",
     "FulfillmentReopenBody",
     "FulfillmentReopenResponse",
+    "OwnerFulfillmentStatusBody",
+    "OwnerFulfillmentStatusResponse",
+    "apply_owner_fulfillment_status",
     "kickoff_vertical_fulfillment",
+    "patch_fulfillment_owner_status",
     "post_fulfillment_kickoff",
     "post_fulfillment_reopen",
     "reopen_vertical_fulfillment",

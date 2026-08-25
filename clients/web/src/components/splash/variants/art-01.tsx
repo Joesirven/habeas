@@ -4,7 +4,7 @@ import { BadgeStage } from '../badge-stage'
 import type { SplashStageProps, SplashVariantModule } from '../types'
 import './art-01.css'
 
-const HERO = 'Habeas Data Privacy Platform'
+const HERO = 'Habeas Platform'
 
 /** Multi-line SVG chrome mark — stroke layer + metal fill layer. */
 function ChromeSvgMark({ mode }: { mode: 'stroke' | 'wipe' }) {
@@ -40,7 +40,7 @@ function ChromeSvgMark({ mode }: { mode: 'stroke' | 'wipe' }) {
             Habeas
           </text>
           <text x="360" y="128" textAnchor="middle" className="art-01-svg-text art-01-svg-sub">
-            Data Privacy Platform
+            Platform
           </text>
         </clipPath>
       </defs>
@@ -66,7 +66,7 @@ function ChromeSvgMark({ mode }: { mode: 'stroke' | 'wipe' }) {
           className="art-01-svg-text art-01-svg-sub art-01-stroke"
           fill="none"
         >
-          Data Privacy Platform
+          Platform
         </text>
       </g>
 
@@ -88,7 +88,7 @@ function ChromeSvgMark({ mode }: { mode: 'stroke' | 'wipe' }) {
           className="art-01-svg-text art-01-svg-sub art-01-fill"
           fill={`url(#${metalId})`}
         >
-          Data Privacy Platform
+          Platform
         </text>
       </g>
 

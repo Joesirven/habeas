@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 
 import { SPLASH_PALETTE } from './palette'
+import { PLATFORM_NAME } from '@/lib/brand'
 import type { SplashStageProps } from './types'
 
 type BadgeStageProps = SplashStageProps & {
@@ -44,7 +45,7 @@ export function BadgeStage({
         } as CSSProperties
       }
       role="status"
-      aria-label="CataPriv Platform loading"
+      aria-label={`${PLATFORM_NAME} loading`}
     >
       {children}
       <div className="badge-scanlines" aria-hidden />
@@ -55,7 +56,7 @@ export function BadgeStage({
 /** Tiny end-card caption — keep secondary to the illustration. */
 export function BadgeDpp({ className = '' }: { className?: string }) {
   return (
-    <p className={`badge-dpp ${className}`.trim()}>CataPriv Platform (DPP)</p>
+    <p className={`badge-dpp ${className}`.trim()}>{PLATFORM_NAME}</p>
   )
 }
 
@@ -82,22 +83,21 @@ export function BadgeWordmark({ kind = 'full', className = '' }: BadgeWordmarkPr
     return (
       <div className={cls}>
         <p className="badge-wordmark-line badge-wordmark-brand">Habeas</p>
-        <p className="badge-wordmark-line badge-wordmark-dpp-sub">DPP</p>
+        <p className="badge-wordmark-line badge-wordmark-dpp-sub">Platform</p>
       </div>
     )
   }
 
   if (kind === 'stacked') {
     return (
-      <div className={cls} aria-label="Habeas Data Privacy Platform">
+      <div className={cls} aria-label={PLATFORM_NAME}>
         <p className="badge-wordmark-line">Habeas</p>
-        <p className="badge-wordmark-line">Data Privacy</p>
         <p className="badge-wordmark-line">Platform</p>
       </div>
     )
   }
 
   return (
-    <p className={cls}>Habeas Data Privacy Platform</p>
+    <p className={cls}>{PLATFORM_NAME}</p>
   )
 }

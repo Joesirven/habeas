@@ -4,10 +4,10 @@ import { BadgeStage } from '../badge-stage'
 import type { SplashStageProps, SplashVariantModule } from '../types'
 import './art-04.css'
 
-const HERO = 'Habeas Data Privacy Platform'
+const HERO = 'Habeas Platform'
 
 /** Teletext rows — each glyph is a discrete CRT cell. */
-const TELETEXT_ROWS = ['Habeas', 'Data Privacy', 'Platform'] as const
+const TELETEXT_ROWS = ['Habeas', 'Platform'] as const
 
 function TeletextCells({ text, rowIndex }: { text: string; rowIndex: number }) {
   return (

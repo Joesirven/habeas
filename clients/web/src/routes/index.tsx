@@ -23,7 +23,15 @@ import {
   getHealth,
   getLegalPortfolio,
   getNeedsAttention,
+  getOwnerFulfillmentNeedsAttention,
 } from '@/lib/api'
+import {
+  ownerAssignedVerticalSummary,
+  ownerConnectorActionRequiredCount,
+  ownerHomeQueueRows,
+} from '@/lib/connection-display'
+import { buildReminderBannerItems } from '@/lib/owner-connector-ui'
+import { cn } from '@/lib/utils'
 import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
 
 function OperatorDashboardHome() {
@@ -462,7 +470,44 @@ function LegalHome() {
   )
 }
 
+function OwnerPulseChip({
+  to,
+  search,
+  value,
+  label,
+  tone,
+}: {
+  to: string
+  search?: Record<string, string>
+  value: string
+  label: string
+  tone?: 'warning' | 'danger'
+}) {
+  return (
+    <Link
+      to={to}
+      search={search}
+      className="min-w-0 flex-1 shrink-0 rounded px-1 py-0.5 text-left transition-colors hover:bg-panel/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid sm:px-1.5"
+    >
+      <p
+        className={cn(
+          'font-display text-base font-medium tabular-nums leading-none sm:text-lg',
+          tone === 'warning' && 'text-amber-700',
+          tone === 'danger' && 'text-red-700',
+          !tone && 'text-ink',
+        )}
+      >
+        {value}
+      </p>
+      <p className="mt-0.5 truncate text-[0.6rem] leading-tight text-mute sm:text-[0.65rem]">
+        {label}
+      </p>
+    </Link>
+  )
+}
+
 function DataOwnerHome() {
+  const { me } = useMe()
   const attentionQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'do-home'],
     queryFn: () => getNeedsAttention({ limit: 1000, kind: 'matching' }),
@@ -476,48 +521,171 @@ function DataOwnerHome() {
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })
-  const items = attentionQuery.data?.items ?? []
-  const mine = assignedQuery.data?.items.length ?? 0
+  const fulfillmentQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'do-fulfillment'],
+    queryFn: () => getOwnerFulfillmentNeedsAttention({ limit: 1000 }),
+    refetchInterval: 10_000,
+    placeholderData: (previous) => previous,
+  })
+  const matchingItems = attentionQuery.data?.items ?? []
+  const fulfillmentItems = fulfillmentQuery.data?.items ?? []
+  const matchingCount =
+    attentionQuery.data?.total ?? matchingItems.length
+  const assignedCount =
+    assignedQuery.data?.total ?? assignedQuery.data?.items.length ?? 0
+  const fulfillmentWaiting =
+    fulfillmentQuery.data?.total ?? fulfillmentItems.length
+  const connectorCount = ownerConnectorActionRequiredCount(me)
+  const verticalSummary = ownerAssignedVerticalSummary(
+    me?.assigned_vertical_labels,
+    me?.verticals,
+  )
+  const assignedVerticals = new Set((me?.verticals ?? []).map((id) => id.trim()).filter(Boolean))
+  const reminderBanners = buildReminderBannerItems(
+    (me?.connector_reminders ?? []).filter(
+      (reminder) => assignedVerticals.size === 0 || assignedVerticals.has(reminder.vertical_id),
+    ),
+  )
+  const queue = ownerHomeQueueRows({
+    matching: matchingItems,
+    fulfillment: fulfillmentItems,
+    limit: 8,
+  })
+  const loading =
+    (attentionQuery.isPending && !attentionQuery.data) ||
+    (fulfillmentQuery.isPending && !fulfillmentQuery.data)
+  const loadError = attentionQuery.isError || assignedQuery.isError || fulfillmentQuery.isError
 
   return (
-    <section className="space-y-6">
+    <section className="space-y-4">
       <header>
-        <p className="taste-micro">Data owner</p>
-        <h2 className="mt-2 font-display text-2xl font-medium tracking-tight text-ink">
-          My work
-        </h2>
-        <p className="mt-2 max-w-xl text-sm text-ink-soft">
-          Approve recommended CA DROP statuses, comment, escalate to Legal, or assign an
-          employee.
+        <p className="taste-micro">{role === 'data_user' ? 'Data user' : 'Data owner'}</p>
+        <h2 className="mt-1 font-display text-2xl font-medium tracking-tight text-ink">Home</h2>
+        <p className="mt-1 text-sm font-medium text-ink">{verticalSummary}</p>
+        <p className="mt-1 max-w-xl text-sm text-ink-soft">
+          Matching and SaaS fulfillment for your assigned verticals after Legal kickoff.
+          Data fulfillment runs automatically.
         </p>
       </header>
-      <div className="grid gap-3 sm:grid-cols-2">
-        <Link
-          to="/requests/needs-attention"
-          search={{ kind: 'matching' }}
-          className="taste-panel-soft block space-y-1 p-4"
-        >
-          <p className="text-[0.65rem] uppercase tracking-wide text-mute">Matching review</p>
-          <p className="font-display text-3xl tabular-nums text-ink">
-            {attentionQuery.isPending && !attentionQuery.data ? '—' : items.length}
-          </p>
-        </Link>
-        <Link
-          to="/requests/needs-attention"
-          search={{ kind: 'pending_tasks' }}
-          className="taste-panel-soft block space-y-1 p-4"
-        >
-          <p className="text-[0.65rem] uppercase tracking-wide text-mute">Assigned to me</p>
-          <p className="font-display text-3xl tabular-nums text-ink">
-            {assignedQuery.isPending && !assignedQuery.data ? '—' : mine}
-          </p>
-        </Link>
+
+      {loadError ? (
+        <p className="text-sm text-red-700">Could not load your queue — retrying automatically.</p>
+      ) : null}
+
+      {loading ? (
+        <div className="rounded-lg border border-line bg-paper p-5">
+          <SkeletonLines lines={5} />
+        </div>
+      ) : (
+        <div className="divide-y divide-line rounded-lg border border-line">
+          <section className="px-4 py-2" aria-label="Owner pulse">
+            <div className="flex flex-nowrap items-stretch justify-between gap-0.5 overflow-x-auto">
+              <OwnerPulseChip
+                to="/requests/needs-attention"
+                search={{ kind: 'matching' }}
+                value={attentionQuery.data ? String(matchingCount) : '—'}
+                label="Matching"
+              />
+              <OwnerPulseChip
+                to="/requests/needs-attention"
+                search={{ kind: 'pending_tasks' }}
+                value={assignedQuery.data ? String(assignedCount) : '—'}
+                label="Assigned"
+              />
+              <OwnerPulseChip
+                to="/requests/needs-attention"
+                search={{ kind: 'fulfillment' }}
+                value={fulfillmentQuery.data ? String(fulfillmentWaiting) : '—'}
+                label="Fulfillment waiting"
+                tone={fulfillmentWaiting > 0 ? 'warning' : undefined}
+              />
+              <OwnerPulseChip
+                to="/owner/connectors"
+                value={connectorCount == null ? '—' : String(connectorCount)}
+                label="Connectors"
+                tone={connectorCount != null && connectorCount > 0 ? 'danger' : undefined}
+              />
+            </div>
+          </section>
+
+          <section className="px-4 py-2.5">
+            <HomeModuleHeader
+              compact
+              title="Queue"
+              hint="Recent matching and fulfillment for your assigned verticals."
+            />
+            {queue.length === 0 ? (
+              <p className="text-xs text-mute">Nothing waiting in your verticals.</p>
+            ) : (
+              <ul className="divide-y divide-line/80">
+                {queue.map((row) => (
+                  <li key={`${row.lane}:${row.requestId}`}>
+                    <Link
+                      to="/requests/$requestId"
+                      params={{ requestId: row.requestId }}
+                      className="flex flex-wrap items-baseline justify-between gap-2 py-1.5 hover:bg-panel/40"
+                    >
+                      <span className="text-sm font-medium text-ink">{row.title}</span>
+                      <span className="text-[0.65rem] text-mute">
+                        {row.lane === 'matching' ? 'Matching' : 'Fulfillment'}
+                        {row.receivedAt
+                          ? ` · ${new Date(row.receivedAt).toLocaleDateString()}`
+                          : ''}
+                      </span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="px-4 py-2.5">
+            <HomeModuleHeader
+              compact
+              title="Connectors"
+              hint="Reminders for your assigned verticals only."
+            />
+            {reminderBanners.length === 0 ? (
+              <p className="text-xs text-mute">
+                {connectorCount === 0
+                  ? 'No connector reminders for your verticals.'
+                  : 'Open Connectors to finish setup or refresh.'}
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {reminderBanners.slice(0, 4).map((banner) => (
+                  <li key={banner.id}>
+                    <Link
+                      to="/owner/connectors"
+                      search={{ vertical: banner.verticalId }}
+                      className="block rounded-md border border-line/80 px-2.5 py-2 hover:bg-panel/40"
+                    >
+                      <p className="text-xs font-medium text-ink">{banner.title}</p>
+                      <p className="mt-0.5 text-[0.65rem] text-ink-soft">{banner.description}</p>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2">
+        <Button asChild size="sm">
+          <Link to="/requests/needs-attention" search={{ kind: 'matching' }}>
+            Inbox Matching
+          </Link>
+        </Button>
+        <Button asChild size="sm" variant="outline">
+          <Link to="/requests/needs-attention" search={{ kind: 'fulfillment' }}>
+            Inbox Fulfillment
+          </Link>
+        </Button>
+        <Button asChild size="sm" variant="outline">
+          <Link to="/owner/connectors">Connectors</Link>
+        </Button>
       </div>
-      <Button asChild size="sm">
-        <Link to="/requests/needs-attention" search={{ kind: 'matching' }}>
-          Open Inbox
-        </Link>
-      </Button>
     </section>
   )
 }
@@ -541,7 +709,7 @@ export function DashboardPage() {
     return <LegalHome />
   }
 
-  if (role === 'data_owner') {
+  if (role === 'data_owner' || role === 'data_user') {
     return <DataOwnerHome />
   }
 

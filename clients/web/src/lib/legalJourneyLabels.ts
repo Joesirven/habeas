@@ -96,8 +96,12 @@ export function workbenchStageLabel(stageKey: string): string {
   return normalized.replaceAll('_', ' ')
 }
 
-/** Vertical catalog labels (live `data` + coming-soon stubs, KTD3). */
+/** Vertical catalog labels (KD20 catalog + legacy journey stubs). */
 const VERTICAL_LABELS: Record<string, string> = {
+  communications: 'Communications',
+  people_hr: 'People/HR',
+  tech: 'Tech',
+  bizdev: 'BizDev',
   data: 'Data',
   mailchimp: 'Mailchimp',
   lever: 'Lever',

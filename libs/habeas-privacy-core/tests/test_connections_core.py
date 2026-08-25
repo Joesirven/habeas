@@ -70,6 +70,7 @@ def test_sanitize_test_detail_allowlists_live_success_codes():
         "lever_ok",
         "auth0_ok",
         "google_sheets_ok",
+        "upload_ok",
     ):
         assert code in ALLOWED_TEST_DETAIL_CODES
         assert sanitize_test_detail(code) == code
@@ -85,6 +86,11 @@ def test_sanitize_test_detail_allowlists_failure_codes():
         "http_5xx",
         "invalid_credentials",
         "invalid_config",
+        "upload_missing_headers",
+        "upload_needs_mapping",
+        "upload_no_usable_rows",
+        "upload_invalid_delimiter",
+        "gate_blocked",
         "unknown_system",
         "infra_only",
         "missing_credentials",

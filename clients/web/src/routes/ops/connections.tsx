@@ -1,10 +1,11 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { useMemo, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import { ConnectionCreateDialog } from '@/components/ops/ConnectionCreateDialog'
 import { ConnectionInvitePanel } from '@/components/ops/ConnectionInvitePanel'
+import { VerticalCatalogPanel } from '@/components/ops/VerticalCatalogPanel'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -13,46 +14,18 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import {
-  connectTestTriageSummary,
-  listConnections,
-  type ConnectionRecord,
-} from '@/lib/api'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { listConnections, type ConnectionRecord } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
 import { RoleGate, isSuperAdmin } from '@/lib/auth'
-import { cn } from '@/lib/utils'
+import {
+  connectionDisplayStatusLabel,
+  connectionDisplayStatusVariant,
+  resolveConnectionChipStatus,
+} from '@/lib/connection-display'
 
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
-}
-
-type ConnectionStatus = ConnectionRecord['status']
-type StatusFilter = 'all' | 'failed' | 'connected' | 'open'
-
-const STATUS_FILTERS: Array<{ value: StatusFilter; label: string }> = [
-  { value: 'all', label: 'All' },
-  { value: 'failed', label: 'Failed' },
-  { value: 'open', label: 'Pending / invited' },
-  { value: 'connected', label: 'Connected' },
-]
-
-function connectionStatusVariant(
-  status: ConnectionStatus,
-): 'ok' | 'fail' | 'run' | 'wait' | 'default' {
-  switch (status) {
-    case 'connected':
-      return 'ok'
-    case 'failed':
-    case 'revoked':
-      return 'fail'
-    case 'invited':
-      return 'run'
-    case 'pending':
-    case 'infra_pending':
-      return 'wait'
-    default:
-      return 'default'
-  }
 }
 
 function formatSystemLabel(system: string): string {
@@ -63,20 +36,7 @@ function connectionDetailTitle(connection: ConnectionRecord): string {
   if (connection.system === 'cassandra') {
     return `${connection.display_name} · Infrastructure`
   }
-  return `${connection.display_name} · Invite`
-}
-
-function matchesStatusFilter(connection: ConnectionRecord, filter: StatusFilter): boolean {
-  if (filter === 'all') return true
-  if (filter === 'failed') {
-    return connection.status === 'failed' || connection.last_test_ok === false
-  }
-  if (filter === 'connected') return connection.status === 'connected'
-  return (
-    connection.status === 'pending' ||
-    connection.status === 'invited' ||
-    connection.status === 'infra_pending'
-  )
+  return connection.display_name
 }
 
 function formatLastTest(connection: ConnectionRecord): string {
@@ -84,23 +44,89 @@ function formatLastTest(connection: ConnectionRecord): string {
   const when = new Date(connection.last_tested_at).toLocaleString()
   if (connection.last_test_ok === true) return `${when} · ok`
   if (connection.last_test_ok === false) {
-    return `${when} · ${connectTestTriageSummary(connection.last_test_detail, connection.metadata)}`
+    const detail = connection.last_test_detail?.trim()
+    return detail ? `${when} · fail (${detail})` : `${when} · fail`
   }
   return when
 }
 
-function triageSort(a: ConnectionRecord, b: ConnectionRecord): number {
-  const aFailed = a.status === 'failed' || a.last_test_ok === false ? 0 : 1
-  const bFailed = b.status === 'failed' || b.last_test_ok === false ? 0 : 1
-  if (aFailed !== bFailed) return aFailed - bFailed
-  return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+function ConnectionsTable({
+  connections,
+  loading,
+  error,
+  onRetry,
+  onSelect,
+}: {
+  connections: ConnectionRecord[]
+  loading: boolean
+  error: unknown
+  onRetry: () => void
+  onSelect: (connection: ConnectionRecord) => void
+}) {
+  if (loading) {
+    return <SkeletonLines lines={6} />
+  }
+  if (error) {
+    return (
+      <div className="space-y-2">
+        <p className="text-sm text-red-700" role="alert">
+          {actionToast.safeErrorMessage(error, 'Could not load connections.')}
+        </p>
+        <Button type="button" size="sm" variant="outline" onClick={onRetry}>
+          Retry
+        </Button>
+      </div>
+    )
+  }
+  if (connections.length === 0) {
+    return (
+      <p className="text-sm text-ink-soft">
+        No connections yet. Create one, then assign verticals on the Verticals tab.
+      </p>
+    )
+  }
+  return (
+    <table className="taste-table">
+      <thead>
+        <tr>
+          <th>System</th>
+          <th>Name</th>
+          <th>Owner</th>
+          <th>Status</th>
+          <th>Last test</th>
+        </tr>
+      </thead>
+      <tbody>
+        {connections.map((connection) => {
+          const chip = resolveConnectionChipStatus(connection)
+          return (
+            <tr
+              key={connection.id}
+              className="cursor-pointer hover:bg-canvas/80"
+              onClick={() => onSelect(connection)}
+            >
+              <td className="font-mono text-xs">{formatSystemLabel(connection.system)}</td>
+              <td>{connection.display_name}</td>
+              <td className="text-ink-soft">{connection.owner_email ?? '—'}</td>
+              <td>
+                <Badge variant={connectionDisplayStatusVariant(chip)}>
+                  {connectionDisplayStatusLabel(chip)}
+                </Badge>
+              </td>
+              <td className="text-xs text-ink-soft">{formatLastTest(connection)}</td>
+            </tr>
+          )
+        })}
+      </tbody>
+    </table>
+  )
 }
 
 function ConnectionsBody() {
   const queryClient = useQueryClient()
   const [createOpen, setCreateOpen] = useState(false)
   const [selected, setSelected] = useState<ConnectionRecord | null>(null)
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [tab, setTab] = useState('connections')
 
   const connectionsQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'connections'],
@@ -113,21 +139,6 @@ function ConnectionsBody() {
   })
 
   const connections = connectionsQuery.data ?? []
-  const failedCount = useMemo(
-    () =>
-      connections.filter(
-        (row) => row.status === 'failed' || row.last_test_ok === false,
-      ).length,
-    [connections],
-  )
-  const visible = useMemo(
-    () =>
-      connections
-        .filter((row) => matchesStatusFilter(row, statusFilter))
-        .slice()
-        .sort(triageSort),
-    [connections, statusFilter],
-  )
 
   function onCreated(_connection: ConnectionRecord) {
     void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'connections'] })
@@ -142,76 +153,39 @@ function ConnectionsBody() {
             Connections
           </h2>
           <p className="mt-1 max-w-xl text-xs text-ink-soft">
-            Secure owner onboarding — invite links and connection tests; credentials never appear
-            here. Failed tests keep allowlisted error codes for triage.
+            Connection registry, gated status, and vertical catalog assignments — credentials never
+            appear here. Owners complete setup from Connectors after vertical assignment.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Link to="/ops/workers/settings" className="taste-btn text-xs">
             ← Worker settings
           </Link>
-          <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
-            New connection
-          </Button>
-        </div>
-      </header>
-
-      {failedCount > 0 ? (
-        <div
-          className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-900"
-          role="status"
-        >
-          <p>
-            {failedCount} connection{failedCount === 1 ? '' : 's'} need triage — open a row for the
-            last test error code and retest after the owner corrects credentials.
-          </p>
-          {statusFilter !== 'failed' ? (
-            <Button type="button" size="sm" variant="outline" onClick={() => setStatusFilter('failed')}>
-              Show failed
+          {tab === 'connections' ? (
+            <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
+              New connection
             </Button>
           ) : null}
         </div>
-      ) : null}
+      </header>
 
-      <div className="flex flex-wrap gap-1.5">
-        {STATUS_FILTERS.map((item) => {
-          const active = statusFilter === item.value
-          return (
-            <button
-              key={item.value}
-              type="button"
-              className={cn(
-                'rounded-md border px-2.5 py-1 text-xs transition-colors',
-                active
-                  ? 'border-ink bg-ink text-paper'
-                  : 'border-line bg-paper text-ink-soft hover:border-ink/40 hover:text-ink',
-              )}
-              aria-pressed={active}
-              onClick={() => setStatusFilter(item.value)}
-            >
-              {item.label}
-              {item.value === 'failed' && failedCount > 0 ? ` (${failedCount})` : null}
-            </button>
-          )
-        })}
-      </div>
+      <Tabs value={tab} onValueChange={setTab}>
+        <TabsList aria-label="Connections views">
+          <TabsTrigger value="connections">Connections</TabsTrigger>
+          <TabsTrigger value="verticals">Verticals</TabsTrigger>
+        </TabsList>
 
-      <div className="taste-panel overflow-x-auto p-4 sm:p-5">
-        {connectionsQuery.isPending && !connectionsQuery.data ? (
-          <SkeletonLines lines={6} />
-        ) : connectionsQuery.isError && !connectionsQuery.data ? (
-          <div className="space-y-2">
-            <p className="text-sm text-red-700" role="alert">
-              {actionToast.safeErrorMessage(
-                connectionsQuery.error,
-                'Could not load connections.',
-              )}
-            </p>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => {
+        <TabsContent value="connections">
+          <div className="taste-panel overflow-x-auto p-4 sm:p-5">
+            <ConnectionsTable
+              connections={connections}
+              loading={connectionsQuery.isPending && !connectionsQuery.data}
+              error={
+                connectionsQuery.isError && !connectionsQuery.data
+                  ? connectionsQuery.error
+                  : null
+              }
+              onRetry={() => {
                 void connectionsQuery.refetch().then((result) => {
                   if (result.isError) {
                     actionToast.error({
@@ -230,63 +204,15 @@ function ConnectionsBody() {
                   }
                 })
               }}
-            >
-              Retry
-            </Button>
+              onSelect={setSelected}
+            />
           </div>
-        ) : connections.length === 0 ? (
-          <p className="text-sm text-ink-soft">
-            No connections yet. Create one to send an owner invite.
-          </p>
-        ) : visible.length === 0 ? (
-          <p className="text-sm text-ink-soft">No connections match this filter.</p>
-        ) : (
-          <table className="taste-table">
-            <thead>
-              <tr>
-                <th>System</th>
-                <th>Name</th>
-                <th>Owner</th>
-                <th>Status</th>
-                <th>Last test / error</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((connection) => {
-                const needsTriage =
-                  connection.status === 'failed' || connection.last_test_ok === false
-                return (
-                  <tr
-                    key={connection.id}
-                    className={cn(
-                      'cursor-pointer hover:bg-canvas/80',
-                      needsTriage && 'bg-red-50/70',
-                    )}
-                    onClick={() => setSelected(connection)}
-                  >
-                    <td className="font-mono text-xs">{formatSystemLabel(connection.system)}</td>
-                    <td>{connection.display_name}</td>
-                    <td className="text-ink-soft">{connection.owner_email ?? '—'}</td>
-                    <td>
-                      <Badge variant={connectionStatusVariant(connection.status)}>
-                        {connection.status.replaceAll('_', ' ')}
-                      </Badge>
-                    </td>
-                    <td
-                      className={cn(
-                        'max-w-md text-xs',
-                        needsTriage ? 'text-red-800' : 'text-ink-soft',
-                      )}
-                    >
-                      {formatLastTest(connection)}
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        )}
-      </div>
+        </TabsContent>
+
+        <TabsContent value="verticals">
+          <VerticalCatalogPanel />
+        </TabsContent>
+      </Tabs>
 
       <ConnectionCreateDialog
         open={createOpen}
@@ -295,7 +221,7 @@ function ConnectionsBody() {
       />
 
       <Dialog open={selected != null} onOpenChange={(open) => !open && setSelected(null)}>
-        <DialogContent>
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>
               {selected ? connectionDetailTitle(selected) : 'Connection'}
@@ -308,10 +234,13 @@ function ConnectionsBody() {
               displayName={selected.display_name}
               ownerEmail={selected.owner_email ?? undefined}
               status={selected.status}
+              displayStatus={selected.display_status}
+              gateCode={selected.gate_code}
+              gateAllowed={selected.gate_allowed}
+              metadata={selected.metadata}
               lastTestOk={selected.last_test_ok}
               lastTestDetail={selected.last_test_detail}
               lastTestedAt={selected.last_tested_at}
-              metadata={selected.metadata}
               onDone={() => setSelected(null)}
               onDeleted={() => {
                 setSelected(null)

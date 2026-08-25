@@ -4,11 +4,11 @@ import { BadgeStage } from '../badge-stage'
 import type { SplashStageProps, SplashVariantModule } from '../types'
 import './art-08.css'
 
-const WORDS = ['Habeas', 'Data', 'Privacy', 'Platform'] as const
+const WORDS = ['Habeas', 'Platform'] as const
 
 function ChyronTitle({ stagger }: { stagger?: boolean }) {
   if (!stagger) {
-    return <p className="art-08-title">Habeas Data Privacy Platform</p>
+    return <p className="art-08-title">Habeas Platform</p>
   }
   return (
     <p className="art-08-title art-08-title-stagger">

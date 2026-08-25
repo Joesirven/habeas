@@ -350,3 +350,48 @@ def test_matching_auth0_vertical_matching_migration_exists():
     assert "CREATE TABLE drop_" not in content
     assert "selected_dwids" not in content
 
+
+def test_vertical_scoped_connectors_migration_exists():
+    migration = (
+        migrations_dir() / "20260811170001_core_vertical_scoped_connectors.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+    assert "CREATE TABLE data_verticals" in content
+    assert "CREATE TABLE vertical_system_bindings" in content
+    assert "CREATE TABLE user_vertical_assignments" in content
+    assert "CREATE TABLE connection_mode_events" in content
+    assert "bizdev_contacts" in content
+    assert "hr_alumni" in content
+    assert "people_hr" in content
+    assert "REVOKE UPDATE, DELETE ON connection_mode_events FROM app_user" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+
+
+def test_communications_axios_hq_migration_exists():
+    migration = (
+        migrations_dir() / "20260824160000_core_communications_axios_hq.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+
+    for constraint in (
+        "vertical_system_bindings_system_valid",
+        "integration_connections_system_valid",
+        "vertical_hash_refresh_attempts_system_valid",
+    ):
+        section = content.split(constraint, 1)[1].split(")", 1)[0]
+        assert "'axios_hq'" in section
+
+    integration_check = content.split("integration_connections_system_valid", 1)[1].split(
+        ")", 1
+    )[0]
+    assert "'mailchimp'" in integration_check
+
+    assert "UPDATE vertical_system_bindings" in content
+    assert "system = 'mailchimp'" in content
+    assert "active = false" in content
+    assert "('communications', 'axios_hq', ARRAY['upload']" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content

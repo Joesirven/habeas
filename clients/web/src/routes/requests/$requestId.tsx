@@ -11,7 +11,8 @@ import { getRequest, getRequestJourney } from '@/lib/api'
 
 export function RequestDetailPage() {
   const { requestId } = useParams({ from: '/requests/$requestId' })
-  const { isSuperAdmin } = useMe()
+  const { isSuperAdmin, role } = useMe()
+  const ownerPersona = role === 'data_owner'
 
   const requestQuery = useQuery({
     queryKey: ['admin-api', 'requests', requestId],
@@ -40,7 +41,7 @@ export function RequestDetailPage() {
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <Link to="/requests" className="taste-link text-xs">
-            ← All requests
+            {ownerPersona ? '← Requests' : '← All requests'}
           </Link>
           <div className="mt-1.5 flex flex-wrap items-baseline gap-2">
             <h2 className="truncate font-mono text-lg font-medium tracking-tight text-ink">
@@ -87,7 +88,7 @@ export function RequestDetailPage() {
           <RequestDetailBody
             requestId={requestId}
             variant="page"
-            defaultTab="fulfillment"
+            defaultTab={ownerPersona ? 'matching' : 'fulfillment'}
             seedRequest={requestQuery.data}
           />
         </div>
