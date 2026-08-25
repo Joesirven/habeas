@@ -255,7 +255,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   // Owners mount ⌘K via AppShell `canAccessOwnerPalette`; People stays legal/admin only.
   const showPeople = canAccessLegalSurfaces(role)
   const showOps = canAccessOpsSurfaces(role)
-  const ownerSurfaces = role === 'data_owner'
+  const ownerSurfaces = role === 'data_owner' || role === 'data_user'
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)

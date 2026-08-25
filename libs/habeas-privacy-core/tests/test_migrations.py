@@ -343,3 +343,31 @@ def test_vertical_scoped_connectors_migration_exists():
     assert "REVOKE UPDATE, DELETE ON connection_mode_events FROM app_user" in content
     assert "migrate:up" in content
     assert "migrate:down" in content
+
+
+def test_communications_axios_hq_migration_exists():
+    migration = (
+        migrations_dir() / "20260824160000_core_communications_axios_hq.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+
+    for constraint in (
+        "vertical_system_bindings_system_valid",
+        "integration_connections_system_valid",
+        "vertical_hash_refresh_attempts_system_valid",
+    ):
+        section = content.split(constraint, 1)[1].split(")", 1)[0]
+        assert "'axios_hq'" in section
+
+    integration_check = content.split("integration_connections_system_valid", 1)[1].split(
+        ")", 1
+    )[0]
+    assert "'mailchimp'" in integration_check
+
+    assert "UPDATE vertical_system_bindings" in content
+    assert "system = 'mailchimp'" in content
+    assert "active = false" in content
+    assert "('communications', 'axios_hq', ARRAY['upload']" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content

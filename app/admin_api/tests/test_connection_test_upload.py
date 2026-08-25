@@ -27,21 +27,21 @@ def _sample_email_pair() -> str:
 
 
 @pytest.mark.asyncio
-async def test_ae9_missing_email_header_returns_upload_missing_headers() -> None:
+async def test_ae9_name_only_rows_are_usable() -> None:
     content = _csv_bytes(["first_name", "last_name"], [["Jane", "Doe"]])
     ok, detail = await test_upload_connection(
         "bizdev_contacts",
         content=content,
         multi_pii_delimiter=None,
     )
-    assert ok is False
-    assert detail == "upload_missing_headers"
+    assert ok is True
+    assert detail == "upload_ok"
 
 
 def test_ae10_semicolon_delimiter_counts_both_emails() -> None:
     content = _csv_bytes(
-        ["first_name", "last_name", "email"],
-        [["Jane", "Doe", _sample_email_pair()]],
+        ["email"],
+        [[_sample_email_pair()]],
     )
     ok, detail, stats = parse_upload_csv(
         system="hr_alumni",
@@ -55,8 +55,8 @@ def test_ae10_semicolon_delimiter_counts_both_emails() -> None:
 
 def test_ae10_wrong_delimiter_does_not_count_both_emails() -> None:
     content = _csv_bytes(
-        ["first_name", "last_name", "email"],
-        [["Jane", "Doe", _sample_email_pair()]],
+        ["email"],
+        [[_sample_email_pair()]],
     )
     _ok, _detail, stats = parse_upload_csv(
         system="hr_alumni",

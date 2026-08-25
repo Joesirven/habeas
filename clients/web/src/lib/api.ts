@@ -1,7 +1,7 @@
 // Empty string (Cloud Run same-origin front door) must fall back to /api — not ??.
 const API_BASE = import.meta.env.VITE_ADMIN_API_URL || '/api'
 
-export type UserRole = 'super_admin' | 'admin' | 'legal' | 'data_owner'
+export type UserRole = 'super_admin' | 'admin' | 'legal' | 'data_owner' | 'data_user'
 
 /** sessionStorage key for X-Dev-Simulate-Role (super_admin local/dev only). */
 export const SIMULATE_ROLE_STORAGE_KEY = 'habeas-cli.simulate-role'
@@ -11,6 +11,7 @@ export const SIMULATE_ROLE_VALUES: UserRole[] = [
   'admin',
   'legal',
   'data_owner',
+  'data_user',
 ]
 
 export type ConnectorReminderSeverity = 'approaching' | 'overdue'
@@ -52,7 +53,8 @@ export function getStoredSimulateRole(): UserRole | null {
     value === 'super_admin' ||
     value === 'admin' ||
     value === 'legal' ||
-    value === 'data_owner'
+    value === 'data_owner' ||
+    value === 'data_user'
   ) {
     return value
   }
@@ -2283,9 +2285,12 @@ export type IntegrationSystemId =
   | 'paylocity'
   | 'lever'
   | 'auth0'
-  | 'google_sheets'
+    | 'google_sheets'
+  | 'alumni_google_sheet'
+  | 'contact_us_google_sheet'
   | 'bizdev_contacts'
   | 'hr_alumni'
+  | 'axios_hq'
   | 'cassandra'
 
 export type ConnectionDisplayStatus =
@@ -2371,6 +2376,7 @@ export type ConnectTestDetailCode =
   | 'stub_ok'
   | 'ok'
   | 'mailchimp_ok'
+  | 'axios_hq_ok'
   | 'paylocity_ok'
   | 'lever_ok'
   | 'auth0_ok'
@@ -2388,6 +2394,7 @@ export type ConnectTestDetailCode =
   | 'unknown_error'
   | 'failed'
   | 'upload_missing_headers'
+  | 'upload_needs_mapping'
   | 'upload_no_usable_rows'
   | 'upload_invalid_delimiter'
 
@@ -2397,17 +2404,23 @@ const CONNECT_SYSTEM_LABELS: Record<IntegrationSystemId, string> = {
   lever: 'Lever',
   auth0: 'Auth0',
   google_sheets: 'Google Sheets',
+  alumni_google_sheet: 'HR alumni Google Sheet',
+  contact_us_google_sheet: 'Contact Us Google Sheet',
   bizdev_contacts: 'BizDev Contacts',
   hr_alumni: 'HR Alumni List',
+  axios_hq: 'Axios HQ',
   cassandra: 'Cassandra',
 }
 
 const CONNECT_TEST_SUCCESS_DESCRIPTIONS: Record<string, string> = {
   mailchimp_ok: 'Mailchimp API credentials were verified successfully.',
+  axios_hq_ok: 'Axios HQ upload was validated successfully.',
   paylocity_ok: 'Paylocity API credentials were verified successfully.',
   lever_ok: 'Lever API credentials were verified successfully.',
   auth0_ok: 'Auth0 credentials were verified successfully.',
   google_sheets_ok: 'Google Sheets connection was verified successfully.',
+  alumni_google_sheet_ok: 'HR alumni Google Sheet connection was verified successfully.',
+  contact_us_google_sheet_ok: 'Contact Us Google Sheet connection was verified successfully.',
   upload_ok: 'Upload file was validated successfully.',
   stub_ok: 'Connection test completed successfully.',
   ok: 'Connection test completed successfully.',
@@ -2428,7 +2441,9 @@ const CONNECT_TEST_FAILURE_MESSAGES: Record<string, string> = {
   unknown_error: 'Connection test failed. Check the values and try again.',
   failed: 'Connection test failed. Check the values and try again.',
   upload_missing_headers:
-    'Upload is missing required template headers. Download the Habeas CSV template and match the column names exactly.',
+    'Upload is missing required columns. Map first name, last name, and email, or download the Habeas CSV template.',
+  upload_needs_mapping:
+    'Map each required Habeas field to a column in your file, then upload again.',
   upload_no_usable_rows:
     'Upload has no usable required identifiers. Check the multi-value delimiter and required columns, then try again.',
   upload_invalid_delimiter: 'The multi-value delimiter is not supported. Choose None, ;, |, or ,.',
@@ -2631,6 +2646,10 @@ export type OwnerUploadResult = {
   connection_id: string
   upload_row_count?: number | null
   gcs_uri?: string | null
+  missing_count?: number | null
+  detected_header_count?: number | null
+  detected_headers?: string[] | null
+  required_headers?: string[] | null
 }
 
 export function listOwnerConnectors(verticalId: string) {
@@ -2650,10 +2669,17 @@ export function setOwnerConnectorMode(
   )
 }
 
+export type RefreshCadence = 'rarely' | 'with_new_batches' | 'weekly'
+export type OwnerCadenceBody = {
+  cadence_days?: number
+  refresh_policy?: 'static' | 'volatile'
+  refresh_cadence?: RefreshCadence
+}
+
 export function setOwnerConnectorCadence(
   verticalId: string,
   system: string,
-  body: { cadence_days?: number; refresh_policy?: 'static' | 'volatile' },
+  body: OwnerCadenceBody,
 ) {
   return fetchAdminApi<OwnerConnectorSystem>(
     `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/cadence`,
@@ -2661,10 +2687,14 @@ export function setOwnerConnectorCadence(
   )
 }
 
-export function completeOwnerConnectorWizard(verticalId: string, system: string) {
+export function completeOwnerConnectorWizard(
+  verticalId: string,
+  system: string,
+  body?: OwnerCadenceBody,
+) {
   return fetchAdminApi<OwnerConnectorSystem>(
     `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/wizard/complete`,
-    { method: 'POST', body: JSON.stringify({}) },
+    { method: 'POST', body: JSON.stringify(body ?? {}) },
   )
 }
 
@@ -2722,6 +2752,7 @@ export async function uploadOwnerConnectorCsv(
   system: string,
   file: File,
   multiPiiDelimiter: string | null,
+  columnMapping?: Record<string, string> | null,
 ): Promise<OwnerUploadResult> {
   const headers: Record<string, string> = { Accept: 'application/json' }
   const simulateRole = getStoredSimulateRole()
@@ -2732,6 +2763,9 @@ export async function uploadOwnerConnectorCsv(
   form.append('file', file)
   if (multiPiiDelimiter != null) {
     form.append('multi_pii_delimiter', multiPiiDelimiter)
+  }
+  if (columnMapping && Object.keys(columnMapping).length > 0) {
+    form.append('column_mapping', JSON.stringify(columnMapping))
   }
   const response = await fetch(
     `${API_BASE}/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/upload`,

@@ -12,11 +12,11 @@ from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
 
 from habeas_privacy_core.auth import (
-    ALL_ROLES,
     is_authenticated_actor,
     resolve_actor,
 )
 from habeas_privacy_core.auth.roles import (
+    ALL_ROLES,
     ROLE_DATA_OWNER,
     ROLE_SUPER_ADMIN,
     Role,
@@ -183,6 +183,24 @@ def _id_token_audience(request: Request) -> str | None:
     return None
 
 
+async def _assignment_role_for_email(email: str) -> Role | None:
+    """DB fallback when the email is a vertical member but not on env allowlists."""
+    if not settings.database_url:
+        return None
+    try:
+        from admin_api.vertical_assignments import fetch_principal_assignment_role
+        from habeas_privacy_core.db.pool import get_pool
+
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            found = await fetch_principal_assignment_role(conn, email=email)
+    except Exception:
+        return None
+    if found in ALL_ROLES:
+        return found  # type: ignore[return-value]
+    return None
+
+
 def _effective_role(real_role: Role, request: Request) -> Role:
     if real_role != ROLE_SUPER_ADMIN:
         return real_role
@@ -222,6 +240,8 @@ async def get_role_principal(request: Request) -> RolePrincipal:
             require_identity=settings.require_iap_identity,
             is_authenticated=authenticated,
         )
+        if role is None and authenticated:
+            role = await _assignment_role_for_email(email)
         if role is None:
             raise HTTPException(status_code=403, detail="role not permitted")
         real_role = role

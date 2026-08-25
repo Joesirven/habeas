@@ -20,6 +20,7 @@ from habeas_privacy_core.adapters.gcs import read_object, write_object
 from habeas_privacy_core.auth import (
     ROLE_ADMIN,
     ROLE_DATA_OWNER,
+    ROLE_DATA_USER,
     ROLE_LEGAL,
     ROLE_SUPER_ADMIN,
 )
@@ -39,7 +40,7 @@ TemplateAdminPrincipal = Annotated[
 # app role that can open the request (adds data_owner vs. legal-only above).
 DocumentPrincipal = Annotated[
     RolePrincipal,
-    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL, ROLE_DATA_OWNER)),
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL, ROLE_DATA_OWNER, ROLE_DATA_USER)),
 ]
 
 _PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")

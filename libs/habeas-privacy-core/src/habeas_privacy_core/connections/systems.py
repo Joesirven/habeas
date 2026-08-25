@@ -8,6 +8,8 @@ from enum import StrEnum
 from typing import Final
 from urllib.parse import urlparse
 
+from habeas_privacy_core.connections.catalog import SHEET_SYSTEMS
+
 __all__ = [
     "SYSTEM_IDS",
     "ConnectionSystem",
@@ -115,6 +117,31 @@ def _saas_trust_copy(*, extra: str | None = None) -> str:
     if extra:
         paragraphs.insert(3, extra)
     return "\n\n".join(paragraphs)
+
+
+def _google_sheet_system(*, system_id: str, display_label: str) -> ConnectionSystem:
+    return ConnectionSystem(
+        system_id=system_id,
+        display_label=display_label,
+        invite_allowed=False,
+        credential_fields=(
+            CredentialField(
+                id="spreadsheet_url",
+                label="Spreadsheet URL",
+                input_type=CredentialInputType.URL,
+                required=True,
+                help=None,
+            ),
+        ),
+        trust_copy=_saas_trust_copy(
+            extra=(
+                f"{display_label}: share the file as Editor with the Habeas service "
+                "account email shown in the credential steps, then paste the editable "
+                "spreadsheet URL. If sharing fails, you can upload a CSV instead. "
+                "We never ask for your Google password or a credentials JSON."
+            ),
+        ),
+    )
 
 
 _SYSTEMS: dict[str, ConnectionSystem] = {
@@ -296,28 +323,17 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
             ),
         ),
     ),
-    "google_sheets": ConnectionSystem(
+    "google_sheets": _google_sheet_system(
         system_id="google_sheets",
         display_label="Google Sheets",
-        invite_allowed=False,
-        credential_fields=(
-            CredentialField(
-                id="spreadsheet_url",
-                label="Spreadsheet URL",
-                input_type=CredentialInputType.URL,
-                required=True,
-                # Filled by google_sheets_spreadsheet_url_help() at invite/catalog response time.
-                help=None,
-            ),
-        ),
-        trust_copy=_saas_trust_copy(
-            extra=(
-                "Google Sheets: share the file as Editor with the Habeas service account "
-                "email shown in the credential steps, then paste the editable spreadsheet URL. "
-                "Editor access is required so Habeas can update or remove rows for "
-                "suppression later. We never ask for your Google password or a credentials JSON."
-            ),
-        ),
+    ),
+    "alumni_google_sheet": _google_sheet_system(
+        system_id="alumni_google_sheet",
+        display_label="HR alumni Google Sheet",
+    ),
+    "contact_us_google_sheet": _google_sheet_system(
+        system_id="contact_us_google_sheet",
+        display_label="Contact Us Google Sheet",
     ),
     "bizdev_contacts": ConnectionSystem(
         system_id="bizdev_contacts",
@@ -347,6 +363,23 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
             ),
         ),
     ),
+    "axios_hq": ConnectionSystem(
+        system_id="axios_hq",
+        display_label="Axios HQ",
+        invite_allowed=False,
+        credential_fields=(),
+        trust_copy=_saas_trust_copy(
+            extra=(
+                "Axios HQ uses Upload mode only. Habeas does not store Axios HQ "
+                "passwords. Export a contact or subscriber list from Axios HQ as CSV "
+                "with first_name, last_name, and email (optional columns are listed in "
+                "the catalog). Download the Habeas CSV template, reshape your export "
+                "to match the required headers, select a multi-value delimiter if "
+                "needed, and upload the file. No API credentials or Google Sheets "
+                "sharing is required."
+            ),
+        ),
+    ),
     "cassandra": ConnectionSystem(
         system_id="cassandra",
         display_label="Cassandra",
@@ -369,7 +402,7 @@ SYSTEM_IDS: Final[frozenset[str]] = frozenset(_SYSTEMS)
 
 def _with_owner_facing_help(system: ConnectionSystem) -> ConnectionSystem:
     """Return a copy with Google Sheets how-to resolved (concrete SA + Editor)."""
-    if system.system_id != "google_sheets":
+    if system.system_id not in SHEET_SYSTEMS:
         return system
     fields: list[CredentialField] = []
     for field in system.credential_fields:
@@ -413,8 +446,11 @@ _SYSTEM_ORDER: Final[tuple[str, ...]] = (
     "lever",
     "auth0",
     "google_sheets",
+    "alumni_google_sheet",
+    "contact_us_google_sheet",
     "bizdev_contacts",
     "hr_alumni",
+    "axios_hq",
     "cassandra",
 )
 

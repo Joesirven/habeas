@@ -20,6 +20,7 @@ from habeas_privacy_core.connections.catalog import (
     VERTICAL_COMMUNICATIONS,
     VERTICAL_DATA,
     VERTICAL_PEOPLE_HR,
+    get_bindings_for_vertical,
 )
 from habeas_privacy_core.connections.freshness import evaluate_connection_gate
 from habeas_privacy_core.connections.models import Connection
@@ -211,11 +212,20 @@ def test_happy_people_hr_paylocity_upload_wizard_complete(
     assert gate.code == "ok"
 
 
-@pytest.mark.parametrize("system", ["hr_alumni", "bizdev_contacts"])
+@pytest.mark.parametrize(
+    ("system", "vertical", "owner_email"),
+    [
+        ("hr_alumni", VERTICAL_PEOPLE_HR, "hr-owner@example.com"),
+        ("bizdev_contacts", VERTICAL_BIZDEV, "biz-owner@example.com"),
+        ("axios_hq", VERTICAL_COMMUNICATIONS, "comm-owner@example.com"),
+    ],
+)
 def test_ae5_upload_only_rejects_live_mode(
-    monkeypatch: pytest.MonkeyPatch, system: str
+    monkeypatch: pytest.MonkeyPatch,
+    system: str,
+    vertical: str,
+    owner_email: str,
 ) -> None:
-    vertical = VERTICAL_PEOPLE_HR if system == "hr_alumni" else VERTICAL_BIZDEV
     current = _connection(
         system=system,
         metadata={"vertical_id": vertical},
@@ -226,12 +236,11 @@ def test_ae5_upload_only_rejects_live_mode(
         "_resolve_connection",
         AsyncMock(return_value=current),
     )
-    email = "hr-owner@example.com" if system == "hr_alumni" else "biz-owner@example.com"
 
     with TestClient(app) as client:
         response = client.post(
             f"/owner/verticals/{vertical}/systems/{system}/mode",
-            headers=_owner_headers(email),
+            headers=_owner_headers(owner_email),
             json={"mode": "live"},
         )
     assert response.status_code == 422
@@ -501,12 +510,12 @@ def test_upload_returns_503_when_gcs_unconfigured(
     helpers["merge"].assert_not_awaited()
 
 
-def test_mailchimp_live_credentials_success_stamps_rotation(
+def test_lever_live_credentials_success_stamps_rotation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    meta: dict = {"vertical_id": VERTICAL_COMMUNICATIONS, "active_mode": "live"}
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "live"}
     current = _connection(
-        system="mailchimp",
+        system="lever",
         metadata=meta,
         status="pending",
     )
@@ -521,7 +530,7 @@ def test_mailchimp_live_credentials_success_stamps_rotation(
     monkeypatch.setattr(
         owner_connectors,
         "test_connection",
-        AsyncMock(return_value=(True, "mailchimp_ok")),
+        AsyncMock(return_value=(True, "lever_ok")),
     )
     set_test = AsyncMock(return_value=current)
     update_status = AsyncMock(return_value=current)
@@ -536,14 +545,14 @@ def test_mailchimp_live_credentials_success_stamps_rotation(
 
     with TestClient(app) as client:
         response = client.post(
-            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/mailchimp/credentials",
-            headers=_owner_headers("comm-owner@example.com"),
-            json={"credentials": {"api_key": "mc-key-us19"}},
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/credentials",
+            headers=_owner_headers(),
+            json={"credentials": {"api_key": "lever-test-key"}},
         )
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["detail"] == "mailchimp_ok"
+    assert body["detail"] == "lever_ok"
     assert body["connection_id"] == str(CONNECTION_ID)
     assert meta.get("credentials_rotated_at")
     assert meta.get("active_mode") == "live"
@@ -557,12 +566,12 @@ def test_live_credentials_failed_test_allows_retry_without_wizard_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     meta: dict = {
-        "vertical_id": VERTICAL_COMMUNICATIONS,
+        "vertical_id": VERTICAL_PEOPLE_HR,
         "active_mode": "live",
         "cadence_days": 30,
     }
     current = _connection(
-        system="mailchimp",
+        system="lever",
         metadata=meta,
         status="pending",
         last_test_ok=False,
@@ -595,8 +604,8 @@ def test_live_credentials_failed_test_allows_retry_without_wizard_complete(
 
     with TestClient(app) as client:
         save = client.post(
-            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/mailchimp/credentials",
-            headers=_owner_headers("comm-owner@example.com"),
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/credentials",
+            headers=_owner_headers(),
             json={"credentials": {"api_key": "bad-key"}},
         )
         assert save.status_code == 200
@@ -604,8 +613,8 @@ def test_live_credentials_failed_test_allows_retry_without_wizard_complete(
         assert "credentials_rotated_at" not in meta
 
         complete = client.post(
-            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/mailchimp/wizard/complete",
-            headers=_owner_headers("comm-owner@example.com"),
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/wizard/complete",
+            headers=_owner_headers(),
         )
         assert complete.status_code == 422
         assert "live credentials required" in complete.json()["detail"]
@@ -631,9 +640,9 @@ def test_cross_vertical_live_credentials_forbidden(
 
     with TestClient(app) as client:
         response = client.post(
-            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/mailchimp/credentials",
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/credentials",
             headers=_owner_headers("outsider@example.com"),
-            json={"credentials": {"api_key": "mc-key-us19"}},
+            json={"credentials": {"api_key": "lever-test-key"}},
         )
     assert response.status_code == 403
 
@@ -642,16 +651,16 @@ def test_live_credentials_rejected_when_active_mode_is_upload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current = _connection(
-        system="mailchimp",
-        metadata={"vertical_id": VERTICAL_COMMUNICATIONS, "active_mode": "upload"},
+        system="lever",
+        metadata={"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "upload"},
     )
     _patch_owner_access(monkeypatch, connection=current)
 
     with TestClient(app) as client:
         response = client.post(
-            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/mailchimp/credentials",
-            headers=_owner_headers("comm-owner@example.com"),
-            json={"credentials": {"api_key": "mc-key-us19"}},
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/credentials",
+            headers=_owner_headers(),
+            json={"credentials": {"api_key": "lever-test-key"}},
         )
     assert response.status_code == 422
     assert "upload" in response.json()["detail"].lower()
@@ -661,22 +670,22 @@ def test_live_retest_uses_stored_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     meta: dict = {
-        "vertical_id": VERTICAL_COMMUNICATIONS,
+        "vertical_id": VERTICAL_PEOPLE_HR,
         "active_mode": "live",
         "credentials_rotated_at": "2026-01-01T00:00:00+00:00",
     }
     current = _connection(
-        system="mailchimp",
+        system="lever",
         metadata=meta,
         status="connected",
         last_test_ok=True,
     )
-    secret_name = connections_db.secret_resource_name("mailchimp", str(CONNECTION_ID))
+    secret_name = connections_db.secret_resource_name("lever", str(CONNECTION_ID))
     current = current.model_copy(update={"secret_resource_name": secret_name})
     writer = owner_connectors.get_secret_writer()
     writer.put_secret(
         secret_name,
-        '{"api_key": "stored-key-us19"}',
+        '{"api_key": "stored-lever-key"}',
     )
 
     def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
@@ -686,7 +695,7 @@ def test_live_retest_uses_stored_secret(
 
     helpers = _patch_owner_access(monkeypatch, connection=current)
     helpers["merge"].side_effect = _apply_merge
-    test_mock = AsyncMock(return_value=(True, "mailchimp_ok"))
+    test_mock = AsyncMock(return_value=(True, "lever_ok"))
     monkeypatch.setattr(owner_connectors, "test_connection", test_mock)
     monkeypatch.setattr(
         owner_connectors.connections_db,
@@ -701,13 +710,13 @@ def test_live_retest_uses_stored_secret(
 
     with TestClient(app) as client:
         response = client.post(
-            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/mailchimp/test",
-            headers=_owner_headers("comm-owner@example.com"),
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/test",
+            headers=_owner_headers(),
         )
     assert response.status_code == 200
     assert response.json()["ok"] is True
     test_mock.assert_awaited_once()
-    assert test_mock.await_args.args[1] == {"api_key": "stored-key-us19"}
+    assert test_mock.await_args.args[1] == {"api_key": "stored-lever-key"}
     assert meta.get("credentials_rotated_at")
     assert meta["credentials_rotated_at"] != "2026-01-01T00:00:00+00:00"
 
@@ -716,15 +725,169 @@ def test_live_retest_without_secret_returns_400(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current = _connection(
-        system="mailchimp",
-        metadata={"vertical_id": VERTICAL_COMMUNICATIONS, "active_mode": "live"},
+        system="lever",
+        metadata={"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "live"},
     )
     _patch_owner_access(monkeypatch, connection=current)
 
     with TestClient(app) as client:
         response = client.post(
-            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/mailchimp/test",
-            headers=_owner_headers("comm-owner@example.com"),
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/test",
+            headers=_owner_headers(),
         )
     assert response.status_code == 400
     assert response.json()["detail"] == "secret not stored"
+
+
+@pytest.mark.parametrize(
+    "payload,detail",
+    [
+        ({"refresh_cadence": "daily"}, "invalid_refresh_cadence"),
+        ({"refresh_policy": "monthly"}, "invalid_refresh_policy"),
+    ],
+)
+def test_cadence_validation_rejects_junk(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, str],
+    detail: str,
+) -> None:
+    current = _connection(metadata={"vertical_id": VERTICAL_PEOPLE_HR})
+    _patch_owner_access(monkeypatch, connection=current)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/cadence",
+            headers=_owner_headers(),
+            json=payload,
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"] == detail
+
+
+@pytest.mark.parametrize(
+    ("refresh_cadence", "expected"),
+    [
+        (
+            "rarely",
+            {
+                "refresh_cadence": "rarely",
+                "refresh_policy": "static",
+                "min_refresh_interval_hours": 0,
+                "cadence_days": 3650,
+            },
+        ),
+        (
+            "with_new_batches",
+            {
+                "refresh_cadence": "with_new_batches",
+                "refresh_policy": "volatile",
+                "min_refresh_interval_hours": 12,
+                "cadence_days": 1,
+            },
+        ),
+        (
+            "weekly",
+            {
+                "refresh_cadence": "weekly",
+                "refresh_policy": "volatile",
+                "min_refresh_interval_hours": 0,
+                "cadence_days": 7,
+            },
+        ),
+    ],
+)
+def test_refresh_cadence_persists_canonical_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    refresh_cadence: str,
+    expected: dict[str, object],
+) -> None:
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR}
+    current = _connection(metadata=meta)
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/cadence",
+            headers=_owner_headers(),
+            json={"refresh_cadence": refresh_cadence},
+        )
+    assert response.status_code == 200
+    for key, value in expected.items():
+        assert meta[key] == value
+
+
+@pytest.mark.parametrize(
+    ("refresh_policy", "expected_cadence"),
+    [
+        ("static", "rarely"),
+        ("volatile", "with_new_batches"),
+    ],
+)
+def test_legacy_refresh_policy_maps_to_refresh_cadence(
+    monkeypatch: pytest.MonkeyPatch,
+    refresh_policy: str,
+    expected_cadence: str,
+) -> None:
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR}
+    current = _connection(metadata=meta)
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/cadence",
+            headers=_owner_headers(),
+            json={"refresh_policy": refresh_policy},
+        )
+    assert response.status_code == 200
+    assert meta["refresh_cadence"] == expected_cadence
+    assert meta["refresh_policy"] == refresh_policy
+
+
+def test_communications_binding_uses_catalog_upload_system() -> None:
+    bindings = get_bindings_for_vertical(VERTICAL_COMMUNICATIONS)
+    assert len(bindings) == 1
+    assert bindings[0].system == "axios_hq"
+
+
+def test_wizard_complete_accepts_refresh_cadence_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meta: dict = {
+        "vertical_id": VERTICAL_PEOPLE_HR,
+        "active_mode": "upload",
+        "last_successful_upload_at": NOW.isoformat(),
+    }
+    current = _connection(metadata=meta, status="connected", last_test_ok=True)
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/wizard/complete",
+            headers=_owner_headers(),
+            json={"refresh_cadence": "weekly"},
+        )
+    assert response.status_code == 200
+    assert meta["refresh_cadence"] == "weekly"
+    assert meta["cadence_days"] == 7
+    assert meta.get("wizard_completed_at")

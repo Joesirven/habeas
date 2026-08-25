@@ -559,7 +559,7 @@ function DataOwnerHome() {
   return (
     <section className="space-y-4">
       <header>
-        <p className="taste-micro">Data owner</p>
+        <p className="taste-micro">{role === 'data_user' ? 'Data user' : 'Data owner'}</p>
         <h2 className="mt-1 font-display text-2xl font-medium tracking-tight text-ink">Home</h2>
         <p className="mt-1 text-sm font-medium text-ink">{verticalSummary}</p>
         <p className="mt-1 max-w-xl text-sm text-ink-soft">
@@ -709,7 +709,7 @@ export function DashboardPage() {
     return <LegalHome />
   }
 
-  if (role === 'data_owner') {
+  if (role === 'data_owner' || role === 'data_user') {
     return <DataOwnerHome />
   }
 

@@ -9,14 +9,19 @@ from datetime import datetime, timezone
 from typing import Annotated, Any, Protocol
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from admin_api.connection_testers import test_connection
 from admin_api.drop_pipeline import _require_database
 from admin_api.roles import ConnectorReminderOut, RolePrincipal, require_roles
 from admin_api.vertical_assignments import fetch_principal_verticals, require_vertical_access
-from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_DATA_OWNER, ROLE_SUPER_ADMIN
+from habeas_privacy_core.auth import (
+    ROLE_ADMIN,
+    ROLE_DATA_OWNER,
+    ROLE_DATA_USER,
+    ROLE_SUPER_ADMIN,
+)
 from habeas_privacy_core.connections.catalog import (
     APPROACH_LIVE,
     APPROACH_UPLOAD,
@@ -44,7 +49,7 @@ router = APIRouter(prefix="/owner", tags=["owner-connectors"])
 
 OwnerRolePrincipal = Annotated[
     RolePrincipal,
-    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_DATA_OWNER)),
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_DATA_OWNER, ROLE_DATA_USER)),
 ]
 VerticalAccessPrincipal = Annotated[
     RolePrincipal,
@@ -56,9 +61,23 @@ class ModeBody(BaseModel):
     mode: str = Field(min_length=1, max_length=16)
 
 
+REFRESH_CADENCE_RARELY = "rarely"
+REFRESH_CADENCE_WITH_NEW_BATCHES = "with_new_batches"
+REFRESH_CADENCE_WEEKLY = "weekly"
+
+_CANONICAL_REFRESH_CADENCES = frozenset(
+    {
+        REFRESH_CADENCE_RARELY,
+        REFRESH_CADENCE_WITH_NEW_BATCHES,
+        REFRESH_CADENCE_WEEKLY,
+    }
+)
+
+
 class CadenceBody(BaseModel):
     cadence_days: int | None = Field(default=None, ge=1, le=3650)
     refresh_policy: str | None = Field(default=None, max_length=16)
+    refresh_cadence: str | None = Field(default=None, max_length=32)
 
 
 class ConnectorSystemOut(BaseModel):
@@ -87,6 +106,10 @@ class UploadResultOut(BaseModel):
     connection_id: str
     upload_row_count: int | None = None
     gcs_uri: str | None = None
+    missing_count: int | None = None
+    detected_header_count: int | None = None
+    detected_headers: list[str] | None = None
+    required_headers: list[str] | None = None
 
 
 class CredentialsBody(BaseModel):
@@ -230,6 +253,16 @@ def _reject_data_wizard(vertical_id: str) -> None:
         )
 
 
+def _reject_data_user_config(principal: RolePrincipal) -> None:
+    if principal.role == ROLE_DATA_USER:
+        raise HTTPException(status_code=403, detail="insufficient role")
+
+
+def _reject_owner_mutations(vertical_id: str, principal: RolePrincipal) -> None:
+    _reject_data_wizard(vertical_id)
+    _reject_data_user_config(principal)
+
+
 def _validate_vertical(vertical_id: str) -> None:
     try:
         get_vertical(vertical_id)
@@ -249,6 +282,65 @@ def _normalize_mode(mode: str) -> str:
     if normalized not in {APPROACH_LIVE, APPROACH_UPLOAD}:
         raise HTTPException(status_code=422, detail="invalid mode")
     return normalized
+
+
+def _cadence_metadata_from_canonical(cadence: str) -> dict[str, Any]:
+    """Map canonical ``refresh_cadence`` to persisted metadata fields."""
+    if cadence == REFRESH_CADENCE_RARELY:
+        return {
+            "refresh_cadence": REFRESH_CADENCE_RARELY,
+            "refresh_policy": "static",
+            "min_refresh_interval_hours": 0,
+            "cadence_days": 3650,
+        }
+    if cadence == REFRESH_CADENCE_WITH_NEW_BATCHES:
+        return {
+            "refresh_cadence": REFRESH_CADENCE_WITH_NEW_BATCHES,
+            "refresh_policy": "volatile",
+            "min_refresh_interval_hours": 12,
+            "cadence_days": 1,
+        }
+    if cadence == REFRESH_CADENCE_WEEKLY:
+        return {
+            "refresh_cadence": REFRESH_CADENCE_WEEKLY,
+            "refresh_policy": "volatile",
+            "min_refresh_interval_hours": 0,
+            "cadence_days": 7,
+        }
+    raise HTTPException(status_code=422, detail="invalid_refresh_cadence")
+
+
+def _cadence_body_has_input(body: CadenceBody) -> bool:
+    return (
+        body.refresh_cadence is not None
+        or body.refresh_policy is not None
+        or body.cadence_days is not None
+    )
+
+
+def _resolve_cadence_patch(body: CadenceBody) -> dict[str, Any]:
+    """Build metadata patch from cadence request body."""
+    cadence_raw = (body.refresh_cadence or "").strip().lower()
+    if cadence_raw:
+        if cadence_raw not in _CANONICAL_REFRESH_CADENCES:
+            raise HTTPException(status_code=422, detail="invalid_refresh_cadence")
+        return _cadence_metadata_from_canonical(cadence_raw)
+
+    policy = (body.refresh_policy or "").strip().lower()
+    if policy:
+        if policy not in {"static", "volatile"}:
+            raise HTTPException(status_code=422, detail="invalid_refresh_policy")
+        canonical = (
+            REFRESH_CADENCE_RARELY
+            if policy == "static"
+            else REFRESH_CADENCE_WITH_NEW_BATCHES
+        )
+        return _cadence_metadata_from_canonical(canonical)
+
+    if body.cadence_days is not None:
+        return {"cadence_days": body.cadence_days}
+
+    raise HTTPException(status_code=422, detail="cadence required")
 
 
 def _connection_to_out(
@@ -562,7 +654,7 @@ async def download_upload_template(
     """Return frozen CSV template bytes for Upload-mode systems."""
     _ = principal
     _validate_vertical(vertical_id)
-    _reject_data_wizard(vertical_id)
+    _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
     if APPROACH_UPLOAD not in binding.allowed_approaches:
         raise HTTPException(status_code=422, detail="upload not allowed for this system")
@@ -598,6 +690,8 @@ async def list_owner_connectors(
     connectors: list[ConnectorSystemOut] = []
     async with pool.acquire() as conn:
         for binding in bindings:
+            if binding.system == "cassandra":
+                continue
             connection = await _find_connection_for_system(
                 conn, vertical_id=vertical_id, system=binding.system
             )
@@ -636,7 +730,7 @@ async def set_system_mode(
     _role: OwnerRolePrincipal,
 ) -> ConnectorSystemOut:
     _validate_vertical(vertical_id)
-    _reject_data_wizard(vertical_id)
+    _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
     mode = _normalize_mode(body.mode)
     if not is_approach_allowed(vertical_id, system, mode):
@@ -690,7 +784,7 @@ async def set_system_cadence(
     _role: OwnerRolePrincipal,
 ) -> ConnectorSystemOut:
     _validate_vertical(vertical_id)
-    _reject_data_wizard(vertical_id)
+    _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
     _require_database()
     pool = get_pool()
@@ -702,17 +796,7 @@ async def set_system_cadence(
             created_by=principal.email,
         )
         patch: dict[str, Any] = {"vertical_id": vertical_id}
-        policy = (body.refresh_policy or "").strip().lower()
-        if policy:
-            if policy not in {"static", "volatile"}:
-                raise HTTPException(status_code=422, detail="invalid_refresh_policy")
-            patch["refresh_policy"] = policy
-            patch["min_refresh_interval_hours"] = 12 if policy == "volatile" else 0
-            patch["cadence_days"] = 1 if policy == "volatile" else 3650
-        elif body.cadence_days is not None:
-            patch["cadence_days"] = body.cadence_days
-        else:
-            raise HTTPException(status_code=422, detail="cadence_days required")
+        patch.update(_resolve_cadence_patch(body))
         updated = await _merge_metadata(
             conn,
             UUID(str(connection.id)),
@@ -739,10 +823,11 @@ async def upload_system_csv(
     _role: OwnerRolePrincipal,
     file: UploadFile = File(...),
     multi_pii_delimiter: str | None = Form(default=None),
+    column_mapping: str | None = Form(default=None),
 ) -> UploadResultOut:
     """Multipart CSV upload → U5 tester → stub/GCS writer → freshness metadata."""
     _validate_vertical(vertical_id)
-    _reject_data_wizard(vertical_id)
+    _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
     if APPROACH_UPLOAD not in binding.allowed_approaches:
         raise HTTPException(status_code=422, detail="upload not allowed for this system")
@@ -759,12 +844,27 @@ async def upload_system_csv(
     if not content:
         raise HTTPException(status_code=422, detail="empty upload")
 
+    parsed_mapping: dict[str, str] | None = None
+    if isinstance(column_mapping, str) and column_mapping.strip():
+        try:
+            raw_map = json.loads(column_mapping)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=422, detail="invalid column_mapping") from exc
+        if not isinstance(raw_map, dict):
+            raise HTTPException(status_code=422, detail="invalid column_mapping")
+        parsed_mapping = {
+            str(key): str(value)
+            for key, value in raw_map.items()
+            if str(key).strip() and str(value).strip()
+        }
+
     from admin_api.connection_tests.upload_csv import test_upload_system
 
     ok, detail, stats = await test_upload_system(
         system,
         content=content,
         multi_pii_delimiter=delimiter,
+        column_mapping=parsed_mapping,
     )
     safe_detail = sanitize_test_detail(detail) or "unknown_error"
 
@@ -785,23 +885,38 @@ async def upload_system_csv(
                 detail="upload not allowed while active_mode is live",
             )
         if not ok:
-            await connections_db.set_test_result(
-                conn,
-                connection_id,
-                ok=False,
-                detail=safe_detail,
-                tested_at=datetime.now(timezone.utc),
-            )
+            if safe_detail != "upload_needs_mapping":
+                await connections_db.set_test_result(
+                    conn,
+                    connection_id,
+                    ok=False,
+                    detail=safe_detail,
+                    tested_at=datetime.now(timezone.utc),
+                )
             logger.info(
                 "owner_upload_failed connection_id=%s system=%s detail=%s",
                 connection_id,
                 system,
                 safe_detail,
             )
+            detected_raw = stats.get("detected_headers")
+            required_raw = stats.get("required_headers")
             return UploadResultOut(
                 ok=False,
                 detail=safe_detail,
                 connection_id=str(connection_id),
+                missing_count=stats.get("missing_count"),
+                detected_header_count=stats.get("detected_header_count"),
+                detected_headers=(
+                    [str(h) for h in detected_raw if str(h).strip()]
+                    if isinstance(detected_raw, list)
+                    else None
+                ),
+                required_headers=(
+                    [str(h) for h in required_raw if str(h).strip()]
+                    if isinstance(required_raw, list)
+                    else None
+                ),
             )
 
         gcs_uri = await persist_upload_object(
@@ -816,6 +931,7 @@ async def upload_system_csv(
             "gcs_uri": gcs_uri,
             "multi_pii_delimiter": delimiter,
             "last_successful_upload_at": uploaded_at,
+            "last_successful_refresh_at": uploaded_at,
             "upload_row_count": row_count,
         }
         if current_mode != APPROACH_LIVE:
@@ -864,7 +980,7 @@ async def live_credential_preview(
 ) -> LiveCredentialPreviewOut:
     """Credential field definitions + how-to copy for in-wizard Live connect."""
     _validate_vertical(vertical_id)
-    _reject_data_wizard(vertical_id)
+    _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
     _ensure_live_allowed(vertical_id, system, binding)
     system_def = get_system(system)
@@ -915,7 +1031,7 @@ async def save_live_credentials(
 ) -> LiveConnectResultOut:
     """Store Live credentials on the vertical-scoped row and run a connection test."""
     _validate_vertical(vertical_id)
-    _reject_data_wizard(vertical_id)
+    _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
     _ensure_live_allowed(vertical_id, system, binding)
     system_def = get_system(system)
@@ -988,7 +1104,7 @@ async def test_live_connection(
 ) -> LiveConnectResultOut:
     """Re-run a Live connection test using stored credentials."""
     _validate_vertical(vertical_id)
-    _reject_data_wizard(vertical_id)
+    _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
     _ensure_live_allowed(vertical_id, system, binding)
 
@@ -1046,9 +1162,10 @@ async def complete_system_wizard(
     system: str,
     principal: VerticalAccessPrincipal,
     _role: OwnerRolePrincipal,
+    body: CadenceBody = Body(default_factory=CadenceBody),
 ) -> ConnectorSystemOut:
     _validate_vertical(vertical_id)
-    _reject_data_wizard(vertical_id)
+    _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
     _require_database()
     pool = get_pool()
@@ -1059,12 +1176,23 @@ async def complete_system_wizard(
             system=system,
             created_by=principal.email,
         )
+        patch: dict[str, Any] = {"vertical_id": vertical_id}
+        if _cadence_body_has_input(body):
+            patch.update(_resolve_cadence_patch(body))
+            connection = await _merge_metadata(
+                conn,
+                UUID(str(connection.id)),
+                patch,
+            )
+            if connection is None:
+                raise HTTPException(status_code=404, detail="connection not found")
         _wizard_ready(connection)
         completed_at = datetime.now(timezone.utc).isoformat()
+        patch = {"wizard_completed_at": completed_at, "vertical_id": vertical_id}
         updated = await _merge_metadata(
             conn,
             UUID(str(connection.id)),
-            {"wizard_completed_at": completed_at, "vertical_id": vertical_id},
+            patch,
         )
         if updated is None:
             raise HTTPException(status_code=404, detail="connection not found")

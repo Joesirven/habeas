@@ -111,7 +111,7 @@ const REMINDER_CODE_COPY: Record<string, { title: string; description: string }>
   sheets_refresh_stale: {
     title: 'Google Sheet refresh needed',
     description:
-      'A new intake batch arrived and this sheet is marked volatile. Refresh (at most every 12 hours) so matching can run. Login is not blocked.',
+      'A new intake batch arrived. Refresh this source if it has been at least 12 hours since the last successful refresh so matching can run. Login is not blocked.',
   },
 }
 
@@ -143,7 +143,9 @@ export function filterRemindersForOwnerConnectorsPage(
 ): ConnectorReminder[] {
   if (!reminders?.length) return []
   return reminders.filter(
-    (reminder) => !OWNER_CONNECTORS_SUPPRESSED_REMINDER_CODES.has(reminder.code),
+    (reminder) =>
+      !OWNER_CONNECTORS_SUPPRESSED_REMINDER_CODES.has(reminder.code) &&
+      reminder.system !== 'cassandra',
   )
 }
 
@@ -184,17 +186,213 @@ export function visibleReminderBanners(
   return items.filter((item) => !dismissed.has(item.id))
 }
 
-export type OwnerWizardStep = 'mode' | 'connect' | 'cadence' | 'confirm'
+export type VerticalWizardStep = {
+  id: string
+  label?: string
+}
 
-export const OWNER_WIZARD_STEPS: { id: OwnerWizardStep; label: string }[] = [
-  { id: 'mode', label: 'Mode' },
-  { id: 'connect', label: 'Connect' },
-  { id: 'cadence', label: 'Cadence' },
-  { id: 'confirm', label: 'Confirm' },
-]
+export type VerticalWizardSystemInput = {
+  system: string
+  allowedApproaches: string[]
+  displayLabel?: string
+}
 
-export function ownerWizardStepIndex(step: OwnerWizardStep): number {
-  return OWNER_WIZARD_STEPS.findIndex((entry) => entry.id === step)
+export type BuildVerticalWizardStepsArgs = {
+  systems: VerticalWizardSystemInput[]
+  viewOnly?: boolean
+}
+
+const WIZARD_STEP_SUFFIXES = [
+  'howto-upload',
+  'howto-live',
+  'live-creds',
+  'upload',
+] as const
+
+export type ParsedVerticalWizardStep =
+  | { kind: (typeof WIZARD_STEP_SUFFIXES)[number]; system: string }
+  | { kind: 'cadence' }
+  | { kind: 'confirm' }
+
+/** Parse a linear wizard step id. Longer suffixes first so `hr_alumni-howto-upload` is not `upload`. */
+export function parseVerticalWizardStepId(
+  stepId: string,
+): ParsedVerticalWizardStep | null {
+  if (stepId === 'cadence') return { kind: 'cadence' }
+  if (stepId === 'confirm') return { kind: 'confirm' }
+  for (const suffix of WIZARD_STEP_SUFFIXES) {
+    const needle = `-${suffix}`
+    if (stepId.endsWith(needle) && stepId.length > needle.length) {
+      return {
+        kind: suffix,
+        system: stepId.slice(0, -needle.length),
+      }
+    }
+  }
+  return null
+}
+
+function wizardSystemStepsForBinding(
+  system: string,
+  allowedApproaches: readonly string[],
+): VerticalWizardStep[] {
+  const normalized = normalizeSystemId(system)
+  const steps: VerticalWizardStep[] = []
+  if (allowsLive(allowedApproaches)) {
+    steps.push({ id: `${normalized}-howto-live` })
+    steps.push({ id: `${normalized}-live-creds` })
+  }
+  if (allowsUpload(allowedApproaches)) {
+    steps.push({ id: `${normalized}-howto-upload` })
+    steps.push({ id: `${normalized}-upload` })
+  }
+  return steps
+}
+
+function shouldIncludeWizardSystem(
+  system: string,
+  allowedApproaches: readonly string[],
+): boolean {
+  if (normalizeSystemId(system) === 'cassandra') return false
+  if (!allowedApproaches.length) return false
+  return allowsUpload(allowedApproaches) || allowsLive(allowedApproaches)
+}
+
+/** Build per-vertical linear wizard steps (one cadence + confirm after all systems). */
+export function buildVerticalWizardSteps(
+  args: BuildVerticalWizardStepsArgs,
+): VerticalWizardStep[] {
+  if (args.viewOnly) return []
+  const steps: VerticalWizardStep[] = []
+  for (const entry of args.systems) {
+    if (!shouldIncludeWizardSystem(entry.system, entry.allowedApproaches)) continue
+    steps.push(...wizardSystemStepsForBinding(entry.system, entry.allowedApproaches))
+  }
+  steps.push({ id: 'cadence' })
+  steps.push({ id: 'confirm' })
+  return steps
+}
+
+export function verticalWizardStepIndex(
+  steps: readonly VerticalWizardStep[],
+  stepId: string,
+): number {
+  return steps.findIndex((entry) => entry.id === stepId)
+}
+
+/** Progress bar fill 0–100 for the current step index and total step count. */
+export function wizardProgressPercent(currentIndex: number, total: number): number {
+  if (total <= 0) return 0
+  if (currentIndex < 0) return 0
+  const bounded = Math.min(currentIndex, total - 1)
+  const pct = Math.round(((bounded + 1) / total) * 100)
+  return Math.min(100, Math.max(0, pct))
+}
+
+export const CADENCE_OPTION_RARELY = 'rarely' as const
+export const CADENCE_OPTION_WITH_NEW_BATCHES = 'with_new_batches' as const
+export const CADENCE_OPTION_WEEKLY = 'weekly' as const
+
+export const CADENCE_OPTION_IDS = [
+  CADENCE_OPTION_RARELY,
+  CADENCE_OPTION_WITH_NEW_BATCHES,
+  CADENCE_OPTION_WEEKLY,
+] as const
+
+export type CadenceOptionId = (typeof CADENCE_OPTION_IDS)[number]
+
+/** Map persisted `refresh_policy` to owner-facing cadence option ids. */
+export function cadenceOptionFromRefreshPolicy(
+  policy: 'static' | 'volatile' | null | undefined,
+): CadenceOptionId | null {
+  if (policy === 'static') return CADENCE_OPTION_RARELY
+  if (policy === 'volatile') return CADENCE_OPTION_WITH_NEW_BATCHES
+  return null
+}
+
+/** Map cadence option id back to API `refresh_policy` when applicable. */
+export function refreshPolicyFromCadenceOption(
+  option: CadenceOptionId | null | undefined,
+): 'static' | 'volatile' | null {
+  if (option === CADENCE_OPTION_RARELY) return 'static'
+  if (option === CADENCE_OPTION_WITH_NEW_BATCHES) return 'volatile'
+  return null
+}
+
+/** Map cadence option id to API `refresh_cadence` string for writes. */
+export function refreshCadenceFromCadenceOption(
+  option: CadenceOptionId | null | undefined,
+): CadenceOptionId | null {
+  if (
+    option === CADENCE_OPTION_RARELY ||
+    option === CADENCE_OPTION_WITH_NEW_BATCHES ||
+    option === CADENCE_OPTION_WEEKLY
+  ) {
+    return option
+  }
+  return null
+}
+
+function parseRefreshCadenceFromMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): CadenceOptionId | null {
+  const raw = metadata?.refresh_cadence
+  if (typeof raw === 'string') {
+    const cadence = raw.trim().toLowerCase()
+    if (cadence === CADENCE_OPTION_RARELY) return CADENCE_OPTION_RARELY
+    if (cadence === CADENCE_OPTION_WITH_NEW_BATCHES) {
+      return CADENCE_OPTION_WITH_NEW_BATCHES
+    }
+    if (cadence === CADENCE_OPTION_WEEKLY) return CADENCE_OPTION_WEEKLY
+  }
+  return cadenceOptionFromRefreshPolicy(refreshPolicyFromMetadata(metadata))
+}
+
+export function cadenceOptionFromMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): CadenceOptionId | null {
+  return parseRefreshCadenceFromMetadata(metadata)
+}
+
+export type SystemWizardCopy = {
+  uploadHowto?: string
+  liveHowto?: string
+}
+
+/** Per-system how-to copy for upload / live wizard substeps. */
+export const SYSTEM_COPY: Record<string, SystemWizardCopy> = {
+  axios_hq: {
+    uploadHowto:
+      'Export a contact or subscriber list from Axios HQ as CSV. Upload the file, then map first name, last name, and email if the column names differ. Habeas does not connect to Axios HQ directly.',
+  },
+  alumni_google_sheet: {
+    liveHowto:
+      'Open the HR alumni Google Sheet, share it as Editor with the Habeas service account in the steps below, then paste the spreadsheet URL. Habeas tests access before you continue.',
+    uploadHowto:
+      'If the live sheet connection fails, upload the alumni list as CSV and map first name, last name, and email.',
+  },
+  contact_us_google_sheet: {
+    liveHowto:
+      'Open the BizDev Contact Us Google Sheet, share it as Editor with the Habeas service account in the steps below, then paste the spreadsheet URL. Habeas tests access before you continue.',
+    uploadHowto:
+      'If the live sheet connection fails, upload Contact Us rows as CSV and map first name, last name, and email.',
+  },
+  paylocity: {
+    liveHowto:
+      'Follow the numbered steps under each field to create Paylocity integration credentials, paste them, then run a connection test.',
+    uploadHowto:
+      'If Live credentials fail, upload a Paylocity CSV and map first name, last name, and email.',
+  },
+  lever: {
+    liveHowto:
+      'Follow the numbered steps to create a Lever API key, paste it, then run a connection test.',
+  },
+  auth0: {
+    liveHowto:
+      'Follow the numbered steps to create an Auth0 Machine-to-Machine app, paste Domain, Client ID, and Client Secret, then run a connection test.',
+    uploadHowto:
+      'If Live credentials fail, export Auth0 users as CSV, upload, then map first name, last name, and email.',
+  },
 }
 
 /** Whether Upload approach is among allowed modes. */
@@ -222,7 +420,7 @@ export type ModeDefinitionCardCopy = {
 export const MODE_UPLOAD_DEFINITION_CARD: ModeDefinitionCardCopy = {
   mode: 'upload',
   title: 'Upload',
-  definition: `You download our template, fill it with your export, and send the file to ${PLATFORM_NAME} on a refresh schedule you choose.`,
+  definition: `You upload your existing export to ${PLATFORM_NAME}, then map columns to first name, last name, and email if the headers differ.`,
 }
 
 export const MODE_LIVE_DEFINITION_CARD: ModeDefinitionCardCopy = {
@@ -256,14 +454,9 @@ const MODE_SYSTEM_HINTS: Record<
   string,
   Partial<Record<ConnectorApproachMode, string>>
 > = {
-  mailchimp: {
-    upload:
-      'Export your Mailchimp audience to our CSV template and upload on your refresh schedule.',
-    live: 'Habeas pulls audience members from Mailchimp using an API key.',
-  },
   paylocity: {
     upload:
-      'Fill the Paylocity template CSV and upload on your cadence — no Developer Portal credentials needed.',
+      'Upload a Paylocity export and map first name, last name, and email — no Developer Portal credentials needed.',
     live:
       'Paylocity will deliver employee files through SFTP (coming soon) — not an API connection.',
   },
@@ -273,16 +466,16 @@ const MODE_SYSTEM_HINTS: Record<
   },
   auth0: {
     upload:
-      'Export Auth0 user records to our template and upload on your refresh schedule.',
+      'Export Auth0 users as CSV, upload the file, then map first name, last name, and email.',
     live: 'Habeas pulls user records from Auth0 using Machine-to-Machine API credentials.',
   },
   bizdev_contacts: {
     upload:
-      'Upload Contact Us shaped contacts using the Habeas CSV template on your refresh schedule.',
+      'Upload Contact Us contacts as CSV, then map first name, last name, and email.',
   },
   hr_alumni: {
     upload:
-      'Upload your static alumni list using the Habeas CSV template on your refresh schedule.',
+      'Upload your alumni list as CSV, then map first name, last name, and email.',
   },
 }
 
@@ -300,7 +493,7 @@ const DISALLOWED_MODE_REASONS: Record<
     upload: 'Lever only supports Live — Habeas connects via the Lever API.',
   },
   paylocity: {
-    live: 'Paylocity Live (SFTP) is not available yet. Use Upload with the Habeas template for now.',
+    live: 'Paylocity Live (SFTP) is not available yet. Use Upload and map columns after the file is sent.',
   },
 }
 
@@ -445,4 +638,158 @@ export function liveConnectReady(input: {
   if (typeof rotated === 'string' && rotated.trim()) return true
   if (input.last_test_ok) return true
   return input.status === 'connected'
+}
+
+/** Cassandra is infrastructure-only — never list it on the owner connectors page. */
+export function isOwnerConnectorsHiddenSystem(system: string): boolean {
+  return normalizeSystemId(system) === 'cassandra'
+}
+
+export function isOwnerConnectorsHiddenVertical(verticalId: string): boolean {
+  return verticalId.trim().toLowerCase() === 'data'
+}
+
+export const UPLOAD_IDENTIFIER_FIELDS = [
+  { id: 'email', label: 'Email' },
+  { id: 'phone', label: 'Phone' },
+  { id: 'first_name', label: 'First name' },
+  { id: 'last_name', label: 'Last name' },
+  { id: 'dob', label: 'Date of birth' },
+  { id: 'zip', label: 'ZIP' },
+] as const
+
+export type UploadIdentifierFieldId = (typeof UPLOAD_IDENTIFIER_FIELDS)[number]['id']
+
+const UPLOAD_HEADER_ALIASES: Record<UploadIdentifierFieldId, readonly string[]> = {
+  email: ['email', 'email_address', 'e_mail', 'mail'],
+  phone: ['phone', 'phone_number', 'mobile', 'cell'],
+  first_name: ['first_name', 'first', 'firstname', 'given_name', 'fname'],
+  last_name: ['last_name', 'last', 'lastname', 'surname', 'family_name', 'lname'],
+  dob: ['dob', 'date_of_birth', 'birth_date'],
+  zip: ['zip', 'zip_code', 'postal', 'postal_code'],
+}
+
+export function normalizeUploadHeader(raw: string): string {
+  return raw.trim().toLowerCase().replaceAll(' ', '_').replaceAll('-', '_')
+}
+
+/** Parse the first CSV row as headers (quoted fields supported). */
+export function parseCsvHeaderRow(text: string): string[] {
+  const firstLine = text.replace(/^\uFEFF/, '').split(/\r?\n/, 1)[0] ?? ''
+  const headers: string[] = []
+  let current = ''
+  let inQuotes = false
+  for (let i = 0; i < firstLine.length; i += 1) {
+    const ch = firstLine[i]
+    if (inQuotes) {
+      if (ch === '"') {
+        if (firstLine[i + 1] === '"') {
+          current += '"'
+          i += 1
+        } else {
+          inQuotes = false
+        }
+      } else {
+        current += ch
+      }
+      continue
+    }
+    if (ch === '"') {
+      inQuotes = true
+      continue
+    }
+    if (ch === ',') {
+      headers.push(current.trim())
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  if (current.trim() || headers.length) headers.push(current.trim())
+  return headers.filter((h) => h.length > 0)
+}
+
+export function suggestUploadColumnMapping(
+  headers: readonly string[],
+  targets: readonly UploadIdentifierFieldId[] = UPLOAD_IDENTIFIER_FIELDS.map((f) => f.id),
+): Record<string, string> {
+  const byNorm = new Map<string, string>()
+  for (const header of headers) {
+    const key = normalizeUploadHeader(header)
+    if (key && !byNorm.has(key)) byNorm.set(key, header)
+  }
+  const mapping: Record<string, string> = {}
+  const used = new Set<string>()
+  for (const target of targets) {
+    const aliases = UPLOAD_HEADER_ALIASES[target] ?? [target]
+    for (const alias of aliases) {
+      const source = byNorm.get(alias)
+      if (source && !used.has(source)) {
+        mapping[target] = source
+        used.add(source)
+        break
+      }
+    }
+  }
+  return mapping
+}
+
+export function uploadMappingComplete(
+  mapping: Record<string, string>,
+  targets: readonly UploadIdentifierFieldId[] = UPLOAD_IDENTIFIER_FIELDS.map((f) => f.id),
+): boolean {
+  return targets.some((id) => Boolean(mapping[id]?.trim()))
+}
+
+/** In-app samples matching admin_api tests/fixtures/upload_mapping/. */
+export const UPLOAD_SAMPLE_CSV: Record<
+  | 'success'
+  | 'success_email_only'
+  | 'success_phone_only'
+  | 'autobind'
+  | 'remap'
+  | 'failure_no_identifier'
+  | 'failure_no_usable_rows',
+  { filename: string; body: string; label: string }
+> = {
+  success: {
+    filename: 'success.csv',
+    label: 'Success (name + email)',
+    body: 'first_name,last_name,email\nAda,Lovelace,ada@example.com\n',
+  },
+  success_email_only: {
+    filename: 'success_email_only.csv',
+    label: 'Success (email only)',
+    body: 'email\nada@example.com\n',
+  },
+  success_phone_only: {
+    filename: 'success_phone_only.csv',
+    label: 'Success (phone only)',
+    body: 'phone\n2025550100\n',
+  },
+  autobind: {
+    filename: 'autobind.csv',
+    label: 'Auto-bind',
+    body: 'First Name,Last Name,Email Address\nGrace,Hopper,grace@example.com\n',
+  },
+  remap: {
+    filename: 'remap.csv',
+    label: 'Remap',
+    body: 'Given,Family,Work Email,Department\nAlan,Turing,alan@example.com,Research\n',
+  },
+  failure_no_identifier: {
+    filename: 'failure_no_identifier.csv',
+    label: 'Fail (no identifier columns)',
+    body: 'department,notes\nResearch,internal only\n',
+  },
+  failure_no_usable_rows: {
+    filename: 'failure_no_usable_rows.csv',
+    label: 'Fail (bad email/phone)',
+    body: 'email,phone\nnot-an-email,123\n',
+  },
+}
+
+export function uploadSampleFile(kind: keyof typeof UPLOAD_SAMPLE_CSV): File {
+  const sample = UPLOAD_SAMPLE_CSV[kind]
+  return new File([sample.body], sample.filename, { type: 'text/csv' })
 }

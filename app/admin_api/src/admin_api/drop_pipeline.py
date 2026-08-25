@@ -41,6 +41,7 @@ from admin_api.vertical_dispositions import normalize_dwids
 from habeas_privacy_core.auth import (
     ROLE_ADMIN,
     ROLE_DATA_OWNER,
+    ROLE_DATA_USER,
     ROLE_LEGAL,
     ROLE_SUPER_ADMIN,
     UNKNOWN_ACTOR,
@@ -348,7 +349,7 @@ SuperAdminPrincipal = Annotated[
 
 MatchingReviewPrincipal = Annotated[
     RolePrincipal,
-    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_DATA_OWNER)),
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_DATA_OWNER, ROLE_DATA_USER)),
 ]
 
 LegalPrincipal = Annotated[

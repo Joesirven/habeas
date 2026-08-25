@@ -17,6 +17,7 @@ async def test_upload_system(
     *,
     content: bytes,
     multi_pii_delimiter: str | None,
+    column_mapping: dict[str, str] | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Run the upload CSV test for *system*."""
     if system not in UPLOAD_SYSTEMS:
@@ -25,6 +26,7 @@ async def test_upload_system(
         system=system,
         content=content,
         multi_pii_delimiter=multi_pii_delimiter,
+        column_mapping=column_mapping,
     )
 
 

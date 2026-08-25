@@ -85,6 +85,7 @@ def test_sanitize_test_detail_allowlists_failure_codes():
         "invalid_credentials",
         "invalid_config",
         "upload_missing_headers",
+        "upload_needs_mapping",
         "upload_no_usable_rows",
         "upload_invalid_delimiter",
         "gate_blocked",

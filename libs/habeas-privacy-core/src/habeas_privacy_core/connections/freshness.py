@@ -4,17 +4,22 @@ Metadata keys on ``integration_connections.metadata``:
 
 - ``active_mode``: ``live`` | ``upload``
 - ``wizard_completed_at``: ISO-8601 timestamp when owner wizard finished
-- ``cadence_days``: owner-set Upload refresh cadence (integer days)
+- ``cadence_days``: owner-set Upload refresh cadence (integer days; legacy upload clock)
 - ``cadence_days_override``: super_admin override for Upload cadence
-- ``refresh_policy``: ``static`` | ``volatile`` (Google Sheets / hash verticals)
-- ``min_refresh_interval_hours``: floor between required refreshes (Sheets volatile = 12)
+- ``refresh_cadence``: ``rarely`` | ``with_new_batches`` | ``weekly`` (owner extract clock)
+- ``refresh_policy``: legacy ``static`` | ``volatile`` (maps to ``rarely`` / ``with_new_batches``)
+- ``min_refresh_interval_hours``: floor between required refreshes (``with_new_batches`` = 12)
 - ``last_successful_refresh_at``: last extract→hash→mart success (ISO-8601)
-- ``last_intake_batch_at``: last intake batch that may require a volatile refresh
+- ``last_intake_batch_at``: last intake batch that may require a ``with_new_batches`` refresh
 - ``last_successful_upload_at``: ISO-8601 timestamp of last valid Upload ingest
 - ``credentials_rotated_at``: ISO-8601 timestamp of last Live credential rotation
 - ``multi_pii_delimiter``: ``None`` (stored as null/empty), ``;``, ``|``, or ``,``
 - ``gcs_uri``: GCS object URI for the latest Upload file (no CSV in Postgres)
 - ``upload_row_count``: integer row count from last successful Upload test
+
+Clock A (extract / upload): ``refresh_cadence`` or legacy ``refresh_policy`` / ``cadence_days``.
+Clock B (Live API credentials): ``credentials_rotated_at`` vs ``LIVE_ROTATION_DAYS`` — independent
+of the 12-hour intake batch floor.
 """
 
 from __future__ import annotations
@@ -24,17 +29,21 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Final, Literal, Protocol
 
+from habeas_privacy_core.connections.catalog import SHEET_SYSTEMS
+
 __all__ = [
     "APPROACHING_WINDOW_FRACTION",
     "DEFAULT_UPLOAD_CADENCE_DAYS",
     "LIVE_ROTATION_DAYS",
     "SHEETS_MIN_REFRESH_INTERVAL_HOURS",
+    "WEEKLY_EXTRACT_CADENCE_DAYS",
     "ConnectionLike",
     "ConnectorReminder",
     "DisplayStatus",
     "GateCode",
     "GateResult",
     "MultiPiiDelimiter",
+    "RefreshCadence",
     "ReminderCode",
     "ReminderSeverity",
     "SimpleConnection",
@@ -44,6 +53,7 @@ __all__ = [
     "evaluate_connection_reminder",
     "gate_fields_from_parts",
     "parse_multi_pii_delimiter",
+    "parse_refresh_cadence",
     "parse_refresh_policy",
     "parse_stored_active_mode",
     "should_stamp_intake_batch",
@@ -52,12 +62,18 @@ __all__ = [
 
 LIVE_ROTATION_DAYS: Final[int] = 180
 DEFAULT_UPLOAD_CADENCE_DAYS: Final[int] = 30
+WEEKLY_EXTRACT_CADENCE_DAYS: Final[int] = 7
 SHEETS_MIN_REFRESH_INTERVAL_HOURS: Final[int] = 12
 _REFRESH_POLICY_STATIC: Final[str] = "static"
 _REFRESH_POLICY_VOLATILE: Final[str] = "volatile"
+_REFRESH_CADENCE_RARELY: Final[str] = "rarely"
+_REFRESH_CADENCE_WITH_NEW_BATCHES: Final[str] = "with_new_batches"
+_REFRESH_CADENCE_WEEKLY: Final[str] = "weekly"
 # Soft reminders fire when remaining time is within this fraction of the window
 # (last 20% of Upload cadence or Live rotation period). Overdue uses gate clocks.
 APPROACHING_WINDOW_FRACTION: Final[float] = 0.20
+
+RefreshCadence = Literal["rarely", "with_new_batches", "weekly"]
 
 MultiPiiDelimiter = Literal[";", "|", ","] | None
 
@@ -185,7 +201,7 @@ def parse_stored_active_mode(metadata: dict[str, Any]) -> str | None:
 
 
 def parse_refresh_policy(metadata: dict[str, Any]) -> str | None:
-    """Normalize ``metadata.refresh_policy`` to ``static`` / ``volatile`` or None."""
+    """Normalize legacy ``metadata.refresh_policy`` to ``static`` / ``volatile`` or None."""
     raw = metadata.get("refresh_policy")
     if not isinstance(raw, str):
         return None
@@ -195,24 +211,35 @@ def parse_refresh_policy(metadata: dict[str, Any]) -> str | None:
     return None
 
 
-def last_refresh_at(metadata: dict[str, Any]) -> datetime | None:
-    """Prefer hash-refresh stamp, then upload, then Live rotation."""
-    return (
-        _parse_iso_datetime(metadata.get("last_successful_refresh_at"))
-        or _parse_iso_datetime(metadata.get("last_successful_upload_at"))
-        or _parse_iso_datetime(metadata.get("credentials_rotated_at"))
-    )
+def parse_refresh_cadence(metadata: dict[str, Any]) -> RefreshCadence | None:
+    """Normalize owner extract cadence from ``refresh_cadence`` or legacy ``refresh_policy``."""
+    raw = metadata.get("refresh_cadence")
+    if isinstance(raw, str):
+        cadence = raw.strip().lower()
+        if cadence == _REFRESH_CADENCE_RARELY:
+            return "rarely"
+        if cadence == _REFRESH_CADENCE_WITH_NEW_BATCHES:
+            return "with_new_batches"
+        if cadence == _REFRESH_CADENCE_WEEKLY:
+            return "weekly"
+    policy = parse_refresh_policy(metadata)
+    if policy == _REFRESH_POLICY_STATIC:
+        return "rarely"
+    if policy == _REFRESH_POLICY_VOLATILE:
+        return "with_new_batches"
+    return None
 
 
 def should_stamp_intake_batch(metadata: dict[str, Any], *, now: datetime) -> bool:
-    """True when a new intake batch should mark this connection for a volatile refresh.
+    """True when a new intake batch should mark this connection for refresh.
 
-    Multiple batches the same day do not re-stamp when the last successful refresh
-    is still within ``SHEETS_MIN_REFRESH_INTERVAL_HOURS``.
+    ``with_new_batches`` (or legacy ``volatile``) connections only. Multiple batches
+    the same day do not re-stamp when the last extract success is still within
+    ``SHEETS_MIN_REFRESH_INTERVAL_HOURS``.
     """
-    if parse_refresh_policy(metadata) != _REFRESH_POLICY_VOLATILE:
+    if parse_refresh_cadence(metadata) != _REFRESH_CADENCE_WITH_NEW_BATCHES:
         return False
-    last = last_refresh_at(metadata)
+    last = _last_extract_success_at(metadata)
     if last is None:
         return True
     return now - last >= timedelta(hours=SHEETS_MIN_REFRESH_INTERVAL_HOURS)
@@ -283,22 +310,23 @@ def evaluate_connection_gate(
             display_status=DisplayStatus.NEEDS_SETUP,
         )
     if active_mode == _ACTIVE_MODE_UPLOAD:
-        if _is_upload_stale(metadata, now=now):
+        stale, code = _extract_stale_gate(metadata, active_mode=active_mode, now=now)
+        if stale:
             return GateResult(
                 allowed=False,
-                code=GateCode.UPLOAD_STALE,
+                code=code,
                 display_status=DisplayStatus.NEEDS_REFRESH,
             )
     elif active_mode == _ACTIVE_MODE_LIVE:
-        if connection.system == "google_sheets" and _is_sheets_refresh_stale(
-            metadata, now=now
-        ):
-            return GateResult(
-                allowed=False,
-                code=GateCode.SHEETS_REFRESH_STALE,
-                display_status=DisplayStatus.NEEDS_REFRESH,
-            )
-        if connection.system != "google_sheets" and _is_rotation_overdue(metadata, now=now):
+        if connection.system in SHEET_SYSTEMS:
+            stale, code = _extract_stale_gate(metadata, active_mode=active_mode, now=now)
+            if stale:
+                return GateResult(
+                    allowed=False,
+                    code=code,
+                    display_status=DisplayStatus.NEEDS_REFRESH,
+                )
+        elif _is_rotation_overdue(metadata, now=now):
             return GateResult(
                 allowed=False,
                 code=GateCode.ROTATION_OVERDUE,
@@ -350,9 +378,9 @@ def evaluate_connection_reminder(
     if active_mode == _ACTIVE_MODE_UPLOAD:
         return _upload_reminder(connection.system, vertical_id, metadata, now=now)
     if active_mode == _ACTIVE_MODE_LIVE:
-        if connection.system == "google_sheets":
-            return _sheets_refresh_reminder(
-                connection.system, vertical_id, metadata, now=now
+        if connection.system in SHEET_SYSTEMS:
+            return _extract_reminder(
+                connection.system, vertical_id, metadata, active_mode=active_mode, now=now
             )
         return _rotation_reminder(connection.system, vertical_id, metadata, now=now)
     return ConnectorReminder(
@@ -370,20 +398,44 @@ def _upload_reminder(
     *,
     now: datetime,
 ) -> ConnectorReminder | None:
-    if _is_upload_stale(metadata, now=now):
+    stale, code = _extract_stale_gate(metadata, active_mode=_ACTIVE_MODE_UPLOAD, now=now)
+    if stale:
+        reminder_code = (
+            ReminderCode.SHEETS_REFRESH_STALE
+            if code == GateCode.SHEETS_REFRESH_STALE
+            else ReminderCode.UPLOAD_STALE
+        )
         return ConnectorReminder(
-            code=ReminderCode.UPLOAD_STALE,
+            code=reminder_code,
             system=system,
             vertical_id=vertical_id,
             severity=ReminderSeverity.OVERDUE,
         )
+    cadence = parse_refresh_cadence(metadata)
+    if cadence == _REFRESH_CADENCE_WEEKLY:
+        last_upload = _last_extract_success_at(metadata, active_mode=_ACTIVE_MODE_UPLOAD)
+        if last_upload is None:
+            return None
+        if _is_approaching(
+            started_at=last_upload,
+            window_days=WEEKLY_EXTRACT_CADENCE_DAYS,
+            now=now,
+        ):
+            return ConnectorReminder(
+                code=ReminderCode.UPLOAD_APPROACHING,
+                system=system,
+                vertical_id=vertical_id,
+                severity=ReminderSeverity.APPROACHING,
+            )
+        return None
+    if cadence is not None:
+        return None
     last_upload = _parse_iso_datetime(metadata.get("last_successful_upload_at"))
     if last_upload is None:
         return None
-    cadence = effective_cadence_days(metadata)
     if _is_approaching(
         started_at=last_upload,
-        window_days=cadence,
+        window_days=effective_cadence_days(metadata),
         now=now,
     ):
         return ConnectorReminder(
@@ -426,21 +478,82 @@ def _rotation_reminder(
     return None
 
 
-def _sheets_refresh_reminder(
+def _extract_reminder(
     system: str,
     vertical_id: str,
     metadata: dict[str, Any],
     *,
+    active_mode: str,
     now: datetime,
 ) -> ConnectorReminder | None:
-    if _is_sheets_refresh_stale(metadata, now=now):
+    stale, code = _extract_stale_gate(metadata, active_mode=active_mode, now=now)
+    if stale:
         return ConnectorReminder(
             code=ReminderCode.SHEETS_REFRESH_STALE,
             system=system,
             vertical_id=vertical_id,
             severity=ReminderSeverity.OVERDUE,
         )
+    cadence = parse_refresh_cadence(metadata)
+    if cadence != _REFRESH_CADENCE_WEEKLY:
+        return None
+    last = _last_extract_success_at(metadata, active_mode=active_mode)
+    if last is None:
+        return None
+    if _is_approaching(
+        started_at=last,
+        window_days=WEEKLY_EXTRACT_CADENCE_DAYS,
+        now=now,
+    ):
+        return ConnectorReminder(
+            code=ReminderCode.UPLOAD_APPROACHING,
+            system=system,
+            vertical_id=vertical_id,
+            severity=ReminderSeverity.APPROACHING,
+        )
     return None
+
+
+def _extract_stale_gate(
+    metadata: dict[str, Any],
+    *,
+    active_mode: str,
+    now: datetime,
+) -> tuple[bool, GateCode]:
+    """Clock A: extract/upload freshness. Returns ``(stale, gate_code)``."""
+    cadence = parse_refresh_cadence(metadata)
+    last = _last_extract_success_at(metadata, active_mode=active_mode)
+
+    if cadence == _REFRESH_CADENCE_RARELY:
+        if last is None:
+            return True, _extract_stale_code(active_mode)
+        return False, GateCode.OK
+
+    if cadence == _REFRESH_CADENCE_WITH_NEW_BATCHES:
+        if last is None:
+            return True, _extract_stale_code(active_mode)
+        if _is_intake_batch_stale(metadata, active_mode=active_mode, now=now):
+            return True, _extract_stale_code(active_mode)
+        return False, GateCode.OK
+
+    if cadence == _REFRESH_CADENCE_WEEKLY:
+        if last is None:
+            return True, _extract_stale_code(active_mode)
+        if now - last > timedelta(days=WEEKLY_EXTRACT_CADENCE_DAYS):
+            return True, _extract_stale_code(active_mode)
+        return False, GateCode.OK
+
+    if active_mode == _ACTIVE_MODE_UPLOAD and _is_upload_stale_legacy(metadata, now=now):
+        return True, GateCode.UPLOAD_STALE
+    if active_mode == _ACTIVE_MODE_LIVE and last is None:
+        return True, GateCode.SHEETS_REFRESH_STALE
+    return False, GateCode.OK
+
+
+def _extract_stale_code(active_mode: str) -> GateCode:
+    if active_mode == _ACTIVE_MODE_UPLOAD:
+        return GateCode.UPLOAD_STALE
+    return GateCode.SHEETS_REFRESH_STALE
 
 
 def _is_approaching(
@@ -460,15 +573,19 @@ def _is_approaching(
     return remaining <= window * APPROACHING_WINDOW_FRACTION
 
 
-def _is_sheets_refresh_stale(metadata: dict[str, Any], *, now: datetime) -> bool:
-    """Volatile Sheets: stale when a newer intake batch exists and last refresh ≥ 12h ago."""
-    policy = parse_refresh_policy(metadata)
-    if policy != _REFRESH_POLICY_VOLATILE:
+def _is_intake_batch_stale(
+    metadata: dict[str, Any],
+    *,
+    active_mode: str,
+    now: datetime,
+) -> bool:
+    """``with_new_batches``: stale when intake is newer than last success and ≥ 12h since success."""
+    if parse_refresh_cadence(metadata) != _REFRESH_CADENCE_WITH_NEW_BATCHES:
         return False
     intake_at = _parse_iso_datetime(metadata.get("last_intake_batch_at"))
     if intake_at is None:
         return False
-    last = last_refresh_at(metadata)
+    last = _last_extract_success_at(metadata, active_mode=active_mode)
     if last is None:
         return True
     if last >= intake_at:
@@ -476,7 +593,23 @@ def _is_sheets_refresh_stale(metadata: dict[str, Any], *, now: datetime) -> bool
     return now - last >= timedelta(hours=SHEETS_MIN_REFRESH_INTERVAL_HOURS)
 
 
-def _is_upload_stale(metadata: dict[str, Any], *, now: datetime) -> bool:
+def _last_extract_success_at(
+    metadata: dict[str, Any],
+    *,
+    active_mode: str | None = None,
+) -> datetime | None:
+    """Last extract/upload success for clock A (never credential rotation)."""
+    refresh = _parse_iso_datetime(metadata.get("last_successful_refresh_at"))
+    upload = _parse_iso_datetime(metadata.get("last_successful_upload_at"))
+    if active_mode == _ACTIVE_MODE_UPLOAD:
+        return upload
+    if active_mode == _ACTIVE_MODE_LIVE:
+        return refresh
+    return refresh or upload
+
+
+def _is_upload_stale_legacy(metadata: dict[str, Any], *, now: datetime) -> bool:
+    """Legacy upload clock when ``refresh_cadence`` / ``refresh_policy`` are unset."""
     last_upload = _parse_iso_datetime(metadata.get("last_successful_upload_at"))
     if last_upload is None:
         return True
@@ -485,6 +618,7 @@ def _is_upload_stale(metadata: dict[str, Any], *, now: datetime) -> bool:
 
 
 def _is_rotation_overdue(metadata: dict[str, Any], *, now: datetime) -> bool:
+    """Clock B: Live API credential rotation (independent of intake batch floor)."""
     rotated_at = _parse_iso_datetime(metadata.get("credentials_rotated_at"))
     if rotated_at is None:
         return True

@@ -14,6 +14,7 @@ from admin_api.vertical_dispositions import is_identity_cleared, is_kd13_satisfi
 from habeas_privacy_core.adapters.gcs import signed_url_for_gcs_uri, write_object
 from habeas_privacy_core.auth import (
     ROLE_DATA_OWNER,
+    ROLE_DATA_USER,
     ROLE_LEGAL,
     ROLE_SUPER_ADMIN,
 )
@@ -30,7 +31,7 @@ router = APIRouter(prefix="/ops/fulfillment", tags=["fulfillment-ops"])
 
 FulfillmentViewer = Annotated[
     RolePrincipal,
-    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_LEGAL, ROLE_DATA_OWNER)),
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_LEGAL, ROLE_DATA_OWNER, ROLE_DATA_USER)),
 ]
 LegalFulfillmentMutator = Annotated[
     RolePrincipal,
@@ -38,7 +39,7 @@ LegalFulfillmentMutator = Annotated[
 ]
 DataOwnerFulfillmentMutator = Annotated[
     RolePrincipal,
-    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_DATA_OWNER)),
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_DATA_OWNER, ROLE_DATA_USER)),
 ]
 
 DeliveryStatus = Literal["pending", "delivered", "failed", "recalled"]

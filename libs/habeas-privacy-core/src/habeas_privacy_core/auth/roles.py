@@ -4,16 +4,32 @@ from __future__ import annotations
 
 from typing import Literal
 
-Role = Literal["super_admin", "admin", "legal", "data_owner"]
+Role = Literal["super_admin", "admin", "legal", "data_owner", "data_user"]
 
 ROLE_SUPER_ADMIN: Role = "super_admin"
 ROLE_ADMIN: Role = "admin"
 ROLE_LEGAL: Role = "legal"
 ROLE_DATA_OWNER: Role = "data_owner"
+ROLE_DATA_USER: Role = "data_user"
 
 ALL_ROLES: frozenset[Role] = frozenset(
-    {ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL, ROLE_DATA_OWNER}
+    {
+        ROLE_SUPER_ADMIN,
+        ROLE_ADMIN,
+        ROLE_LEGAL,
+        ROLE_DATA_OWNER,
+        ROLE_DATA_USER,
+    }
 )
+
+VERTICAL_OPERATOR_ROLES: frozenset[Role] = frozenset(
+    {ROLE_DATA_OWNER, ROLE_DATA_USER}
+)
+
+
+def is_vertical_operator_role(role: str | None) -> bool:
+    """True for data_owner and data_user (review / fulfill / refresh)."""
+    return role in VERTICAL_OPERATOR_ROLES
 
 
 def parse_email_allowlist(raw: str | None) -> frozenset[str]:

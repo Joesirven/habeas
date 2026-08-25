@@ -34,8 +34,11 @@ _EXPECTED_ORDER = (
     "lever",
     "auth0",
     "google_sheets",
+    "alumni_google_sheet",
+    "contact_us_google_sheet",
     "bizdev_contacts",
     "hr_alumni",
+    "axios_hq",
     "cassandra",
 )
 
@@ -84,17 +87,21 @@ class TestVerticalCatalog:
         assert data.view_only is True
         assert data.display_label == "Data"
 
+    def test_communications_upload_only_binding(self) -> None:
+        bindings = get_bindings_for_vertical("communications")
+        assert len(bindings) == 1
+        assert bindings[0].system == "axios_hq"
+        assert bindings[0].allowed_approaches == frozenset({APPROACH_UPLOAD})
+
     def test_people_hr_bindings(self) -> None:
         bindings = {binding.system: binding for binding in get_bindings_for_vertical(VERTICAL_PEOPLE_HR)}
-        assert set(bindings) == {"paylocity", "lever", "hr_alumni"}
+        assert set(bindings) == {"paylocity", "lever", "hr_alumni", "alumni_google_sheet"}
         assert bindings["hr_alumni"].allowed_approaches == frozenset({APPROACH_UPLOAD})
         assert bindings["paylocity"].allowed_approaches == frozenset({APPROACH_UPLOAD, APPROACH_LIVE})
 
     def test_bizdev_upload_only_binding(self) -> None:
         bindings = get_bindings_for_vertical(VERTICAL_BIZDEV)
-        assert len(bindings) == 1
-        assert bindings[0].system == "bizdev_contacts"
-        assert bindings[0].allowed_approaches == frozenset({APPROACH_UPLOAD})
+        assert {b.system for b in bindings} == {"bizdev_contacts", "contact_us_google_sheet"}
 
     def test_is_approach_allowed(self) -> None:
         assert is_approach_allowed("tech", "auth0", APPROACH_LIVE) is True
@@ -102,19 +109,27 @@ class TestVerticalCatalog:
         assert is_approach_allowed("data", "cassandra", APPROACH_UPLOAD) is False
 
     def test_get_bindings_for_system(self) -> None:
-        mailchimp_bindings = get_bindings_for_system("mailchimp")
-        assert len(mailchimp_bindings) == 1
-        assert mailchimp_bindings[0].vertical_id == "communications"
+        assert get_bindings_for_system("mailchimp") == []
+        axios_bindings = get_bindings_for_system("axios_hq")
+        assert len(axios_bindings) == 1
+        assert axios_bindings[0].vertical_id == "communications"
 
     def test_list_verticals_sorted(self) -> None:
         verticals = list_verticals()
         assert [entry.sort_order for entry in verticals] == sorted(entry.sort_order for entry in verticals)
 
     def test_catalog_bindings_count(self) -> None:
-        assert len(CATALOG_BINDINGS) == 7
+        assert len(CATALOG_BINDINGS) == 9
 
 
 class TestUploadSystems:
+    def test_axios_hq_upload_only(self) -> None:
+        system = get_system("axios_hq")
+        assert system.invite_allowed is False
+        assert system.credential_fields == ()
+        assert "Upload mode only" in system.trust_copy
+        assert "Axios HQ" in system.trust_copy
+
     def test_bizdev_contacts_upload_only(self) -> None:
         system = get_system("bizdev_contacts")
         assert system.invite_allowed is False
@@ -128,6 +143,12 @@ class TestUploadSystems:
         assert validate_credentials(system, {}) == {}
 
     def test_upload_template_headers(self) -> None:
+        assert UPLOAD_TEMPLATE_REQUIRED_HEADERS["axios_hq"] == (
+            "first_name",
+            "last_name",
+            "email",
+        )
+        assert "submitted_at" in UPLOAD_TEMPLATE_OPTIONAL_HEADERS["axios_hq"]
         assert UPLOAD_TEMPLATE_REQUIRED_HEADERS["bizdev_contacts"] == (
             "first_name",
             "last_name",
@@ -148,6 +169,7 @@ class TestInvitePolicy:
         assert sheets.invite_allowed is False
 
     def test_upload_systems_disallow_invites(self) -> None:
+        assert get_system("axios_hq").invite_allowed is False
         assert get_system("bizdev_contacts").invite_allowed is False
         assert get_system("hr_alumni").invite_allowed is False
 
@@ -258,7 +280,7 @@ class TestValidateCredentials:
             validate_credentials(system, {"api_key": "nope"})
 
     def test_upload_systems_reject_credentials(self) -> None:
-        for system_id in ("bizdev_contacts", "hr_alumni"):
+        for system_id in ("axios_hq", "bizdev_contacts", "hr_alumni"):
             system = get_system(system_id)
             with pytest.raises(ValueError, match="does not accept credentials via invite"):
                 validate_credentials(system, {"api_key": "nope"})

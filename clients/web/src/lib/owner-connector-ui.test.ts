@@ -9,8 +9,15 @@ import {
   allowsUpload,
   buildModeStepCards,
   buildReminderBannerItems,
+  buildVerticalWizardSteps,
+  parseVerticalWizardStepId,
   cadenceDaysFromMetadata,
+  cadenceOptionFromMetadata,
+  cadenceOptionFromRefreshPolicy,
   HABEAS_PLATFORM_DISPLAY_NAME,
+  CADENCE_OPTION_RARELY,
+  CADENCE_OPTION_WEEKLY,
+  CADENCE_OPTION_WITH_NEW_BATCHES,
   disallowedModeReason,
   delimiterOptionFromKey,
   delimiterValueFromKey,
@@ -22,8 +29,18 @@ import {
   MODE_STEP_CONNECTING_NOT_MATCHING_FOOTNOTE,
   modeStepIntroCopy,
   modeStepSystemHint,
-  ownerWizardStepIndex,
+  refreshCadenceFromCadenceOption,
+  refreshPolicyFromCadenceOption,
+  SYSTEM_COPY,
+  verticalWizardStepIndex,
   visibleReminderBanners,
+  wizardProgressPercent,
+  suggestUploadColumnMapping,
+  uploadMappingComplete,
+  UPLOAD_SAMPLE_CSV,
+  parseCsvHeaderRow,
+  isOwnerConnectorsHiddenSystem,
+  isOwnerConnectorsHiddenVertical,
 } from './owner-connector-ui'
 
 describe('MULTI_PII_DELIMITER_OPTIONS (AE10 UI)', () => {
@@ -85,7 +102,7 @@ describe('reminder banners (R10 soft)', () => {
   const sample: ConnectorReminder[] = [
     {
       code: 'upload_stale',
-      system: 'mailchimp',
+      system: 'axios_hq',
       vertical_id: 'communications',
       severity: 'overdue',
     },
@@ -100,7 +117,7 @@ describe('reminder banners (R10 soft)', () => {
   test('builds non-blocking banner items from reminders', () => {
     const items = buildReminderBannerItems(sample)
     expect(items).toHaveLength(2)
-    expect(items[0].id).toBe('communications:mailchimp:upload_stale')
+    expect(items[0].id).toBe('communications:axios_hq:upload_stale')
     expect(items[0].severity).toBe('overdue')
     expect(items[0].title.toLowerCase()).toContain('overdue')
     expect(items[1].severity).toBe('approaching')
@@ -144,17 +161,31 @@ describe('reminder banners (R10 soft)', () => {
     expect(items[0].severity).toBe('approaching')
   })
 
+  test('sheets_refresh_stale copy avoids volatile wording', () => {
+    const items = buildReminderBannerItems([
+      {
+        code: 'sheets_refresh_stale',
+        system: 'google_sheets',
+        vertical_id: 'tech',
+        severity: 'overdue',
+      },
+    ])
+    expect(items[0].description.toLowerCase()).not.toContain('volatile')
+    expect(items[0].description).toContain('12 hours')
+    expect(items[0].description.toLowerCase()).toContain('login is not blocked')
+  })
+
   test('filterRemindersForOwnerConnectorsPage drops wizard_incomplete', () => {
     const filtered = filterRemindersForOwnerConnectorsPage([
       {
         code: 'wizard_incomplete',
-        system: 'mailchimp',
+        system: 'axios_hq',
         vertical_id: 'communications',
         severity: 'overdue',
       },
       {
         code: 'upload_stale',
-        system: 'mailchimp',
+        system: 'axios_hq',
         vertical_id: 'communications',
         severity: 'overdue',
       },
@@ -200,9 +231,170 @@ describe('mode and cadence helpers', () => {
     ).toBe(true)
   })
 
-  test('ownerWizardStepIndex', () => {
-    expect(ownerWizardStepIndex('mode')).toBe(0)
-    expect(ownerWizardStepIndex('confirm')).toBe(3)
+  test('verticalWizardStepIndex finds dynamic step ids', () => {
+    const steps = buildVerticalWizardSteps({
+      systems: [{ system: 'axios_hq', allowedApproaches: ['upload'] }],
+    })
+    expect(verticalWizardStepIndex(steps, 'axios_hq-howto-upload')).toBe(0)
+    expect(verticalWizardStepIndex(steps, 'confirm')).toBe(steps.length - 1)
+    expect(verticalWizardStepIndex(steps, 'missing')).toBe(-1)
+  })
+})
+
+describe('vertical wizard steps', () => {
+  test('axios_hq upload-only vertical ends with cadence and confirm', () => {
+    const steps = buildVerticalWizardSteps({
+      systems: [{ system: 'axios_hq', allowedApproaches: ['upload'] }],
+    })
+    expect(steps.map((step) => step.id)).toEqual([
+      'axios_hq-howto-upload',
+      'axios_hq-upload',
+      'cadence',
+      'confirm',
+    ])
+  })
+
+  test('parses hr_alumni howto-upload as howto, not upload', () => {
+    expect(parseVerticalWizardStepId('hr_alumni-howto-upload')).toEqual({
+      kind: 'howto-upload',
+      system: 'hr_alumni',
+    })
+    expect(parseVerticalWizardStepId('hr_alumni-upload')).toEqual({
+      kind: 'upload',
+      system: 'hr_alumni',
+    })
+  })
+
+  test('paylocity live first then upload fallback', () => {
+    const steps = buildVerticalWizardSteps({
+      systems: [{ system: 'paylocity', allowedApproaches: ['upload', 'live'] }],
+    })
+    expect(steps.map((step) => step.id)).toEqual([
+      'paylocity-howto-live',
+      'paylocity-live-creds',
+      'paylocity-howto-upload',
+      'paylocity-upload',
+      'cadence',
+      'confirm',
+    ])
+  })
+
+  test('people_hr bindings produce many steps before cadence', () => {
+    const steps = buildVerticalWizardSteps({
+      systems: [
+        { system: 'paylocity', allowedApproaches: ['upload', 'live'] },
+        { system: 'lever', allowedApproaches: ['live'] },
+        { system: 'hr_alumni', allowedApproaches: ['upload'] },
+      ],
+    })
+    expect(steps.map((step) => step.id)).toEqual([
+      'paylocity-howto-live',
+      'paylocity-live-creds',
+      'paylocity-howto-upload',
+      'paylocity-upload',
+      'lever-howto-live',
+      'lever-live-creds',
+      'hr_alumni-howto-upload',
+      'hr_alumni-upload',
+      'cadence',
+      'confirm',
+    ])
+  })
+
+  test('skips cassandra and empty-approach systems', () => {
+    const steps = buildVerticalWizardSteps({
+      systems: [
+        { system: 'cassandra', allowedApproaches: [] },
+        { system: 'bizdev_contacts', allowedApproaches: ['upload'] },
+      ],
+    })
+    expect(steps.map((step) => step.id)).toEqual([
+      'bizdev_contacts-howto-upload',
+      'bizdev_contacts-upload',
+      'cadence',
+      'confirm',
+    ])
+  })
+
+  test('viewOnly vertical yields no steps', () => {
+    expect(
+      buildVerticalWizardSteps({
+        viewOnly: true,
+        systems: [{ system: 'axios_hq', allowedApproaches: ['upload'] }],
+      }),
+    ).toEqual([])
+  })
+
+  test('wizardProgressPercent is 0–100 across the step range', () => {
+    expect(wizardProgressPercent(0, 4)).toBe(25)
+    expect(wizardProgressPercent(3, 4)).toBe(100)
+    expect(wizardProgressPercent(0, 0)).toBe(0)
+    expect(wizardProgressPercent(-1, 5)).toBe(0)
+  })
+})
+
+describe('cadence option mapping', () => {
+  test('maps legacy refresh_policy to cadence option ids', () => {
+    expect(cadenceOptionFromRefreshPolicy('static')).toBe(CADENCE_OPTION_RARELY)
+    expect(cadenceOptionFromRefreshPolicy('volatile')).toBe(
+      CADENCE_OPTION_WITH_NEW_BATCHES,
+    )
+    expect(cadenceOptionFromRefreshPolicy(null)).toBeNull()
+  })
+
+  test('maps cadence options back to refresh_policy when applicable', () => {
+    expect(refreshPolicyFromCadenceOption(CADENCE_OPTION_RARELY)).toBe('static')
+    expect(refreshPolicyFromCadenceOption(CADENCE_OPTION_WITH_NEW_BATCHES)).toBe(
+      'volatile',
+    )
+    expect(refreshPolicyFromCadenceOption(CADENCE_OPTION_WEEKLY)).toBeNull()
+  })
+
+  test('cadenceOptionFromMetadata prefers refresh_cadence over refresh_policy', () => {
+    expect(cadenceOptionFromMetadata({ refresh_cadence: 'rarely' })).toBe(
+      CADENCE_OPTION_RARELY,
+    )
+    expect(
+      cadenceOptionFromMetadata({
+        refresh_cadence: 'with_new_batches',
+        refresh_policy: 'static',
+      }),
+    ).toBe(CADENCE_OPTION_WITH_NEW_BATCHES)
+  })
+
+  test('cadenceOptionFromMetadata falls back to refresh_policy', () => {
+    expect(cadenceOptionFromMetadata({ refresh_policy: 'volatile' })).toBe(
+      CADENCE_OPTION_WITH_NEW_BATCHES,
+    )
+    expect(cadenceOptionFromMetadata({ refresh_policy: 'static' })).toBe(
+      CADENCE_OPTION_RARELY,
+    )
+  })
+
+  test('weekly refresh_cadence wins over volatile refresh_policy', () => {
+    expect(
+      cadenceOptionFromMetadata({
+        refresh_cadence: 'weekly',
+        refresh_policy: 'volatile',
+      }),
+    ).toBe(CADENCE_OPTION_WEEKLY)
+  })
+
+  test('refreshCadenceFromCadenceOption maps option ids to API strings', () => {
+    expect(refreshCadenceFromCadenceOption(CADENCE_OPTION_RARELY)).toBe('rarely')
+    expect(refreshCadenceFromCadenceOption(CADENCE_OPTION_WITH_NEW_BATCHES)).toBe(
+      'with_new_batches',
+    )
+    expect(refreshCadenceFromCadenceOption(CADENCE_OPTION_WEEKLY)).toBe('weekly')
+    expect(refreshCadenceFromCadenceOption(null)).toBeNull()
+  })
+})
+
+describe('SYSTEM_COPY', () => {
+  test('axios_hq upload how-to copy is CSV-only', () => {
+    expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).toContain('axios hq')
+    expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).not.toContain('mailchimp')
+    expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).toContain('csv')
   })
 })
 
@@ -214,7 +406,7 @@ describe('mode step explainer (KD25)', () => {
     expect(MODE_DEFINITION_CARDS[0].definition).toContain(
       HABEAS_PLATFORM_DISPLAY_NAME,
     )
-    expect(MODE_DEFINITION_CARDS[0].definition.toLowerCase()).toContain('schedule')
+    expect(MODE_DEFINITION_CARDS[0].definition.toLowerCase()).toContain('map')
     expect(MODE_DEFINITION_CARDS[1].definition.toLowerCase()).toContain('credentials')
     expect(MODE_STEP_CONNECTING_NOT_MATCHING_FOOTNOTE.toLowerCase()).toContain(
       'does not start matching',
@@ -222,8 +414,8 @@ describe('mode step explainer (KD25)', () => {
   })
 
   test('modeStepIntroCopy names the system', () => {
-    expect(modeStepIntroCopy('Mailchimp')).toContain('Mailchimp')
-    expect(modeStepIntroCopy('Mailchimp')).toContain(
+    expect(modeStepIntroCopy('Axios HQ')).toContain('Axios HQ')
+    expect(modeStepIntroCopy('Axios HQ')).toContain(
       HABEAS_PLATFORM_DISPLAY_NAME,
     )
   })
@@ -234,16 +426,16 @@ describe('mode step explainer (KD25)', () => {
     expect(isModeAllowed('live', ['live'])).toBe(true)
   })
 
-  test('mailchimp cards include per-system hints when both modes allowed', () => {
+  test('paylocity cards include per-system hints when both modes allowed', () => {
     const cards = buildModeStepCards({
-      systemId: 'mailchimp',
-      displayName: 'Mailchimp',
+      systemId: 'paylocity',
+      displayName: 'Paylocity',
       allowedApproaches: ['live', 'upload'],
     })
     expect(cards).toHaveLength(2)
     expect(cards.every((card) => card.allowed)).toBe(true)
-    expect(cards.find((card) => card.mode === 'upload')?.hint).toContain('template')
-    expect(cards.find((card) => card.mode === 'live')?.hint).toContain('API key')
+    expect(cards.find((card) => card.mode === 'upload')?.hint).toContain('map')
+    expect(cards.find((card) => card.mode === 'live')?.hint?.toLowerCase()).toContain('sftp')
     expect(cards.every((card) => card.disabledReason === null)).toBe(true)
   })
 
@@ -290,5 +482,64 @@ describe('mode step explainer (KD25)', () => {
     expect(liveAllowed?.definition.toLowerCase()).toContain('sftp')
     expect(liveAllowed?.hint?.toLowerCase()).toContain('sftp')
     expect(liveAllowed?.hint?.toLowerCase()).toContain('not an api')
+  })
+})
+
+describe('owner connectors hide cassandra', () => {
+  test('hides cassandra system and data vertical', () => {
+    expect(isOwnerConnectorsHiddenSystem('cassandra')).toBe(true)
+    expect(isOwnerConnectorsHiddenSystem('hr_alumni')).toBe(false)
+    expect(isOwnerConnectorsHiddenVertical('data')).toBe(true)
+    expect(isOwnerConnectorsHiddenVertical('people_hr')).toBe(false)
+  })
+})
+
+describe('upload column mapping', () => {
+  test('success and autobind samples suggest a complete map', () => {
+    const successHeaders = parseCsvHeaderRow(UPLOAD_SAMPLE_CSV.success.body)
+    expect(suggestUploadColumnMapping(successHeaders)).toEqual({
+      first_name: 'first_name',
+      last_name: 'last_name',
+      email: 'email',
+    })
+    const autoHeaders = parseCsvHeaderRow(UPLOAD_SAMPLE_CSV.autobind.body)
+    expect(suggestUploadColumnMapping(autoHeaders)).toEqual({
+      first_name: 'First Name',
+      last_name: 'Last Name',
+      email: 'Email Address',
+    })
+    expect(uploadMappingComplete(suggestUploadColumnMapping(autoHeaders))).toBe(true)
+  })
+
+  test('remap sample is incomplete until the owner binds columns', () => {
+    const headers = parseCsvHeaderRow(UPLOAD_SAMPLE_CSV.remap.body)
+    expect(headers).toEqual(['Given', 'Family', 'Work Email', 'Department'])
+    const suggested = suggestUploadColumnMapping(headers)
+    expect(uploadMappingComplete(suggested)).toBe(false)
+    expect(
+      uploadMappingComplete({
+        first_name: 'Given',
+        last_name: 'Family',
+        email: 'Work Email',
+      }),
+    ).toBe(true)
+  })
+
+  test('email-only or phone-only samples auto-bind a complete identifier map', () => {
+    expect(
+      uploadMappingComplete(
+        suggestUploadColumnMapping(parseCsvHeaderRow(UPLOAD_SAMPLE_CSV.success_email_only.body)),
+      ),
+    ).toBe(true)
+    expect(
+      uploadMappingComplete(
+        suggestUploadColumnMapping(parseCsvHeaderRow(UPLOAD_SAMPLE_CSV.success_phone_only.body)),
+      ),
+    ).toBe(true)
+  })
+
+  test('failure with no identifier columns cannot auto-bind', () => {
+    const headers = parseCsvHeaderRow(UPLOAD_SAMPLE_CSV.failure_no_identifier.body)
+    expect(uploadMappingComplete(suggestUploadColumnMapping(headers))).toBe(false)
   })
 })

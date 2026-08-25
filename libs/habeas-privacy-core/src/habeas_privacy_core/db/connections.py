@@ -174,6 +174,26 @@ async def merge_connection_metadata(
     return _row_to_connection(row) if row else None
 
 
+async def stamp_successful_extract_for_system(
+    conn: asyncpg.Connection,
+    system: str,
+    *,
+    at: datetime,
+) -> str:
+    """Stamp last_successful_refresh_at on all rows for *system* (no PII)."""
+    return await conn.execute(
+        """
+        UPDATE integration_connections
+           SET metadata = COALESCE(metadata, '{}'::jsonb)
+               || jsonb_build_object('last_successful_refresh_at', $2::text),
+               updated_at = NOW()
+         WHERE system = $1
+        """,
+        system,
+        at.isoformat(),
+    )
+
+
 async def insert_connection_mode_event(
     conn: asyncpg.Connection,
     *,

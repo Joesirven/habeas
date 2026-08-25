@@ -203,11 +203,14 @@ export function NavMenu() {
   const showOps = canAccessOpsSurfaces(role)
   const legalAdminNav = isLegalAdminPersona(role)
   const showOwnerConnectors =
-    role === 'data_owner' || role === 'admin' || role === 'super_admin'
-  const homeLabel = legalAdminNav || role === 'data_owner' ? 'Home' : 'My work'
+    role === 'data_owner' ||
+    role === 'data_user' ||
+    role === 'admin' ||
+    role === 'super_admin'
+  const homeLabel = legalAdminNav || role === 'data_owner' || role === 'data_user' ? 'Home' : 'My work'
 
   const isLegalNav = legalAdminNav
-  const isDataOwnerNav = role === 'data_owner'
+  const isDataOwnerNav = role === 'data_owner' || role === 'data_user'
   const inboxQuery = useQuery({
     queryKey: [
       'admin-api',

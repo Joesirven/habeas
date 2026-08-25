@@ -23,10 +23,13 @@ ALLOWED_TEST_DETAIL_CODES: Final[frozenset[str]] = frozenset(
         "stub_ok",
         "ok",
         "mailchimp_ok",
+        "axios_hq_ok",
         "paylocity_ok",
         "lever_ok",
         "auth0_ok",
         "google_sheets_ok",
+        "alumni_google_sheet_ok",
+        "contact_us_google_sheet_ok",
         "upload_ok",
         # failure
         "unknown_system",
@@ -41,6 +44,7 @@ ALLOWED_TEST_DETAIL_CODES: Final[frozenset[str]] = frozenset(
         "invalid_credentials",
         "invalid_config",
         "upload_missing_headers",
+        "upload_needs_mapping",
         "upload_no_usable_rows",
         "upload_invalid_delimiter",
         "gate_blocked",
@@ -52,10 +56,13 @@ class ConnectionSystem(StrEnum):
     """Supported integration systems for connections onboarding."""
 
     MAILCHIMP = "mailchimp"
+    AXIOS_HQ = "axios_hq"
     PAYLOCITY = "paylocity"
     LEVER = "lever"
     AUTH0 = "auth0"
     GOOGLE_SHEETS = "google_sheets"
+    ALUMNI_GOOGLE_SHEET = "alumni_google_sheet"
+    CONTACT_US_GOOGLE_SHEET = "contact_us_google_sheet"
     BIZDEV_CONTACTS = "bizdev_contacts"
     HR_ALUMNI = "hr_alumni"
     CASSANDRA = "cassandra"

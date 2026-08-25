@@ -1,4 +1,4 @@
-"""Stamp volatile Google Sheets connections after a new DROP intake batch."""
+"""Stamp ``with_new_batches`` connections after a new DROP intake batch."""
 
 from __future__ import annotations
 
@@ -14,8 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 async def stamp_volatile_sheets_after_intake(*, now: datetime | None = None) -> int:
-    """Record ``last_intake_batch_at`` on volatile Sheets rows that pass the 12h floor.
+    """Record ``last_intake_batch_at`` on ``with_new_batches`` rows that pass the 12h floor.
 
+    Applies to all systems (upload and live extract), not only Google Sheets.
     No-op when the database pool is unavailable. Returns the number of rows stamped.
     """
     clock = now or datetime.now(UTC)
@@ -30,8 +31,6 @@ async def stamp_volatile_sheets_after_intake(*, now: datetime | None = None) -> 
     async with pool.acquire() as conn:
         rows = await connections_db.list_connections(conn)
         for row in rows:
-            if str(row.system) != "google_sheets":
-                continue
             meta = dict(row.metadata or {})
             if not should_stamp_intake_batch(meta, now=clock):
                 continue
@@ -45,3 +44,8 @@ async def stamp_volatile_sheets_after_intake(*, now: datetime | None = None) -> 
     if stamped:
         logger.info("sheets_intake_stamp_ok count=%s", stamped)
     return stamped
+
+
+# Backward-compatible aliases for callers that use older names.
+stamp_sheets_intake_after_promote = stamp_volatile_sheets_after_intake
+stamp_keep_current_after_intake = stamp_volatile_sheets_after_intake

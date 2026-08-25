@@ -54,7 +54,13 @@ from admin_api.worker_schedules import router as worker_schedules_router
 from admin_api.worker_fleet import router as worker_fleet_router
 from admin_api.attempt_tables import router as attempt_tables_router
 from habeas_privacy_core.audit import AuditMiddleware
-from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_DATA_OWNER, ROLE_LEGAL, ROLE_SUPER_ADMIN
+from habeas_privacy_core.auth import (
+    ROLE_ADMIN,
+    ROLE_DATA_OWNER,
+    ROLE_DATA_USER,
+    ROLE_LEGAL,
+    ROLE_SUPER_ADMIN,
+)
 from habeas_privacy_core.connections.catalog import VERTICAL_DATA, get_vertical
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
@@ -87,7 +93,7 @@ LegalIntakePrincipal = Annotated[
 
 RequestsListPrincipal = Annotated[
     RolePrincipal,
-    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL, ROLE_DATA_OWNER)),
+    Depends(require_roles(ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL, ROLE_DATA_OWNER, ROLE_DATA_USER)),
 ]
 
 

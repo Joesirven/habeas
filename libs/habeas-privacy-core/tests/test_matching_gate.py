@@ -107,14 +107,14 @@ async def test_system_gate_stale_upload() -> None:
 async def test_system_gate_does_not_select_other_vertical_row() -> None:
     conn = _conn_for(
         {
-            "mailchimp": _row(
-                "mailchimp",
+            "axios_hq": _row(
+                "axios_hq",
                 _meta(vertical_id="other_vertical", mode="upload"),
             )
         }
     )
     gate = await evaluate_system_matching_gate(
-        conn, system="mailchimp", vertical_id="communications", now=_NOW
+        conn, system="axios_hq", vertical_id="communications", now=_NOW
     )
     assert gate.allowed is False
     assert gate.code == GateCode.WIZARD_INCOMPLETE
@@ -125,13 +125,52 @@ async def test_system_gate_parses_json_metadata_string() -> None:
     meta = _meta(vertical_id="communications", mode="upload")
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(
-        return_value=_row("mailchimp", json.dumps(meta))
+        return_value=_row("axios_hq", json.dumps(meta))
     )
     gate = await evaluate_system_matching_gate(
-        conn, system="mailchimp", vertical_id="communications", now=_NOW
+        conn, system="axios_hq", vertical_id="communications", now=_NOW
     )
     assert gate.allowed is True
     assert gate.code == GateCode.OK
+
+
+@pytest.mark.asyncio
+async def test_vertical_gate_allows_communications_when_axios_hq_passes() -> None:
+    conn = _conn_for(
+        {
+            "axios_hq": _row(
+                "axios_hq",
+                _meta(vertical_id="communications", mode="upload"),
+            )
+        }
+    )
+    gate = await evaluate_vertical_matching_gate(
+        conn, system="axios_hq", vertical_id="communications", now=_NOW
+    )
+    assert gate.allowed is True
+    assert gate.code == GateCode.OK
+
+
+@pytest.mark.asyncio
+async def test_vertical_gate_blocks_communications_when_axios_hq_stale() -> None:
+    conn = _conn_for(
+        {
+            "axios_hq": _row(
+                "axios_hq",
+                _meta(
+                    vertical_id="communications",
+                    mode="upload",
+                    upload_at="2026-06-01T00:00:00+00:00",
+                ),
+            )
+        }
+    )
+    gate = await evaluate_vertical_matching_gate(
+        conn, system="axios_hq", vertical_id="communications", now=_NOW
+    )
+    assert gate.allowed is False
+    assert gate.code == GateCode.UPLOAD_STALE
+    assert gate.blocking_system == "axios_hq"
 
 
 @pytest.mark.asyncio
@@ -151,6 +190,13 @@ async def test_vertical_gate_blocks_lever_when_paylocity_stale() -> None:
             "hr_alumni": _row(
                 "hr_alumni",
                 _meta(vertical_id="people_hr", mode="upload"),
+            ),
+            "alumni_google_sheet": _row(
+                "alumni_google_sheet",
+                {
+                    **_meta(vertical_id="people_hr", mode="live"),
+                    "last_successful_refresh_at": "2026-08-11T00:00:00+00:00",
+                },
             ),
         }
     )
@@ -197,6 +243,13 @@ async def test_vertical_gate_allows_when_all_people_hr_systems_pass() -> None:
             ),
             "hr_alumni": _row(
                 "hr_alumni", _meta(vertical_id="people_hr", mode="upload")
+            ),
+            "alumni_google_sheet": _row(
+                "alumni_google_sheet",
+                {
+                    **_meta(vertical_id="people_hr", mode="live"),
+                    "last_successful_refresh_at": "2026-08-11T00:00:00+00:00",
+                },
             ),
         }
     )

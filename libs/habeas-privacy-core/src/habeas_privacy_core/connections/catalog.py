@@ -14,6 +14,7 @@ __all__ = [
     "CATALOG_BINDINGS",
     "CATALOG_VERTICALS",
     "UPLOAD_ONLY_SYSTEMS",
+    "SHEET_SYSTEMS",
     "UPLOAD_SYSTEMS",
     "UPLOAD_TEMPLATE_OPTIONAL_HEADERS",
     "UPLOAD_TEMPLATE_REQUIRED_HEADERS",
@@ -41,13 +42,18 @@ VERTICAL_BIZDEV: Final[str] = "bizdev"
 VERTICAL_DATA: Final[str] = "data"
 
 UPLOAD_TEMPLATE_REQUIRED_HEADERS: Final[dict[str, tuple[str, ...]]] = {
+    "axios_hq": ("first_name", "last_name", "email"),
     "bizdev_contacts": ("first_name", "last_name", "email"),
+    "contact_us_google_sheet": ("first_name", "last_name", "email"),
     "hr_alumni": ("first_name", "last_name", "email"),
+    "alumni_google_sheet": ("first_name", "last_name", "email"),
     "paylocity": ("first_name", "last_name", "email"),
 }
 
 UPLOAD_TEMPLATE_OPTIONAL_HEADERS: Final[dict[str, tuple[str, ...]]] = {
-    "bizdev_contacts": ("phone", "company", "source", "submitted_at", "notes"),
+    "axios_hq": ("phone", "notes", "submitted_at", "zip", "dob"),
+    "bizdev_contacts": ("phone", "company", "source", "submitted_at", "notes", "zip", "dob"),
+    "contact_us_google_sheet": ("phone", "company", "source", "submitted_at", "notes", "zip", "dob"),
     "hr_alumni": (
         "phone",
         "address",
@@ -56,14 +62,34 @@ UPLOAD_TEMPLATE_OPTIONAL_HEADERS: Final[dict[str, tuple[str, ...]]] = {
         "nickname",
         "left_at",
         "employee_id",
+        "zip",
+        "dob",
     ),
-    "paylocity": ("employee_id", "dob", "phone", "city", "state"),
+    "alumni_google_sheet": (
+        "phone",
+        "address",
+        "city",
+        "state",
+        "nickname",
+        "left_at",
+        "employee_id",
+        "zip",
+        "dob",
+    ),
+    "paylocity": ("employee_id", "dob", "phone", "city", "state", "zip"),
 }
 
 # Systems that accept template CSV Upload (includes Paylocity Upload mode).
 UPLOAD_SYSTEMS: Final[frozenset[str]] = frozenset(UPLOAD_TEMPLATE_REQUIRED_HEADERS)
 # Upload-only systems — no Live credential invite (KD14).
-UPLOAD_ONLY_SYSTEMS: Final[frozenset[str]] = frozenset({"bizdev_contacts", "hr_alumni"})
+UPLOAD_ONLY_SYSTEMS: Final[frozenset[str]] = frozenset(
+    {"axios_hq", "bizdev_contacts", "hr_alumni"}
+)
+
+# Dedicated Google Sheet connections (live URL + CSV fallback).
+SHEET_SYSTEMS: Final[frozenset[str]] = frozenset(
+    {"alumni_google_sheet", "contact_us_google_sheet", "google_sheets"}
+)
 
 
 @dataclass(frozen=True)
@@ -92,8 +118,8 @@ CATALOG_VERTICALS: Final[tuple[VerticalCatalogEntry, ...]] = (
 CATALOG_BINDINGS: Final[tuple[VerticalSystemBinding, ...]] = (
     VerticalSystemBinding(
         VERTICAL_COMMUNICATIONS,
-        "mailchimp",
-        frozenset({APPROACH_LIVE, APPROACH_UPLOAD}),
+        "axios_hq",
+        frozenset({APPROACH_UPLOAD}),
     ),
     VerticalSystemBinding(
         VERTICAL_PEOPLE_HR,
@@ -111,6 +137,11 @@ CATALOG_BINDINGS: Final[tuple[VerticalSystemBinding, ...]] = (
         frozenset({APPROACH_UPLOAD}),
     ),
     VerticalSystemBinding(
+        VERTICAL_PEOPLE_HR,
+        "alumni_google_sheet",
+        frozenset({APPROACH_LIVE, APPROACH_UPLOAD}),
+    ),
+    VerticalSystemBinding(
         VERTICAL_TECH,
         "auth0",
         frozenset({APPROACH_LIVE, APPROACH_UPLOAD}),
@@ -119,6 +150,11 @@ CATALOG_BINDINGS: Final[tuple[VerticalSystemBinding, ...]] = (
         VERTICAL_BIZDEV,
         "bizdev_contacts",
         frozenset({APPROACH_UPLOAD}),
+    ),
+    VerticalSystemBinding(
+        VERTICAL_BIZDEV,
+        "contact_us_google_sheet",
+        frozenset({APPROACH_LIVE, APPROACH_UPLOAD}),
     ),
     VerticalSystemBinding(
         VERTICAL_DATA,

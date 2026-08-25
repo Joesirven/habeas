@@ -249,6 +249,20 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           secure: true,
           rewrite: (path) => path.replace(/^\/api/, ''),
+          // http-proxy does not copy Authorization set on IncomingMessage by
+          // the ADC plugin unless we set it on the outgoing proxy request.
+          configure: (proxy) => {
+            proxy.on('proxyReq', (proxyReq, req) => {
+              const authorization = req.headers.authorization
+              if (typeof authorization === 'string' && authorization) {
+                proxyReq.setHeader('Authorization', authorization)
+              }
+              const iapEmail = req.headers['x-goog-authenticated-user-email']
+              if (typeof iapEmail === 'string' && iapEmail) {
+                proxyReq.setHeader('X-Goog-Authenticated-User-Email', iapEmail)
+              }
+            })
+          },
         },
       },
     },

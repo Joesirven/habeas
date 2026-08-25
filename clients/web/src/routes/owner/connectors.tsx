@@ -12,7 +12,6 @@ import {
   connectRedeemSystemLabel,
   connectTestFailureMessage,
   connectTestSuccessDescription,
-  downloadOwnerUploadTemplate,
   getOwnerConnectorCredentialPreview,
   listOwnerConnectorReminders,
   listOwnerConnectors,
@@ -31,33 +30,106 @@ import {
 import { actionToast } from '@/lib/action-toast'
 import { RoleGate, useAuth } from '@/lib/auth'
 import {
-  MODE_STEP_CONNECTING_NOT_MATCHING_FOOTNOTE,
+  CADENCE_OPTION_IDS,
+  CADENCE_OPTION_RARELY,
+  CADENCE_OPTION_WEEKLY,
+  CADENCE_OPTION_WITH_NEW_BATCHES,
   MULTI_PII_DELIMITER_OPTIONS,
-  OWNER_WIZARD_STEPS,
+  SYSTEM_COPY,
   activeModeFromMetadata,
   allowsLive,
   allowsUpload,
-  buildModeStepCards,
   buildReminderBannerItems,
+  buildVerticalWizardSteps,
+  parseVerticalWizardStepId,
   cadenceDaysFromMetadata,
-  refreshPolicyFromMetadata,
+  cadenceOptionFromMetadata,
   delimiterValueFromKey,
   displayStatusChip,
   filterRemindersForOwnerConnectorsPage,
+  isOwnerConnectorsHiddenSystem,
+  isOwnerConnectorsHiddenVertical,
   liveConnectReady,
-  modeStepIntroCopy,
-  ownerWizardStepIndex,
+  modeStepSystemHint,
+  refreshCadenceFromCadenceOption,
+  suggestUploadColumnMapping,
+  uploadMappingComplete,
+  UPLOAD_IDENTIFIER_FIELDS,
+  UPLOAD_SAMPLE_CSV,
+  verticalWizardStepIndex,
   visibleReminderBanners,
-  type ModeStepCardState,
-  type OwnerWizardStep,
+  wizardProgressPercent,
+  type CadenceOptionId,
 } from '@/lib/owner-connector-ui'
 import { cn } from '@/lib/utils'
 
 const FIELD_CLASS =
   'w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none transition focus:border-habeas-mid focus:ring-2 focus:ring-habeas-mid/20'
 
+const CADENCE_OPTION_COPY: Record<
+  CadenceOptionId,
+  { label: string; description: string }
+> = {
+  [CADENCE_OPTION_RARELY]: {
+    label: 'This list rarely changes',
+    description:
+      'One good extract or upload is enough until you choose otherwise. Matching stays ready.',
+  },
+  [CADENCE_OPTION_WITH_NEW_BATCHES]: {
+    label: 'Keep current with new request batches',
+    description:
+      'When Habeas promotes a new DROP intake batch, refresh this source if the last successful refresh was at least 12 hours ago. Same-day extra batches do not force another refresh. Login is never blocked; matching waits until refresh.',
+  },
+  [CADENCE_OPTION_WEEKLY]: {
+    label: 'Weekly',
+    description:
+      'Matching needs a successful upload or refresh within the last 7 days.',
+  },
+}
+
 function canAccessOwnerConnectors(role: UserRole) {
+  return (
+    role === 'data_owner' ||
+    role === 'data_user' ||
+    role === 'super_admin' ||
+    role === 'admin'
+  )
+}
+
+function canConfigureOwnerConnectors(role: UserRole | undefined) {
   return role === 'data_owner' || role === 'super_admin' || role === 'admin'
+}
+
+function systemsNeedingCadence(connectors: readonly OwnerConnectorSystem[]) {
+  return connectors.filter(
+    (connector) =>
+      allowsUpload(connector.allowed_approaches) ||
+      connector.system === 'google_sheets' ||
+      connector.system === 'alumni_google_sheet' ||
+      connector.system === 'contact_us_google_sheet',
+  )
+}
+
+function wizardableConnectors(connectors: readonly OwnerConnectorSystem[]) {
+  return connectors.filter(
+    (connector) =>
+      !isOwnerConnectorsHiddenSystem(connector.system) &&
+      (allowsUpload(connector.allowed_approaches) || allowsLive(connector.allowed_approaches)),
+  )
+}
+
+function initialCadenceOption(connectors: readonly OwnerConnectorSystem[]): CadenceOptionId | null {
+  for (const connector of systemsNeedingCadence(connectors)) {
+    const fromPolicy = cadenceOptionFromMetadata(connector.metadata)
+    if (fromPolicy) return fromPolicy
+    if (cadenceDaysFromMetadata(connector.metadata) === 7) return CADENCE_OPTION_WEEKLY
+  }
+  return null
+}
+
+function cadenceLabel(option: CadenceOptionId | null): string {
+  if (!option) return '—'
+  return CADENCE_OPTION_COPY[option].label
 }
 
 function Micro({ children }: { children: ReactNode }) {
@@ -153,6 +225,35 @@ function CredentialInput({
   )
 }
 
+function WizardProgressBar({
+  currentIndex,
+  totalSteps,
+}: {
+  currentIndex: number
+  totalSteps: number
+}) {
+  const percent = wizardProgressPercent(currentIndex, totalSteps)
+  const valueNow = totalSteps > 0 ? Math.min(currentIndex + 1, totalSteps) : 0
+
+  return (
+    <div className="mb-4">
+      <div
+        role="progressbar"
+        aria-valuenow={valueNow}
+        aria-valuemin={1}
+        aria-valuemax={Math.max(totalSteps, 1)}
+        aria-label="Connector setup progress"
+        className="h-1.5 overflow-hidden rounded-full bg-line"
+      >
+        <div
+          className="h-full rounded-full bg-habeas-navy transition-all duration-300"
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+    </div>
+  )
+}
+
 function LiveTestOverlay({ systemLabel }: { systemLabel: string }) {
   const [phase, setPhase] = useState<'saving' | 'testing'>('saving')
 
@@ -193,17 +294,126 @@ function LiveTestOverlay({ systemLabel }: { systemLabel: string }) {
   )
 }
 
+function UploadHowToPanel({
+  connector,
+  onContinue,
+}: {
+  verticalId: string
+  connector: OwnerConnectorSystem
+  onContinue: () => void
+}) {
+  const copy =
+    SYSTEM_COPY[connector.system]?.uploadHowto ??
+    modeStepSystemHint(connector.system, 'upload')
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <h4 className="text-sm font-medium text-ink">{connector.display_name} · Upload how-to</h4>
+        {copy ? <p className="mt-1 text-xs leading-relaxed text-ink-soft">{copy}</p> : null}
+      </div>
+
+      <div className="rounded-md border border-line bg-white px-3 py-2.5 text-xs text-ink-soft">
+        <p className="font-medium text-ink">What to upload</p>
+        <p className="mt-1">
+          Use your existing export. After you upload, map your columns to Habeas fields. You do
+          not need to reshape the file to a template first.
+        </p>
+        <p className="mt-2 font-medium text-ink">Need at least one identifier</p>
+        <p className="mt-1 text-ink-soft">
+          Email alone is enough. Phone alone is enough. Name, date of birth, or ZIP also count.
+          Map extra columns after upload if the headers do not match.
+        </p>
+      </div>
+
+      <div className="flex justify-end">
+        <Button type="button" size="sm" onClick={onContinue}>
+          Continue
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function LiveHowToPanel({
+  verticalId,
+  connector,
+  onContinue,
+}: {
+  verticalId: string
+  connector: OwnerConnectorSystem
+  onContinue: () => void
+}) {
+  const copy =
+    SYSTEM_COPY[connector.system]?.liveHowto ?? modeStepSystemHint(connector.system, 'live')
+
+  const previewQuery = useQuery({
+    queryKey: [
+      'admin-api',
+      'owner',
+      'credential-preview',
+      verticalId,
+      connector.system,
+      'howto',
+    ],
+    queryFn: () => getOwnerConnectorCredentialPreview(verticalId, connector.system),
+    staleTime: 60_000,
+  })
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <h4 className="text-sm font-medium text-ink">{connector.display_name} · Live how-to</h4>
+        {copy ? <p className="mt-1 text-xs leading-relaxed text-ink-soft">{copy}</p> : null}
+      </div>
+
+      {previewQuery.isPending ? <SkeletonLines lines={3} /> : null}
+
+      {previewQuery.isError ? (
+        <p className="text-xs text-red-800">
+          Could not load Live credential instructions for {connector.display_name}.
+        </p>
+      ) : null}
+
+      {previewQuery.data?.trust_copy ? (
+        <p className="rounded border border-line bg-white px-3 py-2 text-xs leading-relaxed text-ink-soft">
+          {previewQuery.data.trust_copy}
+        </p>
+      ) : null}
+
+      {previewQuery.data?.fields.length ? (
+        <div className="space-y-3 rounded-md border border-line bg-white px-3 py-2.5">
+          {previewQuery.data.fields.map((field) => (
+            <div key={field.id} className="space-y-1">
+              <p className="text-xs font-medium text-ink">{field.label}</p>
+              {field.help ? <FieldHelp help={field.help} /> : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="flex justify-end">
+        <Button type="button" size="sm" onClick={onContinue}>
+          Continue
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 function LiveConnectPanel({
   verticalId,
   connector,
   onBack,
   onContinue,
+  onUseUpload,
   invalidate,
 }: {
   verticalId: string
   connector: OwnerConnectorSystem
   onBack: () => void
   onContinue: () => void
+  onUseUpload?: () => void
   invalidate: () => void
 }) {
   const previewQuery = useQuery({
@@ -229,9 +439,7 @@ function LiveConnectPanel({
   const [confirmTestOpen, setConfirmTestOpen] = useState(false)
   const [liveTestOk, setLiveTestOk] = useState(connector.last_test_ok === true)
   const [fieldsDirty, setFieldsDirty] = useState(false)
-  const [credentialsSaved, setCredentialsSaved] = useState(
-    liveConnectReady(connector),
-  )
+  const [credentialsSaved, setCredentialsSaved] = useState(liveConnectReady(connector))
 
   useEffect(() => {
     if (connector.last_test_ok === true) setLiveTestOk(true)
@@ -329,14 +537,10 @@ function LiveConnectPanel({
 
   const testing = credentialsMutation.isPending || retestMutation.isPending
   const useStoredRetest = credentialsSaved && !fieldsDirty
-  const latestTest = retestMutation.isSuccess
-    ? retestMutation.data
-    : credentialsMutation.data
+  const latestTest = retestMutation.isSuccess ? retestMutation.data : credentialsMutation.data
   const testFailed = Boolean(latestTest && !latestTest.ok)
   const testPassed = liveTestOk || latestTest?.ok === true
-  const testFailureMessage = testFailed
-    ? connectTestFailureMessage(latestTest?.detail)
-    : null
+  const testFailureMessage = testFailed ? connectTestFailureMessage(latestTest?.detail) : null
   const submitError =
     clientError ??
     (credentialsMutation.isError
@@ -419,20 +623,9 @@ function LiveConnectPanel({
     <div className="relative space-y-3">
       {testing ? <LiveTestOverlay systemLabel={systemLabel} /> : null}
 
+      <h4 className="text-sm font-medium text-ink">{connector.display_name} · Live credentials</h4>
       <p className="text-xs text-mute">
-        Paste Live credentials for {connector.display_name}. Follow the how-to steps below each
-        field, then test the connection before continuing.
-      </p>
-
-      {preview.trust_copy ? (
-        <p className="rounded border border-line bg-white px-3 py-2 text-xs leading-relaxed text-ink-soft">
-          {preview.trust_copy}
-        </p>
-      ) : null}
-
-      <p className="rounded border border-line bg-white px-3 py-2 text-xs text-ink-soft">
-        Connecting credentials is separate from enabling matching. Matching stays gated until
-        freshness and rotation rules pass.
+        Paste Live credentials below, then test the connection before continuing.
       </p>
 
       {preview.fields.length === 0 ? (
@@ -468,24 +661,6 @@ function LiveConnectPanel({
         </p>
       </div>
 
-      {testing ? (
-        <div
-          className="flex items-start gap-3 rounded-md border border-sky-200 bg-sky-50 px-3 py-2.5"
-          role="status"
-          aria-live="polite"
-        >
-          <Spinner className="mt-0.5 size-4 text-sky-700" />
-          <div className="min-w-0 text-xs">
-            <p className="font-medium text-sky-950">Testing your connection</p>
-            <p className="mt-0.5 text-sky-900/80">
-              {useStoredRetest
-                ? `Verifying stored credentials with ${systemLabel}. This usually takes a few seconds.`
-                : `Saving keys, then verifying with ${systemLabel}. This usually takes a few seconds.`}
-            </p>
-          </div>
-        </div>
-      ) : null}
-
       {testPassed && !testing ? (
         <div
           className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-xs text-emerald-900"
@@ -510,7 +685,9 @@ function LiveConnectPanel({
       ) : null}
 
       {submitError && !testPassed ? (
-        <p className="text-xs text-red-700" role="alert">{submitError}</p>
+        <p className="text-xs text-red-700" role="alert">
+          {submitError}
+        </p>
       ) : null}
 
       {!testPassed ? (
@@ -546,6 +723,18 @@ function LiveConnectPanel({
           </Button>
         </div>
       </div>
+      {onUseUpload ? (
+        <p className="text-xs text-mute">
+          Live test failed or the vendor is unavailable?{' '}
+          <button
+            type="button"
+            className="font-medium text-habeas-navy underline-offset-2 hover:underline"
+            onClick={onUseUpload}
+          >
+            Set up a CSV upload instead
+          </button>
+        </p>
+      ) : null}
 
       <ConfirmActionDialog
         open={confirmTestOpen}
@@ -574,75 +763,662 @@ function LiveConnectPanel({
   )
 }
 
-function ModeExplainerCards({
-  cards,
-  selected,
-  onSelect,
+function downloadUploadSample(kind: keyof typeof UPLOAD_SAMPLE_CSV) {
+  const sample = UPLOAD_SAMPLE_CSV[kind]
+  const blob = new Blob([sample.body], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = sample.filename
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+function UploadConnectPanel({
+  verticalId,
+  connector,
+  delimiterKey,
+  onDelimiterChange,
+  uploadOk,
+  onUploadOkChange,
+  onBack,
+  onContinue,
+  invalidate,
 }: {
-  cards: ModeStepCardState[]
-  selected: 'live' | 'upload' | null
-  onSelect: (mode: 'live' | 'upload') => void
+  verticalId: string
+  connector: OwnerConnectorSystem
+  delimiterKey: string
+  onDelimiterChange: (key: string) => void
+  uploadOk: boolean
+  onUploadOkChange: (ok: boolean) => void
+  onBack: () => void
+  onContinue: () => void
+  invalidate: () => void
 }) {
+  const [file, setFile] = useState<File | null>(null)
+  const [csvHeaders, setCsvHeaders] = useState<string[]>([])
+  const [columnMapping, setColumnMapping] = useState<Record<string, string>>({})
+  const [needsMapping, setNeedsMapping] = useState(false)
+
+  const mappingReady = uploadMappingComplete(columnMapping)
+
+  const uploadMutation = useMutation({
+    mutationFn: async () => {
+      if (!file) throw new Error('Choose a CSV file first.')
+      return uploadOwnerConnectorCsv(
+        verticalId,
+        connector.system,
+        file,
+        delimiterValueFromKey(delimiterKey),
+        needsMapping ? columnMapping : null,
+      )
+    },
+    onSuccess: (result) => {
+      invalidate()
+      if (result.ok) {
+        setNeedsMapping(false)
+        onUploadOkChange(true)
+        actionToast.success({
+          title: 'Upload validated',
+          description:
+            result.upload_row_count != null
+              ? `${result.upload_row_count} usable row(s). Continue when ready.`
+              : 'File accepted. Continue when ready.',
+        })
+        return
+      }
+      onUploadOkChange(false)
+      if (result.detail === 'upload_needs_mapping') {
+        const headers =
+          result.detected_headers?.filter((h) => h.trim()) ?? csvHeaders
+        setCsvHeaders(headers)
+        setColumnMapping(suggestUploadColumnMapping(headers))
+        setNeedsMapping(true)
+        actionToast.info({
+          title: 'Map your columns',
+          description:
+            'Match at least one identifier — email, phone, name, date of birth, or ZIP — to a column in the file.',
+        })
+        return
+      }
+      actionToast.error({
+        title: 'Upload test failed',
+        description: actionToast.safeErrorMessage(
+          new Error(result.detail || 'upload failed'),
+          'Check headers and delimiter, then try again.',
+        ),
+      })
+    },
+    onError: (error) => {
+      onUploadOkChange(false)
+      actionToast.error({
+        title: 'Upload failed',
+        description: actionToast.safeErrorMessage(error, 'Check the file and try again.'),
+        action: {
+          label: 'Retry',
+          onClick: () => uploadMutation.mutate(),
+        },
+      })
+    },
+  })
+
   return (
-    <div className="grid gap-2 sm:grid-cols-2">
-      {cards.map((card) => {
-        const isSelected = selected === card.mode
-        return (
-          <button
-            key={card.mode}
+    <div className="space-y-3">
+      <h4 className="text-sm font-medium text-ink">{connector.display_name} · Upload CSV</h4>
+      <p className="text-xs text-mute">
+        Upload your export as-is. Email alone or phone alone is enough. After upload, map columns
+        if the headers do not match.
+      </p>
+      <div className="flex flex-wrap gap-1.5">
+        {(Object.keys(UPLOAD_SAMPLE_CSV) as Array<keyof typeof UPLOAD_SAMPLE_CSV>).map((kind) => (
+          <Button
+            key={kind}
             type="button"
-            disabled={!card.allowed}
-            aria-pressed={isSelected}
+            size="sm"
+            variant="outline"
             onClick={() => {
-              if (card.allowed) onSelect(card.mode)
+              downloadUploadSample(kind)
+              actionToast.success({
+                title: 'Sample downloaded',
+                description: `${UPLOAD_SAMPLE_CSV[kind].filename} is ready to upload.`,
+              })
             }}
-            className={cn(
-              'rounded-md border px-3 py-3 text-left transition',
-              card.allowed
-                ? isSelected
-                  ? 'border-habeas-navy bg-habeas-navy/5 ring-2 ring-habeas-navy/20'
-                  : 'border-line bg-white hover:border-habeas-mid'
-                : 'cursor-not-allowed border-line bg-canvas opacity-60',
-            )}
           >
-            <p className="text-sm font-medium text-ink">{card.title}</p>
-            <p className="mt-1 text-xs leading-relaxed text-ink-soft">{card.definition}</p>
-            {card.allowed && card.hint ? (
-              <p className="mt-2 text-xs text-mute">{card.hint}</p>
-            ) : null}
-            {!card.allowed && card.disabledReason ? (
-              <p className="mt-2 text-xs text-mute">{card.disabledReason}</p>
-            ) : null}
-          </button>
-        )
-      })}
+            {UPLOAD_SAMPLE_CSV[kind].label}
+          </Button>
+        ))}
+      </div>
+
+      <label className="block space-y-1 text-xs">
+        <span className="font-medium text-ink">Multi-PII delimiter</span>
+        <select
+          className={FIELD_CLASS}
+          value={delimiterKey}
+          onChange={(event) => onDelimiterChange(event.target.value)}
+          aria-label="Multi-PII delimiter"
+        >
+          {MULTI_PII_DELIMITER_OPTIONS.map((opt) => (
+            <option key={opt.key} value={opt.key}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label className="block space-y-1 text-xs">
+        <span className="font-medium text-ink">CSV file</span>
+        <input
+          type="file"
+          accept=".csv,text/csv"
+          className="block w-full text-xs text-ink file:mr-2 file:rounded file:border file:border-line file:bg-white file:px-2 file:py-1"
+          onChange={(event) => {
+            setFile(event.target.files?.[0] ?? null)
+            setNeedsMapping(false)
+            setCsvHeaders([])
+            setColumnMapping({})
+            onUploadOkChange(false)
+          }}
+        />
+      </label>
+
+      {needsMapping && csvHeaders.length > 0 ? (
+        <div className="space-y-2 rounded-md border border-line bg-canvas px-3 py-2">
+          <p className="text-xs font-medium text-ink">Column mapping</p>
+          {UPLOAD_IDENTIFIER_FIELDS.map((field) => (
+            <label key={field.id} className="block space-y-1 text-xs">
+              <span className="text-ink">{field.label}</span>
+              <select
+                className={FIELD_CLASS}
+                value={columnMapping[field.id] ?? ''}
+                onChange={(event) => {
+                  const value = event.target.value
+                  setColumnMapping((prev) => ({ ...prev, [field.id]: value }))
+                  onUploadOkChange(false)
+                }}
+                aria-label={`Map ${field.label} column`}
+              >
+                <option value="">Select a column…</option>
+                {csvHeaders.map((header) => (
+                  <option key={`${field.id}:${header}`} value={header}>
+                    {header}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+          {!mappingReady ? (
+            <p className="text-[11px] text-mute">
+              Map at least one identifier (email, phone, name, date of birth, or ZIP). Extra
+              columns are ignored.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap justify-between gap-2">
+        <Button type="button" size="sm" variant="ghost" onClick={onBack}>
+          Back
+        </Button>
+        <div className="flex gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={
+              !file ||
+              uploadMutation.isPending ||
+              (needsMapping && !mappingReady)
+            }
+            onClick={() => uploadMutation.mutate()}
+          >
+            {uploadMutation.isPending
+              ? 'Uploading…'
+              : needsMapping
+                ? 'Apply mapping & test'
+                : 'Upload & test'}
+          </Button>
+          <Button type="button" size="sm" disabled={!uploadOk} onClick={onContinue}>
+            Continue
+          </Button>
+        </div>
+      </div>
     </div>
   )
 }
 
-function WizardProgress({ step }: { step: OwnerWizardStep }) {
-  const activeIndex = ownerWizardStepIndex(step)
+function CadenceStepPanel({
+  connectors,
+  cadenceOption,
+  onCadenceChange,
+  onBack,
+  onContinue,
+  saving,
+}: {
+  connectors: readonly OwnerConnectorSystem[]
+  cadenceOption: CadenceOptionId | null
+  onCadenceChange: (option: CadenceOptionId) => void
+  onBack: () => void
+  onContinue: () => void
+  saving: boolean
+}) {
+  const cadenceSystems = systemsNeedingCadence(connectors)
+
+  if (!cadenceSystems.length) {
+    return (
+      <div className="space-y-3">
+        <p className="text-xs text-mute">
+          This vertical only has Live systems. Refresh cadence applies to file, upload, and sheet
+          sources — continue to confirm.
+        </p>
+        <div className="flex justify-between gap-2">
+          <Button type="button" size="sm" variant="ghost" onClick={onBack}>
+            Back
+          </Button>
+          <Button type="button" size="sm" onClick={onContinue}>
+            Continue
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <ol className="mb-4 flex gap-2" aria-label="Connector setup steps">
-      {OWNER_WIZARD_STEPS.map((entry, index) => {
-        const active = index === activeIndex
-        const done = index < activeIndex
-        return (
+    <div className="space-y-3">
+      <div>
+        <h4 className="text-sm font-medium text-ink">Refresh cadence</h4>
+        <p className="mt-1 text-xs text-mute">
+          Applies to upload and sheet sources in this vertical:{' '}
+          {cadenceSystems.map((connector) => connector.display_name).join(', ')}.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        {CADENCE_OPTION_IDS.map((optionId) => {
+          const copy = CADENCE_OPTION_COPY[optionId]
+          const selected = cadenceOption === optionId
+          return (
+            <button
+              key={optionId}
+              type="button"
+              aria-pressed={selected}
+              onClick={() => onCadenceChange(optionId)}
+              className={cn(
+                'w-full rounded-md border p-3 text-left transition-colors',
+                selected
+                  ? 'border-habeas-navy bg-canvas ring-1 ring-habeas-navy'
+                  : 'border-line hover:border-slate-300',
+              )}
+            >
+              <p className="text-sm font-medium text-ink">{copy.label}</p>
+              <p className="mt-1 text-xs leading-relaxed text-mute">{copy.description}</p>
+            </button>
+          )
+        })}
+      </div>
+
+      <div className="flex flex-wrap justify-between gap-2">
+        <Button type="button" size="sm" variant="ghost" onClick={onBack}>
+          Back
+        </Button>
+        <Button type="button" size="sm" disabled={saving} onClick={onContinue}>
+          {saving ? 'Saving…' : 'Continue'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function ConfirmStepPanel({
+  connectors,
+  cadenceOption,
+  delimiterKeys,
+  onBack,
+  onComplete,
+  completing,
+}: {
+  connectors: readonly OwnerConnectorSystem[]
+  cadenceOption: CadenceOptionId | null
+  delimiterKeys: Record<string, string>
+  onBack: () => void
+  onComplete: () => void
+  completing: boolean
+}) {
+  const cadenceSystems = systemsNeedingCadence(connectors)
+  const liveSystems = connectors.filter((connector) => allowsLive(connector.allowed_approaches))
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <h4 className="text-sm font-medium text-ink">Confirm setup</h4>
+        <p className="mt-1 text-xs text-mute">
+          Review this vertical before completing the wizard.
+        </p>
+      </div>
+
+      <ul className="space-y-2 text-xs">
+        {connectors.map((connector) => (
           <li
-            key={entry.id}
-            className={`flex-1 rounded-md border px-2 py-1.5 text-center text-[11px] font-medium ${
-              active
-                ? 'border-habeas-navy bg-habeas-navy text-white'
-                : done
-                  ? 'border-habeas-navy/30 bg-habeas-navy/5 text-habeas-navy'
-                  : 'border-line bg-canvas text-mute'
-            }`}
+            key={connector.system}
+            className="rounded-md border border-line bg-white px-3 py-2 text-ink-soft"
           >
-            {index + 1}. {entry.label}
+            <span className="font-medium text-ink">{connector.display_name}</span>
+            {allowsUpload(connector.allowed_approaches) ? (
+              <span>
+                {' '}
+                · Upload delimiter:{' '}
+                <span className="font-medium text-ink">
+                  {delimiterValueFromKey(delimiterKeys[connector.system] ?? 'none') ?? 'None'}
+                </span>
+              </span>
+            ) : null}
           </li>
-        )
-      })}
-    </ol>
+        ))}
+      </ul>
+
+      {cadenceSystems.length ? (
+        <p className="text-xs text-mute">
+          Refresh cadence:{' '}
+          <span className="font-medium text-ink">{cadenceLabel(cadenceOption)}</span>
+        </p>
+      ) : null}
+
+      {liveSystems.length ? (
+        <p className="rounded-md border border-line bg-white px-3 py-2 text-xs text-ink-soft">
+          Live credentials must be rotated at least every <strong>180 days</strong> for:{' '}
+          {liveSystems.map((connector) => connector.display_name).join(', ')}. Matching may gate
+          when rotation is overdue.
+        </p>
+      ) : null}
+
+      <div className="flex flex-wrap justify-between gap-2">
+        <Button type="button" size="sm" variant="ghost" onClick={onBack}>
+          Back
+        </Button>
+        <Button type="button" size="sm" disabled={completing} onClick={onComplete}>
+          {completing ? 'Completing…' : 'Complete wizard'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function VerticalWizard({
+  verticalId,
+  list,
+  onDone,
+}: {
+  verticalId: string
+  list: OwnerConnectorList
+  onDone: () => void
+}) {
+  const queryClient = useQueryClient()
+  const connectors = wizardableConnectors(list.connectors)
+  const connectorBySystem = useMemo(
+    () => Object.fromEntries(list.connectors.map((connector) => [connector.system, connector])),
+    [list.connectors],
+  )
+
+  const steps = useMemo(
+    () =>
+      buildVerticalWizardSteps({
+        systems: list.connectors.map((connector) => ({
+          system: connector.system,
+          allowedApproaches: connector.allowed_approaches,
+          displayLabel: connector.display_name,
+        })),
+        viewOnly: list.view_only,
+      }),
+    [list.connectors, list.view_only],
+  )
+
+  const [currentStepId, setCurrentStepId] = useState(() => steps[0]?.id ?? '')
+  const [delimiterKeys, setDelimiterKeys] = useState<Record<string, string>>(() =>
+    Object.fromEntries(connectors.map((connector) => [connector.system, 'none'])),
+  )
+  const [uploadOkBySystem, setUploadOkBySystem] = useState<Record<string, boolean>>({})
+  const [cadenceOption, setCadenceOption] = useState<CadenceOptionId | null>(() =>
+    initialCadenceOption(connectors),
+  )
+
+  const stepIndex = verticalWizardStepIndex(steps, currentStepId)
+  const parsedStep = parseVerticalWizardStepId(currentStepId)
+
+  useEffect(() => {
+    if (!steps.length) return
+    if (verticalWizardStepIndex(steps, currentStepId) < 0) {
+      setCurrentStepId(steps[0].id)
+    }
+  }, [steps, currentStepId])
+
+  const invalidate = () => {
+    void queryClient.invalidateQueries({
+      queryKey: ['admin-api', 'owner', 'connectors', verticalId],
+    })
+    void queryClient.invalidateQueries({ queryKey: ['admin-api', 'me'] })
+    void queryClient.invalidateQueries({
+      queryKey: ['admin-api', 'owner', 'connector-reminders'],
+    })
+  }
+
+  const modeMutation = useMutation({
+    mutationFn: ({
+      system,
+      mode,
+    }: {
+      system: string
+      mode: 'live' | 'upload'
+    }) => setOwnerConnectorMode(verticalId, system, { mode }),
+  })
+
+  const cadenceMutation = useMutation({
+    mutationFn: async (option: CadenceOptionId) => {
+      const refreshCadence = refreshCadenceFromCadenceOption(option)
+      if (!refreshCadence) {
+        throw new Error('Invalid cadence option')
+      }
+      const body = { refresh_cadence: refreshCadence }
+      const targets = systemsNeedingCadence(connectors)
+      for (const connector of targets) {
+        await setOwnerConnectorCadence(verticalId, connector.system, body)
+      }
+    },
+    onSuccess: (_data, option) => {
+      invalidate()
+      actionToast.success({
+        title: 'Cadence saved',
+        description: CADENCE_OPTION_COPY[option].label,
+      })
+      setCurrentStepId((currentId) => {
+        const idx = verticalWizardStepIndex(steps, currentId)
+        if (idx >= 0 && idx < steps.length - 1) return steps[idx + 1].id
+        return currentId
+      })
+    },
+    onError: (error) => {
+      actionToast.error({
+        title: 'Could not save cadence',
+        description: actionToast.safeErrorMessage(error, 'Try again.'),
+        action: {
+          label: 'Retry',
+          onClick: () => {
+            if (cadenceOption) cadenceMutation.mutate(cadenceOption)
+          },
+        },
+      })
+    },
+  })
+
+  const completeMutation = useMutation({
+    mutationFn: async () => {
+      const refreshCadence = refreshCadenceFromCadenceOption(cadenceOption)
+      const body = refreshCadence ? { refresh_cadence: refreshCadence } : undefined
+      for (const connector of connectors) {
+        await completeOwnerConnectorWizard(verticalId, connector.system, body)
+      }
+    },
+    onSuccess: () => {
+      invalidate()
+      actionToast.success({
+        title: 'Wizard complete',
+        description: `${list.display_label} setup finished.`,
+      })
+      onDone()
+    },
+    onError: (error) => {
+      actionToast.error({
+        title: 'Could not complete wizard',
+        description: actionToast.safeErrorMessage(error, 'Try again.'),
+        action: {
+          label: 'Retry',
+          onClick: () => completeMutation.mutate(),
+        },
+      })
+    },
+  })
+
+  function goBack() {
+    if (stepIndex > 0) setCurrentStepId(steps[stepIndex - 1].id)
+  }
+
+  function goNext() {
+    if (stepIndex >= 0 && stepIndex < steps.length - 1) {
+      setCurrentStepId(steps[stepIndex + 1].id)
+    }
+  }
+
+  async function ensureMode(system: string, mode: 'live' | 'upload') {
+    const connector = connectorBySystem[system]
+    if (!connector) return
+    const current = activeModeFromMetadata(connector.metadata)
+    if (current === mode) return
+    await modeMutation.mutateAsync({ system, mode })
+    invalidate()
+  }
+
+  async function handleContinueFromHowTo(system: string, mode: 'live' | 'upload') {
+    try {
+      await ensureMode(system, mode)
+      goNext()
+    } catch (error) {
+      actionToast.error({
+        title: 'Could not save mode',
+        description: actionToast.safeErrorMessage(error, 'Try again.'),
+      })
+    }
+  }
+
+  function handleCadenceContinue() {
+    const targets = systemsNeedingCadence(connectors)
+    if (!targets.length) {
+      goNext()
+      return
+    }
+    if (!cadenceOption) {
+      actionToast.warning({
+        title: 'Choose a refresh cadence',
+        description: 'Pick how often upload or sheet data should stay current.',
+      })
+      return
+    }
+    cadenceMutation.mutate(cadenceOption)
+  }
+
+  if (!steps.length) {
+    return (
+      <p className="mt-3 text-xs text-mute">No owner wizard steps are configured for this vertical.</p>
+    )
+  }
+
+  if (stepIndex < 0 || !parsedStep) {
+    return (
+      <div className="mt-3 rounded-md border border-line bg-canvas p-3 sm:p-4">
+        <WizardProgressBar currentIndex={0} totalSteps={steps.length} />
+        <p className="text-xs text-mute">Could not load this wizard step.</p>
+        <Button type="button" size="sm" className="mt-2" onClick={() => setCurrentStepId(steps[0].id)}>
+          Restart wizard
+        </Button>
+      </div>
+    )
+  }
+
+  const connector =
+    'system' in parsedStep ? connectorBySystem[parsedStep.system] : undefined
+
+  return (
+    <div className="mt-3 rounded-md border border-line bg-canvas p-3 sm:p-4">
+      <WizardProgressBar currentIndex={stepIndex} totalSteps={steps.length} />
+
+      {parsedStep.kind === 'howto-upload' && connector ? (
+        <UploadHowToPanel
+          verticalId={verticalId}
+          connector={connector}
+          onContinue={() => void handleContinueFromHowTo(parsedStep.system, 'upload')}
+        />
+      ) : null}
+
+      {parsedStep.kind === 'howto-live' && connector ? (
+        <LiveHowToPanel
+          verticalId={verticalId}
+          connector={connector}
+          onContinue={() => void handleContinueFromHowTo(parsedStep.system, 'live')}
+        />
+      ) : null}
+
+      {parsedStep.kind === 'upload' && connector ? (
+        <UploadConnectPanel
+          verticalId={verticalId}
+          connector={connector}
+          delimiterKey={delimiterKeys[connector.system] ?? 'none'}
+          onDelimiterChange={(key) =>
+            setDelimiterKeys((current) => ({ ...current, [connector.system]: key }))
+          }
+          uploadOk={uploadOkBySystem[connector.system] === true}
+          onUploadOkChange={(ok) =>
+            setUploadOkBySystem((current) => ({ ...current, [connector.system]: ok }))
+          }
+          onBack={goBack}
+          onContinue={goNext}
+          invalidate={invalidate}
+        />
+      ) : null}
+
+      {parsedStep.kind === 'live-creds' && connector ? (
+        <LiveConnectPanel
+          verticalId={verticalId}
+          connector={connector}
+          invalidate={invalidate}
+          onBack={goBack}
+          onContinue={goNext}
+          onUseUpload={
+            allowsUpload(connector.allowed_approaches)
+              ? () => setCurrentStepId(`${connector.system}-howto-upload`)
+              : undefined
+          }
+        />
+      ) : null}
+
+      {parsedStep.kind === 'cadence' ? (
+        <CadenceStepPanel
+          connectors={connectors}
+          cadenceOption={cadenceOption}
+          onCadenceChange={setCadenceOption}
+          onBack={goBack}
+          onContinue={handleCadenceContinue}
+          saving={cadenceMutation.isPending}
+        />
+      ) : null}
+
+      {parsedStep.kind === 'confirm' ? (
+        <ConfirmStepPanel
+          connectors={connectors}
+          cadenceOption={cadenceOption}
+          delimiterKeys={delimiterKeys}
+          onBack={goBack}
+          onComplete={() => completeMutation.mutate()}
+          completing={completeMutation.isPending}
+        />
+      ) : null}
+    </div>
   )
 }
 
@@ -666,10 +1442,7 @@ function ReminderBanners({
   dismissedIds: ReadonlySet<string>
   onDismiss: (id: string) => void
 }) {
-  const items = visibleReminderBanners(
-    buildReminderBannerItems(reminders),
-    dismissedIds,
-  )
+  const items = visibleReminderBanners(buildReminderBannerItems(reminders), dismissedIds)
   if (!items.length) return null
 
   return (
@@ -735,502 +1508,11 @@ function ViewOnlyCard({ list }: { list: OwnerConnectorList }) {
   )
 }
 
-function ConnectorWizard({
-  verticalId,
-  connector,
-  onDone,
-}: {
-  verticalId: string
-  connector: OwnerConnectorSystem
-  onDone: () => void
-}) {
-  const queryClient = useQueryClient()
+function ConnectorStatusRow({ connector }: { connector: OwnerConnectorSystem }) {
   const metaMode = activeModeFromMetadata(connector.metadata)
-  const canUpload = allowsUpload(connector.allowed_approaches)
-  const canLive = allowsLive(connector.allowed_approaches)
-
-  const initialMode: 'live' | 'upload' | null =
-    metaMode ?? (canUpload ? 'upload' : canLive ? 'live' : null)
-
-  const [step, setStep] = useState<OwnerWizardStep>('mode')
-  const [mode, setMode] = useState<'live' | 'upload' | null>(initialMode)
-  const [delimiterKey, setDelimiterKey] = useState('none')
-  const [cadenceDays, setCadenceDays] = useState(
-    String(cadenceDaysFromMetadata(connector.metadata)),
-  )
-  const [refreshPolicy, setRefreshPolicy] = useState<'static' | 'volatile' | null>(
-    () => refreshPolicyFromMetadata(connector.metadata),
-  )
-  const [file, setFile] = useState<File | null>(null)
-  const [uploadOk, setUploadOk] = useState(false)
-
-  const invalidate = () => {
-    void queryClient.invalidateQueries({
-      queryKey: ['admin-api', 'owner', 'connectors', verticalId],
-    })
-    void queryClient.invalidateQueries({ queryKey: ['admin-api', 'me'] })
-    void queryClient.invalidateQueries({
-      queryKey: ['admin-api', 'owner', 'connector-reminders'],
-    })
-  }
-
-  const modeMutation = useMutation({
-    mutationFn: (next: 'live' | 'upload') =>
-      setOwnerConnectorMode(verticalId, connector.system, { mode: next }),
-    onSuccess: (_data, next) => {
-      invalidate()
-      actionToast.success({
-        title: 'Mode saved',
-        description: `Using ${next === 'upload' ? 'Upload' : 'Live'} for ${connector.display_name}.`,
-      })
-      setStep('connect')
-    },
-    onError: (error) => {
-      actionToast.error({
-        title: 'Could not save mode',
-        description: actionToast.safeErrorMessage(error, 'Try again.'),
-        action: {
-          label: 'Retry',
-          onClick: () => {
-            if (mode) modeMutation.mutate(mode)
-          },
-        },
-      })
-    },
-  })
-
-  const cadenceMutation = useMutation({
-    mutationFn: (input: { cadence_days?: number; refresh_policy?: 'static' | 'volatile' }) =>
-      setOwnerConnectorCadence(verticalId, connector.system, input),
-    onSuccess: (_data, input) => {
-      invalidate()
-      actionToast.success({
-        title: 'Cadence saved',
-        description: input.refresh_policy
-          ? input.refresh_policy === 'volatile'
-            ? 'Volatile sheet — matching may wait for a refresh (12 hour minimum).'
-            : 'Static sheet — hash index once unless you reconnect.'
-          : `Refresh every ${cadenceDays} days.`,
-      })
-      setStep('confirm')
-    },
-    onError: (error) => {
-      actionToast.error({
-        title: 'Could not save cadence',
-        description: actionToast.safeErrorMessage(error, 'Try again.'),
-        action: {
-          label: 'Retry',
-          onClick: () => {
-            if (connector.system === 'google_sheets' && refreshPolicy) {
-              cadenceMutation.mutate({ refresh_policy: refreshPolicy })
-              return
-            }
-            const days = Number.parseInt(cadenceDays, 10)
-            if (Number.isFinite(days) && days >= 1) cadenceMutation.mutate({ cadence_days: days })
-          },
-        },
-      })
-    },
-  })
-
-  const completeMutation = useMutation({
-    mutationFn: () => completeOwnerConnectorWizard(verticalId, connector.system),
-    onSuccess: () => {
-      invalidate()
-      actionToast.success({
-        title: 'Wizard complete',
-        description: `${connector.display_name} setup finished.`,
-      })
-      onDone()
-    },
-    onError: (error) => {
-      actionToast.error({
-        title: 'Could not complete wizard',
-        description: actionToast.safeErrorMessage(error, 'Try again.'),
-        action: {
-          label: 'Retry',
-          onClick: () => completeMutation.mutate(),
-        },
-      })
-    },
-  })
-
-  const uploadMutation = useMutation({
-    mutationFn: async () => {
-      if (!file) throw new Error('Choose a CSV file first.')
-      return uploadOwnerConnectorCsv(
-        verticalId,
-        connector.system,
-        file,
-        delimiterValueFromKey(delimiterKey),
-      )
-    },
-    onSuccess: (result) => {
-      invalidate()
-      if (result.ok) {
-        setUploadOk(true)
-        actionToast.success({
-          title: 'Upload validated',
-          description:
-            result.upload_row_count != null
-              ? `${result.upload_row_count} usable row(s). Continue to cadence.`
-              : 'File accepted. Continue to cadence.',
-        })
-      } else {
-        actionToast.error({
-          title: 'Upload test failed',
-          description: actionToast.safeErrorMessage(
-            new Error(result.detail || 'upload failed'),
-            'Check headers and delimiter, then try again.',
-          ),
-        })
-      }
-    },
-    onError: (error) => {
-      actionToast.error({
-        title: 'Upload failed',
-        description: actionToast.safeErrorMessage(
-          error,
-          'Check the file and try again.',
-        ),
-        action: {
-          label: 'Retry',
-          onClick: () => uploadMutation.mutate(),
-        },
-      })
-    },
-  })
-
-  const templateMutation = useMutation({
-    mutationFn: () => downloadOwnerUploadTemplate(verticalId, connector.system),
-    onSuccess: (blob) => {
-      const url = URL.createObjectURL(blob)
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = `${connector.system}-upload-template.csv`
-      anchor.click()
-      URL.revokeObjectURL(url)
-      actionToast.success({
-        title: 'Template downloaded',
-        description: 'Fill required headers, then upload your CSV.',
-      })
-    },
-    onError: (error) => {
-      actionToast.error({
-        title: 'Could not download template',
-        description: actionToast.safeErrorMessage(
-          error,
-          'Template may not be ready yet. Try again shortly.',
-        ),
-        action: {
-          label: 'Retry',
-          onClick: () => templateMutation.mutate(),
-        },
-      })
-    },
-  })
 
   return (
-    <div className="mt-3 rounded-md border border-line bg-canvas p-3 sm:p-4">
-      <WizardProgress step={step} />
-
-      {step === 'mode' ? (
-        <div className="space-y-3">
-          <p className="text-xs text-mute">{modeStepIntroCopy(connector.display_name)}</p>
-          <ModeExplainerCards
-            cards={buildModeStepCards({
-              systemId: connector.system,
-              displayName: connector.display_name,
-              allowedApproaches: connector.allowed_approaches,
-            })}
-            selected={mode}
-            onSelect={setMode}
-          />
-          <p className="text-xs text-mute">{MODE_STEP_CONNECTING_NOT_MATCHING_FOOTNOTE}</p>
-          {!canUpload && !canLive ? (
-            <p className="text-xs text-mute">
-              No owner approaches are configured for this system.
-            </p>
-          ) : null}
-          <div className="flex justify-end gap-2">
-            <Button
-              type="button"
-              size="sm"
-              disabled={
-                !mode ||
-                modeMutation.isPending ||
-                (mode === 'upload' && !canUpload) ||
-                (mode === 'live' && !canLive)
-              }
-              onClick={() => {
-                if (mode) modeMutation.mutate(mode)
-              }}
-            >
-              {modeMutation.isPending ? 'Saving…' : 'Continue'}
-            </Button>
-          </div>
-        </div>
-      ) : null}
-
-      {step === 'connect' && mode === 'upload' ? (
-        <div className="space-y-3">
-          <p className="text-xs text-mute">
-            Download the frozen template, pick a multi-PII delimiter, then upload a
-            CSV. The connection test checks headers and usable rows.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={templateMutation.isPending}
-              onClick={() => templateMutation.mutate()}
-            >
-              {templateMutation.isPending ? 'Downloading…' : 'Download template'}
-            </Button>
-          </div>
-          <label className="block space-y-1 text-xs">
-            <span className="font-medium text-ink">Multi-PII delimiter</span>
-            <select
-              className={FIELD_CLASS}
-              value={delimiterKey}
-              onChange={(event) => setDelimiterKey(event.target.value)}
-              aria-label="Multi-PII delimiter"
-            >
-              {MULTI_PII_DELIMITER_OPTIONS.map((opt) => (
-                <option key={opt.key} value={opt.key}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="block space-y-1 text-xs">
-            <span className="font-medium text-ink">CSV file</span>
-            <input
-              type="file"
-              accept=".csv,text/csv"
-              className="block w-full text-xs text-ink file:mr-2 file:rounded file:border file:border-line file:bg-white file:px-2 file:py-1"
-              onChange={(event) => {
-                setFile(event.target.files?.[0] ?? null)
-                setUploadOk(false)
-              }}
-            />
-          </label>
-          <div className="flex flex-wrap justify-between gap-2">
-            <Button type="button" size="sm" variant="ghost" onClick={() => setStep('mode')}>
-              Back
-            </Button>
-            <div className="flex gap-2">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={!file || uploadMutation.isPending}
-                onClick={() => uploadMutation.mutate()}
-              >
-                {uploadMutation.isPending ? 'Uploading…' : 'Upload & test'}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                disabled={!uploadOk}
-                onClick={() => setStep('cadence')}
-              >
-                Continue
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {step === 'connect' && mode === 'live' ? (
-        <LiveConnectPanel
-          verticalId={verticalId}
-          connector={connector}
-          invalidate={invalidate}
-          onBack={() => setStep('mode')}
-          onContinue={() => setStep('cadence')}
-        />
-      ) : null}
-
-      {step === 'cadence' ? (
-        <div className="space-y-3">
-          {connector.system === 'google_sheets' ? (
-            <>
-              <p className="text-xs text-mute">
-                How often does this sheet’s data change? Matching for this vertical waits
-                until a refresh when the policy requires it (minimum 12 hours between
-                required refreshes).
-              </p>
-              <div className="grid gap-2 sm:grid-cols-2">
-                <button
-                  type="button"
-                  onClick={() => setRefreshPolicy('static')}
-                  className={cn(
-                    'rounded-md border p-3 text-left transition-colors',
-                    refreshPolicy === 'static'
-                      ? 'border-habeas-navy bg-canvas ring-1 ring-habeas-navy'
-                      : 'border-line hover:border-slate-300',
-                  )}
-                >
-                  <p className="text-sm font-medium text-ink">Static</p>
-                  <p className="mt-1 text-xs text-mute">
-                    Rarely or never changes. Connect and build the hash index once.
-                  </p>
-                  <Badge variant="ok" className="mt-2">
-                    Matching stays ready
-                  </Badge>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRefreshPolicy('volatile')}
-                  className={cn(
-                    'rounded-md border p-3 text-left transition-colors',
-                    refreshPolicy === 'volatile'
-                      ? 'border-habeas-navy bg-canvas ring-1 ring-habeas-navy'
-                      : 'border-line hover:border-slate-300',
-                  )}
-                >
-                  <p className="text-sm font-medium text-ink">Volatile</p>
-                  <p className="mt-1 text-xs text-mute">
-                    Can change (including daily). New intake batches may require a refresh
-                    before matching — not more often than every 12 hours.
-                  </p>
-                  <Badge variant="wait" className="mt-2">
-                    May block matching
-                  </Badge>
-                </button>
-              </div>
-            </>
-          ) : (
-            <>
-              <p className="text-xs text-mute">
-                How often should Habeas expect a refresh for this system? Soft reminders
-                appear when approaching or past this window; matching hard-gates when stale.
-              </p>
-              <label className="block space-y-1 text-xs">
-                <span className="font-medium text-ink">Cadence (days)</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={3650}
-                  className={FIELD_CLASS}
-                  value={cadenceDays}
-                  onChange={(event) => setCadenceDays(event.target.value)}
-                />
-              </label>
-            </>
-          )}
-          <div className="flex flex-wrap justify-between gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={() => setStep('connect')}
-            >
-              Back
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              disabled={cadenceMutation.isPending}
-              onClick={() => {
-                if (connector.system === 'google_sheets') {
-                  if (!refreshPolicy) {
-                    actionToast.warning({
-                      title: 'Choose a refresh policy',
-                      description: 'Pick Static or Volatile before continuing.',
-                    })
-                    return
-                  }
-                  cadenceMutation.mutate({ refresh_policy: refreshPolicy })
-                  return
-                }
-                const days = Number.parseInt(cadenceDays, 10)
-                if (!Number.isFinite(days) || days < 1) {
-                  actionToast.warning({
-                    title: 'Enter a valid cadence',
-                    description: 'Use a whole number of days (1 or more).',
-                  })
-                  return
-                }
-                cadenceMutation.mutate({ cadence_days: days })
-              }}
-            >
-              {cadenceMutation.isPending ? 'Saving…' : 'Continue'}
-            </Button>
-          </div>
-        </div>
-      ) : null}
-
-      {step === 'confirm' ? (
-        <div className="space-y-3">
-          <p className="text-xs text-mute">
-            Confirm setup for {connector.display_name}. Mode:{' '}
-            <span className="font-medium text-ink">{mode ?? '—'}</span>
-            {mode === 'upload' ? (
-              <>
-                {' '}
-                · Delimiter:{' '}
-                <span className="font-medium text-ink">
-                  {delimiterValueFromKey(delimiterKey) ?? 'None'}
-                </span>
-              </>
-            ) : null}
-            {' '}
-            · Cadence:{' '}
-            <span className="font-medium text-ink">
-              {connector.system === 'google_sheets'
-                ? refreshPolicy === 'volatile'
-                  ? 'Volatile (12h floor)'
-                  : refreshPolicy === 'static'
-                    ? 'Static'
-                    : '—'
-                : `${cadenceDays} days`}
-            </span>
-          </p>
-          <div className="flex flex-wrap justify-between gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={() => setStep('cadence')}
-            >
-              Back
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              disabled={completeMutation.isPending}
-              onClick={() => completeMutation.mutate()}
-            >
-              {completeMutation.isPending ? 'Completing…' : 'Complete wizard'}
-            </Button>
-          </div>
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
-function ConnectorCard({
-  verticalId,
-  connector,
-}: {
-  verticalId: string
-  connector: OwnerConnectorSystem
-}) {
-  const [wizardOpen, setWizardOpen] = useState(
-    connector.display_status === 'needs_setup' ||
-      connector.display_status === 'action_required',
-  )
-  const metaMode = activeModeFromMetadata(connector.metadata)
-  const canWizard =
-    allowsUpload(connector.allowed_approaches) ||
-    allowsLive(connector.allowed_approaches)
-
-  return (
-    <div className="rounded-md border border-line bg-white p-3 sm:p-4">
+    <div className="rounded-md border border-line bg-white px-3 py-2.5">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 space-y-1">
           <h4 className="text-sm font-medium text-ink">{connector.display_name}</h4>
@@ -1247,27 +1529,6 @@ function ConnectorCard({
           gateAllowed={connector.gate_allowed}
         />
       </div>
-      {canWizard ? (
-        <div className="mt-3">
-          <Button
-            type="button"
-            size="sm"
-            variant={wizardOpen ? 'outline' : 'default'}
-            onClick={() => setWizardOpen((open) => !open)}
-          >
-            {wizardOpen ? 'Hide wizard' : 'Open setup wizard'}
-          </Button>
-          {wizardOpen ? (
-            <ConnectorWizard
-              verticalId={verticalId}
-              connector={connector}
-              onDone={() => setWizardOpen(false)}
-            />
-          ) : null}
-        </div>
-      ) : (
-        <p className="mt-2 text-xs text-mute">No owner wizard for this system.</p>
-      )}
     </div>
   )
 }
@@ -1281,11 +1542,29 @@ function VerticalConnectorsSection({
   selected: boolean
   onSelect: () => void
 }) {
+  const { role } = useAuth()
   const listQuery = useQuery({
     queryKey: ['admin-api', 'owner', 'connectors', verticalId],
     queryFn: () => listOwnerConnectors(verticalId),
     staleTime: 15_000,
   })
+
+  const list = listQuery.data
+  const needsSetup = useMemo(
+    () =>
+      list?.connectors.some(
+        (connector) =>
+          !isOwnerConnectorsHiddenSystem(connector.system) &&
+          (connector.display_status === 'needs_setup' ||
+            connector.display_status === 'action_required'),
+      ) ?? false,
+    [list],
+  )
+  const [wizardOpen, setWizardOpen] = useState(false)
+
+  useEffect(() => {
+    if (needsSetup) setWizardOpen(true)
+  }, [needsSetup])
 
   if (listQuery.isPending) {
     return (
@@ -1312,12 +1591,19 @@ function VerticalConnectorsSection({
     )
   }
 
-  const list = listQuery.data
   if (!list) return null
 
+  const connectors = list.connectors.filter(
+    (connector) => !isOwnerConnectorsHiddenSystem(connector.system),
+  )
+  if (connectors.length === 0) return null
+
   if (list.view_only) {
-    return <ViewOnlyCard list={list} />
+    return <ViewOnlyCard list={{ ...list, connectors }} />
   }
+
+  const canWizard =
+    canConfigureOwnerConnectors(role) && wizardableConnectors(connectors).length > 0
 
   return (
     <section
@@ -1326,41 +1612,49 @@ function VerticalConnectorsSection({
       }`}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <button
-          type="button"
-          className="text-left"
-          onClick={onSelect}
-        >
+        <button type="button" className="text-left" onClick={onSelect}>
           <h3 className="text-sm font-medium text-ink">{list.display_label}</h3>
-          <p className="text-[11px] text-mute">{list.connectors.length} system(s)</p>
+          <p className="text-[11px] text-mute">{connectors.length} system(s)</p>
         </button>
+        {canWizard ? (
+          <Button
+            type="button"
+            size="sm"
+            variant={wizardOpen ? 'outline' : 'default'}
+            onClick={() => setWizardOpen((open) => !open)}
+          >
+            {wizardOpen ? 'Hide wizard' : 'Open setup wizard'}
+          </Button>
+        ) : null}
       </div>
+
       <div className="space-y-2">
-        {list.connectors.map((connector) => (
-          <ConnectorCard
-            key={connector.system}
-            verticalId={verticalId}
-            connector={connector}
-          />
+        {connectors.map((connector) => (
+          <ConnectorStatusRow key={connector.system} connector={connector} />
         ))}
       </div>
+
+      {wizardOpen && canWizard ? (
+        <VerticalWizard
+          verticalId={verticalId}
+          list={{ ...list, connectors }}
+          onDone={() => setWizardOpen(false)}
+        />
+      ) : null}
     </section>
   )
 }
 
-function OwnerConnectorsBody({
-  verticalFilter,
-}: {
-  verticalFilter?: string
-}) {
+function OwnerConnectorsBody({ verticalFilter }: { verticalFilter?: string }) {
   const { me, role } = useAuth()
   const navigate = useNavigate()
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(() => new Set())
 
   const verticals = me?.verticals ?? []
   const visibleVerticals = useMemo(() => {
-    if (!verticalFilter) return verticals
-    return verticals.filter((id) => id === verticalFilter)
+    const assigned = verticals.filter((id) => !isOwnerConnectorsHiddenVertical(id))
+    if (!verticalFilter) return assigned
+    return assigned.filter((id) => id === verticalFilter)
   }, [verticals, verticalFilter])
 
   const remindersFromMe = me?.connector_reminders
@@ -1371,12 +1665,11 @@ function OwnerConnectorsBody({
         const payload = await listOwnerConnectorReminders()
         return payload.reminders
       } catch {
-        // U10 may land later — fall back to /me reminders without crashing.
         return remindersFromMe ?? []
       }
     },
     staleTime: 30_000,
-    enabled: role === 'data_owner' || role === 'super_admin' || role === 'admin',
+    enabled: role === 'data_owner' || role === 'data_user' || role === 'super_admin' || role === 'admin',
   })
 
   const reminders: ConnectorReminder[] = filterRemindersForOwnerConnectorsPage(
@@ -1392,8 +1685,8 @@ function OwnerConnectorsBody({
             Connectors
           </h2>
           <p className="mt-2 max-w-xl text-sm text-ink-soft">
-            No verticals are assigned to your account yet. Ask a Habeas admin to
-            assign you to a vertical catalog entry.
+            No verticals are assigned to your account yet. Ask a Habeas admin to assign you to a
+            vertical catalog entry.
           </p>
         </header>
         <div className="rounded-md border border-dashed border-line bg-canvas px-4 py-8 text-center text-sm text-mute">
@@ -1417,8 +1710,8 @@ function OwnerConnectorsBody({
             Connectors
           </h2>
           <p className="mt-2 max-w-xl text-sm text-ink-soft">
-            Set Live or Upload mode, cadence, and complete setup for your assigned
-            verticals. Soft reminders never block login.
+            Complete one setup wizard per vertical. Systems are sequential sections inside that
+            wizard. Soft reminders never block login.
           </p>
         </div>
         {verticalFilter ? (
@@ -1452,13 +1745,14 @@ function OwnerConnectorsBody({
 
       {verticalFilter && !verticals.includes(verticalFilter) ? (
         <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">
-          Vertical <code className="text-ink">{verticalFilter}</code> is not assigned
-          to you.
+          Vertical <code className="text-ink">{verticalFilter}</code> is not assigned to you.
         </div>
       ) : null}
 
       <div className="flex flex-wrap gap-2">
-        {verticals.map((id) => (
+        {verticals
+          .filter((id) => !isOwnerConnectorsHiddenVertical(id))
+          .map((id) => (
           <Button
             key={id}
             type="button"
@@ -1499,11 +1793,7 @@ export type OwnerConnectorsSearch = {
   vertical?: string
 }
 
-export function OwnerConnectorsPage({
-  search,
-}: {
-  search?: OwnerConnectorsSearch
-}) {
+export function OwnerConnectorsPage({ search }: { search?: OwnerConnectorsSearch }) {
   return (
     <RoleGate allow={canAccessOwnerConnectors}>
       <OwnerConnectorsBody verticalFilter={search?.vertical} />

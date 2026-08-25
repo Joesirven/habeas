@@ -11,6 +11,7 @@ import pytest
 from habeas_privacy_core.connections.freshness import (
     DEFAULT_UPLOAD_CADENCE_DAYS,
     LIVE_ROTATION_DAYS,
+    WEEKLY_EXTRACT_CADENCE_DAYS,
     DisplayStatus,
     GateCode,
     ReminderCode,
@@ -19,6 +20,8 @@ from habeas_privacy_core.connections.freshness import (
     evaluate_connection_gate,
     evaluate_connection_reminder,
     parse_multi_pii_delimiter,
+    parse_refresh_cadence,
+    should_stamp_intake_batch,
     validate_multi_pii_delimiter,
 )
 
@@ -39,9 +42,13 @@ def _upload_conn(
     last_upload_days_ago: int | None = 10,
     cadence_days: int | None = 30,
     cadence_override: int | None = None,
+    refresh_cadence: str | None = None,
+    refresh_policy: str | None = None,
+    intake_hours_ago: float | None = None,
     wizard_completed: bool = True,
     last_test_ok: bool = True,
     status: str = "connected",
+    system: str = "mailchimp",
 ) -> _Conn:
     metadata: dict[str, Any] = {"active_mode": "upload"}
     if wizard_completed:
@@ -50,12 +57,20 @@ def _upload_conn(
         metadata["cadence_days"] = cadence_days
     if cadence_override is not None:
         metadata["cadence_days_override"] = cadence_override
+    if refresh_cadence is not None:
+        metadata["refresh_cadence"] = refresh_cadence
+    if refresh_policy is not None:
+        metadata["refresh_policy"] = refresh_policy
     if last_upload_days_ago is not None:
         metadata["last_successful_upload_at"] = (
             _NOW - timedelta(days=last_upload_days_ago)
         ).isoformat()
+    if intake_hours_ago is not None:
+        metadata["last_intake_batch_at"] = (
+            _NOW - timedelta(hours=intake_hours_ago)
+        ).isoformat()
     return _Conn(
-        system="mailchimp",
+        system=system,
         status=status,
         last_test_ok=last_test_ok,
         metadata=metadata,
@@ -82,6 +97,111 @@ def _live_conn(
         last_test_ok=last_test_ok,
         metadata=metadata,
     )
+
+
+class TestShouldStampIntakeBatch:
+    def test_non_with_new_batches_returns_false(self) -> None:
+        for cadence in ("rarely", "weekly", None):
+            meta: dict[str, Any] = {}
+            if cadence is not None:
+                meta["refresh_cadence"] = cadence
+            assert should_stamp_intake_batch(meta, now=_NOW) is False
+
+    def test_with_new_batches_stamps_when_no_prior_success(self) -> None:
+        meta = {"refresh_cadence": "with_new_batches"}
+        assert should_stamp_intake_batch(meta, now=_NOW) is True
+
+    def test_with_new_batches_stamps_after_12h_since_success(self) -> None:
+        meta = {
+            "refresh_cadence": "with_new_batches",
+            "last_successful_refresh_at": (_NOW - timedelta(hours=13)).isoformat(),
+        }
+        assert should_stamp_intake_batch(meta, now=_NOW) is True
+
+
+class TestParseRefreshCadence:
+    def test_refresh_cadence_takes_precedence(self) -> None:
+        assert (
+            parse_refresh_cadence(
+                {"refresh_cadence": "weekly", "refresh_policy": "volatile"}
+            )
+            == "weekly"
+        )
+
+    def test_static_policy_maps_to_rarely(self) -> None:
+        assert parse_refresh_cadence({"refresh_policy": "static"}) == "rarely"
+
+    def test_volatile_policy_maps_to_with_new_batches(self) -> None:
+        assert parse_refresh_cadence({"refresh_policy": "volatile"}) == "with_new_batches"
+
+    def test_unset_returns_none(self) -> None:
+        assert parse_refresh_cadence({}) is None
+
+
+class TestUploadRefreshCadence:
+    def test_rarely_never_stales_from_intake(self) -> None:
+        gate = evaluate_connection_gate(
+            _upload_conn(
+                refresh_cadence="rarely",
+                last_upload_days_ago=30,
+                intake_hours_ago=1,
+            ),
+            now=_NOW,
+        )
+        assert gate.allowed is True
+        assert gate.code == GateCode.OK
+
+    def test_rarely_blocks_without_first_upload(self) -> None:
+        gate = evaluate_connection_gate(
+            _upload_conn(refresh_cadence="rarely", last_upload_days_ago=None),
+            now=_NOW,
+        )
+        assert gate.allowed is False
+        assert gate.code == GateCode.UPLOAD_STALE
+
+    def test_weekly_stales_after_seven_days(self) -> None:
+        gate = evaluate_connection_gate(
+            _upload_conn(
+                refresh_cadence="weekly",
+                last_upload_days_ago=WEEKLY_EXTRACT_CADENCE_DAYS + 1,
+            ),
+            now=_NOW,
+        )
+        assert gate.allowed is False
+        assert gate.code == GateCode.UPLOAD_STALE
+
+    def test_weekly_ignores_intake_batch(self) -> None:
+        gate = evaluate_connection_gate(
+            _upload_conn(
+                refresh_cadence="weekly",
+                last_upload_days_ago=2,
+                intake_hours_ago=1,
+            ),
+            now=_NOW,
+        )
+        assert gate.allowed is True
+        assert gate.code == GateCode.OK
+
+    def test_with_new_batches_stales_after_intake_when_upload_older_than_12h(self) -> None:
+        conn = _upload_conn(refresh_cadence="with_new_batches", last_upload_days_ago=None)
+        conn.metadata["last_successful_upload_at"] = (
+            _NOW - timedelta(hours=13)
+        ).isoformat()
+        conn.metadata["last_intake_batch_at"] = (_NOW - timedelta(hours=1)).isoformat()
+        gate = evaluate_connection_gate(conn, now=_NOW)
+        assert gate.allowed is False
+        assert gate.code == GateCode.UPLOAD_STALE
+
+    def test_with_new_batches_same_day_second_batch_within_12h(self) -> None:
+        conn = _upload_conn(refresh_cadence="with_new_batches", last_upload_days_ago=None)
+        conn.metadata["last_successful_upload_at"] = (
+            _NOW - timedelta(hours=3)
+        ).isoformat()
+        assert should_stamp_intake_batch(conn.metadata, now=_NOW) is False
+        conn.metadata["last_intake_batch_at"] = (_NOW - timedelta(hours=1)).isoformat()
+        gate = evaluate_connection_gate(conn, now=_NOW)
+        assert gate.allowed is True
+        assert gate.code == GateCode.OK
 
 
 class TestEffectiveCadenceDays:
@@ -372,6 +492,7 @@ class TestEvaluateConnectionReminder:
 def _sheets_conn(
     *,
     policy: str = "volatile",
+    refresh_cadence: str | None = None,
     last_refresh_hours_ago: float | None = 24,
     intake_hours_ago: float | None = 1,
     wizard_completed: bool = True,
@@ -381,6 +502,9 @@ def _sheets_conn(
         "refresh_policy": policy,
         "min_refresh_interval_hours": 12,
     }
+    if refresh_cadence is not None:
+        metadata["refresh_cadence"] = refresh_cadence
+        metadata.pop("refresh_policy", None)
     if wizard_completed:
         metadata["wizard_completed_at"] = (_NOW - timedelta(days=10)).isoformat()
     if last_refresh_hours_ago is not None:
@@ -401,7 +525,7 @@ def _sheets_conn(
 
 
 class TestSheetsRefreshPolicy:
-    def test_volatile_stale_after_intake_when_refresh_older_than_12h(self) -> None:
+    def test_with_new_batches_stale_after_intake_when_refresh_older_than_12h(self) -> None:
         gate = evaluate_connection_gate(
             _sheets_conn(last_refresh_hours_ago=13, intake_hours_ago=1),
             now=_NOW,
@@ -411,8 +535,6 @@ class TestSheetsRefreshPolicy:
         assert gate.display_status == DisplayStatus.NEEDS_REFRESH
 
     def test_same_day_second_batch_does_not_stale_within_12h(self) -> None:
-        from habeas_privacy_core.connections.freshness import should_stamp_intake_batch
-
         meta = _sheets_conn(last_refresh_hours_ago=3, intake_hours_ago=None).metadata
         assert should_stamp_intake_batch(meta, now=_NOW) is False
         gate = evaluate_connection_gate(
@@ -422,11 +544,9 @@ class TestSheetsRefreshPolicy:
         assert gate.allowed is True
         assert gate.code == GateCode.OK
 
-    def test_static_never_stales_on_intake(self) -> None:
-        from habeas_privacy_core.connections.freshness import should_stamp_intake_batch
-
+    def test_rarely_never_stales_on_intake(self) -> None:
         conn = _sheets_conn(
-            policy="static",
+            refresh_cadence="rarely",
             last_refresh_hours_ago=48,
             intake_hours_ago=1,
         )
@@ -434,7 +554,19 @@ class TestSheetsRefreshPolicy:
         gate = evaluate_connection_gate(conn, now=_NOW)
         assert gate.allowed is True
 
-    def test_volatile_reminder_when_stale(self) -> None:
+    def test_weekly_stales_after_seven_days(self) -> None:
+        gate = evaluate_connection_gate(
+            _sheets_conn(
+                refresh_cadence="weekly",
+                last_refresh_hours_ago=WEEKLY_EXTRACT_CADENCE_DAYS * 24 + 1,
+                intake_hours_ago=1,
+            ),
+            now=_NOW,
+        )
+        assert gate.allowed is False
+        assert gate.code == GateCode.SHEETS_REFRESH_STALE
+
+    def test_with_new_batches_reminder_when_stale(self) -> None:
         reminder = evaluate_connection_reminder(
             _sheets_conn(last_refresh_hours_ago=14, intake_hours_ago=1),
             vertical_id="bizdev",
