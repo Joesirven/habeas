@@ -280,11 +280,14 @@ async def drain_chunk():
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
 
-    from matching.chunk_drain import process_matching_chunk
+    from matching.chunk_drain import process_matching_chunk, reap_stale_matching_claims
 
     pool = get_pool()
     async with pool.acquire() as conn:
-        return await process_matching_chunk(conn, worker_id=settings.worker_id)
+        outer_reaped = await reap_stale_matching_claims(conn)
+        result = await process_matching_chunk(conn, worker_id=settings.worker_id)
+        inner_reaped = int(result.get("reaped") or 0)
+        return {**result, "reaped": outer_reaped + inner_reaped}
 
 
 @app.post("/ensure-drain")
@@ -299,7 +302,7 @@ async def ensure_drain_endpoint():
         start_drain_job_execution,
     )
 
-    max_chunks = int(os.environ.get("MATCHING_DRAIN_MAX_CHUNKS", "50"))
+    max_chunks = int(os.environ.get("MATCHING_DRAIN_MAX_CHUNKS", "0"))
     job_name = os.environ.get("MATCHING_DRAIN_JOB_NAME", "").strip()
     pool = get_pool()
     async with pool.acquire() as conn:

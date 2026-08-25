@@ -505,6 +505,10 @@ async def _probe_worker_health(name: str, base_url: str) -> dict[str, Any]:
             if status_code == 401 and _is_control_plane_health_target(name, base_url):
                 ok = True
                 body = {"status": "iap_front_door", "service": name}
+            elif status_code == 404:
+                # Missing Cloud Run service — not-ok, not a red worker-down.
+                ok = False
+                body = {"status": "not_deployed"}
             return {
                 "name": name,
                 "url": base_url,
@@ -684,7 +688,7 @@ def _rollup_raw_request_groups(
 
 
 async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
-    """SQL snapshot — ids, counts, and statuses only (no PII)."""
+    """Cheap SQL snapshot — ids, counts, and statuses only (no PII)."""
     connector_rows = await conn.fetch(
         """
         SELECT step, status, COUNT(*)::int AS count
@@ -701,6 +705,9 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
          ORDER BY step, status
         """
     )
+    # One GROUP BY on drop_raw_requests — never a second full scan for
+    # response_status, and never a correlated fulfillment.ready walk of the
+    # 1.8M-row spine (approval ⋈ requests ⋈ raws ⋈ matching_results MAX).
     raw_grouped = await conn.fetch(
         """
         SELECT list_type,
@@ -713,56 +720,26 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
     )
     raw_rows, response_status_rows = _rollup_raw_request_groups(raw_grouped)
     if response_status_rows is None:
-        response_status_rows = await conn.fetch(
-            """
-            SELECT response_status, COUNT(*)::int AS count
-              FROM drop_raw_requests
-             GROUP BY response_status
-             ORDER BY response_status NULLS FIRST
-            """
-        )
-    fulfillment_ready = await conn.fetchval(
-        """
-        SELECT COUNT(*)::int
-          FROM approval_requests ar
-          JOIN requests r
-            ON r.id = ar.request_id
-          JOIN drop_raw_requests drr
-            ON drr.id = r.raw_record_id
-         WHERE ar.action_type = $1
-           AND ar.status = 'approved'
-           AND ar.decided_at IS NOT NULL
-           AND r.intake_source = 'drop'
-           AND drr.response_status IS NULL
-           AND EXISTS (
-                 SELECT 1
-                   FROM matching_results mr
-                  WHERE mr.request_id = r.id
-               )
-           AND ar.decided_at >= (
-                 SELECT MAX(mr.recorded_at)
-                   FROM matching_results mr
-                  WHERE mr.request_id = r.id
-               )
-        """,
-        MATCHING_REVIEW_ACTION,
-    )
+        response_status_rows = []
+    fulfillment_ready = 0
     recent_drop_requests = await conn.fetch(
         """
-        SELECT id::text AS id, received_at, raw_record_id,
-               COUNT(*) OVER () AS full_count
+        SELECT id::text AS id, received_at, raw_record_id
           FROM requests
          WHERE intake_source = 'drop'
          ORDER BY received_at DESC
          LIMIT 20
         """
     )
-    if recent_drop_requests and _record_has(recent_drop_requests[0], "full_count"):
-        drop_request_count = int(recent_drop_requests[0]["full_count"])
-    else:
-        drop_request_count = await conn.fetchval(
-            "SELECT COUNT(*)::int FROM requests WHERE intake_source = 'drop'"
-        )
+    # Request cardinality (not raw-spine sum). Index-only COUNT — no
+    # COUNT(*) OVER window, no second drop_raw_requests scan.
+    drop_request_count = await conn.fetchval(
+        """
+        SELECT COUNT(*)::bigint
+          FROM requests
+         WHERE intake_source = 'drop'
+        """
+    )
     matching_attempt_rows = await conn.fetch(
         """
         SELECT ma.status, COUNT(*)::int AS count
@@ -775,7 +752,10 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
     )
     matching_pending = 0
     matching_success = 0
+    matching_claimed = 0
+    matching_failed_terminal = 0
     matching_by_status: list[dict[str, Any]] = []
+    last_fail_status: str | None = None
     for row in matching_attempt_rows:
         item = {"status": row["status"], "count": int(row["count"])}
         matching_by_status.append(item)
@@ -783,6 +763,12 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
             matching_pending = item["count"]
         elif row["status"] == "success":
             matching_success = item["count"]
+        elif row["status"] == "claimed":
+            matching_claimed = item["count"]
+        if row["status"] in _TERMINAL_FAIL_STATUSES:
+            matching_failed_terminal += item["count"]
+            if last_fail_status is None:
+                last_fail_status = str(row["status"])
 
     drain_lease_row = await conn.fetchrow(
         """
@@ -956,6 +942,25 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
         last_success_at=last_connector_success
     )
 
+    promote_pending = sum(
+        int(r["count"])
+        for r in ingest_rows
+        if r["step"] == "promote" and r["status"] == "pending"
+    )
+    raw_total = sum(int(r["total"]) for r in raw_rows)
+    request_rows = int(drop_request_count or 0)
+    drain_active = bool(matching_drain["active"])
+    ops_flags = _ops_flags_snapshot(
+        drain_active=drain_active,
+        matching_claimed=matching_claimed,
+        matching_success=matching_success,
+        matching_failed_terminal=matching_failed_terminal,
+        last_fail_status=last_fail_status,
+        promote_pending=promote_pending,
+        request_rows=request_rows,
+        raw_rows=raw_total,
+    )
+
     return {
         "connector_attempts": [
             {"step": r["step"], "status": r["status"], "count": int(r["count"])}
@@ -1008,10 +1013,12 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
         },
         "matching_attempts": {
             "pending": matching_pending,
+            "claimed": matching_claimed,
             "success": matching_success,
             "by_status": matching_by_status,
             "drain": matching_drain,
         },
+        "ops_flags": ops_flags,
         "approaching_sla": {
             "connector": int(approaching_connector or 0),
             "ingest": int(approaching_ingest or 0),
@@ -1047,8 +1054,69 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
     }
 
 
+def _is_not_deployed_probe(probe: dict[str, Any]) -> bool:
+    """True when fleet/probe marks a missing Cloud Run service (404 ≠ down)."""
+    if probe.get("status_code") == 404:
+        return True
+    for key in ("body", "ready"):
+        payload = probe.get(key)
+        if isinstance(payload, dict) and payload.get("status") == "not_deployed":
+            return True
+    return False
+
+
+def _probe_counts_as_down(probe: dict[str, Any]) -> bool:
+    """Red worker-down only — not_deployed is not-ok but not false-red."""
+    if probe.get("ok"):
+        return False
+    return not _is_not_deployed_probe(probe)
+
+
+def _ops_flags_snapshot(
+    *,
+    drain_active: bool,
+    matching_claimed: int,
+    matching_success: int,
+    matching_failed_terminal: int,
+    last_fail_status: str | None,
+    promote_pending: int,
+    request_rows: int,
+    raw_rows: int,
+) -> dict[str, Any]:
+    """Cheap ops flags from counts already on the snapshot — no extra SQL."""
+    return {
+        "drain_lease_held_claimed_exceeds_success": {
+            "flagged": bool(drain_active and matching_claimed > matching_success),
+            "lease_active": drain_active,
+            "claimed": matching_claimed,
+            "success": matching_success,
+        },
+        "promote_leftover_pending": {
+            "flagged": bool(
+                promote_pending > 0 and raw_rows > 0 and request_rows >= raw_rows
+            ),
+            "promote_pending": promote_pending,
+            "request_rows": request_rows,
+            "raw_rows": raw_rows,
+        },
+        "matching_job_last_fail": {
+            "flagged": matching_failed_terminal > 0,
+            "status": last_fail_status,
+            "failed_terminal": matching_failed_terminal,
+        },
+    }
+
+
 def _public_worker_health(probe: dict[str, Any]) -> dict[str, Any]:
     """Strip worker base URLs before returning probes to the browser."""
+    if _is_not_deployed_probe(probe):
+        return {
+            "name": probe.get("name"),
+            "ok": False,
+            "status_code": probe.get("status_code"),
+            "ready": {"status": "not_deployed"},
+            "error": probe.get("error"),
+        }
     ready_body = probe.get("body")
     if isinstance(ready_body, dict):
         ready_summary: Any = {
@@ -1342,6 +1410,7 @@ async def collect_process_run_groups(
                   JOIN drop_ingest_attempts i
                     ON i.source_csv_filename = drr.source_csv_filename
                    AND i.step = 'land'
+                   AND i.status = 'success'
                    AND i.gcs_uri = $1
                  ORDER BY ma.attempted_at DESC
                  LIMIT $2
@@ -1557,7 +1626,13 @@ async def collect_bulk_process_progress(
                 }
             )
 
-        # Request set for this ZIP: raw rows whose land attempt shares gcs_uri.
+        # Matching scoped by this download's gcs_uri via successful land.
+        # drop_raw_requests has source_csv_filename (ZIP-internal Email/
+        # Phone/NDZ names) and no download id. Joining that name to *any*
+        # land attempt — including a failed file:// land — copies the same
+        # ~1.8M matching totals onto every card. Restrict to land success
+        # so a file:// land-fail card stays land failures only; the
+        # successful gs:// download is the card that inherits the spine.
         request_stats = await conn.fetchrow(
             """
             WITH batch_raw AS (
@@ -1566,6 +1641,7 @@ async def collect_bulk_process_progress(
                   JOIN drop_ingest_attempts i
                     ON i.source_csv_filename = drr.source_csv_filename
                    AND i.step = 'land'
+                   AND i.status = 'success'
                    AND i.gcs_uri = $1
             ),
             batch_requests AS (
@@ -1728,6 +1804,12 @@ async def collect_bulk_process_progress(
         "download_status": str(head["status"]),
         "raw_rows": raw_rows,
         "request_rows": request_rows,
+        "promote_stale": (
+            int(promote.get("open", 0)) > 0
+            and request_rows > 0
+            and raw_rows > 0
+            and request_rows >= raw_rows
+        ),
         "stages": stages,
         "overall": overall,
     }
@@ -3741,7 +3823,9 @@ async def drop_stats_global(_principal: SuperAdminPrincipal):
             ["pending", "claimed", "in_flight"],
         )
     worker_health = await collect_worker_health()
-    workers_down = sum(1 for probe in worker_health.values() if not probe.get("ok"))
+    workers_down = sum(
+        1 for probe in worker_health.values() if _probe_counts_as_down(probe)
+    )
     return {
         "open_drop_requests": int(open_drop or 0),
         "matching_review_pending": int(review_pending or 0),

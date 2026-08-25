@@ -122,10 +122,14 @@ PIPELINE_FIXTURE: dict[str, Any] = {
 
 
 def test_pipeline_status_shape(monkeypatch: pytest.MonkeyPatch):
+    from admin_api import main as admin_main
+
     async def fake_status() -> dict[str, Any]:
         return PIPELINE_FIXTURE
 
     monkeypatch.setattr(drop_pipeline, "get_pipeline_status", fake_status)
+    # Avoid lifespan create_pool when DATABASE_URL points at an unreachable host.
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
 
     with TestClient(app) as client:
         response = client.get("/ops/drop/pipeline")
@@ -403,26 +407,33 @@ def test_fulfill_proxy_forwards_request_id(monkeypatch: pytest.MonkeyPatch):
     assert captured["json"]["request_id"] == "00000000-0000-0000-0000-000000000099"
 
 
+def _is_drop_request_cardinality_sql(sql: str) -> bool:
+    """True for index-only COUNT of DROP requests — not raw GROUP BY or recent LIMIT."""
+    return (
+        "COUNT(*)" in sql
+        and "FROM requests" in sql
+        and "intake_source = 'drop'" in sql
+        and "matching_attempts" not in sql
+        and "drop_raw_requests" not in sql
+        and "LIMIT" not in sql
+    )
+
+
 @pytest.mark.asyncio
 async def test_collect_pipeline_counts_shape():
+    raw_fetches: list[str] = []
+    fetchval_sqls: list[str] = []
+
     async def fetch(sql: str, *args: Any) -> list[_Row]:
         if "drop_connector_attempts" in sql:
             return [_Row(step="download", status="success", count=1)]
         if "drop_ingest_attempts" in sql:
             return [_Row(step="land", status="pending", count=2)]
-        if "drop_raw_requests" in sql and "list_type" in sql:
+        if "drop_raw_requests" in sql:
+            raw_fetches.append(sql)
             return [
-                _Row(
-                    list_type="Email",
-                    total=4,
-                    response_status_null=3,
-                    response_status_set=1,
-                )
-            ]
-        if "drop_raw_requests" in sql and "GROUP BY response_status" in sql:
-            return [
-                _Row(response_status=None, count=3),
-                _Row(response_status=3, count=1),
+                _Row(list_type="Email", response_status=None, count=3),
+                _Row(list_type="Email", response_status=3, count=1),
             ]
         if "matching_attempts" in sql:
             return [_Row(status="pending", count=2), _Row(status="success", count=5)]
@@ -437,13 +448,14 @@ async def test_collect_pipeline_counts_shape():
         return []
 
     async def fetchval(sql: str, *args: Any) -> Any:
+        fetchval_sqls.append(sql)
+        if _is_drop_request_cardinality_sql(sql):
+            return 7
         if "approaching_sla:" in sql:
             return 0
-        if "response_status IS NULL" in sql and "matching_results" in sql:
-            return 2
         if "status = 'success'" in sql and "drop_connector_attempts" in sql:
             return None
-        return 7
+        return 0
 
     async def fetchrow(sql: str, *args: Any) -> _Row | None:
         if "hash_index_refresh_runs" in sql:
@@ -458,13 +470,21 @@ async def test_collect_pipeline_counts_shape():
     conn.fetchrow = AsyncMock(side_effect=fetchrow)
 
     result = await drop_pipeline.collect_pipeline_counts(conn)
+    assert len(raw_fetches) == 1
+    assert "GROUP BY list_type, response_status" in raw_fetches[0]
+    assert not any(
+        "response_status IS NULL" in sql and "matching_results" in sql
+        for sql in fetchval_sqls
+    )
     assert result["connector_attempts"][0]["count"] == 1
     assert result["ingest_attempts"][0]["step"] == "land"
     assert result["raw_requests_by_list_type"][0]["response_status_null"] == 3
-    assert result["fulfillment"]["ready"] == 2
+    assert result["fulfillment"]["ready"] == 0
     assert result["fulfillment"]["response_status_null"] == 3
     assert result["fulfillment"]["by_response_status"][1]["response_status"] == 3
+    assert result["raw_requests_by_list_type"][0]["total"] == 4
     assert result["drop_requests"]["count"] == 7
+    assert any(_is_drop_request_cardinality_sql(sql) for sql in fetchval_sqls)
     assert result["matching_attempts"]["pending"] == 2
     assert result["matching_attempts"]["success"] == 5
     assert result["matching_attempts"]["drain"] == {
@@ -487,6 +507,64 @@ async def test_collect_pipeline_counts_shape():
     assert result["ca_drop_schedule"]["schedule_utc"]
     assert result["ca_drop_schedule"]["next_run_at"]
     assert result["ca_drop_schedule"]["last_success_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_collect_pipeline_counts_drop_requests_count_is_request_cardinality() -> None:
+    """drop_requests.count is COUNT(*) on DROP requests, not sum of raw GROUP BY totals."""
+    cardinality_sqls: list[str] = []
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        if _is_drop_request_cardinality_sql(sql):
+            cardinality_sqls.append(sql)
+            return []
+        if "drop_raw_requests" in sql:
+            return [
+                _Row(list_type="Email", response_status=None, count=3),
+                _Row(list_type="Email", response_status=3, count=1),
+            ]
+        if "drop_connector_attempts" in sql:
+            return []
+        if "drop_ingest_attempts" in sql:
+            return []
+        if "matching_attempts" in sql:
+            return []
+        if "matching_results" in sql:
+            return []
+        if "approval_requests" in sql:
+            return []
+        if "hash_index_refresh_attempts" in sql:
+            return []
+        if "FROM requests" in sql and "LIMIT" in sql:
+            return []
+        return []
+
+    async def fetchval(sql: str, *args: Any) -> Any:
+        if _is_drop_request_cardinality_sql(sql):
+            cardinality_sqls.append(sql)
+            return 7
+        if "approaching_sla:" in sql:
+            return 0
+        if "status = 'success'" in sql and "drop_connector_attempts" in sql:
+            return None
+        return 0
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        if "matching_drain_lease" in sql:
+            return _Row(holder=None, acquired_at=None, expires_at=None, active=False)
+        return None
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchval = AsyncMock(side_effect=fetchval)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+
+    result = await drop_pipeline.collect_pipeline_counts(conn)
+    assert result["raw_requests_by_list_type"][0]["total"] == 4
+    assert result["drop_requests"]["count"] == 7
+    assert result["drop_requests"]["count"] != 4
+    assert len(cardinality_sqls) >= 1
+    assert all(_is_drop_request_cardinality_sql(sql) for sql in cardinality_sqls)
 
 
 @pytest.mark.asyncio
@@ -814,6 +892,20 @@ def test_drop_stats_global(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_drop_workers_and_health_queues(monkeypatch: pytest.MonkeyPatch):
+    from admin_api import worker_fleet
+
+    catalog_minus_phantom = [
+        name
+        for name, _attr in drop_pipeline.WORKER_KEYS
+        if name != "intake_drop_poller"
+    ]
+    assert "intake_drop_poller" in {name for name, _attr in drop_pipeline.WORKER_KEYS}
+    assert len(catalog_minus_phantom) == 7
+    # Phantom poller omitted; 7 env keys (or deployed-only), never 8 WORKER_KEYS.
+    monkeypatch.setattr(
+        worker_fleet, "list_fleet_worker_keys", lambda: list(catalog_minus_phantom)
+    )
+
     async def fake_health() -> dict[str, Any]:
         return {
             "matching": {
@@ -884,15 +976,30 @@ def test_drop_workers_and_health_queues(monkeypatch: pytest.MonkeyPatch):
         workers = client.get("/ops/drop/workers")
         queues = client.get("/ops/health/queues")
 
-    assert workers.status_code == 200
-    body = workers.json()
-    assert len(body["workers"]) == len(drop_pipeline.WORKER_KEYS)
-    matching = next(w for w in body["workers"] if w["name"] == "matching")
-    assert matching["ok"] is True
-    assert matching["queue"]["pending"] == 2
-    assert "email" not in str(body).lower()
-    assert queues.status_code == 200
-    assert queues.json()["queues"][0]["table"] == "matching_attempts"
+        assert workers.status_code == 200
+        body = workers.json()
+        names = [w["name"] for w in body["workers"]]
+        assert "intake_drop_poller" not in names
+        assert len(names) != len(drop_pipeline.WORKER_KEYS)
+        assert len(names) == 7
+        assert names == catalog_minus_phantom
+        matching = next(w for w in body["workers"] if w["name"] == "matching")
+        assert matching["ok"] is True
+        assert matching["queue"]["pending"] == 2
+        assert "email" not in str(body).lower()
+        assert queues.status_code == 200
+        assert queues.json()["queues"][0]["table"] == "matching_attempts"
+
+        deployed_only = ["matching", "drop_connector"]
+        monkeypatch.setattr(
+            worker_fleet, "list_fleet_worker_keys", lambda: list(deployed_only)
+        )
+        deployed = client.get("/ops/drop/workers")
+        assert deployed.status_code == 200
+        deployed_names = [w["name"] for w in deployed.json()["workers"]]
+        assert "intake_drop_poller" not in deployed_names
+        assert deployed_names == deployed_only
+        assert len(deployed_names) != len(drop_pipeline.WORKER_KEYS)
 
 
 def test_auth_headers_skipped_for_localhost():
@@ -2711,6 +2818,95 @@ async def test_collect_process_run_groups_download_stage():
     assert groups[0]["runs"][0]["run_id"] == "drop_connector:12"
 
 
+@pytest.mark.asyncio
+async def test_collect_process_run_groups_matching_requires_land_success() -> None:
+    """Runs matching must join land success + gcs_uri — file:// fail cannot inherit 1.84M."""
+    fail_at = datetime(2026, 8, 25, 18, 26, tzinfo=timezone.utc)
+    ok_at = datetime(2026, 8, 25, 18, 30, tzinfo=timezone.utc)
+    fail_uri = "file:///tmp/drop.zip"
+    ok_uri = "gs://bucket/drop-real.zip"
+    matching_sqls: list[str] = []
+    matching_uris: list[Any] = []
+    heads = {
+        1: _Row(
+            id=1,
+            status="success",
+            attempted_at=fail_at,
+            completed_at=fail_at,
+            gcs_uri=fail_uri,
+            attempt_number=1,
+        ),
+        2: _Row(
+            id=2,
+            status="success",
+            attempted_at=ok_at,
+            completed_at=ok_at,
+            gcs_uri=ok_uri,
+            attempt_number=1,
+        ),
+    }
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        if "FROM drop_connector_attempts" in sql and "LIMIT" in sql:
+            return [
+                _Row(
+                    id=2,
+                    status="success",
+                    attempted_at=ok_at,
+                    completed_at=ok_at,
+                    has_uri=True,
+                ),
+                _Row(
+                    id=1,
+                    status="success",
+                    attempted_at=fail_at,
+                    completed_at=fail_at,
+                    has_uri=True,
+                ),
+            ]
+        if "FROM matching_attempts" in sql:
+            matching_sqls.append(sql)
+            matching_uris.append(args[0])
+            assert "i.status = 'success'" in sql
+            assert "i.gcs_uri = $1" in sql
+            assert "i.step = 'land'" in sql
+            if args[0] == fail_uri:
+                return []
+            return [
+                _Row(
+                    id=99,
+                    step="match",
+                    status="success",
+                    attempted_at=ok_at,
+                    completed_at=ok_at,
+                    attempt_number=1,
+                    request_id="00000000-0000-0000-0000-000000000099",
+                )
+            ]
+        return []
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        if "step = 'download'" in sql:
+            return heads[int(args[0])]
+        return None
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    groups = await drop_pipeline.collect_process_run_groups(
+        conn, stages=["matching"], days=1
+    )
+    by_id = {int(g["process_id"]): g for g in groups}
+    assert matching_uris == [ok_uri, fail_uri]
+    assert all("i.status = 'success'" in sql for sql in matching_sqls)
+    assert all("i.gcs_uri = $1" in sql for sql in matching_sqls)
+    assert by_id[1]["run_count"] == 0
+    assert by_id[1]["runs"] == []
+    assert by_id[2]["run_count"] == 1
+    assert by_id[2]["runs"][0]["job"] == "matching"
+    assert by_id[2]["runs"][0]["run_id"] == "matching:99"
+
+
 def test_ops_health_and_workers_require_super_admin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2799,6 +2995,7 @@ def test_ops_health_and_workers_require_super_admin(
 
 def _reset_worker_health_cache() -> None:
     drop_pipeline._worker_health_cache = None
+    drop_pipeline._worker_health_refresh_task = None
 
 
 def _patch_worker_health_clock(
@@ -2975,3 +3172,409 @@ async def test_pipeline_worker_health_omits_huge_html_body(
     internal_blob = json.dumps(internal["data_fulfillment"].get("body"))
     assert huge_html not in internal_blob
     assert len(internal_blob) < 200
+
+
+def test_probe_counts_as_down_excludes_404_and_not_deployed() -> None:
+    """404 / not_deployed is not-ok but never red workers_down; timeout still is."""
+    four_oh_four = {
+        "name": "hash_index_refresh",
+        "ok": False,
+        "status_code": 404,
+        "body": {"status": "not_deployed"},
+    }
+    ready_only = {
+        "name": "auth0",
+        "ok": None,
+        "status_code": None,
+        "ready": {"status": "not_deployed"},
+    }
+    body_only = {
+        "name": "google_sheets",
+        "ok": False,
+        "status_code": None,
+        "body": {"status": "not_deployed"},
+    }
+    timeout_down = {
+        "name": "matching",
+        "ok": False,
+        "status_code": None,
+        "error": "timeout",
+    }
+    healthy = {
+        "name": "drop_connector",
+        "ok": True,
+        "status_code": 200,
+        "body": {"status": "ok"},
+    }
+    assert drop_pipeline._is_not_deployed_probe(four_oh_four) is True
+    assert drop_pipeline._probe_counts_as_down(four_oh_four) is False
+    assert drop_pipeline._probe_counts_as_down(ready_only) is False
+    assert drop_pipeline._probe_counts_as_down(body_only) is False
+    assert drop_pipeline._probe_counts_as_down(timeout_down) is True
+    assert drop_pipeline._probe_counts_as_down(healthy) is False
+    public = drop_pipeline._public_worker_health(four_oh_four)
+    assert public["ok"] is False
+    assert public["status_code"] == 404
+    assert public["ready"]["status"] == "not_deployed"
+
+
+@pytest.mark.asyncio
+async def test_not_deployed_404_is_not_workers_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing Cloud Run 404 is not_deployed — workers_down / red stay at zero."""
+    from admin_api import worker_fleet
+
+    _reset_worker_health_cache()
+    _patch_worker_health_clock(monkeypatch, now=4_000.0)
+    monkeypatch.setattr(
+        worker_fleet,
+        "discovered_worker_probe_targets",
+        lambda: [
+            ("hash_index_refresh", "http://127.0.0.1:8086"),
+            ("matching", "http://127.0.0.1:8084"),
+        ],
+    )
+
+    def handler(url: str) -> _HealthResponse:
+        if "8086" in url:
+            return _HealthResponse(404, payload=None, text="Error 404 (not found)")
+        return _HealthResponse(200, payload={"status": "ok", "service": "matching"})
+
+    _patch_readyz_httpx(monkeypatch, handler)
+
+    probed = await drop_pipeline._probe_worker_health(
+        "hash_index_refresh", "http://127.0.0.1:8086"
+    )
+    assert probed["ok"] is False
+    assert probed["status_code"] == 404
+    assert probed["body"]["status"] == "not_deployed"
+    assert drop_pipeline._is_not_deployed_probe(probed) is True
+    assert drop_pipeline._probe_counts_as_down(probed) is False
+
+    health = await drop_pipeline.collect_worker_health()
+    assert drop_pipeline._probe_counts_as_down(health["hash_index_refresh"]) is False
+    assert health["matching"]["ok"] is True
+    naive_down = sum(1 for probe in health.values() if not probe.get("ok"))
+    assert naive_down == 1
+    workers_down = sum(
+        1 for probe in health.values() if drop_pipeline._probe_counts_as_down(probe)
+    )
+    assert workers_down == 0
+
+    class _Acquire:
+        async def __aenter__(self):
+            conn = MagicMock()
+            conn.fetchval = AsyncMock(side_effect=[0, 0, 0, 0])
+            return conn
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    stats = await drop_pipeline.drop_stats_global(MagicMock())
+    assert stats["workers_down"] == 0
+    assert stats["workers_total"] == 2
+
+    async def fake_counts(conn: Any) -> dict[str, Any]:
+        return {"connector_attempts": []}
+
+    monkeypatch.setattr(drop_pipeline, "collect_pipeline_counts", fake_counts)
+    status = await drop_pipeline.get_pipeline_status()
+    public = status["worker_health"]["hash_index_refresh"]
+    assert public["ok"] is False
+    assert public["status_code"] == 404
+    assert public["ready"]["status"] == "not_deployed"
+    assert "url" not in public
+    assert drop_pipeline._probe_counts_as_down(public) is False
+
+
+_FOURTEEN_FLEET_PROBE_TARGETS: list[tuple[str, str]] = [
+    ("admin_web", "https://admin-web-prod.example.run.app"),
+    ("admin_api", "https://admin-api-prod.example.run.app"),
+    ("ops_ia_web", "https://ops-ia-web.example.run.app"),
+    ("drop_connector", "http://127.0.0.1:8081"),
+    ("drop_ingestor", "http://127.0.0.1:8082"),
+    ("request_dispatcher", "http://127.0.0.1:8083"),
+    ("matching", "http://127.0.0.1:8084"),
+    ("data_fulfillment", "http://127.0.0.1:8085"),
+    ("hash_index_refresh", "http://127.0.0.1:8086"),
+    ("reaper", "http://127.0.0.1:8087"),
+    ("intake_drop_poller", "http://127.0.0.1:8088"),
+    ("auth0", "http://127.0.0.1:8089"),
+    ("google_sheets", "http://127.0.0.1:8090"),
+    ("sla_monitor", "http://127.0.0.1:8091"),
+]
+
+
+@pytest.mark.asyncio
+async def test_get_pipeline_status_does_not_issue_fourteen_live_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warm worker-health cache + control-plane skip: pipeline must not fan out 14 GETs."""
+    from admin_api import worker_fleet
+
+    assert len(_FOURTEEN_FLEET_PROBE_TARGETS) == 14
+    _reset_worker_health_cache()
+    _patch_worker_health_clock(monkeypatch, now=3_000.0)
+    monkeypatch.setattr(
+        worker_fleet,
+        "discovered_worker_probe_targets",
+        lambda: list(_FOURTEEN_FLEET_PROBE_TARGETS),
+    )
+
+    def handler(url: str) -> _HealthResponse:
+        return _HealthResponse(200, payload={"status": "ok", "service": "worker"})
+
+    seen = _patch_readyz_httpx(monkeypatch, handler)
+
+    first = await drop_pipeline.collect_worker_health()
+    cold_probes = len(seen)
+    assert cold_probes < 14
+    assert cold_probes > 0
+    assert not any(
+        token in url
+        for url in seen
+        for token in ("admin-web", "admin-api", "ops-ia-web")
+    )
+    assert "admin_web" not in first
+    assert "admin_api" not in first
+    assert first["matching"]["ok"] is True
+
+    async def fake_counts(conn: Any) -> dict[str, Any]:
+        return {"connector_attempts": []}
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "collect_pipeline_counts", fake_counts)
+
+    status = await drop_pipeline.get_pipeline_status()
+    again = await drop_pipeline.collect_worker_health()
+    second_status = await drop_pipeline.get_pipeline_status()
+
+    assert status["worker_health"]["matching"]["ok"] is True
+    assert second_status["worker_health"]["matching"]["ok"] is True
+    assert again == first
+    assert len(seen) == cold_probes
+    assert "url" not in status["worker_health"]["matching"]
+
+
+@pytest.mark.asyncio
+async def test_collect_pipeline_counts_single_raw_group_by_no_second_scan() -> None:
+    """Cheap /pipeline counts: one list_type + response_status GROUP BY, no dual raw scan."""
+    raw_fetches: list[str] = []
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        if "drop_raw_requests" in sql:
+            raw_fetches.append(sql)
+            return [
+                _Row(list_type="Email", response_status=None, count=3),
+                _Row(list_type="Email", response_status=3, count=1),
+                _Row(list_type="Phone", response_status=None, count=2),
+            ]
+        if "drop_connector_attempts" in sql:
+            return [_Row(step="download", status="success", count=1)]
+        if "drop_ingest_attempts" in sql:
+            return [_Row(step="land", status="success", count=1)]
+        if "matching_attempts" in sql:
+            return [_Row(status="pending", count=2)]
+        if "matching_results" in sql:
+            return []
+        if "approval_requests" in sql:
+            return [_Row(status="pending", count=1)]
+        if "hash_index_refresh_attempts" in sql:
+            return []
+        if "FROM requests" in sql and "LIMIT" in sql:
+            return []
+        return []
+
+    request_count_sqls: list[str] = []
+
+    async def fetchval(sql: str, *args: Any) -> Any:
+        if _is_drop_request_cardinality_sql(sql):
+            request_count_sqls.append(sql)
+            return 11
+        if "approaching_sla:" in sql:
+            return 0
+        if "response_status IS NULL" in sql and "matching_results" in sql:
+            return 0
+        if "status = 'success'" in sql and "drop_connector_attempts" in sql:
+            return None
+        return 0
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        if "matching_drain_lease" in sql:
+            return _Row(holder=None, acquired_at=None, expires_at=None, active=False)
+        return None
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchval = AsyncMock(side_effect=fetchval)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+
+    result = await drop_pipeline.collect_pipeline_counts(conn)
+    assert len(raw_fetches) == 1
+    assert "GROUP BY list_type, response_status" in raw_fetches[0]
+    assert raw_fetches[0].count("FROM drop_raw_requests") == 1
+    by_list = {row["list_type"]: row for row in result["raw_requests_by_list_type"]}
+    assert by_list["Email"]["total"] == 4
+    assert by_list["Email"]["response_status_null"] == 3
+    assert by_list["Email"]["response_status_set"] == 1
+    assert by_list["Phone"]["total"] == 2
+    assert result["fulfillment"]["response_status_null"] == 5
+    statuses = {
+        row["response_status"]: row["count"]
+        for row in result["fulfillment"]["by_response_status"]
+    }
+    assert statuses[None] == 5
+    assert statuses[3] == 1
+    assert result["fulfillment"]["ready"] == 0
+    assert result["drop_requests"]["count"] == 11
+    assert len(request_count_sqls) == 1
+
+
+@pytest.mark.asyncio
+async def test_collect_bulk_process_progress_matching_not_global_across_cards() -> None:
+    """Process matching is scoped to that download's gcs_uri — not 1.84M on every card."""
+    attempted_fail = datetime(2026, 8, 25, 18, 26, tzinfo=timezone.utc)
+    attempted_ok = datetime(2026, 8, 25, 18, 30, tzinfo=timezone.utc)
+    fail_uri = "file:///tmp/drop.zip"
+    ok_uri = "gs://bucket/drop-real.zip"
+    global_matching = 1_843_251
+    heads = {
+        1: _Row(
+            id=1,
+            status="success",
+            attempted_at=attempted_fail,
+            completed_at=attempted_fail,
+            gcs_uri=fail_uri,
+        ),
+        2: _Row(
+            id=2,
+            status="success",
+            attempted_at=attempted_ok,
+            completed_at=attempted_ok,
+            gcs_uri=ok_uri,
+        ),
+    }
+    scoped_stats = {
+        fail_uri: _Row(
+            raw_rows=0,
+            request_rows=0,
+            land_csv_count=0,
+            matching_none=0,
+            matching_open=0,
+            matching_success=0,
+            matching_failed=0,
+            matching_results_count=0,
+            review_pending=0,
+            review_approved=0,
+            fulfill_unset=0,
+            fulfill_done=0,
+        ),
+        ok_uri: _Row(
+            raw_rows=global_matching,
+            request_rows=global_matching,
+            land_csv_count=3,
+            matching_none=0,
+            matching_open=1_085_000,
+            matching_success=6_342,
+            matching_failed=0,
+            matching_results_count=6_342,
+            review_pending=0,
+            review_approved=0,
+            fulfill_unset=global_matching,
+            fulfill_done=0,
+        ),
+    }
+    matching_sql_uris: list[Any] = []
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        if "FROM drop_connector_attempts" in sql and "step = 'download'" in sql:
+            return heads[int(args[0])]
+        if "batch_raw" in sql or "WITH batch_raw" in sql:
+            uri = args[0]
+            matching_sql_uris.append(uri)
+            assert "i.gcs_uri = $1" in sql
+            assert "i.status = 'success'" in sql
+            assert "FROM matching_attempts" in sql
+            assert "JOIN batch_requests" in sql
+            assert "FROM matching_attempts ma\n         GROUP BY" not in sql
+            return scoped_stats[uri]
+        return None
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        if "drop_ingest_attempts" in sql:
+            assert args[0] in (fail_uri, ok_uri)
+            if args[0] == fail_uri:
+                return [
+                    _Row(step="land", status="submit_error", list_type="Email", count=1),
+                    _Row(step="land", status="submit_error", list_type="Phone", count=1),
+                    _Row(step="land", status="submit_error", list_type="NDZ", count=1),
+                ]
+            return [
+                _Row(step="land", status="success", list_type="Email", count=1),
+                _Row(step="land", status="success", list_type="Phone", count=1),
+                _Row(step="land", status="success", list_type="NDZ", count=1),
+            ]
+        return []
+
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    conn.fetch = AsyncMock(side_effect=fetch)
+
+    fail_card = await drop_pipeline.collect_bulk_process_progress(conn, process_id=1)
+    ok_card = await drop_pipeline.collect_bulk_process_progress(conn, process_id=2)
+    assert fail_card is not None
+    assert ok_card is not None
+    assert matching_sql_uris == [fail_uri, ok_uri]
+    assert fail_card["stages"]["matching"]["total"] == 0
+    assert fail_card["stages"]["matching"]["total"] != global_matching
+    assert ok_card["stages"]["matching"]["open"] == 1_085_000
+    assert ok_card["stages"]["matching"]["success"] == 6_342
+    assert ok_card["stages"]["matching"]["total"] == 1_085_000 + 6_342
+    assert ok_card["stages"]["matching"]["total"] != fail_card["stages"]["matching"]["total"]
+    assert ok_card["stages"]["matching"]["total"] != global_matching
+
+
+@pytest.mark.asyncio
+async def test_collect_bulk_process_progress_missing_gcs_uri_skips_global_matching() -> None:
+    """A download with no gcs_uri must not query unscoped matching_attempts."""
+    attempted = datetime(2026, 8, 25, 18, 26, tzinfo=timezone.utc)
+    matching_queries = 0
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        nonlocal matching_queries
+        if "FROM drop_connector_attempts" in sql and "step = 'download'" in sql:
+            return _Row(
+                id=1,
+                status="success",
+                attempted_at=attempted,
+                completed_at=attempted,
+                gcs_uri=None,
+            )
+        if "matching_attempts" in sql or "batch_raw" in sql:
+            matching_queries += 1
+            raise AssertionError("unscoped matching query for a card with no gcs_uri")
+        return None
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        if "matching_attempts" in sql:
+            raise AssertionError("unscoped matching fetch for a card with no gcs_uri")
+        return []
+
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    conn.fetch = AsyncMock(side_effect=fetch)
+
+    detail = await drop_pipeline.collect_bulk_process_progress(conn, process_id=1)
+    assert detail is not None
+    assert matching_queries == 0
+    assert detail["stages"]["matching"]["total"] == 0
+    assert detail["stages"]["matching"]["open"] == 0
+    assert detail["stages"]["matching"]["success"] == 0
+    assert detail["request_rows"] == 0

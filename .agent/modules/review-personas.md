@@ -24,7 +24,7 @@ UV, packages, and session gates: root [`AGENTS.md`](../../AGENTS.md) — do not 
 
 Each QCQA persona writes `/tmp/qcqa-<persona>-<slug>.md` with the commands run and pass/fail. Fail the QCQA round if a required suite fails or the invariants below regress.
 
-Hermetic pytest: `DATABASE_URL=""`. Run every suite the change touches (at least one persona must run each required command):
+Hermetic pytest: `DATABASE_URL=""`. Run every suite the change touches (at least one persona must run each required command). Testers must **run** the reaper suite and `test_vertical_chunk_drain.py` — listing them is not enough:
 
 ```bash
 DATABASE_URL="" uv run --package drop-ingestor pytest app/drop_ingestor/tests/test_land.py -q
@@ -32,6 +32,7 @@ DATABASE_URL="" uv run --package drop-connector pytest app/drop_connector/tests/
 DATABASE_URL="" uv run --package request-dispatcher pytest app/request_dispatcher/tests/test_dispatch.py -q
 DATABASE_URL="" uv run --package admin-api pytest app/admin_api/tests/test_drop_pipeline.py app/admin_api/tests/test_auth0_matching_api.py -q
 DATABASE_URL="" uv run --package matching-worker pytest app/matching/tests/test_chunk_drain_job.py app/matching/tests/test_vertical_chunk_drain.py -q
+DATABASE_URL="" uv run --package reaper pytest app/reaper/tests/test_reaper_health.py app/reaper/tests/test_reaper_config.py -q
 cd clients/web && bun test
 ```
 
@@ -41,5 +42,7 @@ cd clients/web && bun test
 | drop-connector | `test_download.py` | `K_SERVICE` + empty bucket does not yield `intake_gcs_bucket_required` |
 | request-dispatcher | `test_dispatch.py` | Auth0/Email SQL lacks `$n::varchar` |
 | admin-api | `test_drop_pipeline.py`, `test_auth0_matching_api.py` | health cache regresses; master data repository (MDR) search missing; Auth0 search not gated |
-| matching | `test_chunk_drain_job.py`, `test_vertical_chunk_drain.py` | drain-job or vertical drain invariants regress |
+| admin-api | `test_drop_pipeline.py` (when those tests exist) | 404 undeployed is treated as worker down |
+| matching | `test_chunk_drain_job.py`, `test_vertical_chunk_drain.py` | matching review `INSERT` lacks `$1::varchar` (`AmbiguousParameterError` class); drain-job or vertical drain invariants regress |
+| reaper | `test_reaper_health.py`, `test_reaper_config.py` | testers did not **run** the suite; matching reap or review reconcile regresses; fulfill is invoked |
 | `clients/web` | `bun test` | web tests fail when `clients/web` changed |

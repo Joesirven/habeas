@@ -7,7 +7,9 @@ import inspect
 import json
 import logging
 import os
-from collections.abc import Awaitable, Callable
+import threading
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
@@ -43,6 +45,10 @@ DEFAULT_CHUNK_LIMIT = 10_000
 COMPLETE_BATCH_SIZE = 250
 DEFAULT_DRAIN_LEASE_HOLDER = "matching-drain-job"
 DATA_DROP_LEASE_KEY = "data-drop"
+DEFAULT_DRAIN_TASK_COUNT = 20
+DEFAULT_CLAIM_LEASE_MINUTES = 15
+DEFAULT_IDLE_SLEEP_SECONDS = 1.0
+DEFAULT_LEASE_HEARTBEAT_SECONDS = 30.0
 
 _LOAD_CHUNK_HASHES_SQL = """
 SELECT r.id, drr.list_type, drr.raw_payload
@@ -96,6 +102,211 @@ def drain_lease_holder() -> str:
     return os.environ.get("MATCHING_DRAIN_LEASE_HOLDER", DEFAULT_DRAIN_LEASE_HOLDER)
 
 
+def drain_task_count() -> int:
+    raw = os.environ.get("MATCHING_DRAIN_TASK_COUNT", str(DEFAULT_DRAIN_TASK_COUNT))
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_DRAIN_TASK_COUNT
+
+
+def _idle_sleep_seconds() -> float:
+    raw = os.environ.get(
+        "MATCHING_DRAIN_IDLE_SLEEP_SECONDS", str(DEFAULT_IDLE_SLEEP_SECONDS)
+    )
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_IDLE_SLEEP_SECONDS
+
+
+def _execute_rowcount(result: Any) -> int:
+    """Parse asyncpg ``UPDATE N`` / MagicMock execute results. Counts only."""
+    if not isinstance(result, str):
+        return 0
+    parts = result.split()
+    if len(parts) >= 2 and parts[0].upper() == "UPDATE":
+        try:
+            return int(parts[-1])
+        except ValueError:
+            return 0
+    return 0
+
+
+async def _await_maybe(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _run_claim_release_sql(conn: Any, sql: str, *args: Any) -> int:
+    execute = getattr(conn, "execute", None)
+    if execute is None:
+        return 0
+    try:
+        result = await _await_maybe(execute(sql, *args))
+    except (TypeError, ValueError):
+        return 0
+    return _execute_rowcount(result)
+
+
+async def reap_stale_matching_claims(
+    conn: Any,
+    *,
+    lease_minutes: int = DEFAULT_CLAIM_LEASE_MINUTES,
+) -> int:
+    """Return dead-lease ``claimed`` matching rows to ``pending``.
+
+    Covers expired ``claim_expires_at`` and claimed rows with no heartbeat
+    older than the claim lease window. Ids never logged.
+    """
+    released = await _run_claim_release_sql(
+        conn,
+        f"""
+                UPDATE {MATCHING_ATTEMPTS_TABLE}
+                   SET status = 'pending',
+                       worker_id = NULL,
+                       claim_expires_at = NULL
+                 WHERE status = 'claimed'
+                   AND step = 'matching'
+                   AND (
+                        (claim_expires_at IS NOT NULL
+                         AND claim_expires_at < NOW())
+                        OR (
+                            claim_expires_at IS NULL
+                            AND attempted_at < NOW()
+                                - ($1::varchar || ' minutes')::interval
+                        )
+                   )
+                """,
+        str(lease_minutes),
+    )
+    if released:
+        logger.info(
+            "matching_drain_reaped_stale_claims",
+            extra={
+                "event": "matching_drain_reaped_stale_claims",
+                "reaped": released,
+            },
+        )
+    return released
+
+
+async def reap_all_matching_claims(conn: Any) -> int:
+    """Return every ``claimed`` matching row to ``pending``.
+
+    Used after a new drain lease is acquired: the previous Job is dead,
+    so leftovers must not wait out ``claim_expires_at``. Counts only.
+    """
+    released = await _run_claim_release_sql(
+        conn,
+        f"""
+                UPDATE {MATCHING_ATTEMPTS_TABLE}
+                   SET status = 'pending',
+                       worker_id = NULL,
+                       claim_expires_at = NULL
+                 WHERE status = 'claimed'
+                   AND step = 'matching'
+                """,
+    )
+    if released:
+        logger.info(
+            "matching_drain_reaped_all_claims",
+            extra={
+                "event": "matching_drain_reaped_all_claims",
+                "reaped": released,
+            },
+        )
+    return released
+
+
+async def reap_worker_matching_claims(conn: Any, worker_id: str) -> int:
+    """Return this worker's ``claimed`` matching rows to ``pending``."""
+    released = await _run_claim_release_sql(
+        conn,
+        f"""
+                UPDATE {MATCHING_ATTEMPTS_TABLE}
+                   SET status = 'pending',
+                       worker_id = NULL,
+                       claim_expires_at = NULL
+                 WHERE status = 'claimed'
+                   AND step = 'matching'
+                   AND worker_id = $1::varchar
+                """,
+        worker_id,
+    )
+    if released:
+        logger.info(
+            "matching_drain_reaped_worker_claims",
+            extra={
+                "event": "matching_drain_reaped_worker_claims",
+                "reaped": released,
+            },
+        )
+    return released
+
+
+async def _count_matching_status(conn: Any, sql: str, *args: Any) -> int:
+    try:
+        value = await _await_maybe(conn.fetchval(sql, *args))
+    except (TypeError, ValueError, StopAsyncIteration):
+        return 0
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _stale_claimed_matching_count(
+    conn: Any,
+    *,
+    lease_minutes: int = DEFAULT_CLAIM_LEASE_MINUTES,
+) -> int:
+    return await _count_matching_status(
+        conn,
+        f"""
+                SELECT COUNT(*)::bigint
+                  FROM {MATCHING_ATTEMPTS_TABLE}
+                 WHERE status = 'claimed'
+                   AND step = 'matching'
+                   AND (
+                        (claim_expires_at IS NOT NULL
+                         AND claim_expires_at < NOW())
+                        OR (
+                            claim_expires_at IS NULL
+                            AND attempted_at < NOW()
+                                - ($1::varchar || ' minutes')::interval
+                        )
+                   )
+                """,
+        str(lease_minutes),
+    )
+
+
+async def _claimed_matching_count(conn: Any) -> int:
+    return await _count_matching_status(
+        conn,
+        f"""
+                SELECT COUNT(*)::bigint
+                  FROM {MATCHING_ATTEMPTS_TABLE}
+                 WHERE status = 'claimed'
+                   AND step = 'matching'
+                """,
+    )
+
+
+def _queue_has_matching_work(work: dict[str, int]) -> bool:
+    return int(work.get("pending") or 0) + int(work.get("claimed") or 0) > 0
+
+
+async def _matching_work_remaining(conn: Any) -> dict[str, int]:
+    """Pending + all claimed. Unexpired crash leftovers are still work."""
+    pending = await _pending_matching_count(conn)
+    claimed = await _claimed_matching_count(conn)
+    stale = await _stale_claimed_matching_count(conn)
+    return {"pending": pending, "claimed": claimed, "stale_claimed": stale}
+
+
 def job_task_worker_id(base: str | None = None) -> str:
     """Worker id unique per Cloud Run Job task (SKIP LOCKED safe)."""
     root = base or os.environ.get("WORKER_ID", "matching-drain")
@@ -114,6 +325,134 @@ def _lease_call_kwargs(fn: Callable[..., Any], holder: str) -> dict[str, Any]:
     except (TypeError, ValueError):
         pass
     return kwargs
+
+
+def _lease_heartbeat_seconds() -> float:
+    raw = os.environ.get(
+        "MATCHING_DRAIN_LEASE_HEARTBEAT_SECONDS",
+        str(DEFAULT_LEASE_HEARTBEAT_SECONDS),
+    )
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return DEFAULT_LEASE_HEARTBEAT_SECONDS
+
+
+async def _open_heartbeat_connection() -> Any | None:
+    """Dedicated connection so renew cannot race the chunk's conn."""
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if not database_url:
+        return None
+    try:
+        import asyncpg
+
+        return await asyncpg.connect(database_url)
+    except Exception as exc:
+        logger.warning(
+            "matching_drain_lease_heartbeat_connect_failed",
+            extra={
+                "event": "matching_drain_lease_heartbeat_connect_failed",
+                "error_summary": redact_error_text(str(exc)),
+            },
+        )
+        return None
+
+
+async def _renew_drain_lease_safe(conn: Any, holder: str) -> None:
+    try:
+        await renew_drain_lease(
+            conn, **_lease_call_kwargs(renew_drain_lease, holder)
+        )
+    except Exception as exc:
+        logger.warning(
+            "matching_drain_lease_heartbeat_failed",
+            extra={
+                "event": "matching_drain_lease_heartbeat_failed",
+                "error_summary": redact_error_text(str(exc)),
+            },
+        )
+
+
+async def _lease_heartbeat_async(holder: str, stop: threading.Event) -> None:
+    """Renew on a private loop/connection; BQ blocks the Job event loop."""
+    interval = _lease_heartbeat_seconds()
+    hb_conn = await _open_heartbeat_connection()
+    if hb_conn is None:
+        return
+    try:
+        while not stop.is_set():
+            flagged = await asyncio.to_thread(stop.wait, interval)
+            if flagged:
+                break
+            await _renew_drain_lease_safe(hb_conn, holder)
+    finally:
+        try:
+            await hb_conn.close()
+        except Exception as exc:
+            logger.warning(
+                "matching_drain_lease_heartbeat_close_failed",
+                extra={
+                    "event": "matching_drain_lease_heartbeat_close_failed",
+                    "error_summary": redact_error_text(str(exc)),
+                },
+            )
+
+
+def _lease_heartbeat_thread(holder: str, stop: threading.Event) -> None:
+    try:
+        asyncio.run(_lease_heartbeat_async(holder, stop))
+    except Exception as exc:
+        logger.warning(
+            "matching_drain_lease_heartbeat_failed",
+            extra={
+                "event": "matching_drain_lease_heartbeat_failed",
+                "error_summary": redact_error_text(str(exc)),
+            },
+        )
+
+
+@asynccontextmanager
+async def _drain_lease_heartbeat(holder: str) -> AsyncIterator[None]:
+    """Start a 30s drain-lease renew thread; stop it when the chunk returns.
+
+    Uses a dedicated DB connection on a side thread so a multi-minute
+    blocking BigQuery lookup cannot starve renew (and so we never share
+    the chunk's asyncpg connection).
+    """
+    stop = threading.Event()
+    thread: threading.Thread | None = None
+    try:
+        thread = threading.Thread(
+            target=_lease_heartbeat_thread,
+            args=(holder, stop),
+            name="matching-drain-lease-heartbeat",
+            daemon=True,
+        )
+        thread.start()
+    except Exception as exc:
+        logger.warning(
+            "matching_drain_lease_heartbeat_failed",
+            extra={
+                "event": "matching_drain_lease_heartbeat_failed",
+                "error_summary": redact_error_text(str(exc)),
+            },
+        )
+        thread = None
+    try:
+        yield
+    finally:
+        stop.set()
+        if thread is not None:
+            try:
+                thread.join(timeout=5.0)
+            except Exception as exc:
+                logger.warning(
+                    "matching_drain_lease_heartbeat_failed",
+                    extra={
+                        "event": "matching_drain_lease_heartbeat_failed",
+                        "error_summary": redact_error_text(str(exc)),
+                    },
+                )
 
 
 async def _bulk_ensure_matching_reviews(
@@ -146,25 +485,25 @@ async def _bulk_ensure_matching_reviews(
             context_jsonb, expires_at
         )
         SELECT v.request_id,
-               $1,
-               $2,
-               $3,
+               $1::varchar,
+               $2::bigint,
+               $3::varchar,
                'pending',
                v.context_jsonb::jsonb,
-               $4
+               $4::timestamptz
           FROM UNNEST($5::uuid[], $6::text[]) AS v(request_id, context_jsonb)
          WHERE NOT EXISTS (
                  SELECT 1
                    FROM approval_requests ar
                   WHERE ar.request_id = v.request_id
-                    AND ar.action_type = $1
+                    AND ar.action_type = $1::varchar
                     AND ar.status = 'pending'
                )
            AND NOT EXISTS (
                  SELECT 1
                    FROM approval_requests ar
                   WHERE ar.request_id = v.request_id
-                    AND ar.action_type = $1
+                    AND ar.action_type = $1::varchar
                     AND ar.status = 'approved'
                     AND ar.decided_at IS NOT NULL
                     AND ar.decided_at >= (
@@ -258,9 +597,9 @@ async def _bulk_complete_successes(
                     $1::bigint[],
                     $2::uuid[],
                     $3::boolean[],
-                    $4::text[],
+                    $4::varchar[],
                     $5::numeric[],
-                    $6::text[],
+                    $6::varchar[],
                     $7::int[]
                   ) AS t(
                     attempt_id, request_id, matched, consumer_id,
@@ -343,13 +682,14 @@ async def process_matching_chunk(
     bq_client: Any | None = None,
 ) -> dict[str, Any]:
     """Claim one homogeneous chunk, set-based BQ lookup, bulk-complete."""
+    reaped = await reap_stale_matching_claims(conn)
     claimed = await claim_matching_chunk(
         conn,
         worker_id=worker_id,
         limit=limit,
     )
     if not claimed:
-        return {"status": "idle", "claimed": 0, "completed": 0}
+        return {"status": "idle", "claimed": 0, "completed": 0, "reaped": reaped}
 
     requestor_state = str(claimed[0]["requestor_state"])
     list_type_raw = str(claimed[0]["list_type"])
@@ -561,17 +901,43 @@ async def ensure_drain(
     holder: str | None = None,
     start_job: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
-    """Acquire drain lease if pending work exists; optionally start Job callback."""
+    """Acquire drain lease if pending or claimed work exists; start Job."""
     lease_holder = holder or drain_lease_holder()
-    pending_n = await _pending_matching_count(conn)
-    if pending_n <= 0:
-        return {"status": "idle", "pending": 0, "lease_acquired": False}
+    reaped = await reap_stale_matching_claims(conn)
+    work = await _matching_work_remaining(conn)
+    pending_n = work["pending"]
+    claimed_n = work["claimed"]
+    stale_n = work["stale_claimed"]
+    if not _queue_has_matching_work(work):
+        return {
+            "status": "idle",
+            "pending": 0,
+            "claimed": 0,
+            "stale_claimed": 0,
+            "reaped": reaped,
+            "lease_acquired": False,
+        }
 
     acquired = await acquire_drain_lease(
         conn, **_lease_call_kwargs(acquire_drain_lease, lease_holder)
     )
     if not acquired:
-        return {"status": "drain_active", "pending": pending_n, "lease_acquired": False}
+        return {
+            "status": "drain_active",
+            "pending": pending_n,
+            "claimed": claimed_n,
+            "stale_claimed": stale_n,
+            "reaped": reaped,
+            "lease_acquired": False,
+        }
+
+    # Previous Job is dead. Do not wait 15 minutes for crash leftovers.
+    crash_reaped = await reap_all_matching_claims(conn)
+    reaped += crash_reaped
+    work = await _matching_work_remaining(conn)
+    pending_n = work["pending"]
+    claimed_n = work["claimed"]
+    stale_n = work["stale_claimed"]
 
     job_started = False
     if start_job is not None:
@@ -591,6 +957,9 @@ async def ensure_drain(
                 "status": "error",
                 "reason": "job_start_failed",
                 "pending": pending_n,
+                "claimed": claimed_n,
+                "stale_claimed": stale_n,
+                "reaped": reaped,
                 "lease_acquired": False,
             }
 
@@ -598,9 +967,12 @@ async def ensure_drain(
     return {
         "status": "started",
         "pending": pending_n,
+        "claimed": claimed_n,
+        "stale_claimed": stale_n,
+        "reaped": reaped,
         "lease_acquired": True,
         "job_started": job_started,
-        "task_count": int(os.environ.get("MATCHING_DRAIN_TASK_COUNT", "5")),
+        "task_count": drain_task_count(),
         "chunk_limit": DEFAULT_CHUNK_LIMIT,
         "holder": lease_holder,
     }
@@ -614,11 +986,20 @@ async def run_drain_budget(
     bq_client: Any | None = None,
     holder: str | None = None,
 ) -> dict[str, Any]:
-    """Acquire lease and process chunks until idle or ``max_chunks`` (inline Job shell)."""
+    """Acquire lease and process 10k chunks until the matching queue is empty."""
     lease_holder = holder or drain_lease_holder()
-    pending_before = await _pending_matching_count(conn)
-    if pending_before <= 0:
-        return {"status": "idle", "pending": 0, "chunks": 0, "completed": 0}
+    reaped = await reap_stale_matching_claims(conn)
+    work = await _matching_work_remaining(conn)
+    pending_before = work["pending"]
+    if not _queue_has_matching_work(work):
+        return {
+            "status": "idle",
+            "pending": 0,
+            "claimed": 0,
+            "chunks": 0,
+            "completed": 0,
+            "reaped": reaped,
+        }
 
     acquired = await acquire_drain_lease(
         conn, **_lease_call_kwargs(acquire_drain_lease, lease_holder)
@@ -627,38 +1008,144 @@ async def run_drain_budget(
         return {
             "status": "drain_active",
             "pending": pending_before,
+            "claimed": work["claimed"],
+            "stale_claimed": work["stale_claimed"],
             "chunks": 0,
             "completed": 0,
+            "reaped": reaped,
         }
+
+    reaped += await reap_all_matching_claims(conn)
 
     chunks = 0
     completed = 0
+    last_status = "idle"
     try:
-        while chunks < max_chunks:
-            await renew_drain_lease(
-                conn, **_lease_call_kwargs(renew_drain_lease, lease_holder)
-            )
-            result = await process_matching_chunk(
-                conn,
-                worker_id=worker_id,
-                bq_client=bq_client,
-            )
-            if result.get("status") == "idle" or int(result.get("claimed") or 0) == 0:
-                break
-            chunks += 1
-            completed += int(result.get("completed") or 0)
+        drain = await _drain_until_empty(
+            conn,
+            worker_id=worker_id,
+            lease_holder=lease_holder,
+            max_chunks=max_chunks,
+            bq_client=bq_client,
+        )
+        chunks = drain["chunks"]
+        completed = drain["completed"]
+        last_status = drain["last_status"]
+        reaped += drain["reaped"]
     finally:
         await release_drain_lease(
             conn, **_lease_call_kwargs(release_drain_lease, lease_holder)
         )
 
-    pending_after = await _pending_matching_count(conn)
+    work_after = await _matching_work_remaining(conn)
+    pending_after = work_after["pending"]
+    status = "ok"
+    if _queue_has_matching_work(work_after):
+        status = "pending_remaining"
     return {
-        "status": "ok",
+        "status": status,
         "pending_before": pending_before,
         "pending_after": pending_after,
+        "claimed_after": work_after["claimed"],
         "chunks": chunks,
         "completed": completed,
+        "reaped": reaped,
+        "last_status": last_status,
+    }
+
+
+async def _drain_until_empty(
+    conn: Any,
+    *,
+    worker_id: str,
+    lease_holder: str,
+    max_chunks: int,
+    bq_client: Any | None = None,
+) -> dict[str, Any]:
+    """Claim 10k chunks until pending+claimed is 0.
+
+    An empty homogeneous claim is not idle while matching work remains.
+    Complete-path errors are logged (redacted) and the loop continues.
+    Cloud Run task timeout is the backstop — do not yield while the
+    queue is open. ``max_chunks`` is accepted for callers but does not
+    stop the loop.
+    """
+    chunks = 0
+    completed = 0
+    reaped = 0
+    last_status = "idle"
+    empty_attempts = 0
+    _ = max_chunks
+
+    while True:
+        await renew_drain_lease(
+            conn, **_lease_call_kwargs(renew_drain_lease, lease_holder)
+        )
+        try:
+            async with _drain_lease_heartbeat(lease_holder):
+                result = await process_matching_chunk(
+                    conn,
+                    worker_id=worker_id,
+                    bq_client=bq_client,
+                )
+        except Exception as exc:
+            safe = redact_error_text(str(exc))
+            logger.error(
+                "matching_drain_chunk_failed",
+                extra={
+                    "event": "matching_drain_chunk_failed",
+                    "error_summary": safe,
+                },
+            )
+            released = await reap_worker_matching_claims(conn, worker_id)
+            released += await reap_stale_matching_claims(conn)
+            reaped += released
+            last_status = "pending_remaining"
+            work = await _matching_work_remaining(conn)
+            if not _queue_has_matching_work(work):
+                last_status = "idle"
+                break
+            sleep_s = _idle_sleep_seconds()
+            if sleep_s > 0:
+                await asyncio.sleep(sleep_s)
+            continue
+        last_status = str(result.get("status") or "idle")
+        claimed = int(result.get("claimed") or 0)
+        reaped += int(result.get("reaped") or 0)
+        if claimed > 0:
+            empty_attempts = 0
+            chunks += 1
+            completed += int(result.get("completed") or 0)
+            continue
+
+        released = await reap_stale_matching_claims(conn)
+        reaped += released
+        work = await _matching_work_remaining(conn)
+        if not _queue_has_matching_work(work):
+            last_status = "idle"
+            break
+        empty_attempts += 1
+        last_status = "pending_remaining"
+        logger.info(
+            "matching_drain_retry_pending",
+            extra={
+                "event": "matching_drain_retry_pending",
+                "pending": work["pending"],
+                "claimed": work["claimed"],
+                "stale_claimed": work["stale_claimed"],
+                "empty_attempts": empty_attempts,
+                "reaped": released,
+            },
+        )
+        sleep_s = _idle_sleep_seconds()
+        if sleep_s > 0:
+            await asyncio.sleep(sleep_s)
+
+    return {
+        "chunks": chunks,
+        "completed": completed,
+        "reaped": reaped,
+        "last_status": last_status,
     }
 
 
@@ -670,35 +1157,40 @@ async def run_job_task(
     bq_client: Any | None = None,
     holder: str | None = None,
 ) -> dict[str, Any]:
-    """Cloud Run Job task body: drain chunks via SKIP LOCKED (no lease acquire)."""
+    """Cloud Run Job task body: drain 10k chunks until the queue is empty."""
     lease_holder = holder or drain_lease_holder()
     task_worker = worker_id or job_task_worker_id()
     budget = max_chunks
     if budget is None:
         budget = int(os.environ.get("MATCHING_DRAIN_MAX_CHUNKS", "50"))
 
-    chunks = 0
-    completed = 0
-    last_status = "idle"
-    while chunks < budget:
-        await renew_drain_lease(conn, **_lease_call_kwargs(renew_drain_lease, lease_holder))
-        result = await process_matching_chunk(
-            conn,
-            worker_id=task_worker,
-            bq_client=bq_client,
-        )
-        last_status = str(result.get("status") or "idle")
-        claimed = int(result.get("claimed") or 0)
-        if last_status == "idle" or claimed == 0:
-            break
-        chunks += 1
-        completed += int(result.get("completed") or 0)
+    reaped = await reap_stale_matching_claims(conn)
+    drain = await _drain_until_empty(
+        conn,
+        worker_id=task_worker,
+        lease_holder=lease_holder,
+        max_chunks=budget,
+        bq_client=bq_client,
+    )
+    chunks = drain["chunks"]
+    completed = drain["completed"]
+    last_status = drain["last_status"]
+    reaped += drain["reaped"]
 
-    pending_after = await _pending_matching_count(conn)
-    if pending_after <= 0:
+    work = await _matching_work_remaining(conn)
+    pending_after = work["pending"]
+    claimed_after = work["claimed"]
+    stale_after = work["stale_claimed"]
+    if not _queue_has_matching_work(work):
         await release_drain_lease(
             conn, **_lease_call_kwargs(release_drain_lease, lease_holder)
         )
+
+    status = "ok"
+    if _queue_has_matching_work(work):
+        status = "pending_remaining"
+        if last_status == "idle":
+            last_status = "pending_remaining"
 
     logger.info(
         "matching_drain_job_task_done",
@@ -708,15 +1200,21 @@ async def run_job_task(
             "chunks": chunks,
             "completed": completed,
             "pending_after": pending_after,
+            "claimed_after": claimed_after,
+            "stale_claimed_after": stale_after,
+            "reaped": reaped,
             "last_status": last_status,
         },
     )
     return {
-        "status": "ok",
+        "status": status,
         "worker_id": task_worker,
         "chunks": chunks,
         "completed": completed,
         "pending_after": pending_after,
+        "claimed_after": claimed_after,
+        "stale_claimed_after": stale_after,
+        "reaped": reaped,
         "last_status": last_status,
     }
 
@@ -746,6 +1244,7 @@ async def start_drain_job_execution() -> dict[str, Any]:
         f"https://run.googleapis.com/v2/projects/{project}"
         f"/locations/{region}/jobs/{job_name}:run"
     )
+    task_count = drain_task_count()
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
             url,
@@ -753,7 +1252,7 @@ async def start_drain_job_execution() -> dict[str, Any]:
                 "Authorization": f"Bearer {credentials.token}",
                 "Content-Type": "application/json",
             },
-            json={},
+            json={"overrides": {"taskCount": task_count}},
         )
     if response.status_code >= 400:
         safe = redact_error_text(response.text[:500])
@@ -769,9 +1268,15 @@ async def start_drain_job_execution() -> dict[str, Any]:
             "event": "matching_drain_job_started",
             "job_name": job_name,
             "execution": execution or None,
+            "task_count": task_count,
         },
     )
-    return {"job_name": job_name, "execution": execution or None, "region": region}
+    return {
+        "job_name": job_name,
+        "execution": execution or None,
+        "region": region,
+        "task_count": task_count,
+    }
 
 
 def main() -> None:

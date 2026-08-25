@@ -161,7 +161,7 @@ def _matching_insert_sql(hold_sql: str) -> str:
         WITH inserted AS (
             INSERT INTO {MATCHING_ATTEMPTS_TABLE}
                 (request_id, step, attempt_number, status)
-            SELECT r.id, $1, 1, 'pending'
+            SELECT r.id, $1::varchar, 1, 'pending'
               FROM requests r
              WHERE NOT EXISTS (
                    SELECT 1
@@ -172,7 +172,7 @@ def _matching_insert_sql(hold_sql: str) -> str:
                    SELECT 1
                      FROM approval_requests ar
                     WHERE ar.request_id = r.id
-                      AND ar.action_type = $2
+                      AND ar.action_type = $2::varchar
                       AND ar.status = 'pending'
                       AND ar.approver_role = 'legal'
                       AND ar.context_jsonb->>'kind' = 'triage'
@@ -186,7 +186,7 @@ def _matching_insert_sql(hold_sql: str) -> str:
                  )
                {hold_sql}
              ORDER BY r.received_at ASC
-             LIMIT $3
+             LIMIT $3::int
             ON CONFLICT (request_id, step, attempt_number) DO NOTHING
             RETURNING request_id
         )
@@ -441,7 +441,7 @@ async def enqueue_auth0_matching(conn: DbConnection, request_id: str) -> None:
     await conn.execute(
         f"""
         INSERT INTO {AUTH0_ATTEMPTS_TABLE} (request_id, step, attempt_number, status)
-        VALUES ($1, $2, 1, 'pending')
+        VALUES ($1::uuid, $2::varchar, 1, 'pending')
         ON CONFLICT (request_id, step, attempt_number) DO NOTHING
         """,
         UUID(request_id),
@@ -459,7 +459,7 @@ async def enqueue_google_sheets_matching(conn: DbConnection, request_id: str) ->
     await conn.execute(
         f"""
         INSERT INTO {GOOGLE_SHEETS_ATTEMPTS_TABLE} (request_id, step, attempt_number, status)
-        VALUES ($1, $2, 1, 'pending')
+        VALUES ($1::uuid, $2::varchar, 1, 'pending')
         ON CONFLICT (request_id, step, attempt_number) DO NOTHING
         """,
         UUID(request_id),

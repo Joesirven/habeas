@@ -25,6 +25,25 @@ _EMAIL_HASH = "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY="
 _VENDOR_ID = "auth0|opaque-must-not-log"
 
 
+class AmbiguousParameterError(Exception):
+    """Stand-in for asyncpg.exceptions.AmbiguousParameterError (uncast $n binds)."""
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "")
+
+
+def _assert_explicit_param_casts(sql: str, expected: dict[str, str]) -> None:
+    """Uncast $n in Auth0 complete SQL would raise AmbiguousParameterError."""
+    for needle, casted in expected.items():
+        assert casted in sql, f"expected {casted} in Auth0 complete SQL"
+        leftover = sql.replace(casted, "")
+        assert needle not in leftover, (
+            f"uncast {needle} in Auth0 complete SQL would raise AmbiguousParameterError"
+        )
+
+
 class _RecordingConn:
     def __init__(
         self,
@@ -348,6 +367,113 @@ async def test_complete_auth0_attempts_sql_is_auth0_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_complete_auth0_attempts_sql_uses_explicit_casts() -> None:
+    conn = _RecordingConn()
+    completed = await complete_auth0_attempts(
+        conn,
+        [
+            {
+                "attempt_id": 4,
+                "worker_id": "w",
+                "status": "success",
+                "audit_payload": {"adapter": "auth0_hash"},
+            },
+            {
+                "attempt_id": 5,
+                "worker_id": "w",
+                "status": "submit_error",
+                "error_code": "hash_missing",
+                "error_message": "hash_missing",
+                "retry_after": None,
+                "audit_payload": {"adapter": "auth0_hash", "error_code": "hash_missing"},
+            },
+        ],
+    )
+    assert completed == 2
+    assert len(conn.executemany_calls) == 2
+    success_sql, _success_args = conn.executemany_calls[0]
+    error_sql, _error_args = conn.executemany_calls[1]
+    _assert_explicit_param_casts(
+        success_sql,
+        {
+            "$1": "$1::bigint",
+            "$2": "$2::varchar",
+            "$3": "$3::jsonb",
+        },
+    )
+    _assert_explicit_param_casts(
+        error_sql,
+        {
+            "$1": "$1::bigint",
+            "$2": "$2::varchar",
+            "$3": "$3::varchar",
+            "$4": "$4::text",
+            "$5": "$5::timestamptz",
+            "$6": "$6::jsonb",
+        },
+    )
+    assert "auth0_attempts" in success_sql
+    assert "auth0_attempts" in error_sql
+    assert "matching_attempts" not in success_sql
+    assert "matching_attempts" not in error_sql
+
+
+@pytest.mark.asyncio
+async def test_process_auth0_chunk_does_not_raise_ambiguous_parameter_out() -> None:
+    conn = _RecordingConn()
+    claimed = [{"id": 51, "request_id": _REQUEST_ID, "attempt_number": 1}]
+
+    async def _executemany(sql: str, args: list[Any]) -> str:
+        conn.sql.append(sql)
+        conn.executemany_calls.append((sql, list(args)))
+        raise AmbiguousParameterError("could not determine data type of parameter $1")
+
+    conn.executemany = _executemany  # type: ignore[method-assign]
+
+    with (
+        patch(
+            "matching.vertical_chunk_drain.claim_auth0_chunk",
+            new_callable=AsyncMock,
+            return_value=claimed,
+        ),
+        patch(
+            "matching.vertical_chunk_drain.load_request_row",
+            new_callable=AsyncMock,
+            return_value={"id": _REQUEST_ID, "intake_source": "drop"},
+        ),
+        patch(
+            "matching.main.build_match_request",
+            new_callable=AsyncMock,
+            return_value=_match_request(),
+        ),
+        patch(
+            "matching.vertical_chunk_drain.run_auth0_vertical_match",
+            new_callable=AsyncMock,
+            return_value={"auth0_match_count": 1, "auth0_bq_dataset": "external_hash_index"},
+        ),
+    ):
+        try:
+            out = await process_auth0_chunk(conn, worker_id="matching-drain-auth0")
+        except AmbiguousParameterError:
+            pytest.fail("AmbiguousParameterError escaped process_auth0_chunk")
+
+    assert out["status"] == "error"
+    assert out["reason"] == "complete_failed"
+    assert out["claimed"] == 1
+    assert out["completed"] == 0
+    assert conn.executemany_calls
+    complete_sql = "\n".join(sql for sql, _args in conn.executemany_calls)
+    _assert_explicit_param_casts(
+        complete_sql,
+        {
+            "$1": "$1::bigint",
+            "$2": "$2::varchar",
+            "$3": "$3::jsonb",
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_process_auth0_chunk_logs_counts_only(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -453,6 +579,45 @@ async def test_run_job_task_idle_when_empty() -> None:
     assert out["last_status"] == "idle"
     release.assert_awaited_once()
     assert release.await_args.kwargs["lease_key"] == AUTH0_LEASE_KEY
+
+
+@pytest.mark.asyncio
+async def test_run_job_task_does_not_raise_ambiguous_parameter_out() -> None:
+    conn = _RecordingConn(fetchval=0)
+    calls = {"n": 0}
+
+    async def _process(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise AmbiguousParameterError("could not determine data type of parameter $1")
+        return {"status": "idle", "claimed": 0, "completed": 0}
+
+    release = AsyncMock(return_value=True)
+
+    with (
+        patch(
+            "matching.vertical_chunk_drain.process_auth0_chunk",
+            new_callable=AsyncMock,
+            side_effect=_process,
+        ),
+        patch("matching.vertical_chunk_drain.renew_drain_lease", AsyncMock(return_value=True)),
+        patch("matching.vertical_chunk_drain.release_drain_lease", release),
+        patch(
+            "matching.vertical_chunk_drain._pending_auth0_count",
+            new_callable=AsyncMock,
+            return_value=0,
+        ),
+    ):
+        try:
+            out = await run_job_task(conn, worker_id="matching-drain-auth0-task0")
+        except AmbiguousParameterError:
+            pytest.fail("AmbiguousParameterError escaped run_job_task")
+
+    assert calls["n"] >= 2
+    assert out["status"] == "ok"
+    assert out["last_status"] == "idle"
+    assert out["chunks"] == 1
+    release.assert_awaited_once()
 
 
 def test_job_task_worker_id_includes_task_index(monkeypatch: pytest.MonkeyPatch) -> None:

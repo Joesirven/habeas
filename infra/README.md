@@ -638,16 +638,16 @@ Store the prod `DATABASE_URL` in Secret Manager under the id the provision scrip
 
 Twin of `admin-api-dev`. [`admin-web-prod.yaml`](cloudbuild/admin-web-prod.yaml) leaves `_VITE_ADMIN_API_URL` empty so the SPA uses same-origin `/api`; nginx proxies to `admin-api-prod` via `ADMIN_API_UPSTREAM`. Do not bake a cross-origin admin-api URL — Cloud Run/IAP hide that fetch as `Failed to fetch`.
 
-[`admin-api-prod.yaml`](cloudbuild/admin-api-prod.yaml) interpolates `${_DATABASE_URL}` into Cloud Run `--set-env-vars` and does **not** default it in `substitutions:`. Submit without `--substitutions=_DATABASE_URL=…` deploys an empty URL.
+`admin-api-prod.yaml` is **still missing** — retarget [`admin-api-dev.yaml`](cloudbuild/admin-api-dev.yaml) (`_SERVICE=admin-api-prod`, `_CLOUDSQL_INSTANCE=example-gcp-project:us-east4:dpra-prod`). That yaml interpolates `${_DATABASE_URL}` into Cloud Run `--set-env-vars` and does **not** default it in `substitutions:`. Submit without `--substitutions=_DATABASE_URL=…` deploys an empty URL.
 
 **Do not** copy the temp-dev `--substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@…'` shape. Cloud Build substitutions appear in **build logs** (and then in Cloud Run env). Read the secret at submit time — do not `echo` it, do not `set -x` around this line, do not paste the value into this file or chat:
 
 ```bash
 # Jose-approved first deploy only.
 # Value is captured, never printed. Secret id is from provision_dpra_prod_sql.sh.
-gcloud builds submit --config=infra/cloudbuild/admin-api-prod.yaml \
+gcloud builds submit --config=infra/cloudbuild/admin-api-dev.yaml \
   --project=example-gcp-project \
-  --substitutions=_DATABASE_URL="$(gcloud secrets versions access latest --secret=database-url-prod --project=example-gcp-project)"
+  --substitutions=_SERVICE=admin-api-prod,_CLOUDSQL_INSTANCE=example-gcp-project:us-east4:dpra-prod,_DATABASE_URL="$(gcloud secrets versions access latest --secret=database-url-prod --project=example-gcp-project)"
 ```
 
 `admin-web-prod` must be rebuilt so `/dev/drop-prod-cutover` is reachable, or use local Vite pointed at admin-api-prod. Do **not** submit `drop-connector-prod` yet.
@@ -678,7 +678,7 @@ Prod intake/match workers for this cutover:
 | File | Notes |
 |------|-------|
 | [`cloudbuild/drop-connector-prod.yaml`](cloudbuild/drop-connector-prod.yaml) | `DROP_ENV=production`, `DROP_API_BASE_URL=https://api.drop.privacy.ca.gov`. `--set-secrets` for the key. Set `_DROP_INTAKE_GCS_BUCKET` at submit (ops-named; empty default). Post-deploy admin-api SA invoker. |
-| [`cloudbuild/drop-ingestor-prod.yaml`](cloudbuild/drop-ingestor-prod.yaml) | Land / promote only — no DROP key |
+| [`cloudbuild/drop-ingestor-dev.yaml`](cloudbuild/drop-ingestor-dev.yaml) retarget (`_SERVICE=drop-ingestor-prod`) | Land / promote only — no DROP key. `drop-ingestor-prod.yaml` is **still missing**. |
 | [`cloudbuild/request-dispatcher-prod.yaml`](cloudbuild/request-dispatcher-prod.yaml) | Dispatch after promote |
 | [`cloudbuild/matching-prod.yaml`](cloudbuild/matching-prod.yaml) | Data drain Job `matching-drain-prod`; **deployed** (Cloud SQL `dpra-prod` exists). Needs admin-api SA `roles/run.invoker` (connector yaml does **not** grant this). |
 
@@ -715,15 +715,16 @@ Scaffolding is live (2026-08-25). Do not invent a second Cloud SQL instance, a d
 | `drop-ingestor-prod` | `https://drop-ingestor-prod-hsa55rg7ja-uk.a.run.app` |
 | `request-dispatcher-prod` | `https://request-dispatcher-prod-hsa55rg7ja-uk.a.run.app` |
 | `matching-prod` + Job `matching-drain-prod` | `https://matching-prod-hsa55rg7ja-uk.a.run.app` |
+| `reaper-prod` | `https://reaper-prod-hsa55rg7ja-uk.a.run.app` |
 
 This project’s prod Cloud Run URLs use suffix **`hsa55rg7ja-uk`**. Do not invent a different hash.
 
 **Checklist to attach another worker:**
 
-1. Twin an existing `*-prod.yaml` (start from [`drop-ingestor-prod.yaml`](cloudbuild/drop-ingestor-prod.yaml)). Set `_CLOUDSQL_INSTANCE=example-gcp-project:us-east4:dpra-prod`.
+1. Retarget the matching `*-dev.yaml` when `*-prod.yaml` is missing (`admin-api-prod.yaml` and `drop-ingestor-prod.yaml` are still missing — see [reaper-prod attached](#reaper-prod-attached-2026-08-25)). Set `_SERVICE=<name>-prod` and `_CLOUDSQL_INSTANCE=example-gcp-project:us-east4:dpra-prod`.
 2. Submit with GSM-read `database-url-prod` — same capture-never-print shape as [admin-api-prod submit](#admin-api-prod-submit). Do not put `DATABASE_URL` in git or type a password into `--substitutions`.
 3. Post-deploy `grant-admin-api-invoker`: admin-api runtime SA (`95660886550-compute@developer.gserviceaccount.com`) only. Never `allUsers`. Never user/IAP `run.invoker`.
-4. After the service is Ready, wire it in [`admin-api-prod.yaml`](cloudbuild/admin-api-prod.yaml) at `https://<service>-prod-hsa55rg7ja-uk.a.run.app`, then Jose-approved **redeploy `admin-api-prod`**. The eight substitutions that already exist: `_DROP_CONNECTOR_URL`, `_DROP_INGESTOR_URL`, `_REQUEST_DISPATCHER_URL`, `_MATCHING_URL`, `_DATA_FULFILLMENT_URL`, `_HASH_INDEX_REFRESH_URL`, `_REAPER_URL`, `_INTAKE_DROP_POLLER_URL`. **Override** only if the worker is already one of those. There is no `_AUTH0_URL`, Axios HQ URL key (`_AXIOS_URL` / `_AXIOS_HQ_URL`), or other vertical `_…_URL` — if the key does not exist, **add** the substitution and env mapping. Do not invent a missing key and call it an override.
+4. After the service is Ready, wire it by retargeting [`admin-api-dev.yaml`](cloudbuild/admin-api-dev.yaml) at `https://<service>-prod-hsa55rg7ja-uk.a.run.app`, then Jose-approved **redeploy `admin-api-prod`**. The eight substitutions that already exist: `_DROP_CONNECTOR_URL`, `_DROP_INGESTOR_URL`, `_REQUEST_DISPATCHER_URL`, `_MATCHING_URL`, `_DATA_FULFILLMENT_URL`, `_HASH_INDEX_REFRESH_URL`, `_REAPER_URL`, `_INTAKE_DROP_POLLER_URL`. **Override** only if the worker is already one of those. There is no `_AUTH0_URL`, Axios HQ URL key (`_AXIOS_URL` / `_AXIOS_HQ_URL`), or other vertical `_…_URL` — if the key does not exist, **add** the substitution and env mapping. Do not invent a missing key and call it an override. `intake_drop_poller` has **no app** — do not deploy a poller or invent a URL. Do **not** invent a fulfillment-prod bucket.
 
 **Still held:**
 
@@ -733,5 +734,34 @@ This project’s prod Cloud Run URLs use suffix **`hsa55rg7ja-uk`**. Do not inve
 | Cassandra live writes | Stay stub / non-live. No `cassandra-prod`. |
 | Lab Confirm / first DROP pull | Connector + prod key + named intake bucket still missing. |
 | `dpra-prod-*` Scheduler | Do not flip until after first Confirm. |
+| `intake_drop_poller` | No app — retired. Do not deploy. |
+| fulfillment-prod bucket | Do not invent. Only `privacy-fulfillment-dev` is named. |
 
 Jose-gated ([prod-write-gate](../.agent/modules/prod-write-gate.md)). Mutations still only through admin-api.
+
+### reaper-prod attached (2026-08-25)
+
+Jose-authorized. `reaper-prod` is attached on `example-gcp-project` / `us-east4` by **retargeting** [`reaper-dev.yaml`](cloudbuild/reaper-dev.yaml) — there is no `reaper-prod.yaml`.
+
+| Substitution | Value |
+|--------------|-------|
+| `_SERVICE` | `reaper-prod` |
+| `_CLOUDSQL_INSTANCE` | `example-gcp-project:us-east4:dpra-prod` |
+| `_DATABASE_URL` | GSM `database-url-prod` (capture-never-print) |
+
+```bash
+# Jose-approved. Value is captured, never printed. Do not echo / set -x / paste the URL.
+gcloud builds submit --config=infra/cloudbuild/reaper-dev.yaml \
+  --project=example-gcp-project \
+  --substitutions=_SERVICE=reaper-prod,_CLOUDSQL_INSTANCE=example-gcp-project:us-east4:dpra-prod,_DATABASE_URL="$(gcloud secrets versions access latest --secret=database-url-prod --project=example-gcp-project)"
+```
+
+Observed URL: `https://reaper-prod-hsa55rg7ja-uk.a.run.app`. Post-deploy invoker: admin-api runtime SA (`95660886550-compute@developer.gserviceaccount.com`) only. Override `_REAPER_URL` on the next admin-api-prod retarget.
+
+**Missing `*-prod.yaml` — retarget `*-dev.yaml`:** `admin-api-prod.yaml` and `drop-ingestor-prod.yaml` are **still missing**. Do not invent those files. Submit [`admin-api-dev.yaml`](cloudbuild/admin-api-dev.yaml) / [`drop-ingestor-dev.yaml`](cloudbuild/drop-ingestor-dev.yaml) with `_SERVICE=admin-api-prod` / `_SERVICE=drop-ingestor-prod`, `_CLOUDSQL_INSTANCE=example-gcp-project:us-east4:dpra-prod`, and GSM `database-url-prod`. Same capture-never-print rule.
+
+**Do not invent a fulfillment-prod bucket.** The only named fulfillment bucket is `privacy-fulfillment-dev`. Do not invent `privacy-fulfillment-prod` or any other prod fulfillment name.
+
+**`intake_drop_poller` has no app.** `app/intake_drop_poller/` is retired. Do not deploy `intake-drop-poller-prod` and do not invent a poller yaml. `_INTAKE_DROP_POLLER_URL` on admin-api-dev is a leftover substitution.
+
+Cassandra stays **off** (see [Cassandra stays off](#cassandra-stays-off)).

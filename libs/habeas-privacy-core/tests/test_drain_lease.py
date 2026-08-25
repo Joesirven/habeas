@@ -163,6 +163,24 @@ async def test_status_filters_by_lease_key_when_column_exists():
     assert status["holder"] == "h1"
 
 
+def _assert_twenty_minute_steal_predicate(sql: str) -> None:
+    assert "updated_at < NOW() - INTERVAL '20 minutes'" in sql
+    assert "INTERVAL '5 minutes'" not in sql
+
+
+@pytest.mark.asyncio
+async def test_acquire_sql_steals_after_twenty_minute_heartbeat():
+    keyed = _conn(has_lease_key=True, fetchrow={"holder": "h1"})
+    assert await acquire_drain_lease(keyed, holder="h1", lease_key="auth0") is True
+    _assert_twenty_minute_steal_predicate(keyed.fetchrow.call_args[0][0])
+
+    fallback = _conn(has_lease_key=False, fetchrow={"id": 1})
+    assert await acquire_drain_lease(fallback, holder="h1") is True
+    fallback_sql = fallback.fetchrow.call_args[0][0]
+    assert "id = 1" in fallback_sql
+    _assert_twenty_minute_steal_predicate(fallback_sql)
+
+
 @pytest.mark.asyncio
 async def test_status_unknown_key_without_column():
     conn = _conn(has_lease_key=False)

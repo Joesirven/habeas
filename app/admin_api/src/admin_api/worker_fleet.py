@@ -4,6 +4,8 @@
 ``habeas_privacy_core.fleet`` (E1). Scheduler list via ``worker_schedules``
 ``RestSchedulerClient.list_jobs`` (E2) when available. Health probes reuse
 ``drop_pipeline._probe_worker_health`` (lazy import; no cycle at import time).
+Missing Cloud Run / HTTP 404 is ``not_deployed`` (ok null), not down.
+Phantom ``intake_drop_poller`` is omitted unless Cloud Run lists it.
 """
 
 from __future__ import annotations
@@ -55,6 +57,10 @@ class FleetSettings(CoreSettings):
 
 
 settings = FleetSettings()
+
+# Retired intake poller — no app in this repo. Only surface if Cloud Run lists it.
+_PHANTOM_WORKER_KEYS = frozenset({"intake_drop_poller"})
+_NOT_DEPLOYED_READY = {"status": "not_deployed"}
 
 
 class CloudRunClient(Protocol):
@@ -187,6 +193,40 @@ def _is_control_plane_worker_key(worker_key: str) -> bool:
     return _is_control_plane_slug(worker_key.replace("_", "-"))
 
 
+def _is_phantom_worker_key(worker_key: str) -> bool:
+    return worker_key in _PHANTOM_WORKER_KEYS
+
+
+def _not_deployed_health(*, status_code: int | None = None) -> dict[str, Any]:
+    """Missing Cloud Run service — not a red outage. ``ok`` is null, not false."""
+    return {
+        "ok": None,
+        "status_code": status_code,
+        "ready": dict(_NOT_DEPLOYED_READY),
+    }
+
+
+def _probe_indicates_missing_service(probe: dict[str, Any]) -> bool:
+    if probe.get("status_code") == 404:
+        return True
+    ready = probe.get("body")
+    if isinstance(ready, dict) and ready.get("status") == "not_deployed":
+        return True
+    return False
+
+
+def _omit_phantom_undeployed(inventory: FleetInventory) -> FleetInventory:
+    """Drop intake_drop_poller unless a live Cloud Run service exists."""
+    kept = [
+        worker
+        for worker in inventory.workers
+        if not _is_phantom_worker_key(worker.worker_key) or worker.deployed
+    ]
+    if len(kept) == len(inventory.workers):
+        return inventory
+    return inventory.model_copy(update={"workers": kept})
+
+
 def env_url_map_from_settings() -> dict[str, str]:
     """Build worker_key → base_url from DropPipelineSettings ``*_url`` + WORKER_FLEET_URLS."""
     from admin_api.drop_pipeline import WORKER_KEYS
@@ -194,7 +234,7 @@ def env_url_map_from_settings() -> dict[str, str]:
 
     out: dict[str, str] = {}
     for worker_key, attr in WORKER_KEYS:
-        if _is_control_plane_worker_key(worker_key):
+        if _is_control_plane_worker_key(worker_key) or _is_phantom_worker_key(worker_key):
             continue
         value = getattr(drop_settings, attr, None)
         if isinstance(value, str) and value.strip():
@@ -206,14 +246,18 @@ def env_url_map_from_settings() -> dict[str, str]:
         if field_name == "database_url":
             continue
         worker_key = field_name[: -len("_url")]
-        if worker_key in out or _is_control_plane_worker_key(worker_key):
+        if (
+            worker_key in out
+            or _is_control_plane_worker_key(worker_key)
+            or _is_phantom_worker_key(worker_key)
+        ):
             continue
         value = getattr(drop_settings, field_name, None)
         if isinstance(value, str) and value.strip():
             out[worker_key] = value.rstrip("/")
 
     for worker_key, url in parse_worker_fleet_urls(settings.worker_fleet_urls).items():
-        if _is_control_plane_worker_key(worker_key):
+        if _is_control_plane_worker_key(worker_key) or _is_phantom_worker_key(worker_key):
             continue
         out[worker_key] = url
     return out
@@ -382,14 +426,16 @@ def build_fleet_inventory() -> FleetInventory:
     warnings: list[DiscoveryWarning] = []
 
     if not _scheduler_enabled():
-        return merge_fleet_inventory(
-            env_prefix=prefix,
-            discovery_mode="local",
-            jobs=(),
-            services=(),
-            env_urls=env_urls,
-            discovery_warnings=warnings,
-            service_suffix=env_suffix,
+        return _omit_phantom_undeployed(
+            merge_fleet_inventory(
+                env_prefix=prefix,
+                discovery_mode="local",
+                jobs=(),
+                services=(),
+                env_urls=env_urls,
+                discovery_warnings=warnings,
+                service_suffix=env_suffix,
+            )
         )
 
     services, run_warnings = _list_cloud_run_services(env_suffix=env_suffix, job_prefix=prefix)
@@ -400,25 +446,42 @@ def build_fleet_inventory() -> FleetInventory:
         env_urls, prefix=prefix, env_suffix=env_suffix, services=services
     )
 
-    return merge_fleet_inventory(
-        env_prefix=prefix,
-        discovery_mode="gcp",
-        jobs=jobs,
-        services=services,
-        env_urls=env_urls,
-        discovery_warnings=warnings,
-        service_suffix=env_suffix,
+    return _omit_phantom_undeployed(
+        merge_fleet_inventory(
+            env_prefix=prefix,
+            discovery_mode="gcp",
+            jobs=jobs,
+            services=services,
+            env_urls=env_urls,
+            discovery_warnings=warnings,
+            service_suffix=env_suffix,
+        )
     )
 
 
 def discovered_worker_probe_targets() -> list[tuple[str, str]]:
-    """``(worker_key, base_url)`` pairs for health probes. Never raises."""
+    """``(worker_key, base_url)`` pairs for health probes. Never raises.
+
+    Skips phantom intake_drop_poller and env-only workers when Cloud Run
+    already listed the live set — those 404s are ``not_deployed``, not down.
+    """
     try:
         inventory = build_fleet_inventory()
+        have_cloud_run = any(worker.deployed for worker in inventory.workers)
         targets: list[tuple[str, str]] = []
         for worker in inventory.workers:
-            if worker.base_url:
-                targets.append((worker.worker_key, worker.base_url))
+            if not worker.base_url:
+                continue
+            if _is_phantom_worker_key(worker.worker_key) and not worker.deployed:
+                continue
+            if have_cloud_run and not worker.deployed:
+                continue
+            targets.append((worker.worker_key, worker.base_url))
+        if not targets:
+            # Avoid drop_pipeline WORKER_KEYS fallback (includes phantom poller).
+            for key, url in env_url_map_from_settings().items():
+                if url:
+                    targets.append((key, url))
         return targets
     except Exception:
         logger.exception(
@@ -438,15 +501,16 @@ def list_fleet_worker_keys() -> list[str]:
 
 def _inventory_to_response(inventory: FleetInventory) -> dict[str, Any]:
     """Serialize FleetInventory; fill default health placeholders."""
+    have_cloud_run = any(worker.deployed for worker in inventory.workers)
     workers_out: list[dict[str, Any]] = []
     for worker in inventory.workers:
         health = worker.health
         if health is None:
-            if worker.base_url:
+            if worker.base_url and (worker.deployed or not have_cloud_run):
                 health = FleetWorkerHealth(ok=False, status_code=None, ready={"status": "pending"})
             else:
                 health = FleetWorkerHealth(
-                    ok=False, status_code=None, ready={"status": "not_deployed"}
+                    ok=None, status_code=None, ready=dict(_NOT_DEPLOYED_READY)
                 )
         row = worker.model_dump()
         row["health"] = health.model_dump() if health else None
@@ -459,8 +523,34 @@ def _inventory_to_response(inventory: FleetInventory) -> dict[str, Any]:
     }
 
 
+def _health_from_probe(probe: dict[str, Any]) -> dict[str, Any]:
+    """Map a /readyz probe onto fleet health. 404 → not_deployed, not down."""
+    if _probe_indicates_missing_service(probe):
+        return _not_deployed_health(status_code=probe.get("status_code"))
+    ready_body = probe.get("body")
+    if isinstance(ready_body, dict):
+        ready_summary: dict[str, Any] = {
+            "status": ready_body.get("status"),
+            "service": ready_body.get("service"),
+        }
+    else:
+        ready_summary = {"status": "unknown"}
+    health: dict[str, Any] = {
+        "ok": bool(probe.get("ok")),
+        "status_code": probe.get("status_code"),
+        "ready": ready_summary,
+    }
+    if probe.get("error"):
+        health["error"] = probe.get("error")
+    return health
+
+
 async def build_fleet_inventory_async(*, probe_health: bool = True) -> dict[str, Any]:
-    """Async fleet builder — probes /readyz via drop_pipeline._probe_worker_health."""
+    """Async fleet builder — probes /readyz via drop_pipeline._probe_worker_health.
+
+    Pipeline ``collect_worker_health`` keeps the 15s snapshot; this path maps
+    404 / missing Cloud Run onto ``not_deployed`` (ok is null, not false).
+    """
     import asyncio
 
     from admin_api.drop_pipeline import _probe_worker_health
@@ -470,49 +560,40 @@ async def build_fleet_inventory_async(*, probe_health: bool = True) -> dict[str,
     if not probe_health:
         return payload
 
+    have_cloud_run = any(bool(row.get("deployed")) for row in payload["workers"])
     targets = [
         (str(row["worker_key"]), str(row["base_url"]))
         for row in payload["workers"]
         if row.get("base_url")
+        and (row.get("deployed") or not have_cloud_run)
+        and not (
+            _is_phantom_worker_key(str(row["worker_key"])) and not row.get("deployed")
+        )
     ]
-    if not targets:
-        return payload
+    by_name: dict[str, Any] = {}
+    if targets:
+        sem = asyncio.Semaphore(8)
 
-    sem = asyncio.Semaphore(8)
+        async def _one(name: str, url: str) -> dict[str, Any]:
+            async with sem:
+                return await _probe_worker_health(name, url)
 
-    async def _one(name: str, url: str) -> dict[str, Any]:
-        async with sem:
-            return await _probe_worker_health(name, url)
-
-    probes = await asyncio.gather(*[_one(n, u) for n, u in targets])
-    by_name = {probe["name"]: probe for probe in probes}
+        probes = await asyncio.gather(*[_one(n, u) for n, u in targets])
+        by_name = {probe["name"]: probe for probe in probes}
 
     for row in payload["workers"]:
         key = row["worker_key"]
         probe = by_name.get(key) or {}
         if not row.get("base_url"):
-            row["health"] = {
-                "ok": False,
-                "status_code": None,
-                "ready": {"status": "not_deployed"},
-            }
+            row["health"] = _not_deployed_health()
             continue
-        ready_body = probe.get("body")
-        if isinstance(ready_body, dict):
-            ready_summary = {
-                "status": ready_body.get("status"),
-                "service": ready_body.get("service"),
-            }
-        else:
-            ready_summary = {"status": "unknown"}
-        health: dict[str, Any] = {
-            "ok": bool(probe.get("ok")),
-            "status_code": probe.get("status_code"),
-            "ready": ready_summary,
-        }
-        if probe.get("error"):
-            health["error"] = probe.get("error")
-        row["health"] = health
+        if have_cloud_run and not row.get("deployed"):
+            row["health"] = _not_deployed_health()
+            continue
+        if not probe:
+            row["health"] = _not_deployed_health()
+            continue
+        row["health"] = _health_from_probe(probe)
     return payload
 
 

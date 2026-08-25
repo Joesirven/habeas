@@ -9,7 +9,13 @@ from unittest.mock import AsyncMock, patch
 import drop_ingestor.promote as promote_mod
 import pytest
 from habeas_privacy_core.geo.state import InvalidStateAcronymError
-from drop_ingestor.promote import insert_thin_drop_requests, run_promote
+from drop_ingestor.promote import (
+    LEFTOVER_CLOSE_MAX_ATTEMPTS,
+    close_leftover_pending_promote_attempts,
+    insert_thin_drop_requests,
+    leftover_close_retry_policy,
+    run_promote,
+)
 
 
 def _raw(
@@ -745,3 +751,301 @@ async def test_promote_unscoped_remaining_fails_closed(
     error.assert_awaited_once()
     assert error.await_args.args[1] == 99
     assert error.await_args.kwargs["error_code"] == "InvalidStateAcronymError"
+
+
+def _leftover_close_fetchval(*, leftover: Any, unmatched: Any) -> AsyncMock:
+    """Route leftover COUNT vs unmatched-raw existence (fetchval, not fetch)."""
+
+    async def fetchval(query: str, *args: Any) -> Any:
+        sql = str(query)
+        if "COUNT(*)" in sql:
+            return leftover() if callable(leftover) else leftover
+        if "drop_raw_requests" in sql:
+            value = unmatched() if callable(unmatched) else unmatched
+            return 1 if value else None
+        raise AssertionError(f"unexpected leftover-close fetchval: {sql}")
+
+    return AsyncMock(side_effect=fetchval)
+
+
+@pytest.mark.asyncio
+async def test_close_leftover_pending_promote_attempts_marks_success():
+    """Leftover pending promote rows close as success — no new status."""
+    conn = AsyncMock()
+    conn.execute = AsyncMock(return_value="UPDATE 2")
+    conn.fetchval = _leftover_close_fetchval(leftover=0, unmatched=0)
+
+    closed = await close_leftover_pending_promote_attempts(
+        conn,
+        exclude_attempt_id=8,
+    )
+
+    assert closed == 2
+    sql = str(conn.execute.await_args.args[0])
+    assert "drop_ingest_attempts" in sql
+    assert "success" in sql
+    assert "pending" in sql
+    assert "submit_error" not in sql
+    assert conn.execute.await_args.args[1] == "promote"
+    assert conn.execute.await_args.args[2] == 8
+
+
+@pytest.mark.asyncio
+async def test_promote_closes_leftover_pending_when_no_raws_remain_without_request():
+    """Process 2: claimed list is idle and every raw already has a request.
+
+    Email already drained all lists; leftover Phone/NDZ ``pending`` promote
+    attempts must close (success). Closer must not stay scoped to the
+    claimed Phone list or NDZ leftover stays pending.
+    """
+    conn = AsyncMock()
+    conn.fetch = _unpromoted_then_idle([])
+    conn.fetchval = AsyncMock(return_value=0)
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+    success = AsyncMock()
+    error = AsyncMock()
+    inserted = AsyncMock(return_value=[])
+
+    async def fake_close(
+        conn: Any,
+        *,
+        exclude_attempt_id: int | None = None,
+        source_csv_filename: str | None = None,
+        list_type: str | None = None,
+    ) -> int:
+        if source_csv_filename or list_type:
+            return 0
+        return 1
+
+    closer = AsyncMock(side_effect=fake_close)
+
+    with patch("drop_ingestor.promote.insert_thin_drop_requests", inserted):
+        with patch(
+            "drop_ingestor.promote.claim_next",
+            AsyncMock(
+                return_value=_claim(
+                    attempt_id=8,
+                    filename="20260716_1_PHONE.csv",
+                    list_type="Phone",
+                )
+            ),
+        ):
+            with patch("drop_ingestor.promote.mark_attempt_success", success):
+                with patch("drop_ingestor.promote.mark_attempt_error", error):
+                    with patch(
+                        "drop_ingestor.promote.close_leftover_pending_promote_attempts",
+                        closer,
+                    ):
+                        result = await run_promote(
+                            conn=conn,
+                            worker_id="drop-ingestor-test",
+                        )
+
+    assert result.promoted == 0
+    assert result.promote_attempt_id == 8
+    assert result.leftover_pending_closed == 1
+    inserted.assert_not_awaited()
+    error.assert_not_awaited()
+    success.assert_awaited()
+    assert success.await_args.args[1] == 8
+    closer.assert_awaited()
+    unscoped = [
+        call
+        for call in closer.await_args_list
+        if call.kwargs.get("source_csv_filename") is None
+        and call.kwargs.get("list_type") is None
+    ]
+    assert unscoped, "leftover closer must run unscoped so NDZ pending can close"
+    assert unscoped[-1].kwargs.get("exclude_attempt_id") == 8
+
+
+@pytest.mark.asyncio
+async def test_promote_does_not_close_leftover_pending_while_unmatched_raws_remain():
+    """Inverse of Process 2: leftover sibling pending stays while raws remain.
+
+    ``max_rows`` during unscoped drain leaves Phone/NDZ unmatched. The closer
+    may run scoped to the claimed list, but must not run unscoped — that would
+    mark leftover pending success while raws still lack a request.
+    """
+    email = [
+        _raw(
+            1,
+            list_type="Email",
+            filename="20260716_1_EMAIL.csv",
+            payload={"state": "CA"},
+        )
+    ]
+    more = [
+        _raw(10, list_type="Phone", filename="20260716_1_PHONE.csv", payload={"state": "CA"}),
+        _raw(11, list_type="NDZ", filename="20260716_1_NDZ.csv", payload={"state": "CA"}),
+    ]
+    scoped_fetches = 0
+
+    async def fake_insert(
+        conn: Any,
+        *,
+        raw_record_ids: list[int],
+        requestor_states: list[str],
+        return_ids: bool = True,
+    ) -> list[str]:
+        if not return_ids:
+            return []
+        return [f"{raw_id:032x}" for raw_id in raw_record_ids]
+
+    async def fetch(query: str, *args: Any) -> list[Any]:
+        nonlocal scoped_fetches
+        if _unpromoted_select_is_scoped(query):
+            scoped_fetches += 1
+            return email if scoped_fetches == 1 else []
+        return more
+
+    async def fake_close(
+        conn: Any,
+        *,
+        exclude_attempt_id: int | None = None,
+        source_csv_filename: str | None = None,
+        list_type: str | None = None,
+    ) -> int:
+        if source_csv_filename or list_type:
+            return 0
+        return 1
+
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+    success = AsyncMock()
+    closer = AsyncMock(side_effect=fake_close)
+
+    with patch("drop_ingestor.promote.insert_thin_drop_requests", side_effect=fake_insert):
+        with patch("drop_ingestor.promote.claim_next", AsyncMock(return_value=_claim())):
+            with patch("drop_ingestor.promote.mark_attempt_success", success):
+                with patch(
+                    "drop_ingestor.promote.close_leftover_pending_promote_attempts",
+                    closer,
+                ):
+                    result = await run_promote(
+                        conn=conn,
+                        worker_id="drop-ingestor-test",
+                        limit=2,
+                        max_rows=3,
+                    )
+
+    assert result.promoted == 3
+    assert result.leftover_pending_closed == 0
+    success.assert_not_awaited()
+    unscoped = [
+        call
+        for call in closer.await_args_list
+        if call.kwargs.get("source_csv_filename") is None
+        and call.kwargs.get("list_type") is None
+    ]
+    assert unscoped == []
+
+
+def test_leftover_close_retry_policy_max_attempts_is_three():
+    """Bounded leftover-close retries are locked at 3."""
+    policy = leftover_close_retry_policy()
+    assert LEFTOVER_CLOSE_MAX_ATTEMPTS == 3
+    assert policy.max_attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_close_leftover_retries_when_update_fails_then_succeeds():
+    """UPDATE exception retries; second attempt closes leftover pending."""
+    conn = AsyncMock()
+    conn.execute = AsyncMock(side_effect=[RuntimeError("update failed"), "UPDATE 2"])
+    conn.fetchval = _leftover_close_fetchval(leftover=0, unmatched=0)
+    conn.fetch = AsyncMock(side_effect=AssertionError("closer must not use fetch"))
+
+    closed = await close_leftover_pending_promote_attempts(
+        conn,
+        exclude_attempt_id=8,
+    )
+
+    assert closed == 2
+    assert conn.execute.await_count == 2
+    conn.fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_close_leftover_raises_after_max_update_failures():
+    """UPDATE exceptions retry up to max 3, then raise — only when unmatched is 0."""
+    conn = AsyncMock()
+    conn.execute = AsyncMock(side_effect=RuntimeError("update failed"))
+    conn.fetchval = _leftover_close_fetchval(leftover=0, unmatched=0)
+    conn.fetch = AsyncMock(side_effect=AssertionError("closer must not use fetch"))
+
+    with pytest.raises(RuntimeError, match="update failed"):
+        await close_leftover_pending_promote_attempts(conn)
+
+    assert conn.execute.await_count == 3
+    conn.fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_close_leftover_retries_when_leftover_remains_and_unmatched_are_zero():
+    """Retry while leftover pending remains and unmatched raws are 0."""
+    leftovers = iter([1, 0])
+    conn = AsyncMock()
+    conn.execute = AsyncMock(side_effect=["UPDATE 0", "UPDATE 1"])
+    conn.fetchval = _leftover_close_fetchval(
+        leftover=lambda: next(leftovers),
+        unmatched=0,
+    )
+    conn.fetch = AsyncMock(side_effect=AssertionError("closer must not use fetch"))
+
+    closed = await close_leftover_pending_promote_attempts(conn)
+
+    assert closed == 1
+    assert conn.execute.await_count == 2
+    conn.fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_close_leftover_stops_at_max_retries_when_leftover_remains():
+    """Leftover pending + unmatched 0 retries at most 3 times, then returns."""
+    conn = AsyncMock()
+    conn.execute = AsyncMock(return_value="UPDATE 0")
+    conn.fetchval = _leftover_close_fetchval(leftover=1, unmatched=0)
+    conn.fetch = AsyncMock(side_effect=AssertionError("closer must not use fetch"))
+
+    closed = await close_leftover_pending_promote_attempts(conn)
+
+    assert closed == 0
+    assert conn.execute.await_count == 3
+    conn.fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_close_leftover_does_not_retry_while_unmatched_raws_remain():
+    """Inverse: unmatched raws remain — skip UPDATE, closed==0."""
+    conn = AsyncMock()
+    conn.execute = AsyncMock(return_value="UPDATE 2")
+    conn.fetchval = _leftover_close_fetchval(leftover=2, unmatched=1)
+    conn.fetch = AsyncMock(side_effect=AssertionError("closer must not use fetch"))
+
+    closed = await close_leftover_pending_promote_attempts(conn)
+
+    assert closed == 0
+    conn.execute.assert_not_awaited()
+    conn.fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_close_leftover_stops_retry_when_unmatched_appear():
+    """Retry only while unmatched is 0; a later unmatched≠0 skips UPDATE."""
+    unmatched_seq = iter([0, 1])
+    leftovers = iter([1])
+    conn = AsyncMock()
+    conn.execute = AsyncMock(return_value="UPDATE 0")
+    conn.fetchval = _leftover_close_fetchval(
+        leftover=lambda: next(leftovers),
+        unmatched=lambda: next(unmatched_seq),
+    )
+    conn.fetch = AsyncMock(side_effect=AssertionError("closer must not use fetch"))
+
+    closed = await close_leftover_pending_promote_attempts(conn)
+
+    assert closed == 0
+    assert conn.execute.await_count == 1
+    conn.fetch.assert_not_awaited()

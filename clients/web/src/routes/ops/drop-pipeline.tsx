@@ -92,6 +92,28 @@ const WORKER_ORDER = [
   'intake_drop_poller',
 ] as const
 
+type WorkerProbeTone = 'up' | 'down' | 'not_deployed' | 'unknown'
+
+/** 404 / ready.not_deployed = missing service, not a red outage. */
+function workerProbeTone(probe: WorkerHealthProbe | undefined): WorkerProbeTone {
+  if (probe == null) return 'unknown'
+  if (probe.ok) return 'up'
+  const readyStatus = probe.ready?.status
+  if (readyStatus === 'not_deployed' || probe.status_code === 404) return 'not_deployed'
+  if (readyStatus === 'pending') return 'unknown'
+  return 'down'
+}
+
+function pipelineHealthNames(
+  workerHealth: Record<string, WorkerHealthProbe> | undefined,
+): string[] {
+  if (!workerHealth) return [...WORKER_ORDER]
+  const extras = Object.keys(workerHealth).filter(
+    (name) => !(WORKER_ORDER as readonly string[]).includes(name),
+  )
+  return [...WORKER_ORDER, ...extras]
+}
+
 const PIPELINE_TAB_BAR: { key: PipelineTab; label: string }[] = [
   { key: 'pipeline', label: 'Pipeline' },
   { key: 'hash_refresh', label: 'Hash refresh' },
@@ -1184,14 +1206,13 @@ async function loadBatchRequestRuns(params: {
   days: number
   intake: string
   downloadStatus: string
-  overallStatus: string
 }): Promise<BulkProcessesPayload> {
+  // Cheap list only — include_summary walks collect_bulk_process_progress per row (~60s each).
+  // overall_status is applied only when include_summary=true; do not send it here.
   return listDropBulkProcesses({
     days: params.days,
     intake_source: params.intake || undefined,
     download_status: params.downloadStatus || undefined,
-    overall_status: params.overallStatus || undefined,
-    include_summary: true,
     limit: 50,
   })
 }
@@ -1479,6 +1500,12 @@ function isPendingBulkSummary(row: BulkProcessSummary): boolean {
   const download = row.download_status
   if (download === 'pending' || download === 'in_flight') return true
   return row.overall?.status === 'in_progress' && (row.overall.percent ?? 0) < 5
+}
+
+/** Admin-api `promote_stale` on process detail — field is not on the shared TS type. */
+function isPromoteLedgerStale(detail: BulkProcessDetail | undefined): boolean {
+  if (!detail) return false
+  return (detail as { promote_stale?: unknown })['promote_stale'] === true
 }
 
 function MiniRing({
@@ -1927,6 +1954,7 @@ function stageTabFromOverall(
 function BatchProcessExpandRow({
   row,
   expanded,
+  selected,
   onToggle,
   focusedStage,
   peerProcesses,
@@ -1934,6 +1962,8 @@ function BatchProcessExpandRow({
 }: {
   row: BulkProcessSummary
   expanded: boolean
+  /** True after the user expands or selects this card — never from list-wide prefetch. */
+  selected: boolean
   onToggle: () => void
   focusedStage?: PipelineStageTab
   /** Kept for callers; stage tabs stay local — do not write URL on every click. */
@@ -1943,14 +1973,12 @@ function BatchProcessExpandRow({
   /** Window (days) for stage-run history averages. */
   historyDays: number
 }) {
-  const statusKey = row.overall?.status ?? row.download_status
-  const likelyNeedsReview = statusKey === 'needs_attention'
+  const detailOpen = expanded || selected
   const detailQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-processes', 'detail', row.process_id],
     queryFn: () => getDropBulkProcess(row.process_id),
-    enabled: expanded || isActiveBulkSummary(row),
-    refetchInterval:
-      expanded || likelyNeedsReview || isActiveBulkSummary(row) ? 5_000 : 30_000,
+    enabled: detailOpen,
+    refetchInterval: expanded ? 5_000 : false,
     placeholderData: (previous) => previous,
   })
   const appliedFocusedOnExpand = useRef(false)
@@ -2097,6 +2125,11 @@ function BatchProcessExpandRow({
                 <StatusLight tone="sky" pulse title="Pending" />
               ) : null}
               {needsReview ? <NeedsReviewChip count={reviewCount} /> : null}
+              {isPromoteLedgerStale(detail) ? (
+                <span className="text-[0.6rem] text-mute">
+                  Promote ledger stale — raws already requested
+                </span>
+              ) : null}
               {derived.failed > 0 ? (
                 <span className="text-[0.6rem] text-red-700">
                   {derived.failed} failed
@@ -2221,10 +2254,8 @@ function BatchRequestRunsList({
   const [days, setDays] = useState(7)
   const [intake, setIntake] = useState('drop')
   const [downloadStatus, setDownloadStatus] = useState('')
-  const [overallStatus, setOverallStatus] = useState('')
   const [runStatusFilter, setRunStatusFilter] = useState('attention')
   const [expandedId, setExpandedId] = useState<number | null>(null)
-  const didAutoExpand = useRef(false)
 
   const listQuery = useQuery({
     queryKey: [
@@ -2235,14 +2266,12 @@ function BatchRequestRunsList({
       days,
       intake,
       downloadStatus,
-      overallStatus,
     ],
     queryFn: () =>
       loadBatchRequestRuns({
         days,
         intake,
         downloadStatus,
-        overallStatus,
       }),
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
@@ -2255,22 +2284,6 @@ function BatchRequestRunsList({
   ).length
   const errorMessage =
     listQuery.error instanceof Error ? listQuery.error.message : 'Could not load batch runs.'
-
-  useEffect(() => {
-    if (didAutoExpand.current || rows.length === 0 || viewMode !== 'bulk') return
-    const active = rows.find((row) => isActiveBulkSummary(row))
-    if (active) {
-      didAutoExpand.current = true
-      setExpandedId(active.process_id)
-      onSelectProcess(active.process_id)
-      return
-    }
-    if (selectedProcessId != null && rows.some((row) => row.process_id === selectedProcessId)) {
-      didAutoExpand.current = true
-      setExpandedId(selectedProcessId)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- auto-expand once when list arrives
-  }, [rows, viewMode])
 
   function toggle(processId: number) {
     setExpandedId((current) => {
@@ -2342,17 +2355,6 @@ function BatchRequestRunsList({
             { value: 'success', label: 'success' },
             { value: 'submit_error', label: 'submit_error' },
             { value: 'outcome_error', label: 'outcome_error' },
-          ]}
-        />
-        <CompactFilterSelect
-          label="Overall"
-          value={overallStatus}
-          onChange={setOverallStatus}
-          options={[
-            { value: '', label: 'Any' },
-            { value: 'in_progress', label: 'in_progress' },
-            { value: 'complete', label: 'complete' },
-            { value: 'needs_attention', label: 'needs_attention' },
           ]}
         />
         {viewMode === 'individual' ? (
@@ -2448,6 +2450,7 @@ function BatchRequestRunsList({
                 key={row.process_id}
                 row={row}
                 expanded={expandedId === row.process_id}
+                selected={expandedId === row.process_id}
                 onToggle={() => toggle(row.process_id)}
                 focusedStage={
                   expandedId === row.process_id ? focusedStage : undefined
@@ -2474,26 +2477,6 @@ function formatMetricTs(iso: string | null | undefined): string {
     hour: 'numeric',
     minute: '2-digit',
   })
-}
-
-function CompactOpsMetricsSkeleton() {
-  return (
-    <div
-      className="flex w-full gap-1.5 overflow-x-auto"
-      role="status"
-      aria-label="Loading ops metrics"
-    >
-      {Array.from({ length: 6 }, (_, index) => (
-        <div
-          key={index}
-          className="min-w-[5.5rem] flex-1 rounded-md border border-line bg-paper px-1.5 py-1.5"
-        >
-          <Skeleton className="h-2 w-10" />
-          <Skeleton className="mt-2 h-8 w-8 rounded-full" />
-        </div>
-      ))}
-    </div>
-  )
 }
 
 function MetricSparkBar({
@@ -2542,7 +2525,6 @@ function CompactOpsMetrics({
   matchDrainActive,
   totalSuppressed,
   workerHealth,
-  loading,
 }: {
   openRequests: number | null
   reviewPending: number | null
@@ -2554,11 +2536,18 @@ function CompactOpsMetrics({
   matchDrainActive: boolean | null
   totalSuppressed: number | null
   workerHealth: Record<string, WorkerHealthProbe> | undefined
-  loading?: boolean
 }) {
-  if (loading) return <CompactOpsMetricsSkeleton />
-
-  const workersUp = WORKER_ORDER.filter((name) => workerHealth?.[name]?.ok).length
+  const healthReady = workerHealth != null
+  const healthNames = pipelineHealthNames(workerHealth)
+  const healthTones = healthNames.map((name) => {
+    if (!healthReady) return 'unknown' as const
+    const probe = workerHealth?.[name]
+    if (probe == null) return 'not_deployed' as const
+    return workerProbeTone(probe)
+  })
+  const workersUp = healthTones.filter((tone) => tone === 'up').length
+  const workersDown = healthTones.filter((tone) => tone === 'down').length
+  const workersDeployed = workersUp + workersDown
   const errorPct = errorRateMonth == null ? null : errorRateMonth * 100
   const matchPct = matchRate == null ? null : matchRate * 100
 
@@ -2659,24 +2648,53 @@ function CompactOpsMetrics({
     {
       key: 'health',
       label: 'Health',
-      value: `${workersUp}/${WORKER_ORDER.length}`,
+      value: !healthReady
+        ? '—'
+        : workersDeployed === 0
+          ? '0 deployed'
+          : `${workersUp}/${workersDeployed}`,
       viz: (
         <MiniRing
-          percent={(workersUp / WORKER_ORDER.length) * 100}
-          tone={workersUp === WORKER_ORDER.length ? 'emerald' : 'red'}
+          percent={
+            healthReady && workersDeployed > 0
+              ? (workersUp / workersDeployed) * 100
+              : 0
+          }
+          tone={
+            !healthReady || workersDeployed === 0
+              ? 'navy'
+              : workersDown > 0
+                ? 'red'
+                : 'emerald'
+          }
         />
       ),
       detail: (
         <ul className="space-y-0.5 text-[0.65rem]">
-          {WORKER_ORDER.map((name) => {
-            const probe = workerHealth?.[name]
-            const ok = probe?.ok === true
+          {healthNames.map((name, index) => {
+            const tone = healthTones[index]
+            const label =
+              tone === 'up'
+                ? 'up'
+                : tone === 'down'
+                  ? 'down'
+                  : tone === 'not_deployed'
+                    ? 'not deployed'
+                    : '—'
+            const color =
+              tone === 'up'
+                ? 'text-emerald-700'
+                : tone === 'down'
+                  ? 'text-red-700'
+                  : 'text-mute'
             return (
               <li key={name} className="flex items-center justify-between gap-2">
-                <span className="font-mono text-ink-soft">{name}</span>
-                <span className={ok ? 'text-emerald-700' : 'text-red-700'}>
-                  {probe == null ? '—' : ok ? 'up' : 'down'}
+                <span
+                  className={`font-mono ${tone === 'not_deployed' ? 'text-mute' : 'text-ink-soft'}`}
+                >
+                  {name}
                 </span>
+                <span className={color}>{label}</span>
               </li>
             )
           })}
@@ -2958,7 +2976,7 @@ function HashIndexPanel({
   hashState,
   setHashState,
   hashPending,
-  hashWorkerDown,
+  hashWorkerTone,
   lastRun,
   onHashRefresh,
   hashRefreshPending,
@@ -2969,7 +2987,7 @@ function HashIndexPanel({
   hashState: string
   setHashState: (state: string) => void
   hashPending: boolean
-  hashWorkerDown: boolean
+  hashWorkerTone: WorkerProbeTone
   lastRun: HashIndexRefreshStatus['last_run']
   onHashRefresh: (
     action: { kind: 'refresh-state'; state: string } | { kind: 'refresh-all' },
@@ -3033,14 +3051,24 @@ function HashIndexPanel({
           </div>
         </div>
         <div className="mt-3 flex flex-wrap gap-3 text-xs text-ink-soft">
-          <span>
-            {hashWorkerDown
-              ? 'Worker down'
-              : hashPending
-                ? 'Pending / in-flight'
-                : lastRun
-                  ? `Last ${lastRun.status}`
-                  : 'No runs yet'}
+          <span
+            className={
+              hashWorkerTone === 'not_deployed'
+                ? 'text-mute'
+                : hashWorkerTone === 'down'
+                  ? 'text-red-700'
+                  : undefined
+            }
+          >
+            {hashWorkerTone === 'not_deployed'
+              ? 'Not deployed'
+              : hashWorkerTone === 'down'
+                ? 'Worker down'
+                : hashPending
+                  ? 'Pending / in-flight'
+                  : lastRun
+                    ? `Last ${lastRun.status}`
+                    : 'No runs yet'}
           </span>
           {lastRun?.status === 'success' ? (
             <span>
@@ -3327,7 +3355,11 @@ function DropPipelinePageInner() {
   const data: DropPipelineStatus | undefined = pipelineQuery.data
   const showSkeleton = pipelineQuery.isPending && !data
   const hashPending = (data?.hash_index_refresh?.pending ?? 0) > 0
-  const hashWorkerDown = data ? !data.worker_health.hash_index_refresh?.ok : false
+  const hashWorkerTone = data
+    ? data.worker_health.hash_index_refresh == null
+      ? 'not_deployed'
+      : workerProbeTone(data.worker_health.hash_index_refresh)
+    : 'unknown'
   const lastRun = data?.hash_index_refresh?.last_run
   const caSchedule = data?.ca_drop_schedule
 
@@ -3395,7 +3427,6 @@ function DropPipelinePageInner() {
             </svg>
           </Link>
           <RunPipelineButton
-            disabled={showSkeleton}
             focusResultPanel={() => focusActionResultPanel('pipeline')}
             onQueued={(label, result) => {
               setLastAction(label)
@@ -3406,7 +3437,6 @@ function DropPipelinePageInner() {
       </header>
 
       <CompactOpsMetrics
-        loading={showSkeleton}
         openRequests={data?.drop_requests.count ?? null}
         reviewPending={data?.matching_review.pending ?? null}
         lastCaDrop={caSchedule?.last_success_at ?? null}
@@ -3471,7 +3501,7 @@ function DropPipelinePageInner() {
           hashState={hashState}
           setHashState={setHashState}
           hashPending={hashPending}
-          hashWorkerDown={hashWorkerDown}
+          hashWorkerTone={hashWorkerTone}
           lastRun={lastRun ?? null}
           onHashRefresh={runHashRefresh}
           hashRefreshPending={hashIndexMutation.isPending}

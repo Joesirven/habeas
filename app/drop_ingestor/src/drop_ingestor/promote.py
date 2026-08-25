@@ -29,6 +29,24 @@ PROMOTE_BATCH_SIZE = 5_000
 PROMOTE_MAX_ROWS = 2_000_000
 # Never accumulate every promoted id — HTTP serializes these lists.
 PROMOTE_ID_SAMPLE_CAP = 20
+# Leftover Phone/NDZ pending close: retry if UPDATE fails or leftovers
+# remain while 0 raws lack a request.
+LEFTOVER_CLOSE_MAX_ATTEMPTS = 3
+
+
+@dataclass(frozen=True)
+class LeftoverCloseRetryPolicy:
+    """Bounded leftover-close retries. Log closed_count / attempt only."""
+
+    max_attempts: int = LEFTOVER_CLOSE_MAX_ATTEMPTS
+
+
+LEFTOVER_CLOSE_RETRY_POLICY = LeftoverCloseRetryPolicy()
+
+
+def leftover_close_retry_policy() -> LeftoverCloseRetryPolicy:
+    """Return the leftover-close retry policy (max attempts, no fulfill)."""
+    return LEFTOVER_CLOSE_RETRY_POLICY
 
 
 class DbConnection(Protocol):
@@ -47,6 +65,7 @@ class PromoteResult:
     raw_record_ids: list[int] = field(default_factory=list)
     promote_attempt_id: int | None = None
     matching_attempts_created: int = 0
+    leftover_pending_closed: int = 0
 
 
 def _append_id_sample(
@@ -139,6 +158,13 @@ async def insert_thin_drop_requests(
     return [str(row["id"]) for row in inserted]
 
 
+def _execute_row_count(status: str) -> int:
+    parts = str(status).split()
+    if parts and parts[-1].isdigit():
+        return int(parts[-1])
+    return 0
+
+
 def _log_unscoped_continue(
     *,
     promoted: int,
@@ -154,6 +180,185 @@ def _log_unscoped_continue(
             "promote_attempt_id": attempt_id,
         },
     )
+
+
+def _leftover_pending_filters(
+    *,
+    exclude_attempt_id: int | None,
+    source_csv_filename: str | None,
+    list_type: str | None,
+) -> tuple[list[str], list[Any]]:
+    clauses = ["step = $1", "status = 'pending'"]
+    args: list[Any] = [PROMOTE_STEP]
+    if exclude_attempt_id is not None:
+        args.append(exclude_attempt_id)
+        clauses.append(f"id <> ${len(args)}")
+    if source_csv_filename:
+        args.append(source_csv_filename)
+        clauses.append(f"source_csv_filename = ${len(args)}")
+    if list_type:
+        args.append(list_type)
+        clauses.append(f"list_type = ${len(args)}")
+    return clauses, args
+
+
+def _log_leftover_close_attempt(*, closed_count: int, attempt: int) -> None:
+    logger.info(
+        "drop_promote_leftover_pending_closed",
+        extra={
+            "event": "drop_promote_leftover_pending_closed",
+            "closed_count": closed_count,
+            "attempt": attempt,
+        },
+    )
+
+
+async def _safe_fetchval_int(conn: DbConnection, query: str, *args: Any) -> int | None:
+    """Count query → int, or None when the driver/mock cannot yield a count."""
+    try:
+        value = await conn.fetchval(query, *args)
+        return int(value or 0)
+    except Exception:
+        return None
+
+
+async def _count_leftover_pending_promote_attempts(
+    conn: DbConnection,
+    *,
+    exclude_attempt_id: int | None,
+    source_csv_filename: str | None,
+    list_type: str | None,
+) -> int | None:
+    clauses, args = _leftover_pending_filters(
+        exclude_attempt_id=exclude_attempt_id,
+        source_csv_filename=source_csv_filename,
+        list_type=list_type,
+    )
+    return await _safe_fetchval_int(
+        conn,
+        f"SELECT COUNT(*) FROM {DROP_INGEST_ATTEMPTS_TABLE} WHERE {' AND '.join(clauses)}",
+        *args,
+    )
+
+
+async def _unmatched_raws_exist(
+    conn: DbConnection,
+    *,
+    source_csv_filename: str | None,
+    list_type: str | None,
+) -> int | None:
+    """1 if any raw lacks a DROP request, 0 if none, None if unreadable.
+
+    Uses fetchval (not fetch) so leftover-close retries do not consume the
+    unpromoted-row fetch queue. Existence only — not a full table count.
+    Caller must treat None as fail-closed (do not UPDATE pending→success).
+    """
+    clauses = [
+        """
+        NOT EXISTS (
+            SELECT 1 FROM requests req
+             WHERE req.raw_record_id = r.id
+               AND req.intake_source = 'drop'
+        )
+        """
+    ]
+    args: list[Any] = []
+    if source_csv_filename:
+        args.append(source_csv_filename)
+        clauses.append(f"r.source_csv_filename = ${len(args)}")
+    if list_type:
+        args.append(list_type)
+        clauses.append(f"r.list_type = ${len(args)}")
+    where = " AND ".join(clauses)
+    try:
+        exists = await conn.fetchval(
+            f"""
+            SELECT 1
+              FROM drop_raw_requests r
+             WHERE {where}
+             LIMIT 1
+            """,
+            *args,
+        )
+    except Exception:
+        return None
+    if exists is None:
+        return 0
+    try:
+        return 1 if int(exists) else 0
+    except (TypeError, ValueError):
+        return None
+
+
+async def close_leftover_pending_promote_attempts(
+    conn: DbConnection,
+    *,
+    exclude_attempt_id: int | None = None,
+    source_csv_filename: str | None = None,
+    list_type: str | None = None,
+) -> int:
+    """Mark leftover pending promote attempts ``success`` (no new status).
+
+    Order of operations (each attempt):
+
+    1. Read unmatched raws first (fail-closed if unreadable).
+    2. If any raw lacks a request (or the check is unreadable): return
+       without UPDATE pending→success.
+    3. Else UPDATE leftover pending to ``success``.
+    4. Retry only while leftover pending remains **and** unmatched is
+       still 0 (re-check unmatched first on every attempt). Bound:
+       ``LEFTOVER_CLOSE_MAX_ATTEMPTS``.
+
+    Logs closed_count / attempt only. No fulfill. No PII.
+    """
+    policy = leftover_close_retry_policy()
+    closed_total = 0
+    for attempt in range(1, policy.max_attempts + 1):
+        unmatched = await _unmatched_raws_exist(
+            conn,
+            source_csv_filename=source_csv_filename,
+            list_type=list_type,
+        )
+        if unmatched is None or unmatched != 0:
+            _log_leftover_close_attempt(closed_count=0, attempt=attempt)
+            return closed_total
+
+        clauses, args = _leftover_pending_filters(
+            exclude_attempt_id=exclude_attempt_id,
+            source_csv_filename=source_csv_filename,
+            list_type=list_type,
+        )
+        try:
+            status = await conn.execute(
+                f"""
+                UPDATE {DROP_INGEST_ATTEMPTS_TABLE}
+                   SET status = 'success',
+                       completed_at = NOW()
+                 WHERE {' AND '.join(clauses)}
+                """,
+                *args,
+            )
+        except Exception:
+            _log_leftover_close_attempt(closed_count=0, attempt=attempt)
+            if attempt >= policy.max_attempts:
+                raise
+            continue
+
+        closed = _execute_row_count(status)
+        closed_total += closed
+        leftover = await _count_leftover_pending_promote_attempts(
+            conn,
+            exclude_attempt_id=exclude_attempt_id,
+            source_csv_filename=source_csv_filename,
+            list_type=list_type,
+        )
+        should_retry = leftover is not None and leftover > 0
+        if closed or should_retry:
+            _log_leftover_close_attempt(closed_count=closed, attempt=attempt)
+        if should_retry and attempt < policy.max_attempts:
+            continue
+        return closed_total
+    return closed_total
 
 
 def _prepare_promote_batch(raw_rows: list[dict[str, Any]]) -> tuple[list[int], list[str], int]:
@@ -205,6 +410,15 @@ async def run_promote(
 
     Caller-supplied filename / list_type stay scoped to that list.
 
+    When a claimed or caller-scoped list is idle and zero
+    ``drop_raw_requests`` remain without a request, leftover ``pending``
+    promote attempts for those lists are marked ``success`` (same terminal
+    status as a finished drain — no new status). That clears sibling
+    Phone/NDZ pending after an earlier Email unscoped drain already
+    created every request. Leftover-close reads unmatched raws first and
+    does not UPDATE pending→success if any raw lacks a request. It retries
+    up to ``LEFTOVER_CLOSE_MAX_ATTEMPTS`` only while unmatched is 0.
+
     Never enqueues matching attempts — request_dispatcher owns that.
     """
     attempt_id = promote_attempt_id
@@ -241,6 +455,26 @@ async def run_promote(
     batches = 0
     default_state_total = 0
     idle = False
+
+    async def _unscope_after_claimed_list_idle() -> None:
+        nonlocal filter_filename, filter_list_type, scoped_from_claim
+        result.leftover_pending_closed += (
+            await close_leftover_pending_promote_attempts(
+                conn,
+                exclude_attempt_id=attempt_id,
+                source_csv_filename=filter_filename,
+                list_type=filter_list_type,
+            )
+        )
+        filter_filename = None
+        filter_list_type = None
+        scoped_from_claim = False
+        _log_unscoped_continue(
+            promoted=result.promoted,
+            batches=batches,
+            attempt_id=attempt_id,
+        )
+
     try:
         while result.promoted < drain_cap:
             remaining = drain_cap - result.promoted
@@ -254,14 +488,7 @@ async def run_promote(
             raw_rows = raw_rows[:take]
             if not raw_rows:
                 if scoped_from_claim:
-                    filter_filename = None
-                    filter_list_type = None
-                    scoped_from_claim = False
-                    _log_unscoped_continue(
-                        promoted=result.promoted,
-                        batches=batches,
-                        attempt_id=attempt_id,
-                    )
+                    await _unscope_after_claimed_list_idle()
                     continue
                 idle = True
                 break
@@ -301,22 +528,27 @@ async def run_promote(
             )
             if len(raw_rows) < take:
                 if scoped_from_claim:
-                    filter_filename = None
-                    filter_list_type = None
-                    scoped_from_claim = False
-                    _log_unscoped_continue(
-                        promoted=result.promoted,
-                        batches=batches,
-                        attempt_id=attempt_id,
-                    )
+                    await _unscope_after_claimed_list_idle()
                     continue
                 idle = True
                 break
 
         # Success only when unscoped drain is idle — not after the claimed
         # list alone, and not when max_rows left unpromoted raws behind.
-        if attempt_id is not None and idle:
-            await mark_attempt_success(conn, attempt_id)
+        if idle:
+            if attempt_id is not None:
+                await mark_attempt_success(conn, attempt_id)
+            # Caller-scoped idle: leftover pending for that list only.
+            # Unscoped idle: every leftover pending promote (Phone/NDZ
+            # after Email already created every request).
+            result.leftover_pending_closed += (
+                await close_leftover_pending_promote_attempts(
+                    conn,
+                    exclude_attempt_id=attempt_id,
+                    source_csv_filename=filter_filename if caller_scoped else None,
+                    list_type=filter_list_type if caller_scoped else None,
+                )
+            )
 
         logger.info(
             "drop_promote_complete",
@@ -329,6 +561,7 @@ async def run_promote(
                 "capped": not idle,
                 "promote_attempt_id": attempt_id,
                 "matching_attempts_created": result.matching_attempts_created,
+                "leftover_pending_closed": result.leftover_pending_closed,
             },
         )
         return result

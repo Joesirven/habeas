@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
-
-from fastapi import FastAPI, HTTPException, status
-from pydantic_settings import SettingsConfigDict
+from typing import Any
 
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
@@ -16,7 +14,15 @@ from habeas_privacy_core.observability.logging import configure_logging
 from habeas_privacy_core.observability.tracing import setup_tracing
 from habeas_privacy_core.queue.reap import ReapedTableConfig, run_reap
 from habeas_privacy_core.workflow.approval import reconcile_ungated_matching_reviews
-from reaper.config import DEFAULT_REAPED_TABLES
+from fastapi import FastAPI, HTTPException, status
+from pydantic_settings import SettingsConfigDict
+
+from reaper.config import (
+    DEFAULT_REAPED_TABLES,
+    DROP_INGEST_ATTEMPTS_TABLE,
+    MATCHING_ATTEMPTS_TABLE,
+    PROMOTE_STEP,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +80,11 @@ async def readyz():
     if not settings.database_url:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"status": "unavailable", "service": settings.service_name, "checks": {"database": "missing_url"}},
+            detail={
+                "status": "unavailable",
+                "service": settings.service_name,
+                "checks": {"database": "missing_url"},
+            },
         )
 
     payload = await ready_payload(
@@ -113,12 +123,123 @@ async def _reaped_tables_with_overrides(pool) -> list[ReapedTableConfig]:
     ]
 
 
+def _matching_reap_row(results: Any) -> dict[str, Any] | None:
+    """Pick matching_attempts counts from ``run_reap`` (list of table dicts)."""
+    if not isinstance(results, list):
+        return None
+    for row in results:
+        if isinstance(row, dict) and row.get("table") == MATCHING_ATTEMPTS_TABLE:
+            return row
+    return None
+
+
+def _matching_claimed_reaped(results: Any) -> dict[str, Any]:
+    """Expired claimed matching rows reaped by ``release_dead_claims``. Ids/counts only."""
+    row = _matching_reap_row(results)
+    dead = int((row or {}).get("dead_claims") or 0)
+    stuck = int((row or {}).get("stuck_in_flight") or 0)
+    inserted = int((row or {}).get("inserted") or 0)
+    abandoned = int((row or {}).get("abandoned") or 0)
+    payload = {
+        "table": MATCHING_ATTEMPTS_TABLE,
+        "claimed_reaped": dead,
+        "dead_claims": dead,
+        "stuck_in_flight": stuck,
+        "inserted": inserted,
+        "abandoned": abandoned,
+    }
+    logger.info("matching_claimed_reaped", extra={"event": "matching_claimed_reaped", **payload})
+    return payload
+
+
+async def _close_leftover_pending_promote(conn) -> dict[str, Any]:
+    """Close leftover pending promote rows when every raw already has a request.
+
+    Same rule as ``drop_ingestor.promote.close_leftover_pending_promote_attempts``
+    (unscoped). Does not enqueue matching or fulfillment. Ids/counts only.
+    """
+    leftover_rows = await conn.fetch(
+        f"""
+        SELECT id
+          FROM {DROP_INGEST_ATTEMPTS_TABLE}
+         WHERE step = $1
+           AND status = 'pending'
+         ORDER BY id
+        """,
+        PROMOTE_STEP,
+    )
+    leftover_ids = [int(row["id"]) for row in leftover_rows]
+    leftover_pending_count = len(leftover_ids)
+    if leftover_pending_count == 0:
+        return {
+            "closed_count": 0,
+            "closed_ids": [],
+            "leftover_pending_count": 0,
+            "skipped": "no_leftover_pending",
+        }
+
+    unpromoted_remains = await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+              FROM drop_raw_requests r
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM requests req
+                  WHERE req.raw_record_id = r.id
+                    AND req.intake_source = 'drop'
+             )
+        )
+        """
+    )
+    if unpromoted_remains:
+        skipped = {
+            "closed_count": 0,
+            "closed_ids": [],
+            "leftover_pending_count": leftover_pending_count,
+            "leftover_ids": leftover_ids,
+            "skipped": "unpromoted_raws_remain",
+        }
+        logger.info(
+            "drop_promote_leftover_pending_skipped",
+            extra={"event": "drop_promote_leftover_pending_skipped", **skipped},
+        )
+        return skipped
+
+    # Same UPDATE as promote.close_leftover_pending_promote_attempts (unscoped).
+    closed_rows = await conn.fetch(
+        f"""
+        UPDATE {DROP_INGEST_ATTEMPTS_TABLE}
+           SET status = 'success',
+               completed_at = NOW()
+         WHERE step = $1
+           AND status = 'pending'
+        RETURNING id
+        """,
+        PROMOTE_STEP,
+    )
+    closed_ids = [int(row["id"]) for row in closed_rows]
+    payload = {
+        "closed_count": len(closed_ids),
+        "closed_ids": closed_ids,
+        "leftover_pending_count": leftover_pending_count,
+    }
+    if closed_ids:
+        logger.info(
+            "drop_promote_leftover_pending_closed",
+            extra={"event": "drop_promote_leftover_pending_closed", **payload},
+        )
+    return payload
+
+
 @app.post("/reap")
 async def reap():
     """Run queue sweeps — invoked by Cloud Scheduler every minute.
 
     Also backfills missing matching.review gates (same recovery lane as lease
     reaping — match success opens the gate in-transaction; this catches hangers).
+    After standard reap: close leftover pending promote when every
+    ``drop_raw_requests`` row already has a request (ids/counts only).
+    Does not call fulfillment.
     """
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
@@ -126,6 +247,19 @@ async def reap():
     pool = get_pool()
     tables = await _reaped_tables_with_overrides(pool)
     results = await run_reap(pool, tables)
+    matching_claimed_reaped = _matching_claimed_reaped(results)
+
+    leftover_promote: dict[str, Any] = {}
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                leftover_promote = await _close_leftover_pending_promote(conn)
+    except Exception:
+        logger.exception(
+            "leftover_promote_close_failed",
+            extra={"event": "leftover_promote_close_failed"},
+        )
+        leftover_promote = {"status": "error"}
 
     matching_review_reconcile: dict = {}
     try:
@@ -151,6 +285,8 @@ async def reap():
     return {
         "status": "ok",
         "results": results,
+        "matching_claimed_reaped": matching_claimed_reaped,
+        "leftover_promote_closed": leftover_promote,
         "matching_review_reconcile": matching_review_reconcile,
     }
 

@@ -11,6 +11,20 @@ logger = logging.getLogger(__name__)
 
 DRAIN_LEASE_TABLE = "matching_drain_lease"
 DEFAULT_LEASE_KEY = "data-drop"
+# Renew is between chunks; 20m is longer than a healthy 10k BQ + complete,
+# still faster than waiting the 30m TTL after a crash.
+STALE_HEARTBEAT_MINUTES = 20
+
+
+def _acquire_available_predicate() -> str:
+    """True when the row is free, TTL-expired, or heartbeat-dead."""
+    return f"""(
+                    holder IS NULL
+                    OR expires_at IS NULL
+                    OR expires_at < NOW()
+                    OR updated_at IS NULL
+                    OR updated_at < NOW() - INTERVAL '{STALE_HEARTBEAT_MINUTES} minutes'
+               )"""
 
 
 class DrainLeaseKeyUnavailable(RuntimeError):
@@ -44,14 +58,10 @@ def _acquire_by_lease_key_sql() -> str:
             UPDATE {DRAIN_LEASE_TABLE}
                SET holder = $1,
                    acquired_at = NOW(),
-                   expires_at = NOW() + ($2 || ' minutes')::interval,
+                   expires_at = NOW() + ($2::varchar || ' minutes')::interval,
                    updated_at = NOW()
              WHERE lease_key = $3
-               AND (
-                    holder IS NULL
-                    OR expires_at IS NULL
-                    OR expires_at < NOW()
-               )
+               AND {_acquire_available_predicate()}
             RETURNING holder
             """
 
@@ -69,7 +79,13 @@ async def _acquire_by_lease_key(
         str(lease_minutes),
         lease_key,
     )
-    return row is not None
+    acquired = row is not None
+    if acquired:
+        logger.info(
+            "drain_lease_acquired",
+            extra={"holder": holder, "lease_key": lease_key, "acquired": 1},
+        )
+    return acquired
 
 
 async def acquire_drain_lease(
@@ -79,8 +95,10 @@ async def acquire_drain_lease(
     lease_minutes: int = 30,
     lease_key: str = DEFAULT_LEASE_KEY,
 ) -> bool:
-    """Acquire the drain lease if free or expired.
+    """Acquire the drain lease if free, expired, or heartbeat-dead.
 
+    A held lease is stolen when ``updated_at`` is older than
+    ``STALE_HEARTBEAT_MINUTES`` (live Job renews every chunk).
     After migrate, a non-data-drop key always uses ``WHERE lease_key = $n``.
     A false-negative column probe must not skip SQL for those keys.
     ``data-drop`` may still fall back to ``id = 1``.
@@ -133,20 +151,22 @@ async def acquire_drain_lease(
         UPDATE {DRAIN_LEASE_TABLE}
            SET holder = $1,
                acquired_at = NOW(),
-               expires_at = NOW() + ($2 || ' minutes')::interval,
+               expires_at = NOW() + ($2::varchar || ' minutes')::interval,
                updated_at = NOW()
          WHERE id = 1
-           AND (
-                holder IS NULL
-                OR expires_at IS NULL
-                OR expires_at < NOW()
-           )
+           AND {_acquire_available_predicate()}
         RETURNING id
         """,
         holder,
         str(lease_minutes),
     )
-    return row is not None
+    acquired = row is not None
+    if acquired:
+        logger.info(
+            "drain_lease_acquired",
+            extra={"holder": holder, "lease_key": lease_key, "acquired": 1},
+        )
+    return acquired
 
 
 async def renew_drain_lease(

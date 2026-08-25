@@ -93,16 +93,16 @@ async def claim_auth0_chunk(
             SELECT aa.id
               FROM {AUTH0_ATTEMPTS_TABLE} aa
              WHERE aa.status = 'pending'
-               AND aa.step = $1
+               AND aa.step = $1::varchar
                AND (aa.retry_after IS NULL OR aa.retry_after <= NOW())
              ORDER BY aa.attempted_at
-             LIMIT $2
+             LIMIT $2::int
              FOR UPDATE OF aa SKIP LOCKED
         )
         UPDATE {AUTH0_ATTEMPTS_TABLE} AS t
            SET status = 'claimed',
-               worker_id = $3,
-               claim_expires_at = NOW() + ($4 || ' minutes')::interval
+               worker_id = $3::varchar,
+               claim_expires_at = NOW() + ($4::varchar || ' minutes')::interval
           FROM picked
          WHERE t.id = picked.id
         RETURNING t.id, t.request_id, t.attempt_number, t.worker_id,
@@ -114,6 +114,52 @@ async def claim_auth0_chunk(
         str(lease_minutes),
     )
     return [dict(row) for row in rows]
+
+
+def _execute_rowcount(result: Any) -> int:
+    """Parse asyncpg ``UPDATE N``. Counts only."""
+    if not isinstance(result, str):
+        return 0
+    parts = result.split()
+    if len(parts) >= 2 and parts[0].upper() == "UPDATE":
+        try:
+            return int(parts[-1])
+        except ValueError:
+            return 0
+    return 0
+
+
+async def reap_worker_auth0_claims(conn: Any, worker_id: str) -> int:
+    """Return this worker's ``claimed`` Auth0 rows to ``pending``."""
+    execute = getattr(conn, "execute", None)
+    if execute is None:
+        return 0
+    try:
+        result = await execute(
+            f"""
+            UPDATE {AUTH0_ATTEMPTS_TABLE}
+               SET status = 'pending',
+                   worker_id = NULL,
+                   claim_expires_at = NULL
+             WHERE status = 'claimed'
+               AND step = $1::varchar
+               AND worker_id = $2::varchar
+            """,
+            STEP_MATCHING,
+            worker_id,
+        )
+    except (TypeError, ValueError):
+        return 0
+    released = _execute_rowcount(result)
+    if released:
+        logger.info(
+            "auth0_drain_reaped_worker_claims",
+            extra={
+                "event": "auth0_drain_reaped_worker_claims",
+                "reaped": released,
+            },
+        )
+    return released
 
 
 async def complete_auth0_attempts(
@@ -135,9 +181,9 @@ async def complete_auth0_attempts(
                 UPDATE {AUTH0_ATTEMPTS_TABLE}
                    SET status = 'success',
                        completed_at = NOW(),
-                       worker_id = COALESCE(worker_id, $2),
+                       worker_id = COALESCE(worker_id, $2::varchar),
                        audit_payload = $3::jsonb
-                 WHERE id = $1
+                 WHERE id = $1::bigint
                    AND status = 'claimed'
                 """,
                 [
@@ -156,12 +202,12 @@ async def complete_auth0_attempts(
                 UPDATE {AUTH0_ATTEMPTS_TABLE}
                    SET status = 'submit_error',
                        completed_at = NOW(),
-                       worker_id = COALESCE(worker_id, $2),
-                       error_code = $3,
-                       error_message = $4,
-                       retry_after = $5,
+                       worker_id = COALESCE(worker_id, $2::varchar),
+                       error_code = $3::varchar,
+                       error_message = $4::text,
+                       retry_after = $5::timestamptz,
                        audit_payload = $6::jsonb
-                 WHERE id = $1
+                 WHERE id = $1::bigint
                    AND status = 'claimed'
                 """,
                 [
@@ -335,8 +381,31 @@ async def process_auth0_chunk(
         )
 
     outcomes = early_outcomes + lookup_outcomes
-    completed = await complete_auth0_attempts(conn, outcomes)
     error_n = sum(1 for item in outcomes if item["status"] != "success")
+    try:
+        completed = await complete_auth0_attempts(conn, outcomes)
+    except Exception as exc:
+        safe = redact_error_text(str(exc))
+        reaped = await reap_worker_auth0_claims(conn, worker_id)
+        logger.error(
+            "auth0_drain_complete_failed",
+            extra={
+                "event": "auth0_drain_complete_failed",
+                "error_summary": safe,
+                "claimed": len(claimed),
+                "outcomes": len(outcomes),
+                "errors": error_n,
+                "reaped": reaped,
+            },
+        )
+        return {
+            "status": "error",
+            "reason": "complete_failed",
+            "claimed": len(claimed),
+            "completed": 0,
+            "errors": error_n,
+            "reaped": reaped,
+        }
 
     logger.info(
         "auth0_chunk_completed",
@@ -361,7 +430,7 @@ async def _pending_auth0_count(conn: Any) -> int:
         SELECT COUNT(*)::bigint
           FROM {AUTH0_ATTEMPTS_TABLE}
          WHERE status = 'pending'
-           AND step = $1
+           AND step = $1::varchar
            AND (retry_after IS NULL OR retry_after <= NOW())
         """,
         STEP_MATCHING,
@@ -453,12 +522,31 @@ async def run_drain_budget(
     try:
         while chunks < max_chunks:
             await _call_drain_lease(renew_drain_lease, conn, holder=lease_holder)
-            result = await process_auth0_chunk(
-                conn,
-                worker_id=worker_id,
-                pipeline=pipeline,
-            )
-            if result.get("status") == "idle" or int(result.get("claimed") or 0) == 0:
+            try:
+                result = await process_auth0_chunk(
+                    conn,
+                    worker_id=worker_id,
+                    pipeline=pipeline,
+                )
+            except Exception as exc:
+                safe = redact_error_text(str(exc))
+                reaped = await reap_worker_auth0_claims(conn, worker_id)
+                logger.error(
+                    "auth0_drain_chunk_failed",
+                    extra={
+                        "event": "auth0_drain_chunk_failed",
+                        "error_summary": safe,
+                        "chunks": chunks,
+                        "completed": completed,
+                        "reaped": reaped,
+                    },
+                )
+                chunks += 1
+                continue
+            if (
+                result.get("status") in ("idle", "error")
+                or int(result.get("claimed") or 0) == 0
+            ):
                 break
             chunks += 1
             completed += int(result.get("completed") or 0)
@@ -495,14 +583,31 @@ async def run_job_task(
     last_status = "idle"
     while chunks < budget:
         await _call_drain_lease(renew_drain_lease, conn, holder=lease_holder)
-        result = await process_auth0_chunk(
-            conn,
-            worker_id=task_worker,
-            pipeline=pipeline,
-        )
+        try:
+            result = await process_auth0_chunk(
+                conn,
+                worker_id=task_worker,
+                pipeline=pipeline,
+            )
+        except Exception as exc:
+            safe = redact_error_text(str(exc))
+            reaped = await reap_worker_auth0_claims(conn, task_worker)
+            logger.error(
+                "auth0_drain_chunk_failed",
+                extra={
+                    "event": "auth0_drain_chunk_failed",
+                    "error_summary": safe,
+                    "chunks": chunks,
+                    "completed": completed,
+                    "reaped": reaped,
+                },
+            )
+            last_status = "error"
+            chunks += 1
+            continue
         last_status = str(result.get("status") or "idle")
         claimed = int(result.get("claimed") or 0)
-        if last_status == "idle" or claimed == 0:
+        if last_status in ("idle", "error") or claimed == 0:
             break
         chunks += 1
         completed += int(result.get("completed") or 0)
