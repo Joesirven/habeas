@@ -5,12 +5,14 @@
 ``RestSchedulerClient.list_jobs`` (E2) when available. Health probes reuse
 ``drop_pipeline._probe_worker_health`` (lazy import; no cycle at import time).
 Missing Cloud Run / HTTP 404 is ``not_deployed`` (ok null), not down.
-Phantom ``intake_drop_poller`` is omitted unless Cloud Run lists it.
+``intake_drop_poller`` is never listed. Inventory + probes cache for 15s.
+No PII in logs or fleet payloads.
 """
 
 from __future__ import annotations
 
 import logging
+from time import monotonic
 from typing import Annotated, Any, Protocol
 
 import google.auth
@@ -23,9 +25,11 @@ from habeas_privacy_core.fleet import (
     CloudRunServiceInput,
     DiscoveryWarning,
     FleetInventory,
+    FleetWorker,
     FleetWorkerHealth,
     SchedulerJobInput,
     is_excluded_service_slug,
+    label_from_worker_key,
     merge_fleet_inventory,
     parse_worker_fleet_urls,
     service_slug_from_name,
@@ -58,9 +62,50 @@ class FleetSettings(CoreSettings):
 
 settings = FleetSettings()
 
-# Retired intake poller — no app in this repo. Only surface if Cloud Run lists it.
+# Retired intake poller — never list, even if a leftover Cloud Run name exists.
 _PHANTOM_WORKER_KEYS = frozenset({"intake_drop_poller"})
 _NOT_DEPLOYED_READY = {"status": "not_deployed"}
+_FLEET_CACHE_TTL_SECONDS = 15.0
+
+# Cloud Run *-prod vertical workers this loop must surface (missing = not_deployed).
+_VERTICAL_WORKER_KEYS = frozenset(
+    {
+        "auth0",
+        "cassandra",
+        "mailchimp",
+        "paylocity",
+        "lever",
+        "google_sheets",
+    }
+)
+# DROP / platform workers that must appear beside verticals.
+_PLATFORM_WORKER_KEYS = frozenset(
+    {
+        "drop_connector",
+        "drop_ingestor",
+        "request_dispatcher",
+        "matching",
+        "data_fulfillment",
+        "hash_index_refresh",
+        "reaper",
+        "drop_notice",
+    }
+)
+_EXPECTED_WORKER_KEYS = _VERTICAL_WORKER_KEYS | _PLATFORM_WORKER_KEYS
+
+# Dispatcher Cloud Run slugs → fleet worker_key (core already aliases fulfillment).
+_WORKER_KEY_ALIASES = {
+    "drop_notice_dispatcher": "drop_notice",
+}
+
+_inventory_cache: tuple[float, FleetInventory] | None = None
+_payload_cache: tuple[float, dict[str, Any]] | None = None
+
+
+def _clear_fleet_cache() -> None:
+    global _inventory_cache, _payload_cache
+    _inventory_cache = None
+    _payload_cache = None
 
 
 class CloudRunClient(Protocol):
@@ -126,11 +171,13 @@ def set_cloud_run_client_factory(factory: Any) -> None:
     """Test hook to inject a fake Cloud Run client factory."""
     global _cloud_run_client_factory
     _cloud_run_client_factory = factory
+    _clear_fleet_cache()
 
 
 def reset_cloud_run_client_factory() -> None:
     global _cloud_run_client_factory
     _cloud_run_client_factory = RestCloudRunClient
+    _clear_fleet_cache()
 
 
 def _make_cloud_run_client() -> CloudRunClient:
@@ -197,6 +244,24 @@ def _is_phantom_worker_key(worker_key: str) -> bool:
     return worker_key in _PHANTOM_WORKER_KEYS
 
 
+def _canonical_worker_key(worker_key: str) -> str:
+    """Map dispatcher slugs onto the fleet key (drop_notice_dispatcher → drop_notice)."""
+    return _WORKER_KEY_ALIASES.get(worker_key, worker_key)
+
+
+def _expected_worker_keys() -> frozenset[str]:
+    """Union of DropPipelineSettings WORKER_KEYS and the hardcoded prod catalog."""
+    keys = set(_EXPECTED_WORKER_KEYS)
+    try:
+        from admin_api.drop_pipeline import WORKER_KEYS
+
+        keys.update(name for name, _attr in WORKER_KEYS)
+    except Exception:
+        pass
+    keys -= _PHANTOM_WORKER_KEYS
+    return frozenset(key for key in keys if not _is_control_plane_worker_key(key))
+
+
 def _not_deployed_health(*, status_code: int | None = None) -> dict[str, Any]:
     """Missing Cloud Run service — not a red outage. ``ok`` is null, not false."""
     return {
@@ -215,51 +280,129 @@ def _probe_indicates_missing_service(probe: dict[str, Any]) -> bool:
     return False
 
 
-def _omit_phantom_undeployed(inventory: FleetInventory) -> FleetInventory:
-    """Drop intake_drop_poller unless a live Cloud Run service exists."""
+def _merge_worker_rows(left: FleetWorker, right: FleetWorker) -> FleetWorker:
+    """Prefer the deployed Cloud Run row; union sources and schedule keys."""
+    primary, secondary = (left, right)
+    if right.deployed and not left.deployed:
+        primary, secondary = right, left
+    sources = sorted(set(left.sources) | set(right.sources))
+    schedule_job_keys = sorted(set(left.schedule_job_keys) | set(right.schedule_job_keys))
+    return primary.model_copy(
+        update={
+            "deployed": left.deployed or right.deployed,
+            "scheduled": left.scheduled or right.scheduled,
+            "service_name": primary.service_name or secondary.service_name,
+            "base_url": primary.base_url or secondary.base_url,
+            "sources": sources,
+            "schedule_job_keys": schedule_job_keys,
+            "attempt_table": primary.attempt_table or secondary.attempt_table,
+        }
+    )
+
+
+def _canonicalize_worker_keys(inventory: FleetInventory) -> FleetInventory:
+    by_key: dict[str, FleetWorker] = {}
+    for worker in inventory.workers:
+        key = _canonical_worker_key(worker.worker_key)
+        remapped = (
+            worker
+            if key == worker.worker_key
+            else worker.model_copy(
+                update={"worker_key": key, "label": label_from_worker_key(key)}
+            )
+        )
+        existing = by_key.get(key)
+        by_key[key] = remapped if existing is None else _merge_worker_rows(existing, remapped)
+    workers = sorted(by_key.values(), key=lambda row: row.worker_key)
+    if workers == inventory.workers:
+        return inventory
+    return inventory.model_copy(update={"workers": workers})
+
+
+def _omit_phantom_workers(inventory: FleetInventory) -> FleetInventory:
+    """Never list intake_drop_poller — 404 leftover or live name."""
     kept = [
         worker
         for worker in inventory.workers
-        if not _is_phantom_worker_key(worker.worker_key) or worker.deployed
+        if not _is_phantom_worker_key(worker.worker_key)
     ]
     if len(kept) == len(inventory.workers):
         return inventory
     return inventory.model_copy(update={"workers": kept})
 
 
+def _ensure_expected_workers(inventory: FleetInventory) -> FleetInventory:
+    """Surface expected *-prod verticals/platform workers as not_deployed when missing."""
+    have = {worker.worker_key for worker in inventory.workers}
+    extra: list[FleetWorker] = []
+    for key in sorted(_expected_worker_keys()):
+        if key in have:
+            continue
+        extra.append(
+            FleetWorker(
+                worker_key=key,
+                label=label_from_worker_key(key),
+                deployed=False,
+                scheduled=False,
+                base_url=None,
+                sources=[],
+            )
+        )
+    if not extra:
+        return inventory
+    workers = sorted([*inventory.workers, *extra], key=lambda row: row.worker_key)
+    return inventory.model_copy(update={"workers": workers})
+
+
+def _finalize_inventory(inventory: FleetInventory) -> FleetInventory:
+    return _ensure_expected_workers(
+        _omit_phantom_workers(_canonicalize_worker_keys(inventory))
+    )
+
+
+def _accepted_env_worker_key(worker_key: str) -> str | None:
+    key = _canonical_worker_key(worker_key)
+    if _is_control_plane_worker_key(key) or _is_phantom_worker_key(key):
+        return None
+    return key
+
+
 def env_url_map_from_settings() -> dict[str, str]:
-    """Build worker_key → base_url from DropPipelineSettings ``*_url`` + WORKER_FLEET_URLS."""
+    """Build worker_key → base_url from DropPipelineSettings ``*_url`` + WORKER_FLEET_URLS.
+
+    Verticals (auth0, mailchimp, paylocity, lever, google_sheets, cassandra) come
+    from ``WORKER_KEYS`` / ``*_url`` once impl-pipeline-api sets those fields,
+    plus optional ``WORKER_FLEET_URLS`` JSON. Never includes intake_drop_poller.
+    """
     from admin_api.drop_pipeline import WORKER_KEYS
     from admin_api.drop_pipeline import settings as drop_settings
 
     out: dict[str, str] = {}
     for worker_key, attr in WORKER_KEYS:
-        if _is_control_plane_worker_key(worker_key) or _is_phantom_worker_key(worker_key):
+        key = _accepted_env_worker_key(worker_key)
+        if key is None:
             continue
         value = getattr(drop_settings, attr, None)
         if isinstance(value, str) and value.strip():
-            out[worker_key] = value.rstrip("/")
+            out[key] = value.rstrip("/")
 
     for field_name in type(drop_settings).model_fields:
         if not field_name.endswith("_url"):
             continue
         if field_name == "database_url":
             continue
-        worker_key = field_name[: -len("_url")]
-        if (
-            worker_key in out
-            or _is_control_plane_worker_key(worker_key)
-            or _is_phantom_worker_key(worker_key)
-        ):
+        key = _accepted_env_worker_key(field_name[: -len("_url")])
+        if key is None or key in out:
             continue
         value = getattr(drop_settings, field_name, None)
         if isinstance(value, str) and value.strip():
-            out[worker_key] = value.rstrip("/")
+            out[key] = value.rstrip("/")
 
     for worker_key, url in parse_worker_fleet_urls(settings.worker_fleet_urls).items():
-        if _is_control_plane_worker_key(worker_key) or _is_phantom_worker_key(worker_key):
+        key = _accepted_env_worker_key(worker_key)
+        if key is None:
             continue
-        out[worker_key] = url
+        out[key] = url
     return out
 
 
@@ -270,8 +413,12 @@ def _cloud_run_worker_keys(services: list[CloudRunServiceInput], *, env_suffix: 
         if slug is None or _is_control_plane_slug(slug):
             continue
         worker_key = worker_key_from_service_slug(slug)
-        if worker_key:
-            keys.add(worker_key)
+        if not worker_key:
+            continue
+        worker_key = _canonical_worker_key(worker_key)
+        if _is_phantom_worker_key(worker_key):
+            continue
+        keys.add(worker_key)
     return keys
 
 
@@ -284,8 +431,8 @@ def _env_urls_for_gcp_merge(
 ) -> dict[str, str]:
     """On prod, keep env URLs only as fill-in for discovered ``*-prod`` services.
 
-    Drops unsuffixed env twins (``drop_connector`` beside ``drop_connector_prod``)
-    and does not invent workers that exist only as settings URLs.
+    Missing expected verticals are seeded later without these localhost defaults
+    so they stay ``not_deployed`` instead of probing 127.0.0.1.
     """
     if not _is_prod_job_prefix(prefix):
         return env_urls
@@ -359,6 +506,9 @@ def _keep_cloud_run_basename(basename: str, *, env_suffix: str, job_prefix: str)
         return False
     if _is_control_plane_slug(slug) or _is_control_plane_slug(basename):
         return False
+    worker_key = worker_key_from_service_slug(slug)
+    if worker_key and _is_phantom_worker_key(_canonical_worker_key(worker_key)):
+        return False
     return True
 
 
@@ -419,14 +569,21 @@ def _list_cloud_run_services(
 
 
 def build_fleet_inventory() -> FleetInventory:
-    """Assemble fleet inventory without probing (sync-safe)."""
+    """Assemble fleet inventory without probing (sync-safe). Cached 15s."""
+    global _inventory_cache
+    cached = _inventory_cache
+    if cached is not None:
+        cached_at, inventory = cached
+        if monotonic() - cached_at < _FLEET_CACHE_TTL_SECONDS:
+            return inventory
+
     prefix = _job_prefix()
     env_suffix = _prod_service_suffix(prefix)
     env_urls = env_url_map_from_settings()
     warnings: list[DiscoveryWarning] = []
 
     if not _scheduler_enabled():
-        return _omit_phantom_undeployed(
+        inventory = _finalize_inventory(
             merge_fleet_inventory(
                 env_prefix=prefix,
                 discovery_mode="local",
@@ -437,6 +594,8 @@ def build_fleet_inventory() -> FleetInventory:
                 service_suffix=env_suffix,
             )
         )
+        _inventory_cache = (monotonic(), inventory)
+        return inventory
 
     services, run_warnings = _list_cloud_run_services(env_suffix=env_suffix, job_prefix=prefix)
     warnings.extend(run_warnings)
@@ -446,7 +605,7 @@ def build_fleet_inventory() -> FleetInventory:
         env_urls, prefix=prefix, env_suffix=env_suffix, services=services
     )
 
-    return _omit_phantom_undeployed(
+    inventory = _finalize_inventory(
         merge_fleet_inventory(
             env_prefix=prefix,
             discovery_mode="gcp",
@@ -457,30 +616,37 @@ def build_fleet_inventory() -> FleetInventory:
             service_suffix=env_suffix,
         )
     )
+    _inventory_cache = (monotonic(), inventory)
+    return inventory
 
 
 def discovered_worker_probe_targets() -> list[tuple[str, str]]:
     """``(worker_key, base_url)`` pairs for health probes. Never raises.
 
-    Skips phantom intake_drop_poller and env-only workers when Cloud Run
-    already listed the live set — those 404s are ``not_deployed``, not down.
+    Never probes intake_drop_poller. Env-only / missing Cloud Run workers are
+    ``not_deployed`` (not probed) once any ``*-prod``/``*-dev`` service exists.
+    Local mode may fall back to settings URLs; GCP mode does not probe localhost
+    defaults for services Cloud Run did not list.
     """
     try:
         inventory = build_fleet_inventory()
         have_cloud_run = any(worker.deployed for worker in inventory.workers)
+        local_mode = inventory.discovery_mode == "local"
         targets: list[tuple[str, str]] = []
         for worker in inventory.workers:
             if not worker.base_url:
                 continue
-            if _is_phantom_worker_key(worker.worker_key) and not worker.deployed:
+            if _is_phantom_worker_key(worker.worker_key):
+                continue
+            # GCP: only probe Cloud Run-listed services. Missing = not_deployed.
+            if not local_mode and not worker.deployed:
                 continue
             if have_cloud_run and not worker.deployed:
                 continue
             targets.append((worker.worker_key, worker.base_url))
-        if not targets:
-            # Avoid drop_pipeline WORKER_KEYS fallback (includes phantom poller).
+        if not targets and local_mode:
             for key, url in env_url_map_from_settings().items():
-                if url:
+                if url and not _is_phantom_worker_key(key):
                     targets.append((key, url))
         return targets
     except Exception:
@@ -548,12 +714,19 @@ def _health_from_probe(probe: dict[str, Any]) -> dict[str, Any]:
 async def build_fleet_inventory_async(*, probe_health: bool = True) -> dict[str, Any]:
     """Async fleet builder — probes /readyz via drop_pipeline._probe_worker_health.
 
-    Pipeline ``collect_worker_health`` keeps the 15s snapshot; this path maps
-    404 / missing Cloud Run onto ``not_deployed`` (ok is null, not false).
+    Cached 15s. Maps 404 / missing Cloud Run onto ``not_deployed`` (ok is null,
+    not false). Never includes intake_drop_poller. Probe results are ids/status
+    only — no requestor PII.
     """
+    global _payload_cache
     import asyncio
 
     from admin_api.drop_pipeline import _probe_worker_health
+
+    if probe_health and _payload_cache is not None:
+        cached_at, cached_payload = _payload_cache
+        if monotonic() - cached_at < _FLEET_CACHE_TTL_SECONDS:
+            return cached_payload
 
     inventory = build_fleet_inventory()
     payload = _inventory_to_response(inventory)
@@ -561,14 +734,13 @@ async def build_fleet_inventory_async(*, probe_health: bool = True) -> dict[str,
         return payload
 
     have_cloud_run = any(bool(row.get("deployed")) for row in payload["workers"])
+    local_mode = payload.get("discovery_mode") == "local"
     targets = [
         (str(row["worker_key"]), str(row["base_url"]))
         for row in payload["workers"]
         if row.get("base_url")
-        and (row.get("deployed") or not have_cloud_run)
-        and not (
-            _is_phantom_worker_key(str(row["worker_key"])) and not row.get("deployed")
-        )
+        and not _is_phantom_worker_key(str(row["worker_key"]))
+        and (row.get("deployed") or (local_mode and not have_cloud_run))
     ]
     by_name: dict[str, Any] = {}
     if targets:
@@ -584,16 +756,19 @@ async def build_fleet_inventory_async(*, probe_health: bool = True) -> dict[str,
     for row in payload["workers"]:
         key = row["worker_key"]
         probe = by_name.get(key) or {}
+        if _is_phantom_worker_key(str(key)):
+            continue
         if not row.get("base_url"):
             row["health"] = _not_deployed_health()
             continue
-        if have_cloud_run and not row.get("deployed"):
+        if (have_cloud_run or not local_mode) and not row.get("deployed"):
             row["health"] = _not_deployed_health()
             continue
         if not probe:
             row["health"] = _not_deployed_health()
             continue
         row["health"] = _health_from_probe(probe)
+    _payload_cache = (monotonic(), payload)
     return payload
 
 

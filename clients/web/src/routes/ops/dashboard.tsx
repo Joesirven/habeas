@@ -9,15 +9,55 @@ import {
   listRuns,
   type OpsTimeWindow,
   type RunSummary,
-  type WorkerHealthProbe,
 } from '@/lib/api'
 import { RoleGate } from '@/lib/auth'
-import {
-  isWorkerHealthy,
-  orderedWorkers,
-  workerDisplayLabel,
-  workerKey,
-} from '@/lib/worker-fleet'
+import { orderedWorkers, workerDisplayLabel, workerKey } from '@/lib/worker-fleet'
+
+type WorkerHealthTone = 'up' | 'down' | 'not_deployed' | 'unknown'
+
+type WorkerHealthSignals = {
+  ok?: boolean | null
+  status_code?: number | null
+  ready?: { status?: string } | null
+}
+
+const EXCLUDED_WORKER_KEYS = new Set(['intake_drop_poller'])
+
+function isCountedWorker(name: string): boolean {
+  return Boolean(name) && !EXCLUDED_WORKER_KEYS.has(name)
+}
+
+/**
+ * Health rule (dashboard worker pool):
+ * - Prefer fleet discovery order; pipeline worker_health is probe overlay only.
+ * - Never count intake_drop_poller.
+ * - up: ok === true
+ * - not_deployed: status_code === 404 or ready.status === 'not_deployed' (not down)
+ * - unknown: missing probe, ok === null, or ready.status === 'pending' (not down)
+ * - down: ok === false after the above
+ */
+function workerHealthTone(signals: WorkerHealthSignals | null | undefined): WorkerHealthTone {
+  if (signals == null) return 'unknown'
+  if (signals.ok === true) return 'up'
+  const readyStatus = signals.ready?.status
+  if (readyStatus === 'not_deployed' || signals.status_code === 404) return 'not_deployed'
+  if (signals.ok == null) return 'unknown'
+  if (readyStatus === 'pending') return 'unknown'
+  return 'down'
+}
+
+function toneLabel(tone: WorkerHealthTone): string {
+  if (tone === 'up') return 'Up'
+  if (tone === 'down') return 'Down'
+  if (tone === 'not_deployed') return 'Not deployed'
+  return 'Unknown'
+}
+
+function toneClass(tone: WorkerHealthTone): string {
+  if (tone === 'up') return 'text-emerald-700'
+  if (tone === 'down') return 'text-red-700'
+  return 'text-mute'
+}
 
 const WINDOW_OPTIONS: { value: OpsTimeWindow; label: string }[] = [
   { value: '8h', label: '8h' },
@@ -176,20 +216,22 @@ function TallyRow({
 }
 
 function WorkerHealthCard({
-  name,
-  probe,
+  label,
+  tone,
+  statusCode,
+  readyStatus,
 }: {
-  name: string
-  probe: WorkerHealthProbe | { ok: boolean; status_code?: number | null; ready?: { status?: string } }
+  label: string
+  tone: WorkerHealthTone
+  statusCode: number | null
+  readyStatus: string | null
 }) {
   return (
     <div className="rounded-lg border border-line bg-paper/60 px-3 py-2.5">
-      <p className="taste-micro text-[0.65rem]">{name.replaceAll('_', ' ')}</p>
-      <p className={`mt-1 text-xs font-medium ${probe.ok ? 'text-emerald-700' : 'text-red-700'}`}>
-        {probe.ok ? 'Up' : 'Down'}
-      </p>
+      <p className="taste-micro text-[0.65rem]">{label}</p>
+      <p className={`mt-1 text-xs font-medium ${toneClass(tone)}`}>{toneLabel(tone)}</p>
       <p className="mt-0.5 font-mono text-[0.6rem] text-mute">
-        {probe.status_code ?? '—'} · {probe.ready?.status ?? '—'}
+        {statusCode ?? '—'} · {readyStatus ?? '—'}
       </p>
     </div>
   )
@@ -252,37 +294,49 @@ function DashboardContent() {
   /** Prefer fleet discovery order; fall back to pipeline worker_health keys. */
   const workerEntries = useMemo(() => {
     if (fleetWorkers.length > 0) {
-      return fleetWorkers.map((worker) => {
+      return fleetWorkers.flatMap((worker) => {
         const key = workerKey(worker)
+        if (!isCountedWorker(key)) return []
         const probe = pipelineHealth?.[key]
-        return {
-          name: key,
-          label: workerDisplayLabel(worker),
-          ok: probe?.ok ?? isWorkerHealthy(worker),
+        const signals: WorkerHealthSignals = {
+          ok: probe?.ok ?? worker.health?.ok ?? worker.ok ?? null,
           status_code: probe?.status_code ?? worker.health?.status_code ?? worker.status_code ?? null,
           ready: probe?.ready ?? worker.health?.ready ?? worker.ready,
         }
+        return [
+          {
+            name: key,
+            label: workerDisplayLabel(worker),
+            tone: workerHealthTone(signals),
+            status_code: signals.status_code ?? null,
+            ready: signals.ready,
+          },
+        ]
       })
     }
     if (pipelineHealth) {
-      return Object.keys(pipelineHealth).map((name) => {
+      return Object.keys(pipelineHealth).flatMap((name) => {
+        if (!isCountedWorker(name)) return []
         const probe = pipelineHealth[name]!
-        return {
-          name,
-          label: name.replaceAll('_', ' '),
-          ok: probe.ok,
-          status_code: probe.status_code ?? null,
-          ready: probe.ready,
-        }
+        return [
+          {
+            name,
+            label: name.replaceAll('_', ' '),
+            tone: workerHealthTone(probe),
+            status_code: probe.status_code ?? null,
+            ready: probe.ready,
+          },
+        ]
       })
     }
     return []
   }, [fleetWorkers, pipelineHealth])
 
-  const workersUp =
-    workerEntries.length > 0
-      ? workerEntries.filter((entry) => entry.ok).length
-      : null
+  const deployedEntries = workerEntries.filter(
+    (entry) => entry.tone === 'up' || entry.tone === 'down',
+  )
+  const workersUp = deployedEntries.length > 0 ? deployedEntries.filter((entry) => entry.tone === 'up').length : null
+  const workersTotal = deployedEntries.length
 
   const loading =
     (runsQuery.isPending && !runsQuery.data) ||
@@ -336,7 +390,7 @@ function DashboardContent() {
             <TallyRow
               summary={summary}
               workersUp={workersUp}
-              workersTotal={workerEntries.length}
+              workersTotal={workersTotal}
               window={window}
             />
           </div>
@@ -405,12 +459,10 @@ function DashboardContent() {
                   {workerEntries.map((entry) => (
                     <WorkerHealthCard
                       key={entry.name}
-                      name={entry.name}
-                      probe={{
-                        ok: entry.ok,
-                        status_code: entry.status_code,
-                        ready: entry.ready,
-                      }}
+                      label={entry.label}
+                      tone={entry.tone}
+                      statusCode={entry.status_code}
+                      readyStatus={entry.ready?.status ?? null}
                     />
                   ))}
                 </div>

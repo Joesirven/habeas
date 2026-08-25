@@ -43,6 +43,9 @@ cd clients/web && bun test
 | request-dispatcher | `test_dispatch.py` | Auth0/Email SQL lacks `$n::varchar` |
 | admin-api | `test_drop_pipeline.py`, `test_auth0_matching_api.py` | health cache regresses; master data repository (MDR) search missing; Auth0 search not gated |
 | admin-api | `test_drop_pipeline.py` (when those tests exist) | 404 undeployed is treated as worker down |
+| admin-api | `test_drop_pipeline.py` | `GET /ops/drop/matching-progress` missing, or its SQL scans `drop_raw_requests` (must be one `GROUP BY status` on `matching_attempts` only) |
+| admin-api | `test_drop_pipeline.py` | `intake_drop_poller` is in `WORKER_KEYS` or the pipeline chip |
 | matching | `test_chunk_drain_job.py`, `test_vertical_chunk_drain.py` | matching review `INSERT` lacks `$1::varchar` (`AmbiguousParameterError` class); drain-job or vertical drain invariants regress |
 | reaper | `test_reaper_health.py`, `test_reaper_config.py` | testers did not **run** the suite; matching reap or review reconcile regresses; fulfill is invoked |
 | `clients/web` | `bun test` | web tests fail when `clients/web` changed |
+| QCQA | every required suite | testers did not **run** pytest / `bun test` — listing commands is not enough |

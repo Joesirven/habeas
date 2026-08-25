@@ -33,6 +33,7 @@ import { actionToast } from '@/lib/action-toast'
 import { RoleGate, isSuperAdmin } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 import {
+  fetchAdminApi,
   getDropBulkProcess,
   getDropPipeline,
   getDropWorkerTrends,
@@ -89,12 +90,53 @@ const WORKER_ORDER = [
   'data_fulfillment',
   'hash_index_refresh',
   'reaper',
-  'intake_drop_poller',
 ] as const
+
+const RETIRED_WORKER_KEYS = new Set(['intake_drop_poller'])
 
 type WorkerProbeTone = 'up' | 'down' | 'not_deployed' | 'unknown'
 
-/** 404 / ready.not_deployed = missing service, not a red outage. */
+/** Cheap matching GROUP BY — same client as getDropPipeline; helper is not in api.ts. */
+type MatchingAttemptCounts = {
+  pending?: number
+  claimed?: number
+  success?: number
+  by_status?: { status: string; count: number }[]
+  drain?: {
+    active: boolean
+    holder: string | null
+    expires_at: string | null
+  }
+}
+
+type DropMatchingProgress = MatchingAttemptCounts & {
+  matching_attempts?: MatchingAttemptCounts
+}
+
+function getDropMatchingProgress() {
+  return fetchAdminApi<DropMatchingProgress>('/ops/drop/matching-progress')
+}
+
+function matchingAttemptSlice(
+  progress: DropMatchingProgress | undefined,
+): MatchingAttemptCounts | undefined {
+  if (!progress) return undefined
+  return progress.matching_attempts ?? progress
+}
+
+function matchingProgressCount(
+  progress: DropMatchingProgress | undefined,
+  status: 'pending' | 'success' | 'claimed',
+): number | null {
+  const slice = matchingAttemptSlice(progress)
+  if (!slice) return null
+  const top = slice[status]
+  if (typeof top === 'number') return top
+  const row = slice.by_status?.find((item) => item.status === status)
+  return row != null ? row.count : null
+}
+
+/** 404 / ready.not_deployed = missing service (muted), not a red outage. */
 function workerProbeTone(probe: WorkerHealthProbe | undefined): WorkerProbeTone {
   if (probe == null) return 'unknown'
   if (probe.ok) return 'up'
@@ -109,7 +151,9 @@ function pipelineHealthNames(
 ): string[] {
   if (!workerHealth) return [...WORKER_ORDER]
   const extras = Object.keys(workerHealth).filter(
-    (name) => !(WORKER_ORDER as readonly string[]).includes(name),
+    (name) =>
+      !(WORKER_ORDER as readonly string[]).includes(name) &&
+      !RETIRED_WORKER_KEYS.has(name),
   )
   return [...WORKER_ORDER, ...extras]
 }
@@ -3168,7 +3212,12 @@ function DropPipelinePageInner() {
   const [lastAction, setLastAction] = useState<string | null>(null)
   const [actionResult, setActionResult] = useState<string | null>(null)
   const [hashState, setHashState] = useState('CA')
+  const [fatPipelineEnabled, setFatPipelineEnabled] = useState(false)
   const actionResultRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    setFatPipelineEnabled(true)
+  }, [])
 
   function focusActionResultPanel(targetTab: PipelineTab = 'pipeline') {
     const focusPanel = () => {
@@ -3212,11 +3261,20 @@ function DropPipelinePageInner() {
     })
   }
 
+  const matchingProgressQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'drop-matching-progress'],
+    queryFn: getDropMatchingProgress,
+    refetchInterval: 2_000,
+    placeholderData: (previous) => previous,
+  })
+
   const pipelineQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-pipeline'],
     queryFn: getDropPipeline,
     refetchInterval: 5_000,
     placeholderData: (previous) => previous,
+    // First paint must not wait on fat GET /ops/drop/pipeline.
+    enabled: fatPipelineEnabled,
   })
 
   const processesQuery = useQuery({
@@ -3273,6 +3331,7 @@ function DropPipelinePageInner() {
     },
     onSuccess: ({ key, data }) => {
       setActionResult(JSON.stringify(data, null, 2))
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-matching-progress'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-processes'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'approvals'] })
@@ -3319,6 +3378,7 @@ function DropPipelinePageInner() {
     },
     onSuccess: (payload) => {
       setActionResult(JSON.stringify(payload, null, 2))
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-matching-progress'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-processes'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-stats-global'] })
@@ -3353,6 +3413,7 @@ function DropPipelinePageInner() {
   }
 
   const data: DropPipelineStatus | undefined = pipelineQuery.data
+  const matchingProgress = matchingProgressQuery.data
   const showSkeleton = pipelineQuery.isPending && !data
   const hashPending = (data?.hash_index_refresh?.pending ?? 0) > 0
   const hashWorkerTone = data
@@ -3375,9 +3436,9 @@ function DropPipelinePageInner() {
     return failed / total
   })()
 
-  const matchPending = data?.matching_attempts.pending ?? null
-  const matchSuccess = data?.matching_attempts.success ?? null
-  const matchDrainActive = data?.matching_attempts.drain?.active ?? null
+  const matchPending = matchingProgressCount(matchingProgress, 'pending')
+  const matchSuccess = matchingProgressCount(matchingProgress, 'success')
+  const matchDrainActive = matchingAttemptSlice(matchingProgress)?.drain?.active ?? null
   const matchRate =
     matchPending != null && matchSuccess != null && matchPending + matchSuccess > 0
       ? matchSuccess / (matchSuccess + matchPending)
@@ -3401,7 +3462,8 @@ function DropPipelinePageInner() {
           <h2 className="mt-1 text-xl font-semibold tracking-tight text-ink">Console</h2>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {pipelineQuery.isFetching && !pipelineQuery.isPending ? (
+          {(matchingProgressQuery.isFetching && !matchingProgressQuery.isPending) ||
+          (pipelineQuery.isFetching && !pipelineQuery.isPending) ? (
             <span className="rounded-md border border-line px-2 py-0.5 text-[0.65rem] text-mute">
               Refreshing
             </span>

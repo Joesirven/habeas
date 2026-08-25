@@ -100,7 +100,6 @@ _WORKER_QUEUE_TABLES: dict[str, str | None] = {
     "data_fulfillment": "data_fulfillment_attempts",
     "hash_index_refresh": "hash_index_refresh_attempts",
     "reaper": None,
-    "intake_drop_poller": None,
     "communication": "communication_attempts",
 }
 
@@ -142,7 +141,13 @@ class DropPipelineSettings(CoreSettings):
     data_fulfillment_url: str = "http://127.0.0.1:8085"
     hash_index_refresh_url: str = "http://127.0.0.1:8086"
     reaper_url: str = "http://127.0.0.1:8087"
-    intake_drop_poller_url: str = "http://127.0.0.1:8088"
+    auth0_url: str = "http://127.0.0.1:8088"
+    mailchimp_url: str = "http://127.0.0.1:8089"
+    paylocity_url: str = "http://127.0.0.1:8090"
+    lever_url: str = "http://127.0.0.1:8091"
+    google_sheets_url: str = "http://127.0.0.1:8092"
+    cassandra_url: str = "http://127.0.0.1:8093"
+    drop_notice_url: str = "http://127.0.0.1:8094"
     # When true, mutating /ops/drop/* requires X-Goog-Authenticated-User-Email.
     # Local default false; enable with IAP in front of admin-api (see infra/README).
     require_iap_identity: bool = False
@@ -206,7 +211,13 @@ WORKER_KEYS = (
     ("data_fulfillment", "data_fulfillment_url"),
     ("hash_index_refresh", "hash_index_refresh_url"),
     ("reaper", "reaper_url"),
-    ("intake_drop_poller", "intake_drop_poller_url"),
+    ("auth0", "auth0_url"),
+    ("mailchimp", "mailchimp_url"),
+    ("paylocity", "paylocity_url"),
+    ("lever", "lever_url"),
+    ("google_sheets", "google_sheets_url"),
+    ("cassandra", "cassandra_url"),
+    ("drop_notice", "drop_notice_url"),
 )
 
 
@@ -687,6 +698,64 @@ def _rollup_raw_request_groups(
     return list_rows, status_rows
 
 
+async def collect_matching_progress(conn: Any) -> dict[str, Any]:
+    """One GROUP BY on matching_attempts (DROP intake) plus drain lease. No PII."""
+    matching_attempt_rows = await conn.fetch(
+        """
+        SELECT ma.status, COUNT(*)::int AS count
+          FROM matching_attempts ma
+          JOIN requests r ON r.id = ma.request_id
+         WHERE r.intake_source = 'drop'
+         GROUP BY ma.status
+         ORDER BY ma.status
+        """
+    )
+    matching_pending = 0
+    matching_success = 0
+    matching_claimed = 0
+    matching_by_status: list[dict[str, Any]] = []
+    for row in matching_attempt_rows:
+        item = {"status": row["status"], "count": int(row["count"])}
+        matching_by_status.append(item)
+        if row["status"] == "pending":
+            matching_pending = item["count"]
+        elif row["status"] == "success":
+            matching_success = item["count"]
+        elif row["status"] == "claimed":
+            matching_claimed = item["count"]
+
+    drain_lease_row = await conn.fetchrow(
+        """
+        SELECT holder,
+               acquired_at,
+               expires_at,
+               (holder IS NOT NULL AND expires_at IS NOT NULL AND expires_at >= NOW())
+                 AS active
+          FROM matching_drain_lease
+         WHERE id = 1
+        """
+    )
+    return {
+        "pending": matching_pending,
+        "claimed": matching_claimed,
+        "success": matching_success,
+        "by_status": matching_by_status,
+        "drain": {
+            "active": bool(drain_lease_row["active"]) if drain_lease_row else False,
+            "holder": (
+                str(drain_lease_row["holder"])
+                if drain_lease_row and drain_lease_row["holder"] is not None
+                else None
+            ),
+            "expires_at": (
+                drain_lease_row["expires_at"].isoformat()
+                if drain_lease_row and drain_lease_row["expires_at"] is not None
+                else None
+            ),
+        },
+    }
+
+
 async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
     """Cheap SQL snapshot — ids, counts, and statuses only (no PII)."""
     connector_rows = await conn.fetch(
@@ -740,60 +809,19 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
          WHERE intake_source = 'drop'
         """
     )
-    matching_attempt_rows = await conn.fetch(
-        """
-        SELECT ma.status, COUNT(*)::int AS count
-          FROM matching_attempts ma
-          JOIN requests r ON r.id = ma.request_id
-         WHERE r.intake_source = 'drop'
-         GROUP BY ma.status
-         ORDER BY ma.status
-        """
-    )
-    matching_pending = 0
-    matching_success = 0
-    matching_claimed = 0
+    matching_progress = await collect_matching_progress(conn)
+    matching_pending = int(matching_progress["pending"])
+    matching_claimed = int(matching_progress["claimed"])
+    matching_success = int(matching_progress["success"])
+    matching_by_status = matching_progress["by_status"]
+    matching_drain = matching_progress["drain"]
     matching_failed_terminal = 0
-    matching_by_status: list[dict[str, Any]] = []
     last_fail_status: str | None = None
-    for row in matching_attempt_rows:
-        item = {"status": row["status"], "count": int(row["count"])}
-        matching_by_status.append(item)
-        if row["status"] == "pending":
-            matching_pending = item["count"]
-        elif row["status"] == "success":
-            matching_success = item["count"]
-        elif row["status"] == "claimed":
-            matching_claimed = item["count"]
-        if row["status"] in _TERMINAL_FAIL_STATUSES:
-            matching_failed_terminal += item["count"]
+    for item in matching_by_status:
+        if item["status"] in _TERMINAL_FAIL_STATUSES:
+            matching_failed_terminal += int(item["count"])
             if last_fail_status is None:
-                last_fail_status = str(row["status"])
-
-    drain_lease_row = await conn.fetchrow(
-        """
-        SELECT holder,
-               acquired_at,
-               expires_at,
-               (holder IS NOT NULL AND expires_at IS NOT NULL AND expires_at >= NOW())
-                 AS active
-          FROM matching_drain_lease
-         WHERE id = 1
-        """
-    )
-    matching_drain = {
-        "active": bool(drain_lease_row["active"]) if drain_lease_row else False,
-        "holder": (
-            str(drain_lease_row["holder"])
-            if drain_lease_row and drain_lease_row["holder"] is not None
-            else None
-        ),
-        "expires_at": (
-            drain_lease_row["expires_at"].isoformat()
-            if drain_lease_row and drain_lease_row["expires_at"] is not None
-            else None
-        ),
-    }
+                last_fail_status = str(item["status"])
 
     matching_result_rows = await conn.fetch(
         """
@@ -1884,6 +1912,15 @@ def _model_dump_nonzero(model: BaseModel) -> dict[str, Any]:
 @router.get("/pipeline")
 async def drop_pipeline_status(_principal: SuperAdminPrincipal):
     return await get_pipeline_status()
+
+
+@router.get("/matching-progress")
+async def drop_matching_progress(_principal: SuperAdminPrincipal):
+    """Cheap matching counters for the live console — no raw-spine scan."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        return await collect_matching_progress(conn)
 
 
 @router.get("/processes")

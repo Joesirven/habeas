@@ -892,18 +892,24 @@ def test_drop_stats_global(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_drop_workers_and_health_queues(monkeypatch: pytest.MonkeyPatch):
+    from admin_api import main as admin_main
     from admin_api import worker_fleet
 
-    catalog_minus_phantom = [
-        name
-        for name, _attr in drop_pipeline.WORKER_KEYS
-        if name != "intake_drop_poller"
+    catalog = [
+        "drop_connector",
+        "drop_ingestor",
+        "request_dispatcher",
+        "matching",
+        "data_fulfillment",
+        "hash_index_refresh",
+        "reaper",
     ]
-    assert "intake_drop_poller" in {name for name, _attr in drop_pipeline.WORKER_KEYS}
-    assert len(catalog_minus_phantom) == 7
-    # Phantom poller omitted; 7 env keys (or deployed-only), never 8 WORKER_KEYS.
+    assert "intake_drop_poller" not in {
+        name for name, _attr in drop_pipeline.WORKER_KEYS
+    }
+    # Retired poller is not a catalog key; fleet lists env keys or deployed-only.
     monkeypatch.setattr(
-        worker_fleet, "list_fleet_worker_keys", lambda: list(catalog_minus_phantom)
+        worker_fleet, "list_fleet_worker_keys", lambda: list(catalog)
     )
 
     async def fake_health() -> dict[str, Any]:
@@ -963,6 +969,7 @@ def test_drop_workers_and_health_queues(monkeypatch: pytest.MonkeyPatch):
         def acquire(self):
             return _Acquire()
 
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
     monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
     monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
     monkeypatch.setattr(drop_pipeline, "collect_worker_health", fake_health)
@@ -980,9 +987,8 @@ def test_drop_workers_and_health_queues(monkeypatch: pytest.MonkeyPatch):
         body = workers.json()
         names = [w["name"] for w in body["workers"]]
         assert "intake_drop_poller" not in names
-        assert len(names) != len(drop_pipeline.WORKER_KEYS)
         assert len(names) == 7
-        assert names == catalog_minus_phantom
+        assert names == catalog
         matching = next(w for w in body["workers"] if w["name"] == "matching")
         assert matching["ok"] is True
         assert matching["queue"]["pending"] == 2
@@ -3578,3 +3584,134 @@ async def test_collect_bulk_process_progress_missing_gcs_uri_skips_global_matchi
     assert detail["stages"]["matching"]["open"] == 0
     assert detail["stages"]["matching"]["success"] == 0
     assert detail["request_rows"] == 0
+
+
+def _is_matching_progress_attempts_group_by(sql: str) -> bool:
+    """Cheap ticker: one GROUP BY on matching_attempts — never the raw spine."""
+    return (
+        "matching_attempts" in sql
+        and "GROUP BY" in sql
+        and "drop_raw_requests" not in sql
+    )
+
+
+def _capturing_matching_progress_conn() -> tuple[MagicMock, list[str]]:
+    issued: list[str] = []
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        issued.append(sql)
+        if "drop_raw_requests" in sql:
+            raise AssertionError("matching-progress must not scan drop_raw_requests")
+        if "matching_attempts" in sql:
+            return [
+                _Row(status="pending", count=10),
+                _Row(status="claimed", count=3),
+                _Row(status="success", count=100),
+                _Row(status="failed", count=1),
+            ]
+        return []
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        issued.append(sql)
+        if "drop_raw_requests" in sql:
+            raise AssertionError("matching-progress must not scan drop_raw_requests")
+        if "matching_drain_lease" in sql:
+            return _Row(
+                holder="matching-drain-1",
+                acquired_at=datetime(2026, 8, 25, 22, 40, tzinfo=timezone.utc),
+                expires_at=datetime(2026, 8, 25, 23, 0, tzinfo=timezone.utc),
+                active=True,
+            )
+        return None
+
+    async def fetchval(sql: str, *args: Any) -> Any:
+        issued.append(sql)
+        if "drop_raw_requests" in sql:
+            raise AssertionError("matching-progress must not scan drop_raw_requests")
+        return 0
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    conn.fetchval = AsyncMock(side_effect=fetchval)
+    return conn, issued
+
+
+def _assert_matching_progress_sql(issued: list[str]) -> None:
+    assert issued, "matching-progress issued no SQL"
+    assert all("drop_raw_requests" not in sql for sql in issued)
+    group_bys = [sql for sql in issued if _is_matching_progress_attempts_group_by(sql)]
+    assert len(group_bys) == 1
+    compact = " ".join(group_bys[0].split())
+    assert "FROM matching_attempts" in compact
+    assert "GROUP BY ma.status" in compact or "GROUP BY status" in compact
+    attempt_sqls = [sql for sql in issued if "matching_attempts" in sql]
+    assert len(attempt_sqls) == 1
+    assert all("drop_connector_attempts" not in sql for sql in issued)
+    assert all("drop_ingest_attempts" not in sql for sql in issued)
+
+
+def _assert_matching_progress_body(body: dict[str, Any]) -> None:
+    assert body["pending"] == 10
+    assert body["claimed"] == 3
+    assert body["success"] == 100
+    assert any(row["status"] == "pending" and row["count"] == 10 for row in body["by_status"])
+    assert body["drain"]["active"] is True
+    assert body["drain"]["holder"] == "matching-drain-1"
+    blob = json.dumps(body).lower()
+    assert "email" not in blob
+    assert "consumer_id" not in blob
+    assert "drop_raw_requests" not in blob
+
+
+def test_worker_keys_excludes_intake_drop_poller() -> None:
+    """Retired intake_drop_poller must not be a WORKER_KEYS probe target."""
+    names = [name for name, _attr in drop_pipeline.WORKER_KEYS]
+    assert "intake_drop_poller" not in names
+    assert "intake_drop_poller" not in {attr for _name, attr in drop_pipeline.WORKER_KEYS}
+
+
+@pytest.mark.asyncio
+async def test_collect_matching_progress_sql_is_attempts_group_by_only() -> None:
+    """GET matching-progress SQL is one GROUP BY on matching_attempts — no raws."""
+    conn, issued = _capturing_matching_progress_conn()
+    result = await drop_pipeline.collect_matching_progress(conn)
+    _assert_matching_progress_sql(issued)
+    _assert_matching_progress_body(result)
+    assert conn.fetch.await_count == 1
+    assert conn.fetchrow.await_count == 1
+
+
+def test_matching_progress_sql_is_attempts_group_by_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GET /ops/drop/matching-progress issues attempts GROUP BY only — hermetic."""
+    from admin_api import main as admin_main
+
+    conn, issued = _capturing_matching_progress_conn()
+
+    class _Acquire:
+        async def __aenter__(self):
+            return conn
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
+
+    with TestClient(app) as client:
+        response = client.get("/ops/drop/matching-progress")
+
+    assert response.status_code == 200
+    _assert_matching_progress_sql(issued)
+    _assert_matching_progress_body(response.json())
