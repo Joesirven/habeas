@@ -12,10 +12,18 @@ plugin({
   },
 })
 
-const { canAccessLegalSurfaces, canAccessOwnerPalette } = await import('./auth')
+const { canAccessLegalSurfaces, canAccessOwnerPalette, isVerticalOperatorRole } =
+  await import('./auth')
+const { PENDING_SETTING_INVITE_USERS, SIMULATE_ROLE_VALUES } = await import('./api')
 const { paletteSearchPlaceholder, staticActions } = await import(
   '../components/CommandPalette'
 )
+const {
+  nextPostAuthPrompt,
+  shouldHintSettingsInvite,
+  shouldShowConnectorWelcome,
+  shouldShowPendingSettings,
+} = await import('../components/AppShell')
 
 describe('canAccessOwnerPalette', () => {
   test('true for data_owner, data_user, legal, admin, super_admin', () => {
@@ -31,9 +39,21 @@ describe('canAccessOwnerPalette', () => {
   })
 })
 
+describe('isVerticalOperatorRole', () => {
+  test('true for data_owner and data_user', () => {
+    expect(isVerticalOperatorRole('data_owner')).toBe(true)
+    expect(isVerticalOperatorRole('data_user')).toBe(true)
+  })
+
+  test('false for legal, admin, super_admin', () => {
+    expect(isVerticalOperatorRole('legal')).toBe(false)
+    expect(isVerticalOperatorRole('admin')).toBe(false)
+    expect(isVerticalOperatorRole('super_admin')).toBe(false)
+  })
+})
+
 describe('simulate-role palette', () => {
-  test('includes data_user', async () => {
-    const { SIMULATE_ROLE_VALUES } = await import('./api')
+  test('includes data_user', () => {
     expect(SIMULATE_ROLE_VALUES).toContain('data_user')
     expect(SIMULATE_ROLE_VALUES).toContain('data_owner')
   })
@@ -89,5 +109,107 @@ describe('owner command palette (R65 leftovers)', () => {
     expect(navigate).not.toHaveBeenCalledWith(
       expect.objectContaining({ to: '/ops/drop-pipeline' }),
     )
+  })
+})
+
+describe('pending-settings invite prompt', () => {
+  const ownerEmail = 'owner@example.com'
+
+  function ownerMe(overrides = {}) {
+    return {
+      email: ownerEmail,
+      role: 'data_owner',
+      real_role: 'data_owner',
+      verticals: ['data'],
+      pending_settings: [
+        {
+          id: PENDING_SETTING_INVITE_USERS,
+          title: 'Invite data users',
+          status: 'pending',
+        },
+      ],
+      ...overrides,
+    }
+  }
+
+  test('does not block login when data_owner has invite_data_users pending', () => {
+    const me = ownerMe()
+    expect(shouldShowPendingSettings(me)).toBe(false)
+    expect(nextPostAuthPrompt(me)).toBeNull()
+    expect(shouldHintSettingsInvite(me)).toBe(true)
+  })
+
+  test('hides hint when invite_data_users is skipped or done', () => {
+    expect(
+      shouldShowPendingSettings(
+        ownerMe({
+          pending_settings: [
+            {
+              id: PENDING_SETTING_INVITE_USERS,
+              title: 'Invite data users',
+              status: 'skipped',
+            },
+          ],
+        }),
+      ),
+    ).toBe(false)
+    expect(
+      shouldHintSettingsInvite(
+        ownerMe({
+          pending_settings: [
+            {
+              id: PENDING_SETTING_INVITE_USERS,
+              title: 'Invite data users',
+              status: 'skipped',
+            },
+          ],
+        }),
+      ),
+    ).toBe(false)
+    expect(
+      shouldHintSettingsInvite(
+        ownerMe({
+          pending_settings: [
+            {
+              id: PENDING_SETTING_INVITE_USERS,
+              title: 'Invite data users',
+              status: 'done',
+            },
+          ],
+        }),
+      ),
+    ).toBe(false)
+    expect(
+      nextPostAuthPrompt(
+        ownerMe({
+          pending_settings: [
+            {
+              id: PENDING_SETTING_INVITE_USERS,
+              title: 'Invite data users',
+              status: 'done',
+            },
+          ],
+        }),
+      ),
+    ).toBeNull()
+  })
+
+  test('hides for data_user even when invite_data_users is pending', () => {
+    const me = ownerMe({
+      email: 'teammate@example.com',
+      role: 'data_user',
+      real_role: 'data_user',
+    })
+    expect(shouldShowPendingSettings(me)).toBe(false)
+    expect(shouldHintSettingsInvite(me)).toBe(false)
+    expect(nextPostAuthPrompt(me)).toBeNull()
+  })
+
+  test('connector welcome still shows when setup is needed', () => {
+    const me = ownerMe({ needs_connector_setup: true })
+    expect(shouldShowConnectorWelcome(me)).toBe(true)
+    expect(shouldShowPendingSettings(me)).toBe(false)
+    expect(shouldHintSettingsInvite(me)).toBe(true)
+    expect(nextPostAuthPrompt(me)).toBe('connector_welcome')
   })
 })

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
-import type { LegalInboxFilter } from '@/router'
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import type { LegalInboxFilter, NeedsAttentionSearch } from '@/router'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import {
@@ -13,16 +13,27 @@ import {
   DropResponseStatusPicker,
   InboxConnectorNotificationsPanel,
   MatchingReviewPanel,
+  MatchedContactsPanel,
   OwnerFulfillmentStatusPanel,
   isAutomaticFulfillmentVertical,
   matchingDispositionCopy,
+  ownerDropStatusLabel,
   ownerFulfillmentVerticalRows,
   ownerStatusErrorMessage,
   useMatchingConnectorGate,
 } from '@/components/requests/RequestTriageDialog'
+import { MatchingResultsLabView } from '@/components/matching-results-lab/MatchingResultsLabView'
+import { InboxViewSettingsPopover } from '@/components/inbox/InboxViewSettingsPopover'
+import { InboxMatchingDispositionCard } from '@/components/requests/InboxMatchingDispositionCard'
 import {
+  Auth0MatchCandidatesList,
   RequestDetailOverlay,
   FulfillmentGateControls,
+  isAuth0MatchingScope,
+  JourneyStageSubsteps,
+  REQUEST_DETAIL_TAB_TRIGGER,
+  RequestDetailSideColumn,
+  RequestDetailWorkbenchShell,
   RequesterContactSection,
   ThinJourneyPipeline,
   useRequestDetailOverlay,
@@ -43,16 +54,27 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { isLegalAdminPersona, useMe } from '@/lib/auth'
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import { isLegalAdminPersona, isVerticalOperatorRole, useMe } from '@/lib/auth'
+import {
+  DROP_RESPONSE_STATUS_OPTIONS,
   dropResponseStatusLabel,
   getDropMatchingResultDetail,
+  fetchOwnerVerticalMatchingDetailOptional,
   getFulfillmentArtifact,
   getLatestIdentityVerification,
   getLegalNeedsAttention,
   getLegalOperators,
+  listVerticalMembers,
   getNeedsAttention,
   getOwnerFulfillmentNeedsAttention,
+  getOwnerMatchingNeedsAttention,
+  isOwnerVerticalTask,
   getBatchJourneyWorkbench,
   getRequest,
   getRequestComments,
@@ -72,7 +94,9 @@ import {
   type DropResponseStatusCode,
   type IdentityVerificationRecord,
   type IntakeSource,
+  type ConnectorReminder,
   type MatchingResultDetail,
+  type NeedsAttentionFilterOption,
   type NeedsAttentionItem,
   type RequestRecord,
   type TimelineEntry,
@@ -80,20 +104,108 @@ import {
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
 import {
-  buildInboxBatchStatusCrossGroups,
+  ownerConnectorsSearch,
+  type MatchingConnectorGate,
+} from '@/lib/connection-display'
+import {
+  buildInboxGroupingStacks,
   groupInboxConnectorNotifications,
-  groupInboxItemsByBatchStatus,
   inboxBatchStatusStackSubtitle,
+  inboxDateSourceLabel,
+  inboxItemConnectorBlock,
+  inboxItemsConnectorBlock,
+  type InboxConnectorBlock,
 } from '@/lib/inbox-batch-status'
 import {
+  coalesceInboxReviewItems,
+  expandInboxReviewBySystem,
+  inboxItemConnections,
+  inboxItemHasSystem,
+  inboxSystemFilterOptions,
+  isInboxIdentifierSurface,
+  inboxReviewItemKey,
+  inboxReviewItemSystemLabel,
+  inboxReviewItemVerticalLabel,
+  matchingReviewBulkPromoteToast,
+  matchingReviewPostFields,
+  matchingReviewPromoteToast,
+  requestIdsFromSelectedReviewItems,
+  selectedReviewTargets,
+} from '@/lib/inbox-status-lab'
+import {
   actionReasonLabel,
+  aggregateOwnerSystemWorkbenchSubsteps,
+  aggregateStackWorkbenchChrome,
   deriveWorkbenchChromeFromOpsJourney,
+  formatStackSubstepCounts,
+  isWorkbenchStageKey,
+  matchingSystemColorClass,
   NOTICE_APPROVAL,
+  opsStageToWorkbench,
+  workbenchStatusLabel,
+  type DerivedWorkbenchSubstep,
+  type WorkbenchStageKey,
 } from '@/lib/legalJourneyLabels'
-import { cn, paginate } from '@/lib/utils'
+import { cn, filterRequestUuids, isRequestUuid, paginate } from '@/lib/utils'
 
 /** Left-pane queue page size — keeps the dense inbox list scannable without one giant scroll. */
 const INBOX_PAGE_SIZE = 30
+const INBOX_DETAIL_TAB_TRIGGER = REQUEST_DETAIL_TAB_TRIGGER
+
+export const INBOX_LIST_COLLAPSED_KEY = 'inbox-list-collapsed'
+/** Expanded left list (Inbox + Results lab). Collapsed rail stays a thin strip. */
+export const INBOX_LIST_EXPANDED_COLS = 'md:grid-cols-[minmax(10rem,14rem)_minmax(0,1fr)]'
+export const INBOX_LIST_COLLAPSED_COLS = 'md:grid-cols-[3rem_minmax(0,1fr)]'
+export const INBOX_LIST_HOVER_FLYOUT =
+  'md:absolute md:inset-y-0 md:left-0 md:z-20 md:w-[14rem] md:shadow-md'
+
+const INBOX_STEP_KEYS = ['ingest', 'matching', 'fulfillment', 'notice'] as const
+const INBOX_INTAKE_SOURCE_ORDER = ['drop', 'webform', 'csv', 'manual'] as const
+
+export function useInboxListCollapsed(): {
+  pinnedCollapsed: boolean
+  hoverOpen: boolean
+  effectiveCollapsed: boolean
+  setPinnedCollapsed: (v: boolean) => void
+  onRailEnter: () => void
+  onRailLeave: () => void
+} {
+  const [pinnedCollapsed, setPinnedCollapsedState] = useState(() => {
+    if (typeof window === 'undefined') return false
+    try {
+      return window.localStorage.getItem(INBOX_LIST_COLLAPSED_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
+  const [hoverOpen, setHoverOpen] = useState(false)
+
+  const setPinnedCollapsed = useCallback((value: boolean) => {
+    setPinnedCollapsedState(value)
+    try {
+      window.localStorage.setItem(INBOX_LIST_COLLAPSED_KEY, value ? '1' : '0')
+    } catch {
+      // private mode / quota — pin still works for this session
+    }
+  }, [])
+
+  const onRailEnter = useCallback(() => {
+    setHoverOpen(true)
+  }, [])
+
+  const onRailLeave = useCallback(() => {
+    setHoverOpen(false)
+  }, [])
+
+  return {
+    pinnedCollapsed,
+    hoverOpen,
+    effectiveCollapsed: pinnedCollapsed && !hoverOpen,
+    setPinnedCollapsed,
+    onRailEnter,
+    onRailLeave,
+  }
+}
 
 function recommendedStatusFromItem(
   item: NeedsAttentionItem,
@@ -129,6 +241,26 @@ async function resolvePromoteDwids(
   try {
     const detail = await getDropMatchingResultDetail(requestId)
     return (detail.matched_contacts ?? []).map((contact) => contact.dwid)
+  } catch {
+    return undefined
+  }
+}
+
+async function resolveOwnerPromoteDwids(
+  requestId: string,
+  vertical: string,
+  system: string | undefined,
+  status: DropResponseStatusCode | undefined,
+): Promise<string[] | undefined> {
+  if (status === 5) return []
+  if (status !== 3 && status !== 4) return undefined
+  try {
+    const detail = await fetchOwnerVerticalMatchingDetailOptional(
+      requestId,
+      vertical,
+      system,
+    )
+    return (detail?.matched_contacts ?? []).map((contact) => contact.dwid)
   } catch {
     return undefined
   }
@@ -197,35 +329,6 @@ type InboxKind =
   | 'pending_tasks'
 type MatchFilter = 'all' | 'single_match' | 'multi_match' | 'not_found' | 'unknown'
 type DueFilter = 'all' | 'overdue' | 'due_soon' | 'on_track'
-
-type InboxWorkType =
-  | 'notice'
-  | 'delivery'
-  | 'matching'
-  | 'triage'
-  | 'assignment_to_legal'
-  | 'communications'
-  | 'other'
-
-const INBOX_WORK_TYPE_ORDER: InboxWorkType[] = [
-  'matching',
-  'triage',
-  'assignment_to_legal',
-  'notice',
-  'delivery',
-  'communications',
-  'other',
-]
-
-const INBOX_WORK_TYPE_LABELS: Record<InboxWorkType, string> = {
-  notice: 'Notice',
-  delivery: 'Delivery',
-  matching: 'Matching',
-  triage: 'Pre-matching hold',
-  assignment_to_legal: 'Assignment to legal',
-  communications: 'Comms',
-  other: 'Other',
-}
 
 const OPS_INBOX_KIND_TABS: { value: InboxKind; label: string }[] = [
   { value: 'all', label: 'All' },
@@ -573,37 +676,6 @@ export function dropStatusPill(
   return { label: 'DROP status · unknown', tone: 'unknown' }
 }
 
-function inboxWorkType(item: NeedsAttentionItem): InboxWorkType {
-  if (isNoticeItem(item)) return 'notice'
-  if (isDeliveryItem(item)) return 'delivery'
-  if (isAssignmentToLegalItem(item) || isEscalationItem(item)) {
-    return 'assignment_to_legal'
-  }
-  if (isTriageItem(item)) return 'triage'
-  if (isMatchingItem(item)) return 'matching'
-  if (isCommsItem(item)) return 'communications'
-  return 'other'
-}
-
-function buildTypeSections(
-  items: NeedsAttentionItem[],
-): { key: InboxWorkType; label: string; items: NeedsAttentionItem[] }[] {
-  const buckets = new Map<InboxWorkType, NeedsAttentionItem[]>()
-  for (const item of items) {
-    const key = inboxWorkType(item)
-    const list = buckets.get(key) ?? []
-    list.push(item)
-    buckets.set(key, list)
-  }
-  return INBOX_WORK_TYPE_ORDER.filter((key) => (buckets.get(key)?.length ?? 0) > 0).map(
-    (key) => ({
-      key,
-      label: INBOX_WORK_TYPE_LABELS[key],
-      items: buckets.get(key) ?? [],
-    }),
-  )
-}
-
 function workQueueOwnerChip(item: NeedsAttentionItem): string {
   if (isNoticeItem(item)) return 'Legal · Fulfillment notice'
   if (isDeliveryItem(item)) return 'Legal · Access delivery'
@@ -620,11 +692,14 @@ function workQueueOwnerChip(item: NeedsAttentionItem): string {
 function showInboxIndividualAssignee(
   _item: NeedsAttentionItem,
   _legalPersona: boolean,
+  dataOwnerPersona = false,
 ): boolean {
+  // Owner scope is `user_vertical_assignments`, not request-level assignee.
+  if (dataOwnerPersona) return false
   return true
 }
 
-function inboxItemTitle(item: NeedsAttentionItem): string {
+export function inboxItemTitle(item: NeedsAttentionItem): string {
   if (isTriageItem(item)) {
     const state = item.requestor_state?.trim()
     return state ? `Hold · ${state}` : 'Pre-matching hold'
@@ -635,8 +710,578 @@ function inboxItemTitle(item: NeedsAttentionItem): string {
   if (isNoticeItem(item)) return 'Fulfillment notice'
   if (isCommsItem(item)) return 'Communications'
   if (isOwnerFulfillmentItem(item)) return 'Fulfillment'
+  const connections = inboxItemConnections({
+    request_id: item.request_id,
+    system: inboxItemSystemId(item),
+    system_label: item.system_label,
+    connections: item.connections,
+  })
+  if (connections.length > 1) {
+    return isMatchingItem(item) ? 'Matching review' : reasonLabel(item.reason)
+  }
+  const systemName = inboxReviewItemSystemLabel({
+    request_id: item.request_id,
+    system: inboxItemSystemId(item),
+    system_label: item.system_label,
+    vertical: item.vertical,
+  })
+  if (systemName) return systemName
   if (isFulfillmentLegalItem(item)) return 'Pre-fulfillment'
   return reasonLabel(item.reason)
+}
+
+/** Catalog system id — `system`, then `system_id`. Never a composite POST key. */
+export function inboxItemSystemId(
+  item: Pick<NeedsAttentionItem, 'system' | 'system_id'>,
+): string | null {
+  return item.system?.trim() || item.system_id?.trim() || null
+}
+
+export type InboxCatalogSearch = NeedsAttentionSearch & {
+  vertical?: string
+  system?: string
+}
+
+/**
+ * Inbox URL merge — key presence so All/clear works.
+ * Omit the key → keep current. Pass explicit `undefined` → clear.
+ */
+export function mergeInboxCatalogSearch(
+  current: {
+    bulk?: number
+    kind?: InboxCatalogSearch['kind']
+    filter?: InboxCatalogSearch['filter']
+    assignee?: string
+    vertical?: string
+    system?: string
+    source?: string
+    step?: string
+  },
+  patch: Partial<InboxCatalogSearch>,
+): InboxCatalogSearch {
+  const bulk = 'bulk' in patch ? patch.bulk : current.bulk
+  const kind = 'kind' in patch ? patch.kind : current.kind
+  const filter = 'filter' in patch ? patch.filter : current.filter
+  const assignee = 'assignee' in patch ? patch.assignee : current.assignee
+  const vertical = 'vertical' in patch ? patch.vertical : current.vertical
+  const system = 'system' in patch ? patch.system : current.system
+  const source = 'source' in patch ? patch.source : current.source
+  const rawStep = 'step' in patch ? patch.step : current.step
+  const step =
+    rawStep === 'ingest' ||
+    rawStep === 'matching' ||
+    rawStep === 'fulfillment' ||
+    rawStep === 'notice'
+      ? rawStep
+      : undefined
+  const next: InboxCatalogSearch = {}
+  if (bulk != null) next.bulk = bulk
+  if (kind) next.kind = kind
+  if (filter) next.filter = filter
+  if (assignee) next.assignee = assignee
+  if (vertical?.trim()) next.vertical = vertical.trim()
+  if (system?.trim()) next.system = system.trim()
+  if (source?.trim()) next.source = source.trim()
+  if (step) next.step = step
+  return next
+}
+
+/** Owner matching rows — hide verticals not in `me.verticals`. */
+export function ownerVisibleInboxItems(
+  items: NeedsAttentionItem[],
+  assignedVerticals: readonly string[] | null | undefined,
+): NeedsAttentionItem[] {
+  const allowed = new Set(
+    (assignedVerticals ?? []).map((id) => id.trim()).filter(Boolean),
+  )
+  return items.filter((item) => {
+    if (!isMatchingItem(item)) return true
+    const vertical = item.vertical?.trim()
+    if (!vertical) return false
+    return allowed.has(vertical)
+  })
+}
+
+export function normalizeInboxItem(item: NeedsAttentionItem): NeedsAttentionItem {
+  const system = inboxItemSystemId(item)
+  if (!system || item.system === system) return item
+  return { ...item, system }
+}
+
+function matchingReviewBody(item: NeedsAttentionItem): {
+  vertical?: string
+  system?: string
+} {
+  const fields = matchingReviewPostFields({
+    request_id: item.request_id,
+    vertical: item.vertical,
+    system: inboxItemSystemId(item),
+  })
+  return {
+    ...(fields.vertical ? { vertical: fields.vertical } : {}),
+    ...(fields.system ? { system: fields.system } : {}),
+  }
+}
+
+function inboxSystemIdentityToken(token?: string | null): string {
+  const normalized = (token ?? '').trim().toLowerCase()
+  return normalized === 'amber' ? 'slate' : normalized
+}
+
+export function inboxSystemTitleClass(token?: string | null): string {
+  switch (inboxSystemIdentityToken(token)) {
+    case 'mid':
+      return 'text-habeas-mid'
+    case 'light':
+      return 'text-habeas-light'
+    case 'teal':
+      return 'text-teal-700'
+    case 'slate':
+      return 'text-ink'
+    case 'navy':
+      return 'text-habeas-navy'
+    default:
+      return 'text-ink'
+  }
+}
+
+export function inboxSystemRailClass(token?: string | null): string {
+  switch (inboxSystemIdentityToken(token)) {
+    case 'mid':
+      return 'border-l-habeas-mid'
+    case 'light':
+      return 'border-l-habeas-light'
+    case 'teal':
+      return 'border-l-teal-600'
+    case 'slate':
+      return 'border-l-slate-400'
+    case 'sky':
+      return 'border-l-sky-500'
+    case 'navy':
+      return 'border-l-habeas-navy'
+    default:
+      return token?.trim() ? 'border-l-habeas-navy' : ''
+  }
+}
+
+export type InboxCatalogFilterPatch = {
+  vertical?: string
+  system?: string
+}
+
+/** Vertical change clears system so Inbox and Results lab cannot drift. */
+export function inboxCatalogFilterChange(
+  field: 'vertical' | 'system',
+  next: string | undefined,
+): InboxCatalogFilterPatch {
+  return field === 'vertical' ? { vertical: next, system: undefined } : { system: next }
+}
+
+export function InboxCatalogSelect({
+  label,
+  value,
+  options,
+  onChange,
+  allowAll = true,
+  disabled = false,
+}: {
+  label: string
+  value: string | undefined
+  options: readonly { id: string; label: string }[]
+  onChange: (next: string | undefined) => void
+  allowAll?: boolean
+  disabled?: boolean
+}) {
+  const lockedValue =
+    !allowAll && !value && options.length === 1 ? options[0]?.id : value
+  return (
+    <label className="flex shrink-0 items-center gap-1 text-[0.6rem] uppercase tracking-wide text-mute">
+      {label}
+      <select
+        className="h-7 max-w-[12rem] rounded-md border border-line bg-paper px-1.5 text-[0.65rem] font-medium normal-case tracking-normal text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-habeas-mid disabled:opacity-70"
+        value={lockedValue ?? ''}
+        aria-label={label}
+        disabled={disabled}
+        onChange={(event) => {
+          const next = event.target.value
+          onChange(next ? next : undefined)
+        }}
+      >
+        {allowAll ? <option value="">All</option> : null}
+        {options.map((option) => (
+          <option key={option.id} value={option.id}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+/** data_owner / data_user never get a Vertical dropdown — assigned verticals only. Count is ignored. */
+export function hideInboxVerticalFilter(
+  dataOwnerPersona: boolean,
+  _assignedVerticals?: readonly string[] | null,
+): boolean {
+  return dataOwnerPersona
+}
+
+export function inboxItemSourceIds(
+  item: Pick<NeedsAttentionItem, 'intake_source'>,
+): string[] {
+  const intake = item.intake_source?.trim()
+  if (!intake || isInboxIdentifierSurface(intake)) return []
+  return [intake]
+}
+
+export function inboxItemSourceLabel(id: string): string {
+  if (isInboxIdentifierSurface(id)) return id
+  return SOURCE_LABELS[id] ?? id
+}
+
+/** Map ops `current_stage` into the four workbench steps. Unknown stages land on ingest. */
+export function inboxItemStep(
+  item: Pick<NeedsAttentionItem, 'current_stage'>,
+): WorkbenchStageKey {
+  return opsStageToWorkbench(item.current_stage ?? '') ?? 'ingest'
+}
+
+export function ownerAssignCandidateEmails(input: {
+  verticalMemberEmails?: readonly string[]
+  legalOperatorEmails?: readonly string[]
+  superAdminEmails?: readonly string[]
+}): string[] {
+  const set = new Set<string>()
+  for (const email of [
+    ...(input.verticalMemberEmails ?? []),
+    ...(input.legalOperatorEmails ?? []),
+    ...(input.superAdminEmails ?? []),
+  ]) {
+    const trimmed = email.trim()
+    if (trimmed) set.add(trimmed)
+  }
+  return [...set].sort((left, right) => left.localeCompare(right))
+}
+
+export function resolveInboxAssignCandidates(input: {
+  dataOwnerPersona: boolean
+  selfEmail?: string | null
+  itemAssigneeEmails?: readonly string[]
+  verticalMemberEmails?: readonly string[]
+  operators?: readonly { email?: string | null; kind?: string | null }[]
+}): string[] {
+  const operators = input.operators ?? []
+  const legalOperatorEmails = operators
+    .filter((operator) => {
+      const kind = (operator.kind ?? '').trim().toLowerCase()
+      return kind === 'legal' || kind === 'legal_team'
+    })
+    .map((operator) => operator.email ?? '')
+  const superAdminEmails = operators
+    .filter((operator) => operator.kind === 'super_admin')
+    .map((operator) => operator.email ?? '')
+  if (input.dataOwnerPersona) {
+    return ownerAssignCandidateEmails({
+      verticalMemberEmails: input.verticalMemberEmails,
+      legalOperatorEmails,
+      superAdminEmails,
+    })
+  }
+  const set = new Set<string>()
+  if (input.selfEmail?.trim()) set.add(input.selfEmail.trim())
+  for (const email of input.itemAssigneeEmails ?? []) {
+    if (email.trim()) set.add(email.trim())
+  }
+  for (const operator of operators) {
+    if (operator.email?.trim()) set.add(operator.email.trim())
+  }
+  return [...set].sort((left, right) => left.localeCompare(right))
+}
+
+export function stackMatchingStatusSummary(
+  items: Array<Pick<NeedsAttentionItem, 'match_type'>>,
+  ownerLanguage = false,
+): { label: string; mixed: boolean } {
+  let single = 0
+  let multi = 0
+  let notFound = 0
+  let other = 0
+  for (const item of items) {
+    if (item.match_type === 'single_match') single += 1
+    else if (item.match_type === 'multi_match') multi += 1
+    else if (item.match_type === 'not_found') notFound += 1
+    else other += 1
+  }
+  const parts: string[] = []
+  if (single) parts.push(`${single} ${matchTypeLabel('single_match', ownerLanguage)}`)
+  if (multi) parts.push(`${multi} ${matchTypeLabel('multi_match', ownerLanguage)}`)
+  if (notFound) parts.push(`${notFound} ${matchTypeLabel('not_found', ownerLanguage)}`)
+  if (other) parts.push(`${other} no match data`)
+  const kinds = [single, multi, notFound].filter((count) => count > 0).length
+  return {
+    label: parts.join(' · ') || 'No match data',
+    mixed: kinds > 1,
+  }
+}
+
+/** Queue row density — readable titles and icons; stats stay icon + tooltip. */
+const INBOX_QUEUE_ROW_BUTTON =
+  'flex min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-hidden px-1.5 py-1.5 pr-2 text-left text-xs leading-normal'
+const INBOX_QUEUE_META = 'shrink-0 text-xs leading-normal text-mute'
+const INBOX_QUEUE_ICON =
+  'inline-flex h-4 w-4 shrink-0 items-center justify-center text-mute'
+
+function InboxStatTip({
+  label,
+  children,
+}: {
+  label: string
+  children: ReactNode
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent side="top">{label}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+function InboxHintGlyph({
+  label,
+  className,
+  children,
+}: {
+  label: string
+  className?: string
+  children: ReactNode
+}) {
+  return (
+    <InboxStatTip label={label}>
+      <span className={cn(INBOX_QUEUE_ICON, className)} aria-label={label}>
+        {children}
+      </span>
+    </InboxStatTip>
+  )
+}
+
+function InboxClockGlyph() {
+  return (
+    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden>
+      <circle
+        cx="8"
+        cy="8"
+        r="5.25"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.25"
+      />
+      <path
+        d="M8 5.25V8l2 1.25"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+function inboxMatchHintKind(
+  matchType: string | null | undefined,
+  fallbackLabel?: string | null,
+): string {
+  if (matchType) return matchType
+  const label = fallbackLabel ?? ''
+  if (label === 'Exact 1:1' || label === 'Confirm match') return 'single_match'
+  if (label === 'Multi-person') return 'multi_match'
+  if (label === 'Not found' || label === 'Not a match') return 'not_found'
+  return 'other'
+}
+
+function InboxMatchHint({
+  matchType,
+  dataOwnerPersona,
+  label: labelOverride,
+}: {
+  matchType?: string | null
+  dataOwnerPersona: boolean
+  label?: string | null
+}) {
+  const kind = inboxMatchHintKind(matchType, labelOverride)
+  const label = labelOverride ?? matchTypeLabel(matchType, dataOwnerPersona)
+  return (
+    <InboxHintGlyph label={label} className="w-auto min-w-4 gap-px px-0.5">
+      {kind === 'multi_match' ? (
+        <>
+          <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden />
+          <span className="h-1.5 w-1.5 rounded-full bg-amber-500/70" aria-hidden />
+        </>
+      ) : kind === 'not_found' ? (
+        <span
+          className="h-1.5 w-1.5 rounded-full border border-slate-400 bg-transparent"
+          aria-hidden
+        />
+      ) : kind === 'other' ? (
+        <span className="h-1.5 w-1.5 rounded-full bg-slate-300" aria-hidden />
+      ) : (
+        <span className="h-1.5 w-1.5 rounded-full bg-habeas-navy" aria-hidden />
+      )}
+    </InboxHintGlyph>
+  )
+}
+
+function inboxDueHintLabel(item: NeedsAttentionItem): string {
+  const when = formatDueWhen(item)
+  if (!when) return 'No due date'
+  const bucket = dueBucket(item)
+  if (bucket === 'overdue') return ['Overdue', when].join(' · ')
+  if (bucket === 'due_soon') return ['Due soon', when].join(' · ')
+  return ['Due', when].join(' ')
+}
+
+function InboxDueHint({ item }: { item: NeedsAttentionItem }) {
+  const when = formatDueWhen(item)
+  if (!when) return null
+  const bucket = dueBucket(item)
+  const label = inboxDueHintLabel(item)
+  return (
+    <InboxHintGlyph
+      label={label}
+      className={cn(
+        'ml-auto',
+        bucket === 'overdue' && 'text-red-700',
+        bucket === 'due_soon' && 'text-amber-700',
+      )}
+    >
+      {bucket === 'overdue' ? (
+        <span className="text-[0.7rem] font-bold leading-none">!</span>
+      ) : (
+        <InboxClockGlyph />
+      )}
+    </InboxHintGlyph>
+  )
+}
+
+function InboxCountHint({ count }: { count: number }) {
+  const label = count === 1 ? '1 request' : `${count} requests`
+  return (
+    <InboxStatTip label={label}>
+      <span className={cn(INBOX_QUEUE_META, 'tabular-nums')} aria-label={label}>
+        {count}
+      </span>
+    </InboxStatTip>
+  )
+}
+
+function InboxVerticalHint({ label }: { label: string }) {
+  return (
+    <InboxHintGlyph label={label}>
+      <span className="h-1.5 w-1.5 rounded-[1px] bg-slate-400" aria-hidden />
+    </InboxHintGlyph>
+  )
+}
+
+function InboxConnectorStatusHint({ block }: { block: InboxConnectorBlock | null }) {
+  if (!block) return null
+  return (
+    <span
+      className="shrink-0 text-[0.6rem] font-medium text-amber-800"
+      aria-label={block.label}
+    >
+      {block.label}
+    </span>
+  )
+}
+
+function InboxConnectorStatusChrome({
+  block,
+  verticalId,
+  showWizard,
+}: {
+  block: InboxConnectorBlock | null
+  verticalId?: string | null
+  showWizard: boolean
+}) {
+  if (!block) return null
+  return (
+    <div
+      className="flex flex-wrap items-center gap-2"
+      role="status"
+      aria-label={block.label}
+    >
+      <span className="text-[0.7rem] font-medium text-amber-900">{block.label}</span>
+      {showWizard ? (
+        <Button asChild size="sm" variant="outline">
+          <Link to="/owner/connectors" search={ownerConnectorsSearch(verticalId)}>
+            Open connectors
+          </Link>
+        </Button>
+      ) : null}
+    </div>
+  )
+}
+
+/** Shared Inbox / Results lab catalog toolbar — Vertical only. System lives in the popover. */
+export function InboxCatalogFilterToolbar({
+  vertical,
+  verticalOptions,
+  onPatch,
+  hideVertical = false,
+}: {
+  vertical: string | undefined
+  verticalOptions: readonly { id: string; label: string }[]
+  onPatch: (patch: InboxCatalogFilterPatch) => void
+  hideVertical?: boolean
+}) {
+  if (hideVertical) return null
+  return (
+    <>
+      <InboxCatalogSelect
+        label="Vertical"
+        value={vertical}
+        options={verticalOptions}
+        onChange={(next) => onPatch(inboxCatalogFilterChange('vertical', next))}
+      />
+      <span
+        className="mx-1.5 h-6 w-px shrink-0 self-center bg-line"
+        aria-hidden
+      />
+    </>
+  )
+}
+
+export function catalogOptionsFromItems(
+  items: NeedsAttentionItem[],
+  field: 'vertical' | 'system',
+): NeedsAttentionFilterOption[] {
+  const seen = new Map<string, NeedsAttentionFilterOption>()
+  for (const item of items) {
+    if (field === 'vertical') {
+      const id = item.vertical?.trim()
+      if (!id || seen.has(id)) continue
+      seen.set(id, {
+        id,
+        label: inboxReviewItemVerticalLabel(item) ?? id,
+      })
+      continue
+    }
+    const id = inboxItemSystemId(item)
+    if (!id || seen.has(id)) continue
+    const label = inboxReviewItemSystemLabel({
+      request_id: item.request_id,
+      system: id,
+      system_label: item.system_label,
+      vertical: item.vertical,
+    })
+    if (!label) continue
+    seen.set(id, {
+      id,
+      label,
+      vertical: item.vertical?.trim() || undefined,
+      color_token: item.color_token,
+    })
+  }
+  return [...seen.values()]
 }
 
 function emailInitials(email: string | null | undefined): string {
@@ -658,9 +1303,9 @@ function deriveDueAt(item: NeedsAttentionItem): Date | null {
   return new Date(start.getTime() + MATCHING_REVIEW_SLA_HOURS * 60 * 60 * 1000)
 }
 
-type DueBucket = 'overdue' | 'due_soon' | 'on_track' | 'unknown'
+export type DueBucket = 'overdue' | 'due_soon' | 'on_track' | 'unknown'
 
-function dueBucket(item: NeedsAttentionItem, now = Date.now()): DueBucket {
+export function dueBucket(item: NeedsAttentionItem, now = Date.now()): DueBucket {
   const due = deriveDueAt(item)
   if (!due) return 'unknown'
   const msLeft = due.getTime() - now
@@ -684,13 +1329,13 @@ function formatDueLabel(item: NeedsAttentionItem): string {
   const when = formatDueWhen(item)
   if (!when) return 'No due date'
   const bucket = dueBucket(item)
-  if (bucket === 'overdue') return `Overdue · ${when}`
+  if (bucket === 'overdue') return 'Overdue'
   if (bucket === 'due_soon') return `Due soon · ${when}`
   return `Due ${when}`
 }
 
-/** Colored due/SLA pill for list + detail — urgency without a text dump. */
-function DuePill({
+/** Colored due/SLA pill for the detail pane — list rows use InboxDueHint. */
+export function DuePill({
   item,
   className,
 }: {
@@ -702,7 +1347,7 @@ function DuePill({
   const bucket = dueBucket(item)
   const label =
     bucket === 'overdue'
-      ? `Overdue · ${when}`
+      ? 'Overdue'
       : bucket === 'due_soon'
         ? `Due soon · ${when}`
         : `Due ${when}`
@@ -721,7 +1366,7 @@ function DuePill({
   )
 }
 
-function InboxPaginationBar({
+export function InboxPaginationBar({
   start,
   end,
   total,
@@ -770,7 +1415,7 @@ function InboxPaginationBar({
   )
 }
 
-function FilterChip({
+export function FilterChip({
   active,
   label,
   count,
@@ -845,6 +1490,8 @@ function AssigneeAvatarPicker({
   pending,
   error,
   onAssign,
+  matchingReviewLabel,
+  ownerAssignMode = false,
 }: {
   currentEmail: string | null | undefined
   currentGroup?: 'legal' | 'data' | null
@@ -853,6 +1500,10 @@ function AssigneeAvatarPicker({
   pending: boolean
   error: string | null
   onAssign: (target: AssignTarget) => void
+  /** Per-vertical matching review — never “assign this request.” */
+  matchingReviewLabel?: string | null
+  /** Data owners: vertical members + legal + super_admin only. */
+  ownerAssignMode?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -869,7 +1520,10 @@ function AssigneeAvatarPicker({
       candidates.some((email) => email.toLowerCase() === normalizedQuery),
   )
   const canAssignTyped =
-    normalizedQuery.includes('@') && normalizedQuery.length >= 3 && !exactMatch
+    !ownerAssignMode &&
+    normalizedQuery.includes('@') &&
+    normalizedQuery.length >= 3 &&
+    !exactMatch
 
   return (
     <div className="flex items-center gap-2">
@@ -890,7 +1544,15 @@ function AssigneeAvatarPicker({
                 ? 'cursor-default opacity-70'
                 : 'hover:border-habeas-navy/30 hover:bg-habeas-navy/[0.04]',
             )}
-            aria-label={assigned ? `Assigned to ${label}` : 'Assign reviewer'}
+            aria-label={
+              matchingReviewLabel
+                ? assigned
+                  ? `Assigned to legal · ${label}`
+                  : 'Assign to legal'
+                : assigned
+                  ? `Assigned to ${label}`
+                  : 'Assign to legal or a reviewer'
+            }
           >
             <Avatar className="h-7 w-7">
               <AvatarFallback>
@@ -902,7 +1564,9 @@ function AssigneeAvatarPicker({
               </AvatarFallback>
             </Avatar>
             <span className="min-w-0 max-w-[10rem]">
-              <span className="block text-[0.6rem] text-mute">Assignee</span>
+              <span className="block text-[0.6rem] text-mute">
+                {matchingReviewLabel ? 'Matching review' : 'Assignee'}
+              </span>
               <span className="block truncate text-[0.7rem] font-medium text-ink">
                 {label}
               </span>
@@ -911,7 +1575,11 @@ function AssigneeAvatarPicker({
         </PopoverTrigger>
         <PopoverContent className="w-80 p-2" align="start">
           <p className="px-1.5 pb-1.5 text-[0.65rem] text-mute">
-            Assign a person or team queue
+            {ownerAssignMode
+              ? 'Assign to a teammate on this vertical, legal, or an admin'
+              : matchingReviewLabel
+                ? 'Assign this request to legal. Owner matching review is a vertical catalog assignment, not this picker.'
+                : 'Assign to legal, or claim this legal item'}
           </p>
           <input
             className="mb-2 w-full rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
@@ -937,18 +1605,28 @@ function AssigneeAvatarPicker({
               Teams
             </p>
             {(
-              [
-                {
-                  group: 'legal' as const,
-                  title: 'Legal',
-                  hint: 'Anyone on the Legal team',
-                },
-                {
-                  group: 'data' as const,
-                  title: 'Data',
-                  hint: 'Anyone on the Data team',
-                },
-              ] as const
+              ownerAssignMode || matchingReviewLabel
+                ? ([
+                    {
+                      group: 'legal' as const,
+                      title: 'Legal',
+                      hint: ownerAssignMode
+                        ? 'Legal team'
+                        : 'Assign to legal — request journey',
+                    },
+                  ] as const)
+                : ([
+                    {
+                      group: 'legal' as const,
+                      title: 'Legal',
+                      hint: 'Anyone on the Legal team',
+                    },
+                    {
+                      group: 'data' as const,
+                      title: 'Data',
+                      hint: 'Anyone on the Data team',
+                    },
+                  ] as const)
             ).map((team) => {
               const selected = currentGroup === team.group && !currentEmail
               return (
@@ -1015,8 +1693,12 @@ function AssigneeAvatarPicker({
             {predicted.length === 0 && !canAssignTyped ? (
               <li className="px-1.5 py-2 text-[0.65rem] text-mute">
                 {normalizedQuery
-                  ? 'No matching people. Type a full email to assign.'
-                  : 'No known reviewers yet.'}
+                  ? matchingReviewLabel
+                    ? 'No matching people. Type a full email to assign to legal.'
+                    : 'No matching people. Type a full email to assign.'
+                  : matchingReviewLabel
+                    ? 'No known legal reviewers yet.'
+                    : 'No known reviewers yet.'}
               </li>
             ) : null}
             {canAssignTyped ? (
@@ -1182,7 +1864,7 @@ function buildLegalComposerOptions(
     options.push({
       id: 'take_it',
       label: 'Take it — claim assignment',
-      hint: 'Assign this request to you',
+      hint: 'Claim this legal item for your queue',
       run: async (body) => {
         if (body.trim()) await postRequestComment(item.request_id, body.trim())
         await postDropWorkflowAssign({
@@ -1331,7 +2013,7 @@ export function LegalInboxComposer({
   )
 }
 
-function inboxItemToSeedRequest(item: NeedsAttentionItem): RequestRecord {
+export function inboxItemToSeedRequest(item: NeedsAttentionItem): RequestRecord {
   return {
     id: item.request_id,
     received_at: item.received_at ?? item.requested_at ?? '',
@@ -1386,10 +2068,12 @@ function InboxActivityPanel({
   const queryClient = useQueryClient()
   const [filter, setFilter] = useState<InboxActivityFilter>('all')
   const [comment, setComment] = useState('')
+  const requestIdReady = isRequestUuid(requestId)
 
   const timelineQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', requestId, 'timeline'],
     queryFn: () => getRequestTimeline(requestId),
+    enabled: requestIdReady,
     refetchInterval: 15_000,
     placeholderData: (previous) => previous,
   })
@@ -1544,8 +2228,7 @@ function InboxActivityPanel({
   )
 }
 
-const INBOX_DETAIL_TAB_TRIGGER =
-  'h-7 rounded-md border border-transparent px-2.5 text-[0.7rem] data-[state=active]:border-habeas-navy/25 data-[state=active]:bg-white data-[state=active]:text-habeas-navy data-[state=active]:shadow-sm'
+type InboxWorkbenchTab = 'overview' | WorkbenchStageKey
 
 /** Dense ops summary for Inbox Overview tab — request + process context. */
 function RequestProcessSummary({
@@ -1573,7 +2256,9 @@ function RequestProcessSummary({
   const ownerRole = item.assignment?.target_role
 
   let ownerValue = 'Unassigned'
-  if (!showInboxIndividualAssignee(item, legalPersona)) {
+  if (dataOwnerPersona) {
+    ownerValue = item.vertical_label?.trim() || item.vertical?.trim() || '—'
+  } else if (!showInboxIndividualAssignee(item, legalPersona, dataOwnerPersona)) {
     ownerValue = workQueueOwnerChip(item)
   } else if (assignee) {
     ownerValue = ownerRole
@@ -1601,7 +2286,7 @@ function RequestProcessSummary({
   const rows: { label: string; value: ReactNode; fullWidth?: boolean }[] = [
     { label: 'Channel', value: channel },
     { label: 'Due', value: <DuePill item={item} /> },
-    { label: 'Owner', value: ownerValue },
+    { label: dataOwnerPersona ? 'Vertical' : 'Owner', value: ownerValue },
     { label: 'Identity', value: identityValue, fullWidth: true },
   ]
   if (matchType || reviewStatus) {
@@ -1648,7 +2333,7 @@ function RequestProcessSummary({
   )
 }
 
-function InboxReviewPane({
+export function InboxReviewPane({
   item,
   canReviewActions,
   assigneeCandidates,
@@ -1681,7 +2366,14 @@ function InboxReviewPane({
     | 'notice_approve'
     | null
   >(null)
+  const [tab, setTab] = useState<InboxWorkbenchTab>('overview')
+  const [matchingBatchDefault, setMatchingBatchDefault] = useState<string | null>(null)
+  const [matchingUseBatchDefault, setMatchingUseBatchDefault] = useState(true)
+  const [activeConnectionSystem, setActiveConnectionSystem] = useState<string | null>(
+    () => inboxItemSystemId(item),
+  )
   const isAccessRequest = useIsAccessRequest(item.request_id)
+  const reviewItemKey = inboxReviewItemKey(item)
 
   const showTriage = isTriageItem(item)
   const showAssignmentToLegal = legalPersona && isAssignmentToLegalItem(item)
@@ -1700,12 +2392,37 @@ function InboxReviewPane({
     (isDeliveryItem(item) || item.current_stage === 'fulfill')
   const showNotice = isNoticeItem(item)
   const showComms = isCommsItem(item) && !legalPersona
+  const requestIdReady = isRequestUuid(item.request_id)
+
+  const ownerVertical = dataOwnerPersona ? item.vertical?.trim() || null : null
+  const ownerSystem = dataOwnerPersona
+    ? (activeConnectionSystem ?? inboxItemSystemId(item))
+    : null
 
   // Matching detail for review + notice (post-fulfill summary still needs match info).
+  // Owners load the vertical-item payload — never the whole-request DROP URL.
   const matchingQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'drop', 'matching-results', item.request_id],
-    queryFn: () => fetchMatchingDetailOptional(item.request_id),
-    enabled: true,
+    queryKey: ownerVertical
+      ? [
+          'admin-api',
+          'ops',
+          'requests',
+          item.request_id,
+          'verticals',
+          ownerVertical,
+          ownerSystem,
+          'matching-results',
+        ]
+      : ['admin-api', 'ops', 'drop', 'matching-results', item.request_id],
+    queryFn: () =>
+      ownerVertical
+        ? fetchOwnerVerticalMatchingDetailOptional(
+            item.request_id,
+            ownerVertical,
+            ownerSystem ?? undefined,
+          )
+        : fetchMatchingDetailOptional(item.request_id),
+    enabled: requestIdReady && (!dataOwnerPersona || Boolean(ownerVertical)),
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })
@@ -1713,6 +2430,7 @@ function InboxReviewPane({
   const journeyQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', item.request_id, 'journey'],
     queryFn: () => getRequestJourney(item.request_id),
+    enabled: requestIdReady,
     refetchInterval: 15_000,
     placeholderData: (previous) => previous,
   })
@@ -1729,6 +2447,7 @@ function InboxReviewPane({
         throw error
       }
     },
+    enabled: requestIdReady,
     refetchInterval: 15_000,
     placeholderData: (previous) => previous,
     retry: false,
@@ -1737,6 +2456,7 @@ function InboxReviewPane({
   const artifactQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'fulfillment', 'artifact', item.request_id],
     queryFn: () => getFulfillmentArtifact(item.request_id),
+    enabled: requestIdReady,
     refetchInterval: 15_000,
     retry: false,
   })
@@ -1744,6 +2464,7 @@ function InboxReviewPane({
   const identityQuery = useQuery({
     queryKey: ['admin-api', 'requests', item.request_id, 'identity-verification'],
     queryFn: () => getLatestIdentityVerification(item.request_id),
+    enabled: requestIdReady,
     refetchInterval: 15_000,
     retry: false,
   })
@@ -1751,12 +2472,14 @@ function InboxReviewPane({
   const commentsQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', item.request_id, 'comments'],
     queryFn: () => getRequestComments(item.request_id),
+    enabled: requestIdReady,
     refetchInterval: 15_000,
   })
 
   const requestQuery = useQuery({
     queryKey: ['admin-api', 'requests', item.request_id],
     queryFn: () => getRequest(item.request_id),
+    enabled: requestIdReady,
     refetchInterval: 30_000,
     placeholderData: (previous) => previous,
   })
@@ -1798,17 +2521,18 @@ function InboxReviewPane({
       postDropMatchingResultPromote(item.request_id, {
         response_status: responseStatus,
         ...promoteDwidsForStatus(responseStatus, dwids),
+        ...matchingReviewBody({
+          ...item,
+          system: ownerSystem ?? inboxItemSystemId(item) ?? item.system,
+        }),
       }),
     onSuccess: async (data) => {
       setConfirmAction(null)
-      if (data.disposition?.recorded === false) {
-        actionToast.warning({
-          title: 'Matching approved — disposition incomplete',
-          description:
-            'No person id recorded for status 3/4. Select matched people and set disposition again before fulfillment kickoff.',
-        })
+      const copy = matchingReviewPromoteToast(data)
+      if (copy.variant === 'warning') {
+        actionToast.warning({ title: copy.title, description: copy.description })
       } else {
-        actionToast.success({ title: 'Request fulfilled' })
+        actionToast.success({ title: copy.title, description: copy.description })
       }
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
     },
@@ -1825,7 +2549,14 @@ function InboxReviewPane({
   })
 
   const declineMutation = useMutation({
-    mutationFn: () => postDropMatchingResultDecline(item.request_id),
+    mutationFn: () =>
+      postDropMatchingResultDecline(
+        item.request_id,
+        matchingReviewBody({
+          ...item,
+          system: ownerSystem ?? inboxItemSystemId(item) ?? item.system,
+        }),
+      ),
     onSuccess: async () => {
       actionToast.success({ title: 'Matching review declined' })
       await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
@@ -1930,9 +2661,14 @@ function InboxReviewPane({
   const assignMutation = useMutation({
     mutationFn: (target: AssignTarget) => {
       if (target.kind === 'group') {
+        if (target.group !== 'legal') {
+          throw new Error(
+            'Owner matching review is a vertical catalog assignment, not a request assignment.',
+          )
+        }
         return postDropWorkflowEscalate({
           request_ids: [item.request_id],
-          target_role: target.group === 'legal' ? 'legal' : 'data_owner',
+          target_role: 'legal',
         })
       }
       return postDropWorkflowAssign({
@@ -1953,12 +2689,15 @@ function InboxReviewPane({
             ...previous,
             items: previous.items.map((row) => {
               if (row.request_id !== item.request_id) return row
+              if (item.vertical && row.vertical && row.vertical !== item.vertical) {
+                return row
+              }
               if (target.kind === 'group') {
                 return {
                   ...row,
                   assignment: {
                     kind: 'escalate',
-                    target_role: target.group === 'legal' ? 'legal' : 'data_owner',
+                    target_role: 'legal',
                     assignee_identity: null,
                   },
                 }
@@ -2074,16 +2813,33 @@ function InboxReviewPane({
   const showHandoffTab = showDelivery || showComms
   const showResolveMatching = showMatching || showAssignmentToLegal
   const dropPill = dropStatusPill(item, matchingQuery.data, dataOwnerPersona)
-  /** Work-type tabs only when they hold tools — notice CTA lives in the next-step card. */
-  const primaryTab = showTriage
-    ? 'triage'
-    : showAssignmentToLegal
+  /** Open the stage that holds the current job; Overview otherwise. */
+  const primaryTab: InboxWorkbenchTab = showTriage
+    ? 'ingest'
+    : showAssignmentToLegal || showMatching
       ? 'matching'
-      : showMatching
-        ? 'matching'
-        : showHandoffTab
-          ? 'delivery'
+      : showNotice
+        ? 'notice'
+        : showHandoffTab || showOwnerFulfillmentPane
+          ? 'fulfillment'
           : 'overview'
+
+  useEffect(() => {
+    setTab(primaryTab)
+  }, [reviewItemKey, primaryTab])
+
+  useEffect(() => {
+    setActiveConnectionSystem(inboxItemSystemId(item))
+  }, [reviewItemKey, item.system, item.system_id])
+
+  const matchingStatusOptions = useMemo(
+    () =>
+      DROP_RESPONSE_STATUS_OPTIONS.map((row) => ({
+        id: String(row.code),
+        label: dataOwnerPersona ? (ownerDropStatusLabel(row.code) ?? row.label) : row.label,
+      })),
+    [dataOwnerPersona],
+  )
 
   const currentStageLabel =
     stages.find(
@@ -2100,7 +2856,7 @@ function InboxReviewPane({
       : showTriage
         ? 'Reject as exempted, or release to matching for the data owner.'
         : showMatching
-          ? 'Confirm the match disposition, or send to legal if you need help.'
+          ? 'Confirm the match disposition.'
           : showOwnerFulfillmentPane
             ? 'Legal kicked off fulfillment. Mark each owned SaaS system; Data runs automatically.'
             : showAssignmentToLegal
@@ -2137,7 +2893,7 @@ function InboxReviewPane({
   }
 
   return (
-      <div className="flex h-full min-h-0 flex-col">
+      <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
         <ConfirmActionDialog
           open={confirmAction === 'fulfill'}
           onOpenChange={(open) => {
@@ -2190,8 +2946,8 @@ function InboxReviewPane({
           onOpenChange={(open) => {
             if (!open && !actionPending) setConfirmAction(null)
           }}
-          title="Assignment to legal?"
-          description={`Send request ${item.request_id.slice(0, 8)}… to Legal Inbox · Assignment to legal. Add a comment first if context is needed.`}
+          title="Assign to legal?"
+          description={`Send this matching review to Legal Inbox for the request journey. Add a comment first if context is needed.`}
           confirmLabel="Assign to legal"
           confirming={actionPending && confirmAction === 'escalate'}
           onConfirm={() => escalateMutation.mutate()}
@@ -2231,7 +2987,9 @@ function InboxReviewPane({
           onConfirm={() => noticeApproveMutation.mutate()}
         />
 
-        <div className="shrink-0 space-y-2 border-b border-line px-4 py-2.5">
+        <RequestDetailWorkbenchShell
+          header={
+        <div className="shrink-0 space-y-1.5 border-b border-line px-3 py-2">
           {onBackToQueue ? (
             <button
               type="button"
@@ -2246,14 +3004,41 @@ function InboxReviewPane({
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0 flex-1 space-y-0.5">
               <div className="flex flex-wrap items-center gap-2">
-                <h2 className="text-sm font-semibold text-ink">{inboxItemTitle(item)}</h2>
+                {item.color_token ? (
+                  <span
+                    className={cn(
+                      'h-2.5 w-2.5 shrink-0 rounded-full border',
+                      matchingSystemColorClass(item.color_token),
+                    )}
+                    aria-hidden
+                  />
+                ) : null}
+                <h2
+                  className={cn(
+                    'text-sm font-semibold',
+                    inboxSystemTitleClass(item.color_token),
+                  )}
+                >
+                  {inboxItemTitle(item)}
+                </h2>
                 <DuePill item={item} />
               </div>
+              <InboxConnectorStatusChrome
+                block={inboxItemConnectorBlock(item, {
+                  reminders: me?.connector_reminders,
+                  matchingDetail: matchingQuery.data,
+                })}
+                verticalId={item.vertical}
+                showWizard={dataOwnerPersona}
+              />
               <p className="font-mono text-[0.65rem] text-ink-soft">
                 {item.request_id}
                 <span className="font-sans text-mute">
                   {' '}
                   · {SOURCE_LABELS[item.intake_source] ?? item.intake_source}
+                  {item.vertical_label || item.vertical
+                    ? ` · ${item.vertical_label || item.vertical}`
+                    : ''}
                 </span>
               </p>
               {currentStageLabel ? (
@@ -2268,11 +3053,28 @@ function InboxReviewPane({
               pending={assignMutation.isPending}
               error={null}
               onAssign={(target) => assignMutation.mutate(target)}
+              ownerAssignMode={dataOwnerPersona}
+              matchingReviewLabel={
+                dataOwnerPersona || legalPersona
+                  ? null
+                  : item.vertical_label?.trim() || item.vertical?.trim() || 'this vertical'
+              }
             />
           </div>
 
           {/* 2. Next step — one clear job for the eye */}
-          {nextStepHint || canReviewActions ? (
+          {showMatching && !legalPersona ? (
+            <InboxMatchingDispositionCard
+              canReviewActions={canReviewActions}
+              actionPending={actionPending}
+              dataOwnerPersona={dataOwnerPersona}
+              onConfirm={() => setConfirmAction('fulfill')}
+              onDecline={() => setConfirmAction('decline')}
+              onEscalate={() => setConfirmAction('escalate')}
+              onSeeMoreDetails={(trigger) => onOpenDetail?.(item, trigger)}
+            />
+          ) : null}
+          {(!showMatching || legalPersona) && (nextStepHint || canReviewActions) ? (
             <div className="rounded-md border border-habeas-navy/20 bg-habeas-navy/[0.03] px-3 py-2">
               {nextStepHint ? (
                 <p className="text-[0.7rem] leading-snug text-ink-soft">{nextStepHint}</p>
@@ -2333,38 +3135,6 @@ function InboxReviewPane({
                     </Button>
                   </>
                 ) : null}
-                {showMatching && canReviewActions && !legalPersona ? (
-                  <>
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={actionPending}
-                      onClick={() => setConfirmAction('fulfill')}
-                    >
-                      {dataOwnerPersona
-                        ? matchingDispositionCopy('data_owner').confirmLabel
-                        : 'Fulfill'}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={actionPending}
-                      onClick={() => setConfirmAction('decline')}
-                    >
-                      Decline
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={actionPending}
-                      onClick={() => setConfirmAction('escalate')}
-                    >
-                      Assign to legal
-                    </Button>
-                  </>
-                ) : null}
                 {showDelivery && canReviewActions ? (
                   <>
                     {shareableUrl ? (
@@ -2378,24 +3148,24 @@ function InboxReviewPane({
                     ) : null}
                   </>
                 ) : null}
-                <button
-                  type="button"
-                  className="text-[0.7rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
-                  aria-label="See more details"
-                  onClick={(event) => {
-                    onOpenDetail?.(item, event.currentTarget)
-                  }}
-                >
-                  See more details
-                </button>
+                {!showMatching ? (
+                  <button
+                    type="button"
+                    className="text-[0.7rem] font-medium text-habeas-navy underline-offset-2 hover:underline"
+                    aria-label="See more details"
+                    onClick={(event) => {
+                      onOpenDetail?.(item, event.currentTarget)
+                    }}
+                  >
+                    See more details
+                  </button>
+                ) : null}
               </div>
             </div>
           ) : null}
         </div>
-
-        {/* Thin four-stage pipeline + type/source substeps (list rows stay strip-free — R1/AE5) */}
-        {pipelineStages.length > 0 ? (
-          <div className="shrink-0 border-b border-line px-4 py-2">
+          }
+          rail={
             <ThinJourneyPipeline
               stages={pipelineStages}
               substeps={pipelineSubsteps}
@@ -2403,16 +3173,97 @@ function InboxReviewPane({
               fulfillmentCluster={workbench?.fulfillment_cluster}
               splitPosture={workbench?.split_posture ?? derivedChrome?.split_posture}
               density="compact"
+              showSubsteps={false}
+              expandedStage={isWorkbenchStageKey(tab) ? tab : null}
+              onStageActivate={(stage) => {
+                if (isWorkbenchStageKey(stage)) setTab(stage)
+              }}
             />
-          </div>
-        ) : null}
-
-        <Tabs
-          key={item.request_id}
-          defaultValue={primaryTab}
-          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          }
+          side={
+            <RequestDetailSideColumn
+              activity={
+                <InboxActivityPanel
+                  requestId={item.request_id}
+                  canCompose={false}
+                />
+              }
+              comments={
+                <div className="flex min-h-0 flex-col space-y-2">
+                  <p className="text-[0.6rem] font-medium uppercase tracking-wide text-mute">
+                    {showAssignmentToLegal ? 'Assignment thread' : 'Comments'}
+                    {comments.length > 0 ? (
+                      <span className="ml-1 tabular-nums opacity-70">({comments.length})</span>
+                    ) : null}
+                  </p>
+                  <div className="min-h-0 flex-1 space-y-1">
+                    {commentsQuery.isError ? (
+                      <p className="text-[0.7rem] text-red-700">Could not load comments.</p>
+                    ) : null}
+                    {!commentsQuery.isPending && !commentsQuery.isError && comments.length === 0 ? (
+                      <p className="text-[0.7rem] text-mute">No comments yet.</p>
+                    ) : null}
+                    {comments.map((comment) => (
+                      <div key={comment.id} className="border-b border-line/70 py-1.5 last:border-0">
+                        <div className="flex flex-wrap items-baseline justify-between gap-1">
+                          <span className="text-[0.65rem] font-medium text-ink">{comment.actor}</span>
+                          <span className="tabular-nums text-[0.6rem] text-mute">
+                            {formatRelativeTime(comment.occurred_at)}
+                          </span>
+                        </div>
+                        <p className="whitespace-pre-wrap text-[0.7rem] text-ink-soft">
+                          {comment.body}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                  {canReviewActions && legalPersona ? (
+                    <LegalInboxComposer
+                      item={item}
+                      canReviewActions={canReviewActions}
+                      myEmail={me?.email}
+                      onSuccess={async () => {
+                        await queryClient.invalidateQueries({
+                          queryKey: ['admin-api', 'ops', 'requests', item.request_id, 'comments'],
+                        })
+                        await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+                      }}
+                    />
+                  ) : canReviewActions ? (
+                    <div className="flex shrink-0 items-end gap-2 border-t border-line pt-2">
+                      <textarea
+                        className="min-h-[3.5rem] max-h-32 flex-1 resize-y rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
+                        value={commentDraft}
+                        onChange={(event) => setCommentDraft(event.target.value)}
+                        placeholder="Add a review note…"
+                        aria-label="Comment body"
+                        maxLength={2000}
+                      />
+                      <Button
+                        size="sm"
+                        disabled={commentMutation.isPending || commentDraft.trim().length === 0}
+                        onClick={() => commentMutation.mutate(commentDraft.trim())}
+                      >
+                        {commentMutation.isPending ? '…' : 'Post'}
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              }
+            />
+          }
         >
-          <div className="shrink-0 border-b border-line px-4 py-1.5">
+        <Tabs
+          key={inboxReviewItemKey(item)}
+          value={tab}
+          onValueChange={(value) => {
+            if (value === 'overview' || isWorkbenchStageKey(value)) {
+              setTab(value)
+            }
+          }}
+          className="flex h-full min-h-0 flex-1 flex-col overflow-hidden"
+        >
+          <div className="shrink-0 border-b border-line px-3 py-1">
             <TabsList
               className="h-8 w-full justify-start gap-1 overflow-x-auto rounded-md border border-line bg-canvas p-0.5"
               aria-label="Request detail sections"
@@ -2420,48 +3271,28 @@ function InboxReviewPane({
               <TabsTrigger value="overview" className={INBOX_DETAIL_TAB_TRIGGER}>
                 Overview
               </TabsTrigger>
-              {showTriage ? (
-                <TabsTrigger value="triage" className={INBOX_DETAIL_TAB_TRIGGER}>
-                  Triage
-                </TabsTrigger>
-              ) : null}
-              {showResolveMatching ? (
-                <TabsTrigger value="matching" className={INBOX_DETAIL_TAB_TRIGGER}>
-                  Matching
-                </TabsTrigger>
-              ) : null}
-              {showHandoffTab ? (
-                <TabsTrigger value="delivery" className={INBOX_DETAIL_TAB_TRIGGER}>
-                  {showDelivery ? 'Delivery' : 'Handoff'}
-                </TabsTrigger>
-              ) : null}
-              {showComms && showDelivery ? (
-                <TabsTrigger value="comms" className={INBOX_DETAIL_TAB_TRIGGER}>
-                  Comms
-                </TabsTrigger>
-              ) : null}
-              {isAccessRequest === true ? (
-                <TabsTrigger value="access-email" className={INBOX_DETAIL_TAB_TRIGGER}>
-                  Access email
-                </TabsTrigger>
-              ) : null}
-              <TabsTrigger value="activity" className={INBOX_DETAIL_TAB_TRIGGER}>
-                Activity
+              <TabsTrigger value="ingest" className={INBOX_DETAIL_TAB_TRIGGER}>
+                Ingest
               </TabsTrigger>
-              <TabsTrigger
-                value="comments"
-                className={cn(INBOX_DETAIL_TAB_TRIGGER, 'gap-1')}
-              >
-                {showAssignmentToLegal ? 'Assignment thread' : 'Comments'}
-                {comments.length > 0 ? (
-                  <span className="tabular-nums opacity-70">({comments.length})</span>
-                ) : null}
+              <TabsTrigger value="matching" className={INBOX_DETAIL_TAB_TRIGGER}>
+                Matching
+              </TabsTrigger>
+              <TabsTrigger value="fulfillment" className={INBOX_DETAIL_TAB_TRIGGER}>
+                Fulfillment
+              </TabsTrigger>
+              <TabsTrigger value="notice" className={INBOX_DETAIL_TAB_TRIGGER}>
+                Notice
               </TabsTrigger>
             </TabsList>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-            <TabsContent value="overview" className="mt-0 space-y-3">
+          <div
+            className={cn(
+              'min-h-0 flex-1 px-3 py-2.5',
+              showMatching && tab === 'matching' ? 'overflow-hidden' : 'overflow-y-auto',
+            )}
+          >
+            <TabsContent value="overview" className="mt-0 max-h-full space-y-3 overflow-y-auto">
               {showNotice ? (
                 <p className="text-[0.75rem] text-ink-soft">
                   After approval, this row enters the next weekly DROP upload batch
@@ -2480,22 +3311,26 @@ function InboxReviewPane({
                   {dropPill.label}
                 </Badge>
               ) : null}
-              <RequesterContactSection
-                intakeSource={item.intake_source}
-                displayLabel={requestQuery.data?.display_label}
-                requestContact={requestQuery.data?.contact}
-                matching={matchingQuery.data}
-                dropPreMatch={
-                  item.intake_source === 'drop' &&
-                  matchingQuery.data == null &&
-                  (item.current_stage === 'received' ||
-                    item.current_stage === 'download' ||
-                    item.current_stage === 'land' ||
-                    item.current_stage === 'promote' ||
-                    item.current_stage === 'match')
-                }
-                compact
-              />
+              {dataOwnerPersona && showMatching ? (
+                <MatchedContactsPanel matching={matchingQuery.data ?? undefined} />
+              ) : (
+                <RequesterContactSection
+                  intakeSource={item.intake_source}
+                  displayLabel={requestQuery.data?.display_label}
+                  requestContact={requestQuery.data?.contact}
+                  matching={matchingQuery.data}
+                  dropPreMatch={
+                    item.intake_source === 'drop' &&
+                    matchingQuery.data == null &&
+                    (item.current_stage === 'received' ||
+                      item.current_stage === 'download' ||
+                      item.current_stage === 'land' ||
+                      item.current_stage === 'promote' ||
+                      item.current_stage === 'match')
+                  }
+                  compact
+                />
+              )}
               <RequestProcessSummary
                 item={item}
                 matching={matchingQuery.data}
@@ -2506,53 +3341,138 @@ function InboxReviewPane({
               />
             </TabsContent>
 
-            {showTriage ? (
-              <TabsContent value="triage" className="mt-0 space-y-2 text-xs">
-                <p className="text-ink-soft">
-                  Condition routed this request here before matching. Reject as DROP{' '}
-                  <span className="font-mono">2</span> Exempted, or send to matching for the
-                  data owner.
+            <TabsContent value="ingest" className="mt-0 max-h-full space-y-3 overflow-y-auto">
+              <JourneyStageSubsteps
+                stages={pipelineStages}
+                stageKey="ingest"
+                substeps={pipelineSubsteps}
+                density="compact"
+              />
+              {showTriage ? (
+                <div className="space-y-2 text-xs">
+                  <p className="text-ink-soft">
+                    Condition routed this request here before matching. Reject as DROP{' '}
+                    <span className="font-mono">2</span> Exempted, or send to matching for the
+                    data owner.
+                  </p>
+                  {item.requestor_state ? (
+                    <p className="text-mute">
+                      Requestor state:{' '}
+                      <span className="font-medium text-ink">{item.requestor_state}</span>
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+            </TabsContent>
+
+            <TabsContent
+              value="matching"
+              className={cn(
+                'mt-0 space-y-3',
+                showMatching && 'flex h-full min-h-0 flex-col overflow-hidden',
+              )}
+            >
+              {showMatching ? (
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                  {isAuth0MatchingScope(item.vertical, inboxItemSystemId(item)) ? (
+                    <div className="shrink-0 pb-3">
+                      <Auth0MatchCandidatesList requestId={item.request_id} />
+                    </div>
+                  ) : null}
+                  <div className="min-h-0 flex-1 overflow-y-auto">
+                    <MatchingResultsLabView
+                      method="two-tier"
+                      item={item}
+                      detail={matchingQuery.data ?? null}
+                      contacts={matchedContacts}
+                      loading={matchingQuery.isPending}
+                      ownerLanguage={dataOwnerPersona}
+                      statusOptions={matchingStatusOptions}
+                      statusId={
+                        matchingUseBatchDefault && matchingBatchDefault
+                          ? matchingBatchDefault
+                          : fulfillStatus != null
+                            ? String(fulfillStatus)
+                            : null
+                      }
+                      onStatusChange={(next) => {
+                        const code = Number(next) as DropResponseStatusCode
+                        if (code === 3 || code === 4 || code === 5) {
+                          handleFulfillStatusChange(code)
+                        }
+                        setMatchingUseBatchDefault(false)
+                      }}
+                      selectedDwids={selectedDwids}
+                      onSelectedDwidsChange={setSelectedDwids}
+                      disabled={!canReviewActions || legalPersona}
+                      pending={actionPending}
+                      onApply={(draft) => {
+                        const raw = draft?.statusId ?? (fulfillStatus != null ? String(fulfillStatus) : null)
+                        const code = Number(raw) as DropResponseStatusCode
+                        if (code !== 3 && code !== 4 && code !== 5) return
+                        const dwids = code === 5 ? [] : (draft?.selectedDwids ?? selectedDwids)
+                        if ((code === 3 || code === 4) && dwids.length === 0) return
+                        promoteMutation.mutate({ responseStatus: code, dwids })
+                      }}
+                      batchDefaultStatus={matchingBatchDefault ?? (suggestedStatus != null ? String(suggestedStatus) : null)}
+                      onBatchDefaultStatusChange={(next) => {
+                        setMatchingBatchDefault(next)
+                        const code = Number(next) as DropResponseStatusCode
+                        if (matchingUseBatchDefault && (code === 3 || code === 4 || code === 5)) {
+                          handleFulfillStatusChange(code)
+                        }
+                      }}
+                      useBatchDefault={matchingUseBatchDefault}
+                      onUseBatchDefaultChange={setMatchingUseBatchDefault}
+                      selectedCount={0}
+                      onApplySelection={() => undefined}
+                    />
+                  </div>
+                </div>
+              ) : showResolveMatching ? (
+                <>
+                  <MatchingReviewPanel
+                    requestId={item.request_id}
+                    matching={matchingQuery.data}
+                    isPending={matchingQuery.isPending}
+                    isError={matchingQuery.isError}
+                    canReviewActions={canReviewActions && !legalPersona}
+                    actionPending={actionPending}
+                    connectorReminders={me?.connector_reminders}
+                    fetchConnectorConnections={isAdmin}
+                    onPromote={(responseStatus, dwids) =>
+                      promoteMutation.mutate({ responseStatus, dwids })
+                    }
+                    onDecline={() => declineMutation.mutate()}
+                    compact
+                    layout="tabs"
+                    hideActions
+                    persona={dataOwnerPersona ? 'data_owner' : legalPersona ? 'legal' : 'ops'}
+                  />
+                  {legalPersona && showAssignmentToLegal ? (
+                    <p className="text-[0.7rem] text-ink-soft">
+                      Matching is read-only here — use Start fulfillment in the next-step card
+                      (or request detail Fulfillment tab) after disposition is recorded.
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p className="text-[0.7rem] text-mute">
+                  Matching detail appears when this request is in review.
                 </p>
-                {item.requestor_state ? (
-                  <p className="text-mute">
-                    Requestor state:{' '}
-                    <span className="font-medium text-ink">{item.requestor_state}</span>
-                  </p>
-                ) : null}
-              </TabsContent>
-            ) : null}
+              )}
+            </TabsContent>
 
-            {showResolveMatching ? (
-              <TabsContent value="matching" className="mt-0">
-                <MatchingReviewPanel
-                  requestId={item.request_id}
-                  matching={matchingQuery.data}
-                  isPending={matchingQuery.isPending}
-                  isError={matchingQuery.isError}
-                  canReviewActions={canReviewActions && !legalPersona}
-                  actionPending={actionPending}
-                  connectorReminders={me?.connector_reminders}
-                  fetchConnectorConnections={isAdmin}
-                  onPromote={(responseStatus, dwids) =>
-                    promoteMutation.mutate({ responseStatus, dwids })
-                  }
-                  onDecline={() => declineMutation.mutate()}
-                  compact
-                  layout="tabs"
-                  hideActions
-                  persona={dataOwnerPersona ? 'data_owner' : legalPersona ? 'legal' : 'ops'}
-                />
-                {legalPersona && showAssignmentToLegal ? (
-                  <p className="mt-2 text-[0.7rem] text-ink-soft">
-                    Matching is read-only here — use Start fulfillment in the next-step card
-                    (or request detail Fulfillment tab) after disposition is recorded.
-                  </p>
-                ) : null}
-              </TabsContent>
-            ) : null}
-
-            {showHandoffTab ? (
-              <TabsContent value="delivery" className="mt-0 space-y-3">
+            <TabsContent value="fulfillment" className="mt-0 max-h-full space-y-3 overflow-y-auto">
+              <JourneyStageSubsteps
+                stages={pipelineStages}
+                stageKey="fulfillment"
+                substeps={pipelineSubsteps}
+                matchingCluster={workbench?.matching_cluster}
+                fulfillmentCluster={workbench?.fulfillment_cluster}
+                density="compact"
+              />
+              {showHandoffTab ? (
                 <AccessHandoffPanel
                   requestId={item.request_id}
                   artifact={artifactQuery.data}
@@ -2563,103 +3483,72 @@ function InboxReviewPane({
                   onCopyUrl={copyShareableUrl}
                   onSetStatus={(status) => deliveryMutation.mutate(status)}
                 />
-                {showComms && !showDelivery ? (
-                  <p className="text-xs text-ink-soft">
-                    Requester communications will thread here as outbound and inbound messages
-                    are recorded.
+              ) : null}
+              {showComms ? (
+                <div className="text-xs text-ink-soft">
+                  <p className="font-medium text-ink">Requester communications</p>
+                  <p className="mt-1">
+                    Outbound drafts, sent attempts, and inbound replies will thread here. Use
+                    Access email below for access URL emails today.
                   </p>
-                ) : null}
-              </TabsContent>
-            ) : null}
-
-            {showComms && showDelivery ? (
-              <TabsContent value="comms" className="mt-0 text-xs text-ink-soft">
-                <p className="font-medium text-ink">Requester communications</p>
-                <p className="mt-1">
-                  Outbound drafts, sent attempts, and inbound replies will thread here. Use
-                  the Access delivery email tab (render API) for access URL emails today.
-                </p>
-              </TabsContent>
-            ) : null}
-
-            {isAccessRequest === true ? (
-              <TabsContent value="access-email" className="mt-0">
-                <AccessDeliveryEmailCard requestId={item.request_id} />
-              </TabsContent>
-            ) : null}
-
-            <TabsContent value="activity" className="mt-0">
-              <InboxActivityPanel
-                requestId={item.request_id}
-                canCompose={canReviewActions}
-              />
-            </TabsContent>
-
-            <TabsContent value="comments" className="mt-0 flex min-h-[16rem] flex-col space-y-2">
-              <div className="min-h-0 flex-1 space-y-1">
-                {commentsQuery.isError ? (
-                  <p className="text-[0.7rem] text-red-700">Could not load comments.</p>
-                ) : null}
-                {!commentsQuery.isPending && !commentsQuery.isError && comments.length === 0 ? (
-                  <p className="text-[0.7rem] text-mute">No comments yet.</p>
-                ) : null}
-                {comments.map((comment) => (
-                  <div key={comment.id} className="border-b border-line/70 py-1.5 last:border-0">
-                    <div className="flex flex-wrap items-baseline justify-between gap-1">
-                      <span className="text-[0.65rem] font-medium text-ink">{comment.actor}</span>
-                      <span className="tabular-nums text-[0.6rem] text-mute">
-                        {formatRelativeTime(comment.occurred_at)}
-                      </span>
-                    </div>
-                    <p className="whitespace-pre-wrap text-[0.7rem] text-ink-soft">
-                      {comment.body}
-                    </p>
-                  </div>
-                ))}
-              </div>
-              {canReviewActions && legalPersona ? (
-                <LegalInboxComposer
-                  item={item}
-                  canReviewActions={canReviewActions}
-                  myEmail={me?.email}
-                  onSuccess={async () => {
-                    await queryClient.invalidateQueries({
-                      queryKey: ['admin-api', 'ops', 'requests', item.request_id, 'comments'],
-                    })
-                    await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
-                  }}
-                />
-              ) : canReviewActions ? (
-                <div className="flex shrink-0 items-end gap-2 border-t border-line pt-2">
-                  <textarea
-                    className="min-h-[3.5rem] max-h-32 flex-1 resize-y rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
-                    value={commentDraft}
-                    onChange={(event) => setCommentDraft(event.target.value)}
-                    placeholder="Add a review note…"
-                    aria-label="Comment body"
-                    maxLength={2000}
-                  />
-                  <Button
-                    size="sm"
-                    disabled={commentMutation.isPending || commentDraft.trim().length === 0}
-                    onClick={() => commentMutation.mutate(commentDraft.trim())}
-                  >
-                    {commentMutation.isPending ? '…' : 'Post'}
-                  </Button>
                 </div>
               ) : null}
+              {isAccessRequest === true ? (
+                <AccessDeliveryEmailCard requestId={item.request_id} />
+              ) : null}
+            </TabsContent>
+
+            <TabsContent value="notice" className="mt-0 max-h-full space-y-3 overflow-y-auto">
+              <JourneyStageSubsteps
+                stages={pipelineStages}
+                stageKey="notice"
+                substeps={pipelineSubsteps}
+                density="compact"
+              />
+              <p className="text-[0.75rem] text-ink-soft">
+                After approval, fulfilled DROP rows enter the next weekly upload batch
+                (America/Los_Angeles) — not a consumer delivery URL.
+              </p>
             </TabsContent>
           </div>
         </Tabs>
+        </RequestDetailWorkbenchShell>
       </div>
   )
 }
 
 
 
-type InboxStackKind = 'batch' | 'type' | 'batch_type' | 'status' | 'batch_status'
+export type InboxStackKind =
+  | 'batch_type'
+  | 'status'
+  | 'batch_status'
+  | 'system'
+  | 'date_source'
 
-type InboxRow =
+export function inboxThreadMicroLabel(stackKind: InboxStackKind): string {
+  switch (stackKind) {
+    case 'system':
+      return 'System'
+    case 'status':
+      return 'Status'
+    case 'batch_type':
+      return 'Batch · System'
+    case 'batch_status':
+      return 'Batch · Status'
+    case 'date_source':
+    default:
+      return 'Batch'
+  }
+}
+
+export function inboxStackCountCaption(count: number): string {
+  return count === 1
+    ? 'Counts across 1 request in this group.'
+    : `Counts across ${count} requests in this group.`
+}
+
+export type InboxRow =
   | {
       kind: 'thread'
       stackKind: InboxStackKind
@@ -2669,7 +3558,7 @@ type InboxRow =
     }
   | { kind: 'request'; item: NeedsAttentionItem }
 
-function findThreadRow(
+export function findThreadRow(
   rows: InboxRow[],
   batchKey: string,
 ): Extract<InboxRow, { kind: 'thread' }> | null {
@@ -2679,161 +3568,88 @@ function findThreadRow(
   return null
 }
 
-function countThreadStacks(rows: InboxRow[]): number {
+/** Open a single request so the Matching-tab DWID selector is on screen — not a batch aggregate. */
+export function firstIndividualInboxTarget(rows: InboxRow[]): {
+  target: InboxActiveTarget
+  expandBatchKey?: string
+} | null {
+  const firstRequest = rows.find(
+    (row): row is Extract<InboxRow, { kind: 'request' }> => row.kind === 'request',
+  )
+  if (firstRequest) {
+    return { target: { kind: 'request', itemKey: inboxReviewItemKey(firstRequest.item) } }
+  }
+  const firstThread = rows.find(
+    (row): row is Extract<InboxRow, { kind: 'thread' }> => row.kind === 'thread',
+  )
+  if (!firstThread) return null
+  const firstItem = firstThread.items[0]
+  if (firstItem) {
+    return {
+      target: { kind: 'request', itemKey: inboxReviewItemKey(firstItem) },
+      expandBatchKey: firstThread.batchKey,
+    }
+  }
+  return { target: { kind: 'thread', batchKey: firstThread.batchKey } }
+}
+
+export function countThreadStacks(rows: InboxRow[]): number {
   return rows.filter((row) => row.kind === 'thread').length
 }
 
-const UNKEYED_BATCH_KEY = 'u:none'
-const UNKEYED_BATCH_LABEL = 'No DROP batch'
-
-function itemBatchParts(item: NeedsAttentionItem): { key: string; label: string } {
-  const key = inboxBatchKey(item)
-  if (key != null) {
-    return { key, label: inboxBatchLabel(item) }
-  }
-  return { key: UNKEYED_BATCH_KEY, label: UNKEYED_BATCH_LABEL }
-}
-
-/**
- * Batch × type cross-product: one stack per (batch, work-type) pair.
- * Example: batch #1 × Notice, batch #1 × Delivery, batch #2 × Notice, …
- */
-function buildBatchTypeCrossRows(items: NeedsAttentionItem[]): InboxRow[] {
-  type CrossGroup = {
-    batchKey: string
-    batchLabel: string
-    typeKey: InboxWorkType
-    typeLabel: string
-    items: NeedsAttentionItem[]
-  }
-  const groups = new Map<string, CrossGroup>()
-
-  for (const item of items) {
-    const batch = itemBatchParts(item)
-    const typeKey = inboxWorkType(item)
-    const compositeKey = `${batch.key}::${typeKey}`
-    const existing = groups.get(compositeKey)
-    if (existing) {
-      existing.items.push(item)
-    } else {
-      groups.set(compositeKey, {
-        batchKey: batch.key,
-        batchLabel: batch.label,
-        typeKey,
-        typeLabel: INBOX_WORK_TYPE_LABELS[typeKey],
-        items: [item],
-      })
-    }
-  }
-
-  const typeRank = new Map(
-    INBOX_WORK_TYPE_ORDER.map((key, index) => [key, index] as const),
-  )
-
-  const timed = [...groups.entries()].map(([compositeKey, group]) => {
-    const sorted = [...group.items].sort((a, b) =>
-      (a.requested_at ?? '').localeCompare(b.requested_at ?? ''),
-    )
-    return {
-      t: sorted[0]?.requested_at ?? '',
-      typeRank: typeRank.get(group.typeKey) ?? 99,
-      batchLabel: group.batchLabel,
-      row: {
-        kind: 'thread' as const,
-        stackKind: 'batch_type' as const,
-        batchKey: compositeKey,
-        batchLabel: `${group.batchLabel} · ${group.typeLabel}`,
-        items: sorted,
-      },
-    }
-  })
-
-  timed.sort((a, b) => {
-    const byTime = a.t.localeCompare(b.t)
-    if (byTime !== 0) return byTime
-    const byType = a.typeRank - b.typeRank
-    if (byType !== 0) return byType
-    return a.batchLabel.localeCompare(b.batchLabel)
-  })
-  return timed.map((entry) => entry.row)
-}
-
-/** Batch × batch-status type — e.g. #42 · Single match, #42 · Multi-person. */
-function buildBatchStatusCrossRows(
+/** Stack by date+source, system, and/or status. Multi-select is SQL GROUP BY. */
+export function buildGroupedInboxRows(
   items: NeedsAttentionItem[],
+  options: {
+    byStatus?: boolean
+    byDateSource?: boolean
+    bySystem?: boolean
+    reminders?: ConnectorReminder[] | null
+    gate?: MatchingConnectorGate | null
+  },
   ownerLanguage = false,
 ): InboxRow[] {
-  const groups = buildInboxBatchStatusCrossGroups(items, itemBatchParts, ownerLanguage)
-  return groups.map((group) => {
-    const sorted = [...group.items].sort((a, b) =>
+  const byDateSource = options.byDateSource ?? false
+  const bySystem = options.bySystem ?? false
+  const byStatus = options.byStatus ?? false
+  if (!byDateSource && !bySystem && !byStatus) {
+    return items.map((item) => ({ kind: 'request' as const, item }))
+  }
+  return buildInboxGroupingStacks(
+    items,
+    {
+      byDateSource,
+      bySystem,
+      byStatus,
+      reminders: options.reminders,
+      gate: options.gate,
+    },
+    ownerLanguage,
+  ).map((stack) => {
+    const sorted = [...stack.items].sort((a, b) =>
       (a.requested_at ?? '').localeCompare(b.requested_at ?? ''),
     )
+    const stackKind: InboxStackKind =
+      byDateSource && byStatus
+        ? 'batch_status'
+        : byDateSource && bySystem
+          ? 'batch_type'
+          : byStatus
+            ? 'status'
+            : bySystem
+              ? 'system'
+              : 'date_source'
     return {
       kind: 'thread' as const,
-      stackKind: 'batch_status' as const,
-      batchKey: group.compositeKey,
-      batchLabel: `${group.batchLabel} · ${group.statusLabel}`,
+      stackKind,
+      batchKey: stack.key,
+      batchLabel: stack.label,
       items: sorted,
     }
   })
 }
 
-/** Stack by batch-status type only — Single match, Multi-person, Not found, DROP 3/4/5. */
-function buildStatusGroupedRows(
-  items: NeedsAttentionItem[],
-  ownerLanguage = false,
-): InboxRow[] {
-  const rows: InboxRow[] = []
-  for (const section of groupInboxItemsByBatchStatus(items, ownerLanguage)) {
-    const sorted = [...section.items].sort((a, b) =>
-      (a.requested_at ?? '').localeCompare(b.requested_at ?? ''),
-    )
-    rows.push({
-      kind: 'thread',
-      stackKind: 'status',
-      batchKey: `status:${section.key}`,
-      batchLabel: section.label,
-      items: sorted,
-    })
-  }
-  return rows
-}
-
-/** Stack by batch, type, status, or cross-products when multiple toggles are on. */
-function buildGroupedInboxRows(
-  items: NeedsAttentionItem[],
-  options: { byBatch: boolean; byType: boolean; byStatus: boolean },
-  ownerLanguage = false,
-): InboxRow[] {
-  if (options.byBatch && options.byStatus) {
-    return buildBatchStatusCrossRows(items, ownerLanguage)
-  }
-  if (options.byBatch && options.byType) {
-    return buildBatchTypeCrossRows(items)
-  }
-  if (options.byStatus) {
-    return buildStatusGroupedRows(items, ownerLanguage)
-  }
-  if (options.byType) {
-    const rows: InboxRow[] = []
-    for (const section of buildTypeSections(items)) {
-      const sorted = [...section.items].sort((a, b) =>
-        (a.requested_at ?? '').localeCompare(b.requested_at ?? ''),
-      )
-      rows.push({
-        kind: 'thread',
-        stackKind: 'type',
-        batchKey: `type:${section.key}`,
-        batchLabel: section.label,
-        items: sorted,
-      })
-    }
-    return rows
-  }
-  return buildInboxRows(items, options.byBatch)
-}
-
-function InboxGroupSwitch({
+export function InboxGroupSwitch({
   label,
   checked,
   onToggle,
@@ -2883,7 +3699,7 @@ function InboxGroupSwitch({
 }
 
 /** When grouping is on, never leave bare request rows at the top level. */
-function coerceGroupedInboxRows(
+export function coerceGroupedInboxRows(
   rows: InboxRow[],
   groupingActive: boolean,
 ): InboxRow[] {
@@ -2892,99 +3708,22 @@ function coerceGroupedInboxRows(
     if (row.kind === 'thread') return row
     return {
       kind: 'thread',
-      stackKind: 'batch',
-      batchKey: `singleton:${row.item.request_id}`,
+      stackKind: 'date_source',
+      batchKey: `singleton:${inboxReviewItemKey(row.item)}`,
       batchLabel: inboxItemTitle(row.item),
       items: [row.item],
     }
   })
 }
 
-type ActiveTarget =
+export type InboxActiveTarget =
   | { kind: 'thread'; batchKey: string }
-  | { kind: 'request'; requestId: string }
+  | { kind: 'request'; itemKey: string }
 
-/** Prefer download attempt id; fall back to ZIP member name (seed/broker rows). */
-function inboxBatchKey(item: NeedsAttentionItem): string | null {
-  if (item.bulk_process_id != null) return `p:${item.bulk_process_id}`
-  if (item.source_csv_filename) return `c:${item.source_csv_filename}`
-  return null
-}
+type ActiveTarget = InboxActiveTarget
 
-function threadIsExactMatchBatch(items: NeedsAttentionItem[]): boolean {
+export function threadIsExactMatchBatch(items: NeedsAttentionItem[]): boolean {
   return items.length > 0 && items.every((entry) => entry.match_type === 'single_match')
-}
-
-function inboxBatchLabel(item: NeedsAttentionItem): string {
-  if (item.bulk_process_id != null) return `#${item.bulk_process_id}`
-  const name = item.source_csv_filename?.split('/').pop() ?? item.source_csv_filename
-  if (!name) return 'batch'
-  return name.replace(/\.csv$/i, '')
-}
-
-/**
- * When Batch is on: every row is a stack — keyed DROP batches (including size 1)
- * plus one leftover stack for items with no process/CSV key.
- */
-function buildInboxRows(
-  items: NeedsAttentionItem[],
-  groupThreads: boolean,
-): InboxRow[] {
-  if (!groupThreads) {
-    return items.map((item) => ({ kind: 'request' as const, item }))
-  }
-
-  const byBatch = new Map<string, NeedsAttentionItem[]>()
-  const individuals: NeedsAttentionItem[] = []
-
-  for (const item of items) {
-    const key = inboxBatchKey(item)
-    if (key != null) {
-      const list = byBatch.get(key) ?? []
-      list.push(item)
-      byBatch.set(key, list)
-    } else {
-      individuals.push(item)
-    }
-  }
-
-  type Timed = { t: string; row: InboxRow }
-  const timed: Timed[] = []
-
-  for (const [batchKey, members] of byBatch) {
-    const sorted = [...members].sort((a, b) =>
-      (a.requested_at ?? '').localeCompare(b.requested_at ?? ''),
-    )
-    timed.push({
-      t: sorted[0]?.requested_at ?? '',
-      row: {
-        kind: 'thread',
-        stackKind: 'batch',
-        batchKey,
-        batchLabel: inboxBatchLabel(sorted[0]!),
-        items: sorted,
-      },
-    })
-  }
-
-  if (individuals.length > 0) {
-    const sorted = [...individuals].sort((a, b) =>
-      (a.requested_at ?? '').localeCompare(b.requested_at ?? ''),
-    )
-    timed.push({
-      t: sorted[0]?.requested_at ?? '',
-      row: {
-        kind: 'thread',
-        stackKind: 'batch',
-        batchKey: UNKEYED_BATCH_KEY,
-        batchLabel: UNKEYED_BATCH_LABEL,
-        items: sorted,
-      },
-    })
-  }
-
-  timed.sort((a, b) => a.t.localeCompare(b.t))
-  return timed.map((entry) => entry.row)
 }
 
 /** Shared download-attempt id when every member has the same bulk_process_id. */
@@ -2997,31 +3736,282 @@ function sharedBulkProcessId(items: NeedsAttentionItem[]): number | null {
 
 function batchClusterAsPipelineRows(rows: WorkbenchVerticalBatchRow[]) {
   return rows.map((row) => {
-    const countParts = Object.entries(row.member_status_counts)
-      .filter(([, n]) => n > 0)
-      .map(([status, n]) => `${n} ${status}`)
+    const countLabel = formatStackSubstepCounts(row.member_status_counts)
     return {
       vertical: row.vertical,
       label: row.label,
       live: row.live,
       matching_status: row.matching_status,
       fulfillment_status: row.fulfillment_status,
-      blocker: countParts.length > 0 ? countParts.join(', ') : null,
+      blocker: countLabel || null,
     }
   })
 }
 
-function ThreadReviewPane({
+/** Vertical cluster rows as countable substeps — never per-request match rows. */
+function batchClusterAsSubsteps(
+  rows: WorkbenchVerticalBatchRow[] | undefined,
+  parent: 'matching' | 'fulfillment',
+): DerivedWorkbenchSubstep[] {
+  if (!rows?.length) return []
+  return rows.map((row) => {
+    const status =
+      parent === 'matching'
+        ? row.matching_status
+        : (row.fulfillment_status ?? 'not_started')
+    const countLabel = formatStackSubstepCounts(row.member_status_counts)
+    return {
+      key: `${parent}-${row.vertical}`,
+      label: row.label,
+      status,
+      parent,
+      blocker: null,
+      statusLabel: countLabel || (row.live ? workbenchStatusLabel(status) : 'Soon'),
+    }
+  })
+}
+
+function countStackKeys(values: Array<string | null | undefined>): Array<{ key: string; count: number }> {
+  const tallies = new Map<string, number>()
+  for (const value of values) {
+    const key = value?.trim() || 'unknown'
+    tallies.set(key, (tallies.get(key) ?? 0) + 1)
+  }
+  return [...tallies.entries()]
+    .map(([key, count]) => ({ key, count }))
+    .sort((a, b) => b.count - a.count)
+}
+
+function dueBucketLabel(bucket: string): string {
+  if (bucket === 'overdue') return 'Overdue'
+  if (bucket === 'due_soon') return 'Due soon'
+  if (bucket === 'on_track') return 'On track'
+  return 'No due date'
+}
+
+/** Stack-level counts only — never per-request match rows or DWID tables. */
+function StackCollectiveSummary({
+  items,
+  dataOwnerPersona,
+  showMatching = true,
+}: {
+  items: NeedsAttentionItem[]
+  dataOwnerPersona: boolean
+  showMatching?: boolean
+}) {
+  const matchRows = countStackKeys(items.map((item) => item.match_type))
+  const dueRows = countStackKeys(items.map((item) => dueBucket(item)))
+  const stageRows = countStackKeys(items.map((item) => item.current_stage ?? item.kind))
+  const verticalRows = countStackKeys(
+    items.map((item) => item.vertical_label || item.vertical),
+  )
+  const statusRows = countStackKeys(
+    items.map((item) =>
+      item.recommended_response_status != null
+        ? String(item.recommended_response_status)
+        : null,
+    ),
+  )
+
+  return (
+    <div className="space-y-3">
+      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-3">
+        <div className="min-w-0">
+          <dt className="text-[0.6rem] uppercase tracking-wide text-mute">In stack</dt>
+          <dd className="text-xs font-medium tabular-nums text-ink">{items.length}</dd>
+        </div>
+        {dueRows.map((row) => (
+          <div key={`due-${row.key}`} className="min-w-0">
+            <dt className="text-[0.6rem] uppercase tracking-wide text-mute">
+              {dueBucketLabel(row.key)}
+            </dt>
+            <dd className="text-xs font-medium tabular-nums text-ink">{row.count}</dd>
+          </div>
+        ))}
+      </dl>
+      {showMatching ? (
+        <div>
+          <p className="text-[0.6rem] uppercase tracking-wide text-mute">Match results</p>
+          <ul className="mt-1 space-y-0.5">
+            {matchRows.map((row) => (
+              <li
+                key={`match-${row.key}`}
+                className="flex items-baseline justify-between gap-2 text-[0.7rem]"
+              >
+                <span className="text-ink">
+                  {row.key === 'unknown'
+                    ? 'No match data'
+                    : matchTypeLabel(row.key, dataOwnerPersona)}
+                </span>
+                <span className="tabular-nums text-mute">{row.count}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {statusRows.some((row) => row.key !== 'unknown') ? (
+        <div>
+          <p className="text-[0.6rem] uppercase tracking-wide text-mute">
+            {dataOwnerPersona ? 'Recommended result' : 'Recommended CA DROP'}
+          </p>
+          <ul className="mt-1 space-y-0.5">
+            {statusRows.map((row) => (
+              <li
+                key={`status-${row.key}`}
+                className="flex items-baseline justify-between gap-2 text-[0.7rem]"
+              >
+                <span className="text-ink">
+                  {row.key === 'unknown'
+                    ? 'Pending'
+                    : dataOwnerPersona
+                      ? ownerMatchResultLabel(Number(row.key))
+                      : dropResponseStatusLabel(Number(row.key))}
+                </span>
+                <span className="tabular-nums text-mute">{row.count}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {verticalRows.some((row) => row.key !== 'unknown') ? (
+        <div>
+          <p className="text-[0.6rem] uppercase tracking-wide text-mute">Verticals</p>
+          <ul className="mt-1 space-y-0.5">
+            {verticalRows.map((row) => (
+              <li
+                key={`vert-${row.key}`}
+                className="flex items-baseline justify-between gap-2 text-[0.7rem]"
+              >
+                <span className="text-ink">{row.key === 'unknown' ? 'Unassigned' : row.key}</span>
+                <span className="tabular-nums text-mute">{row.count}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      <div>
+        <p className="text-[0.6rem] uppercase tracking-wide text-mute">Stages</p>
+        <ul className="mt-1 space-y-0.5">
+          {stageRows.map((row) => (
+            <li
+              key={`stage-${row.key}`}
+              className="flex items-baseline justify-between gap-2 text-[0.7rem]"
+            >
+              <span className="capitalize text-ink">{row.key.replaceAll('_', ' ')}</span>
+              <span className="tabular-nums text-mute">{row.count}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  )
+}
+
+function InboxEarliestComments({
+  requestId,
+  canCompose,
+}: {
+  requestId: string
+  canCompose: boolean
+}) {
+  const queryClient = useQueryClient()
+  const [commentDraft, setCommentDraft] = useState('')
+  const requestIdReady = isRequestUuid(requestId)
+
+  const commentsQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'requests', requestId, 'comments'],
+    queryFn: () => getRequestComments(requestId),
+    enabled: requestIdReady,
+    refetchInterval: 15_000,
+  })
+
+  const commentMutation = useMutation({
+    mutationFn: (body: string) => postRequestComment(requestId, body),
+    onSuccess: async () => {
+      setCommentDraft('')
+      actionToast.success({ title: 'Comment posted' })
+      await queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'ops', 'requests', requestId, 'comments'],
+      })
+    },
+    onError: (error, variables) => {
+      actionToast.error({
+        title: 'Comment failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => commentMutation.mutate(variables),
+        },
+      })
+    },
+  })
+
+  const comments = commentsQuery.data ?? []
+
+  return (
+    <div className="flex min-h-0 flex-col space-y-2">
+      <p className="text-[0.6rem] font-medium uppercase tracking-wide text-mute">
+        Comments
+        {comments.length > 0 ? (
+          <span className="ml-1 tabular-nums opacity-70">({comments.length})</span>
+        ) : null}
+      </p>
+      <div className="min-h-0 flex-1 space-y-1">
+        {commentsQuery.isError ? (
+          <p className="text-[0.7rem] text-red-700">Could not load comments.</p>
+        ) : null}
+        {!commentsQuery.isPending && !commentsQuery.isError && comments.length === 0 ? (
+          <p className="text-[0.7rem] text-mute">No comments yet.</p>
+        ) : null}
+        {comments.map((comment) => (
+          <div key={comment.id} className="border-b border-line/70 py-1.5 last:border-0">
+            <div className="flex flex-wrap items-baseline justify-between gap-1">
+              <span className="text-[0.65rem] font-medium text-ink">{comment.actor}</span>
+              <span className="tabular-nums text-[0.6rem] text-mute">
+                {formatRelativeTime(comment.occurred_at)}
+              </span>
+            </div>
+            <p className="whitespace-pre-wrap text-[0.7rem] text-ink-soft">{comment.body}</p>
+          </div>
+        ))}
+      </div>
+      {canCompose ? (
+        <div className="flex shrink-0 items-end gap-2 border-t border-line pt-2">
+          <textarea
+            className="min-h-[3.5rem] max-h-32 flex-1 resize-y rounded-md border border-line bg-paper px-2 py-1.5 text-xs text-ink"
+            value={commentDraft}
+            onChange={(event) => setCommentDraft(event.currentTarget.value)}
+            placeholder="Add a review note…"
+            aria-label="Comment body"
+            maxLength={2000}
+          />
+          <Button
+            size="sm"
+            disabled={commentMutation.isPending || commentDraft.trim().length === 0}
+            onClick={() => commentMutation.mutate(commentDraft.trim())}
+          >
+            {commentMutation.isPending ? '…' : 'Post'}
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+export function ThreadReviewPane({
   batchLabel,
   items,
-  stackKind = 'batch',
+  stackKind = 'date_source',
   canReviewActions,
   dataOwnerPersona = false,
   onPromoteAll,
   onDeclineAll,
+  onEscalateAll,
   actionPending,
   onBackToQueue,
-  onOpenDetail,
+  onSeeMoreDetails,
+  assigneeCandidates = [],
+  onBulkAssign,
 }: {
   batchLabel: string
   items: NeedsAttentionItem[]
@@ -3030,11 +4020,21 @@ function ThreadReviewPane({
   dataOwnerPersona?: boolean
   onPromoteAll: (responseStatus: DropResponseStatusCode) => void
   onDeclineAll: () => void
+  onEscalateAll?: () => void
   actionPending: boolean
   onBackToQueue?: () => void
   onOpenDetail?: (item: NeedsAttentionItem, trigger: HTMLElement) => void
+  onSeeMoreDetails?: () => void
+  assigneeCandidates?: string[]
+  onBulkAssign?: (target: AssignTarget) => void
 }) {
-  const [confirm, setConfirm] = useState<'fulfill' | 'decline' | null>(null)
+  const [confirm, setConfirm] = useState<'fulfill' | 'decline' | 'escalate' | null>(null)
+  const [tab, setTab] = useState<InboxWorkbenchTab>(() =>
+    items.some(isMatchingItem) ? 'matching' : 'overview',
+  )
+  useEffect(() => {
+    setTab(items.some(isMatchingItem) ? 'matching' : 'overview')
+  }, [batchLabel, stackKind])
   const threadFulfillSuggestion = suggestedBulkFulfillStatus(items)
   const [fulfillStatus, setFulfillStatus] = useState<DropResponseStatusCode | null>(
     threadFulfillSuggestion,
@@ -3048,26 +4048,31 @@ function ThreadReviewPane({
     if (!best) return item
     return (item.requested_at ?? '') < (best.requested_at ?? '') ? item : best
   }, null)
-  const bucket = earliest ? dueBucket(earliest) : 'unknown'
-  const exactMatchBatch =
-    (stackKind === 'batch' ||
-      stackKind === 'batch_type' ||
-      stackKind === 'batch_status') &&
-    threadIsExactMatchBatch(items)
-  const showBulkMatchingActions = canReviewActions && exactMatchBatch
-  const groupNoun =
-    stackKind === 'type'
-      ? 'Type'
-      : stackKind === 'batch_type'
-        ? 'Batch · type'
-        : stackKind === 'status'
-          ? 'Status'
-          : stackKind === 'batch_status'
-            ? 'Batch · status'
-            : 'Batch'
+  const showDisposition = canReviewActions && onPromoteAll != null && onDeclineAll != null
+  const memberCount = items.length
+  const matchingStatus = stackMatchingStatusSummary(items, dataOwnerPersona)
+  const sharedAssignee = items.every(
+    (item) =>
+      (item.assignment?.assignee_identity ?? null) ===
+      (items[0]?.assignment?.assignee_identity ?? null),
+  )
+    ? items[0]?.assignment?.assignee_identity
+    : null
+  const sharedGroup = items.every(
+    (item) =>
+      (item.assignment?.target_role ?? null) === (items[0]?.assignment?.target_role ?? null),
+  )
+    ? items[0]?.assignment?.target_role === 'legal'
+      ? 'legal'
+      : items[0]?.assignment?.target_role === 'data'
+        ? 'data'
+        : null
+    : null
 
   const bulkId =
-    stackKind === 'batch' || stackKind === 'batch_type' || stackKind === 'batch_status'
+    stackKind === 'date_source' ||
+    stackKind === 'batch_type' ||
+    stackKind === 'batch_status'
       ? sharedBulkProcessId(items)
       : null
 
@@ -3090,49 +4095,40 @@ function ThreadReviewPane({
     retry: false,
   })
 
-  // No shared bulk_process_id (type stacks / unkeyed CSV stacks): do NOT invent a
-  // fake batch aggregate. Derive four-stage chrome from the first member's ops
-  // journey only — member list remains the source of truth for the group.
-  const firstMember = items[0] ?? null
-  const fallbackJourneyQuery = useQuery({
-    queryKey: [
-      'admin-api',
-      'ops',
-      'requests',
-      firstMember?.request_id,
-      'journey',
-      'thread-fallback',
-    ],
-    queryFn: () => getRequestJourney(firstMember!.request_id),
-    enabled: bulkId == null && firstMember != null,
-    refetchInterval: 15_000,
-    placeholderData: (previous) => previous,
-  })
-
-  const derivedChrome = fallbackJourneyQuery.data
-    ? deriveWorkbenchChromeFromOpsJourney({
-        stages: fallbackJourneyQuery.data.stages,
-        current_stage: fallbackJourneyQuery.data.current_stage,
-        intake_source: firstMember!.intake_source,
-        request_type: null,
-      })
-    : null
-
+  const stackChrome = useMemo(() => aggregateStackWorkbenchChrome(items), [items])
   const batchWorkbench = batchWorkbenchQuery.data
-  const pipelineStages = batchWorkbench?.stages ?? derivedChrome?.stages ?? []
-  const pipelineSubsteps =
-    bulkId != null
-      ? undefined
-      : derivedChrome?.substeps
+  const pipelineStages = stackChrome.stages
   const matchingCluster = batchWorkbench
     ? batchClusterAsPipelineRows(batchWorkbench.matching_cluster)
     : undefined
   const fulfillmentCluster = batchWorkbench
     ? batchClusterAsPipelineRows(batchWorkbench.fulfillment_cluster)
     : undefined
+  const pipelineSubsteps = useMemo(
+    () =>
+      dataOwnerPersona
+        ? aggregateOwnerSystemWorkbenchSubsteps(items)
+        : [
+            ...stackChrome.substeps,
+            ...batchClusterAsSubsteps(batchWorkbench?.matching_cluster, 'matching'),
+            ...batchClusterAsSubsteps(batchWorkbench?.fulfillment_cluster, 'fulfillment'),
+          ],
+    [
+      batchWorkbench?.fulfillment_cluster,
+      batchWorkbench?.matching_cluster,
+      dataOwnerPersona,
+      items,
+      stackChrome.substeps,
+    ],
+  )
+  const stackCountCaption = inboxStackCountCaption(stackChrome.member_count)
+  const { me } = useMe()
+  const threadConnectorBlock = inboxItemsConnectorBlock(items, {
+    reminders: me?.connector_reminders,
+  })
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
       <ConfirmActionDialog
         open={confirm === 'fulfill'}
         onOpenChange={(open) => {
@@ -3141,18 +4137,18 @@ function ThreadReviewPane({
         }}
         title={
           dataOwnerPersona
-            ? `Confirm ${items.length} exact matches?`
-            : `Bulk fulfill ${items.length} exact matches?`
+            ? `Confirm ${memberCount} match${memberCount === 1 ? '' : 'es'}?`
+            : `Fulfill ${memberCount} request${memberCount === 1 ? '' : 's'}?`
         }
         description={
           dataOwnerPersona
-            ? `Confirm the match result for all single-match requests from batch ${batchLabel}.`
-            : `Approve matching review for all single-match requests from batch ${batchLabel} and set the CA DROP status result.`
+            ? `Confirm the match result for ${memberCount} request${memberCount === 1 ? '' : 's'} in this group.`
+            : `Approve matching review for ${memberCount} request${memberCount === 1 ? '' : 's'} in this group and set the CA DROP status result.`
         }
         confirmLabel={
           dataOwnerPersona
-            ? `Confirm ${items.length}`
-            : `Fulfill ${items.length}`
+            ? `Confirm ${memberCount}`
+            : `Fulfill ${memberCount}`
         }
         confirming={actionPending && confirm === 'fulfill'}
         confirmDisabled={fulfillStatus == null}
@@ -3173,15 +4169,28 @@ function ThreadReviewPane({
         onOpenChange={(open) => {
           if (!open && !actionPending) setConfirm(null)
         }}
-        title={`Bulk decline ${items.length} exact matches?`}
-        description={`Decline all single-match requests from batch ${batchLabel} without fulfillment.`}
-        confirmLabel={`Decline ${items.length}`}
+        title={`Decline ${memberCount} request${memberCount === 1 ? '' : 's'}?`}
+        description={`Decline ${memberCount} request${memberCount === 1 ? '' : 's'} in this group without fulfillment.`}
+        confirmLabel={`Decline ${memberCount}`}
         tone="destructive"
         confirming={actionPending && confirm === 'decline'}
         onConfirm={() => onDeclineAll()}
       />
+      <ConfirmActionDialog
+        open={confirm === 'escalate'}
+        onOpenChange={(open) => {
+          if (!open && !actionPending) setConfirm(null)
+        }}
+        title="Assign to legal?"
+        description={`Send ${memberCount} matching review${memberCount === 1 ? '' : 's'} in this batch to Legal Inbox for the request journey. Add a comment first if context is needed.`}
+        confirmLabel="Assign to legal"
+        confirming={actionPending && confirm === 'escalate'}
+        onConfirm={() => onEscalateAll?.()}
+      />
 
-      <div className="shrink-0 space-y-2 border-b border-line px-4 py-3">
+      <RequestDetailWorkbenchShell
+        header={
+      <div className="shrink-0 space-y-1.5 border-b border-line px-3 py-2">
         {onBackToQueue ? (
           <button
             type="button"
@@ -3191,185 +4200,518 @@ function ThreadReviewPane({
             ← Queue
           </button>
         ) : null}
-        <Micro>
-          {stackKind === 'type'
-            ? 'Type stack'
-            : stackKind === 'batch_type'
-              ? 'Batch · type stack'
-              : stackKind === 'status'
-                ? 'Status stack'
-                : stackKind === 'batch_status'
-                  ? 'Batch · status stack'
-                  : 'Batch thread'}
-        </Micro>
-        <h2 className="text-sm font-medium text-ink">
-          {exactMatchBatch
-            ? `Exact 1:1 matches · ${items.length} requests`
-            : `${groupNoun} stack · ${items.length} requests`}
-        </h2>
-        <dl className="flex flex-wrap gap-x-4 gap-y-1 text-[0.7rem] text-ink-soft">
-          <div>
-            Group{' '}
-            <span
-              className={
-                stackKind === 'type' ||
-                stackKind === 'batch_type' ||
-                stackKind === 'status' ||
-                stackKind === 'batch_status'
-                  ? 'text-ink'
-                  : 'font-mono text-ink'
-              }
-            >
-              {batchLabel}
-            </span>
+        <Micro>{inboxThreadMicroLabel(stackKind)}</Micro>
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <h2 className="text-sm font-medium text-ink">{batchLabel}</h2>
+            <p className="text-[0.65rem] text-mute">
+              {items.length} request{items.length === 1 ? '' : 's'}
+              {earliest ? ` · ${formatDueLabel(earliest)}` : ''}
+            </p>
+            {threadConnectorBlock ? (
+              <div className="mt-1.5">
+                <InboxConnectorStatusChrome
+                  block={threadConnectorBlock}
+                  verticalId={items[0]?.vertical}
+                  showWizard={dataOwnerPersona}
+                />
+              </div>
+            ) : null}
           </div>
-          {exactMatchBatch ? (
-            <div>
-              Match <span className="text-ink">single match</span>
-            </div>
-          ) : null}
-          {earliest ? (
-            <div>
-              Due{' '}
-              <span
-                className={cn(
-                  bucket === 'overdue'
-                    ? 'text-red-700'
-                    : bucket === 'due_soon'
-                      ? 'text-amber-800'
-                      : 'text-ink',
-                )}
-              >
-                {formatDueLabel(earliest)}
-              </span>
-            </div>
-          ) : null}
-        </dl>
+          <div className="flex shrink-0 items-center gap-2">
+            <Badge
+              variant={matchingStatus.mixed ? 'wait' : 'ok'}
+              className="normal-case tracking-normal"
+              aria-label={`Matching status ${matchingStatus.label}`}
+            >
+              {matchingStatus.label}
+            </Badge>
+            {onBulkAssign ? (
+              <AssigneeAvatarPicker
+                currentEmail={sharedAssignee}
+                currentGroup={sharedGroup}
+                candidates={assigneeCandidates}
+                disabled={!canReviewActions}
+                pending={actionPending}
+                error={null}
+                onAssign={onBulkAssign}
+                ownerAssignMode={dataOwnerPersona}
+              />
+            ) : null}
+          </div>
+        </div>
+        {showDisposition ? (
+          <InboxMatchingDispositionCard
+            variant="batch"
+            canReviewActions={canReviewActions}
+            actionPending={actionPending}
+            dataOwnerPersona={dataOwnerPersona}
+            onConfirm={() => setConfirm('fulfill')}
+            onDecline={() => setConfirm('decline')}
+            onEscalate={() => setConfirm('escalate')}
+            onSeeMoreDetails={
+              onSeeMoreDetails
+                ? (_trigger) => onSeeMoreDetails()
+                : undefined
+            }
+          />
+        ) : null}
       </div>
-
-      {/* Same four-stage chrome as individual Inbox detail (KD2) — batch aggregate when keyed. */}
-      {pipelineStages.length > 0 ? (
-        <div className="shrink-0 border-b border-line px-4 py-2">
+        }
+        rail={
           <ThinJourneyPipeline
             stages={pipelineStages}
             substeps={pipelineSubsteps}
             matchingCluster={matchingCluster}
             fulfillmentCluster={fulfillmentCluster}
-            splitPosture={
-              batchWorkbench?.split_posture ?? derivedChrome?.split_posture
-            }
+            splitPosture={batchWorkbench?.split_posture ?? stackChrome.split_posture}
             density="compact"
+            showSubsteps={false}
+            expandedStage={isWorkbenchStageKey(tab) ? tab : null}
+            onStageActivate={(stage) => {
+              if (isWorkbenchStageKey(stage)) setTab(stage)
+            }}
           />
-          {bulkId == null && derivedChrome ? (
-            <p className="mt-1 text-center text-[0.55rem] text-mute">
-              Journey shown for first member — not a batch aggregate
-            </p>
-          ) : null}
+        }
+        side={
+          earliest ? (
+            <RequestDetailSideColumn
+              activity={
+                <InboxActivityPanel requestId={earliest.request_id} canCompose={false} />
+              }
+              comments={
+                <InboxEarliestComments
+                  requestId={earliest.request_id}
+                  canCompose={canReviewActions}
+                />
+              }
+            />
+          ) : undefined
+        }
+      >
+      <Tabs
+        value={tab}
+        onValueChange={(value) => {
+          if (value === 'overview' || isWorkbenchStageKey(value)) {
+            setTab(value)
+          }
+        }}
+        className="flex min-h-0 flex-1 flex-col overflow-hidden"
+      >
+        <div className="shrink-0 border-b border-line px-3 py-1">
+          <TabsList
+            className="h-8 w-full justify-start gap-1 overflow-x-auto rounded-md border border-line bg-canvas p-0.5"
+            aria-label="Thread detail sections"
+          >
+            <TabsTrigger value="overview" className={INBOX_DETAIL_TAB_TRIGGER}>
+              Overview
+            </TabsTrigger>
+            <TabsTrigger value="ingest" className={INBOX_DETAIL_TAB_TRIGGER}>
+              Ingest
+            </TabsTrigger>
+            <TabsTrigger value="matching" className={INBOX_DETAIL_TAB_TRIGGER}>
+              Matching
+            </TabsTrigger>
+            <TabsTrigger value="fulfillment" className={INBOX_DETAIL_TAB_TRIGGER}>
+              Fulfillment
+            </TabsTrigger>
+            <TabsTrigger value="notice" className={INBOX_DETAIL_TAB_TRIGGER}>
+              Notice
+            </TabsTrigger>
+          </TabsList>
         </div>
-      ) : null}
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
-        <p className="text-xs text-ink-soft">
-          {exactMatchBatch ? (
-            <>
-              These requests each matched exactly one DWID in DROP batch{' '}
-              <span className="font-mono">{batchLabel}</span>. Fulfill the whole thread at
-              once, or open a single request below.
-            </>
-          ) : stackKind === 'type' ? (
-            <>
-              These requests share work type <span className="text-ink">{batchLabel}</span>.
-              Open a member below for full detail.
-            </>
-          ) : stackKind === 'status' ? (
-            <>
-              These requests share batch-status type{' '}
-              <span className="text-ink">{batchLabel}</span>. Open a member below for full
-              detail.
-            </>
-          ) : stackKind === 'batch_status' ? (
-            <>
-              These requests share batch and status{' '}
-              <span className="text-ink">{batchLabel}</span>. Open a member below for full
-              detail.
-            </>
-          ) : stackKind === 'batch_type' ? (
-            <>
-              These requests share batch and work type{' '}
-              <span className="text-ink">{batchLabel}</span>. Open a member below for full
-              detail.
-            </>
-          ) : (
-            <>
-              These requests share DROP batch{' '}
-              <span className="font-mono">{batchLabel}</span>. Open a member below for full
-              detail.
-            </>
-          )}
-        </p>
-        <ul className="max-h-56 divide-y divide-line overflow-y-auto rounded-lg border border-line">
-          {items.map((entry) => (
-            <li key={entry.request_id} className="text-[0.7rem]">
-              {onOpenDetail ? (
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left hover:bg-canvas"
-                  onClick={(event) => onOpenDetail(entry, event.currentTarget)}
-                >
-                  <span className="font-mono text-ink">
-                    {entry.request_id.slice(0, 8)}…
-                  </span>
-                  <span className="text-mute">
-                    {entry.requestor_state ?? '—'}
-                    {entry.match_type
-                      ? ` · ${matchTypeLabel(entry.match_type, dataOwnerPersona)}`
-                      : ''}
-                    {entry.matched_via ? ` · ${entry.matched_via}` : ''}
-                  </span>
-                </button>
-              ) : (
-                <div className="flex items-center justify-between gap-2 px-3 py-2">
-                  <span className="font-mono text-ink">
-                    {entry.request_id.slice(0, 8)}…
-                  </span>
-                  <span className="text-mute">
-                    {entry.requestor_state ?? '—'}
-                    {entry.match_type
-                      ? ` · ${matchTypeLabel(entry.match_type, dataOwnerPersona)}`
-                      : ''}
-                    {entry.matched_via ? ` · ${entry.matched_via}` : ''}
-                  </span>
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
-        {showBulkMatchingActions ? (
-          <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" disabled={actionPending} onClick={() => setConfirm('fulfill')}>
-              {actionPending && confirm === 'fulfill'
-                ? dataOwnerPersona
-                  ? `Confirming ${items.length}…`
-                  : `Fulfilling ${items.length}…`
-                : dataOwnerPersona
-                  ? `Confirm ${items.length}`
-                  : `Bulk fulfill #${items.length}`}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={actionPending}
-              onClick={() => setConfirm('decline')}
-            >
-              {actionPending && confirm === 'decline' ? 'Declining…' : 'Bulk decline'}
-            </Button>
-          </div>
-        ) : null}
-      </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2.5">
+          <TabsContent value="overview" className="mt-0 space-y-3">
+            <p className="text-xs text-ink-soft">
+              Collective stack summary. Open a queue row on the left to inspect one match.
+            </p>
+            <StackCollectiveSummary items={items} dataOwnerPersona={dataOwnerPersona} />
+          </TabsContent>
+
+          <TabsContent value="ingest" className="mt-0 space-y-3">
+            <p className="text-[0.65rem] text-mute">{stackCountCaption}</p>
+            <JourneyStageSubsteps
+              stages={pipelineStages}
+              stageKey="ingest"
+              substeps={pipelineSubsteps}
+              density="compact"
+            />
+          </TabsContent>
+
+          <TabsContent value="matching" className="mt-0 space-y-3">
+            <p className="text-[0.65rem] text-mute">{stackCountCaption}</p>
+            <JourneyStageSubsteps
+              stages={pipelineStages}
+              stageKey="matching"
+              substeps={pipelineSubsteps}
+              density="compact"
+            />
+            <StackCollectiveSummary
+              items={items}
+              dataOwnerPersona={dataOwnerPersona}
+              showMatching
+            />
+          </TabsContent>
+
+          <TabsContent value="fulfillment" className="mt-0 space-y-3">
+            <p className="text-[0.65rem] text-mute">{stackCountCaption}</p>
+            <JourneyStageSubsteps
+              stages={pipelineStages}
+              stageKey="fulfillment"
+              substeps={pipelineSubsteps}
+              density="compact"
+            />
+          </TabsContent>
+
+          <TabsContent value="notice" className="mt-0 space-y-3">
+            <p className="text-[0.65rem] text-mute">{stackCountCaption}</p>
+            <JourneyStageSubsteps
+              stages={pipelineStages}
+              stageKey="notice"
+              substeps={pipelineSubsteps}
+              density="compact"
+            />
+          </TabsContent>
+        </div>
+      </Tabs>
+      </RequestDetailWorkbenchShell>
     </div>
   )
 }
 
+/** Shared Inbox queue chrome — live Inbox and Results lab must not fork this markup. */
+export function InboxQueueRows({
+  groupingActive,
+  rows,
+  selectedKeys,
+  activeTarget,
+  expandedThreads,
+  dataOwnerPersona,
+  legalPersona = false,
+  connectorReminders = null,
+  connectorGate = null,
+  onToggleThreadSelect,
+  onToggleThreadExpand,
+  onOpenThread,
+  onToggleItem,
+  onOpenItem,
+}: {
+  groupingActive: boolean
+  rows: InboxRow[]
+  selectedKeys: Set<string>
+  activeTarget: InboxActiveTarget | null
+  expandedThreads: Set<string>
+  dataOwnerPersona: boolean
+  legalPersona?: boolean
+  connectorReminders?: ConnectorReminder[] | null
+  connectorGate?: MatchingConnectorGate | null
+  onToggleThreadSelect: (ids: string[]) => void
+  onToggleThreadExpand: (batchKey: string) => void
+  onOpenThread: (batchKey: string) => void
+  onToggleItem: (itemKey: string) => void
+  onOpenItem: (itemKey: string) => void
+}) {
+  return (
+    <TooltipProvider delayDuration={200}>
+      {rows.map((row) => {
+        if (row.kind === 'thread') {
+          const ids = row.items.map((item) => inboxReviewItemKey(item))
+          const selected = ids.every((id) => selectedKeys.has(id))
+          const partial = !selected && ids.some((id) => selectedKeys.has(id))
+          const active =
+            activeTarget?.kind === 'thread' && activeTarget.batchKey === row.batchKey
+          const expanded = expandedThreads.has(row.batchKey)
+          const earliest = row.items[0]!
+          const exactMatchBatch =
+            (row.stackKind === 'date_source' ||
+              row.stackKind === 'batch_type' ||
+              row.stackKind === 'batch_status') &&
+            threadIsExactMatchBatch(row.items)
+          const isSystemStack = row.stackKind === 'system'
+          const isCrossStack = row.stackKind === 'batch_type'
+          const isStatusStack = row.stackKind === 'status'
+          const isBatchStatusStack = row.stackKind === 'batch_status'
+          const statusSubtitle = inboxBatchStatusStackSubtitle(row.items, dataOwnerPersona)
+          const threadConnectorBlock = inboxItemsConnectorBlock(row.items, {
+            reminders: connectorReminders,
+            gate: connectorGate,
+          })
+          const stackKindLabel = isBatchStatusStack
+            ? 'date · status'
+            : isCrossStack
+              ? 'date · system'
+              : isStatusStack
+                ? 'status'
+                : isSystemStack
+                  ? 'system'
+                  : 'date · source'
+          return (
+            <li key={`thread-${row.batchKey}`} className="list-none">
+              <div
+                className={cn(
+                  'relative flex min-h-0 items-stretch gap-0 border-b border-line/80 bg-paper',
+                  active
+                    ? 'bg-habeas-navy/[0.07]'
+                    : selected
+                      ? 'bg-habeas-navy/[0.03]'
+                      : 'hover:bg-panel/40',
+                )}
+              >
+                <span
+                  className={cn(
+                    'w-0.5 shrink-0 self-stretch',
+                    isCrossStack || isBatchStatusStack
+                      ? 'bg-habeas-navy/80'
+                      : isSystemStack || isStatusStack
+                        ? 'bg-habeas-navy/45'
+                        : 'bg-habeas-navy/70',
+                  )}
+                  aria-hidden
+                />
+                <label
+                  className="flex shrink-0 cursor-pointer items-center px-1"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <input
+                    type="checkbox"
+                    className="h-3 w-3 rounded border-line accent-habeas-navy"
+                    checked={selected}
+                    ref={(element) => {
+                      if (element) element.indeterminate = partial
+                    }}
+                    onChange={() => onToggleThreadSelect(ids)}
+                    aria-label={`Select ${stackKindLabel} ${row.batchLabel}`}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="shrink-0 self-center rounded px-0.5 py-0.5 text-xs leading-normal text-mute hover:bg-panel hover:text-ink"
+                  aria-label={
+                    expanded
+                      ? `Collapse ${row.batchLabel}`
+                      : `Expand ${row.batchLabel}`
+                  }
+                  onClick={() => onToggleThreadExpand(row.batchKey)}
+                >
+                  {expanded ? '▾' : '▸'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onOpenThread(row.batchKey)}
+                  className={INBOX_QUEUE_ROW_BUTTON}
+                  aria-label={`${row.batchLabel}, ${row.items.length} requests`}
+                >
+                  <InboxCountHint count={row.items.length} />
+                  <span className="min-w-0 truncate font-medium text-ink">
+                    {row.batchLabel}
+                  </span>
+                  {statusSubtitle || exactMatchBatch ? (
+                    <InboxMatchHint
+                      matchType={
+                        exactMatchBatch
+                          ? 'single_match'
+                          : inboxMatchHintKind(null, statusSubtitle)
+                      }
+                      dataOwnerPersona={dataOwnerPersona}
+                      label={statusSubtitle ?? 'Exact 1:1'}
+                    />
+                  ) : null}
+                  <InboxConnectorStatusHint block={threadConnectorBlock} />
+                  <InboxDueHint item={earliest} />
+                </button>
+              </div>
+              {expanded ? (
+                <ul className="mx-0.5 mb-0 space-y-0 overflow-hidden rounded-sm border border-habeas-navy/15 border-t-0 bg-canvas/50 py-0">
+                  {row.items.map((item) => {
+                    const itemKey = inboxReviewItemKey(item)
+                    const verticalLabelText = inboxReviewItemVerticalLabel(item)
+                    const systemLabelText = inboxReviewItemSystemLabel({
+                      request_id: item.request_id,
+                      system: inboxItemSystemId(item),
+                      system_label: item.system_label,
+                      vertical: item.vertical,
+                    })
+                    const childSelected = selectedKeys.has(itemKey)
+                    const childActive =
+                      activeTarget?.kind === 'request' && activeTarget.itemKey === itemKey
+                    const railClass = inboxSystemRailClass(item.color_token)
+                    return (
+                      <li key={itemKey}>
+                        <div
+                          className={cn(
+                            'flex items-stretch gap-0 pl-6 transition-colors',
+                            railClass && 'border-l-2',
+                            railClass,
+                            childActive
+                              ? 'bg-habeas-navy/[0.07]'
+                              : childSelected
+                                ? 'bg-habeas-navy/[0.03]'
+                                : 'hover:bg-panel/40',
+                          )}
+                        >
+                          <label
+                            className="flex shrink-0 cursor-pointer items-center px-1"
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            <input
+                              type="checkbox"
+                              className="h-3 w-3 rounded border-line accent-habeas-navy"
+                              checked={childSelected}
+                              onChange={() => onToggleItem(itemKey)}
+                              aria-label={
+                                systemLabelText
+                                  ? `Select ${systemLabelText} matching result`
+                                  : verticalLabelText
+                                    ? `Select ${verticalLabelText} matching result`
+                                    : `Select ${item.request_id}`
+                              }
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => onOpenItem(itemKey)}
+                            className={INBOX_QUEUE_ROW_BUTTON}
+                          >
+                            {item.color_token ? (
+                              <span
+                                className={cn(
+                                  'h-1.5 w-1.5 shrink-0 rounded-full border',
+                                  matchingSystemColorClass(item.color_token),
+                                )}
+                                aria-hidden
+                              />
+                            ) : null}
+                            <span
+                              className={cn(
+                                'truncate font-medium',
+                                inboxSystemTitleClass(item.color_token),
+                              )}
+                            >
+                              {inboxItemTitle(item)}
+                            </span>
+                            {verticalLabelText ? (
+                              <InboxVerticalHint label={verticalLabelText} />
+                            ) : null}
+                            <InboxConnectorStatusHint
+                              block={inboxItemConnectorBlock(item, {
+                                reminders: connectorReminders,
+                                gate: connectorGate,
+                              })}
+                            />
+                          </button>
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ul>
+              ) : null}
+            </li>
+          )
+        }
+
+        if (groupingActive) return null
+
+        const item = row.item
+        const itemKey = inboxReviewItemKey(item)
+        const verticalLabelText = inboxReviewItemVerticalLabel(item)
+        const systemLabelText = inboxReviewItemSystemLabel({
+          request_id: item.request_id,
+          system: inboxItemSystemId(item),
+          system_label: item.system_label,
+          vertical: item.vertical,
+        })
+        const selected = selectedKeys.has(itemKey)
+        const active = activeTarget?.kind === 'request' && activeTarget.itemKey === itemKey
+        const urgentAssignment = legalPersona && isAssignmentToLegalItem(item)
+        const railClass = inboxSystemRailClass(item.color_token)
+        return (
+          <li key={itemKey}>
+            <div
+              className={cn(
+                'flex items-stretch gap-0 transition-colors',
+                urgentAssignment && 'border-l-2 border-l-red-600',
+                !urgentAssignment && railClass && 'border-l-2',
+                !urgentAssignment && railClass,
+                active
+                  ? 'bg-habeas-navy/[0.07]'
+                  : selected
+                    ? 'bg-habeas-navy/[0.03]'
+                    : 'hover:bg-panel/50',
+              )}
+            >
+              <label
+                className="flex shrink-0 cursor-pointer items-center px-1"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <input
+                  type="checkbox"
+                  className="h-3 w-3 rounded border-line accent-habeas-navy"
+                  checked={selected}
+                  onChange={() => onToggleItem(itemKey)}
+                  aria-label={
+                    systemLabelText
+                      ? `Select ${systemLabelText} matching result`
+                      : verticalLabelText
+                        ? `Select ${verticalLabelText} matching result`
+                        : `Select ${item.request_id}`
+                  }
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => onOpenItem(itemKey)}
+                className={INBOX_QUEUE_ROW_BUTTON}
+              >
+                {item.color_token ? (
+                  <span
+                    className={cn(
+                      'h-1.5 w-1.5 shrink-0 rounded-full border',
+                      matchingSystemColorClass(item.color_token),
+                    )}
+                    aria-hidden
+                  />
+                ) : null}
+                <span
+                  className={cn(
+                    'min-w-0 truncate font-medium',
+                    inboxSystemTitleClass(item.color_token),
+                  )}
+                >
+                  {inboxItemTitle(item)}
+                </span>
+                {urgentAssignment ? (
+                  <InboxHintGlyph
+                    label="Urgent"
+                    className="rounded-sm bg-red-50 text-red-700"
+                  >
+                    <span className="text-[0.7rem] font-bold leading-none">!</span>
+                  </InboxHintGlyph>
+                ) : null}
+                {item.match_type ? (
+                  <InboxMatchHint
+                    matchType={item.match_type}
+                    dataOwnerPersona={dataOwnerPersona}
+                  />
+                ) : null}
+                <InboxConnectorStatusHint
+                  block={inboxItemConnectorBlock(item, {
+                    reminders: connectorReminders,
+                    gate: connectorGate,
+                  })}
+                />
+                {verticalLabelText ? (
+                  <InboxVerticalHint label={verticalLabelText} />
+                ) : null}
+                <InboxDueHint item={item} />
+              </button>
+            </div>
+          </li>
+        )
+      })}
+    </TooltipProvider>
+  )
+}
 
 export function NeedsAttentionPage() {
   const queryClient = useQueryClient()
@@ -3378,7 +4720,7 @@ export function NeedsAttentionPage() {
   const bulkFilter = search.bulk
   const { isAdmin, role, me, isLoading: meLoading } = useMe()
   const legalPersona = isLegalAdminPersona(role)
-  const dataOwnerPersona = role === 'data_owner'
+  const dataOwnerPersona = isVerticalOperatorRole(role)
   const canReviewActions =
     Boolean(isAdmin) || legalPersona || dataOwnerPersona
   const inboxConnectorGate = useMatchingConnectorGate({
@@ -3422,15 +4764,15 @@ export function NeedsAttentionPage() {
     null,
   )
   const groupByBatch = groupByBatchOverride ?? !legalPersona
-  const [groupByType, setGroupByType] = useState(false)
-  const [groupByStatus, setGroupByStatus] = useState(dataOwnerPersona)
-  const groupingActive = groupByBatch || groupByType || groupByStatus
+  const [groupBySystem, setGroupBySystem] = useState(false)
+  const [groupByStatus, setGroupByStatus] = useState(false)
   const [page, setPage] = useState(1)
+  const listChrome = useInboxListCollapsed()
 
   useEffect(() => {
-    // Collapsed stacks when grouping mode changes — avoids “stuck” expanded flat-looking lists.
+    // Collapsed groups when grouping mode changes — avoids “stuck” expanded flat-looking lists.
     setExpandedThreads(new Set())
-  }, [groupByBatch, groupByType, groupByStatus])
+  }, [groupByBatch, groupBySystem, groupByStatus])
 
   useEffect(() => {
     if (legalPersona) {
@@ -3500,30 +4842,15 @@ export function NeedsAttentionPage() {
       'data-owner',
       'matching',
       inboxFetchLimit,
+      search.vertical ?? null,
+      search.system ?? null,
     ],
     queryFn: () =>
-      getNeedsAttention({ limit: inboxFetchLimit, offset: 0, kind: 'matching' }),
-    enabled: dataOwnerPersona,
-    refetchInterval: 10_000,
-    placeholderData: (previous) => previous,
-  })
-
-  const ownerAssignedQuery = useQuery({
-    queryKey: [
-      'admin-api',
-      'ops',
-      'requests',
-      'needs-attention',
-      'data-owner',
-      'assigned-me',
-      inboxFetchLimit,
-    ],
-    queryFn: () =>
-      getNeedsAttention({
+      getOwnerMatchingNeedsAttention({
         limit: inboxFetchLimit,
         offset: 0,
-        kind: 'matching',
-        assignee: 'me',
+        vertical: search.vertical,
+        system: search.system,
       }),
     enabled: dataOwnerPersona,
     refetchInterval: 10_000,
@@ -3539,6 +4866,8 @@ export function NeedsAttentionPage() {
       legalPersona ? 'legal' : 'ops',
       search.assignee ?? null,
       inboxFetchLimit,
+      search.vertical ?? null,
+      search.system ?? null,
     ],
     queryFn: () => {
       if (search.assignee) {
@@ -3547,35 +4876,47 @@ export function NeedsAttentionPage() {
           offset: 0,
           kind: 'matching',
           assignee: search.assignee,
+          vertical: search.vertical,
+          system: search.system,
         })
       }
       if (legalPersona) {
         return getLegalNeedsAttention({ limit: inboxFetchLimit, offset: 0 })
       }
-      return getNeedsAttention({ limit: inboxFetchLimit, offset: 0 })
+      return getNeedsAttention({
+        limit: inboxFetchLimit,
+        offset: 0,
+        vertical: search.vertical,
+        system: search.system,
+      })
     },
     enabled: !dataOwnerPersona,
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })
 
+  const verticalFilter = search.vertical?.trim() || undefined
+  const systemFilter = search.system?.trim() || undefined
+  const sourceFilter = search.source?.trim() || undefined
+  const stepFilter = search.step || undefined
+
+  function patchInboxCatalogSearch(
+    patch: Partial<Pick<InboxCatalogSearch, 'vertical' | 'system' | 'source' | 'step'>>,
+  ) {
+    void navigate({
+      to: '/requests/needs-attention',
+      search: (prev) => mergeInboxCatalogSearch(prev, patch),
+      replace: true,
+    })
+  }
+
   function setLegalFilterAndUrl(next: LegalInboxFilter | null) {
     setLegalInboxFilter(next)
     setMobilePane('queue')
     void navigate({
       to: '/requests/needs-attention',
-      // Build a full search object (omit cleared keys) so filters can toggle off.
-      search: (prev) => {
-        const nextSearch: {
-          bulk?: number
-          filter?: LegalInboxFilter
-          assignee?: string
-        } = {}
-        if (prev.bulk != null) nextSearch.bulk = prev.bulk
-        if (prev.assignee) nextSearch.assignee = prev.assignee
-        if (next != null) nextSearch.filter = next
-        return nextSearch
-      },
+      search: (prev) =>
+        mergeInboxCatalogSearch(prev, { filter: next ?? undefined }),
       replace: true,
     })
   }
@@ -3588,42 +4929,55 @@ export function NeedsAttentionPage() {
     }
     void navigate({
       to: '/requests/needs-attention',
-      search: (prev) => {
-        const nextSearch: {
-          bulk?: number
-          kind?: InboxKind
-          assignee?: string
-          filter?: LegalInboxFilter
-        } = {}
-        if (prev.bulk != null) nextSearch.bulk = prev.bulk
-        if (prev.assignee) nextSearch.assignee = prev.assignee
-        if (prev.filter) nextSearch.filter = prev.filter
-        if (!(next === defaultKind && !legalPersona)) nextSearch.kind = next
-        return nextSearch
-      },
+      search: (prev) =>
+        mergeInboxCatalogSearch(prev, {
+          kind: next === defaultKind && !legalPersona ? undefined : next,
+        }),
       replace: true,
     })
   }
 
-  const items =
+  const ownerTaskItems = useMemo(() => {
+    if (!dataOwnerPersona) return []
+    const matching = ownerMatchingQuery.data?.items ?? []
+    const fulfillment = ownerFulfillmentQuery.data?.items ?? []
+    return [...matching, ...fulfillment].filter((item) =>
+      isOwnerVerticalTask(item, me?.verticals),
+    )
+  }, [
+    dataOwnerPersona,
+    me?.verticals,
+    ownerFulfillmentQuery.data?.items,
+    ownerMatchingQuery.data?.items,
+  ])
+
+  const rawItems =
     dataOwnerPersona && inboxKind === 'fulfillment'
       ? (ownerFulfillmentQuery.data?.items ?? [])
       : dataOwnerPersona && inboxKind === 'pending_tasks'
-        ? (ownerAssignedQuery.data?.items ?? [])
+        ? ownerTaskItems
         : dataOwnerPersona
           ? (ownerMatchingQuery.data?.items ?? [])
           : (attentionQuery.data?.items ?? [])
+  const items = useMemo(() => {
+    const scoped = dataOwnerPersona
+      ? ownerVisibleInboxItems(rawItems, me?.verticals)
+      : rawItems
+    const normalized = scoped.map(normalizeInboxItem)
+    return coalesceInboxReviewItems(
+      dataOwnerPersona ? expandInboxReviewBySystem(normalized) : normalized,
+    )
+  }, [dataOwnerPersona, me?.verticals, rawItems])
   const ownerFulfillmentCount =
     ownerFulfillmentQuery.data?.total ?? ownerFulfillmentQuery.data?.items.length ?? 0
   const ownerMatchingCount =
     ownerMatchingQuery.data?.total ?? ownerMatchingQuery.data?.items.length ?? 0
-  const ownerAssignedCount =
-    ownerAssignedQuery.data?.total ?? ownerAssignedQuery.data?.items.length ?? 0
+  const ownerAssignedCount = ownerTaskItems.length
   const attentionListQuery =
     dataOwnerPersona && inboxKind === 'fulfillment'
       ? ownerFulfillmentQuery
       : dataOwnerPersona && inboxKind === 'pending_tasks'
-        ? ownerAssignedQuery
+        ? ownerMatchingQuery
         : dataOwnerPersona
           ? ownerMatchingQuery
           : attentionQuery
@@ -3631,23 +4985,43 @@ export function NeedsAttentionPage() {
   const operatorsQuery = useQuery({
     queryKey: ['admin-api', 'legal', 'operators'],
     queryFn: getLegalOperators,
-    enabled: Boolean(isAdmin || legalPersona),
+    enabled: Boolean(isAdmin || legalPersona || dataOwnerPersona),
+    staleTime: 60_000,
+  })
+  const ownerVerticalIds = me?.verticals ?? []
+  const verticalMembersQuery = useQuery({
+    queryKey: ['admin-api', 'owner', 'vertical-members', ownerVerticalIds],
+    queryFn: async () => {
+      const rows = await Promise.all(
+        ownerVerticalIds.filter(Boolean).map((id) => listVerticalMembers(id)),
+      )
+      return rows.flat()
+    },
+    enabled: Boolean(dataOwnerPersona && ownerVerticalIds.length > 0),
     staleTime: 60_000,
   })
 
-  const assigneeCandidates = useMemo(() => {
-    const set = new Set<string>()
-    if (me?.email) set.add(me.email)
-    for (const item of items) {
-      const email = item.assignment?.assignee_identity?.trim()
-      if (email) set.add(email)
-    }
-    for (const operator of operatorsQuery.data ?? []) {
-      const email = operator.email?.trim()
-      if (email) set.add(email)
-    }
-    return [...set].sort((a, b) => a.localeCompare(b))
-  }, [items, me?.email, operatorsQuery.data])
+  const assigneeCandidates = useMemo(
+    () =>
+      resolveInboxAssignCandidates({
+        dataOwnerPersona,
+        selfEmail: me?.email,
+        itemAssigneeEmails: items
+          .map((item) => item.assignment?.assignee_identity?.trim())
+          .filter((email): email is string => Boolean(email)),
+        verticalMemberEmails: (verticalMembersQuery.data ?? [])
+          .filter((row) => row.active !== false)
+          .map((row) => row.email),
+        operators: operatorsQuery.data ?? [],
+      }),
+    [
+      dataOwnerPersona,
+      items,
+      me?.email,
+      operatorsQuery.data,
+      verticalMembersQuery.data,
+    ],
+  )
 
   const kindCounts = useMemo(() => {
     const myEmail = me?.email
@@ -3667,7 +5041,11 @@ export function NeedsAttentionPage() {
       if (isNoticeItem(item)) notice += 1
       if (isCommsItem(item)) communications += 1
       if (isOwnerFulfillmentItem(item)) fulfillment += 1
-      if (isPendingTaskFor(item, myEmail)) pendingTasks += 1
+      if (dataOwnerPersona) {
+        if (isOwnerVerticalTask(item, me?.verticals)) pendingTasks += 1
+      } else if (isPendingTaskFor(item, myEmail)) {
+        pendingTasks += 1
+      }
     }
     return {
       all: items.length,
@@ -3684,6 +5062,7 @@ export function NeedsAttentionPage() {
     dataOwnerPersona,
     items,
     me?.email,
+    me?.verticals,
     ownerAssignedCount,
     ownerFulfillmentCount,
     ownerMatchingCount,
@@ -3713,6 +5092,82 @@ export function NeedsAttentionPage() {
     return (['overdue', 'due_soon', 'on_track'] as DueFilter[])
       .filter((key) => (counts.get(key) ?? 0) > 0)
       .map((key) => [key, counts.get(key) ?? 0] as const)
+  }, [items])
+
+  const catalogFilterPayload = dataOwnerPersona
+    ? ownerMatchingQuery.data
+    : attentionQuery.data
+  const verticalFilterOptions = useMemo(() => {
+    if (dataOwnerPersona) {
+      const assigned = (me?.assigned_vertical_labels ?? []).map((row) => ({
+        id: row.vertical_id,
+        label: row.display_label,
+      }))
+      if (assigned.length > 0) return assigned
+    }
+    const fromApi = catalogFilterPayload?.filter_verticals ?? []
+    return fromApi.length > 0 ? fromApi : catalogOptionsFromItems(items, 'vertical')
+  }, [
+    catalogFilterPayload?.filter_verticals,
+    dataOwnerPersona,
+    items,
+    me?.assigned_vertical_labels,
+  ])
+  const systemFilterOptions = useMemo(() => {
+    const fromApi = catalogFilterPayload?.filter_systems ?? []
+    const options = fromApi.length > 0 ? fromApi : catalogOptionsFromItems(items, 'system')
+    return inboxSystemFilterOptions(options, verticalFilter)
+  }, [catalogFilterPayload?.filter_systems, items, verticalFilter])
+  const showSystem = useMemo(() => {
+    const unique = new Set(
+      systemFilterOptions.map((row) => row.id.trim()).filter(Boolean),
+    )
+    return unique.size >= 2
+  }, [systemFilterOptions])
+  const effectiveGroupBySystem = showSystem && groupBySystem
+  const groupingActive = groupByBatch || effectiveGroupBySystem || groupByStatus
+
+  const sourceOptions = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const item of items) {
+      for (const id of inboxItemSourceIds(item)) {
+        counts.set(id, (counts.get(id) ?? 0) + 1)
+      }
+    }
+    const extras = [...counts.keys()].filter(
+      (id) =>
+        !(INBOX_INTAKE_SOURCE_ORDER as readonly string[]).includes(id) &&
+        !isInboxIdentifierSurface(id),
+    )
+    const ordered = [
+      ...INBOX_INTAKE_SOURCE_ORDER.filter((id) => counts.has(id)),
+      ...extras.sort((left, right) => left.localeCompare(right)),
+    ]
+    return ordered.map((id) => ({
+      id,
+      label: inboxItemSourceLabel(id),
+      count: counts.get(id) ?? 0,
+    }))
+  }, [items])
+
+  const stepOptions = useMemo(() => {
+    const counts = new Map<WorkbenchStageKey, number>()
+    for (const item of items) {
+      const step = inboxItemStep(item)
+      counts.set(step, (counts.get(step) ?? 0) + 1)
+    }
+    return INBOX_STEP_KEYS.filter((id) => (counts.get(id) ?? 0) > 0).map((id) => ({
+      id,
+      label:
+        id === 'ingest'
+          ? 'Ingest'
+          : id === 'matching'
+            ? 'Matching'
+            : id === 'fulfillment'
+              ? 'Fulfillment'
+              : 'Notice',
+      count: counts.get(id) ?? 0,
+    }))
   }, [items])
 
   const showMatchResultFilters =
@@ -3748,8 +5203,12 @@ export function NeedsAttentionPage() {
         if (inboxKind === 'notice' && !isNoticeItem(item)) return false
         if (inboxKind === 'communications' && !isCommsItem(item)) return false
         if (inboxKind === 'fulfillment' && !isOwnerFulfillmentItem(item)) return false
-        if (inboxKind === 'pending_tasks' && !isPendingTaskFor(item, myEmail)) {
-          return false
+        if (inboxKind === 'pending_tasks') {
+          if (dataOwnerPersona) {
+            if (!isOwnerVerticalTask(item, me?.verticals)) return false
+          } else if (!isPendingTaskFor(item, myEmail)) {
+            return false
+          }
         }
         if (inboxKind === 'matching' || inboxKind === 'all') {
           if (matchFilter !== 'all') {
@@ -3759,6 +5218,18 @@ export function NeedsAttentionPage() {
         }
       }
       if (dueFilter !== 'all' && dueBucket(item) !== dueFilter) return false
+      if (verticalFilter && item.vertical?.trim() !== verticalFilter) return false
+      if (showSystem && systemFilter && !inboxItemHasSystem(item, systemFilter)) {
+        return false
+      }
+      if (
+        sourceFilter &&
+        !isInboxIdentifierSurface(sourceFilter) &&
+        !inboxItemSourceIds(item).includes(sourceFilter)
+      ) {
+        return false
+      }
+      if (stepFilter && inboxItemStep(item) !== stepFilter) return false
       return true
     })
   }, [
@@ -3766,11 +5237,18 @@ export function NeedsAttentionPage() {
     inboxKind,
     legalInboxFilter,
     legalPersona,
+    dataOwnerPersona,
     matchFilter,
     dueFilter,
     me?.email,
+    me?.verticals,
     bulkFilter,
     showMatchResultFilters,
+    verticalFilter,
+    systemFilter,
+    showSystem,
+    sourceFilter,
+    stepFilter,
   ])
 
   const inboxRows = useMemo(
@@ -3779,18 +5257,25 @@ export function NeedsAttentionPage() {
         buildGroupedInboxRows(
           filteredItems,
           {
-            byBatch: groupByBatch,
-            byType: groupByType,
+            byDateSource: groupByBatch,
+            bySystem: effectiveGroupBySystem,
             byStatus: groupByStatus,
+            reminders: me?.connector_reminders,
+            gate: inboxConnectorGate,
           },
           dataOwnerPersona,
         ),
         groupingActive,
       ),
-    [filteredItems, groupByBatch, groupByType, groupByStatus, groupingActive, dataOwnerPersona],
+    [
+      filteredItems,
+      groupByBatch,
+      effectiveGroupBySystem,
+      groupByStatus,
+      groupingActive,
+      dataOwnerPersona,
+    ],
   )
-
-  const stackCount = useMemo(() => countThreadStacks(inboxRows), [inboxRows])
 
   // Reset to page 1 whenever the filter/grouping/search context changes — otherwise a stale
   // page number can land the user on an empty page after the list reshapes.
@@ -3802,10 +5287,14 @@ export function NeedsAttentionPage() {
     matchFilter,
     dueFilter,
     groupByBatch,
-    groupByType,
+    groupBySystem,
     groupByStatus,
     bulkFilter,
     search.assignee,
+    verticalFilter,
+    systemFilter,
+    sourceFilter,
+    stepFilter,
   ])
 
   const {
@@ -3835,20 +5324,24 @@ export function NeedsAttentionPage() {
       activeTarget != null &&
       (activeTarget.kind === 'thread'
         ? findThreadRow(inboxRows, activeTarget.batchKey) != null
-        : filteredItems.some((item) => item.request_id === activeTarget.requestId))
+        : filteredItems.some(
+            (item) => inboxReviewItemKey(item) === activeTarget.itemKey,
+          ))
     if (!stillValid) {
-      const first =
-        inboxRows.find((row) => row.kind === 'thread' || row.kind === 'request') ??
-        null
-      if (!first) {
+      const pick = firstIndividualInboxTarget(inboxRows)
+      if (!pick) {
         setActiveTarget(null)
         return
       }
-      setActiveTarget(
-        first.kind === 'thread'
-          ? { kind: 'thread', batchKey: first.batchKey }
-          : { kind: 'request', requestId: first.item.request_id },
-      )
+      if (pick.expandBatchKey) {
+        setExpandedThreads((previous) => {
+          if (previous.has(pick.expandBatchKey!)) return previous
+          const next = new Set(previous)
+          next.add(pick.expandBatchKey!)
+          return next
+        })
+      }
+      setActiveTarget(pick.target)
     }
   }, [inboxRows, filteredItems, activeTarget])
 
@@ -3859,12 +5352,13 @@ export function NeedsAttentionPage() {
 
   const activeItem =
     activeTarget?.kind === 'request'
-      ? (filteredItems.find((item) => item.request_id === activeTarget.requestId) ??
-        null)
+      ? (filteredItems.find(
+          (item) => inboxReviewItemKey(item) === activeTarget.itemKey,
+        ) ?? null)
       : null
 
   const filteredIds = useMemo(
-    () => filteredItems.map((item) => item.request_id),
+    () => filteredItems.map((item) => inboxReviewItemKey(item)),
     [filteredItems],
   )
 
@@ -3874,30 +5368,192 @@ export function NeedsAttentionPage() {
 
   const bulkFulfillTargets = allFilteredSelected
     ? filteredItems
-    : filteredItems.filter((item) => selectedIds.has(item.request_id))
+    : filteredItems.filter((item) => selectedIds.has(inboxReviewItemKey(item)))
   const bulkFulfillSuggestion = suggestedBulkFulfillStatus(bulkFulfillTargets)
   const [bulkFulfillStatus, setBulkFulfillStatus] =
     useState<DropResponseStatusCode | null>(null)
+  const [bulkSelectedDwids, setBulkSelectedDwids] = useState<string[]>([])
+
+  const bulkFulfillTargetIds = useMemo(() => {
+    if (bulkConfirm !== 'fulfill') return []
+    const items = allFilteredSelected
+      ? filteredItems
+      : filteredItems.filter((item) => selectedIds.has(inboxReviewItemKey(item)))
+    return [...new Set(items.map((item) => item.request_id))].filter(isRequestUuid)
+  }, [bulkConfirm, allFilteredSelected, filteredItems, selectedIds])
+
+  const singleNeedsAttentionBulkId =
+    bulkFulfillTargetIds.length === 1 ? bulkFulfillTargetIds[0] : null
+  const singleNeedsAttentionBulkVertical = useMemo(() => {
+    if (!dataOwnerPersona || !singleNeedsAttentionBulkId) return null
+    const selected = (
+      allFilteredSelected
+        ? filteredItems
+        : filteredItems.filter((item) => selectedIds.has(inboxReviewItemKey(item)))
+    ).find((item) => item.request_id === singleNeedsAttentionBulkId)
+    return selected?.vertical?.trim() || null
+  }, [
+    allFilteredSelected,
+    dataOwnerPersona,
+    filteredItems,
+    selectedIds,
+    singleNeedsAttentionBulkId,
+  ])
+
+  const singleNeedsAttentionBulkSystem = useMemo(() => {
+    if (!dataOwnerPersona || !singleNeedsAttentionBulkId) return null
+    const selected = (
+      allFilteredSelected
+        ? filteredItems
+        : filteredItems.filter((item) => selectedIds.has(inboxReviewItemKey(item)))
+    ).find((item) => item.request_id === singleNeedsAttentionBulkId)
+    return selected ? inboxItemSystemId(selected) : null
+  }, [
+    allFilteredSelected,
+    dataOwnerPersona,
+    filteredItems,
+    selectedIds,
+    singleNeedsAttentionBulkId,
+  ])
+
+  const singleNeedsAttentionBulkMatchingQuery = useQuery({
+    queryKey: singleNeedsAttentionBulkVertical
+      ? [
+          'admin-api',
+          'ops',
+          'requests',
+          singleNeedsAttentionBulkId,
+          'verticals',
+          singleNeedsAttentionBulkVertical,
+          singleNeedsAttentionBulkSystem,
+          'matching-results',
+        ]
+      : [
+          'admin-api',
+          'ops',
+          'drop',
+          'matching-results',
+          'needs-attention-bulk',
+          singleNeedsAttentionBulkId,
+        ],
+    queryFn: () =>
+      singleNeedsAttentionBulkVertical && singleNeedsAttentionBulkId
+        ? fetchOwnerVerticalMatchingDetailOptional(
+            singleNeedsAttentionBulkId,
+            singleNeedsAttentionBulkVertical,
+            singleNeedsAttentionBulkSystem ?? undefined,
+          )
+        : fetchMatchingDetailOptional(singleNeedsAttentionBulkId!),
+    enabled: Boolean(
+      dataOwnerPersona &&
+        bulkConfirm === 'fulfill' &&
+        singleNeedsAttentionBulkId &&
+        singleNeedsAttentionBulkVertical,
+    ),
+  })
+
+  const bulkFulfillContacts =
+    singleNeedsAttentionBulkMatchingQuery.data?.matched_contacts ?? []
+  const bulkFulfillSuggestedStatus = useMemo(
+    () =>
+      singleNeedsAttentionBulkId && singleNeedsAttentionBulkMatchingQuery.data
+        ? suggestedDropResponseStatus(
+            singleNeedsAttentionBulkMatchingQuery.data.match_type,
+            singleNeedsAttentionBulkMatchingQuery.data.match_count,
+          )
+        : bulkFulfillSuggestion,
+    [
+      singleNeedsAttentionBulkId,
+      singleNeedsAttentionBulkMatchingQuery.data,
+      bulkFulfillSuggestion,
+    ],
+  )
+
+  useEffect(() => {
+    if (bulkConfirm !== 'fulfill' || !dataOwnerPersona || !singleNeedsAttentionBulkId) return
+    const nextStatus = bulkFulfillSuggestedStatus
+    if (nextStatus == null) return
+    setBulkFulfillStatus(nextStatus)
+    const dwids = bulkFulfillContacts.map((contact) => contact.dwid)
+    setBulkSelectedDwids(nextStatus === 3 || nextStatus === 4 ? dwids : [])
+  }, [
+    bulkConfirm,
+    dataOwnerPersona,
+    singleNeedsAttentionBulkId,
+    bulkFulfillSuggestedStatus,
+    bulkFulfillContacts,
+  ])
+
+  const bulkFulfillNeedsDwids = bulkFulfillStatus === 3 || bulkFulfillStatus === 4
+  const bulkFulfillDwidsReady =
+    !bulkFulfillNeedsDwids ||
+    bulkSelectedDwids.length > 0 ||
+    !dataOwnerPersona ||
+    bulkFulfillTargetIds.length !== 1
+
+  function handleBulkFulfillStatusChange(code: DropResponseStatusCode) {
+    setBulkFulfillStatus(code)
+    if (code === 5) {
+      setBulkSelectedDwids([])
+      return
+    }
+    if (code === 3 || code === 4) {
+      setBulkSelectedDwids(bulkFulfillContacts.map((contact) => contact.dwid))
+    }
+  }
 
   const bulkMutation = useMutation({
     mutationFn: async ({
       action,
       requestIds,
       responseStatus,
+      targets,
     }: {
       action: 'fulfill' | 'decline'
       requestIds: string[]
       responseStatus?: DropResponseStatusCode
+      targets?: Array<{ request_id: string; vertical?: string | null; system?: string | null }>
     }) => {
+      const promoteTargets =
+        targets && targets.length > 0
+          ? targets.filter((target) => isRequestUuid(target.request_id))
+          : requestIds.map((request_id) => ({
+              request_id,
+              vertical: null as string | null,
+              system: null as string | null,
+            }))
       const results = await Promise.allSettled(
-        requestIds.map(async (requestId) => {
+        promoteTargets.map(async (target) => {
+          const vertical = target.vertical?.trim() || undefined
+          const system = target.system?.trim() || undefined
           if (action !== 'fulfill') {
-            return postDropMatchingResultDecline(requestId)
+            return postDropMatchingResultDecline(target.request_id, { vertical, system })
           }
-          const dwids = await resolvePromoteDwids(requestId, responseStatus)
-          return postDropMatchingResultPromote(requestId, {
+          if (dataOwnerPersona) {
+            const dwids =
+              promoteTargets.length === 1
+                ? bulkSelectedDwids
+                : vertical
+                  ? await resolveOwnerPromoteDwids(
+                      target.request_id,
+                      vertical,
+                      system,
+                      responseStatus,
+                    )
+                  : undefined
+            return postDropMatchingResultPromote(target.request_id, {
+              response_status: responseStatus,
+              ...promoteDwidsForStatus(responseStatus, dwids),
+              vertical,
+              system,
+            })
+          }
+          const dwids = await resolvePromoteDwids(target.request_id, responseStatus)
+          return postDropMatchingResultPromote(target.request_id, {
             response_status: responseStatus,
             ...promoteDwidsForStatus(responseStatus, dwids),
+            vertical,
+            system,
           })
         }),
       )
@@ -3906,27 +5562,34 @@ export function NeedsAttentionPage() {
       )
       const failed = failedResults.length
       const succeeded = results.length - failed
-      return { succeeded, failed, action }
+      const decisions = results.flatMap((result) =>
+        result.status === 'fulfilled' ? [result.value] : [],
+      )
+      return { succeeded, failed, action, decisions }
     },
     onSuccess: async (result, variables) => {
-      const verb = result.action === 'fulfill' ? 'fulfilled' : 'declined'
       if (result.failed > 0) {
         actionToast.warning({
           title:
             result.action === 'fulfill'
-              ? 'Bulk fulfill partially completed'
+              ? 'Bulk confirm partially completed'
               : 'Bulk decline partially completed',
-          description: `${result.succeeded} ${verb}, ${result.failed} failed`,
+          description: `${result.succeeded} recorded, ${result.failed} failed`,
           action: {
             label: 'Retry',
             onClick: () => bulkMutation.mutate(variables),
           },
         })
+      } else if (result.action === 'fulfill') {
+        const copy = matchingReviewBulkPromoteToast(result.decisions)
+        actionToast.success({
+          title: copy.title,
+          description: copy.description,
+        })
       } else {
         actionToast.success({
-          title:
-            result.action === 'fulfill' ? 'Requests fulfilled' : 'Requests declined',
-          description: `${result.succeeded} ${verb}`,
+          title: 'Matching reviews declined',
+          description: `${result.succeeded} declined`,
         })
       }
       setSelectedIds(new Set())
@@ -3946,6 +5609,34 @@ export function NeedsAttentionPage() {
     },
   })
 
+  const bulkEscalateMutation = useMutation({
+    mutationFn: (requestIds: string[]) => {
+      const validIds = filterRequestUuids(requestIds)
+      if (validIds.length === 0) throw new Error('No valid request ids.')
+      return postDropWorkflowEscalate({
+        request_ids: validIds,
+        target_role: 'legal',
+      })
+    },
+    onSuccess: async (_data, requestIds) => {
+      actionToast.success({
+        title: 'Assigned to legal',
+        description: `${filterRequestUuids(requestIds).length} updated`,
+      })
+      await queryClient.invalidateQueries({ queryKey: ['admin-api'] })
+    },
+    onError: (error, requestIds) => {
+      actionToast.error({
+        title: 'Assign to legal failed',
+        description: actionToast.safeErrorMessage(error),
+        action: {
+          label: 'Retry',
+          onClick: () => bulkEscalateMutation.mutate(requestIds),
+        },
+      })
+    },
+  })
+
   const bulkAssignMutation = useMutation({
     mutationFn: async ({
       requestIds,
@@ -3955,9 +5646,14 @@ export function NeedsAttentionPage() {
       target: AssignTarget
     }) => {
       if (target.kind === 'group') {
+        if (target.group !== 'legal') {
+          throw new Error(
+            'Owner matching review is a vertical catalog assignment, not a request assignment.',
+          )
+        }
         return postDropWorkflowEscalate({
           request_ids: requestIds,
-          target_role: target.group === 'legal' ? 'legal' : 'data_owner',
+          target_role: 'legal',
         })
       }
       return postDropWorkflowAssign({
@@ -4128,12 +5824,30 @@ export function NeedsAttentionPage() {
     })
   }
 
+  function selectedWorkRequestIds(): string[] {
+    if (allFilteredSelected) {
+      return filterRequestUuids(filteredItems.map((item) => item.request_id))
+    }
+    return requestIdsFromSelectedReviewItems(filteredItems, selectedIds)
+  }
+
+  function selectedWorkTargets() {
+    if (allFilteredSelected) {
+      return selectedReviewTargets(
+        filteredItems,
+        new Set(filteredItems.map((item) => inboxReviewItemKey(item))),
+      )
+    }
+    return selectedReviewTargets(filteredItems, selectedIds)
+  }
+
   function runBulk(action: 'fulfill' | 'decline', responseStatus?: DropResponseStatusCode) {
     // Select-all acts on every row loaded so far (server-paginated growing window),
     // not the whole server-side total — see the "(of N)" hint in the selection chip.
-    const requestIds = allFilteredSelected ? [...filteredIds] : [...selectedIds]
-    if (requestIds.length === 0) return
-    bulkMutation.mutate({ action, requestIds, responseStatus })
+    const targets = selectedWorkTargets()
+    const requestIds = filterRequestUuids(targets.map((target) => target.request_id))
+    if (targets.length === 0) return
+    bulkMutation.mutate({ action, requestIds, responseStatus, targets })
   }
 
   const selectedCount = selectedIds.size
@@ -4148,7 +5862,7 @@ export function NeedsAttentionPage() {
   }
 
   return (
-    <section className="flex h-[calc(100vh-6.5rem)] flex-col gap-3">
+    <section className="flex h-[calc(100vh-5rem)] flex-col gap-2">
       <ConfirmActionDialog
         open={bulkConfirm === 'fulfill'}
         onOpenChange={(open) => {
@@ -4165,16 +5879,19 @@ export function NeedsAttentionPage() {
         }
         confirmLabel={dataOwnerPersona ? 'Confirm selected' : 'Fulfill selected'}
         confirming={bulkMutation.isPending && bulkConfirm === 'fulfill'}
-        confirmDisabled={bulkFulfillStatus == null}
+        confirmDisabled={bulkFulfillStatus == null || !bulkFulfillDwidsReady}
         onConfirm={() => {
           if (bulkFulfillStatus != null) runBulk('fulfill', bulkFulfillStatus)
         }}
       >
         <DropResponseStatusPicker
           value={bulkFulfillStatus}
-          onChange={setBulkFulfillStatus}
+          onChange={handleBulkFulfillStatusChange}
           disabled={bulkMutation.isPending}
-          suggested={bulkFulfillSuggestion}
+          suggested={bulkFulfillSuggestedStatus}
+          contacts={singleNeedsAttentionBulkId ? bulkFulfillContacts : undefined}
+          selectedDwids={bulkSelectedDwids}
+          onSelectedDwidsChange={setBulkSelectedDwids}
           persona={dataOwnerPersona ? 'data_owner' : legalPersona ? 'legal' : 'ops'}
         />
       </ConfirmActionDialog>
@@ -4219,7 +5936,7 @@ export function NeedsAttentionPage() {
               : null)
           if (!target) return
           bulkAssignMutation.mutate({
-            requestIds: allFilteredSelected ? [...filteredIds] : [...selectedIds],
+            requestIds: selectedWorkRequestIds(),
             target,
           })
         }}
@@ -4235,7 +5952,7 @@ export function NeedsAttentionPage() {
         tone="destructive"
         confirming={bulkTriageRejectMutation.isPending}
         onConfirm={() => {
-          const requestIds = allFilteredSelected ? [...filteredIds] : [...selectedIds]
+          const requestIds = selectedWorkRequestIds()
           if (requestIds.length > 0) bulkTriageRejectMutation.mutate(requestIds)
         }}
       />
@@ -4249,7 +5966,7 @@ export function NeedsAttentionPage() {
         confirmLabel="Send to matching"
         confirming={bulkTriageMatchMutation.isPending}
         onConfirm={() => {
-          const requestIds = allFilteredSelected ? [...filteredIds] : [...selectedIds]
+          const requestIds = selectedWorkRequestIds()
           if (requestIds.length > 0) bulkTriageMatchMutation.mutate(requestIds)
         }}
       />
@@ -4263,81 +5980,32 @@ export function NeedsAttentionPage() {
         confirmLabel={NOTICE_APPROVAL.action}
         confirming={bulkNoticeApproveMutation.isPending}
         onConfirm={() => {
-          const requestIds = allFilteredSelected ? [...filteredIds] : [...selectedIds]
+          const requestIds = selectedWorkRequestIds()
           if (requestIds.length > 0) bulkNoticeApproveMutation.mutate(requestIds)
         }}
       />
-      <header className="flex shrink-0 flex-wrap items-end justify-between gap-3">
-        <div>
-          <Micro>
-            {legalPersona ? 'Legal' : dataOwnerPersona ? 'Data owner' : 'Requests'}
-          </Micro>
-          <div className="mt-1 flex flex-wrap items-baseline gap-2">
-            <h2 className="font-display text-xl font-medium tracking-tight text-ink">
-              Inbox
-            </h2>
-            {attentionListQuery.isFetching && !attentionListQuery.isPending ? (
-              <span className="taste-frost-chip text-[0.65rem]">Refreshing</span>
-            ) : null}
-            {bulkMutation.isPending ||
-            bulkAssignMutation.isPending ||
-            triageBulkPending ||
-            noticeBulkPending ? (
-              <span className="taste-frost-chip text-[0.65rem]" role="status" aria-live="polite">
-                {bulkNoticeApproveMutation.isPending
-                  ? 'Approving notice…'
-                  : bulkTriageRejectMutation.isPending
-                    ? 'Rejecting…'
-                    : bulkTriageMatchMutation.isPending
-                      ? 'Sending…'
-                      : bulkMutation.isPending
-                        ? bulkConfirm === 'decline'
-                          ? 'Declining…'
-                          : 'Fulfilling…'
-                        : 'Assigning…'}
-              </span>
-            ) : null}
-            {attentionListQuery.data && attentionListQuery.data.items.length > 0 ? (
-              <Badge variant="notification" aria-label={`${attentionListQuery.data.items.length} to review`}>
-                {attentionListQuery.data.items.length > 99
-                  ? '99+'
-                  : attentionListQuery.data.items.length}
-              </Badge>
-            ) : null}
-          </div>
-          <p className="mt-1 max-w-lg text-xs text-ink-soft">
-            {legalPersona
-              ? 'Open work for legal — filter, act, move on.'
-              : dataOwnerPersona
-                ? 'Matching review, fulfillment after Legal kickoff, and tasks assigned to you.'
-                : 'Pending matching, delivery, notice, and communications.'}
-          </p>
-          {bulkFilter != null ? (
-            <p className="mt-1.5 flex flex-wrap items-center gap-2 text-[0.7rem]">
-              <span className="taste-frost-chip tabular-nums">
-                Bulk run #{bulkFilter}
-              </span>
-              <button
-                type="button"
-                className="font-medium text-habeas-navy underline-offset-2 hover:underline"
-                onClick={() =>
-                  void navigate({
-                    to: '/requests/needs-attention',
-                    search: {},
-                  })
-                }
-              >
-                Clear bulk filter
-              </button>
-            </p>
-          ) : null}
-        </div>
-        <Link to="/requests" className="taste-btn text-xs">
-          {dataOwnerPersona ? 'Requests' : 'All requests'}
-        </Link>
-      </header>
-
       <div className="taste-panel flex min-h-0 flex-1 flex-col overflow-hidden">
+        {attentionListQuery.isFetching && !attentionListQuery.isPending ? (
+          <span className="sr-only">Refreshing</span>
+        ) : null}
+        {bulkMutation.isPending ||
+        bulkAssignMutation.isPending ||
+        triageBulkPending ||
+        noticeBulkPending ? (
+          <span className="sr-only" role="status" aria-live="polite">
+            {bulkNoticeApproveMutation.isPending
+              ? 'Approving notice…'
+              : bulkTriageRejectMutation.isPending
+                ? 'Rejecting…'
+                : bulkTriageMatchMutation.isPending
+                  ? 'Sending…'
+                  : bulkMutation.isPending
+                    ? bulkConfirm === 'decline'
+                      ? 'Declining…'
+                      : 'Fulfilling…'
+                    : 'Assigning…'}
+          </span>
+        ) : null}
         <div
           className={cn(
             'min-w-0 shrink-0 items-center gap-1 overflow-x-auto border-b border-line px-2.5 py-1.5',
@@ -4453,100 +6121,85 @@ export function NeedsAttentionPage() {
             className="mx-1.5 h-6 w-px shrink-0 self-center bg-line"
             aria-hidden
           />
-          <div
-            className="flex shrink-0 items-center gap-2 rounded-md border border-line/80 bg-canvas/70 px-2 py-0.5"
-            role="group"
-            aria-label="List grouping"
-          >
-            <span className="shrink-0 text-[0.6rem] uppercase tracking-wide text-mute">
-              Group
-            </span>
-            <InboxGroupSwitch
-              label="Batch"
-              checked={groupByBatch}
-              onToggle={() =>
-                setGroupByBatchOverride((previous) => !(previous ?? !legalPersona))
+          <InboxCatalogFilterToolbar
+            vertical={verticalFilter}
+            verticalOptions={verticalFilterOptions}
+            onPatch={patchInboxCatalogSearch}
+            hideVertical={dataOwnerPersona}
+          />
+          <InboxViewSettingsPopover
+            groupByBatch={groupByBatch}
+            groupBySystem={effectiveGroupBySystem}
+            groupByStatus={groupByStatus}
+            matchFilter={matchFilter}
+            dueFilter={dueFilter}
+            systemFilter={showSystem ? systemFilter : undefined}
+            sourceFilter={sourceFilter}
+            stepFilter={stepFilter}
+            systemOptions={systemFilterOptions}
+            sourceOptions={sourceOptions}
+            stepOptions={stepOptions}
+            matchOptions={matchOptions.map(([id, count]) => ({
+              id,
+              label: matchTypeLabel(id, dataOwnerPersona),
+              count,
+            }))}
+            dueOptions={dueOptions.map(([id, count]) => ({
+              id,
+              label:
+                id === 'overdue' ? 'Overdue' : id === 'due_soon' ? 'Soon' : 'On track',
+              count,
+            }))}
+            showSystem={showSystem}
+            onChange={(patch) => {
+              if ('groupByBatch' in patch && patch.groupByBatch != null) {
+                setGroupByBatchOverride(patch.groupByBatch)
               }
-              ariaLabel="Group inbox by DROP batch"
-              titleOn="Batch grouping on — click to show flat rows"
-              titleOff="Batch grouping off — click to stack by DROP batch"
-            />
-            <InboxGroupSwitch
-              label="Type"
-              checked={groupByType}
-              onToggle={() => setGroupByType((previous) => !previous)}
-              ariaLabel="Group inbox by work type"
-              titleOn="Type grouping on — click to show flat type rows"
-              titleOff="Type grouping off — click to stack by work type"
-            />
-            <InboxGroupSwitch
-              label="Status"
-              checked={groupByStatus}
-              onToggle={() => setGroupByStatus((previous) => !previous)}
-              ariaLabel="Group inbox by batch-status type"
-              titleOn="Status grouping on — click to show flat status rows"
-              titleOff="Status grouping off — click to stack by match result / DROP status"
-            />
-          </div>
-          {showMatchResultFilters ? (
-            <>
-              <span className="ml-0.5 shrink-0 text-[0.6rem] uppercase tracking-wide text-mute">
-                Result
+              if ('groupBySystem' in patch && patch.groupBySystem != null) {
+                setGroupBySystem(patch.groupBySystem)
+              }
+              if ('groupByStatus' in patch && patch.groupByStatus != null) {
+                setGroupByStatus(patch.groupByStatus)
+              }
+              if ('matchFilter' in patch && patch.matchFilter) {
+                setMatchFilter(patch.matchFilter as MatchFilter)
+              }
+              if ('dueFilter' in patch && patch.dueFilter) {
+                setDueFilter(patch.dueFilter as DueFilter)
+              }
+              if ('system' in patch) {
+                patchInboxCatalogSearch({ system: patch.system })
+              }
+              if ('source' in patch) {
+                patchInboxCatalogSearch({ source: patch.source })
+              }
+              if ('step' in patch) {
+                patchInboxCatalogSearch({
+                  step: patch.step as InboxCatalogSearch['step'],
+                })
+              }
+            }}
+          />
+          {bulkFilter != null ? (
+            <span className="ml-auto flex shrink-0 items-center gap-1.5 text-[0.65rem]">
+              <span className="text-mute">
+                {filteredItems[0]
+                  ? inboxDateSourceLabel(filteredItems[0])
+                  : 'This batch'}
               </span>
-              <FilterChip
-                compact
-                active={matchFilter === 'all'}
-                label="All"
-                title="All results"
-                onClick={() => setMatchFilter('all')}
-              />
-              {matchOptions.map(([matchType, count]) => (
-                <FilterChip
-                  key={matchType}
-                  compact
-                  active={matchFilter === matchType}
-                  label={matchTypeLabel(matchType, dataOwnerPersona)}
-                  count={count}
-                  onClick={() =>
-                    setMatchFilter((current) =>
-                      current === matchType ? 'all' : matchType,
-                    )
-                  }
-                />
-              ))}
-            </>
-          ) : null}
-          {dueOptions.length > 0 ? (
-            <>
-              <span className="ml-0.5 shrink-0 text-[0.6rem] uppercase tracking-wide text-mute">
-                Due
-              </span>
-              {dueOptions.map(([due, count]) => (
-                <FilterChip
-                  key={due}
-                  compact
-                  active={dueFilter === due}
-                  label={
-                    due === 'overdue'
-                      ? 'Overdue'
-                      : due === 'due_soon'
-                        ? 'Soon'
-                        : 'On track'
-                  }
-                  title={
-                    due === 'overdue'
-                      ? 'Overdue'
-                      : due === 'due_soon'
-                        ? 'Due soon'
-                        : 'On track'
-                  }
-                  count={count}
-                  onClick={() =>
-                    setDueFilter((current) => (current === due ? 'all' : due))
-                  }
-                />
-              ))}
-            </>
+              <button
+                type="button"
+                className="font-medium text-habeas-navy underline-offset-2 hover:underline"
+                onClick={() =>
+                  void navigate({
+                    to: '/requests/needs-attention',
+                    search: (prev) => mergeInboxCatalogSearch(prev, { bulk: undefined }),
+                  })
+                }
+              >
+                Clear
+              </button>
+            </span>
           ) : null}
         </div>
 
@@ -4564,14 +6217,64 @@ export function NeedsAttentionPage() {
           </div>
         ) : null}
 
-        <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden md:grid-cols-[minmax(16rem,22rem)_minmax(0,1fr)]">
         <div
           className={cn(
-            'min-h-0 flex-col border-line md:border-r',
-            mobilePane === 'detail' ? 'hidden md:flex' : 'flex',
+            'grid min-h-0 flex-1 grid-cols-1 overflow-hidden',
+            listChrome.pinnedCollapsed
+              ? INBOX_LIST_COLLAPSED_COLS
+              : INBOX_LIST_EXPANDED_COLS,
           )}
         >
-          <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
+        <div
+          className={cn(
+            'relative min-h-0',
+            mobilePane === 'detail' ? 'hidden md:block' : 'block',
+          )}
+        >
+        <div
+          className={cn(
+            'flex h-full min-h-0 flex-col border-line bg-paper md:border-r',
+            listChrome.pinnedCollapsed &&
+              listChrome.hoverOpen &&
+              INBOX_LIST_HOVER_FLYOUT,
+          )}
+          onMouseEnter={listChrome.onRailEnter}
+          onMouseLeave={listChrome.onRailLeave}
+        >
+          <div
+            className={cn(
+              'flex shrink-0 items-center border-b border-line',
+              listChrome.effectiveCollapsed
+                ? 'flex-col gap-1.5 px-1 py-1.5'
+                : 'flex-wrap gap-2 px-2 py-1',
+            )}
+          >
+            <button
+              type="button"
+              className={cn(
+                'inline-flex shrink-0 items-center justify-center rounded-md border border-line text-ink-soft hover:bg-panel/60 hover:text-ink',
+                listChrome.effectiveCollapsed ? 'h-7 w-7 text-[0.8rem]' : 'h-6 w-6 text-[0.7rem]',
+              )}
+              aria-pressed={listChrome.pinnedCollapsed}
+              aria-label={
+                listChrome.pinnedCollapsed ? 'Expand inbox list' : 'Collapse inbox list'
+              }
+              title={listChrome.pinnedCollapsed ? 'Expand list' : 'Collapse list'}
+              onClick={() => listChrome.setPinnedCollapsed(!listChrome.pinnedCollapsed)}
+            >
+              {listChrome.pinnedCollapsed ? '›' : '‹'}
+            </button>
+            {listChrome.effectiveCollapsed ? (
+              <span className="text-[0.6rem] tabular-nums text-mute">
+                {filteredItems.length}
+              </span>
+            ) : null}
+            <div
+              className={cn(
+                'flex min-w-0 flex-1 flex-wrap items-center gap-2',
+                listChrome.effectiveCollapsed && 'hidden',
+              )}
+            >
             <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-ink-soft">
               <input
                 type="checkbox"
@@ -4649,8 +6352,8 @@ export function NeedsAttentionPage() {
               {selectedCount > 0 ? (
                 <span className="taste-frost-chip tabular-nums text-[0.65rem]">
                   {allFilteredSelected
-                    ? `All ${filteredIds.length} loaded${moreRowsToLoad ? ` (of ${rawInboxTotal})` : ''}`
-                    : `${selectedInFilterCount} of ${filteredIds.length} loaded`}
+                    ? `All ${filteredIds.length}`
+                    : `${selectedInFilterCount} of ${filteredIds.length}`}
                   <button
                     type="button"
                     className="ml-1.5 text-mute hover:text-ink"
@@ -4660,26 +6363,12 @@ export function NeedsAttentionPage() {
                     ×
                   </button>
                 </span>
-              ) : (
-                <span className="text-[0.65rem] text-mute tabular-nums">
-                  #{filteredItems.length} loaded
-                  {moreRowsToLoad ? ` (of ${rawInboxTotal} — page forward to load more)` : ''}
-                  {groupingActive && stackCount > 0
-                    ? groupByBatch && groupByStatus
-                      ? ` · ${stackCount} batch×status stacks`
-                      : groupByBatch && groupByType
-                        ? ` · ${stackCount} batch×type stacks`
-                        : groupByBatch
-                          ? ` · ${stackCount} batch stacks`
-                          : groupByStatus
-                            ? ` · ${stackCount} status stacks`
-                            : ` · ${stackCount} type stacks`
-                    : ''}
-                </span>
-              )}
+              ) : null}
+            </div>
             </div>
           </div>
 
+          <div className={cn('flex min-h-0 flex-1 flex-col', listChrome.effectiveCollapsed && 'hidden')}>
           {(isAdmin || legalPersona) && selectedCount > 0 ? (
             <div className="flex flex-wrap items-end gap-2 border-b border-line px-3 py-2">
               <label className="flex min-w-[12rem] flex-1 flex-col gap-1 text-[0.65rem] text-ink-soft">
@@ -4725,6 +6414,7 @@ export function NeedsAttentionPage() {
               >
                 Legal team
               </Button>
+              {inboxKind === 'matching' ? null : (
               <Button
                 size="sm"
                 variant="outline"
@@ -4736,6 +6426,7 @@ export function NeedsAttentionPage() {
               >
                 Data team
               </Button>
+              )}
             </div>
           ) : null}
 
@@ -4769,345 +6460,41 @@ export function NeedsAttentionPage() {
                               : inboxKind === 'fulfillment'
                                 ? 'No kicked-off fulfillment in this filter.'
                                 : inboxKind === 'pending_tasks'
-                                  ? 'No pending tasks assigned to you.'
+                                  ? 'No pending tasks for your assigned verticals.'
                                   : 'No items match the current view.'}
               </p>
             ) : null}
 
             {!loading && !attentionListQuery.isError && filteredItems.length > 0 ? (
               <ul
-                key={`inbox-group-${groupByBatch ? 'b' : ''}${groupByType ? 't' : ''}${groupByStatus ? 's' : ''}-n`}
+                key={`inbox-group-${groupByBatch ? 'b' : ''}${groupBySystem ? 's' : ''}${groupByStatus ? 'r' : ''}-n`}
                 className={cn(
-                  groupingActive ? 'space-y-1 bg-canvas/40 p-1.5' : 'divide-y divide-line',
+                  groupingActive ? 'space-y-0 bg-canvas/40 p-0' : 'divide-y divide-line',
                 )}
               >
-                {pagedInboxRows.map((row) => {
-                  if (row.kind === 'thread') {
-                    const ids = row.items.map((item) => item.request_id)
-                    const selected = ids.every((id) => selectedIds.has(id))
-                    const partial =
-                      !selected && ids.some((id) => selectedIds.has(id))
-                    const active =
-                      activeTarget?.kind === 'thread' &&
-                      activeTarget.batchKey === row.batchKey
-                    const expanded = expandedThreads.has(row.batchKey)
-                    const earliest = row.items[0]!
-                    const exactMatchBatch =
-                      (row.stackKind === 'batch' ||
-                        row.stackKind === 'batch_type' ||
-                        row.stackKind === 'batch_status') &&
-                      threadIsExactMatchBatch(row.items)
-                    const isTypeStack = row.stackKind === 'type'
-                    const isCrossStack = row.stackKind === 'batch_type'
-                    const isStatusStack = row.stackKind === 'status'
-                    const isBatchStatusStack = row.stackKind === 'batch_status'
-                    const statusSubtitle = inboxBatchStatusStackSubtitle(
-                      row.items,
-                      dataOwnerPersona,
-                    )
-                    const stackKindLabel = isBatchStatusStack
-                      ? 'batch·status'
-                      : isCrossStack
-                        ? 'batch·type'
-                        : isStatusStack
-                          ? 'status'
-                          : isTypeStack
-                            ? 'type'
-                            : 'batch'
-                    const unbatched =
-                      row.batchKey === UNKEYED_BATCH_KEY ||
-                      row.batchKey.startsWith(`${UNKEYED_BATCH_KEY}::`)
-                    return (
-                      <li key={`thread-${row.batchKey}`} className="list-none">
-                        <div
-                          className={cn(
-                            'relative flex items-stretch gap-0 rounded-md border-2 bg-paper shadow-[0_1px_0_rgba(15,35,70,0.06),0_3px_0_-1px_rgba(15,35,70,0.05),0_6px_0_-2px_rgba(15,35,70,0.04)] transition-colors',
-                            isCrossStack || isBatchStatusStack
-                              ? 'border-habeas-navy/45'
-                              : isTypeStack || isStatusStack
-                                ? 'border-habeas-navy/30'
-                                : 'border-habeas-navy/40',
-                            active
-                              ? 'border-habeas-navy/60 bg-habeas-navy/[0.07]'
-                              : selected
-                                ? 'bg-habeas-navy/[0.03]'
-                                : 'hover:border-habeas-navy/50 hover:bg-panel/40',
-                          )}
-                        >
-                          <span
-                            className={cn(
-                              'w-1 shrink-0 rounded-l-md',
-                              isCrossStack || isBatchStatusStack
-                                ? 'bg-habeas-navy/80'
-                                : isTypeStack || isStatusStack
-                                  ? 'bg-habeas-navy/45'
-                                  : 'bg-habeas-navy/70',
-                            )}
-                            aria-hidden
-                          />
-                          <label
-                            className="flex shrink-0 cursor-pointer items-center px-3"
-                            onClick={(event) => event.stopPropagation()}
-                          >
-                            <input
-                              type="checkbox"
-                              className="h-3.5 w-3.5 rounded border-line accent-habeas-navy"
-                              checked={selected}
-                              ref={(element) => {
-                                if (element) element.indeterminate = partial
-                              }}
-                              onChange={() => toggleThreadSelect(ids)}
-                              aria-label={`Select ${stackKindLabel} stack ${row.batchLabel}`}
-                            />
-                          </label>
-                          <button
-                            type="button"
-                            className="mt-1 shrink-0 self-start rounded px-1 py-2.5 text-[0.65rem] text-mute hover:bg-panel hover:text-ink"
-                            aria-label={
-                              expanded
-                                ? `Collapse ${stackKindLabel} stack ${row.batchLabel}`
-                                : `Expand ${stackKindLabel} stack ${row.batchLabel}`
-                            }
-                            onClick={() => toggleThreadExpand(row.batchKey)}
-                          >
-                            {expanded ? '▾' : '▸'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              toggleThreadExpand(row.batchKey)
-                              setActiveTarget({
-                                kind: 'thread',
-                                batchKey: row.batchKey,
-                              })
-                              setMobilePane('detail')
-                            }}
-                            className="flex min-w-0 flex-1 items-start gap-2.5 px-1 py-3 pr-2 text-left"
-                            aria-label={`${stackKindLabel} stack ${row.batchLabel}, ${row.items.length} requests`}
-                          >
-                            <span
-                              className="relative mt-0.5 flex h-7 w-8 shrink-0 items-center justify-center"
-                              aria-hidden
-                              title="Grouped inbox stack"
-                            >
-                              <span className="absolute left-0 top-1 h-5 w-5 rounded-md border border-habeas-navy/20 bg-habeas-navy/[0.04]" />
-                              <span className="absolute left-1 top-0.5 h-5 w-5 rounded-md border border-habeas-navy/30 bg-habeas-navy/[0.08]" />
-                              <span className="relative flex h-5 w-5 items-center justify-center rounded-md border border-habeas-navy/55 bg-paper text-[0.55rem] font-semibold tabular-nums text-habeas-navy shadow-sm">
-                                {row.items.length > 99 ? '99+' : row.items.length}
-                              </span>
-                            </span>
-                            <div className="min-w-0 flex-1">
-                              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                                <span
-                                  className={cn(
-                                    'text-[0.75rem] font-semibold text-ink',
-                                    isTypeStack ||
-                                    isCrossStack ||
-                                    isStatusStack ||
-                                    isBatchStatusStack
-                                      ? null
-                                      : 'font-mono',
-                                  )}
-                                >
-                                  {row.batchLabel}
-                                </span>
-                                <span className="text-[0.7rem] text-mute">
-                                  {statusSubtitle ? `${statusSubtitle} · ` : exactMatchBatch ? 'Exact 1:1 · ' : ''}
-                                  {row.items.length} requests
-                                </span>
-                              </div>
-                              <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                                {statusSubtitle ? (
-                                  <Badge
-                                    variant="ok"
-                                    className="normal-case tracking-normal"
-                                  >
-                                    {statusSubtitle}
-                                  </Badge>
-                                ) : exactMatchBatch ? (
-                                  <Badge
-                                    variant="ok"
-                                    className="normal-case tracking-normal"
-                                  >
-                                    single match
-                                  </Badge>
-                                ) : isStatusStack ? (
-                                  <Badge
-                                    variant="default"
-                                    className="normal-case tracking-normal"
-                                  >
-                                    {row.batchLabel}
-                                  </Badge>
-                                ) : unbatched ? (
-                                  <Badge
-                                    variant="default"
-                                    className="normal-case tracking-normal"
-                                  >
-                                    unbatched
-                                  </Badge>
-                                ) : null}
-                                <DuePill item={earliest} className="text-[0.6rem]" />
-                              </div>
-                            </div>
-                          </button>
-                        </div>
-                        {expanded ? (
-                          <ul className="mx-1.5 mb-1.5 space-y-0 overflow-hidden rounded-md border border-habeas-navy/15 border-t-0 bg-canvas/50 py-1">
-                            {row.items.map((item) => {
-                              const childSelected = selectedIds.has(item.request_id)
-                              const childActive =
-                                activeTarget?.kind === 'request' &&
-                                activeTarget.requestId === item.request_id
-                              return (
-                                <li key={item.request_id}>
-                                  <div
-                                    className={cn(
-                                      'flex items-stretch gap-0 pl-6 transition-colors',
-                                      childActive
-                                        ? 'bg-habeas-navy/[0.07]'
-                                        : childSelected
-                                          ? 'bg-habeas-navy/[0.03]'
-                                          : 'hover:bg-panel/40',
-                                    )}
-                                  >
-                                    <label
-                                      className="flex shrink-0 cursor-pointer items-center px-3"
-                                      onClick={(event) => event.stopPropagation()}
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        className="h-3.5 w-3.5 rounded border-line accent-habeas-navy"
-                                        checked={childSelected}
-                                        onChange={() => toggleId(item.request_id)}
-                                        aria-label={`Select ${item.request_id}`}
-                                      />
-                                    </label>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setActiveTarget({
-                                          kind: 'request',
-                                          requestId: item.request_id,
-                                        })
-                                        setMobilePane('detail')
-                                      }}
-                                      className="flex min-w-0 flex-1 items-center gap-2 px-1 py-1.5 pr-3 text-left"
-                                    >
-                                      <span className="truncate text-[0.7rem] font-medium text-ink">
-                                        {inboxItemTitle(item)}
-                                      </span>
-                                      <span className="text-[0.6rem] text-mute">
-                                        {item.requestor_state ?? '—'}
-                                      </span>
-                                      {item.bulk_process_id != null ||
-                                      item.source_csv_filename ? (
-                                        <span className="ml-auto font-mono text-[0.6rem] text-mute">
-                                          {inboxBatchLabel(item)}
-                                        </span>
-                                      ) : null}
-                                    </button>
-                                  </div>
-                                </li>
-                              )
-                            })}
-                          </ul>
-                        ) : null}
-                      </li>
-                    )
-                  }
-
-                  // Grouping coerce should eliminate this branch; keep as flat fallback only.
-                  if (groupingActive) return null
-
-                  const item = row.item
-                  const selected = selectedIds.has(item.request_id)
-                  const active =
-                    activeTarget?.kind === 'request' &&
-                    activeTarget.requestId === item.request_id
-                  const assignee = item.assignment?.assignee_identity
-                  const showRowAssignee = showInboxIndividualAssignee(
-                    item,
-                    legalPersona,
-                  )
-                  const urgentAssignment = legalPersona && isAssignmentToLegalItem(item)
-                  return (
-                    <li key={item.request_id}>
-                      <div
-                        className={cn(
-                          'flex items-stretch gap-0 transition-colors',
-                          urgentAssignment && 'border-l-2 border-l-red-600',
-                          active
-                            ? 'bg-habeas-navy/[0.07]'
-                            : selected
-                              ? 'bg-habeas-navy/[0.03]'
-                              : 'hover:bg-panel/50',
-                        )}
-                      >
-                        <label
-                          className="flex shrink-0 cursor-pointer items-center px-3"
-                          onClick={(event) => event.stopPropagation()}
-                        >
-                          <input
-                            type="checkbox"
-                            className="h-3.5 w-3.5 rounded border-line accent-habeas-navy"
-                            checked={selected}
-                            onChange={() => toggleId(item.request_id)}
-                            aria-label={`Select ${item.request_id}`}
-                          />
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setActiveTarget({
-                              kind: 'request',
-                              requestId: item.request_id,
-                            })
-                            setMobilePane('detail')
-                          }}
-                          className="flex min-w-0 flex-1 flex-col gap-1 px-1 py-2.5 pr-3 text-left text-xs"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="min-w-0 truncate font-medium text-ink">
-                              {inboxItemTitle(item)}
-                            </span>
-                            <div className="flex shrink-0 items-center gap-1.5">
-                              {urgentAssignment ? (
-                                <Badge
-                                  variant="fail"
-                                  className="normal-case tracking-normal text-[0.55rem]"
-                                >
-                                  Urgent
-                                </Badge>
-                              ) : null}
-                              <DuePill item={item} className="text-[0.6rem]" />
-                            </div>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-1.5 text-[0.65rem] text-ink-soft">
-                            <ChannelOriginAvatar item={item} />
-                            <span className="text-mute">
-                              {SOURCE_LABELS[item.intake_source] ?? item.intake_source}
-                            </span>
-                            {showRowAssignee ? (
-                              assignee ? (
-                                <>
-                                  <span className="text-mute">·</span>
-                                  <span className="max-w-[9rem] truncate">
-                                    {assignee.split('@')[0]}
-                                  </span>
-                                </>
-                              ) : (
-                                <>
-                                  <span className="text-mute">·</span>
-                                  <span className="text-mute">Unassigned</span>
-                                </>
-                              )
-                            ) : null}
-                          </div>
-                        </button>
-                      </div>
-                    </li>
-                  )
-                })}
+                <InboxQueueRows
+                  groupingActive={groupingActive}
+                  rows={pagedInboxRows}
+                  selectedKeys={selectedIds}
+                  activeTarget={activeTarget}
+                  expandedThreads={expandedThreads}
+                  dataOwnerPersona={dataOwnerPersona}
+                  legalPersona={legalPersona}
+                  connectorReminders={me?.connector_reminders}
+                  connectorGate={inboxConnectorGate}
+                  onToggleThreadSelect={toggleThreadSelect}
+                  onToggleThreadExpand={toggleThreadExpand}
+                  onOpenThread={(batchKey) => {
+                    toggleThreadExpand(batchKey)
+                    setActiveTarget({ kind: 'thread', batchKey })
+                    setMobilePane('detail')
+                  }}
+                  onToggleItem={toggleId}
+                  onOpenItem={(itemKey) => {
+                    setActiveTarget({ kind: 'request', itemKey })
+                    setMobilePane('detail')
+                  }}
+                />
               </ul>
             ) : null}
           </div>
@@ -5123,12 +6510,14 @@ export function NeedsAttentionPage() {
               onNext={() => setPage(Math.min(inboxTotalPages, inboxCurrentPage + 1))}
             />
           ) : null}
+          </div>
+        </div>
         </div>
 
         <div
           className={cn(
-            'min-h-0 min-w-0 overflow-hidden',
-            mobilePane === 'queue' ? 'hidden md:block' : 'block',
+            'flex min-h-0 min-w-0 flex-col overflow-hidden',
+            mobilePane === 'queue' ? 'hidden md:flex' : 'flex',
           )}
         >
           {activeThread ? (
@@ -5138,27 +6527,67 @@ export function NeedsAttentionPage() {
               stackKind={activeThread.stackKind}
               canReviewActions={canReviewActions}
               dataOwnerPersona={dataOwnerPersona}
-              actionPending={bulkMutation.isPending}
+              assigneeCandidates={assigneeCandidates}
+              onBulkAssign={(target) => {
+                bulkAssignMutation.mutate({
+                  requestIds: filterRequestUuids(
+                    activeThread.items.map((item) => item.request_id),
+                  ),
+                  target,
+                })
+              }}
+              actionPending={
+                bulkMutation.isPending ||
+                bulkEscalateMutation.isPending ||
+                bulkAssignMutation.isPending
+              }
               onBackToQueue={() => setMobilePane('queue')}
               onOpenDetail={(item, trigger) => {
                 detailOverlay.openOverlay(
                   item.request_id,
                   trigger,
                   inboxItemToSeedRequest(item),
+                  item.vertical,
+                  inboxItemSystemId(item),
                 )
               }}
               onPromoteAll={(responseStatus) => {
+                const targets = selectedReviewTargets(
+                  activeThread.items,
+                  new Set(activeThread.items.map((item) => inboxReviewItemKey(item))),
+                )
                 bulkMutation.mutate({
                   action: 'fulfill',
-                  requestIds: activeThread.items.map((item) => item.request_id),
+                  requestIds: filterRequestUuids(targets.map((target) => target.request_id)),
                   responseStatus,
+                  targets,
                 })
               }}
               onDeclineAll={() => {
+                const targets = selectedReviewTargets(
+                  activeThread.items,
+                  new Set(activeThread.items.map((item) => inboxReviewItemKey(item))),
+                )
                 bulkMutation.mutate({
                   action: 'decline',
-                  requestIds: activeThread.items.map((item) => item.request_id),
+                  requestIds: filterRequestUuids(targets.map((target) => target.request_id)),
+                  targets,
                 })
+              }}
+              onEscalateAll={() => {
+                bulkEscalateMutation.mutate(
+                  activeThread.items.map((item) => item.request_id),
+                )
+              }}
+              onSeeMoreDetails={() => {
+                const first = activeThread.items[0]
+                if (first) {
+                  setActiveTarget({
+                    kind: 'request',
+                    itemKey: inboxReviewItemKey(first),
+                  })
+                }
+                setMobilePane('detail')
               }}
             />
           ) : activeItem ? (
@@ -5175,6 +6604,8 @@ export function NeedsAttentionPage() {
                   item.request_id,
                   trigger,
                   inboxItemToSeedRequest(item),
+                  item.vertical,
+                  inboxItemSystemId(item),
                 )
               }}
             />
@@ -5192,6 +6623,8 @@ export function NeedsAttentionPage() {
         onOpenChange={detailOverlay.onOpenChange}
         returnFocusRef={detailOverlay.returnFocusRef}
         seedRequest={detailOverlay.seedRequest}
+        vertical={detailOverlay.vertical}
+        system={detailOverlay.system}
       />
     </section>
   )

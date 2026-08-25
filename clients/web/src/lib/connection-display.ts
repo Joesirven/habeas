@@ -10,6 +10,7 @@ import type {
 
 /** Upload-only systems — no Live credential invite (KD14). */
 export const UPLOAD_ONLY_SYSTEMS: ReadonlySet<IntegrationSystemId> = new Set([
+  'axios_headquarters',
   'bizdev_contacts',
   'hr_alumni',
 ])
@@ -89,13 +90,13 @@ export function connectionInviteAllowed(options: {
   return true
 }
 
-/** Hide retired Google Sheets from new-connection pickers. */
+/** Hide retired Google Sheets and infra-only cassandra from new-connection pickers. */
 export function isCreatableConnectionSystem(options: {
   system_id: string
   invite_allowed: boolean
 }): boolean {
   if (options.system_id === 'google_sheets') return false
-  if (options.system_id === 'cassandra') return true
+  if (options.system_id === 'cassandra') return false
   if (isUploadOnlySystem(options.system_id)) return true
   return options.invite_allowed
 }
@@ -146,6 +147,9 @@ export type OwnerHomeQueueRow = {
   title: string
   lane: OwnerHomeQueueLane
   receivedAt: string | null
+  /** Matching-review item is per vertical — not request-level assignment. */
+  vertical: string | null
+  verticalLabel: string | null
 }
 
 export function ownerHomeItemTitle(
@@ -173,6 +177,8 @@ export function ownerHomeQueueRows(options: {
       title: ownerHomeItemTitle(item, 'matching'),
       lane: 'matching',
       receivedAt: item.received_at ?? item.requested_at,
+      vertical: item.vertical ?? null,
+      verticalLabel: item.vertical_label ?? null,
     })
   }
   for (const item of options.fulfillment) {
@@ -181,6 +187,8 @@ export function ownerHomeQueueRows(options: {
       title: ownerHomeItemTitle(item, 'fulfillment'),
       lane: 'fulfillment',
       receivedAt: item.received_at ?? item.requested_at,
+      vertical: item.vertical ?? null,
+      verticalLabel: item.vertical_label ?? null,
     })
   }
   rows.sort((left, right) => {

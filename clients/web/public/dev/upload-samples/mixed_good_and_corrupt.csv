@@ -1,0 +1,4 @@
+email,phone,first_name
+ada@example.com,2025550100,Ada
+not-an-email,2025550100,Bad
+grace@example.com,123,Grace

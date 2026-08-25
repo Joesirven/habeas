@@ -28,7 +28,7 @@ export const SAFE_API_ERROR_DETAILS: Record<string, string> = {
   'secret not stored':
     'No credentials are stored for this connection yet. Send an owner invite first.',
   'invites not allowed for cassandra':
-    'Cassandra is infrastructure-only — no owner invite is sent.',
+    'This system is infrastructure-only — no owner invite is sent.',
   'owner_email required': 'Choose an owner email before continuing.',
   'owner_email must be an allowlisted habeas operator':
     'Owner email must be an allowlisted Habeas operator.',

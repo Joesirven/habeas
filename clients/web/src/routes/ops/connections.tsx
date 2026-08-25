@@ -23,20 +23,25 @@ import {
   connectionDisplayStatusVariant,
   resolveConnectionChipStatus,
 } from '@/lib/connection-display'
+import { catalogSystemDisplayLabel } from '@/lib/legalJourneyLabels'
 
 function Micro({ children }: { children: ReactNode }) {
   return <p className="taste-micro">{children}</p>
 }
 
-function formatSystemLabel(system: string): string {
-  return system.replaceAll('_', ' ')
+function formatSystemLabel(system: string, displayName?: string | null): string {
+  return (
+    catalogSystemDisplayLabel(system, { systemLabel: displayName }) ??
+    (displayName?.trim() && displayName.trim().toLowerCase() !== 'cassandra'
+      ? displayName.trim()
+      : system === 'cassandra'
+        ? 'Infrastructure'
+        : system.replaceAll('_', ' '))
+  )
 }
 
 function connectionDetailTitle(connection: ConnectionRecord): string {
-  if (connection.system === 'cassandra') {
-    return `${connection.display_name} · Infrastructure`
-  }
-  return connection.display_name
+  return formatSystemLabel(connection.system, connection.display_name)
 }
 
 function formatLastTest(connection: ConnectionRecord): string {
@@ -105,7 +110,9 @@ function ConnectionsTable({
               className="cursor-pointer hover:bg-canvas/80"
               onClick={() => onSelect(connection)}
             >
-              <td className="font-mono text-xs">{formatSystemLabel(connection.system)}</td>
+              <td className="font-mono text-xs">
+                {formatSystemLabel(connection.system, connection.display_name)}
+              </td>
               <td>{connection.display_name}</td>
               <td className="text-ink-soft">{connection.owner_email ?? '—'}</td>
               <td>

@@ -4,6 +4,10 @@
 
 **Habeas Platform** admin web (slug `habeas-cli`). Legal DROP hash/notice unchanged.
 
+## Vocabulary (ops inbox)
+
+**Source** = intake (**CA DROP**, portal, agent) — not a connection. **System** = a vertical’s data connection; owner verifies matching **per system**. **Test vertical** shows **System A** / **System B**; other verticals show the real name. Full list: root [`AGENTS.md`](../../AGENTS.md) and [`.agent/modules/design-taste-ops-ia.md`](../../.agent/modules/design-taste-ops-ia.md).
+
 ## Locked stack
 
 Vite · React · TypeScript · TanStack Router · TanStack Query · shadcn · Bun

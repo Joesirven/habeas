@@ -2,6 +2,8 @@ import { createRootRoute, createRoute, createRouter, Outlet, redirect } from '@t
 import { TanStackRouterDevtools } from '@tanstack/router-devtools'
 
 import { AppShell } from '@/components/AppShell'
+import { isInboxIdentifierSurface } from '@/lib/inbox-status-lab'
+import { isRequestUuid } from '@/lib/utils'
 import { DashboardPage } from '@/routes/index'
 import { DeMonitorPage } from '@/routes/ops/de-monitor'
 import { OpsIncidentsPage } from '@/routes/ops/incidents'
@@ -21,11 +23,18 @@ import {
 import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
 import { RequestDetailPage } from '@/routes/requests/$requestId'
 import { NeedsAttentionPage } from '@/routes/requests/needs-attention'
+import { MatchingResultsLabPage } from '@/routes/requests/matching-results-lab'
+import { PendingSettingsLabPage } from '@/routes/dev/pending-settings-lab'
+import { DevLabsIndexPage } from '@/routes/dev/index'
+import {
+  SheetsOauthLabPage,
+  type SheetsOauthLabSearch,
+} from '@/routes/dev/sheets-oauth'
+import { SheetsCadenceLabPage } from '@/routes/dev/sheets-cadence-lab'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
 import { RequestsSlasPage } from '@/routes/requests/slas'
 import { DocsPage } from '@/routes/docs'
-import { SheetsCadenceLabPage } from '@/routes/dev/sheets-cadence-lab'
 import { HOME_WINDOWS, type HomeWindow } from '@/components/legal/home/DateToolbar'
 
 export const PIPELINE_TABS = [
@@ -480,6 +489,8 @@ export type RequestsSearch = {
   raw?: 'yes' | 'no'
   received_after?: string
   received_before?: string
+  /** All-requests list: omit = flat rows; `batch` = intake-batch grouping. */
+  view?: 'batch'
 }
 
 function parseRequestsSearch(search: Record<string, unknown>): RequestsSearch {
@@ -527,6 +538,9 @@ function parseRequestsSearch(search: Record<string, unknown>): RequestsSearch {
   if (typeof search.received_before === 'string' && search.received_before.trim()) {
     parsed.received_before = search.received_before.trim()
   }
+  if (search.view === 'batch') {
+    parsed.view = 'batch'
+  }
   return parsed
 }
 
@@ -563,6 +577,15 @@ export const LEGAL_INBOX_FILTERS = [
 
 export type LegalInboxFilter = (typeof LEGAL_INBOX_FILTERS)[number]
 
+export const NEEDS_ATTENTION_STEPS = [
+  'ingest',
+  'matching',
+  'fulfillment',
+  'notice',
+] as const
+
+export type NeedsAttentionStep = (typeof NEEDS_ATTENTION_STEPS)[number]
+
 export type NeedsAttentionSearch = {
   bulk?: number
   /** Inbox lane tab — Legal defaults to triage when omitted. */
@@ -571,9 +594,19 @@ export type NeedsAttentionSearch = {
   filter?: LegalInboxFilter
   /** Scope matching review queue to a data-owner assignee (API `assignee` param). */
   assignee?: string
+  /** Matching inbox — catalog vertical id. */
+  vertical?: string
+  /** Matching inbox — catalog system slug. */
+  system?: string
+  /** Intake source (drop / webform / csv / manual). Not email/phone/ndz. */
+  source?: string
+  /** Journey step filter — ingest | matching | fulfillment | notice. */
+  step?: NeedsAttentionStep
 }
 
-function parseNeedsAttentionSearch(search: Record<string, unknown>): NeedsAttentionSearch {
+export function parseNeedsAttentionSearch(
+  search: Record<string, unknown>,
+): NeedsAttentionSearch {
   const parsed: NeedsAttentionSearch = {}
   const raw = search.bulk
   const n =
@@ -598,7 +631,53 @@ function parseNeedsAttentionSearch(search: Record<string, unknown>): NeedsAttent
   if (typeof search.assignee === 'string' && search.assignee.trim()) {
     parsed.assignee = search.assignee.trim()
   }
+  if (typeof search.vertical === 'string' && search.vertical.trim()) {
+    parsed.vertical = search.vertical.trim()
+  }
+  if (typeof search.system === 'string' && search.system.trim()) {
+    parsed.system = search.system.trim()
+  }
+  if (typeof search.source === 'string' && search.source.trim()) {
+    const source = search.source.trim()
+    if (!isInboxIdentifierSurface(source)) parsed.source = source
+  }
+  if (
+    typeof search.step === 'string' &&
+    (NEEDS_ATTENTION_STEPS as readonly string[]).includes(search.step)
+  ) {
+    parsed.step = search.step as NeedsAttentionStep
+  }
   return parsed
+}
+
+/**
+ * Inbox URL merge — key presence so All/clear works (frontend-stack).
+ * Omit the key → keep current. Pass explicit `undefined` → clear.
+ */
+export function mergeNeedsAttentionSearch(
+  current: NeedsAttentionSearch,
+  patch: Partial<NeedsAttentionSearch>,
+): NeedsAttentionSearch {
+  const bulk = 'bulk' in patch ? patch.bulk : current.bulk
+  const kind = 'kind' in patch ? patch.kind : current.kind
+  const filter = 'filter' in patch ? patch.filter : current.filter
+  const assignee = 'assignee' in patch ? patch.assignee : current.assignee
+  const vertical = 'vertical' in patch ? patch.vertical : current.vertical
+  const system = 'system' in patch ? patch.system : current.system
+  const source = 'source' in patch ? patch.source : current.source
+  const step = 'step' in patch ? patch.step : current.step
+  const next: NeedsAttentionSearch = {}
+  if (bulk != null) next.bulk = bulk
+  if (kind) next.kind = kind
+  if (filter) next.filter = filter
+  if (assignee) next.assignee = assignee
+  if (vertical?.trim()) next.vertical = vertical.trim()
+  if (system?.trim()) next.system = system.trim()
+  if (source?.trim() && !isInboxIdentifierSurface(source.trim())) {
+    next.source = source.trim()
+  }
+  if (step) next.step = step
+  return next
 }
 
 const needsAttentionRoute = createRoute({
@@ -607,6 +686,57 @@ const needsAttentionRoute = createRoute({
   validateSearch: (search: Record<string, unknown>) =>
     parseNeedsAttentionSearch(search),
   component: NeedsAttentionPage,
+})
+
+function parseStatusLabSearch(search: Record<string, unknown>): NeedsAttentionSearch {
+  // Status lab is status-update only — ignore overlay/detail URL params (request_id, etc.).
+  return parseNeedsAttentionSearch(search)
+}
+
+const inboxStatusLabRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/requests/inbox-status-lab',
+  validateSearch: (search: Record<string, unknown>) => parseStatusLabSearch(search),
+  beforeLoad: ({ search }) => {
+    throw redirect({ to: '/requests/needs-attention', search, replace: true })
+  },
+  component: () => null,
+})
+
+const matchingResultsLabRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/requests/matching-results-lab',
+  validateSearch: (search: Record<string, unknown>) => parseStatusLabSearch(search),
+  component: MatchingResultsLabPage,
+})
+
+const sheetsCadenceLabRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/dev/sheets-cadence-lab',
+  component: SheetsCadenceLabPage,
+})
+
+const sheetsOauthLabRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/dev/sheets-oauth',
+  validateSearch: (search: Record<string, unknown>): SheetsOauthLabSearch => ({
+    code: typeof search.code === 'string' ? search.code : undefined,
+    state: typeof search.state === 'string' ? search.state : undefined,
+    error: typeof search.error === 'string' ? search.error : undefined,
+  }),
+  component: SheetsOauthLabPage,
+})
+
+const devLabsIndexRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/dev',
+  component: DevLabsIndexPage,
+})
+
+const pendingSettingsLabRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/dev/pending-settings',
+  component: PendingSettingsLabPage,
 })
 
 const requestsSlasRoute = createRoute({
@@ -627,15 +757,24 @@ const docsRoute = createRoute({
   component: DocsPage,
 })
 
-const sheetsCadenceLabRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/dev/sheets-cadence-lab',
-  component: SheetsCadenceLabPage,
-})
-
 const requestDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests/$requestId',
+  validateSearch: (search: Record<string, unknown>) => {
+    const parsed: { vertical?: string; system?: string } = {}
+    if (typeof search.vertical === 'string' && search.vertical.trim()) {
+      parsed.vertical = search.vertical.trim()
+    }
+    if (typeof search.system === 'string' && search.system.trim()) {
+      parsed.system = search.system.trim()
+    }
+    return parsed
+  },
+  beforeLoad: ({ params }) => {
+    if (!isRequestUuid(params.requestId)) {
+      throw redirect({ to: '/requests/needs-attention' })
+    }
+  },
   component: RequestDetailPage,
 })
 
@@ -842,10 +981,15 @@ const routeTree = rootRoute.addChildren([
   indexRoute,
   requestsRoute,
   needsAttentionRoute,
+  inboxStatusLabRoute,
+  matchingResultsLabRoute,
+  devLabsIndexRoute,
+  sheetsCadenceLabRoute,
+  sheetsOauthLabRoute,
+  pendingSettingsLabRoute,
   requestsSlasRoute,
   manualRequestRoute,
   docsRoute,
-  sheetsCadenceLabRoute,
   requestDetailRoute,
   matchingReviewRoute,
   opsDashboardRoute,

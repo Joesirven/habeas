@@ -10,7 +10,7 @@ import { actionToast } from '@/lib/action-toast'
 import { RoleGate, type UserRole } from '@/lib/auth'
 
 function canAccessMatchingReview(role: UserRole | undefined): boolean {
-  return role === 'super_admin' || role === 'admin' || role === 'data_owner'
+  return role === 'super_admin' || role === 'admin' || role === 'data_owner' || role === 'data_user'
 }
 
 function MatchingReviewTableSkeleton({ rows = 5 }: { rows?: number }) {
