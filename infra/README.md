@@ -529,7 +529,7 @@ Rules: service name = kebab-case + `-dev`; `google_sheets` → `google-sheets-de
 
 **DROP intake (complete):** first production CA DROP pull finished (~1.84M requests ingested). Data-vertical matching is complete. Cutover ops used `POST /ops/drop/prod/confirm-run` on admin-api — that endpoint chains connector `/download` → ingestor land/promote → request dispatch → matching `/ensure-drain`. It is the orchestrated spine runbook, not an open “first pull never run” blocker. Ongoing intake uses scheduled `drop-connector-prod` `/download` (`dpra-prod-drop-connector-download`).
 
-**Prod workers (live):** `admin-api-prod`, `drop-connector-prod`, `drop-ingestor-prod`, `request-dispatcher-prod`, `data-vertical-matching-prod`, `hash-index-refresh-prod`, `data-fulfillment-dispatcher-prod`, `drop-notice-dispatcher-prod`, `reaper-prod`, and vertical workers `auth0-prod`, `axios-headquarters-prod`, `google-sheets-prod`, `lever-prod`, `paylocity-prod`.
+**Prod workers (live):** `admin-api-prod`, `drop-connector-prod`, `drop-ingestor-prod`, `request-dispatcher-prod`, `data-vertical-matching-prod`, `hash-index-refresh-prod`, `data-fulfillment-dispatcher-prod`, `drop-notice-dispatcher-prod`, `reaper-prod`, and vertical workers `auth0-prod`, `axios-headquarters-prod`, `google-sheets-prod`, `lever-prod`, `paylocity-prod`. Redeploy DROP hash worker via [`cloudbuild/hash-index-refresh-prod.yaml`](cloudbuild/hash-index-refresh-prod.yaml) (pass `_DATABASE_URL` from `database-url-prod` at submit).
 
 **Not live in prod:** `cassandra-prod` (stub / do-not-write until explicit cutover). `mailchimp-prod` is retired. Legacy `matching-prod` may still exist in the project; do not point admin-api at it.
 

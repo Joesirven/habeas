@@ -1,0 +1,47 @@
+# hash-index-refresh-prod — twin of hash-index-refresh-dev. Cloud SQL dpra-prod + _DATABASE_URL.
+substitutions:
+  _REGION: us-east4
+  _PROJECT: example-gcp-project
+  _SERVICE: hash-index-refresh-prod
+  _TAG: latest
+  _CLOUDSQL_INSTANCE: example-gcp-project:us-east4:dpra-prod
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+      - -f
+      - app/hash_index_refresh/Dockerfile
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
+      - --timeout=3600
+      - --cpu=2
+      - --memory=4Gi
+      - --set-env-vars=SERVICE_NAME=hash-index-refresh,WORKER_ID=hash-index-refresh-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DROP_HASH_DBT_DIR=/app/transform/drop_hash,DBT_PROFILES_DIR=/app/transform/drop_hash,DBT_TIMEOUT_SECONDS=3300,DATABASE_URL=${_DATABASE_URL}
+
+images:
+  - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}

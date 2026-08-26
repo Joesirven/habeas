@@ -13,6 +13,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
+
+import asyncpg
 from habeas_privacy_core.audit.redaction import redact_error_text
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.connections.freshness import GateResult
@@ -38,6 +41,7 @@ from habeas_privacy_core.queue.constants import (
     VERTICAL_HASH_REFRESH_ATTEMPTS_TABLE,
 )
 from habeas_privacy_core.vertical_hash.audit import build_vertical_audit_payload
+from habeas_privacy_core.workflow.approval import fetch_active_rule
 from fastapi import FastAPI, HTTPException
 from pydantic_settings import SettingsConfigDict
 
@@ -52,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 SYSTEM = "axios_headquarters"
 ATTEMPTS_TABLE = AXIOS_HEADQUARTERS_ATTEMPTS_TABLE
+SUPPRESS_AXIOS_HEADQUARTERS_ACTION = "suppress.axios_headquarters"
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _DEFAULT_EXTERNAL_HASH_DBT_DIR = _REPO_ROOT / "transform" / "external_hash"
 AXIOS_HEADQUARTERS_DBT_SELECT = ("stg_axios_headquarters_hashed", "mart_axios_headquarters_email_hash")
@@ -117,6 +122,41 @@ async def _claim(step: str) -> dict[str, Any] | None:
             worker_id=settings.worker_id,
             lease_minutes=10,
         )
+
+
+async def _release_claim(conn: asyncpg.Connection, attempt_id: int) -> None:
+    """Return a claimed row to pending when an approval gate blocks work."""
+    await conn.execute(
+        f"""
+        UPDATE {ATTEMPTS_TABLE}
+           SET status = 'pending',
+               worker_id = NULL,
+               claim_expires_at = NULL
+         WHERE id = $1
+           AND status = 'claimed'
+        """,
+        attempt_id,
+    )
+
+
+async def _is_suppress_axios_headquarters_approved(
+    conn: asyncpg.Connection,
+    request_id: str,
+) -> bool:
+    """Return True when suppress.axios_headquarters has an approved approval_requests row."""
+    row = await conn.fetchval(
+        """
+        SELECT 1
+          FROM approval_requests
+         WHERE request_id = $1
+           AND action_type = $2
+           AND status = 'approved'
+         LIMIT 1
+        """,
+        UUID(request_id),
+        SUPPRESS_AXIOS_HEADQUARTERS_ACTION,
+    )
+    return row is not None
 
 
 async def _complete_stub(
@@ -284,18 +324,31 @@ async def matching_collect():
 
 @app.post("/suppression/submit")
 async def suppression_submit():
-    """Submit Axios HQ suppression via stub adapter until live vendor lands."""
+    """Submit Axios HQ suppression via stub adapter until live vendor lands.
+
+    Live suppress MUST respect approval rule ``suppress.axios_headquarters``.
+    Do not complete suppression until an approved ``approval_requests`` row exists.
+    """
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
     row = await _claim(STEP_SUPPRESSION)
     if row is None:
         return {"claimed": False}
-    from axios_headquarters.adapters.stub import StubAxiosHeadquartersSuppressor
 
-    vendor_id = row.get("matched_external_id") or "axios_headquarters|stub-unknown"
-    suppress = await StubAxiosHeadquartersSuppressor().suppress(str(vendor_id))
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rule = await fetch_active_rule(conn, SUPPRESS_AXIOS_HEADQUARTERS_ACTION)
+        requires_approval = True if rule is None else bool(rule.get("requires_approval"))
+        if requires_approval:
+            request_id = str(row["request_id"])
+            if not await _is_suppress_axios_headquarters_approved(conn, request_id):
+                await _release_claim(conn, int(row["id"]))
+                return {
+                    "claimed": False,
+                    "reason": "awaiting_suppress_axios_headquarters_approval",
+                }
+
     result = await _complete_stub(int(row["id"]), STEP_SUPPRESSION)
-    del suppress  # stub outcome not yet wired to audit columns
     return {"claimed": True, **result}
 
 
