@@ -90,7 +90,7 @@ def test_fleet_worker_fleet_urls_json(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         worker_fleet.settings,
         "worker_fleet_urls",
-        '{"mailchimp":"http://127.0.0.1:8099"}',
+        '{"axios_headquarters":"http://127.0.0.1:8099"}',
     )
 
     async def fake_probe(name: str, base_url: str) -> dict[str, Any]:
@@ -109,9 +109,9 @@ def test_fleet_worker_fleet_urls_json(monkeypatch: pytest.MonkeyPatch):
 
     assert response.status_code == 200
     body = response.json()
-    mailchimp = next(w for w in body["workers"] if w["worker_key"] == "mailchimp")
-    assert mailchimp["base_url"] == "http://127.0.0.1:8099"
-    assert mailchimp["label"] == "Mailchimp"
+    axios = next(w for w in body["workers"] if w["worker_key"] == "axios_headquarters")
+    assert axios["base_url"] == "http://127.0.0.1:8099"
+    assert axios["label"] == "Axios HQ"
 
 
 def test_fleet_gcp_merge_excludes_control_plane(monkeypatch: pytest.MonkeyPatch):

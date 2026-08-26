@@ -509,8 +509,9 @@ Do **not** treat Cloud Run **Jobs** (`data-vertical-matching-drain-dev`) as flee
 | `google_sheets` | `google-sheets-dev` | `google-sheets-prod` |
 | `drop_notice_dispatcher` | `drop-notice-dispatcher-dev` | `drop-notice-dispatcher-prod` |
 | `cassandra` | `cassandra-dev` | *(not deployed — stays stub)* |
+| `axios_headquarters` | *(add `axios-headquarters-dev` when needed)* | `axios-headquarters-prod` |
 
-Mailchimp is **retired** — do not deploy `mailchimp-prod`. Communications vertical is **Axios HQ** (`axios_headquarters`); its Cloud Build yaml and worker live on the other checkout (`agent/connection-error-triage`) — do not first-create `axios-headquarters-dev` from this tree.
+Mailchimp is **retired** — do not deploy `mailchimp-prod`. Communications vertical is **Axios HQ** (`axios_headquarters`); prod deploy via `infra/cloudbuild/axios-headquarters-prod.yaml`.
 
 Rules: service name = kebab-case + `-dev`; `google_sheets` → `google-sheets-dev` (hyphen), worker_key stays underscore. Health probe path is always `GET {service_url}/readyz`.
 
@@ -528,7 +529,7 @@ Rules: service name = kebab-case + `-dev`; `google_sheets` → `google-sheets-de
 
 **DROP intake (complete):** first production CA DROP pull finished (~1.84M requests ingested). Data-vertical matching is complete. Cutover ops used `POST /ops/drop/prod/confirm-run` on admin-api — that endpoint chains connector `/download` → ingestor land/promote → request dispatch → matching `/ensure-drain`. It is the orchestrated spine runbook, not an open “first pull never run” blocker. Ongoing intake uses scheduled `drop-connector-prod` `/download` (`dpra-prod-drop-connector-download`).
 
-**Prod workers (live):** `admin-api-prod`, `drop-connector-prod`, `drop-ingestor-prod`, `request-dispatcher-prod`, `data-vertical-matching-prod`, `hash-index-refresh-prod`, `data-fulfillment-dispatcher-prod`, `drop-notice-dispatcher-prod`, `reaper-prod`, and vertical workers `auth0-prod`, `google-sheets-prod`, `lever-prod`, `paylocity-prod`.
+**Prod workers (live):** `admin-api-prod`, `drop-connector-prod`, `drop-ingestor-prod`, `request-dispatcher-prod`, `data-vertical-matching-prod`, `hash-index-refresh-prod`, `data-fulfillment-dispatcher-prod`, `drop-notice-dispatcher-prod`, `reaper-prod`, and vertical workers `auth0-prod`, `axios-headquarters-prod`, `google-sheets-prod`, `lever-prod`, `paylocity-prod`.
 
 **Not live in prod:** `cassandra-prod` (stub / do-not-write until explicit cutover). `mailchimp-prod` is retired. Legacy `matching-prod` may still exist in the project; do not point admin-api at it.
 

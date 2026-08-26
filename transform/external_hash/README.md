@@ -114,7 +114,7 @@ dbt build --select stg_auth0_hashed mart_auth0_email_hash
 | System | Hashed raw | Mart | Hash refresh |
 |--------|------------|------|--------------|
 | Auth0 | `auth0_hashed_raw` | `mart_auth0_email_hash` (`auth0_email_hash__build`) | Yes |
-| Axios HQ (`axios_headquarters`) | — (upload-every-batch; do not invent `axios_hashed_raw`) | — (no empty Axios HQ mart SQL this slice) | No |
+| Axios HQ (`axios_headquarters`) | `axios_headquarters_hashed_raw` | `mart_axios_headquarters_email_hash` (`axios_headquarters_email_hash__build`) | Yes (upload CSV) |
 | Paylocity | `paylocity_hashed_raw` | `mart_paylocity_email_hash` (`paylocity_email_hash__build`) | Yes |
 | Lever | `lever_hashed_raw` | `mart_lever_email_hash` (`lever_email_hash__build`) | Yes |
 | Alumni Google Sheet | `hr_alumni_hashed_raw` | `mart_hr_alumni_email_hash` (`hr_alumni_email_hash__build`) | Yes |

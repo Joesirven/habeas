@@ -12,6 +12,7 @@ import pytest
 from admin_api import remaining_vertical_ops, roles
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
 from habeas_privacy_core.queue.constants import (
+    AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
     GOOGLE_SHEETS_ATTEMPTS_TABLE,
     LEVER_ATTEMPTS_TABLE,
     PAYLOCITY_ATTEMPTS_TABLE,
@@ -42,7 +43,7 @@ DEFAULT_WORKER_URLS = {
 }
 
 ATTEMPTS_TABLES = {
-    "axios_headquarters": remaining_vertical_ops.AXIOS_HQ_ATTEMPTS_TABLE,
+    "axios_headquarters": AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
     "paylocity": PAYLOCITY_ATTEMPTS_TABLE,
     "lever": LEVER_ATTEMPTS_TABLE,
     "hr_alumni": GOOGLE_SHEETS_ATTEMPTS_TABLE,
@@ -220,7 +221,7 @@ def test_alumni_and_contact_us_share_google_sheets_worker_url():
     assert remaining_vertical_ops.ATTEMPTS_TABLE_BY_SYSTEM["bizdev_contacts"] == (
         GOOGLE_SHEETS_ATTEMPTS_TABLE
     )
-    assert remaining_vertical_ops.AXIOS_HQ_ATTEMPTS_TABLE == (
+    assert remaining_vertical_ops.AXIOS_HEADQUARTERS_ATTEMPTS_TABLE == (
         "axios_headquarters_attempts"
     )
 

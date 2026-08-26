@@ -33,6 +33,7 @@ members = [
     "app/sla_monitor",
     # suppression (tier C — scaffold)
     "app/paylocity",
+    "app/axios_headquarters",
     "app/lever",
     "app/auth0",
     "app/google_sheets",
@@ -55,6 +56,7 @@ root_packages = [
     "drop_notice_dispatcher",
     "hash_index_refresh",
     "paylocity",
+    "axios_headquarters",
     "lever",
     "auth0",
     "google_sheets",
@@ -78,6 +80,7 @@ source_modules = [
     "drop_notice_dispatcher",
     "hash_index_refresh",
     "paylocity",
+    "axios_headquarters",
     "lever",
     "auth0",
     "google_sheets",

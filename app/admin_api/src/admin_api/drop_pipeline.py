@@ -143,7 +143,7 @@ class DropPipelineSettings(CoreSettings):
     hash_index_refresh_url: str = "http://127.0.0.1:8086"
     reaper_url: str = "http://127.0.0.1:8087"
     auth0_url: str = "http://127.0.0.1:8088"
-    mailchimp_url: str = "http://127.0.0.1:8089"
+    axios_headquarters_url: str = "http://127.0.0.1:8089"
     paylocity_url: str = "http://127.0.0.1:8090"
     lever_url: str = "http://127.0.0.1:8091"
     google_sheets_url: str = "http://127.0.0.1:8092"
@@ -215,7 +215,7 @@ WORKER_KEYS = (
     ("hash_index_refresh", "hash_index_refresh_url"),
     ("reaper", "reaper_url"),
     ("auth0", "auth0_url"),
-    ("mailchimp", "mailchimp_url"),
+    ("axios_headquarters", "axios_headquarters_url"),
     ("paylocity", "paylocity_url"),
     ("lever", "lever_url"),
     ("google_sheets", "google_sheets_url"),

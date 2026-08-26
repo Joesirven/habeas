@@ -20,6 +20,7 @@ resolution-markers = [
 members = [
     "admin-api",
     "auth0-worker",
+    "axios-headquarters-worker",
     "cassandra-worker",
     "habeas-cli",
     "habeas-privacy-core",
@@ -226,6 +227,23 @@ requires-dist = [
     { name = "dbt-bigquery", specifier = ">=1.8" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+]
+
+[[package]]
+name = "axios-headquarters-worker"
+version = "0.1.0"
+source = { editable = "app/axios_headquarters" }
+dependencies = [
+    { name = "habeas-privacy-core" },
+    { name = "fastapi" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "fastapi", specifier = ">=0.115" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 

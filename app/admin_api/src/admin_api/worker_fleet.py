@@ -72,7 +72,7 @@ _VERTICAL_WORKER_KEYS = frozenset(
     {
         "auth0",
         "cassandra",
-        "mailchimp",
+        "axios_headquarters",
         "paylocity",
         "lever",
         "google_sheets",
@@ -370,7 +370,7 @@ def _accepted_env_worker_key(worker_key: str) -> str | None:
 def env_url_map_from_settings() -> dict[str, str]:
     """Build worker_key → base_url from DropPipelineSettings ``*_url`` + WORKER_FLEET_URLS.
 
-    Verticals (auth0, mailchimp, paylocity, lever, google_sheets, cassandra) come
+    Verticals (auth0, axios_headquarters, paylocity, lever, google_sheets, cassandra) come
     from ``WORKER_KEYS`` / ``*_url`` once impl-pipeline-api sets those fields,
     plus optional ``WORKER_FLEET_URLS`` JSON. Never includes intake_drop_poller.
     """

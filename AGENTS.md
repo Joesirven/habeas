@@ -22,7 +22,7 @@ Code repo for **Habeas Data Privacy Request Automation**. Design authority (arch
 |------|------|
 | [`libs/habeas-privacy-core/`](libs/habeas-privacy-core/) | Shared library — models, queue, audit, adapter bases (not deployed alone) |
 | [`transform/drop_hash/`](transform/drop_hash/) | dbt + UDF DROP hash index — prod home; serving marts `email_hash` / `phone_hash` / `ndz_hash` in `example-gcp-project.drop_hash_index` (not `analytics/`) |
-| [`transform/external_hash/`](transform/external_hash/) | dbt marts for external vertical hash indexes (Auth0, Paylocity, Lever, Sheets, …) — hashed raw only; Axios HQ (`axios_headquarters`) is upload-every-batch (no `axios_hashed_raw` invented this slice) |
+| [`transform/external_hash/`](transform/external_hash/) | dbt marts for external vertical hash indexes (Auth0, Axios HQ, Paylocity, Lever, Sheets, …) — hashed raw only; Axios HQ (`axios_headquarters`) is upload-every-batch |
 | [`app/`](app/) | All Cloud Run FastAPI apps — control plane + automation |
 | [`app/matching/`](app/matching/) | Matching worker + chunk drain; Python package stays `matching`; Job target `data-vertical-matching-drain-*` via `/ensure-drain`. **Prod** uses `data-vertical-matching-prod` (`admin-api-prod` `_MATCHING_URL`). **Dev** cutover from legacy `matching-dev` is still Jose-gated. |
 | [`app/admin_api/`](app/admin_api/) | Main control-plane app — mutations, dashboard, live events |

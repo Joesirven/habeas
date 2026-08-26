@@ -1,8 +1,8 @@
-# mailchimp-prod — twin of historical mailchimp-dev. Cloud SQL dpra-prod + _DATABASE_URL.
+# axios-headquarters-prod — upload-every-batch Communications vertical (replaces mailchimp-prod).
 substitutions:
   _REGION: us-east4
   _PROJECT: example-gcp-project
-  _SERVICE: mailchimp-prod
+  _SERVICE: axios-headquarters-prod
   _TAG: latest
   _CLOUDSQL_INSTANCE: example-gcp-project:us-east4:dpra-prod
 
@@ -17,7 +17,7 @@ steps:
       - -t
       - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
       - -f
-      - app/mailchimp/Dockerfile
+      - app/axios_headquarters/Dockerfile
       - .
 
   - id: push
@@ -39,7 +39,7 @@ steps:
       - --no-allow-unauthenticated
       - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
       - --timeout=3600
-      - --set-env-vars=SERVICE_NAME=mailchimp,WORKER_ID=mailchimp-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},EXTERNAL_HASH_DBT_DIR=/app/transform/external_hash,DBT_PROFILES_DIR=/app/transform/external_hash,EXTERNAL_HASH_BQ_DATASET=external_hash_index,EXTERNAL_HASH_DBT_TIMEOUT_SECONDS=3300
+      - --set-env-vars=SERVICE_NAME=axios_headquarters,WORKER_ID=axios-headquarters-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},EXTERNAL_HASH_DBT_DIR=/app/transform/external_hash,DBT_PROFILES_DIR=/app/transform/external_hash,EXTERNAL_HASH_BQ_DATASET=external_hash_index,EXTERNAL_HASH_DBT_TIMEOUT_SECONDS=3300
 
   # admin-api runtime SA only — never user/IAP run.invoker on workers. Never allUsers.
   - id: grant-admin-api-invoker

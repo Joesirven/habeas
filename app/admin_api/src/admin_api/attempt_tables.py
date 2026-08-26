@@ -23,6 +23,7 @@ from habeas_privacy_core.auth import ROLE_SUPER_ADMIN
 from habeas_privacy_core.db.pool import get_pool
 from habeas_privacy_core.queue.claim import _validate_table
 from habeas_privacy_core.queue.constants import (
+    AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
     AUTH0_ATTEMPTS_TABLE,
     GOOGLE_SHEETS_ATTEMPTS_TABLE,
     MAILCHIMP_ATTEMPTS_TABLE,
@@ -41,6 +42,7 @@ SuperAdminPrincipal = Annotated[
 BROWSER_VERTICAL_ATTEMPT_TABLES: frozenset[str] = frozenset(
     {
         AUTH0_ATTEMPTS_TABLE,
+        AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
         MAILCHIMP_ATTEMPTS_TABLE,
         GOOGLE_SHEETS_ATTEMPTS_TABLE,
     }

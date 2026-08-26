@@ -13,10 +13,10 @@ All Cloud Run FastAPI deployables. **Each app subdirectory has its own AGENTS.md
 
 ## All apps (version 0)
 
-[`admin_api/`](admin_api/) · [`matching/`](matching/) · [`request_dispatcher/`](request_dispatcher/) · [`drop_connector/`](drop_connector/) · [`drop_ingestor/`](drop_ingestor/) · [`hash_index_refresh/`](hash_index_refresh/) · [`data_fulfillment_dispatcher/`](data_fulfillment_dispatcher/) · [`reaper/`](reaper/) · [`sla_monitor/`](sla_monitor/) · [`cassandra/`](cassandra/) · [`paylocity/`](paylocity/) · [`lever/`](lever/) · [`auth0/`](auth0/) · [`google_sheets/`](google_sheets/)
+[`admin_api/`](admin_api/) · [`matching/`](matching/) · [`request_dispatcher/`](request_dispatcher/) · [`drop_connector/`](drop_connector/) · [`drop_ingestor/`](drop_ingestor/) · [`hash_index_refresh/`](hash_index_refresh/) · [`data_fulfillment_dispatcher/`](data_fulfillment_dispatcher/) · [`reaper/`](reaper/) · [`sla_monitor/`](sla_monitor/) · [`cassandra/`](cassandra/) · [`axios_headquarters/`](axios_headquarters/) · [`paylocity/`](paylocity/) · [`lever/`](lever/) · [`auth0/`](auth0/) · [`google_sheets/`](google_sheets/)
 
 
-Do not create `app/axios_headquarters/` here. The Axios HQ worker lives on the other checkout (`agent/connection-error-triage`); this tree must not create a second copy. Catalog slug `axios_headquarters`, display Axios HQ. Mailchimp is retired — do not treat `app/mailchimp/` or `mailchimp-prod` as a live Communications worker.
+Do not create duplicate Axios HQ workers elsewhere. Catalog slug `axios_headquarters`, display Axios HQ. Mailchimp is retired — use [`axios_headquarters/`](axios_headquarters/). Mailchimp is retired — do not treat `app/mailchimp/` or `mailchimp-prod` as a live Communications worker.
 
 ## Prod vertical workers (2026-08-25)
 

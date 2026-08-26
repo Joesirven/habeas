@@ -50,6 +50,7 @@ from habeas_privacy_core.db.vertical_matching import (
     normalize_vendor_record_ids,
 )
 from habeas_privacy_core.queue.constants import (
+    AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
     GOOGLE_SHEETS_ATTEMPTS_TABLE,
     LEVER_ATTEMPTS_TABLE,
     PAYLOCITY_ATTEMPTS_TABLE,
@@ -67,9 +68,6 @@ from admin_api.vertical_assignments import fetch_principal_verticals
 
 logger = logging.getLogger(__name__)
 
-# constants.py is owned by I2 — keep Axios HQ local until that constant lands.
-AXIOS_HQ_ATTEMPTS_TABLE = "axios_headquarters_attempts"
-
 REMAINING_VERTICAL_SYSTEMS = frozenset(
     {
         "axios_headquarters",
@@ -81,7 +79,7 @@ REMAINING_VERTICAL_SYSTEMS = frozenset(
 )
 
 ATTEMPTS_TABLE_BY_SYSTEM: dict[str, str] = {
-    "axios_headquarters": AXIOS_HQ_ATTEMPTS_TABLE,
+    "axios_headquarters": AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
     "paylocity": PAYLOCITY_ATTEMPTS_TABLE,
     "lever": LEVER_ATTEMPTS_TABLE,
     "hr_alumni": GOOGLE_SHEETS_ATTEMPTS_TABLE,
@@ -541,7 +539,7 @@ router.include_router(ops_router)
 router.include_router(candidates_router)
 
 __all__ = [
-    "AXIOS_HQ_ATTEMPTS_TABLE",
+    "AXIOS_HEADQUARTERS_ATTEMPTS_TABLE",
     "ATTEMPTS_TABLE_BY_SYSTEM",
     "CANDIDATES_AUDIT_COMMAND",
     "REMAINING_VERTICAL_SYSTEMS",
