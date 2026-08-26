@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useSearch } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import {
@@ -33,8 +33,11 @@ import {
 } from '@/lib/connection-display'
 import { buildReminderBannerItems } from '@/lib/owner-connector-ui'
 import { cn, firstNameFromEmail } from '@/lib/utils'
-import { DropPipelinePage } from '@/routes/ops/drop-pipeline'
 import { ownerVisibleInboxItems } from '@/routes/requests/needs-attention'
+
+const DropPipelinePage = lazy(() =>
+  import('@/routes/ops/drop-pipeline').then((module) => ({ default: module.DropPipelinePage })),
+)
 
 function OperatorDashboardHome() {
   const { isAdmin } = useMe()
@@ -699,19 +702,34 @@ function DataOwnerHome() {
   )
 }
 
-export function DashboardPage() {
-  const { isSuperAdmin, isLoading, role } = useMe()
+function DashboardHomeSkeleton() {
+  return (
+    <section className="space-y-4">
+      <SkeletonLines lines={5} />
+    </section>
+  )
+}
 
-  if (isLoading) {
+export function DashboardPage() {
+  const { isSuperAdmin, isLoading, me, role } = useMe()
+  const authBlocking = isLoading && !me
+
+  useEffect(() => {
+    if (authBlocking) {
+      void import('@/routes/ops/drop-pipeline')
+    }
+  }, [authBlocking])
+
+  if (isSuperAdmin) {
     return (
-      <section className="space-y-4">
-        <SkeletonLines lines={5} />
-      </section>
+      <Suspense fallback={<DashboardHomeSkeleton />}>
+        <DropPipelinePage />
+      </Suspense>
     )
   }
 
-  if (isSuperAdmin) {
-    return <DropPipelinePage />
+  if (authBlocking) {
+    return <DashboardHomeSkeleton />
   }
 
   if (isLegalAdminPersona(role)) {

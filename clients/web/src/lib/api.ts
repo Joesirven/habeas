@@ -82,7 +82,48 @@ export function setStoredSimulateRole(role: UserRole | null) {
   }
 }
 
-export async function fetchAdminApi<T>(path: string, init?: RequestInit): Promise<T> {
+/** Default abort for slow ops reads (pipeline, matching progress, …). */
+export const OPS_QUERY_TIMEOUT_MS = 30_000
+
+export type AdminApiFetchInit = RequestInit & {
+  /** When set, abort the request after this many milliseconds. */
+  timeoutMs?: number
+}
+
+function mergeAbortSignals(
+  left: AbortSignal | null | undefined,
+  right: AbortSignal | null | undefined,
+): AbortSignal | undefined {
+  if (left == null) return right ?? undefined
+  if (right == null) return left
+  if (typeof AbortSignal !== 'undefined' && 'any' in AbortSignal) {
+    return AbortSignal.any([left, right])
+  }
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  if (left.aborted || right.aborted) {
+    controller.abort()
+    return controller.signal
+  }
+  left.addEventListener('abort', abort)
+  right.addEventListener('abort', abort)
+  return controller.signal
+}
+
+/** Optional per-request timeout merged with any caller-provided signal. */
+export function adminApiAbortSignal(
+  timeoutMs?: number,
+  signal?: AbortSignal | null,
+): AbortSignal | undefined {
+  if (timeoutMs == null || timeoutMs <= 0) return signal ?? undefined
+  if (typeof AbortSignal === 'undefined' || !('timeout' in AbortSignal)) {
+    return signal ?? undefined
+  }
+  return mergeAbortSignals(signal, AbortSignal.timeout(timeoutMs))
+}
+
+export async function fetchAdminApi<T>(path: string, init?: AdminApiFetchInit): Promise<T> {
+  const { timeoutMs, signal: callerSignal, ...rest } = init ?? {}
   const headers: Record<string, string> = {
     Accept: 'application/json',
     'Content-Type': 'application/json',
@@ -92,13 +133,24 @@ export async function fetchAdminApi<T>(path: string, init?: RequestInit): Promis
     headers['X-Dev-Simulate-Role'] = simulateRole
   }
 
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: {
-      ...headers,
-      ...init?.headers,
-    },
-  })
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      ...rest,
+      signal: adminApiAbortSignal(timeoutMs, callerSignal),
+      headers: {
+        ...headers,
+        ...rest.headers,
+      },
+    })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'TimeoutError') {
+      throw new Error(
+        `Admin API timed out after ${timeoutMs ?? OPS_QUERY_TIMEOUT_MS}ms: ${path}`,
+      )
+    }
+    throw error
+  }
 
   if (!response.ok) {
     const detail = await response.text()
@@ -701,11 +753,15 @@ export type DropGlobalStats = {
 }
 
 export function getDropPipeline() {
-  return fetchAdminApi<DropPipelineStatus>('/ops/drop/pipeline')
+  return fetchAdminApi<DropPipelineStatus>('/ops/drop/pipeline', {
+    timeoutMs: OPS_QUERY_TIMEOUT_MS,
+  })
 }
 
 export function getDropPipelineLite() {
-  return fetchAdminApi<DropPipelineStatus>('/ops/drop/pipeline?detail=lite')
+  return fetchAdminApi<DropPipelineStatus>('/ops/drop/pipeline?detail=lite', {
+    timeoutMs: OPS_QUERY_TIMEOUT_MS,
+  })
 }
 
 export type BulkProcessSummary = {
@@ -836,6 +892,7 @@ export function listDropBulkProcesses(params?: {
   const query = search.toString()
   return fetchAdminApi<BulkProcessesPayload>(
     `/ops/drop/processes${query ? `?${query}` : ''}`,
+    { timeoutMs: OPS_QUERY_TIMEOUT_MS },
   )
 }
 

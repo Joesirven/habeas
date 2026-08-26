@@ -200,7 +200,9 @@ PROMOTE_PROXY_TIMEOUT = INGEST_PROXY_TIMEOUT
 HASH_INDEX_REFRESH_PROXY_TIMEOUT = 3300.0
 # Matching chunk drain can process many 10K BQ chunks per ensure-drain call.
 MATCHING_DRAIN_PROXY_TIMEOUT = 3300.0
-# First-pull dispatch of ~1.8M thin requests exceeds DEFAULT_PROXY_TIMEOUT (60s).
+# drain_all loops inside request_dispatcher until idle or 2M rows; first-pull
+# (~1.8M thin requests) exceeds DEFAULT_PROXY_TIMEOUT (60s). Keep under worker
+# Cloud Run timeout (3600s).
 DISPATCH_PROXY_TIMEOUT = 3300.0
 
 WORKER_KEYS = (
@@ -764,8 +766,10 @@ async def collect_pipeline_counts(
 ) -> dict[str, Any]:
     """SQL snapshot — ids, counts, and statuses only (no PII).
 
-    ``detail=lite`` skips the 1.8M-row raw spine GROUP BY and other heavy
-    walks so the console can paint before background refresh.
+    ``detail=lite`` skips the 1.8M-row raw spine GROUP BY, approval_requests
+    / hash_index_refresh scans, and approaching_sla probes so the console
+    can paint before background refresh. ``ca_drop_schedule`` (last connector
+    success) still runs.
     """
     lite = detail == "lite"
     connector_rows = await conn.fetch(
@@ -863,100 +867,108 @@ async def collect_pipeline_counts(
             """
         )
     fulfillment_ready = 0
-    approval_rows = await conn.fetch(
-        """
-        SELECT status, COUNT(*)::int AS count
-          FROM approval_requests
-         WHERE action_type = $1
-         GROUP BY status
-         ORDER BY status
-        """,
-        MATCHING_REVIEW_ACTION,
-    )
     approval_pending = 0
     approval_approved = 0
     approvals_by_status: list[dict[str, Any]] = []
-    for row in approval_rows:
-        item = {"status": row["status"], "count": int(row["count"])}
-        approvals_by_status.append(item)
-        if row["status"] == "pending":
-            approval_pending = item["count"]
-        elif row["status"] == "approved":
-            approval_approved = item["count"]
-
-    refresh_attempt_rows = await conn.fetch(
-        """
-        SELECT status, COUNT(*)::int AS count
-          FROM hash_index_refresh_attempts
-         GROUP BY status
-         ORDER BY status
-        """
-    )
     refresh_pending = 0
     refresh_by_status: list[dict[str, Any]] = []
-    for row in refresh_attempt_rows:
-        item = {"status": row["status"], "count": int(row["count"])}
-        refresh_by_status.append(item)
-        if row["status"] in ("pending", "claimed", "in_flight"):
-            refresh_pending += item["count"]
-
-    last_run_row = await conn.fetchrow(
-        """
-        SELECT r.status,
-               r.finished_at,
-               r.rows_email,
-               r.rows_phone,
-               r.rows_ndz,
-               r.error_message,
-               r.rematch_enqueued_count,
-               a.state
-          FROM hash_index_refresh_runs r
-          JOIN hash_index_refresh_attempts a ON a.id = r.attempt_id
-         ORDER BY COALESCE(r.finished_at, r.started_at) DESC
-         LIMIT 1
-        """
-    )
     last_run: dict[str, Any] | None = None
-    if last_run_row is not None:
-        last_run = {
-            "state": last_run_row["state"],
-            "status": last_run_row["status"],
-            "finished_at": last_run_row["finished_at"].isoformat()
-            if last_run_row["finished_at"] is not None
-            else None,
-            "rows_email": last_run_row["rows_email"],
-            "rows_phone": last_run_row["rows_phone"],
-            "rows_ndz": last_run_row["rows_ndz"],
-            "error_message": last_run_row["error_message"],
-            "rematch_enqueued_count": int(last_run_row["rematch_enqueued_count"] or 0),
-        }
+    approaching_connector = 0
+    approaching_ingest = 0
+    approaching_matching = 0
+    approaching_matching_review = 0
 
-    open_statuses = list(_OPEN_ATTEMPT_STATUSES)
-    approaching_connector = await conn.fetchval(
-        """
-        -- approaching_sla:connector
-        SELECT COUNT(*)::int
-          FROM drop_connector_attempts
-         WHERE status = ANY($1::text[])
-           AND attempted_at < NOW() - ($2 || ' hours')::interval
-        """,
-        open_statuses,
-        str(APPROACHING_SLA_THRESHOLD_HOURS["connector"]),
-    )
-    approaching_ingest = await conn.fetchval(
-        """
-        -- approaching_sla:ingest
-        SELECT COUNT(*)::int
-          FROM drop_ingest_attempts
-         WHERE status = ANY($1::text[])
-           AND attempted_at < NOW() - ($2 || ' hours')::interval
-        """,
-        open_statuses,
-        str(APPROACHING_SLA_THRESHOLD_HOURS["ingest"]),
-    )
-    if lite:
-        approaching_matching = 0
-    else:
+    if not lite:
+        # Lite skips approval_requests + hash_index scans and approaching_sla
+        # probes; matching_review / hash_index_refresh paint as zeros until
+        # the full refresh. ca_drop_schedule (last connector success) stays.
+        approval_rows = await conn.fetch(
+            """
+            SELECT status, COUNT(*)::int AS count
+              FROM approval_requests
+             WHERE action_type = $1
+             GROUP BY status
+             ORDER BY status
+            """,
+            MATCHING_REVIEW_ACTION,
+        )
+        for row in approval_rows:
+            item = {"status": row["status"], "count": int(row["count"])}
+            approvals_by_status.append(item)
+            if row["status"] == "pending":
+                approval_pending = item["count"]
+            elif row["status"] == "approved":
+                approval_approved = item["count"]
+
+        refresh_attempt_rows = await conn.fetch(
+            """
+            SELECT status, COUNT(*)::int AS count
+              FROM hash_index_refresh_attempts
+             GROUP BY status
+             ORDER BY status
+            """
+        )
+        for row in refresh_attempt_rows:
+            item = {"status": row["status"], "count": int(row["count"])}
+            refresh_by_status.append(item)
+            if row["status"] in ("pending", "claimed", "in_flight"):
+                refresh_pending += item["count"]
+
+        last_run_row = await conn.fetchrow(
+            """
+            SELECT r.status,
+                   r.finished_at,
+                   r.rows_email,
+                   r.rows_phone,
+                   r.rows_ndz,
+                   r.error_message,
+                   r.rematch_enqueued_count,
+                   a.state
+              FROM hash_index_refresh_runs r
+              JOIN hash_index_refresh_attempts a ON a.id = r.attempt_id
+             ORDER BY COALESCE(r.finished_at, r.started_at) DESC
+             LIMIT 1
+            """
+        )
+        if last_run_row is not None:
+            last_run = {
+                "state": last_run_row["state"],
+                "status": last_run_row["status"],
+                "finished_at": last_run_row["finished_at"].isoformat()
+                if last_run_row["finished_at"] is not None
+                else None,
+                "rows_email": last_run_row["rows_email"],
+                "rows_phone": last_run_row["rows_phone"],
+                "rows_ndz": last_run_row["rows_ndz"],
+                "error_message": last_run_row["error_message"],
+                "rematch_enqueued_count": int(
+                    last_run_row["rematch_enqueued_count"] or 0
+                ),
+            }
+
+        open_statuses = list(_OPEN_ATTEMPT_STATUSES)
+        approaching_connector = await conn.fetchval(
+            """
+            -- approaching_sla:connector
+            SELECT COUNT(*)::int
+              FROM drop_connector_attempts
+             WHERE status = ANY($1::text[])
+               AND attempted_at < NOW() - ($2 || ' hours')::interval
+            """,
+            open_statuses,
+            str(APPROACHING_SLA_THRESHOLD_HOURS["connector"]),
+        )
+        approaching_ingest = await conn.fetchval(
+            """
+            -- approaching_sla:ingest
+            SELECT COUNT(*)::int
+              FROM drop_ingest_attempts
+             WHERE status = ANY($1::text[])
+               AND attempted_at < NOW() - ($2 || ' hours')::interval
+            """,
+            open_statuses,
+            str(APPROACHING_SLA_THRESHOLD_HOURS["ingest"]),
+        )
         approaching_matching = await conn.fetchval(
             """
             -- approaching_sla:matching
@@ -970,18 +982,18 @@ async def collect_pipeline_counts(
             open_statuses,
             str(APPROACHING_SLA_THRESHOLD_HOURS["matching"]),
         )
-    approaching_matching_review = await conn.fetchval(
-        """
-        -- approaching_sla:matching_review
-        SELECT COUNT(*)::int
-          FROM approval_requests
-         WHERE action_type = $1
-           AND status = 'pending'
-           AND requested_at < NOW() - ($2 || ' hours')::interval
-        """,
-        MATCHING_REVIEW_ACTION,
-        str(APPROACHING_SLA_THRESHOLD_HOURS["matching_review"]),
-    )
+        approaching_matching_review = await conn.fetchval(
+            """
+            -- approaching_sla:matching_review
+            SELECT COUNT(*)::int
+              FROM approval_requests
+             WHERE action_type = $1
+               AND status = 'pending'
+               AND requested_at < NOW() - ($2 || ' hours')::interval
+            """,
+            MATCHING_REVIEW_ACTION,
+            str(APPROACHING_SLA_THRESHOLD_HOURS["matching_review"]),
+        )
 
     last_connector_success = await conn.fetchval(
         """

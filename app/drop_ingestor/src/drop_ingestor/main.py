@@ -38,7 +38,7 @@ class PromoteRequest(BaseModel):
     promote_attempt_id: int | None = None
     source_csv_filename: str | None = None
     list_type: str | None = None
-    limit: int = Field(default=500, ge=1, le=5000)
+    limit: int = Field(default=5000, ge=1, le=5000)
 
 
 @asynccontextmanager

@@ -146,9 +146,9 @@ type RoleGateProps = {
 }
 
 export function RoleGate({ allow, children }: RoleGateProps) {
-  const { role, isLoading, isError, error } = useAuth()
+  const { role, isLoading, me, isError, error } = useAuth()
 
-  if (isLoading) {
+  if (isLoading && !me) {
     return (
       <div className="space-y-3" role="status" aria-label="Loading access">
         {Array.from({ length: 4 }, (_, index) => (

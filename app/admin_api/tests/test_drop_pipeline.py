@@ -209,6 +209,63 @@ def test_pipeline_lite_skips_worker_probes(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
+async def test_collect_pipeline_counts_lite_skips_approval_hash_sla() -> None:
+    """detail=lite must not scan approval_requests, hash_index, or approaching_sla."""
+    fetch_sqls: list[str] = []
+    fetchval_sqls: list[str] = []
+    fetchrow_sqls: list[str] = []
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        fetch_sqls.append(sql)
+        if "drop_connector_attempts" in sql and "GROUP BY" in sql:
+            return [_Row(step="download", status="success", count=1)]
+        if "drop_ingest_attempts" in sql and "GROUP BY" in sql:
+            return [_Row(step="land", status="pending", count=2)]
+        return []
+
+    async def fetchval(sql: str, *args: Any) -> Any:
+        fetchval_sqls.append(sql)
+        if "status = 'success'" in sql and "drop_connector_attempts" in sql:
+            return None
+        return 0
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        fetchrow_sqls.append(sql)
+        return None
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchval = AsyncMock(side_effect=fetchval)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+
+    result = await drop_pipeline.collect_pipeline_counts(conn, detail="lite")
+
+    assert not any("approval_requests" in sql for sql in fetch_sqls)
+    assert not any("hash_index_refresh_attempts" in sql for sql in fetch_sqls)
+    assert not any("hash_index_refresh_runs" in sql for sql in fetchrow_sqls)
+    assert not any("approaching_sla:" in sql for sql in fetchval_sqls)
+    assert any(
+        "status = 'success'" in sql and "drop_connector_attempts" in sql
+        for sql in fetchval_sqls
+    )
+
+    assert result["matching_review"]["pending"] == 0
+    assert result["matching_review"]["approved"] == 0
+    assert result["matching_review"]["by_status"] == []
+    assert result["hash_index_refresh"]["pending"] == 0
+    assert result["hash_index_refresh"]["attempts_by_status"] == []
+    assert result["hash_index_refresh"]["last_run"] is None
+    assert result["approaching_sla"] == {
+        "connector": 0,
+        "ingest": 0,
+        "matching": 0,
+        "matching_review": 0,
+        "thresholds_hours": dict(drop_pipeline.APPROACHING_SLA_THRESHOLD_HOURS),
+    }
+    assert "ca_drop_schedule" in result
+
+
+@pytest.mark.asyncio
 async def test_pipeline_status_strips_worker_urls(monkeypatch: pytest.MonkeyPatch):
     async def fake_counts(conn: Any, *, detail: str = "full") -> dict[str, Any]:
         return {"connector_attempts": []}
@@ -451,6 +508,8 @@ def test_fulfill_proxy_forwards_request_id(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_dispatch_proxy_forwards_drain_all(monkeypatch: pytest.MonkeyPatch):
+    from admin_api import main as admin_main
+
     captured: list[tuple[str, Any]] = []
 
     class FakeResponse:
@@ -474,6 +533,8 @@ def test_dispatch_proxy_forwards_drain_all(monkeypatch: pytest.MonkeyPatch):
             return FakeResponse()
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(drop_pipeline, "auth_headers_for", lambda _url: {})
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
 
     with TestClient(app) as client:
         response = client.post("/ops/drop/dispatch", json={"drain_all": True})

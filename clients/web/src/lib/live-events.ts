@@ -15,7 +15,11 @@ export function useLiveEvents() {
     })
 
     source.onmessage = () => {
-      queryClient.invalidateQueries()
+      void queryClient.invalidateQueries({
+        queryKey: ['admin-api', 'ops', 'drop-matching-progress'],
+      })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
+      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-processes'] })
     }
 
     source.onerror = () => {

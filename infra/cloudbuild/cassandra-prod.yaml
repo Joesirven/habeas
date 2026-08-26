@@ -1,0 +1,65 @@
+# cassandra-prod — Cloud SQL dpra-prod, Cassandra ring stays DEV.
+# Host/port/keyspace: broker-db-dev.example.internal:9041 / person_db_dev (not :9042 / person_db).
+# cassandra-dev.yaml does not set CASSANDRA_* or --set-secrets. Env names from the
+# worker adapter (do not put passwords in yaml; no Secret Manager refs here):
+#   CASSANDRA_HOST, CASSANDRA_PORT, CASSANDRA_KEYSPACE, CASSANDRA_TABLE
+#   CASSANDRA_USER, CASSANDRA_PASSWORD / CASSANDRA_PASSWORD_FILE, CASSANDRA_SSL_CA
+#   CASSANDRA_TRANSPORT (defaults stub)
+substitutions:
+  _REGION: us-east4
+  _PROJECT: example-gcp-project
+  _SERVICE: cassandra-prod
+  _TAG: latest
+  _CLOUDSQL_INSTANCE: example-gcp-project:us-east4:dpra-prod
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+      - -f
+      - app/cassandra/Dockerfile
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
+      - --timeout=3600
+      - --set-env-vars=SERVICE_NAME=cassandra,WORKER_ID=cassandra-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},CASSANDRA_HOST=broker-db.example.internal,CASSANDRA_PORT=9041,CASSANDRA_KEYSPACE=person_db_dev,CASSANDRA_TABLE=restricted_person_id_worker
+
+  # admin-api runtime SA only — never user/IAP run.invoker on workers. Never allUsers.
+  - id: grant-admin-api-invoker
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - add-iam-policy-binding
+      - ${_SERVICE}
+      - --region=${_REGION}
+      - --member=serviceAccount:95660886550-compute@developer.gserviceaccount.com
+      - --role=roles/run.invoker
+      - --quiet
+
+images:
+  - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}

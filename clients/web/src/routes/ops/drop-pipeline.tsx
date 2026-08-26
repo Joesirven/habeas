@@ -42,6 +42,7 @@ import {
   listDropBulkProcessRuns,
   listOpsLogs,
   listRuns,
+  OPS_QUERY_TIMEOUT_MS,
   postDropDownload,
   postDropFulfill,
   postDropLand,
@@ -115,7 +116,9 @@ type DropMatchingProgress = MatchingAttemptCounts & {
 }
 
 function getDropMatchingProgress() {
-  return fetchAdminApi<DropMatchingProgress>('/ops/drop/matching-progress')
+  return fetchAdminApi<DropMatchingProgress>('/ops/drop/matching-progress', {
+    timeoutMs: OPS_QUERY_TIMEOUT_MS,
+  })
 }
 
 function matchingAttemptSlice(
@@ -3298,6 +3301,7 @@ function DropPipelinePageInner() {
     queryKey: ['admin-api', 'ops', 'drop-processes', 'recent-30d'],
     // Prefer recent window (not calendar "today") so older downloads still surface.
     queryFn: () => listDropBulkProcesses({ days: 30, limit: 100 }),
+    enabled: pipelineLiteQuery.isSuccess,
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })
@@ -3327,7 +3331,7 @@ function DropPipelinePageInner() {
   const trendsQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-workers', 'trends', '3m'],
     queryFn: () => getDropWorkerTrends('3m'),
-    enabled: (pipelineLiteQuery.isFetched || pipelineQuery.isFetched) && processesQuery.isFetched,
+    enabled: pipelineLiteQuery.isFetched && fatPipelineEnabled,
     refetchInterval: 60_000,
     placeholderData: (previous) => previous,
   })
@@ -3429,18 +3433,20 @@ function DropPipelinePageInner() {
     })
   }
 
-  const data: DropPipelineStatus | undefined = pipelineQuery.data ?? pipelineLiteQuery.data
+  const liteData = pipelineLiteQuery.data
+  const data: DropPipelineStatus | undefined = pipelineQuery.data ?? liteData
+  const headerData = liteData ?? data
   const matchingProgress = matchingProgressQuery.data
-  const showSkeleton = pipelineLiteQuery.isPending && !pipelineLiteQuery.data
+  const showSkeleton = pipelineLiteQuery.isPending && !liteData
   const hashPending = (data?.hash_index_refresh?.pending ?? 0) > 0
-  const workerHealth = pipelineQuery.data?.worker_health ?? data?.worker_health
+  const workerHealth = pipelineQuery.data?.worker_health ?? headerData?.worker_health
   const hashWorkerTone = workerHealth
     ? workerHealth.hash_index_refresh == null
       ? 'not_deployed'
       : workerProbeTone(workerHealth.hash_index_refresh)
     : 'unknown'
   const lastRun = data?.hash_index_refresh?.last_run
-  const caSchedule = data?.ca_drop_schedule
+  const caSchedule = headerData?.ca_drop_schedule
 
   const monthErrorRate = (() => {
     const rows = trendsQuery.data?.workers ?? []
@@ -3518,8 +3524,8 @@ function DropPipelinePageInner() {
       </header>
 
       <CompactOpsMetrics
-        openRequests={data?.drop_requests.count ?? null}
-        reviewPending={data?.matching_review.pending ?? null}
+        openRequests={headerData?.drop_requests.count ?? null}
+        reviewPending={headerData?.matching_review.pending ?? null}
         lastCaDrop={caSchedule?.last_success_at ?? null}
         nextCaDrop={caSchedule?.next_run_at ?? null}
         errorRateMonth={monthErrorRate}
@@ -3527,7 +3533,7 @@ function DropPipelinePageInner() {
         matchPending={matchPending}
         matchDrainActive={matchDrainActive}
         totalSuppressed={totalSuppressed}
-        workerHealth={data?.worker_health}
+        workerHealth={headerData?.worker_health}
       />
 
       {lastAction && actionResult && tab === 'pipeline' ? (
@@ -3545,11 +3551,11 @@ function DropPipelinePageInner() {
 
       <PipelineTabBar active={tab} onSelect={setTab} />
 
-      {pipelineQuery.isError && !data && (
+      {(pipelineLiteQuery.isError || pipelineQuery.isError) && !liteData && !data ? (
         <p className="text-sm text-red-700">
           Could not load DROP pipeline status from admin-api.
         </p>
-      )}
+      ) : null}
 
       {tab === 'pipeline' ? (
         <BatchRequestRunsList
