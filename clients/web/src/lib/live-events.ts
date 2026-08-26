@@ -69,10 +69,12 @@ function isBulkProcessListQuery(queryKey: readonly unknown[]): boolean {
   return segment === 'recent-30d' || segment === 'pipeline-list'
 }
 
-export function useLiveEvents() {
+export function useLiveEvents(enabled = true) {
   const queryClient = useQueryClient()
 
   useEffect(() => {
+    if (!enabled) return
+
     const source = new EventSource(LIVE_EVENTS_PATH)
 
     source.addEventListener('ready', () => {
@@ -120,5 +122,5 @@ export function useLiveEvents() {
     }
 
     return () => source.close()
-  }, [queryClient])
+  }, [enabled, queryClient])
 }

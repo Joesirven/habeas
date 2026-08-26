@@ -25,6 +25,7 @@ from admin_api.drop_pipeline import APPROACHING_SLA_THRESHOLD_HOURS, MatchingRev
 from admin_api.drop_pipeline import health_router as ops_health_router
 from admin_api.drop_pipeline import iter_live_pipeline_events
 from admin_api.drop_pipeline import router as drop_pipeline_router
+from admin_api.drop_pipeline import SuperAdminPrincipal
 from admin_api.drop_prod_cutover import router as drop_prod_cutover_router
 from admin_api.fulfillment_kickoff import router as fulfillment_kickoff_router
 from admin_api.fulfillment_ops import router as fulfillment_ops_router
@@ -940,7 +941,7 @@ async def readyz():
 
 
 @app.get("/live/events")
-async def live_events():
+async def live_events(_principal: SuperAdminPrincipal):
     """Server-Sent Events — matching_progress and bulk_process count patches."""
 
     return EventSourceResponse(iter_live_pipeline_events())

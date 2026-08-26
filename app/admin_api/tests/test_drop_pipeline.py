@@ -244,6 +244,8 @@ async def test_collect_pipeline_counts_lite_skips_approval_hash_sla() -> None:
     assert not any("hash_index_refresh_attempts" in sql for sql in fetch_sqls)
     assert not any("hash_index_refresh_runs" in sql for sql in fetchrow_sqls)
     assert not any("approaching_sla:" in sql for sql in fetchval_sqls)
+    assert not any("drop_raw_requests" in sql for sql in fetch_sqls)
+    assert len(fetch_sqls) == 2
     assert any(
         "status = 'success'" in sql and "drop_connector_attempts" in sql
         for sql in fetchval_sqls
@@ -2596,6 +2598,32 @@ def test_drop_pipeline_read_requires_super_admin(
     assert response.json()["detail"] == "insufficient role"
 
 
+def test_live_events_requires_super_admin(
+    monkeypatch: pytest.MonkeyPatch,
+    _admin_headers: dict[str, str],
+) -> None:
+    roles.settings.admin_api_admins = "admin@example.com"
+    roles.settings.admin_api_super_admins = ""
+
+    with TestClient(app) as client:
+        response = client.get("/live/events", headers=_admin_headers)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "insufficient role"
+
+
+def test_live_events_requires_iap_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    roles.settings.admin_api_super_admins = "ops@example.com"
+
+    with TestClient(app) as client:
+        response = client.get("/live/events")
+
+    assert response.status_code == 401
+
+
 def test_drop_spine_proxy_requires_super_admin(
     monkeypatch: pytest.MonkeyPatch,
     _admin_headers: dict[str, str],
@@ -3865,3 +3893,364 @@ def test_matching_progress_sql_is_attempts_group_by_only(
     assert response.status_code == 200
     _assert_matching_progress_sql(issued)
     _assert_matching_progress_body(response.json())
+
+
+def _capturing_pipeline_summary_conn() -> tuple[MagicMock, list[str]]:
+    """Conn that records summary SQL — must stay off the drop_raw_requests spine."""
+    issued: list[str] = []
+
+    async def fetchval(sql: str, *args: Any) -> Any:
+        issued.append(sql)
+        if "drop_raw_requests" in sql:
+            raise AssertionError("pipeline summary must not scan drop_raw_requests")
+        if "FROM requests" in sql and "intake_source = 'drop'" in sql:
+            return 1_843_251
+        if "approval_requests" in sql and "status = 'pending'" in sql:
+            return 17
+        if "drop_connector_attempts" in sql and "completed_at" in sql:
+            return datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+        return 0
+
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(side_effect=fetchval)
+    conn.fetch = AsyncMock(
+        side_effect=lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("pipeline summary must not use fetch()")
+        )()
+    )
+    conn.fetchrow = AsyncMock(
+        side_effect=lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("pipeline summary must not use fetchrow()")
+        )()
+    )
+    return conn, issued
+
+
+async def _fake_ca_drop_schedule_payload(
+    *, last_success_at: datetime | str | None = None
+) -> dict[str, Any]:
+    last_iso = (
+        last_success_at.isoformat()
+        if isinstance(last_success_at, datetime)
+        else last_success_at
+    )
+    return {
+        "label": "CA DROP download",
+        "schedule_utc": "14:00",
+        "cadence": "every_15_days",
+        "next_run_at": "2026-08-26T14:00:00+00:00",
+        "last_success_at": last_iso,
+        "interval_days": 15,
+    }
+
+
+def _assert_pipeline_summary_sql(issued: list[str]) -> None:
+    assert len(issued) == 3
+    assert all("drop_raw_requests" not in sql for sql in issued)
+    open_sql = next(sql for sql in issued if "FROM requests" in sql)
+    review_sql = next(sql for sql in issued if "approval_requests" in sql)
+    connector_sql = next(sql for sql in issued if "drop_connector_attempts" in sql)
+    assert "intake_source = 'drop'" in open_sql
+    assert "COUNT(*)" in open_sql
+    assert "status = 'pending'" in review_sql
+    assert "status = 'success'" in connector_sql
+    assert "GROUP BY" not in " ".join(issued)
+
+
+def _assert_pipeline_summary_body(body: dict[str, Any]) -> None:
+    assert body["open_requests"] == 1_843_251
+    assert body["review_pending"] == 17
+    assert body["drop_requests"]["count"] == 1_843_251
+    assert body["matching_review"]["pending"] == 17
+    assert body["workers_total"] == len(drop_pipeline.WORKER_KEYS)
+    assert "as_of" in body
+    assert "worker_health" in body
+    assert isinstance(body["worker_health"], dict)
+    assert "ca_drop_schedule" in body
+    assert body["ca_drop_schedule"]["cadence"] == "every_15_days"
+    assert body["ca_drop_schedule"]["last_success_at"] is not None
+    blob = json.dumps(body).lower()
+    assert "drop_raw_requests" not in blob
+
+
+@pytest.mark.asyncio
+async def test_collect_pipeline_summary_bounded_sql_no_raw_spine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Header summary counts requests + review pending only — no raw spine."""
+    monkeypatch.setattr(
+        "admin_api.worker_schedules.ca_drop_schedule_payload",
+        _fake_ca_drop_schedule_payload,
+    )
+    conn, issued = _capturing_pipeline_summary_conn()
+    body = await drop_pipeline.collect_pipeline_summary(conn)
+    _assert_pipeline_summary_sql(issued)
+    _assert_pipeline_summary_body(body)
+    assert conn.fetchval.await_count == 3
+
+
+def test_pipeline_summary_route_no_drop_raw_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GET /ops/drop/pipeline/summary stays off drop_raw_requests."""
+    from admin_api import main as admin_main
+
+    conn, issued = _capturing_pipeline_summary_conn()
+
+    class _Acquire:
+        async def __aenter__(self):
+            return conn
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(
+        "admin_api.worker_schedules.ca_drop_schedule_payload",
+        _fake_ca_drop_schedule_payload,
+    )
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/drop/pipeline/summary",
+            headers={IAP_EMAIL_HEADER: "accounts.google.com:ops@example.com"},
+        )
+
+    assert response.status_code == 200
+    _assert_pipeline_summary_sql(issued)
+    _assert_pipeline_summary_body(response.json())
+
+
+@pytest.mark.asyncio
+async def test_collect_bulk_process_summaries_lite_no_spine_cte() -> None:
+    """Lite bulk summaries batch connector + ingest ledgers — never batch_raw CTE."""
+    attempted = datetime(2026, 8, 25, 18, 0, tzinfo=timezone.utc)
+    issued: list[str] = []
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        issued.append(sql)
+        if "drop_raw_requests" in sql or "batch_raw" in sql:
+            raise AssertionError("lite summaries must not use drop_raw_requests spine")
+        if "drop_connector_attempts" in sql and "ANY($1::bigint[])" in sql:
+            assert args[0] == [1, 2, 3]
+            return [
+                _Row(
+                    id=1,
+                    status="success",
+                    attempted_at=attempted,
+                    completed_at=attempted,
+                    gcs_uri="gs://bucket/a.zip",
+                ),
+                _Row(
+                    id=2,
+                    status="success",
+                    attempted_at=attempted,
+                    completed_at=attempted,
+                    gcs_uri="gs://bucket/b.zip",
+                ),
+                _Row(
+                    id=3,
+                    status="pending",
+                    attempted_at=attempted,
+                    completed_at=None,
+                    gcs_uri=None,
+                ),
+            ]
+        if "drop_ingest_attempts" in sql and "ANY($1::text[])" in sql:
+            return [
+                _Row(
+                    gcs_uri="gs://bucket/a.zip",
+                    step="land",
+                    status="success",
+                    list_type="Email",
+                    count=1,
+                ),
+            ]
+        return []
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+
+    summaries = await drop_pipeline.collect_bulk_process_summaries_lite(
+        conn, process_ids=[1, 2, 3]
+    )
+    assert set(summaries) == {1, 2, 3}
+    assert all("drop_raw_requests" not in sql for sql in issued)
+    assert all("batch_raw" not in sql for sql in issued)
+    assert len([sql for sql in issued if "drop_connector_attempts" in sql]) == 1
+    assert conn.fetch.await_count == 2
+
+
+def test_processes_include_summary_uses_lite_bulk_not_spine_per_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """include_summary=true bulk-calls lite summaries — not collect_bulk_process_progress."""
+    from admin_api import main as admin_main
+
+    progress_calls: list[int] = []
+    lite_calls: list[list[int]] = []
+    attempted = datetime(2026, 8, 25, 18, 0, tzinfo=timezone.utc)
+
+    async def fake_list(
+        conn: Any,
+        *,
+        day: Any = None,
+        days: int = 1,
+        intake_source: str | None = None,
+        download_status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "process_id": pid,
+                "intake_source": "drop",
+                "process_at": attempted.isoformat(),
+                "completed_at": None,
+                "download_status": "success",
+                "label": f"drop · {pid}",
+                "linkable": True,
+            }
+            for pid in (10, 11, 12)
+        ]
+
+    async def forbidden_progress(
+        conn: Any, *, process_id: int, detail: str = "full"
+    ) -> dict[str, Any] | None:
+        progress_calls.append(process_id)
+        raise AssertionError(
+            "include_summary list path must not call collect_bulk_process_progress"
+        )
+
+    async def tracking_lite(
+        conn: Any, *, process_ids: list[int]
+    ) -> dict[int, dict[str, Any]]:
+        lite_calls.append(list(process_ids))
+        return {
+            pid: {
+                "process_id": pid,
+                "overall": {
+                    "status": "running",
+                    "current_stage": "land",
+                    "percent": 25,
+                },
+                "raw_rows": 0,
+                "request_rows": 0,
+                "stages": {
+                    "download": {"success": 1, "failed": 0, "open": 0, "total": 1},
+                    "land": {"success": 1, "failed": 0, "open": 0, "total": 1},
+                    "promote": {"success": 0, "failed": 0, "open": 0, "total": 0},
+                },
+            }
+            for pid in process_ids
+        }
+
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "list_bulk_processes", fake_list)
+    monkeypatch.setattr(drop_pipeline, "collect_bulk_process_progress", forbidden_progress)
+    monkeypatch.setattr(drop_pipeline, "collect_bulk_process_summaries_lite", tracking_lite)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/drop/processes?include_summary=true",
+            headers={IAP_EMAIL_HEADER: "accounts.google.com:ops@example.com"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert progress_calls == []
+    assert lite_calls == [[10, 11, 12]]
+    assert len(body["processes"]) == 3
+    assert all(item["overall"]["status"] == "running" for item in body["processes"])
+    assert all(item["request_rows"] == 0 for item in body["processes"])
+
+
+@pytest.mark.asyncio
+async def test_iter_live_pipeline_events_emits_typed_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SSE emits ready, matching_progress, and bulk_process patches — hermetic."""
+    import asyncio
+
+    matching_payload = {
+        "pending": 4,
+        "claimed": 1,
+        "success": 99,
+        "by_status": [{"status": "pending", "count": 4}],
+        "drain": {"active": False, "holder": None, "expires_at": None},
+    }
+    bulk_summary = {
+        "process_id": 12,
+        "overall": {
+            "status": "running",
+            "current_stage": "matching",
+            "percent": 40,
+        },
+        "raw_rows": 0,
+        "request_rows": 0,
+        "stages": {
+            "download": {"success": 1, "failed": 0, "open": 0, "total": 1},
+            "land": {"success": 3, "failed": 0, "open": 0, "total": 3},
+            "promote": {"success": 0, "failed": 0, "open": 1, "total": 1},
+        },
+    }
+
+    async def fake_matching(_conn: Any) -> dict[str, Any]:
+        return matching_payload
+
+    async def fake_list(_conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return [{"process_id": 12, "intake_source": "drop", "label": "drop · test"}]
+
+    async def fake_lite(
+        _conn: Any, *, process_ids: list[int]
+    ) -> dict[int, dict[str, Any]]:
+        assert process_ids == [12]
+        return {12: bulk_summary}
+
+    sleep_calls = 0
+
+    async def fake_sleep(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(drop_pipeline.settings, "database_url", "postgresql://test")
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "collect_matching_progress", fake_matching)
+    monkeypatch.setattr(drop_pipeline, "list_bulk_processes", fake_list)
+    monkeypatch.setattr(drop_pipeline, "collect_bulk_process_summaries_lite", fake_lite)
+    monkeypatch.setattr(drop_pipeline, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    gen = drop_pipeline.iter_live_pipeline_events()
+    collected: list[dict[str, str]] = []
+    try:
+        while True:
+            collected.append(await gen.__anext__())
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await gen.aclose()
+
+    assert collected[0] == {"event": "ready", "data": "connected"}
+    assert collected[1]["event"] == "matching_progress"
+    assert json.loads(collected[1]["data"]) == matching_payload
+    assert collected[2]["event"] == "bulk_process"
+    assert json.loads(collected[2]["data"]) == bulk_summary
+    assert sleep_calls == 1

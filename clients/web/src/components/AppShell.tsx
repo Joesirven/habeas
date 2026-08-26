@@ -292,9 +292,9 @@ function RoleStatusBanner() {
 }
 
 function AppShellFrame({ children }: AppShellProps) {
-  useLiveEvents()
   const navigate = useNavigate()
   const { role, me } = useAuth()
+  useLiveEvents(role === 'super_admin')
   const showPalette = canAccessOwnerPalette(role)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const openPalette = useCallback(() => setPaletteOpen(true), [])
