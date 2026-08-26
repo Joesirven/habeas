@@ -39,9 +39,11 @@ from habeas_privacy_core.connections.catalog import (
     APPROACH_LIVE,
     APPROACH_UPLOAD,
     VERTICAL_DATA,
+    connection_method_label,
     get_bindings_for_vertical,
     get_vertical,
     is_approach_allowed,
+    upload_allowed,
 )
 from habeas_privacy_core.connections.freshness import (
     connection_gate_input,
@@ -52,7 +54,7 @@ from habeas_privacy_core.connections.freshness import (
     validate_multi_pii_delimiter,
 )
 from habeas_privacy_core.connections.models import Connection, sanitize_test_detail
-from habeas_privacy_core.connections.secrets import get_secret_writer
+from habeas_privacy_core.connections.secrets import get_secret_reader, get_secret_writer
 from habeas_privacy_core.connections.systems import get_system, validate_credentials
 from habeas_privacy_core.db import connections as connections_db
 from habeas_privacy_core.db.pool import get_pool
@@ -92,6 +94,13 @@ _CANONICAL_REFRESH_CADENCES = frozenset(
 
 _OWNER_SHEETS_OAUTH_SYSTEMS = frozenset({"hr_alumni", "bizdev_contacts"})
 _OWNER_CONNECTORS_PATH = "/owner/connectors"
+# Session/web catalog id is ``axios_hq``. KD20 binding + matching-gate /
+# upload-template slug stays ``axios_headquarters``. Accept both on owner
+# routes; persist the binding slug so gate lookup succeeds; emit ``axios_hq``
+# so the shipped wizard copy and cadence hint match.
+_AXIOS_HQ_SESSION_SYSTEM = "axios_hq"
+_AXIOS_HQ_BINDING_SYSTEM = "axios_headquarters"
+_AXIOS_HQ_SYSTEMS = frozenset({_AXIOS_HQ_SESSION_SYSTEM, _AXIOS_HQ_BINDING_SYSTEM})
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
 _AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
@@ -116,6 +125,9 @@ class ConnectorSystemOut(BaseModel):
     display_status: str
     gate_code: str
     gate_allowed: bool
+    connection_method_label: str | None = None
+    upload_allowed: bool
+    connection_method: str | None = None
 
 
 class ConnectorListOut(BaseModel):
@@ -214,6 +226,8 @@ class LiveCredentialPreviewOut(BaseModel):
     display_name: str
     fields: list[CredentialFieldOut]
     trust_copy: str
+    connection_method_label: str | None = None
+    upload_allowed: bool
 
 
 class ConnectorRemindersOut(BaseModel):
@@ -373,9 +387,31 @@ def _validate_vertical(vertical_id: str) -> None:
         raise HTTPException(status_code=422, detail="unknown vertical_id") from exc
 
 
+def _canonical_owner_system(system: str) -> str:
+    """Resolve session ``axios_hq`` to the Communications catalog binding slug."""
+    key = system.strip().lower()
+    if key in _AXIOS_HQ_SYSTEMS:
+        return _AXIOS_HQ_BINDING_SYSTEM
+    return key
+
+
+def _session_owner_system(system: str) -> str:
+    """Owner-wizard / web catalog id — Axios HQ is ``axios_hq``, not the worker slug."""
+    key = system.strip().lower()
+    if key in _AXIOS_HQ_SYSTEMS:
+        return _AXIOS_HQ_SESSION_SYSTEM
+    return key
+
+
 def _binding_or_404(vertical_id: str, system: str) -> Any:
+    canonical = _canonical_owner_system(system)
     for binding in get_bindings_for_vertical(vertical_id):
-        if binding.system == system:
+        if binding.system == canonical:
+            return binding
+        if (
+            binding.system in _AXIOS_HQ_SYSTEMS
+            and canonical in _AXIOS_HQ_SYSTEMS
+        ):
             return binding
     raise HTTPException(status_code=404, detail="system not bound to vertical")
 
@@ -434,6 +470,13 @@ def _connection_to_out(
     connection: Connection | None,
     display_name: str,
 ) -> ConnectorSystemOut:
+    # upload_allowed is catalog advertise-Upload, not inferred from
+    # allowed_approaches (Auth0 may list upload but the flag is False).
+    out_system = _session_owner_system(system)
+    persist_system = _canonical_owner_system(
+        connection.system if connection is not None else system
+    )
+    method_label = connection_method_label(persist_system)
     if connection is None:
         display_status, gate_code, gate_allowed = gate_fields_from_parts(
             system=system,
@@ -442,7 +485,7 @@ def _connection_to_out(
             metadata={},
         )
         return ConnectorSystemOut(
-            system=system,
+            system=out_system,
             display_name=display_name,
             allowed_approaches=allowed_approaches,
             connection_id=None,
@@ -452,6 +495,9 @@ def _connection_to_out(
             display_status=display_status,
             gate_code=gate_code,
             gate_allowed=gate_allowed,
+            connection_method_label=method_label,
+            upload_allowed=upload_allowed(system),
+            connection_method=method_label,
         )
     metadata = dict(connection.metadata or {})
     display_status, gate_code, gate_allowed = gate_fields_from_parts(
@@ -461,7 +507,7 @@ def _connection_to_out(
         metadata=metadata,
     )
     return ConnectorSystemOut(
-        system=connection.system,
+        system=_session_owner_system(connection.system),
         display_name=connection.display_name or display_name,
         allowed_approaches=allowed_approaches,
         connection_id=str(connection.id),
@@ -471,6 +517,9 @@ def _connection_to_out(
         display_status=display_status,
         gate_code=gate_code,
         gate_allowed=gate_allowed,
+        connection_method_label=method_label,
+        upload_allowed=upload_allowed(system),
+        connection_method=method_label,
     )
 
 
@@ -480,16 +529,21 @@ async def _find_connection_for_system(
     vertical_id: str,
     system: str,
 ) -> Connection | None:
+    lookup_systems = (
+        [_AXIOS_HQ_BINDING_SYSTEM, _AXIOS_HQ_SESSION_SYSTEM]
+        if system in _AXIOS_HQ_SYSTEMS
+        else [system]
+    )
     row = await conn.fetchrow(
         """
         SELECT id
           FROM integration_connections
-         WHERE system = $1
+         WHERE system = ANY($1::text[])
            AND metadata->>'vertical_id' = $2
          ORDER BY created_at DESC
          LIMIT 1
         """,
-        system,
+        lookup_systems,
         vertical_id,
     )
     if row is None:
@@ -504,8 +558,9 @@ async def _resolve_connection(
     system: str,
     created_by: str,
 ) -> Connection:
+    persist_system = _canonical_owner_system(system)
     existing = await _find_connection_for_system(
-        conn, vertical_id=vertical_id, system=system
+        conn, vertical_id=vertical_id, system=persist_system
     )
     if existing is not None:
         return existing
@@ -513,13 +568,13 @@ async def _resolve_connection(
     try:
         from habeas_privacy_core.connections.systems import get_system
 
-        label = get_system(system).display_label
+        label = get_system(persist_system).display_label
     except Exception:  # noqa: BLE001 — catalog fallback
-        label = system
+        label = persist_system
 
     return await connections_db.insert_connection(
         conn,
-        system=system,
+        system=persist_system,
         display_name=label,
         created_by=created_by,
         owner_email=created_by,
@@ -568,7 +623,7 @@ def _service_account_from_metadata(metadata: dict[str, Any] | None) -> str | Non
 def _load_stored_credentials(secret_resource_name: str | None) -> dict[str, str] | None:
     if not secret_resource_name:
         return None
-    store = get_secret_writer()
+    store = get_secret_reader()
     get_secret = getattr(store, "get_secret", None)
     if not callable(get_secret):
         return None
@@ -831,7 +886,11 @@ async def _ingest_owner_csv(
         connection_id = UUID(str(connection.id))
         current_mode = parse_stored_active_mode(dict(connection.metadata or {}))
         live_failed = _live_test_failed(connection)
-        if current_mode == APPROACH_LIVE and not allow_live_mode and not live_failed:
+        if (
+            current_mode == APPROACH_LIVE
+            and not allow_live_mode
+            and not _upload_permitted_during_live(system, connection)
+        ):
             raise HTTPException(
                 status_code=422,
                 detail="upload not allowed while active_mode is live",
@@ -876,7 +935,11 @@ async def _ingest_owner_csv(
         }
         if extra_metadata:
             patch.update(extra_metadata)
-        if current_mode != APPROACH_LIVE or live_failed:
+        if (
+            current_mode != APPROACH_LIVE
+            or live_failed
+            or system in _PING_ONLY_LIVE_SYSTEMS
+        ):
             patch["active_mode"] = APPROACH_UPLOAD
         updated = await _merge_metadata(conn, connection_id, patch)
         if updated is None:
@@ -960,6 +1023,14 @@ async def _apply_live_test_outcome(
     return refreshed
 
 
+# Live ping is connectivity only — matching still needs a mapped upload.
+# Auth0 Live is a matching extract and does not belong here.
+_PING_ONLY_LIVE_SYSTEMS = frozenset({"paylocity", "lever"})
+# 00023/00027 SPA after a green Live test may POST mode=upload with no CSV.
+# Complete must still finish; a real Paylocity/Lever upload keeps upload mode.
+_LIVE_COMPLETE_WITHOUT_UPLOAD_SYSTEMS = frozenset({"auth0", "paylocity", "lever"})
+
+
 def _live_credentials_ready(connection: Connection) -> bool:
     """True when Live credentials have been stored and tested successfully."""
     meta = connection.metadata or {}
@@ -967,17 +1038,30 @@ def _live_credentials_ready(connection: Connection) -> bool:
     return bool(rotated) or bool(connection.last_test_ok) or connection.status == "connected"
 
 
-def _auth0_live_overrides_upload(connection: Connection, *, system: str) -> bool:
-    """00023 SPA after green Live test POSTs mode=upload with no CSV.
+def _live_overrides_upload(connection: Connection, *, system: str) -> bool:
+    """SPA overwrote Live to upload after a green test; no CSV exists.
 
-    Auth0 Live must still be allowed to finish the wizard without a file.
+    Auth0 Live is a matching extract. Paylocity / Lever Live is a ping — upload
+    remains valid when a file exists (this helper then returns False).
     """
-    if system != "auth0":
+    if system not in _LIVE_COMPLETE_WITHOUT_UPLOAD_SYSTEMS:
         return False
     meta = connection.metadata or {}
     if meta.get("last_successful_upload_at"):
         return False
     return _live_credentials_ready(connection)
+
+
+def _auth0_live_overrides_upload(connection: Connection, *, system: str) -> bool:
+    """Backward-compatible alias — Auth0 uses the shared live-complete exception."""
+    return _live_overrides_upload(connection, system=system)
+
+
+def _upload_permitted_during_live(system: str, connection: Connection) -> bool:
+    """Upload fallback after Live fail, or mapping upload after a ping-only Live."""
+    if _live_test_failed(connection):
+        return True
+    return system in _PING_ONLY_LIVE_SYSTEMS
 
 
 def _wizard_ready(connection: Connection, *, system: str) -> None:
@@ -990,7 +1074,7 @@ def _wizard_ready(connection: Connection, *, system: str) -> None:
     if active_mode == APPROACH_UPLOAD:
         if meta.get("last_successful_upload_at"):
             return
-        if _auth0_live_overrides_upload(connection, system=system):
+        if _live_overrides_upload(connection, system=system):
             return
         raise HTTPException(status_code=422, detail="successful upload required")
     elif active_mode == APPROACH_LIVE:
@@ -1089,6 +1173,7 @@ async def download_upload_template(
     _validate_vertical(vertical_id)
     _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
+    system = binding.system
     if APPROACH_UPLOAD not in binding.allowed_approaches:
         raise HTTPException(status_code=422, detail="upload not allowed for this system")
     from admin_api.upload_templates import template_csv_bytes
@@ -1165,6 +1250,7 @@ async def set_system_mode(
     _validate_vertical(vertical_id)
     _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
+    system = binding.system
     mode = _normalize_mode(body.mode)
     if not is_approach_allowed(vertical_id, system, mode):
         raise HTTPException(
@@ -1219,6 +1305,7 @@ async def set_system_cadence(
     _validate_vertical(vertical_id)
     _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
+    system = binding.system
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -1264,6 +1351,7 @@ async def upload_system_csv(
     _validate_vertical(vertical_id)
     _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
+    system = binding.system
     if APPROACH_UPLOAD not in binding.allowed_approaches:
         raise HTTPException(status_code=422, detail="upload not allowed for this system")
 
@@ -1310,6 +1398,7 @@ async def live_credential_preview(
     _validate_vertical(vertical_id)
     _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
+    system = binding.system
     _ensure_live_allowed(vertical_id, system, binding)
     system_def = get_system(system)
     sa_email: str | None = None
@@ -1343,6 +1432,9 @@ async def live_credential_preview(
         display_name=system_def.display_label,
         fields=fields_out,
         trust_copy=system_def.trust_copy,
+        connection_method_label=connection_method_label(system),
+        # Catalog advertise-Upload, not allowed_approaches (see _connection_to_out).
+        upload_allowed=upload_allowed(system),
     )
 
 
@@ -1361,6 +1453,7 @@ async def save_live_credentials(
     _validate_vertical(vertical_id)
     _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
+    system = binding.system
     _ensure_live_allowed(vertical_id, system, binding)
     system_def = get_system(system)
     try:
@@ -1381,7 +1474,15 @@ async def save_live_credentials(
         connection_id = UUID(str(connection.id))
         secret_name = connections_db.secret_resource_name(system, str(connection_id))
         writer = get_secret_writer()
-        writer.put_secret(secret_name, json.dumps(cleaned, sort_keys=True))
+        try:
+            writer.put_secret(secret_name, json.dumps(cleaned, sort_keys=True))
+        except Exception:
+            logger.warning(
+                "owner_live_credentials secret_write_failed connection_id=%s system=%s",
+                connection_id,
+                system,
+            )
+            raise HTTPException(status_code=502, detail="secret_write_failed") from None
         await connections_db.update_connection_status(
             conn,
             connection_id,
@@ -1434,6 +1535,7 @@ async def test_live_connection(
     _validate_vertical(vertical_id)
     _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
+    system = binding.system
     _ensure_live_allowed(vertical_id, system, binding)
 
     _require_database()
@@ -1495,6 +1597,7 @@ async def complete_system_wizard(
     _validate_vertical(vertical_id)
     _reject_owner_mutations(vertical_id, principal)
     binding = _binding_or_404(vertical_id, system)
+    system = binding.system
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -1514,12 +1617,31 @@ async def complete_system_wizard(
             )
             if connection is None:
                 raise HTTPException(status_code=404, detail="connection not found")
-        _wizard_ready(connection, system=system)
+        try:
+            _wizard_ready(connection, system=system)
+        except HTTPException as exc:
+            # 00023/00027 confirm loops every system in the vertical. Skip
+            # unready siblings (200, no stamp) so Paylocity can finish.
+            if exc.status_code != 422:
+                raise
+            logger.info(
+                "owner_wizard_complete_skip connection_id=%s system=%s detail=%s",
+                connection.id,
+                system,
+                exc.detail,
+            )
+            return _connection_to_out(
+                system=system,
+                allowed_approaches=sorted(binding.allowed_approaches),
+                connection=connection,
+                display_name=connection.display_name,
+            )
         completed_at = datetime.now(timezone.utc).isoformat()
         patch = {"wizard_completed_at": completed_at, "vertical_id": vertical_id}
-        # Restore Live when the shipped SPA overwrote Auth0 to upload after a
+        # Restore Live when the shipped SPA overwrote Live to upload after a
         # green test so matching is not left gated as upload-without-CSV.
-        if _auth0_live_overrides_upload(connection, system=system):
+        # A real Paylocity/Lever CSV keeps upload (override is false).
+        if _live_overrides_upload(connection, system=system):
             patch["active_mode"] = APPROACH_LIVE
         updated = await _merge_metadata(
             conn,
@@ -1552,8 +1674,9 @@ def _sheets_oauth_guards(
 ) -> Any:
     _validate_vertical(vertical_id)
     _reject_owner_mutations(vertical_id, principal)
-    _reject_non_sheets_oauth(system)
-    return _binding_or_404(vertical_id, system)
+    binding = _binding_or_404(vertical_id, system)
+    _reject_non_sheets_oauth(binding.system)
+    return binding
 
 
 @router.post(
@@ -1716,13 +1839,21 @@ async def redeem_owner_sheets_oauth(
         connection_id = UUID(str(connection.id))
         secret_name = connections_db.secret_resource_name(system, str(connection_id))
         writer = get_secret_writer()
-        writer.put_secret(
-            secret_name,
-            json.dumps(
-                {"auth_mode": "oauth", "refresh_token": refresh_token},
-                sort_keys=True,
-            ),
-        )
+        try:
+            writer.put_secret(
+                secret_name,
+                json.dumps(
+                    {"auth_mode": "oauth", "refresh_token": refresh_token},
+                    sort_keys=True,
+                ),
+            )
+        except Exception:
+            logger.warning(
+                "owner_sheets_oauth_redeem secret_write_failed connection_id=%s system=%s",
+                connection_id,
+                system,
+            )
+            raise HTTPException(status_code=502, detail="secret_write_failed") from None
         rotated_at = datetime.now(timezone.utc).isoformat()
         updated = await _merge_metadata(
             conn,

@@ -9,6 +9,8 @@ from habeas_privacy_core.connections.catalog import (
     APPROACH_UPLOAD,
     CATALOG_BINDINGS,
     CATALOG_VERTICALS,
+    CONNECTION_METHOD_LABELS,
+    MANUAL_UPLOAD_LABEL,
     UPLOAD_ONLY_SYSTEMS,
     UPLOAD_SYSTEMS,
     UPLOAD_TEMPLATE_OPTIONAL_HEADERS,
@@ -16,11 +18,13 @@ from habeas_privacy_core.connections.catalog import (
     VERTICAL_BIZDEV,
     VERTICAL_DATA,
     VERTICAL_PEOPLE_HR,
+    connection_method_label,
     get_bindings_for_system,
     get_bindings_for_vertical,
     get_vertical,
     is_approach_allowed,
     list_verticals,
+    upload_allowed,
 )
 from habeas_privacy_core.connections.systems import (
     SYSTEM_IDS,
@@ -80,6 +84,78 @@ class TestCatalog:
     def test_get_system_unknown_raises(self) -> None:
         with pytest.raises(ValueError, match="unknown connection system"):
             get_system("vertica")
+
+
+class TestConnectionMethodLabels:
+    def test_manual_upload_label(self) -> None:
+        assert MANUAL_UPLOAD_LABEL == "Manual upload"
+
+    @pytest.mark.parametrize(
+        ("system_id", "expected"),
+        [
+            ("paylocity", "SFTP"),
+            ("lever", "Lever API"),
+            ("auth0", "Management API"),
+            ("hr_alumni", "Google OAuth"),
+            ("bizdev_contacts", "Google OAuth"),
+            ("google_sheets", "Google Sheets"),
+            ("alumni_google_sheet", "Google Sheets"),
+            ("contact_us_google_sheet", "Google Sheets"),
+            ("axios_headquarters", None),
+            ("axios_hq", None),
+            ("cassandra", None),
+        ],
+    )
+    def test_connection_method_label(self, system_id: str, expected: str | None) -> None:
+        label = connection_method_label(system_id)
+        assert label == expected
+        if label is not None:
+            assert "live" not in label.lower()
+
+    def test_axios_hq_alias_matches_headquarters(self) -> None:
+        assert connection_method_label("axios_hq") == connection_method_label(
+            "axios_headquarters"
+        )
+
+    def test_connection_method_labels_omit_live_and_axios_hq_api(self) -> None:
+        for label in CONNECTION_METHOD_LABELS.values():
+            assert "live" not in label.lower()
+            assert "Axios HQ API" not in label
+
+    @pytest.mark.parametrize(
+        "system_id",
+        [
+            "paylocity",
+            "lever",
+            "axios_headquarters",
+            "axios_hq",
+            "hr_alumni",
+            "bizdev_contacts",
+        ],
+    )
+    def test_upload_allowed_true(self, system_id: str) -> None:
+        assert upload_allowed(system_id) is True
+
+    @pytest.mark.parametrize(
+        "system_id",
+        ["auth0", "cassandra", "google_sheets", "mailchimp"],
+    )
+    def test_upload_allowed_false(self, system_id: str) -> None:
+        assert upload_allowed(system_id) is False
+
+    def test_auth0_not_in_upload_template_headers(self) -> None:
+        assert "auth0" not in UPLOAD_TEMPLATE_REQUIRED_HEADERS
+
+    def test_auth0_binding_keeps_upload_while_upload_allowed_is_false(self) -> None:
+        # SPA quirk: advertise-Upload is upload_allowed, not allowed_approaches.
+        # Do not drop APPROACH_UPLOAD from the Auth0 binding to "fix" this.
+        assert upload_allowed("auth0") is False
+        assert "auth0" not in UPLOAD_TEMPLATE_REQUIRED_HEADERS
+        bindings = get_bindings_for_system("auth0")
+        assert bindings
+        assert all(APPROACH_UPLOAD in binding.allowed_approaches for binding in bindings)
+        assert is_approach_allowed("tech", "auth0", APPROACH_UPLOAD) is True
+        assert is_approach_allowed("tech", "auth0", APPROACH_LIVE) is True
 
 
 class TestVerticalCatalog:
@@ -268,9 +344,9 @@ class TestFieldSchemas:
 
     def test_paylocity_trust_copy_documents_upload_and_live(self) -> None:
         copy = get_system("paylocity").trust_copy
-        assert "Upload mode" in copy
-        assert "Live mode" in copy
+        assert "Upload" in copy
         assert "SFTP" in copy
+        assert "Live mode" not in copy
         assert "does not extract candidate emails" in copy
         assert "Matching uses Upload" in copy
         assert "listdir" not in copy.lower()

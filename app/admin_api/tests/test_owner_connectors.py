@@ -18,6 +18,7 @@ from admin_api import main as admin_main
 from admin_api import owner_connectors, roles
 from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER, ROLE_DATA_USER
+
 from habeas_privacy_core.connections.catalog import (
     VERTICAL_BIZDEV,
     VERTICAL_COMMUNICATIONS,
@@ -49,6 +50,15 @@ MAPPED_PAYLOCITY_COLUMNS = {
 }
 
 
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
+
 @pytest.fixture(autouse=True)
 def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
@@ -69,16 +79,13 @@ def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _owner_headers(email: str = "hr-owner@example.com") -> dict[str, str]:
     roles.settings.admin_api_data_owners = email
-    return {IAP_EMAIL_HEADER: email}
+    return signed_headers(email)
 
 
 def _data_user_headers(email: str = "ops@example.com") -> dict[str, str]:
     """Super_admin + simulate header — same pattern as test_auth_me / test_roles."""
     roles.settings.admin_api_super_admins = email
-    return {
-        IAP_EMAIL_HEADER: email,
-        roles.DEV_SIMULATE_ROLE_HEADER: ROLE_DATA_USER,
-    }
+    return signed_headers(email, **{roles.DEV_SIMULATE_ROLE_HEADER: ROLE_DATA_USER})
 
 
 def _fake_pool(conn: AsyncMock) -> MagicMock:
@@ -153,6 +160,54 @@ def _patch_owner_access(
         "resolved": resolved,
         "enqueue": enqueue_mock,
     }
+
+
+def _patch_owner_list(monkeypatch: pytest.MonkeyPatch, *, allowed: bool = True) -> None:
+    """Stub assignment + empty connections for GET /owner/verticals/.../connectors."""
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[{"?column?": 1}] if allowed else [])
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    from admin_api import vertical_assignments
+
+    monkeypatch.setattr(owner_connectors, "_require_database", lambda: None)
+    monkeypatch.setattr(owner_connectors, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(vertical_assignments, "_require_database", lambda: None)
+    monkeypatch.setattr(vertical_assignments, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(
+        owner_connectors,
+        "_find_connection_for_system",
+        AsyncMock(return_value=None),
+    )
+
+
+_CONNECTION_METHOD_BY_SYSTEM = {
+    "paylocity": "SFTP",
+    "lever": "Lever API",
+    "auth0": "Management API",
+    "hr_alumni": "Google OAuth",
+    "bizdev_contacts": "Google OAuth",
+}
+
+
+def _assert_list_connection_methods(connectors: list[dict]) -> None:
+    """Owner list exposes live/direct method copy; Axios HQ has no method."""
+    for row in connectors:
+        system = row["system"]
+        method = row.get("connection_method")
+        label = row.get("connection_method_label")
+        if system in {"axios_hq", "axios_headquarters"}:
+            assert method is None
+            assert label is None
+        elif system in _CONNECTION_METHOD_BY_SYSTEM:
+            assert method == _CONNECTION_METHOD_BY_SYSTEM[system]
+        if system == "auth0":
+            # Binding may keep upload (SPA quirk); do not infer advertise from it.
+            assert "upload" in row["allowed_approaches"]
+            assert row["upload_allowed"] is False
 
 
 def test_happy_people_hr_paylocity_upload_wizard_complete(
@@ -250,7 +305,10 @@ def test_happy_people_hr_paylocity_upload_wizard_complete(
     assert gate.code == "ok"
 
 
-def test_ae5_upload_only_rejects_live_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("system_slug", ["axios_hq", "axios_headquarters"])
+def test_ae5_upload_only_rejects_live_mode(
+    monkeypatch: pytest.MonkeyPatch, system_slug: str
+) -> None:
     current = _connection(
         system="axios_headquarters",
         metadata={"vertical_id": VERTICAL_COMMUNICATIONS},
@@ -264,7 +322,7 @@ def test_ae5_upload_only_rejects_live_mode(monkeypatch: pytest.MonkeyPatch) -> N
 
     with TestClient(app) as client:
         response = client.post(
-            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/axios_headquarters/mode",
+            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/{system_slug}/mode",
             headers=_owner_headers("comm-owner@example.com"),
             json={"mode": "live"},
         )
@@ -272,6 +330,256 @@ def test_ae5_upload_only_rejects_live_mode(monkeypatch: pytest.MonkeyPatch) -> N
     assert "live" in response.json()["detail"].lower() or "not allowed" in response.json()[
         "detail"
     ].lower()
+
+
+def test_happy_communications_axios_hq_upload_wizard_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session slug axios_hq must onboard Communications (upload every batch)."""
+    meta: dict = {"vertical_id": VERTICAL_COMMUNICATIONS}
+    current = _connection(
+        system="axios_headquarters",
+        metadata=meta,
+    )
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        current.status = "connected"
+        current.last_test_ok = True
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+
+    async def _resolve(_conn, *, vertical_id, system, created_by):  # noqa: ANN001
+        assert vertical_id == VERTICAL_COMMUNICATIONS
+        assert system == "axios_headquarters"
+        return current
+
+    monkeypatch.setattr(owner_connectors, "_resolve_connection", _resolve)
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "insert_connection_mode_event",
+        AsyncMock(return_value=1),
+    )
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "set_test_result",
+        AsyncMock(return_value=current),
+    )
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "update_connection_status",
+        AsyncMock(return_value=current),
+    )
+
+    with TestClient(app) as client:
+        headers = _owner_headers("comm-owner@example.com")
+        mode = client.post(
+            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/axios_hq/mode",
+            headers=headers,
+            json={"mode": "upload"},
+        )
+        assert mode.status_code == 200
+        assert mode.json()["system"] == "axios_hq"
+        assert meta["active_mode"] == "upload"
+
+        cadence = client.post(
+            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/axios_hq/cadence",
+            headers=headers,
+            json={"refresh_cadence": "with_new_batches"},
+        )
+        assert cadence.status_code == 200
+        assert meta["refresh_cadence"] == "with_new_batches"
+
+        upload = client.post(
+            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/axios_hq/upload",
+            headers=headers,
+            data={"multi_pii_delimiter": ""},
+            files={"file": ("axios.csv", PAYLOCITY_CSV, "text/csv")},
+        )
+        assert upload.status_code == 200
+        body = upload.json()
+        assert body["ok"] is True
+        assert "gcs_uri" not in body
+        assert meta.get("gcs_uri")
+        helpers["enqueue"].assert_awaited()
+        assert helpers["enqueue"].await_args.kwargs["system"] == "axios_headquarters"
+
+        complete = client.post(
+            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/systems/axios_hq/wizard/complete",
+            headers=headers,
+        )
+        assert complete.status_code == 200
+        assert complete.json()["system"] == "axios_hq"
+        assert meta.get("wizard_completed_at")
+
+
+def test_list_communications_emits_session_axios_hq(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[{"?column?": 1}])
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    from admin_api import vertical_assignments
+
+    monkeypatch.setattr(owner_connectors, "_require_database", lambda: None)
+    monkeypatch.setattr(owner_connectors, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(vertical_assignments, "_require_database", lambda: None)
+    monkeypatch.setattr(vertical_assignments, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(
+        owner_connectors,
+        "_find_connection_for_system",
+        AsyncMock(return_value=None),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/owner/verticals/{VERTICAL_COMMUNICATIONS}/connectors",
+            headers=_owner_headers("comm-owner@example.com"),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["vertical_id"] == VERTICAL_COMMUNICATIONS
+    assert [row["system"] for row in body["connectors"]] == ["axios_hq"]
+    assert body["connectors"][0]["allowed_approaches"] == ["upload"]
+    assert body["connectors"][0]["connection_method"] is None
+    assert body["connectors"][0]["connection_method_label"] is None
+    assert body["connectors"][0]["upload_allowed"] is True
+    _assert_list_connection_methods(body["connectors"])
+
+
+@pytest.mark.parametrize(
+    ("vertical_id", "owner_email"),
+    [
+        (VERTICAL_PEOPLE_HR, "hr-owner@example.com"),
+        (VERTICAL_TECH, "tech-owner@example.com"),
+        (VERTICAL_BIZDEV, "biz-owner@example.com"),
+    ],
+)
+def test_list_connectors_includes_connection_method(
+    monkeypatch: pytest.MonkeyPatch,
+    vertical_id: str,
+    owner_email: str,
+) -> None:
+    """GET owner connectors exposes connection_method for live/direct systems."""
+    _patch_owner_list(monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/owner/verticals/{vertical_id}/connectors",
+            headers=_owner_headers(owner_email),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["vertical_id"] == vertical_id
+    systems = {row["system"] for row in body["connectors"]}
+    if vertical_id == VERTICAL_PEOPLE_HR:
+        assert {"paylocity", "lever", "hr_alumni"} <= systems
+    elif vertical_id == VERTICAL_TECH:
+        assert "auth0" in systems
+    elif vertical_id == VERTICAL_BIZDEV:
+        assert "bizdev_contacts" in systems
+    _assert_list_connection_methods(body["connectors"])
+
+
+def test_list_people_hr_and_tech_emit_connection_method_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owner list emits per-vendor method labels; skip cassandra.
+
+    Auth0 may list upload in allowed_approaches while upload_allowed is False.
+    """
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[{"?column?": 1}])
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    from admin_api import vertical_assignments
+
+    monkeypatch.setattr(owner_connectors, "_require_database", lambda: None)
+    monkeypatch.setattr(owner_connectors, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(vertical_assignments, "_require_database", lambda: None)
+    monkeypatch.setattr(vertical_assignments, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(
+        owner_connectors,
+        "_find_connection_for_system",
+        AsyncMock(return_value=None),
+    )
+
+    with TestClient(app) as client:
+        people = client.get(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/connectors",
+            headers=_owner_headers("hr-owner@example.com"),
+        )
+        tech = client.get(
+            f"/owner/verticals/{VERTICAL_TECH}/connectors",
+            headers=_owner_headers("tech-owner@example.com"),
+        )
+    assert people.status_code == 200
+    assert tech.status_code == 200
+    people_by_system = {row["system"]: row for row in people.json()["connectors"]}
+    assert people_by_system["paylocity"]["connection_method_label"] == "SFTP"
+    assert people_by_system["paylocity"]["upload_allowed"] is True
+    assert people_by_system["lever"]["connection_method_label"] == "Lever API"
+    assert people_by_system["lever"]["upload_allowed"] is True
+    assert "cassandra" not in people_by_system
+    tech_by_system = {row["system"]: row for row in tech.json()["connectors"]}
+    assert tech_by_system["auth0"]["connection_method_label"] == "Management API"
+    assert "upload" in tech_by_system["auth0"]["allowed_approaches"]
+    assert tech_by_system["auth0"]["upload_allowed"] is False
+    assert "cassandra" not in tech_by_system
+
+
+def test_auth0_credential_preview_emits_method_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auth0 preview is Management API; do not advertise Upload.
+
+    Binding may still include upload (SPA complete-wizard quirk). Advertise-Upload
+    is ``upload_allowed`` — do not infer it from ``allowed_approaches``.
+    """
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[{"?column?": 1}])
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    from admin_api import vertical_assignments
+
+    monkeypatch.setattr(owner_connectors, "_require_database", lambda: None)
+    monkeypatch.setattr(owner_connectors, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(vertical_assignments, "_require_database", lambda: None)
+    monkeypatch.setattr(vertical_assignments, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(
+        owner_connectors,
+        "_find_connection_for_system",
+        AsyncMock(return_value=None),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/owner/verticals/{VERTICAL_TECH}/systems/auth0/credential-preview",
+            headers=_owner_headers("tech-owner@example.com"),
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["connection_method_label"] == "Management API"
+    auth0_binding = next(
+        binding
+        for binding in get_bindings_for_vertical(VERTICAL_TECH)
+        if binding.system == "auth0"
+    )
+    assert "upload" in auth0_binding.allowed_approaches
+    assert body["upload_allowed"] is False
 
 
 @pytest.mark.parametrize(
@@ -435,19 +743,57 @@ def test_list_connectors_forbidden_without_assignment(monkeypatch: pytest.Monkey
     assert response.status_code == 403
 
 
-def test_upload_rejected_when_active_mode_is_live(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_paylocity_upload_allowed_after_green_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live SFTP ping is not extract — mapping upload is the Paylocity path."""
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "live"}
     current = _connection(
-        metadata={"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "live"},
+        metadata=meta,
         status="connected",
         last_test_ok=True,
     )
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
     helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    _patch_ingest_writes(monkeypatch, current)
+
     with TestClient(app) as client:
         upload = client.post(
             f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/upload",
             headers=_owner_headers(),
             data={"multi_pii_delimiter": ""},
             files={"file": ("paylocity.csv", PAYLOCITY_CSV, "text/csv")},
+        )
+    assert upload.status_code == 200
+    assert upload.json()["ok"] is True
+    assert meta["active_mode"] == "upload"
+    assert meta.get("last_successful_upload_at")
+    helpers["enqueue"].assert_awaited()
+
+
+def test_auth0_upload_rejected_when_live_extract_is_green(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auth0 Live is a matching extract — do not accept a CSV while live is green."""
+    current = _connection(
+        system="auth0",
+        metadata={"vertical_id": VERTICAL_TECH, "active_mode": "live"},
+        status="connected",
+        last_test_ok=True,
+    )
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    with TestClient(app) as client:
+        upload = client.post(
+            f"/owner/verticals/{VERTICAL_TECH}/systems/auth0/upload",
+            headers=_owner_headers("tech-owner@example.com"),
+            data={"multi_pii_delimiter": ""},
+            files={"file": ("auth0.csv", PAYLOCITY_CSV, "text/csv")},
         )
     assert upload.status_code == 422
     assert "live" in upload.json()["detail"].lower()
@@ -754,6 +1100,20 @@ async def test_find_connection_requires_vertical_id_match() -> None:
 
 
 @pytest.mark.asyncio
+async def test_find_connection_looks_up_both_axios_hq_slugs() -> None:
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=None)
+    found = await owner_connectors._find_connection_for_system(
+        conn, vertical_id=VERTICAL_COMMUNICATIONS, system="axios_hq"
+    )
+    assert found is None
+    slugs = conn.fetchrow.await_args.args[1]
+    assert "axios_hq" in slugs
+    assert "axios_headquarters" in slugs
+    assert conn.fetchrow.await_args.args[2] == VERTICAL_COMMUNICATIONS
+
+
+@pytest.mark.asyncio
 async def test_persist_upload_fails_closed_outside_test(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -795,9 +1155,10 @@ async def test_persist_upload_uses_gcs_when_bucket_set(
     assert "paylocity" in write.await_args.args[1]
 
 
-def test_wizard_complete_rejects_unset_active_mode(
+def test_wizard_complete_skips_unset_active_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """SPA confirm loops every system — never-started siblings return 200, no stamp."""
     current = _connection(metadata={"vertical_id": VERTICAL_PEOPLE_HR})
     helpers = _patch_owner_access(monkeypatch, connection=current)
 
@@ -806,9 +1167,9 @@ def test_wizard_complete_rejects_unset_active_mode(
             f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/wizard/complete",
             headers=_owner_headers(),
         )
-    assert response.status_code == 422
-    assert "active_mode" in response.json()["detail"]
-    helpers["merge"].assert_not_awaited()
+    assert response.status_code == 200
+    assert not (response.json().get("metadata") or {}).get("wizard_completed_at")
+    helpers["enqueue"].assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -911,6 +1272,29 @@ def test_lever_live_credentials_success_stamps_rotation(
     assert update_status.await_args.args[2] == "connected"
 
 
+def test_live_credentials_gsm_write_failure_returns_502(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = _connection(
+        system="lever",
+        metadata={"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "live"},
+        status="pending",
+    )
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    writer = owner_connectors.get_secret_writer()
+    monkeypatch.setattr(writer, "put_secret", MagicMock(side_effect=RuntimeError("secret_write_failed")))
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/credentials",
+            headers=_owner_headers(),
+            json={"credentials": {"api_key": "lever-test-key"}},
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "secret_write_failed"
+    helpers["merge"].assert_not_awaited()
+
+
 def test_live_credentials_failed_test_allows_retry_without_wizard_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -965,8 +1349,8 @@ def test_live_credentials_failed_test_allows_retry_without_wizard_complete(
             f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/wizard/complete",
             headers=_owner_headers(),
         )
-        assert complete.status_code == 422
-        assert "live credentials required" in complete.json()["detail"]
+        # Confirm loops every People/HR system — skip unready (no stamp).
+        assert complete.status_code == 200
         assert "wizard_completed_at" not in meta
         assert meta.get("active_mode") == "live"
         helpers["enqueue"].assert_not_awaited()
@@ -1191,6 +1575,8 @@ def test_communications_binding_uses_catalog_upload_system() -> None:
     bindings = get_bindings_for_vertical(VERTICAL_COMMUNICATIONS)
     assert len(bindings) == 1
     assert bindings[0].system == "axios_headquarters"
+    assert owner_connectors._canonical_owner_system("axios_hq") == "axios_headquarters"
+    assert owner_connectors._session_owner_system("axios_headquarters") == "axios_hq"
 
 
 def test_upload_rejects_over_cap(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1300,9 +1686,148 @@ def test_auth0_complete_still_requires_upload_without_live_test(
             f"/owner/verticals/{VERTICAL_TECH}/systems/auth0/wizard/complete",
             headers=_owner_headers(),
         )
-    assert response.status_code == 422
-    assert response.json()["detail"] == "successful upload required"
+    assert response.status_code == 200
     assert "wizard_completed_at" not in meta
+
+
+def test_paylocity_complete_allows_live_when_spa_overwrote_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """00023 Continue POSTs mode=upload after a green SFTP ping; no CSV yet.
+
+    Complete must succeed for Paylocity Live. A later real upload stays upload.
+    """
+    meta: dict = {
+        "vertical_id": VERTICAL_PEOPLE_HR,
+        "active_mode": "upload",
+        "refresh_cadence": "rarely",
+        "credentials_rotated_at": NOW.isoformat(),
+    }
+    current = _connection(
+        system="paylocity",
+        metadata=meta,
+        status="connected",
+        last_test_ok=True,
+    )
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/wizard/complete",
+            headers=_owner_headers(),
+        )
+    assert response.status_code == 200
+    assert meta.get("wizard_completed_at")
+    assert meta["active_mode"] == "live"
+    assert "last_successful_upload_at" not in meta
+    helpers["enqueue"].assert_not_awaited()
+
+
+def test_paylocity_complete_keeps_upload_when_csv_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upload is valid for Paylocity — do not restore Live after a real CSV."""
+    meta: dict = {
+        "vertical_id": VERTICAL_PEOPLE_HR,
+        "active_mode": "upload",
+        "refresh_cadence": "weekly",
+        "last_successful_upload_at": NOW.isoformat(),
+        "gcs_uri": "memory://uploads/paylocity/" + str(CONNECTION_ID),
+        "credentials_rotated_at": NOW.isoformat(),
+    }
+    current = _connection(
+        metadata=meta,
+        status="connected",
+        last_test_ok=True,
+    )
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/wizard/complete",
+            headers=_owner_headers(),
+        )
+    assert response.status_code == 200
+    assert meta.get("wizard_completed_at")
+    assert meta["active_mode"] == "upload"
+    helpers["enqueue"].assert_awaited_once()
+
+
+def test_paylocity_live_only_wizard_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meta: dict = {
+        "vertical_id": VERTICAL_PEOPLE_HR,
+        "active_mode": "live",
+        "refresh_cadence": "rarely",
+        "credentials_rotated_at": NOW.isoformat(),
+    }
+    current = _connection(
+        metadata=meta,
+        status="connected",
+        last_test_ok=True,
+    )
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/wizard/complete",
+            headers=_owner_headers(),
+        )
+    assert response.status_code == 200
+    assert meta.get("wizard_completed_at")
+    assert meta["active_mode"] == "live"
+    helpers["enqueue"].assert_not_awaited()
+
+
+def test_people_hr_complete_skips_unready_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SPA confirm POSTs Paylocity then Lever — Lever howto-only must not 422."""
+    meta: dict = {
+        "vertical_id": VERTICAL_PEOPLE_HR,
+        "active_mode": "live",
+        "refresh_cadence": "rarely",
+    }
+    current = _connection(
+        system="lever",
+        metadata=meta,
+        status="pending",
+        last_test_ok=None,
+    )
+    helpers = _patch_owner_access(monkeypatch, connection=current, merge_result=current)
+    helpers["merge"].return_value = current
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/wizard/complete",
+            headers=_owner_headers(),
+            json={"refresh_cadence": "rarely"},
+        )
+    assert response.status_code == 200
+    assert "wizard_completed_at" not in meta
+    helpers["enqueue"].assert_not_awaited()
 
 
 @pytest.mark.parametrize(

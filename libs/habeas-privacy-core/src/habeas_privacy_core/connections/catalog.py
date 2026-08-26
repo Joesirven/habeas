@@ -13,6 +13,8 @@ __all__ = [
     "APPROACH_UPLOAD",
     "CATALOG_BINDINGS",
     "CATALOG_VERTICALS",
+    "CONNECTION_METHOD_LABELS",
+    "MANUAL_UPLOAD_LABEL",
     "MATCHING_SYSTEM_COLOR_TOKENS",
     "MATCHING_SYSTEM_LABELS",
     "UPLOAD_ONLY_SYSTEMS",
@@ -29,6 +31,7 @@ __all__ = [
     "MatchingReviewSystem",
     "VerticalCatalogEntry",
     "VerticalSystemBinding",
+    "connection_method_label",
     "get_bindings_for_system",
     "get_bindings_for_vertical",
     "get_vertical",
@@ -38,6 +41,7 @@ __all__ = [
     "list_verticals",
     "matching_system_color_token",
     "matching_system_label",
+    "upload_allowed",
 ]
 
 APPROACH_LIVE: Final[str] = "live"
@@ -115,6 +119,25 @@ MATCHING_SYSTEM_COLOR_TOKENS: Final[dict[str, str]] = {
     "cassandra": "navy",
 }
 
+# Owner-wizard method labels (display-only; APPROACH_LIVE stays "live").
+# Canonical slugs only — alias axios_hq via _SYSTEM_ALIASES, not this map.
+MANUAL_UPLOAD_LABEL: Final[str] = "Manual upload"
+
+CONNECTION_METHOD_LABELS: Final[dict[str, str]] = {
+    "paylocity": "SFTP",
+    "lever": "Lever API",
+    "auth0": "Management API",
+    "hr_alumni": "Google OAuth",
+    "bizdev_contacts": "Google OAuth",
+    "google_sheets": "Google Sheets",
+    "alumni_google_sheet": "Google Sheets",
+    "contact_us_google_sheet": "Google Sheets",
+}
+
+_SYSTEM_ALIASES: Final[dict[str, str]] = {
+    "axios_hq": "axios_headquarters",
+}
+
 
 @dataclass(frozen=True)
 class VerticalCatalogEntry:
@@ -172,6 +195,7 @@ CATALOG_BINDINGS: Final[tuple[VerticalSystemBinding, ...]] = (
         "hr_alumni",
         frozenset({APPROACH_UPLOAD, APPROACH_LIVE}),
     ),
+    # Auth0 keeps APPROACH_UPLOAD (SPA complete-wizard quirk); upload_allowed is False.
     VerticalSystemBinding(
         VERTICAL_TECH,
         "auth0",
@@ -251,6 +275,11 @@ def is_approach_allowed(vertical_id: str, system: str, approach: str) -> bool:
     return False
 
 
+def _canonical_system(system: str) -> str:
+    normalized = system.strip().lower()
+    return _SYSTEM_ALIASES.get(normalized, normalized)
+
+
 def matching_system_label(system: str, *, vertical_id: str | None = None) -> str:
     """Inbox / matching-by-system title for a catalog system slug.
 
@@ -264,6 +293,24 @@ def matching_system_label(system: str, *, vertical_id: str | None = None) -> str
     if normalized in MATCHING_SYSTEM_LABELS:
         return MATCHING_SYSTEM_LABELS[normalized]
     return normalized.replace("_", " ").title() if normalized else system
+
+
+def connection_method_label(system: str) -> str | None:
+    """Owner-wizard method label for a catalog system slug."""
+    canonical = _canonical_system(system)
+    return CONNECTION_METHOD_LABELS.get(canonical)
+
+
+def upload_allowed(system: str) -> bool:
+    """Advertise-Upload flag for owner wizard cards.
+
+    True only when template headers exist in ``UPLOAD_TEMPLATE_REQUIRED_HEADERS``.
+    Do not infer Upload from ``allowed_approaches`` / ``APPROACH_UPLOAD``. Auth0
+    may still bind ``APPROACH_UPLOAD`` (SPA complete-wizard quirk) while this
+    returns False — keep that binding; do not add Auth0 here. Mailchimp stays
+    retired.
+    """
+    return _canonical_system(system) in UPLOAD_TEMPLATE_REQUIRED_HEADERS
 
 
 def matching_system_color_token(system: str) -> str:
