@@ -59,6 +59,7 @@ import {
   LIVE_CONNECT_FAILURE_RETRY_ONLY_HINT,
   LIVE_CONNECT_RETRY_LABEL,
   LIVE_CONNECT_SETUP_UPLOAD_LABEL,
+  LIVE_CONNECT_SUCCESS_CONTINUE_HINT,
   LIVE_CONNECT_SUCCESS_MAPPING_HINT,
   LIVE_PING_NOT_EXTRACT_HINT,
   LIVE_PING_NOT_EXTRACT_SYSTEMS,
@@ -68,6 +69,7 @@ import {
   liveMappingFollowOnStepId,
   livePingIsNotMatchingExtract,
   liveUploadFallbackStepId,
+  nextWizardStepAfterSuccessfulLive,
   mappingFollowOnCopy,
   shouldIncludeLiveMappingFollowOn,
 } from './owner-connector-ui'
@@ -651,10 +653,12 @@ describe('live connect mapping follow-on (Wave M)', () => {
       system: 'auth0',
       allowedApproaches: ['live', 'upload'],
     })
-    expect(auth0.nextKind).toBe('howto-upload')
-    expect(auth0.nextStepId).toBe('auth0-howto-upload')
+    expect(auth0.nextKind).toBe('continue')
+    expect(auth0.nextStepId).toBeNull()
     expect(auth0.setupManualUpload).toBeNull()
-    expect(auth0.hint).toBe(LIVE_CONNECT_SUCCESS_MAPPING_HINT)
+    expect(auth0.hint).toBe(LIVE_CONNECT_SUCCESS_CONTINUE_HINT)
+    expect(auth0.hint.toLowerCase()).not.toContain('upload')
+    expect(auth0.hint.toLowerCase()).toContain('cadence')
 
     const leverPingOnly = liveConnectSuccessFollowOn({
       system: 'lever',
@@ -664,6 +668,35 @@ describe('live connect mapping follow-on (Wave M)', () => {
     expect(leverPingOnly.nextStepId).toBeNull()
     expect(leverPingOnly.hint).toBe(LIVE_PING_NOT_EXTRACT_HINT)
     expect(leverPingOnly.setupManualUpload).toBeNull()
+  })
+
+  test('Auth0 Live success skips upload how-to and lands on cadence', () => {
+    const steps = buildVerticalWizardSteps({
+      systems: [{ system: 'auth0', allowedApproaches: ['live', 'upload'] }],
+    })
+    expect(steps.map((step) => step.id)).toEqual([
+      'auth0-howto-live',
+      'auth0-live-creds',
+      'auth0-howto-upload',
+      'auth0-upload',
+      'cadence',
+      'confirm',
+    ])
+    expect(nextWizardStepAfterSuccessfulLive(steps, 'auth0')).toBe('cadence')
+    expect(nextWizardStepAfterSuccessfulLive(steps, 'Auth0')).toBe('cadence')
+    expect(nextWizardStepAfterSuccessfulLive(steps, 'lever')).toBeNull()
+  })
+
+  test('Auth0 Live success skips only Auth0 upload when another system follows', () => {
+    const steps = buildVerticalWizardSteps({
+      systems: [
+        { system: 'auth0', allowedApproaches: ['live', 'upload'] },
+        { system: 'axios_hq', allowedApproaches: ['upload'] },
+      ],
+    })
+    expect(nextWizardStepAfterSuccessfulLive(steps, 'auth0')).toBe(
+      'axios_hq-howto-upload',
+    )
   })
 
   test('mapping follow-on copy uses identifier fields only', () => {

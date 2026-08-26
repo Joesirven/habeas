@@ -71,6 +71,7 @@ import {
   liveMappingFollowOnStepId,
   livePingIsNotMatchingExtract,
   liveUploadFallbackStepId,
+  nextWizardStepAfterSuccessfulLive,
   mappingFollowOnCopy,
   modeStepSystemHint,
   refreshCadenceFromCadenceOption,
@@ -2789,13 +2790,23 @@ function VerticalWizard({
       allowedApproaches: connector.allowed_approaches,
     })
     const mappingId = liveMappingFollowOnStepId(connector.system)
-    const preferred =
+    if (
       livePingIsNotMatchingExtract(connector.system) &&
       verticalWizardStepIndex(steps, mappingId) >= 0
-        ? mappingId
-        : followOn.nextStepId
-    if (preferred && verticalWizardStepIndex(steps, preferred) >= 0) {
-      setCurrentStepId(preferred)
+    ) {
+      setCurrentStepId(mappingId)
+      return
+    }
+    // Auth0 Live extract: never walk Upload how-to (that Continue POSTs mode=upload).
+    if (followOn.nextKind !== 'howto-upload') {
+      const skipped = nextWizardStepAfterSuccessfulLive(steps, connector.system)
+      if (skipped && verticalWizardStepIndex(steps, skipped) >= 0) {
+        setCurrentStepId(skipped)
+        return
+      }
+    }
+    if (followOn.nextStepId && verticalWizardStepIndex(steps, followOn.nextStepId) >= 0) {
+      setCurrentStepId(followOn.nextStepId)
       return
     }
     goNext()

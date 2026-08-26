@@ -302,6 +302,10 @@ export const LIVE_CONNECT_SETUP_UPLOAD_LABEL = 'Set up manual upload'
 export const LIVE_CONNECT_SUCCESS_MAPPING_HINT =
   'Connection confirmed. Next, map identifier columns if the headers differ. Email or phone is enough. A Live test does not start matching by itself.'
 
+/** Auth0 Live extract — after a passing test, go to cadence / Complete, not Upload. */
+export const LIVE_CONNECT_SUCCESS_CONTINUE_HINT =
+  'Connection confirmed. Continue to choose a refresh cadence, then complete the wizard. A Live test does not start matching by itself.'
+
 export const LIVE_CONNECT_FAILURE_HINT =
   'Connection test failed. Retry the connection, or set up a manual upload and map identifier columns if the headers differ. Email or phone is enough.'
 
@@ -412,13 +416,13 @@ export function liveConnectSuccessFollowOn(input: {
       setupManualUpload,
     }
   }
-  if (canUpload) {
+  // Ping-only Live (Lever / Paylocity) may still walk Upload. Auth0 Live is a
+  // matching extract — do not send a passing test to Upload how-to.
+  if (canUpload && pingOnly) {
     return {
       nextStepId: liveUploadFallbackStepId(normalized),
       nextKind: 'howto-upload',
-      hint: pingOnly
-        ? LIVE_PING_NOT_EXTRACT_HINT
-        : LIVE_CONNECT_SUCCESS_MAPPING_HINT,
+      hint: LIVE_PING_NOT_EXTRACT_HINT,
       setupManualUpload,
     }
   }
@@ -427,9 +431,40 @@ export function liveConnectSuccessFollowOn(input: {
     nextKind: 'continue',
     hint: pingOnly
       ? LIVE_PING_NOT_EXTRACT_HINT
-      : LIVE_CONNECT_SUCCESS_MAPPING_HINT,
+      : LIVE_CONNECT_SUCCESS_CONTINUE_HINT,
     setupManualUpload,
   }
+}
+
+const LIVE_SUCCESS_SKIP_STEP_KINDS = new Set(['howto-upload', 'upload'])
+
+/**
+ * After a passing Auth0 (live-extract) test, skip that system's Upload how-to
+ * and Upload steps. Next is cadence, confirm, or the following system.
+ * Returns null for ping-only systems (Lever / Paylocity) — those use mapping.
+ */
+export function nextWizardStepAfterSuccessfulLive(
+  steps: readonly VerticalWizardStep[],
+  system: string,
+): string | null {
+  const normalized = normalizeSystemId(system)
+  if (livePingIsNotMatchingExtract(normalized)) return null
+  const liveCredsId = `${normalized}-live-creds`
+  const start = verticalWizardStepIndex(steps, liveCredsId)
+  const from = start >= 0 ? start + 1 : 0
+  for (let i = from; i < steps.length; i += 1) {
+    const parsed = parseVerticalWizardStepId(steps[i].id)
+    if (
+      parsed &&
+      'system' in parsed &&
+      parsed.system === normalized &&
+      LIVE_SUCCESS_SKIP_STEP_KINDS.has(parsed.kind)
+    ) {
+      continue
+    }
+    return steps[i].id
+  }
+  return null
 }
 
 export function mappingFollowOnCopy(displayName: string): {
