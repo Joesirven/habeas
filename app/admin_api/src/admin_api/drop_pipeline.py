@@ -874,25 +874,8 @@ async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
             raise
         open_n = int(open_requests or 0)
         _header_open_requests_cache = (stamp, open_n)
-    review_pending = await conn.fetchval(
-        """
-        SELECT COUNT(*)::int
-          FROM approval_requests
-         WHERE action_type = $1
-           AND status = 'pending'
-        """,
-        MATCHING_REVIEW_ACTION,
-    )
-    last_connector_success = await conn.fetchval(
-        """
-        SELECT completed_at
-          FROM drop_connector_attempts
-         WHERE status = 'success'
-           AND completed_at IS NOT NULL
-         ORDER BY completed_at DESC
-         LIMIT 1
-        """
-    )
+    # Do not COUNT approval_requests or scan drop_connector_attempts here —
+    # both hung the 4s statement_timeout on prod (00087/00091).
     from admin_api.worker_schedules import ca_drop_schedule_payload
 
     health = peek_worker_health_snapshot()
@@ -903,11 +886,9 @@ async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
         if health
         else {}
     )
-    ca_drop_schedule = await ca_drop_schedule_payload(
-        last_success_at=last_connector_success
-    )
+    ca_drop_schedule = await ca_drop_schedule_payload(last_success_at=None)
     now = datetime.now(timezone.utc)
-    review_n = int(review_pending or 0)
+    review_n = 0
     return {
         "as_of": now.isoformat(),
         "open_requests": open_n,
@@ -1583,24 +1564,20 @@ async def collect_console_snapshot(
     summary = await collect_pipeline_summary(conn)
     summary.pop("as_of", None)
     matching_progress = await collect_matching_progress(conn)
-    processes = await _snapshot_processes(
-        conn,
-        days=process_days,
-        limit=process_limit,
-    )
-    recent_processes = await list_bulk_processes(
-        conn,
-        days=max(1, min(recent_days, 30)),
-        limit=max(1, min(recent_limit, 100)),
-    )
+    # Process ledgers stay off this ticker — they 504d the 4s budget on 00091.
+    # Full process lists remain on GET /ops/drop/processes.
     return {
         "as_of": datetime.now(timezone.utc).isoformat(),
         "summary": summary,
         "matching_progress": matching_progress,
-        "processes": processes,
+        "processes": {
+            "day": datetime.now(timezone.utc).date().isoformat(),
+            "days": max(1, min(process_days, 30)),
+            "processes": [],
+        },
         "recent_processes": {
             "days": max(1, min(recent_days, 30)),
-            "processes": recent_processes,
+            "processes": [],
         },
     }
 

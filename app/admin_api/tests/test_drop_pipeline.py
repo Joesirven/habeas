@@ -4107,32 +4107,29 @@ async def _fake_ca_drop_schedule_payload(
 
 def _assert_pipeline_summary_sql(issued: list[str]) -> None:
     data_sql = [sql for sql in issued if "set_config" not in sql]
-    assert len(data_sql) == 3
+    assert len(data_sql) == 1
     assert all("drop_raw_requests" not in sql for sql in data_sql)
     open_sql = next(sql for sql in data_sql if "pg_class" in sql or "reltuples" in sql)
-    review_sql = next(sql for sql in data_sql if "approval_requests" in sql)
-    connector_sql = next(sql for sql in data_sql if "drop_connector_attempts" in sql)
     assert "reltuples" in open_sql
     assert "COUNT(*)" not in open_sql
     assert "FROM requests" not in open_sql
-    assert "status = 'pending'" in review_sql
-    assert "status = 'success'" in connector_sql
+    assert all("approval_requests" not in sql for sql in data_sql)
+    assert all("drop_connector_attempts" not in sql for sql in data_sql)
     assert "JOIN" not in " ".join(data_sql)
-    assert "drop_raw_requests" not in " ".join(data_sql)
 
 
 def _assert_pipeline_summary_body(body: dict[str, Any]) -> None:
     assert body["open_requests"] == 1_843_251
-    assert body["review_pending"] == 17
+    assert body["review_pending"] == 0
     assert body["drop_requests"]["count"] == 1_843_251
-    assert body["matching_review"]["pending"] == 17
+    assert body["matching_review"]["pending"] == 0
     assert body["workers_total"] == len(drop_pipeline.WORKER_KEYS)
     assert "as_of" in body
     assert "worker_health" in body
     assert isinstance(body["worker_health"], dict)
     assert "ca_drop_schedule" in body
     assert body["ca_drop_schedule"]["cadence"] == "every_15_days"
-    assert body["ca_drop_schedule"]["last_success_at"] is not None
+    assert "last_success_at" in body["ca_drop_schedule"]
     blob = json.dumps(body).lower()
     assert "email" not in blob
     assert "consumer_id" not in blob
@@ -4153,7 +4150,7 @@ async def test_collect_pipeline_summary_bounded_sql_no_raw_spine(
     body = await drop_pipeline.collect_pipeline_summary(conn)
     _assert_pipeline_summary_sql(issued)
     _assert_pipeline_summary_body(body)
-    assert conn.fetchval.await_count == 3
+    assert conn.fetchval.await_count == 1
 
 
 def test_pipeline_summary_route_no_drop_raw_requests(
@@ -4325,9 +4322,9 @@ def _assert_console_snapshot_body(body: dict[str, Any]) -> None:
     assert isinstance(body["as_of"], str)
     summary = body["summary"]
     assert summary["open_requests"] == 1_843_251
-    assert summary["review_pending"] == 17
+    assert summary["review_pending"] == 0
     assert summary["drop_requests"]["count"] == 1_843_251
-    assert summary["matching_review"]["pending"] == 17
+    assert summary["matching_review"]["pending"] == 0
     assert isinstance(summary["matching_review"]["action_type"], str)
     assert "workers_down" in summary
     assert "workers_total" in summary
@@ -4341,15 +4338,11 @@ def _assert_console_snapshot_body(body: dict[str, Any]) -> None:
     assert isinstance(processes, dict)
     assert isinstance(processes["day"], str)
     assert isinstance(processes.get("days"), int)
-    assert isinstance(processes["processes"], list)
-    assert processes["processes"][0]["process_id"] == 12
-    assert processes["processes"][0]["intake_source"] == "drop"
-    assert "label" in processes["processes"][0]
+    assert processes["processes"] == []
     recent = body["recent_processes"]
     assert isinstance(recent, dict)
     assert recent["days"] == 30
-    assert isinstance(recent["processes"], list)
-    assert recent["processes"][0]["process_id"] == 12
+    assert recent["processes"] == []
     blob = json.dumps(body).lower()
     assert "email" not in blob
     assert "consumer_id" not in blob
@@ -4382,7 +4375,7 @@ async def test_collect_console_snapshot_shape(
     body = await drop_pipeline.collect_console_snapshot(conn)
     _assert_console_snapshot_sql(issued)
     _assert_console_snapshot_body(body)
-    assert conn.fetchval.await_count == 3
+    assert conn.fetchval.await_count == 1
 
 
 def test_console_snapshot_route_registered() -> None:
