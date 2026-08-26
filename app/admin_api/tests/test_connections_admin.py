@@ -113,6 +113,18 @@ def test_systems_catalog_shape() -> None:
     assert systems["cassandra"]["invite_allowed"] is False
     assert systems["cassandra"]["credential_fields"] == []
     assert systems["cassandra"]["trust_copy"]
+    assert systems["paylocity"]["connection_method_label"] == "SFTP"
+    assert systems["paylocity"]["upload_allowed"] is True
+    assert systems["lever"]["connection_method_label"] == "Lever API"
+    assert systems["lever"]["upload_allowed"] is True
+    assert systems["auth0"]["connection_method_label"] == "Management API"
+    assert systems["auth0"]["upload_allowed"] is False
+    assert systems["cassandra"]["connection_method_label"] is None
+    assert systems["cassandra"]["upload_allowed"] is False
+    assert systems["axios_hq"]["connection_method_label"] is None
+    assert systems["axios_hq"]["upload_allowed"] is True
+    assert systems["google_sheets"]["connection_method_label"] == "Google Sheets"
+    assert systems["google_sheets"]["upload_allowed"] is False
 
 
 def test_hardcoded_systems_catalog_excludes_mailchimp() -> None:
@@ -122,6 +134,19 @@ def test_hardcoded_systems_catalog_excludes_mailchimp() -> None:
     assert ids[0] == "axios_hq"
     assert catalog.systems[0].invite_allowed is False
     assert catalog.systems[0].credential_fields == []
+    by_id = {entry.system_id: entry for entry in catalog.systems}
+    assert by_id["auth0"].connection_method_label == "Management API"
+    assert by_id["auth0"].upload_allowed is False
+    assert by_id["paylocity"].connection_method_label == "SFTP"
+    assert by_id["paylocity"].upload_allowed is True
+    assert by_id["lever"].connection_method_label == "Lever API"
+    assert by_id["lever"].upload_allowed is True
+    assert by_id["cassandra"].connection_method_label is None
+    assert by_id["cassandra"].upload_allowed is False
+    assert by_id["axios_hq"].connection_method_label is None
+    assert by_id["axios_hq"].upload_allowed is True
+    assert by_id["google_sheets"].connection_method_label == "Google Sheets"
+    assert by_id["google_sheets"].upload_allowed is False
 
 
 def test_owner_candidates_union_of_role_allowlists() -> None:
@@ -943,6 +968,54 @@ async def test_force_live_on_hr_alumni_rejected(monkeypatch: pytest.MonkeyPatch)
         status="connected",
         owner_email="owner@example.com",
         secret_resource_name=f"dpra/connections/hr_alumni/{connection_id}",
+        last_tested_at=None,
+        last_test_ok=True,
+        last_test_detail="upload_ok",
+        created_by="ops@example.com",
+        created_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        metadata={"active_mode": "upload"},
+    )
+
+    async def _get_connection(*_args, **_kwargs):
+        return connection
+
+    conn = AsyncMock()
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    principal = RolePrincipal(
+        email="ops@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
+    monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await connections_admin.force_connection_mode(
+            connection_id,
+            connections_admin.ForceModeBody(mode="live"),
+            principal,
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "live mode not allowed for this system"
+
+
+@pytest.mark.asyncio
+async def test_force_live_on_axios_hq_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    connection_id = uuid4()
+    connection = Connection(
+        id=str(connection_id),
+        system="axios_hq",
+        display_name="Axios HQ",
+        status="connected",
+        owner_email="owner@example.com",
+        secret_resource_name=f"dpra/connections/axios_hq/{connection_id}",
         last_tested_at=None,
         last_test_ok=True,
         last_test_detail="upload_ok",

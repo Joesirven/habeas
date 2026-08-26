@@ -33,12 +33,10 @@ import { actionToast } from '@/lib/action-toast'
 import { RoleGate, isSuperAdmin } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 import {
-  collapsedPipelineCardFields,
+  collapsedBulkRowDisplay,
   getDropBulkProcess,
   getDropConsoleSnapshot,
-  getDropMatchingProgress,
   getDropPipeline,
-  getDropPipelineSummary,
   getDropWorkerTrends,
   listDropBulkProcesses,
   listDropBulkProcessRuns,
@@ -56,6 +54,7 @@ import {
   type BulkProcessStageCounts,
   type BulkProcessSummary,
   type BulkProcessesPayload,
+  type DropConsoleSnapshot,
   type DropMatchingProgress,
   type DropPipelineStatus,
   type HashIndexRefreshStatus,
@@ -212,24 +211,19 @@ function mergeStageCounts(
 function countsForStageTab(
   detail: BulkProcessDetail | undefined,
   tab: (typeof BULK_CARD_STAGE_TABS)[number],
-  liteStages?: BulkProcessSummary['stages'],
 ): BulkProcessStageCounts | undefined {
-  if (detail) {
-    if (tab.key === 'matching') {
-      return detail.stages.matching
-    }
-    if (tab.key === 'review') {
-      return detail.stages.review
-    }
-    return mergeStageCounts(tab.stages.map((stage) => detail.stages[stage.key]))
+  if (!detail) return undefined
+  // Matching % / Finished·Queued·Failed chips use matching_attempts only.
+  // Review is its own tab with request-spine counts from detail.stages.review.
+  if (tab.key === 'matching') {
+    return detail.stages.matching
   }
-  if (!liteStages) return undefined
-  if (tab.key === 'matching' || tab.key === 'review' || tab.key === 'fulfillment') {
-    return undefined
+  if (tab.key === 'review') {
+    return detail.stages.review
   }
-  return mergeStageCounts(
-    tab.stages.map((stage) => liteStages[stage.key as 'download' | 'land' | 'promote']),
-  )
+  // Ingest: land + promote are sequential CSV steps — merged success/total is a fair
+  // average across both sub-stages.
+  return mergeStageCounts(tab.stages.map((stage) => detail.stages[stage.key]))
 }
 
 function isStageTabCurrent(
@@ -1218,6 +1212,30 @@ function OpsLogExplorer({ mode }: { mode: 'errors' | 'logs' }) {
 /** Only feature a bulk process as "current" when recent + not finished. */
 const ACTIVE_BULK_MAX_AGE_MS = 48 * 60 * 60 * 1000
 
+const CONSOLE_SNAPSHOT_PARAMS = {
+  process_days: 7,
+  process_limit: 50,
+  recent_days: 30,
+  recent_limit: 100,
+} as const
+
+const CONSOLE_SNAPSHOT_QUERY_KEY = [
+  'admin-api',
+  'ops',
+  'drop-console',
+  'snapshot',
+  CONSOLE_SNAPSHOT_PARAMS,
+] as const
+
+function consoleSnapshotDrainActive(snapshot: DropConsoleSnapshot | undefined): boolean {
+  const progress = snapshot?.matching_progress
+  if (!progress) return false
+  const drainActive = progress.drain?.active ?? false
+  const pending = matchingProgressCount(progress, 'pending') ?? 0
+  const claimed = matchingProgressCount(progress, 'claimed') ?? 0
+  return drainActive || pending > 0 || claimed > 0
+}
+
 function isActiveBulkDetail(detail: BulkProcessDetail | undefined): boolean {
   if (!detail?.process_at) return false
   const status = detail.overall.status
@@ -1230,14 +1248,15 @@ async function loadBatchRequestRuns(params: {
   days: number
   intake: string
   downloadStatus: string
+  includeSummary: boolean
 }): Promise<BulkProcessesPayload> {
-  // Lite summaries batch connector + ingest ledgers — no per-row spine CTE.
+  // Snapshot miss: list only. Filter changes: cheap lite summaries (ledger, no spine).
   return listDropBulkProcesses({
     days: params.days,
     intake_source: params.intake || undefined,
     download_status: params.downloadStatus || undefined,
     limit: 50,
-    include_summary: true,
+    include_summary: params.includeSummary,
   })
 }
 
@@ -1362,20 +1381,6 @@ function durationVsAvgHint(
     deltaLabel,
     ofAvgPercent: Math.round((currentMs / avgMs) * 100),
   }
-}
-
-/** Human title for bulk cards from process_at (e.g. Jul 22, 2026, 2:00 PM). */
-function formatBulkProcessName(processAt: string | null | undefined): string {
-  if (!processAt) return '—'
-  const start = new Date(processAt)
-  if (Number.isNaN(start.getTime())) return '—'
-  return start.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  })
 }
 
 function stageRunIndicators(counts: BulkProcessStageCounts | undefined): {
@@ -1586,7 +1591,6 @@ function BulkStageStrip({
   onSelectTab,
   expanded,
   summaryCurrentStage,
-  liteStages,
 }: {
   detail: BulkProcessDetail | undefined
   loading?: boolean
@@ -1597,7 +1601,6 @@ function BulkStageStrip({
   expanded: boolean
   /** List-summary current stage — paints compact chips before per-row detail. */
   summaryCurrentStage?: string
-  liteStages?: BulkProcessSummary['stages']
 }) {
   return (
     <div
@@ -1606,8 +1609,7 @@ function BulkStageStrip({
       aria-label="Bulk process stages"
     >
       {BULK_CARD_STAGE_TABS.map((tab) => {
-        const waitingOnDetail =
-          !detail && !liteStages && (expanded || loading)
+        const waitingOnDetail = !detail && (expanded || loading)
         if (waitingOnDetail) {
           return (
             <div
@@ -1622,7 +1624,7 @@ function BulkStageStrip({
             </div>
           )
         }
-        const counts = countsForStageTab(detail, tab, liteStages)
+        const counts = countsForStageTab(detail, tab)
         const isCurrent = detail
           ? isStageTabCurrent(detail, tab)
           : tab.stages.some((stage) => stage.key === summaryCurrentStage)
@@ -2016,13 +2018,10 @@ function BatchProcessExpandRow({
     BULK_CARD_STAGE_TABS.find((tab) => tab.key === stageTab) ?? BULK_CARD_STAGE_TABS[0]
 
   const detail = detailQuery.data
-  const lite = collapsedPipelineCardFields(row)
   const running = isActiveBulkSummary(row) || isActiveBulkDetail(detail)
   const pending = !running && isPendingBulkSummary(row)
-  const percent = detail?.overall.percent ?? lite.percent
-  const resolvedStatusKey = detail?.overall.status ?? lite.status
-  const status = resolvedStatusKey.replaceAll('_', ' ')
-  const requestRows = detail?.request_rows ?? lite.requestRows
+  const resolvedStatusKey =
+    detail?.overall.status ?? row.overall?.status ?? row.download_status
   const completedAt = detail?.completed_at ?? row.completed_at
   const bulkDurationMs = durationMsBetween(
     row.process_at,
@@ -2075,7 +2074,7 @@ function BatchProcessExpandRow({
   const needsReview =
     resolvedStatusKey === 'needs_attention' || derived.reviewOpen > 0
   const reviewCount = derived.reviewOpen > 0 ? derived.reviewOpen : null
-  const activeTabCounts = countsForStageTab(detail, activeStage, row.stages)
+  const activeTabCounts = countsForStageTab(detail, activeStage)
   const activeIndicators = stageRunIndicators(activeTabCounts)
   const estCompletion = activeIndicators.percent
   const errorRate =
@@ -2110,7 +2109,16 @@ function BatchProcessExpandRow({
     setStageTab(next)
   }
 
-  const processName = lite.title !== '—' ? lite.title : formatBulkProcessName(row.process_at)
+  const collapsed = collapsedBulkRowDisplay({
+    process_at: row.process_at,
+    intake_source: row.intake_source,
+    label: row.label,
+    download_status: detail?.download_status ?? row.download_status,
+    overall: detail?.overall ?? row.overall,
+    request_rows: detail?.request_rows ?? row.request_rows,
+  })
+  const processName = collapsed.dateLabel
+  const status = collapsed.statusLabel
   const rowTone = running
     ? 'border-b border-emerald-200/70 bg-emerald-50/30 last:border-b-0'
     : pending
@@ -2176,8 +2184,8 @@ function BatchProcessExpandRow({
                   </span>
                 ) : (
                   <span>
-                    Prog {percent != null ? `${percent}%` : '—'}
-                    {requestRows != null ? ` · ${requestRows} req` : ''}
+                    Prog {collapsed.progressLabel || '—'}
+                    {collapsed.countLabel ? ` · ${collapsed.countLabel}` : ''}
                   </span>
                 )}
               </span>
@@ -2194,8 +2202,7 @@ function BatchProcessExpandRow({
             activeTab={stageTab}
             onSelectTab={selectStage}
             expanded={expanded}
-            summaryCurrentStage={lite.currentStage ?? row.overall?.current_stage}
-            liteStages={row.stages}
+            summaryCurrentStage={row.overall?.current_stage}
           />
         </div>
       </div>
@@ -2291,9 +2298,12 @@ function BatchRequestRunsList({
   const [runStatusFilter, setRunStatusFilter] = useState('attention')
   const [expandedId, setExpandedId] = useState<number | null>(null)
 
-  const defaultFilters = days === 7 && intake === 'drop' && !downloadStatus
-  const snapshotRows = snapshotProcesses?.processes ?? []
-  const useSnapshotList = defaultFilters && snapshotRows.length > 0
+  const defaultFilters =
+    days === CONSOLE_SNAPSHOT_PARAMS.process_days &&
+    intake === 'drop' &&
+    !downloadStatus
+
+  const useSnapshotList = defaultFilters && snapshotProcesses != null
 
   const listQuery = useQuery({
     queryKey: [
@@ -2310,20 +2320,22 @@ function BatchRequestRunsList({
         days,
         intake,
         downloadStatus,
+        includeSummary: !(defaultFilters && snapshotError),
       }),
-    enabled: !useSnapshotList,
+    enabled: !defaultFilters || (snapshotError && !useSnapshotList),
     refetchInterval: useSnapshotList ? false : 10_000,
     placeholderData: (previous) => previous,
   })
 
   const rows = useSnapshotList
-    ? snapshotRows
+    ? (snapshotProcesses.processes ?? [])
     : (listQuery.data?.processes ?? [])
-  const listPending =
-    (defaultFilters && snapshotPending && snapshotRows.length === 0 && !listQuery.data) ||
-    (!useSnapshotList && listQuery.isPending && !listQuery.data)
-  const listError =
-    !useSnapshotList && (listQuery.isError || (snapshotError && !listQuery.data))
+  const bulkListPending = defaultFilters
+    ? snapshotPending && !snapshotProcesses
+    : listQuery.isPending && !listQuery.data
+  const bulkListError = defaultFilters
+    ? snapshotError && !snapshotProcesses
+    : listQuery.isError
   const activeCount = rows.filter((row) => isActiveBulkSummary(row)).length
   const pendingCount = rows.filter(
     (row) => !isActiveBulkSummary(row) && isPendingBulkSummary(row),
@@ -2443,7 +2455,7 @@ function BatchRequestRunsList({
 
       <div className="min-h-[16rem]">
         {viewMode === 'individual' ? (
-          listError ? (
+          listQuery.isError ? (
             <div className="space-y-2 px-3 py-3">
               <p className="text-xs text-red-700">{errorMessage}</p>
               <Button
@@ -2471,7 +2483,7 @@ function BatchRequestRunsList({
               emptyLabel="No individual runs match the current filters."
             />
           )
-        ) : listError ? (
+        ) : bulkListError ? (
           <div className="space-y-2 px-3 py-3">
             <p className="text-xs text-red-700">{errorMessage}</p>
             <Button
@@ -2483,7 +2495,7 @@ function BatchRequestRunsList({
               Retry
             </Button>
           </div>
-        ) : listPending ? (
+        ) : bulkListPending ? (
           <div className="space-y-2 p-3" role="status" aria-label="Loading batch runs">
             {Array.from({ length: 5 }, (_, index) => (
               <Skeleton key={index} className="h-14 w-full" />
@@ -2610,7 +2622,7 @@ function CompactOpsMetrics({
   }[] = [
     {
       key: 'open',
-      label: 'Open',
+      label: 'Open in pipeline',
       value: openRequests == null ? '—' : String(openRequests),
       viz: (
         <MiniRing
@@ -2621,7 +2633,12 @@ function CompactOpsMetrics({
       detail: (
         <>
           <p className="text-xs text-ink-soft">
-            Review queue <span className="tabular-nums text-ink">{reviewPending ?? '—'}</span>
+            DROP requests not yet noticed or still in lifecycle (excludes closed
+            and notice-approved).
+          </p>
+          <p className="mt-2 text-xs text-ink-soft">
+            Review queue{' '}
+            <span className="tabular-nums text-ink">{reviewPending ?? '—'}</span>
           </p>
           <Link
             to="/requests/needs-attention"
@@ -3218,17 +3235,8 @@ export function DropPipelinePageInner() {
   const [lastAction, setLastAction] = useState<string | null>(null)
   const [actionResult, setActionResult] = useState<string | null>(null)
   const [hashState, setHashState] = useState('CA')
-  const [fatPipelineEnabled, setFatPipelineEnabled] = useState(false)
+  const [fullPipelineRefreshNonce, setFullPipelineRefreshNonce] = useState(0)
   const actionResultRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (typeof requestIdleCallback === 'function') {
-      const id = requestIdleCallback(() => setFatPipelineEnabled(true), { timeout: 400 })
-      return () => cancelIdleCallback(id)
-    }
-    const id = window.setTimeout(() => setFatPipelineEnabled(true), 0)
-    return () => clearTimeout(id)
-  }, [])
 
   function focusActionResultPanel(targetTab: PipelineTab = 'pipeline') {
     const focusPanel = () => {
@@ -3272,59 +3280,25 @@ export function DropPipelinePageInner() {
     })
   }
 
-  const matchingProgressQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'drop-matching-progress'],
-    queryFn: getDropMatchingProgress,
-    refetchInterval: (query) => {
-      const drainActive = query.state.data?.drain?.active ?? false
-      const pending = matchingProgressCount(query.state.data, 'pending') ?? 0
-      const claimed = matchingProgressCount(query.state.data, 'claimed') ?? 0
-      return drainActive || pending > 0 || claimed > 0 ? 750 : 5_000
-    },
+  const consoleSnapshotQuery = useQuery({
+    queryKey: CONSOLE_SNAPSHOT_QUERY_KEY,
+    queryFn: () => getDropConsoleSnapshot(CONSOLE_SNAPSHOT_PARAMS),
+    refetchInterval: (query) =>
+      consoleSnapshotDrainActive(query.state.data) ? 750 : 15_000,
     placeholderData: (previous) => previous,
   })
 
-  const pipelineSummaryQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'drop-pipeline', 'summary'],
-    queryFn: getDropPipelineSummary,
-    refetchInterval: 15_000,
-    placeholderData: (previous) => previous,
-  })
+  const fullPipelineEnabled = tab === 'hash_refresh' || fullPipelineRefreshNonce > 0
 
   const pipelineQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-pipeline', 'full'],
     queryFn: () => getDropPipeline(),
-    refetchInterval: 30_000,
+    refetchInterval: fullPipelineEnabled ? 30_000 : false,
     placeholderData: (previous) => previous,
-    enabled: fatPipelineEnabled,
+    enabled: fullPipelineEnabled,
   })
 
-  const consoleSnapshotQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'drop-console', 'snapshot'],
-    queryFn: () =>
-      getDropConsoleSnapshot({
-        process_days: 7,
-        process_limit: 50,
-        recent_days: 30,
-        recent_limit: 50,
-      }),
-    refetchInterval: 15_000,
-    placeholderData: (previous) => previous,
-  })
-
-  const processesQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'drop-processes', 'recent-30d'],
-    // Prefer recent window (not calendar "today") so older downloads still surface.
-    queryFn: () =>
-      listDropBulkProcesses({ days: 30, limit: 100, include_summary: true }),
-    refetchInterval: 10_000,
-    placeholderData: (previous) => previous,
-  })
-
-  const processList =
-    (consoleSnapshotQuery.data?.recent_processes?.processes?.length
-      ? consoleSnapshotQuery.data.recent_processes.processes
-      : processesQuery.data?.processes) ?? []
+  const processList = consoleSnapshotQuery.data?.recent_processes?.processes ?? []
 
   // Auto-select only a recent process (48h) — older downloads are History/Inspect.
   useEffect(() => {
@@ -3349,8 +3323,8 @@ export function DropPipelinePageInner() {
   const trendsQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-workers', 'trends', '3m'],
     queryFn: () => getDropWorkerTrends('3m'),
-    enabled: fatPipelineEnabled,
-    refetchInterval: 60_000,
+    enabled: tab === 'hash_refresh',
+    refetchInterval: tab === 'hash_refresh' ? 60_000 : false,
     placeholderData: (previous) => previous,
   })
 
@@ -3370,7 +3344,7 @@ export function DropPipelinePageInner() {
     },
     onSuccess: ({ key, data }) => {
       setActionResult(JSON.stringify(data, null, 2))
-      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-matching-progress'] })
+      void queryClient.invalidateQueries({ queryKey: CONSOLE_SNAPSHOT_QUERY_KEY })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-processes'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'approvals'] })
@@ -3417,7 +3391,7 @@ export function DropPipelinePageInner() {
     },
     onSuccess: (payload) => {
       setActionResult(JSON.stringify(payload, null, 2))
-      void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-matching-progress'] })
+      void queryClient.invalidateQueries({ queryKey: CONSOLE_SNAPSHOT_QUERY_KEY })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-pipeline'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-processes'] })
       void queryClient.invalidateQueries({ queryKey: ['admin-api', 'ops', 'drop-stats-global'] })
@@ -3451,11 +3425,10 @@ export function DropPipelinePageInner() {
     })
   }
 
-  const summaryData = pipelineSummaryQuery.data
+  const summaryData = consoleSnapshotQuery.data?.summary
   const data: DropPipelineStatus | undefined = pipelineQuery.data
-  const matchingProgress = matchingProgressQuery.data
-  const showHashSkeleton =
-    tab === 'hash_refresh' && fatPipelineEnabled && pipelineQuery.isPending && !data
+  const matchingProgress = consoleSnapshotQuery.data?.matching_progress
+  const showHashSkeleton = tab === 'hash_refresh' && pipelineQuery.isPending && !data
   const hashPending = (data?.hash_index_refresh?.pending ?? 0) > 0
   const workerHealth =
     summaryData?.workers_stale === false
@@ -3510,13 +3483,25 @@ export function DropPipelinePageInner() {
           <h2 className="mt-1 text-xl font-semibold tracking-tight text-ink">Console</h2>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {(matchingProgressQuery.isFetching && !matchingProgressQuery.isPending) ||
-          (pipelineSummaryQuery.isFetching && !pipelineSummaryQuery.isPending) ||
+          {(consoleSnapshotQuery.isFetching && !consoleSnapshotQuery.isPending) ||
           (pipelineQuery.isFetching && !pipelineQuery.isPending) ? (
             <span className="rounded-md border border-line px-2 py-0.5 text-[0.65rem] text-mute">
               Refreshing
             </span>
           ) : null}
+          <button
+            type="button"
+            className="taste-btn inline-flex h-9 items-center px-2.5 text-[0.65rem]"
+            onClick={() => {
+              setFullPipelineRefreshNonce((value) => value + 1)
+              void queryClient.invalidateQueries({
+                queryKey: ['admin-api', 'ops', 'drop-pipeline', 'full'],
+              })
+              void consoleSnapshotQuery.refetch()
+            }}
+          >
+            Refresh snapshot
+          </button>
           <Link
             to="/ops/workers/settings"
             className="taste-btn inline-flex h-9 w-9 items-center justify-center p-0"
@@ -3575,9 +3560,9 @@ export function DropPipelinePageInner() {
 
       <PipelineTabBar active={tab} onSelect={setTab} />
 
-      {pipelineSummaryQuery.isError && !summaryData ? (
+      {consoleSnapshotQuery.isError && !consoleSnapshotQuery.data ? (
         <p className="text-sm text-red-700">
-          Could not load pipeline header summary from admin-api.
+          Could not load pipeline console snapshot from admin-api.
         </p>
       ) : null}
 

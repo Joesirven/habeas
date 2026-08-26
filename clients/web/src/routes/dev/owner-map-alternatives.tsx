@@ -113,7 +113,7 @@ const FIXTURES: readonly FixtureSystem[] = [
     verticalLabel: 'People/HR',
     approaches: ['live', 'upload'],
     kind: 'live_ping',
-    note: 'A passing Live test only checks Users read/list. Matching still needs a mapped upload.',
+    note: 'A passing Lever API test only checks Users read/list. Matching still needs a mapped upload.',
   },
   {
     id: 'paylocity',
@@ -121,7 +121,7 @@ const FIXTURES: readonly FixtureSystem[] = [
     verticalLabel: 'People/HR',
     approaches: ['live', 'upload'],
     kind: 'live_ping',
-    note: 'Live is SFTP, not an API. A passing ping is not matching-ready.',
+    note: 'Paylocity uses SFTP, not an API. A passing ping is not matching-ready.',
   },
   {
     id: 'cassandra',
@@ -141,7 +141,7 @@ const VARIANT_META: Record<
     letter: 'A',
     title: 'Honest split-rail',
     blurb:
-      'Production pick. Left rail lists systems; the right pane is connect or map. Live success opens mapping. Live fail keeps Retry and Set up manual upload equal. Email or phone is enough.',
+      'Production pick. Left rail lists systems; the right pane is connect or map. A passing connection test opens mapping. A failed test keeps Retry connection and Set up manual upload equal. Email or phone is enough.',
     pick: true,
   },
   b: {
@@ -157,17 +157,17 @@ const VARIANT_META: Record<
   d: {
     letter: 'D',
     title: 'Two-pane',
-    blurb: 'Connect on the left, map on the right. Mapping stays inert until Live passes or upload is chosen.',
+    blurb: 'Connect on the left, map on the right. Mapping stays inert until the connection test passes or Manual upload is chosen.',
   },
   e: {
     letter: 'E',
     title: 'Fail cards',
-    blurb: 'After Live fail, choose Retry or Set up manual upload as equal cards.',
+    blurb: 'After a failed connection test, choose Retry connection or Set up manual upload as equal cards.',
   },
   f: {
     letter: 'F',
     title: 'Upload-first',
-    blurb: 'CSV + mapping is the default path. Live is optional for Lever and Paylocity.',
+    blurb: 'CSV + mapping is the default path. Lever API and Paylocity SFTP are optional.',
   },
   g: {
     letter: 'G',
@@ -213,8 +213,8 @@ function CassandraInfraCard({ compact = false }: { compact?: boolean }) {
         <Badge variant="default">Infra</Badge>
       </div>
       <p className="mt-1 text-xs leading-relaxed text-mute">
-        Suppress-only infrastructure. No owner mapping, no hash extract, and no Live credentials
-        on this surface.
+        Suppress-only infrastructure. No owner mapping, no hash extract, and no connection
+        credentials on this surface.
       </p>
     </article>
   )
@@ -342,7 +342,7 @@ function FixtureLiveToggle({
 }) {
   return (
     <div className="flex flex-wrap items-center gap-1">
-      <span className="text-[11px] text-mute">Simulate Live</span>
+      <span className="text-[11px] text-mute">Simulate connection test</span>
       {(['idle', 'pass', 'fail'] as const).map((outcome) => (
         <Button
           key={outcome}
@@ -920,8 +920,8 @@ function VariantD() {
             <MappingBody fixture={fixture} />
           ) : (
             <p className="text-xs text-mute">
-              Mapping unlocks after a passing Live test or Set up manual upload. A Live ping is
-              not matching-ready.
+              Mapping unlocks after a passing connection test or Set up manual upload. A
+              Users read/list or SFTP ping is not matching-ready.
             </p>
           )}
         </section>
@@ -935,7 +935,7 @@ function VariantE() {
   const fixture = useOwnerMapFixture('lever')
   const [chooser, setChooser] = useState<'retry' | 'upload' | null>(null)
   return (
-    <LabFrame title="E · Card chooser after Live fail">
+    <LabFrame title="E · Card chooser after connection test fail">
       <div className="mb-3 flex flex-wrap gap-1">
         {FIXTURES.filter((row) => row.kind !== 'infra').map((row) => (
           <Button
@@ -1025,7 +1025,7 @@ function VariantF() {
   const fixture = useOwnerMapFixture('axios_hq')
   const [liveOpen, setLiveOpen] = useState(false)
   return (
-    <LabFrame title="F · Upload-first, Live optional">
+    <LabFrame title="F · Upload-first, connection test optional">
       <div className="mb-3 flex flex-wrap gap-1">
         {FIXTURES.map((row) => (
           <Button
@@ -1044,7 +1044,7 @@ function VariantF() {
       ) : (
         <div className="space-y-4">
           <section className="space-y-2 rounded-md border border-line p-3">
-            <p className="text-xs font-medium text-ink">Upload (default)</p>
+            <p className="text-xs font-medium text-ink">Manual upload (default)</p>
             <p className="text-xs leading-relaxed text-ink-soft">
               {SYSTEM_COPY[fixture.system.id]?.uploadHowto ??
                 SYSTEM_COPY.axios_hq?.uploadHowto}
@@ -1058,7 +1058,13 @@ function VariantF() {
                 className="text-xs font-medium text-habeas-navy underline-offset-2 hover:underline"
                 onClick={() => setLiveOpen((open) => !open)}
               >
-                {liveOpen ? 'Hide Live connection' : 'Optional: test a Live connection'}
+                {liveOpen
+                  ? fixture.system.id === 'paylocity'
+                    ? 'Hide SFTP'
+                    : 'Hide Lever API'
+                  : fixture.system.id === 'paylocity'
+                    ? 'Optional: test SFTP'
+                    : 'Optional: test Lever API'}
               </button>
               {liveOpen ? (
                 <div className="mt-3">
@@ -1073,7 +1079,9 @@ function VariantF() {
                 </div>
               ) : (
                 <p className="mt-1 text-[11px] text-mute">
-                  Live is optional. A passing ping is not matching-ready.
+                  {fixture.system.id === 'paylocity'
+                    ? 'SFTP is optional. A passing ping is not matching-ready.'
+                    : 'Lever API is optional. A passing Users read/list ping is not matching-ready.'}
                 </p>
               )}
             </section>
@@ -1133,7 +1141,7 @@ function VariantG() {
                           : 'wait'
                     }
                   >
-                    Live ping
+                    {row.id === 'paylocity' ? 'SFTP' : 'Lever API'}
                   </Badge>
                 )}
               </div>
@@ -1217,8 +1225,10 @@ function VariantH() {
               row.kind === 'infra'
                 ? '—'
                 : allowsUpload(row.approaches) && allowsLive(row.approaches)
-                  ? 'Live + upload'
-                  : 'Upload'
+                  ? row.id === 'paylocity'
+                    ? 'SFTP + Manual upload'
+                    : 'Lever API + Manual upload'
+                  : 'Manual upload'
             const chip =
               row.kind === 'infra'
                 ? displayStatusChip('view_only')

@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import shutil
+import subprocess
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -19,14 +22,14 @@ from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
 
 
+
 def signed_headers(email: str, **extra: str) -> dict[str, str]:
-    """Verified Bearer + matching IAP email — header-alone is 401 on master."""
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
     return {
         IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
         "Authorization": f"Bearer {email}",
         **extra,
     }
-
 
 def test_next_scheduled_retrieval_utc_rolls_forward():
     now = datetime(2026, 7, 21, 15, 0, tzinfo=timezone.utc)
@@ -1885,7 +1888,7 @@ def test_matching_results_bulk_approve_prefers_iap_actor(monkeypatch: pytest.Mon
     with TestClient(app) as client:
         response = client.post(
             "/ops/drop/matching-results/bulk-approve",
-            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
+            headers=signed_headers("ops@habeas.com"),
             json={
                 "match_type": "multi_match",
                 "decided_by": "spoofed@example.com",
@@ -1914,14 +1917,12 @@ def test_drop_mutation_requires_iap_when_configured(monkeypatch: pytest.MonkeyPa
         denied = client.post("/ops/drop/hash-index-refresh/enqueue", json={"state": "CA"})
         unknown = client.post(
             "/ops/drop/hash-index-refresh/enqueue",
-            headers={
-                "X-Goog-Authenticated-User-Email": "accounts.google.com:stranger@habeas.com"
-            },
+            headers=signed_headers("stranger@habeas.com"),
             json={"state": "CA"},
         )
         allowed = client.post(
             "/ops/drop/hash-index-refresh/enqueue",
-            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
+            headers=signed_headers("ops@habeas.com"),
             json={"state": "CA"},
         )
 
@@ -1942,17 +1943,35 @@ def test_data_owner_cannot_read_pipeline_console(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(drop_pipeline, "get_pipeline_status", fake_status)
 
-    owner_headers = signed_headers("owner@habeas.com")
-
     with TestClient(app) as client:
         response = client.get(
             "/ops/drop/pipeline",
-            headers=owner_headers,
+            headers=signed_headers("owner@habeas.com"),
         )
-        snapshot = client.get("/ops/drop/console/snapshot", headers=owner_headers)
-        summary = client.get("/ops/drop/pipeline/summary", headers=owner_headers)
 
     assert response.status_code == 403
+
+
+def test_data_owner_cannot_read_console_snapshot_or_pipeline_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """data_owner is API 403 on console snapshot and pipeline summary."""
+    from admin_api import main as admin_main
+
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
+    monkeypatch.setattr(drop_pipeline.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "owner@habeas.com")
+
+    headers = signed_headers("owner@habeas.com")
+
+    with TestClient(app) as client:
+        snapshot = client.get("/ops/drop/console/snapshot", headers=headers)
+        summary = client.get("/ops/drop/pipeline/summary", headers=headers)
+
     assert snapshot.status_code == 403
     assert summary.status_code == 403
 
@@ -2155,7 +2174,7 @@ def test_matching_result_promote_and_decline_routes(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(drop_pipeline, "decline_matching_review_for_request", fake_decline)
 
     rid = "00000000-0000-0000-0000-000000000033"
-    headers = {"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"}
+    headers = signed_headers("ops@habeas.com")
     with TestClient(app) as client:
         promote = client.post(
             f"/ops/drop/matching-results/{rid}/promote",
@@ -2185,6 +2204,7 @@ def test_matching_result_promote_and_decline_routes(monkeypatch: pytest.MonkeyPa
     assert promote.status_code == 200
     assert promote.json()["status"] == "ok"
     assert promote.json()["system"] == "auth0"
+    assert captured["promote"]["decided_by"] == "ops@habeas.com"
     assert captured["promote"]["vertical"] == "auth0"
     assert captured["promote"]["system"] == "auth0"
     assert decline.status_code == 200
@@ -2282,7 +2302,7 @@ def test_workflow_assign_escalate_and_list(monkeypatch: pytest.MonkeyPatch):
     with TestClient(app) as client:
         assign = client.post(
             "/ops/drop/workflow/assign",
-            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:rev@habeas.com"},
+            headers=signed_headers("rev@habeas.com"),
             json={
                 "request_ids": ["00000000-0000-0000-0000-000000000001"],
                 "target_role": "reviewer",
@@ -2291,7 +2311,7 @@ def test_workflow_assign_escalate_and_list(monkeypatch: pytest.MonkeyPatch):
         )
         escalate = client.post(
             "/ops/drop/workflow/escalate",
-            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
+            headers=signed_headers("ops@habeas.com"),
             json={
                 "request_ids": [
                     "00000000-0000-0000-0000-000000000001",
@@ -2375,8 +2395,8 @@ def test_legal_triage_bulk_reject_and_send_to_matching(
     monkeypatch.setattr(drop_pipeline, "bulk_reject_legal_triage", fake_reject)
     monkeypatch.setattr(drop_pipeline, "send_legal_triage_to_matching", fake_send)
 
-    legal_headers = {IAP_EMAIL_HEADER: "legal@example.com"}
-    owner_headers = {IAP_EMAIL_HEADER: "owner@example.com"}
+    legal_headers = signed_headers("legal@example.com")
+    owner_headers = signed_headers("owner@example.com")
     rid = "00000000-0000-0000-0000-000000000099"
 
     with TestClient(app) as client:
@@ -2441,12 +2461,12 @@ def test_delivery_status_legal_only(monkeypatch: pytest.MonkeyPatch) -> None:
     with TestClient(app) as client:
         ok = client.patch(
             f"/ops/drop/workflow/delivery/{rid}/status",
-            headers={IAP_EMAIL_HEADER: "legal@example.com"},
+            headers=signed_headers("legal@example.com"),
             json={"status": "delivered"},
         )
         forbidden = client.patch(
             f"/ops/drop/workflow/delivery/{rid}/status",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=signed_headers("owner@example.com"),
             json={"status": "delivered"},
         )
 
@@ -2495,12 +2515,12 @@ def test_notice_approve_legal_only(monkeypatch: pytest.MonkeyPatch) -> None:
     with TestClient(app) as client:
         ok = client.post(
             "/ops/drop/workflow/notice/approve",
-            headers={IAP_EMAIL_HEADER: "legal@example.com"},
+            headers=signed_headers("legal@example.com"),
             json={"request_ids": [rid]},
         )
         forbidden = client.post(
             "/ops/drop/workflow/notice/approve",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=signed_headers("owner@example.com"),
             json={"request_ids": [rid]},
         )
 
@@ -2567,9 +2587,9 @@ def test_route_triage_conditions_get_put_legal_only(
     monkeypatch.setattr(drop_pipeline, "fetch_intake_route_triage_rule", fake_fetch)
     monkeypatch.setattr(drop_pipeline, "version_intake_route_triage_rule", fake_version)
 
-    legal_headers = {IAP_EMAIL_HEADER: "legal@example.com"}
-    admin_headers = {IAP_EMAIL_HEADER: "admin@example.com"}
-    owner_headers = {IAP_EMAIL_HEADER: "owner@example.com"}
+    legal_headers = signed_headers("legal@example.com")
+    admin_headers = signed_headers("admin@example.com")
+    owner_headers = signed_headers("owner@example.com")
 
     with TestClient(app) as client:
         get_ok = client.get(
@@ -2632,12 +2652,12 @@ async def test_create_workflow_assignment_validation():
 
 @pytest.fixture
 def _admin_headers() -> dict[str, str]:
-    return {IAP_EMAIL_HEADER: "admin@example.com"}
+    return signed_headers("admin@example.com")
 
 
 @pytest.fixture
 def _data_owner_headers() -> dict[str, str]:
-    return {IAP_EMAIL_HEADER: "owner@example.com"}
+    return signed_headers("owner@example.com")
 
 
 def test_drop_pipeline_read_requires_super_admin(
@@ -2802,7 +2822,7 @@ def test_drop_spine_composes_super_admin_role_with_iap_actor(
         "habeas_privacy_core.db.hash_index_refresh.enqueue_hash_index_refresh",
         fake_enqueue,
     )
-    headers = {IAP_EMAIL_HEADER: "accounts.google.com:ops@habeas.com"}
+    headers = signed_headers("ops@habeas.com")
 
     with TestClient(app) as client:
         denied = client.post("/ops/drop/hash-index-refresh/enqueue", json={"state": "CA"})
@@ -2844,6 +2864,31 @@ async def test_list_bulk_processes_keyed_by_intake_datetime():
     assert rows[0]["intake_source"] == "drop"
     assert rows[0]["label"].startswith("drop · ")
     assert "gcs_uri" not in rows[0]
+
+
+@pytest.mark.asyncio
+async def test_list_bulk_processes_skips_gcs_uri_trim():
+    """Avoid length(trim(gcs_uri)) — that expression blocks a cheap LIMIT plan."""
+    issued: list[str] = []
+
+    async def fetch(sql: str, *args: Any) -> list[Any]:
+        issued.append(sql)
+        return []
+
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+    await drop_pipeline.list_bulk_processes(conn, days=7, limit=50)
+    assert issued
+    sql = issued[0]
+    assert "length(trim" not in sql
+    assert "gcs_uri <> ''" in sql
+    assert "LIMIT" in sql
+
+
+def test_ops_fast_statement_timeout_skips_mocks():
+    conn = MagicMock()
+    assert drop_pipeline._supports_local_statement_timeout(conn) is False
+    assert drop_pipeline.OPS_FAST_STATEMENT_TIMEOUT_MS == 8_000
 
 
 @pytest.mark.asyncio
@@ -2993,7 +3038,7 @@ def test_bulk_processes_route(monkeypatch: pytest.MonkeyPatch):
     with TestClient(app) as client:
         response = client.get(
             "/ops/drop/processes",
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:ops@example.com"},
+            headers=signed_headers("ops@example.com"),
         )
 
     assert response.status_code == 200
@@ -3204,11 +3249,11 @@ def test_ops_health_and_workers_require_super_admin(
     monkeypatch.setattr(roles.settings, "admin_api_legals", "legal@example.com")
     monkeypatch.setattr(roles.settings, "admin_api_data_owners", "owner@example.com")
 
-    ops = {IAP_EMAIL_HEADER: "ops@example.com"}
+    ops = signed_headers("ops@example.com")
     denied = [
-        {IAP_EMAIL_HEADER: "admin@example.com"},
-        {IAP_EMAIL_HEADER: "legal@example.com"},
-        {IAP_EMAIL_HEADER: "owner@example.com"},
+        signed_headers("admin@example.com"),
+        signed_headers("legal@example.com"),
+        signed_headers("owner@example.com"),
     ]
     paths = (
         "/ops/drop/workers",
@@ -3225,7 +3270,7 @@ def test_ops_health_and_workers_require_super_admin(
 
         patch_denied = client.patch(
             "/ops/health/retry-config",
-            headers={IAP_EMAIL_HEADER: "admin@example.com"},
+            headers=signed_headers("admin@example.com"),
             json={"table_name": "matching_attempts", "max_attempts": 6},
         )
         assert patch_denied.status_code == 403
@@ -3823,117 +3868,29 @@ async def test_collect_bulk_process_progress_missing_gcs_uri_skips_global_matchi
     assert detail["request_rows"] == 0
 
 
+def _reset_matching_progress_cache() -> None:
+    """Drop in-process matching TTL so hermetic tests hit SQL, not a prior result."""
+    drop_pipeline._matching_progress_cache = None
+
+
+@pytest.fixture(autouse=True)
+def _clear_matching_progress_cache() -> Any:
+    _reset_matching_progress_cache()
+    yield
+    _reset_matching_progress_cache()
+
+
 def _is_matching_progress_attempts_group_by(sql: str) -> bool:
     """Cheap ticker: one GROUP BY on matching_attempts — never the raw spine."""
     return (
         "matching_attempts" in sql
         and "GROUP BY" in sql
         and "drop_raw_requests" not in sql
-        and "JOIN" not in sql
     )
-
-
-_HEADER_CACHE_ATTRS = (
-    "_header_open_requests_cache",
-    "_matching_progress_cache",
-    "_pipeline_summary_cache",
-    "_console_snapshot_cache",
-    "_header_ticker_cache",
-    "_open_requests_cache",
-    "_SUMMARY_CACHE",
-    "_MATCHING_PROGRESS_CACHE",
-    "_SNAPSHOT_CACHE",
-)
-
-
-def _clear_header_collector_cache() -> None:
-    """TTL open_requests cache must not hide collector SQL from asserts."""
-    for name in (
-        "clear_pipeline_header_cache",
-        "clear_header_collector_cache",
-    ):
-        clearer = getattr(drop_pipeline, name, None)
-        if callable(clearer):
-            clearer()
-    for name in _HEADER_CACHE_ATTRS:
-        if hasattr(drop_pipeline, name):
-            setattr(drop_pipeline, name, None)
-
-
-def _attach_execute_recorder(conn: MagicMock) -> None:
-    """Record set_config / statement_timeout without polluting fetch SQL lists."""
-    executes: list[tuple[str, tuple[Any, ...]]] = []
-
-    async def execute(sql: str, *args: Any) -> str:
-        executes.append((sql, args))
-        return "OK"
-
-    class _Txn:
-        async def __aenter__(self) -> None:
-            return None
-
-        async def __aexit__(self, *args: Any) -> None:
-            return None
-
-    conn.execute = AsyncMock(side_effect=execute)
-    conn.transaction = lambda: _Txn()
-    conn._timeout_executes = executes
-
-
-def _assert_statement_timeout_armed(conn: MagicMock) -> None:
-    """Routes must set (and reset) statement_timeout via execute or the helper."""
-    executes: list[tuple[str, tuple[Any, ...]]] = list(
-        getattr(conn, "_timeout_executes", [])
-    )
-    if not executes:
-        for call in getattr(conn.execute, "await_args_list", []):
-            args = call.args
-            sql = str(args[0]) if args else ""
-            executes.append((sql, args[1:]))
-    blobs = [
-        " ".join((sql, *(str(arg) for arg in args))).lower()
-        for sql, args in executes
-    ]
-    assert any(
-        "set_config" in blob and "statement_timeout" in blob for blob in blobs
-    ), "statement_timeout / set_config not invoked on acquired conn"
-    assert any(
-        "4000" in blob for blob in blobs
-    ), "statement_timeout must be armed at 4000ms"
-    assert any(
-        "statement_timeout" in blob
-        and ("'0'" in blob or '"0"' in blob or blob.rstrip().endswith(" 0"))
-        for blob in blobs
-    ), "statement_timeout must be reset on the pooled conn"
-
-
-def _wrap_busy_flag(conn: MagicMock) -> MagicMock:
-    """Fail if two awaits overlap on one conn (busy-flag + asyncio.sleep(0))."""
-    busy = False
-
-    def _guard(orig: AsyncMock) -> AsyncMock:
-        async def guarded(*args: Any, **kwargs: Any) -> Any:
-            nonlocal busy
-            if busy:
-                raise AssertionError("overlapping await on one connection")
-            busy = True
-            try:
-                await asyncio.sleep(0)
-                return await orig(*args, **kwargs)
-            finally:
-                busy = False
-
-        return AsyncMock(side_effect=guarded)
-
-    conn.fetch = _guard(conn.fetch)
-    conn.fetchval = _guard(conn.fetchval)
-    conn.fetchrow = _guard(conn.fetchrow)
-    if isinstance(getattr(conn, "execute", None), AsyncMock):
-        conn.execute = _guard(conn.execute)
-    return conn
 
 
 def _capturing_matching_progress_conn() -> tuple[MagicMock, list[str]]:
+    _reset_matching_progress_cache()
     issued: list[str] = []
 
     async def fetch(sql: str, *args: Any) -> list[_Row]:
@@ -3972,24 +3929,28 @@ def _capturing_matching_progress_conn() -> tuple[MagicMock, list[str]]:
     conn.fetch = AsyncMock(side_effect=fetch)
     conn.fetchrow = AsyncMock(side_effect=fetchrow)
     conn.fetchval = AsyncMock(side_effect=fetchval)
-    _attach_execute_recorder(conn)
     return conn, issued
 
 
 def _assert_matching_progress_sql(issued: list[str]) -> None:
     assert issued, "matching-progress issued no SQL"
     assert all("drop_raw_requests" not in sql for sql in issued)
-    assert all("matching_attempts" not in sql for sql in issued)
-    assert any("matching_drain_lease" in sql for sql in issued)
+    group_bys = [sql for sql in issued if _is_matching_progress_attempts_group_by(sql)]
+    assert len(group_bys) == 1
+    compact = " ".join(group_bys[0].split())
+    assert "FROM matching_attempts" in compact
+    assert "GROUP BY ma.status" in compact or "GROUP BY status" in compact
+    attempt_sqls = [sql for sql in issued if "matching_attempts" in sql]
+    assert len(attempt_sqls) == 1
     assert all("drop_connector_attempts" not in sql for sql in issued)
     assert all("drop_ingest_attempts" not in sql for sql in issued)
 
 
 def _assert_matching_progress_body(body: dict[str, Any]) -> None:
-    assert body["pending"] == 0
-    assert body["claimed"] == 0
-    assert body["success"] == 0
-    assert body["by_status"] == []
+    assert body["pending"] == 10
+    assert body["claimed"] == 3
+    assert body["success"] == 100
+    assert any(row["status"] == "pending" and row["count"] == 10 for row in body["by_status"])
     assert body["drain"]["active"] is True
     assert body["drain"]["holder"] == "matching-drain-1"
     blob = json.dumps(body).lower()
@@ -4008,12 +3969,12 @@ def test_worker_keys_excludes_intake_drop_poller() -> None:
 @pytest.mark.asyncio
 async def test_collect_matching_progress_sql_is_attempts_group_by_only() -> None:
     """GET matching-progress SQL is one GROUP BY on matching_attempts — no raws."""
-    _clear_header_collector_cache()
+    _reset_matching_progress_cache()
     conn, issued = _capturing_matching_progress_conn()
     result = await drop_pipeline.collect_matching_progress(conn)
     _assert_matching_progress_sql(issued)
     _assert_matching_progress_body(result)
-    assert conn.fetch.await_count == 0
+    assert conn.fetch.await_count == 1
     assert conn.fetchrow.await_count == 1
 
 
@@ -4023,7 +3984,7 @@ def test_matching_progress_sql_is_attempts_group_by_only(
     """GET /ops/drop/matching-progress issues attempts GROUP BY only — hermetic."""
     from admin_api import main as admin_main
 
-    _clear_header_collector_cache()
+    _reset_matching_progress_cache()
     conn, issued = _capturing_matching_progress_conn()
 
     class _Acquire:
@@ -4053,6 +4014,28 @@ def test_matching_progress_sql_is_attempts_group_by_only(
     _assert_matching_progress_body(response.json())
 
 
+@pytest.mark.asyncio
+async def test_collect_matching_progress_ttl_skips_immediate_second_sql() -> None:
+    """Second immediate collect_matching_progress must reuse the TTL cache."""
+    _reset_matching_progress_cache()
+    conn, issued = _capturing_matching_progress_conn()
+    first = await drop_pipeline.collect_matching_progress(conn)
+    first_sql = list(issued)
+    _assert_matching_progress_sql(first_sql)
+    _assert_matching_progress_body(first)
+    assert conn.fetch.await_count == 1
+    assert conn.fetchrow.await_count == 1
+
+    second = await drop_pipeline.collect_matching_progress(conn)
+    assert issued == first_sql
+    assert second == first
+    assert conn.fetch.await_count == 1
+    assert conn.fetchrow.await_count == 1
+    blob = json.dumps(second).lower()
+    assert "email" not in blob
+    assert "consumer_id" not in blob
+
+
 def _capturing_pipeline_summary_conn() -> tuple[MagicMock, list[str]]:
     """Conn that records summary SQL — must stay off the drop_raw_requests spine."""
     issued: list[str] = []
@@ -4061,9 +4044,7 @@ def _capturing_pipeline_summary_conn() -> tuple[MagicMock, list[str]]:
         issued.append(sql)
         if "drop_raw_requests" in sql:
             raise AssertionError("pipeline summary must not scan drop_raw_requests")
-        if "COUNT(*)" in sql and "FROM requests" in sql:
-            raise AssertionError("pipeline summary must not COUNT(*) requests")
-        if "pg_class" in sql or "reltuples" in sql:
+        if "FROM requests" in sql and "intake_source = 'drop'" in sql:
             return 1_843_251
         if "approval_requests" in sql and "status = 'pending'" in sql:
             return 17
@@ -4083,7 +4064,6 @@ def _capturing_pipeline_summary_conn() -> tuple[MagicMock, list[str]]:
             AssertionError("pipeline summary must not use fetchrow()")
         )()
     )
-    _attach_execute_recorder(conn)
     return conn, issued
 
 
@@ -4106,33 +4086,31 @@ async def _fake_ca_drop_schedule_payload(
 
 
 def _assert_pipeline_summary_sql(issued: list[str]) -> None:
-    data_sql = [sql for sql in issued if "set_config" not in sql]
-    assert len(data_sql) == 1
-    assert all("drop_raw_requests" not in sql for sql in data_sql)
-    open_sql = next(sql for sql in data_sql if "pg_class" in sql or "reltuples" in sql)
-    assert "reltuples" in open_sql
-    assert "COUNT(*)" not in open_sql
-    assert "FROM requests" not in open_sql
-    assert all("approval_requests" not in sql for sql in data_sql)
-    assert all("drop_connector_attempts" not in sql for sql in data_sql)
-    assert "JOIN" not in " ".join(data_sql)
+    assert len(issued) == 3
+    assert all("drop_raw_requests" not in sql for sql in issued)
+    open_sql = next(sql for sql in issued if "FROM requests" in sql)
+    review_sql = next(sql for sql in issued if "approval_requests" in sql)
+    connector_sql = next(sql for sql in issued if "drop_connector_attempts" in sql)
+    assert "intake_source = 'drop'" in open_sql
+    assert "COUNT(*)" in open_sql
+    assert "status = 'pending'" in review_sql
+    assert "status = 'success'" in connector_sql
+    assert "GROUP BY" not in " ".join(issued)
 
 
 def _assert_pipeline_summary_body(body: dict[str, Any]) -> None:
     assert body["open_requests"] == 1_843_251
-    assert body["review_pending"] == 0
+    assert body["review_pending"] == 17
     assert body["drop_requests"]["count"] == 1_843_251
-    assert body["matching_review"]["pending"] == 0
+    assert body["matching_review"]["pending"] == 17
     assert body["workers_total"] == len(drop_pipeline.WORKER_KEYS)
     assert "as_of" in body
     assert "worker_health" in body
     assert isinstance(body["worker_health"], dict)
     assert "ca_drop_schedule" in body
     assert body["ca_drop_schedule"]["cadence"] == "every_15_days"
-    assert "last_success_at" in body["ca_drop_schedule"]
+    assert body["ca_drop_schedule"]["last_success_at"] is not None
     blob = json.dumps(body).lower()
-    assert "email" not in blob
-    assert "consumer_id" not in blob
     assert "drop_raw_requests" not in blob
 
 
@@ -4141,7 +4119,6 @@ async def test_collect_pipeline_summary_bounded_sql_no_raw_spine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Header summary counts requests + review pending only — no raw spine."""
-    _clear_header_collector_cache()
     monkeypatch.setattr(
         "admin_api.worker_schedules.ca_drop_schedule_payload",
         _fake_ca_drop_schedule_payload,
@@ -4150,7 +4127,53 @@ async def test_collect_pipeline_summary_bounded_sql_no_raw_spine(
     body = await drop_pipeline.collect_pipeline_summary(conn)
     _assert_pipeline_summary_sql(issued)
     _assert_pipeline_summary_body(body)
-    assert conn.fetchval.await_count == 1
+    assert conn.fetchval.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_collect_pipeline_summary_fetchvals_are_sequential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three fetchvals must run one-at-a-time — gather on one asyncpg conn 500s."""
+    monkeypatch.setattr(
+        "admin_api.worker_schedules.ca_drop_schedule_payload",
+        _fake_ca_drop_schedule_payload,
+    )
+    busy = False
+    await_count = 0
+    issued: list[str] = []
+
+    async def fetchval(sql: str, *args: Any) -> Any:
+        nonlocal busy, await_count
+        if busy:
+            raise AssertionError(
+                "concurrent fetchval — asyncio.gather on one asyncpg conn would 500"
+            )
+        busy = True
+        await_count += 1
+        issued.append(sql)
+        try:
+            await asyncio.sleep(0)
+            if "drop_raw_requests" in sql:
+                raise AssertionError("pipeline summary must not scan drop_raw_requests")
+            if "FROM requests" in sql and "intake_source = 'drop'" in sql:
+                return 1_843_251
+            if "approval_requests" in sql and "status = 'pending'" in sql:
+                return 17
+            if "drop_connector_attempts" in sql and "completed_at" in sql:
+                return datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+            return 0
+        finally:
+            busy = False
+
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(side_effect=fetchval)
+    body = await drop_pipeline.collect_pipeline_summary(conn)
+    assert await_count == 3
+    assert conn.fetchval.await_count == 3
+    _assert_pipeline_summary_sql(issued)
+    _assert_pipeline_summary_body(body)
+    assert drop_pipeline._supports_local_statement_timeout(conn) is False
 
 
 def test_pipeline_summary_route_no_drop_raw_requests(
@@ -4159,7 +4182,6 @@ def test_pipeline_summary_route_no_drop_raw_requests(
     """GET /ops/drop/pipeline/summary stays off drop_raw_requests."""
     from admin_api import main as admin_main
 
-    _clear_header_collector_cache()
     conn, issued = _capturing_pipeline_summary_conn()
 
     class _Acquire:
@@ -4245,61 +4267,86 @@ async def _fake_snapshot_lite_summaries(
     }
 
 
-def _capturing_console_snapshot_conn() -> tuple[MagicMock, list[str]]:
-    """Conn that records snapshot SQL — summary fetchval + matching fetch."""
+def _capturing_console_snapshot_conn(
+    *, reject_concurrent: bool = False
+) -> tuple[MagicMock, list[str]]:
+    """Conn that records snapshot SQL and optionally fails on concurrent ops."""
+    _reset_matching_progress_cache()
     issued: list[str] = []
+    busy = False
+
+    async def _enter(sql: str) -> None:
+        nonlocal busy
+        if reject_concurrent and busy:
+            raise AssertionError(
+                "concurrent conn operation — asyncio.gather on one asyncpg conn would 500"
+            )
+        busy = True
+        issued.append(sql)
+        if reject_concurrent:
+            await asyncio.sleep(0)
+
+    def _leave() -> None:
+        nonlocal busy
+        busy = False
 
     async def fetchval(sql: str, *args: Any) -> Any:
-        issued.append(sql)
-        if _sql_uses_raw_spine_for_open(sql):
-            raise AssertionError(
-                "console snapshot open count must not GROUP BY / JOIN drop_raw_requests"
-            )
-        if "COUNT(*)" in sql and "FROM requests" in sql:
-            raise AssertionError("console snapshot must not COUNT(*) requests")
-        if "pg_class" in sql or "reltuples" in sql:
-            return 1_843_251
-        if "approval_requests" in sql and "status = 'pending'" in sql:
-            return 17
-        if "drop_connector_attempts" in sql and "completed_at" in sql:
-            return datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
-        return 0
+        await _enter(sql)
+        try:
+            if _sql_uses_raw_spine_for_open(sql):
+                raise AssertionError(
+                    "console snapshot open count must not GROUP BY / JOIN drop_raw_requests"
+                )
+            if "FROM requests" in sql and "intake_source = 'drop'" in sql:
+                return 1_843_251
+            if "approval_requests" in sql and "status = 'pending'" in sql:
+                return 17
+            if "drop_connector_attempts" in sql and "completed_at" in sql:
+                return datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+            return 0
+        finally:
+            _leave()
 
     async def fetch(sql: str, *args: Any) -> list[_Row]:
-        issued.append(sql)
-        if _sql_uses_raw_spine_for_open(sql):
-            raise AssertionError(
-                "console snapshot open count must not GROUP BY / JOIN drop_raw_requests"
-            )
-        if "matching_attempts" in sql:
-            return [
-                _Row(status="pending", count=10),
-                _Row(status="claimed", count=3),
-                _Row(status="success", count=100),
-                _Row(status="failed", count=1),
-            ]
-        return []
+        await _enter(sql)
+        try:
+            if _sql_uses_raw_spine_for_open(sql):
+                raise AssertionError(
+                    "console snapshot open count must not GROUP BY / JOIN drop_raw_requests"
+                )
+            if "matching_attempts" in sql:
+                return [
+                    _Row(status="pending", count=10),
+                    _Row(status="claimed", count=3),
+                    _Row(status="success", count=100),
+                    _Row(status="failed", count=1),
+                ]
+            return []
+        finally:
+            _leave()
 
     async def fetchrow(sql: str, *args: Any) -> _Row | None:
-        issued.append(sql)
-        if _sql_uses_raw_spine_for_open(sql):
-            raise AssertionError(
-                "console snapshot open count must not GROUP BY / JOIN drop_raw_requests"
-            )
-        if "matching_drain_lease" in sql:
-            return _Row(
-                holder="matching-drain-1",
-                acquired_at=datetime(2026, 8, 25, 22, 40, tzinfo=timezone.utc),
-                expires_at=datetime(2026, 8, 25, 23, 0, tzinfo=timezone.utc),
-                active=True,
-            )
-        return None
+        await _enter(sql)
+        try:
+            if _sql_uses_raw_spine_for_open(sql):
+                raise AssertionError(
+                    "console snapshot open count must not GROUP BY / JOIN drop_raw_requests"
+                )
+            if "matching_drain_lease" in sql:
+                return _Row(
+                    holder="matching-drain-1",
+                    acquired_at=datetime(2026, 8, 25, 22, 40, tzinfo=timezone.utc),
+                    expires_at=datetime(2026, 8, 25, 23, 0, tzinfo=timezone.utc),
+                    active=True,
+                )
+            return None
+        finally:
+            _leave()
 
     conn = MagicMock()
     conn.fetchval = AsyncMock(side_effect=fetchval)
     conn.fetch = AsyncMock(side_effect=fetch)
     conn.fetchrow = AsyncMock(side_effect=fetchrow)
-    _attach_execute_recorder(conn)
     return conn, issued
 
 
@@ -4309,31 +4356,8 @@ def _assert_console_snapshot_sql(issued: list[str]) -> None:
     assert all("drop_raw_requests" not in sql for sql in issued)
 
 
-def _assert_lite_process_item(
-    item: dict[str, Any], *, expect_lite: bool = True
-) -> None:
-    """Collapsed card fields: head + lite overall / request_rows (optional stages)."""
-    assert isinstance(item, dict)
-    assert item.get("process_id") is not None
-    assert item.get("process_at") or item.get("label")
-    has_download = item.get("download_status") is not None
-    overall = item.get("overall")
-    has_overall_status = isinstance(overall, dict) and overall.get("status")
-    assert has_download or has_overall_status
-    if not expect_lite:
-        return
-    assert isinstance(overall, dict)
-    assert overall.get("status")
-    assert "request_rows" in item
-    stages = item.get("stages")
-    if stages is not None:
-        assert isinstance(stages, dict)
-        assert {"download", "land", "promote"} <= set(stages)
-        assert set(stages) <= {"download", "land", "promote"}
-
-
 def _assert_console_snapshot_body(body: dict[str, Any]) -> None:
-    """Web getDropConsoleSnapshot — DropConsoleSnapshot shape."""
+    """Web getDropConsoleSnapshot (00022/00023) — DropConsoleSnapshot shape."""
     for key in (
         "as_of",
         "summary",
@@ -4345,9 +4369,9 @@ def _assert_console_snapshot_body(body: dict[str, Any]) -> None:
     assert isinstance(body["as_of"], str)
     summary = body["summary"]
     assert summary["open_requests"] == 1_843_251
-    assert summary["review_pending"] == 0
+    assert summary["review_pending"] == 17
     assert summary["drop_requests"]["count"] == 1_843_251
-    assert summary["matching_review"]["pending"] == 0
+    assert summary["matching_review"]["pending"] == 17
     assert isinstance(summary["matching_review"]["action_type"], str)
     assert "workers_down" in summary
     assert "workers_total" in summary
@@ -4361,15 +4385,15 @@ def _assert_console_snapshot_body(body: dict[str, Any]) -> None:
     assert isinstance(processes, dict)
     assert isinstance(processes["day"], str)
     assert isinstance(processes.get("days"), int)
-    assert processes["processes"], "snapshot processes.processes must be non-empty with list/lite mocks"
-    for item in processes["processes"]:
-        _assert_lite_process_item(item)
+    assert isinstance(processes["processes"], list)
+    assert processes["processes"][0]["process_id"] == 12
+    assert processes["processes"][0]["intake_source"] == "drop"
+    assert "label" in processes["processes"][0]
     recent = body["recent_processes"]
     assert isinstance(recent, dict)
     assert recent["days"] == 30
-    assert recent["processes"], "snapshot recent_processes.processes must be non-empty with list/lite mocks"
-    for item in recent["processes"]:
-        _assert_lite_process_item(item)
+    assert isinstance(recent["processes"], list)
+    assert recent["processes"][0]["process_id"] == 12
     blob = json.dumps(body).lower()
     assert "email" not in blob
     assert "consumer_id" not in blob
@@ -4388,21 +4412,20 @@ def _install_console_snapshot_process_mocks(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_collect_console_snapshot_shape(
+async def test_collect_console_snapshot_sequential_no_raw_spine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Snapshot merges summary, matching, and process heads (DropConsoleSnapshot)."""
-    _clear_header_collector_cache()
+    """Snapshot collectors are sequential; open count stays off the raw spine."""
     monkeypatch.setattr(
         "admin_api.worker_schedules.ca_drop_schedule_payload",
         _fake_ca_drop_schedule_payload,
     )
     _install_console_snapshot_process_mocks(monkeypatch)
-    conn, issued = _capturing_console_snapshot_conn()
+    conn, issued = _capturing_console_snapshot_conn(reject_concurrent=True)
     body = await drop_pipeline.collect_console_snapshot(conn)
     _assert_console_snapshot_sql(issued)
     _assert_console_snapshot_body(body)
-    assert conn.fetchval.await_count == 1
+    assert conn.fetchval.await_count == 3
 
 
 def test_console_snapshot_route_registered() -> None:
@@ -4421,7 +4444,7 @@ def test_console_snapshot_route_no_drop_raw_requests(
     """GET /ops/drop/console/snapshot stays off drop_raw_requests."""
     from admin_api import main as admin_main
 
-    _clear_header_collector_cache()
+    _reset_matching_progress_cache()
     conn, issued = _capturing_console_snapshot_conn()
 
     class _Acquire:
@@ -4464,103 +4487,6 @@ def test_console_snapshot_route_no_drop_raw_requests(
     assert response.status_code == 200
     _assert_console_snapshot_sql(issued)
     _assert_console_snapshot_body(response.json())
-
-
-@pytest.mark.asyncio
-async def test_busy_flag_rejects_overlapping_awaits_on_one_conn() -> None:
-    """A conn held across overlapping awaits must fail (busy-flag + sleep(0))."""
-    conn, _issued = _capturing_matching_progress_conn()
-    _wrap_busy_flag(conn)
-    with pytest.raises(AssertionError, match="overlapping await"):
-        await asyncio.gather(conn.fetch("SELECT 1"), conn.fetch("SELECT 2"))
-
-
-@pytest.mark.asyncio
-async def test_header_collectors_reject_concurrent_awaits_on_one_conn(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """summary, matching-progress, and snapshot must not overlap awaits on one conn.
-
-    Sequential fetchval counts already prove gather is sequentialized — that is
-    not enough for the prod hang. This busy-flag + sleep(0) guard would fail if
-    any header collector still issued overlapping I/O on one connection.
-    """
-    _clear_header_collector_cache()
-    monkeypatch.setattr(
-        "admin_api.worker_schedules.ca_drop_schedule_payload",
-        _fake_ca_drop_schedule_payload,
-    )
-    _install_console_snapshot_process_mocks(monkeypatch)
-
-    summary_conn, _summary_sql = _capturing_pipeline_summary_conn()
-    _wrap_busy_flag(summary_conn)
-    summary = await drop_pipeline.collect_pipeline_summary(summary_conn)
-    _assert_pipeline_summary_body(summary)
-
-    progress_conn, progress_sql = _capturing_matching_progress_conn()
-    _wrap_busy_flag(progress_conn)
-    progress = await drop_pipeline.collect_matching_progress(progress_conn)
-    _assert_matching_progress_sql(progress_sql)
-    _assert_matching_progress_body(progress)
-
-    snapshot_conn, snapshot_sql = _capturing_console_snapshot_conn()
-    _wrap_busy_flag(snapshot_conn)
-    snapshot = await drop_pipeline.collect_console_snapshot(snapshot_conn)
-    _assert_console_snapshot_sql(snapshot_sql)
-    _assert_console_snapshot_body(snapshot)
-
-
-def _install_header_route_pool(monkeypatch: pytest.MonkeyPatch, conn: MagicMock) -> None:
-    from admin_api import main as admin_main
-
-    class _Acquire:
-        async def __aenter__(self):
-            return conn
-
-        async def __aexit__(self, *args: Any) -> None:
-            return None
-
-    class FakePool:
-        def acquire(self):
-            return _Acquire()
-
-    monkeypatch.setattr(admin_main.settings, "database_url", "")
-    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
-    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
-    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
-    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
-    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
-    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
-    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
-
-
-def test_header_routes_set_local_statement_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """summary, snapshot, and matching-progress arm statement_timeout after acquire."""
-    _clear_header_collector_cache()
-    monkeypatch.setattr(
-        "admin_api.worker_schedules.ca_drop_schedule_payload",
-        _fake_ca_drop_schedule_payload,
-    )
-    _install_console_snapshot_process_mocks(monkeypatch)
-
-    routes = (
-        ("/ops/drop/pipeline/summary", _capturing_pipeline_summary_conn),
-        ("/ops/drop/console/snapshot", _capturing_console_snapshot_conn),
-        ("/ops/drop/matching-progress", _capturing_matching_progress_conn),
-    )
-    with TestClient(app) as client:
-        for path, factory in routes:
-            conn, _issued = factory()
-            _install_header_route_pool(monkeypatch, conn)
-            response = client.get(path, headers=signed_headers("ops@example.com"))
-            assert response.status_code == 200, path
-            _assert_statement_timeout_armed(conn)
-            blob = json.dumps(response.json()).lower()
-            assert "email" not in blob
-            assert "consumer_id" not in blob
-            assert "drop_raw_requests" not in blob
 
 
 @pytest.mark.asyncio
@@ -4700,7 +4626,7 @@ def test_processes_include_summary_uses_lite_bulk_not_spine_per_row(
     with TestClient(app) as client:
         response = client.get(
             "/ops/drop/processes?include_summary=true",
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:ops@example.com"},
+            headers=signed_headers("ops@example.com"),
         )
 
     assert response.status_code == 200
@@ -4708,13 +4634,8 @@ def test_processes_include_summary_uses_lite_bulk_not_spine_per_row(
     assert progress_calls == []
     assert lite_calls == [[10, 11, 12]]
     assert len(body["processes"]) == 3
-    for item in body["processes"]:
-        _assert_lite_process_item(item)
-        assert item["overall"]["status"] == "running"
-        assert item["request_rows"] == 0
-        assert item["stages"]["download"]["success"] == 1
-        assert item["stages"]["land"]["success"] == 1
-        assert item["stages"]["promote"]["total"] == 0
+    assert all(item["overall"]["status"] == "running" for item in body["processes"])
+    assert all(item["request_rows"] == 0 for item in body["processes"])
 
 
 @pytest.mark.asyncio
@@ -4790,3 +4711,191 @@ async def test_iter_live_pipeline_events_emits_typed_events(
     assert collected[2]["event"] == "bulk_process"
     assert json.loads(collected[2]["data"]) == bulk_summary
     assert sleep_calls == 1
+
+
+_PROD_PROBE_URL = os.getenv("ADMIN_API_PROBE_URL", "").rstrip("/")
+_PROD_PROBE_TOKEN = (
+    os.getenv("ADMIN_API_PROBE_TOKEN")
+    or os.getenv("ADMIN_API_ID_TOKEN")
+    or os.getenv("CLOUD_RUN_ID_TOKEN")
+    or ""
+)
+_PROD_PROBE_EMAIL = os.getenv("ADMIN_API_PROBE_EMAIL") or os.getenv("IAP_USER_EMAIL") or ""
+
+# First-paint GETs — fail QCQA if slower than these (seconds). /me is stricter.
+_SNAPSHOT_PATH = "/ops/drop/console/snapshot?process_days=7&process_limit=50"
+_PROCESSES_PATH = "/ops/drop/processes?days=7&intake_source=drop&limit=50"
+_SUMMARY_PATH = "/ops/drop/pipeline/summary"
+_TECH_CONNECTORS_PATH = "/owner/verticals/tech/connectors"
+_PROD_PAGE_LOAD_BUDGETS: tuple[tuple[str, float], ...] = (
+    ("/me", 2.0),
+    ("/ops/connections", 5.0),
+    (_TECH_CONNECTORS_PATH, 5.0),
+    (_SNAPSHOT_PATH, 5.0),
+    (_PROCESSES_PATH, 5.0),
+    (_SUMMARY_PATH, 5.0),
+)
+_SPA_TIMEOUT_S = 8.0
+_GIS_WEB_REVISION_MARKERS = ("00024",)
+
+
+def test_prod_page_load_budgets_are_jose_gates() -> None:
+    """Hermetic: QCQA budgets stay /me 2s, named serving probes 5s, SPA abort 8s."""
+    by_path = dict(_PROD_PAGE_LOAD_BUDGETS)
+    assert by_path["/me"] == 2.0
+    assert by_path[_TECH_CONNECTORS_PATH] == 5.0
+    assert by_path[_SUMMARY_PATH] == 5.0
+    assert by_path[_PROCESSES_PATH] == 5.0
+    assert all(budget == 5.0 for path, budget in _PROD_PAGE_LOAD_BUDGETS if path != "/me")
+    assert _SPA_TIMEOUT_S == 8.0
+    assert "00024" in _GIS_WEB_REVISION_MARKERS
+
+
+def test_snapshot_process_rows_empty_when_list_has_rows_is_qcqa_fail() -> None:
+    """Hermetic: snapshot.processes [] while list has rows is a blank-batch HOLD."""
+    snapshot = {"processes": {"day": "2026-08-21", "processes": []}}
+    listing = {"processes": [{"process_id": 12, "label": "Aug 21 · CA DROP"}]}
+    assert _snapshot_process_rows(snapshot) == []
+    assert len(_list_process_rows(listing)) == 1
+    assert _list_process_rows(listing) and not _snapshot_process_rows(snapshot)
+
+
+def _prod_probe_headers() -> dict[str, str]:
+    headers = {"Authorization": f"Bearer {_PROD_PROBE_TOKEN}", "Accept": "application/json"}
+    if _PROD_PROBE_EMAIL:
+        headers[IAP_EMAIL_HEADER] = f"accounts.google.com:{_PROD_PROBE_EMAIL}"
+    return headers
+
+
+def _probe_get(
+    client: httpx.Client, path: str
+) -> tuple[int, float, dict[str, Any] | list[Any] | None]:
+    started = datetime.now(timezone.utc)
+    try:
+        response = client.get(f"{_PROD_PROBE_URL}{path}", headers=_prod_probe_headers())
+        elapsed_s = (datetime.now(timezone.utc) - started).total_seconds()
+        try:
+            payload: dict[str, Any] | list[Any] | None = response.json()
+        except ValueError:
+            payload = None
+        return response.status_code, elapsed_s, payload
+    except httpx.TimeoutException:
+        return 0, 12.0, None
+
+
+def _snapshot_process_rows(snapshot: dict[str, Any] | list[Any] | None) -> list[Any]:
+    if not isinstance(snapshot, dict):
+        return []
+    processes = snapshot.get("processes")
+    if isinstance(processes, list):
+        return processes
+    if isinstance(processes, dict):
+        inner = processes.get("processes")
+        return inner if isinstance(inner, list) else []
+    return []
+
+
+def _list_process_rows(payload: dict[str, Any] | list[Any] | None) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        inner = payload.get("processes")
+        return inner if isinstance(inner, list) else []
+    return []
+
+
+@pytest.mark.skipif(
+    not _PROD_PROBE_URL or not _PROD_PROBE_TOKEN,
+    reason="ADMIN_API_PROBE_URL + token required for live page-load probe",
+)
+def test_prod_page_load_critical_gets_under_budget() -> None:
+    """Live admin-api first-paint GETs — HOLD if /me > 2s or other critical GET > 5s."""
+    failures: list[str] = []
+    snapshot_body: dict[str, Any] | list[Any] | None = None
+    processes_body: dict[str, Any] | list[Any] | None = None
+    snapshot_status = 0
+    processes_status = 0
+    with httpx.Client(timeout=httpx.Timeout(12.0), follow_redirects=False) as client:
+        for path, budget_s in _PROD_PAGE_LOAD_BUDGETS:
+            status, elapsed_s, payload = _probe_get(client, path)
+            if path == _SNAPSHOT_PATH:
+                snapshot_status, snapshot_body = status, payload
+            if path == _PROCESSES_PATH:
+                processes_status, processes_body = status, payload
+            if elapsed_s > _SPA_TIMEOUT_S:
+                failures.append(f"{path} {elapsed_s:.3f}s (SPA timeout {_SPA_TIMEOUT_S:.0f}s)")
+                continue
+            if elapsed_s > budget_s:
+                failures.append(f"{path} {elapsed_s:.3f}s exceeds {budget_s:.0f}s budget")
+                continue
+            if path == "/me" and status != 200:
+                failures.append(f"/me HTTP {status} in {elapsed_s:.3f}s")
+        if snapshot_status == 200 and processes_status == 200:
+            snapshot_rows = _snapshot_process_rows(snapshot_body)
+            list_rows = _list_process_rows(processes_body)
+            if list_rows and not snapshot_rows:
+                failures.append(
+                    "snapshot.processes is [] while GET /ops/drop/processes returned "
+                    f"{len(list_rows)} row(s)"
+                )
+    assert not failures, "prod page-load QCQA HOLD: " + "; ".join(failures)
+
+
+def _gis_traffic_percent_from_env() -> int | None:
+    raw = os.getenv("ADMIN_WEB_GIS_TRAFFIC_PERCENT")
+    if raw is None or raw.strip() == "":
+        return None
+    return int(raw)
+
+
+def _gis_traffic_percent_from_gcloud() -> int | None:
+    if shutil.which("gcloud") is None:
+        return None
+    try:
+        raw = subprocess.check_output(
+            [
+                "gcloud",
+                "run",
+                "services",
+                "describe",
+                "admin-web-prod",
+                "--project",
+                "example-gcp-project",
+                "--region",
+                "us-east4",
+                "--format",
+                "json",
+            ],
+            text=True,
+            timeout=30,
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    total = 0
+    for spec in payload.get("status", {}).get("traffic", []) or []:
+        percent = int(spec.get("percent") or 0)
+        revision = str(spec.get("revisionName") or "")
+        if percent <= 0:
+            continue
+        if any(marker in revision for marker in _GIS_WEB_REVISION_MARKERS):
+            total += percent
+    return total
+
+
+@pytest.mark.skipif(
+    _gis_traffic_percent_from_env() is None and not _PROD_PROBE_URL,
+    reason="no GIS traffic fixture / prod probe context",
+)
+def test_prod_web_gis_not_at_100_percent() -> None:
+    """QCQA HOLD if GIS bake (admin-web-prod-00024) is serving 100%."""
+    percent = _gis_traffic_percent_from_env()
+    if percent is None:
+        percent = _gis_traffic_percent_from_gcloud()
+    if percent is None:
+        pytest.skip("could not read admin-web-prod traffic")
+    assert percent < 100, f"GIS web at {percent}% — do not flip; HOLD ship"

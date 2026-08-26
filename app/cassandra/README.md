@@ -5,6 +5,8 @@ on-prem restricted-dwid tables. The DWID is already matched by **Data Vertical
 Matching** ([`app/matching/`](../matching/) against `drop_hash_index`). This
 worker does not match, hash, or refresh an index.
 
+Owner wizard: no method — INF provisioned; prod cassandra-prod stays stub / do-not-write.
+
 Queue: `cassandra_attempts` (`step=suppression` only). Catalog binding: Data
 vertical → system `cassandra` (empty `allowed_approaches`). Test vertical uses
 the same slug as **System A** (placeholder), never as a live hash source.

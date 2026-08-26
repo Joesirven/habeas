@@ -1,5 +1,8 @@
 // @ts-nocheck — exercised via `bun test`; not part of app tsc graph
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import type { ConnectorReminder } from './api'
 import {
@@ -58,6 +61,9 @@ import {
   isOwnerWizardHiddenSystem,
   ownerConnectorsVerticalIds,
   ownerSeesAllCatalogVerticals,
+  OWNER_CONNECTORS_FAIL_SOFT_MS,
+  ownerConnectorsListPhase,
+  prefetchOwnerConnectorsParallel,
   filterOwnerWizardConnectors,
   ownerConnectorDisplayName,
   catalogOwnerSystemId,
@@ -1342,6 +1348,83 @@ describe('owner connectors super_admin verticals', () => {
   })
 })
 
+describe('owner connectors list phase and prefetch', () => {
+  test('OWNER_CONNECTORS_FAIL_SOFT_MS is 8000', () => {
+    expect(OWNER_CONNECTORS_FAIL_SOFT_MS).toBe(8000)
+  })
+
+  test('catalog pending + no verticals is pending, not empty', () => {
+    expect(
+      ownerConnectorsListPhase({
+        catalogPending: true,
+        catalogError: false,
+        verticals: [],
+      }),
+    ).toBe('pending')
+    expect(
+      ownerConnectorsListPhase({
+        catalogPending: true,
+        catalogError: false,
+        verticals: [],
+      }),
+    ).not.toBe('empty')
+  })
+
+  test('catalog error + no verticals is error', () => {
+    expect(
+      ownerConnectorsListPhase({
+        catalogPending: false,
+        catalogError: true,
+        verticals: [],
+      }),
+    ).toBe('error')
+  })
+
+  test('no pending or error + no verticals is empty', () => {
+    expect(
+      ownerConnectorsListPhase({
+        catalogPending: false,
+        catalogError: false,
+        verticals: [],
+      }),
+    ).toBe('empty')
+  })
+
+  test('verticals present while catalog pending is ready (paint from /me)', () => {
+    expect(
+      ownerConnectorsListPhase({
+        catalogPending: true,
+        catalogError: false,
+        verticals: ['tech'],
+      }),
+    ).toBe('ready')
+  })
+
+  test('prefetchOwnerConnectorsParallel starts every load before the first resolves', async () => {
+    const ids = ['communications', 'people_hr', 'tech']
+    let started = 0
+    const startedIds: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+
+    const load = (id: string) => {
+      started += 1
+      startedIds.push(id)
+      return gate.then(() => id)
+    }
+
+    const pending = prefetchOwnerConnectorsParallel(ids, load)
+    await Promise.resolve()
+    expect(started).toBe(ids.length)
+    expect(startedIds).toEqual(ids)
+
+    release()
+    await pending
+  })
+})
+
 describe('owner connectors hide cassandra', () => {
   test('hides cassandra system and data vertical', () => {
     expect(isOwnerConnectorsHiddenSystem('cassandra')).toBe(true)
@@ -1464,5 +1547,22 @@ describe('upload column mapping', () => {
     expect(doc.rows).toHaveLength(3)
     expect(doc.rows[1][0]).toBe('not-an-email')
     expect(parseCsvDocument(serializeCsvDocument(doc)).rows).toEqual(doc.rows)
+  })
+})
+
+describe('connectors first-paint (QCQA)', () => {
+  const here = dirname(fileURLToPath(import.meta.url))
+
+  test('owner connectors page uses timed list helpers', () => {
+    const source = readFileSync(join(here, '..', 'routes', 'owner', 'connectors.tsx'), 'utf8')
+    expect(source).toContain('listOwnerConnectors')
+    expect(source).toContain('listOwnerVisibleVerticals')
+    expect(source).not.toMatch(/fetch\(`?['"]\/owner\/verticals/)
+  })
+
+  test('ops connections page uses timed listConnections', () => {
+    const source = readFileSync(join(here, '..', 'routes', 'ops', 'connections.tsx'), 'utf8')
+    expect(source).toContain('listConnections')
+    expect(source).not.toMatch(/fetch\(`?['"]\/ops\/connections/)
   })
 })

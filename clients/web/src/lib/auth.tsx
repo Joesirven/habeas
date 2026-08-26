@@ -19,6 +19,8 @@ export type { MePayload, UserRole }
 export const GIS_SCRIPT_SRC = 'https://accounts.google.com/gsi/client'
 export const GIS_LOAD_TIMEOUT_MS = 8_000
 const GIS_PROMPT_TIMEOUT_MS = 8_000
+/** RoleGate skeleton cap — flip to RoleApiErrorState if /me never arrives. */
+export const ROLE_GATE_FAIL_SOFT_MS = 8_000
 
 /** Architecture B (direct admin-api) miss vs same-origin `/api` role load. */
 export type IdentityMissKind = 'google_sign_in' | 'role_api'
@@ -426,8 +428,23 @@ function GoogleSignInErrorState({ onRetry }: { onRetry: () => void }) {
 
 export function RoleGate({ allow, children }: RoleGateProps) {
   const { role, isLoading, me, isError, error, googleSignInFailed, retryIdentity } = useAuth()
+  const [loadingTimedOut, setLoadingTimedOut] = useState(false)
+  const waitingForMe = isLoading && !me
 
-  if (isLoading && !me) {
+  useEffect(() => {
+    if (!waitingForMe) {
+      setLoadingTimedOut(false)
+      return
+    }
+    const timer = window.setTimeout(() => {
+      setLoadingTimedOut(true)
+    }, ROLE_GATE_FAIL_SOFT_MS)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [waitingForMe])
+
+  if (waitingForMe && !loadingTimedOut) {
     return (
       <div className="space-y-3" role="status" aria-label="Loading access">
         {Array.from({ length: 4 }, (_, index) => (
@@ -447,7 +464,7 @@ export function RoleGate({ allow, children }: RoleGateProps) {
     return <GoogleSignInErrorState onRetry={retryIdentity} />
   }
 
-  if (isError) {
+  if (isError || loadingTimedOut) {
     return <RoleApiErrorState error={error} />
   }
 

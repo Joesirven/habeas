@@ -234,9 +234,15 @@ def test_get_secret_writer_uses_gcp_when_project_set(monkeypatch: pytest.MonkeyP
     assert isinstance(writer, _StubWriter)
 
 
-def test_get_secret_writer_memory_flag_wins_over_project(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("memory_flag", ["SECRET_WRITER", "SECRET_READER"])
+def test_get_secret_writer_memory_flag_wins_over_project(
+    monkeypatch: pytest.MonkeyPatch,
+    memory_flag: str,
+):
     monkeypatch.setenv("GCP_PROJECT", "example-gcp-project")
-    monkeypatch.setenv("SECRET_WRITER", "memory")
+    other_flag = "SECRET_READER" if memory_flag == "SECRET_WRITER" else "SECRET_WRITER"
+    monkeypatch.delenv(other_flag, raising=False)
+    monkeypatch.setenv(memory_flag, "memory")
     writer = get_secret_writer()
     assert isinstance(writer, InMemorySecretWriter)
 
@@ -264,14 +270,26 @@ def test_gcp_secret_writer_treats_already_exists_as_success():
     ]
 
 
-def test_gcp_secret_writer_does_not_log_secret_value(caplog: pytest.LogCaptureFixture):
-    client = _FakeGsmWriteClient(version_error=RuntimeError("denied: super-secret-value"))
+@pytest.mark.parametrize(
+    "client_kwargs",
+    [
+        {"create_error": RuntimeError("denied: super-secret-value")},
+        {"version_error": RuntimeError("denied: super-secret-value")},
+    ],
+)
+def test_gcp_secret_writer_does_not_log_secret_value(
+    caplog: pytest.LogCaptureFixture,
+    client_kwargs: dict[str, Exception],
+):
+    client = _FakeGsmWriteClient(**client_kwargs)
     writer = GcpSecretWriter(project_id="example-gcp-project", client=client)
-    with caplog.at_level("WARNING"), pytest.raises(RuntimeError, match="secret_write_failed"):
+    with caplog.at_level("WARNING"), pytest.raises(RuntimeError, match="secret_write_failed") as exc_info:
         writer.put_secret(AUTH0_SECRET_ID, AUTH0_JSON)
     combined = " ".join(record.getMessage() for record in caplog.records)
     assert "super-secret-value" not in combined
     assert AUTH0_JSON not in combined
+    assert "super-secret-value" not in str(exc_info.value)
+    assert AUTH0_JSON not in str(exc_info.value)
     for record in caplog.records:
         extras = getattr(record, "__dict__", {})
         assert "super-secret-value" not in str(extras.get("secret_id", ""))

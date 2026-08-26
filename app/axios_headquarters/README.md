@@ -2,6 +2,8 @@
 
 Upload-every-batch Communications vertical (replaces retired Mailchimp).
 
+Owner wizard method: Axios HQ CSV upload (every batch). Not an HTTP API.
+
 Hash in worker → BigQuery `axios_headquarters_hashed_raw` →
 [`transform/external_hash`](../../transform/external_hash/) dbt marts.
 Queue: `axios_headquarters_attempts` (`step` = `matching` | `suppression`).

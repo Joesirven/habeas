@@ -1,7 +1,9 @@
 // @ts-nocheck — exercised via `bun test`; not part of app tsc graph
 import { plugin } from 'bun'
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 plugin({
   name: 'at-alias',
@@ -170,6 +172,126 @@ describe('Architecture B admin-api client', () => {
     await fetchAdminApi('/me')
     expect(fetchCall(fetchMock).url).toBe('/api/me')
     expect(headerValue(fetchCall(fetchMock).init.headers, 'Authorization')).toBeNull()
+  })
+
+  test('listDropBulkProcesses uses the 8s fast-query timeout, not 30s', async () => {
+    const originalTimeout = AbortSignal.timeout
+    const timeoutMs: number[] = []
+    AbortSignal.timeout = ((ms: number) => {
+      timeoutMs.push(ms)
+      return originalTimeout.call(AbortSignal, ms)
+    }) as typeof AbortSignal.timeout
+    try {
+      const { listDropBulkProcesses, OPS_FAST_QUERY_TIMEOUT_MS, OPS_QUERY_TIMEOUT_MS } =
+        await importApi(undefined)
+      expect(OPS_FAST_QUERY_TIMEOUT_MS).toBe(8_000)
+      expect(OPS_QUERY_TIMEOUT_MS).toBe(30_000)
+      await listDropBulkProcesses({
+        days: 7,
+        intake_source: 'drop',
+        include_summary: true,
+        limit: 50,
+      })
+      expect(timeoutMs).toContain(8_000)
+      expect(timeoutMs).not.toContain(30_000)
+      expect(fetchCall(fetchMock).url).toContain('/ops/drop/processes')
+      expect(fetchCall(fetchMock).url).toContain('include_summary=true')
+    } finally {
+      AbortSignal.timeout = originalTimeout
+    }
+  })
+
+  test('listDropBulkProcesses omits include_summary unless requested', async () => {
+    const { listDropBulkProcesses } = await importApi(undefined)
+    await listDropBulkProcesses({ days: 7, intake_source: 'drop', limit: 50 })
+    expect(fetchCall(fetchMock).url).toContain('/ops/drop/processes')
+    expect(fetchCall(fetchMock).url).not.toContain('include_summary=')
+  })
+
+  test.each([
+    [
+      'listOwnerVisibleVerticals',
+      (api: Awaited<ReturnType<typeof importApi>>) => api.listOwnerVisibleVerticals(),
+      '/owner/verticals',
+    ],
+    [
+      'listOwnerConnectors',
+      (api: Awaited<ReturnType<typeof importApi>>) => api.listOwnerConnectors('people_hr'),
+      '/owner/verticals/people_hr/connectors',
+    ],
+    [
+      'listOwnerConnectorReminders',
+      (api: Awaited<ReturnType<typeof importApi>>) => api.listOwnerConnectorReminders(),
+      '/owner/connector-reminders',
+    ],
+  ])('%s uses the 8s fast-query timeout, not 30s', async (_name, call, path) => {
+    const originalTimeout = AbortSignal.timeout
+    const timeoutMs: number[] = []
+    AbortSignal.timeout = ((ms: number) => {
+      timeoutMs.push(ms)
+      return originalTimeout.call(AbortSignal, ms)
+    }) as typeof AbortSignal.timeout
+    try {
+      const api = await importApi(undefined)
+      expect(api.OPS_FAST_QUERY_TIMEOUT_MS).toBe(8_000)
+      expect(api.OPS_QUERY_TIMEOUT_MS).toBe(30_000)
+      await call(api)
+      expect(timeoutMs).toContain(8_000)
+      expect(timeoutMs).not.toContain(30_000)
+      expect(fetchCall(fetchMock).url).toContain(path)
+    } finally {
+      AbortSignal.timeout = originalTimeout
+    }
+  })
+
+  test.each([
+    ['getMe', () => importApi(undefined).then((api) => api.getMe()), '/me'],
+    [
+      'getDropConsoleSnapshot',
+      () => importApi(undefined).then((api) => api.getDropConsoleSnapshot()),
+      '/ops/drop/console/snapshot',
+    ],
+    [
+      'getDropPipelineSummary',
+      () => importApi(undefined).then((api) => api.getDropPipelineSummary()),
+      '/ops/drop/pipeline/summary',
+    ],
+    [
+      'listConnections',
+      () => importApi(undefined).then((api) => api.listConnections()),
+      '/ops/connections',
+    ],
+    [
+      'listOwnerConnectors',
+      () =>
+        importApi(undefined).then((api) => api.listOwnerConnectors('people_hr')),
+      '/owner/verticals/people_hr/connectors',
+    ],
+    [
+      'listOwnerConnectors tech',
+      () => importApi(undefined).then((api) => api.listOwnerConnectors('tech')),
+      '/owner/verticals/tech/connectors',
+    ],
+  ])('%s first-paint GET uses the 8s SPA timeout', async (_name, call, path) => {
+    const originalTimeout = AbortSignal.timeout
+    const timeoutMs: number[] = []
+    AbortSignal.timeout = ((ms: number) => {
+      timeoutMs.push(ms)
+      return originalTimeout.call(AbortSignal, ms)
+    }) as typeof AbortSignal.timeout
+    try {
+      const { OPS_FAST_QUERY_TIMEOUT_MS, OPS_PROD_PROBE_MAX_MS, OPS_ME_PROD_MAX_MS } =
+        await importApi(undefined)
+      expect(OPS_FAST_QUERY_TIMEOUT_MS).toBe(8_000)
+      expect(OPS_PROD_PROBE_MAX_MS).toBe(5_000)
+      expect(OPS_ME_PROD_MAX_MS).toBe(2_000)
+      await call()
+      expect(timeoutMs).toContain(8_000)
+      expect(timeoutMs).not.toContain(30_000)
+      expect(fetchCall(fetchMock).url).toContain(path)
+    } finally {
+      AbortSignal.timeout = originalTimeout
+    }
   })
 
   test('getMe applies the 8s fast-query timeout', async () => {
@@ -593,5 +715,97 @@ describe('Identity miss copy (P1-1 GIS vs role API)', () => {
     expect(classifyIdentityMiss({ directAdminApi: false, hasUserToken: false })).toBe('role_api')
     expect(classifyIdentityMiss({ directAdminApi: false, hasUserToken: true })).toBe('role_api')
     expect(GOOGLE_SIGN_IN_ERROR.title).not.toBe('Cannot load role')
+  })
+})
+
+describe('collapsed pipeline batch row (QCQA)', () => {
+  function summary(overrides: Record<string, unknown> = {}) {
+    return {
+      process_id: 12,
+      intake_source: 'drop',
+      process_at: '2026-08-21T16:00:00.000Z',
+      completed_at: '2026-08-21T18:00:00.000Z',
+      download_status: 'success',
+      label: 'Aug 21 · CA DROP',
+      linkable: true,
+      overall: { percent: 100, current_stage: 'fulfillment', status: 'complete' },
+      request_rows: 1_840_000,
+      ...overrides,
+    }
+  }
+
+  test('keeps date, status, and counts when the API returned them', async () => {
+    const { collapsedBulkRowDisplay } = await importApi(undefined)
+    const display = collapsedBulkRowDisplay(summary())
+    expect(display.dateLabel).not.toBe('—')
+    expect(display.dateLabel.length).toBeGreaterThan(0)
+    expect(display.dateLabel).toContain('CA DROP')
+    expect(display.sourceLabel).toBe('CA DROP')
+    expect(display.statusLabel).toBe('complete')
+    expect(display.progressLabel).toBe('100%')
+    expect(display.countLabel).toBe('1840000 req')
+  })
+
+  test('falls back to label and download_status when process_at/overall are missing', async () => {
+    const { collapsedBulkRowDisplay } = await importApi(undefined)
+    const display = collapsedBulkRowDisplay(
+      summary({ process_at: null, overall: undefined }),
+    )
+    expect(display.dateLabel).toBe('Aug 21 · CA DROP')
+    expect(display.statusLabel).toBe('success')
+    expect(display.progressLabel).toBe('')
+    expect(display.countLabel).toBe('1840000 req')
+  })
+
+  test('QCQA fails if a returned field is blanked', async () => {
+    const { collapsedBulkRowDisplay } = await importApi(undefined)
+    const rows = [
+      summary(),
+      summary({ overall: { percent: 0, current_stage: 'download', status: 'in_progress' } }),
+      summary({ process_at: 'not-a-date', overall: undefined, request_rows: 0 }),
+    ]
+    for (const row of rows) {
+      const display = collapsedBulkRowDisplay(row)
+      if (row.process_at || String(row.label ?? '').trim()) {
+        expect(display.dateLabel.trim().length).toBeGreaterThan(0)
+      }
+      if (row.overall?.status || row.download_status) {
+        expect(display.statusLabel.trim().length).toBeGreaterThan(0)
+      }
+      if (row.overall?.percent != null) {
+        expect(display.progressLabel).toMatch(/%$/)
+      }
+      if (row.request_rows != null) {
+        expect(display.countLabel).toContain('req')
+      }
+    }
+  })
+
+  test('pipeline collapsed row uses collapsedBulkRowDisplay chips', () => {
+    const source = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'routes', 'ops', 'drop-pipeline.tsx'),
+      'utf8',
+    )
+    expect(source).toContain('collapsedBulkRowDisplay')
+    expect(source).toContain('collapsed.dateLabel')
+    expect(source).toContain('intake_source: row.intake_source')
+    expect(source).toContain('collapsed.statusLabel')
+    expect(source).toContain('collapsed.progressLabel')
+    expect(source).toContain('collapsed.countLabel')
+  })
+})
+
+describe('listOwnerConnectors timeout (QCQA)', () => {
+  test('source sets OPS_FAST_QUERY_TIMEOUT_MS (8s SPA abort)', () => {
+    const source = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), 'api.ts'),
+      'utf8',
+    )
+    expect(source).toMatch(
+      /export function listOwnerConnectors\([\s\S]*?timeoutMs:\s*OPS_FAST_QUERY_TIMEOUT_MS/,
+    )
+    expect(source).not.toMatch(
+      /export function listOwnerConnectors\([^)]*\)\s*\{\s*return fetchAdminApi<OwnerConnectorList>\(\s*`\$\{[^`]+\}`,\s*\)/,
+    )
   })
 })

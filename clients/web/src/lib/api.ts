@@ -183,6 +183,12 @@ export function adminApiAuthHeaders(
 /** Fast ops reads — lite pipeline, matching progress, header summary. */
 export const OPS_FAST_QUERY_TIMEOUT_MS = 8_000
 
+/** Prod probe: first-paint GETs (`/me`, connectors, snapshot/processes, header) must finish under this. */
+export const OPS_PROD_PROBE_MAX_MS = 5_000
+
+/** Prod serving GET /me — QCQA HOLD if slower. */
+export const OPS_ME_PROD_MAX_MS = 2_000
+
 /** Bulk process row expand — spine walk may take tens of seconds. */
 export const OPS_EXPAND_DETAIL_TIMEOUT_MS = 45_000
 
@@ -1126,6 +1132,57 @@ export function collapsedPipelineCardFields(
     typeof row.request_rows === 'number' ? row.request_rows : null
   const currentStage = row.overall?.current_stage ?? null
   return { title, status, percent, requestRows, currentStage }
+}
+
+export type CollapsedBulkRowDisplay = {
+  dateLabel: string
+  sourceLabel: string
+  statusLabel: string
+  progressLabel: string
+  countLabel: string | null
+}
+
+function formatCollapsedBulkProcessAt(processAt: string | null | undefined): string | null {
+  if (!processAt) return null
+  const start = new Date(processAt)
+  if (Number.isNaN(start.getTime())) return null
+  return start.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
+/** Collapsed pipeline batch chips — never blank a field the API returned. */
+export function collapsedBulkRowDisplay(
+  row: Pick<
+    BulkProcessSummary,
+    | 'process_at'
+    | 'intake_source'
+    | 'label'
+    | 'download_status'
+    | 'overall'
+    | 'request_rows'
+  >,
+): CollapsedBulkRowDisplay {
+  const fromAt = formatCollapsedBulkProcessAt(row.process_at)
+  const label = row.label?.trim() ?? ''
+  const intake = (row.intake_source ?? '').trim()
+  const sourceLabel = intake === 'drop' ? 'CA DROP' : intake
+  const dateLabel = fromAt
+    ? sourceLabel
+      ? `${fromAt} · ${sourceLabel}`
+      : fromAt
+    : label || sourceLabel || '—'
+  const statusKey = (row.overall?.status || row.download_status || '').trim()
+  const statusLabel = statusKey.replaceAll('_', ' ')
+  const percent = row.overall?.percent
+  const progressLabel =
+    percent != null && Number.isFinite(percent) ? `${percent}%` : ''
+  const countLabel = row.request_rows != null ? `${row.request_rows} req` : null
+  return { dateLabel, sourceLabel, statusLabel, progressLabel, countLabel }
 }
 
 export type BulkProcessStageCounts = {
@@ -3145,7 +3202,9 @@ export function connectTestFailureMessage(detail: string | null | undefined): st
 }
 
 export function listConnections() {
-  return fetchAdminApi<{ connections: ConnectionRecord[] }>('/ops/connections')
+  return fetchAdminApi<{ connections: ConnectionRecord[] }>('/ops/connections', {
+    timeoutMs: OPS_FAST_QUERY_TIMEOUT_MS,
+  })
 }
 
 /** Create a connection. Axios HQ writes use `axios_hq` — `axios_headquarters` is retracted. */
@@ -3381,7 +3440,9 @@ export type OwnerUploadResult = {
 }
 
 export function listOwnerVisibleVerticals() {
-  return fetchAdminApi<VerticalCatalogEntry[]>('/owner/verticals')
+  return fetchAdminApi<VerticalCatalogEntry[]>('/owner/verticals', {
+    timeoutMs: OPS_FAST_QUERY_TIMEOUT_MS,
+  })
 }
 
 export function listOwnerConnectors(verticalId: string) {
@@ -3633,7 +3694,9 @@ export function ownerSheetsOauthExtract(
 }
 
 export function listOwnerConnectorReminders() {
-  return fetchAdminApi<{ reminders: ConnectorReminder[] }>('/owner/connector-reminders')
+  return fetchAdminApi<{ reminders: ConnectorReminder[] }>('/owner/connector-reminders', {
+    timeoutMs: OPS_FAST_QUERY_TIMEOUT_MS,
+  })
 }
 
 export function getConnectPreview(token: string) {

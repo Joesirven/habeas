@@ -1097,6 +1097,21 @@ async def test_find_connection_requires_vertical_id_match() -> None:
     assert "IS NULL" not in sql
     assert "vertical_id" in sql
     assert conn.fetchrow.await_args.args[2] == VERTICAL_PEOPLE_HR
+    conn.fetchrow.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_find_connection_looks_up_both_axios_hq_slugs() -> None:
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=None)
+    found = await owner_connectors._find_connection_for_system(
+        conn, vertical_id=VERTICAL_COMMUNICATIONS, system="axios_hq"
+    )
+    assert found is None
+    slugs = conn.fetchrow.await_args.args[1]
+    assert "axios_hq" in slugs
+    assert "axios_headquarters" in slugs
+    assert conn.fetchrow.await_args.args[2] == VERTICAL_COMMUNICATIONS
 
 
 @pytest.mark.asyncio

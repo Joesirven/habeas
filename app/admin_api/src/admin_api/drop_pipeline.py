@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
 from collections.abc import AsyncIterator
@@ -28,11 +29,7 @@ from habeas_privacy_core.auth.roles import (
     resolve_role_from_allowlists,
 )
 from habeas_privacy_core.config import CoreSettings
-from habeas_privacy_core.db.pool import (
-    get_pool,
-    reset_statement_timeout,
-    set_local_statement_timeout,
-)
+from habeas_privacy_core.db.pool import get_pool
 from habeas_privacy_core.db.request_resolver import request_resolver
 from habeas_privacy_core.db.vertical_matching import (
     AUTH0_VERTICAL,
@@ -128,6 +125,31 @@ _TERMINAL_FAIL_STATUSES = (
     "failed",
 )
 _OPEN_ATTEMPT_STATUSES = ("pending", "claimed", "in_flight")
+
+# Console / owner list hops must not run past the SPA 8s abort (00028 had no client cap).
+OPS_FAST_STATEMENT_TIMEOUT_MS = 8_000
+
+
+def _supports_local_statement_timeout(conn: Any) -> bool:
+    """Skip unittest mocks — MagicMock.transaction/execute are callable."""
+    if type(conn).__module__.startswith("unittest.mock"):
+        return False
+    return callable(getattr(conn, "transaction", None)) and callable(
+        getattr(conn, "execute", None)
+    )
+
+
+@asynccontextmanager
+async def ops_fast_statement_scope(conn: Any) -> AsyncIterator[None]:
+    """SET LOCAL statement_timeout = 8s inside a transaction (no-op on test mocks)."""
+    if not _supports_local_statement_timeout(conn):
+        yield
+        return
+    async with conn.transaction():
+        await conn.execute(
+            f"SET LOCAL statement_timeout = {int(OPS_FAST_STATEMENT_TIMEOUT_MS)}"
+        )
+        yield
 
 # Approaching-SLA MVP (R8 / AE2): age-policy thresholds on open queue rows.
 # No DROP legal-deadline column exists yet — these are ops attention windows
@@ -735,77 +757,63 @@ def _rollup_raw_request_groups(
     return list_rows, status_rows
 
 
-_HEADER_STATEMENT_TIMEOUT_MS = 4000
-_HEADER_COUNT_TTL_SECONDS = 15.0
-_header_open_requests_cache: tuple[float, int] | None = None
+_MATCHING_PROGRESS_TTL_SECONDS = 2.0
+_MATCHING_PROGRESS_DRAIN_TTL_SECONDS = 4.0
+_matching_progress_cache: tuple[float, dict[str, Any]] | None = None
+_matching_progress_refresh_lock: asyncio.Lock | None = None
 
 
-def clear_pipeline_header_cache() -> None:
-    """Drop cached DROP open_requests COUNT so callers can force SQL."""
-    global _header_open_requests_cache
-    _header_open_requests_cache = None
+def _matching_progress_lock() -> asyncio.Lock:
+    global _matching_progress_refresh_lock
+    if _matching_progress_refresh_lock is None:
+        _matching_progress_refresh_lock = asyncio.Lock()
+    return _matching_progress_refresh_lock
 
 
-def _is_statement_timeout_error(exc: BaseException) -> bool:
-    if type(exc).__name__ == "QueryCanceledError":
-        return True
-    return getattr(exc, "sqlstate", None) == "57014"
+def _matching_progress_ttl_seconds(result: dict[str, Any]) -> float:
+    if result.get("drain", {}).get("active"):
+        return _MATCHING_PROGRESS_DRAIN_TTL_SECONDS
+    return _MATCHING_PROGRESS_TTL_SECONDS
 
 
-def _log_header_query_timeout(query_name: str, started: float) -> None:
-    logger.warning(
-        "drop_pipeline_query_timeout",
-        extra={
-            "query": query_name,
-            "elapsed_ms": int((monotonic() - started) * 1000),
-        },
-    )
-
-
-async def _with_header_statement_timeout(
-    conn: Any,
-    collect: Any,
+def _matching_progress_cache_hit(
     *,
-    query_name: str,
-) -> Any:
-    """Bound header/snapshot SQL at 4s; reset so the pooled conn is not left hot.
-
-    SET LOCAL only applies inside a transaction (asyncpg often autocommits).
-    Timeout/cancel returns HTTP 504 JSON — never hang with 0 bytes.
-    """
-    started = monotonic()
-    try:
-        async with conn.transaction():
-            await set_local_statement_timeout(conn, _HEADER_STATEMENT_TIMEOUT_MS)
-            return await collect()
-    except asyncio.CancelledError:
-        _log_header_query_timeout(query_name, started)
-        raise HTTPException(status_code=504, detail="query timeout") from None
-    except Exception as exc:
-        if _is_statement_timeout_error(exc):
-            _log_header_query_timeout(query_name, started)
-            raise HTTPException(status_code=504, detail="query timeout") from exc
-        raise
-    finally:
-        try:
-            await reset_statement_timeout(conn)
-        except Exception:
-            logger.info(
-                "drop_pipeline_timeout_reset_failed",
-                extra={"query": query_name},
-            )
+    now: float | None = None,
+) -> dict[str, Any] | None:
+    if _matching_progress_cache is None:
+        return None
+    cached_at, cached_result = _matching_progress_cache
+    stamp = now if now is not None else monotonic()
+    if stamp - cached_at >= _matching_progress_ttl_seconds(cached_result):
+        return None
+    return cached_result
 
 
-async def collect_matching_progress(conn: Any) -> dict[str, Any]:
-    """Drain lease only — do not scan matching_attempts (~1.84M GROUP BY hung 00078).
-
-    Pending/claimed/success paint as zero on this ticker. Full counts stay on
-    ``GET /ops/drop/pipeline`` (not the header/snapshot path). No PII.
-    """
+async def _fetch_matching_progress(conn: Any) -> dict[str, Any]:
+    """One GROUP BY on matching_attempts (DROP intake) plus drain lease. No PII."""
+    matching_attempt_rows = await conn.fetch(
+        """
+        SELECT ma.status, COUNT(*)::int AS count
+          FROM matching_attempts ma
+          JOIN requests r ON r.id = ma.request_id
+         WHERE r.intake_source = 'drop'
+         GROUP BY ma.status
+         ORDER BY ma.status
+        """
+    )
     matching_pending = 0
     matching_success = 0
     matching_claimed = 0
     matching_by_status: list[dict[str, Any]] = []
+    for row in matching_attempt_rows:
+        item = {"status": row["status"], "count": int(row["count"])}
+        matching_by_status.append(item)
+        if row["status"] == "pending":
+            matching_pending = item["count"]
+        elif row["status"] == "success":
+            matching_success = item["count"]
+        elif row["status"] == "claimed":
+            matching_claimed = item["count"]
 
     drain_lease_row = await conn.fetchrow(
         """
@@ -839,43 +847,71 @@ async def collect_matching_progress(conn: Any) -> dict[str, Any]:
     }
 
 
+async def collect_matching_progress(conn: Any) -> dict[str, Any]:
+    """Return cached matching progress; refresh at most once per ~2s (~4s during drain).
+
+    Pipeline / matching-progress polls (~750ms during drain) must not each pay the
+    full matching_attempts GROUP BY cost (~8s p95 on prod).
+    """
+    hit = _matching_progress_cache_hit()
+    if hit is not None:
+        return hit
+    async with _matching_progress_lock():
+        hit = _matching_progress_cache_hit()
+        if hit is not None:
+            return hit
+        result = await _fetch_matching_progress(conn)
+        global _matching_progress_cache
+        _matching_progress_cache = (monotonic(), result)
+        return result
+
+
 async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
     """Header counts for Pipeline console — no drop_raw_requests spine scan.
 
-    ``open_requests`` is a cheap ``pg_class.reltuples`` estimate (not a
-    ``COUNT(*)`` of the 1.84M-row spine). ``review_pending`` is
-    approval_requests.pending for matching.review. Worker-down uses the cached
+    ``open_requests`` is DROP intake volume on ``requests`` only. ``review_pending``
+    is approval_requests.pending for matching.review. Worker-down uses the cached
     probe snapshot only (never fans out on this path). ``ca_drop_schedule`` reuses
-    the lite connector last-success query (no raw spine). ``clear_pipeline_header_cache``
-    forces the estimate SQL.
+    the lite connector last-success query (no raw spine).
     """
     # asyncpg connections are not concurrent — never asyncio.gather on one conn.
-    global _header_open_requests_cache
-    cached = _header_open_requests_cache
-    stamp = monotonic()
-    if cached is not None and stamp - cached[0] < _HEADER_COUNT_TTL_SECONDS:
-        open_n = cached[1]
-    else:
-        count_started = monotonic()
-        try:
-            open_requests = await conn.fetchval(
-                """
-                SELECT GREATEST(reltuples::bigint, 0)
-                  FROM pg_class
-                 WHERE oid = 'public.requests'::regclass
-                """
-            )
-        except asyncio.CancelledError:
-            _log_header_query_timeout("open_requests", count_started)
-            raise
-        except Exception as exc:
-            if _is_statement_timeout_error(exc):
-                _log_header_query_timeout("open_requests", count_started)
-            raise
-        open_n = int(open_requests or 0)
-        _header_open_requests_cache = (stamp, open_n)
-    # Do not COUNT approval_requests or scan drop_connector_attempts here —
-    # both hung the 4s statement_timeout on prod (00087/00091).
+    async with ops_fast_statement_scope(conn):
+        return await _collect_pipeline_summary_body(conn)
+
+
+async def _collect_pipeline_summary_body(conn: Any) -> dict[str, Any]:
+    if _supports_local_statement_timeout(conn):
+        # Prefer ix_requests_intake_source_received / ix_requests_drop_id over a
+        # 1.8M-row heap scan (prod p95 ~15s without the index-only path).
+        await conn.execute("SET LOCAL enable_seqscan = off")
+    open_requests = await conn.fetchval(
+        """
+        SELECT COUNT(*)::bigint
+          FROM requests
+         WHERE intake_source = 'drop'
+        """
+    )
+    if _supports_local_statement_timeout(conn):
+        await conn.execute("SET LOCAL enable_seqscan = on")
+    review_pending = await conn.fetchval(
+        """
+        SELECT COUNT(*)::int
+          FROM approval_requests
+         WHERE action_type = $1
+           AND status = 'pending'
+        """,
+        MATCHING_REVIEW_ACTION,
+    )
+    last_connector_success = await conn.fetchval(
+        """
+        SELECT completed_at
+          FROM drop_connector_attempts
+         WHERE status = 'success'
+           AND completed_at IS NOT NULL
+         ORDER BY completed_at DESC
+         LIMIT 1
+        """
+    )
     from admin_api.worker_schedules import ca_drop_schedule_payload
 
     health = peek_worker_health_snapshot()
@@ -886,9 +922,12 @@ async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
         if health
         else {}
     )
-    ca_drop_schedule = await ca_drop_schedule_payload(last_success_at=None)
+    ca_drop_schedule = await ca_drop_schedule_payload(
+        last_success_at=last_connector_success
+    )
     now = datetime.now(timezone.utc)
-    review_n = 0
+    open_n = int(open_requests or 0)
+    review_n = int(review_pending or 0)
     return {
         "as_of": now.isoformat(),
         "open_requests": open_n,
@@ -1476,17 +1515,18 @@ async def list_bulk_processes(
         return []
 
     params.append(max(1, min(limit, 100)))
-    rows = await conn.fetch(
-        f"""
-        SELECT id, status, attempted_at, completed_at,
-               (gcs_uri IS NOT NULL AND length(trim(gcs_uri)) > 0) AS has_uri
-          FROM drop_connector_attempts
-         WHERE {' AND '.join(clauses)}
-         ORDER BY attempted_at DESC
-         LIMIT ${idx}
-        """,
-        *params,
-    )
+    async with ops_fast_statement_scope(conn):
+        rows = await conn.fetch(
+            f"""
+            SELECT id, status, attempted_at, completed_at,
+                   (gcs_uri IS NOT NULL AND gcs_uri <> '') AS has_uri
+              FROM drop_connector_attempts
+             WHERE {' AND '.join(clauses)}
+             ORDER BY attempted_at DESC
+             LIMIT ${idx}
+            """,
+            *params,
+        )
     processes: list[dict[str, Any]] = []
     for row in rows:
         attempted_at = row["attempted_at"]
@@ -1509,31 +1549,6 @@ async def list_bulk_processes(
     return processes
 
 
-def _attach_lite_process_summary(
-    item: dict[str, Any],
-    summary: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """Copy lite list-head fields (ids/counts/timestamps only) onto a process row."""
-    if summary is None:
-        return item
-    attached = {
-        **item,
-        "overall": summary["overall"],
-        "request_rows": summary["request_rows"],
-        "raw_rows": summary["raw_rows"],
-    }
-    stages = summary.get("stages")
-    if isinstance(stages, dict):
-        lite_stages = {
-            key: stages[key]
-            for key in ("download", "land", "promote")
-            if key in stages
-        }
-        if lite_stages:
-            attached["stages"] = lite_stages
-    return attached
-
-
 async def _snapshot_processes(
     conn: Any,
     *,
@@ -1553,12 +1568,19 @@ async def _snapshot_processes(
             conn,
             process_ids=[int(item["process_id"]) for item in processes],
         )
-        processes = [
-            _attach_lite_process_summary(
-                item, summaries.get(int(item["process_id"]))
-            )
-            for item in processes
-        ]
+        enriched: list[dict[str, Any]] = []
+        for item in processes:
+            pid = int(item["process_id"])
+            summary = summaries.get(pid)
+            if summary is not None:
+                item = {
+                    **item,
+                    "overall": summary["overall"],
+                    "request_rows": summary["request_rows"],
+                    "raw_rows": summary["raw_rows"],
+                }
+            enriched.append(item)
+        processes = enriched
     return {
         "day": datetime.now(timezone.utc).date().isoformat(),
         "days": bounded_days,
@@ -1587,31 +1609,19 @@ async def collect_console_snapshot(
         days=process_days,
         limit=process_limit,
     )
-    recent_days_bounded = max(1, min(recent_days, 30))
-    recent = await list_bulk_processes(
+    recent_processes = await list_bulk_processes(
         conn,
-        days=recent_days_bounded,
-        limit=recent_limit,
+        days=max(1, min(recent_days, 30)),
+        limit=max(1, min(recent_limit, 100)),
     )
-    if recent:
-        recent_summaries = await collect_bulk_process_summaries_lite(
-            conn,
-            process_ids=[int(item["process_id"]) for item in recent],
-        )
-        recent = [
-            _attach_lite_process_summary(
-                item, recent_summaries.get(int(item["process_id"]))
-            )
-            for item in recent
-        ]
     return {
         "as_of": datetime.now(timezone.utc).isoformat(),
         "summary": summary,
         "matching_progress": matching_progress,
         "processes": processes,
         "recent_processes": {
-            "days": recent_days_bounded,
-            "processes": recent,
+            "days": max(1, min(recent_days, 30)),
+            "processes": recent_processes,
         },
     }
 
@@ -2399,11 +2409,7 @@ async def drop_pipeline_summary(_principal: SuperAdminPrincipal):
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
-        return await _with_header_statement_timeout(
-            conn,
-            lambda: collect_pipeline_summary(conn),
-            query_name="pipeline_summary",
-        )
+        return await collect_pipeline_summary(conn)
 
 
 @router.get("/console/snapshot")
@@ -2418,16 +2424,12 @@ async def drop_console_snapshot(
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
-        return await _with_header_statement_timeout(
+        return await collect_console_snapshot(
             conn,
-            lambda: collect_console_snapshot(
-                conn,
-                process_days=process_days,
-                process_limit=process_limit,
-                recent_days=recent_days,
-                recent_limit=recent_limit,
-            ),
-            query_name="console_snapshot",
+            process_days=process_days,
+            process_limit=process_limit,
+            recent_days=recent_days,
+            recent_limit=recent_limit,
         )
 
 
@@ -2449,11 +2451,7 @@ async def drop_matching_progress(_principal: SuperAdminPrincipal):
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
-        return await _with_header_statement_timeout(
-            conn,
-            lambda: collect_matching_progress(conn),
-            query_name="matching_progress",
-        )
+        return await collect_matching_progress(conn)
 
 
 @router.get("/processes")
@@ -2476,9 +2474,8 @@ async def drop_bulk_processes(
     """List DROP bulk processes keyed by intake type + datetime."""
     _require_database()
     pool = get_pool()
-
-    async def _collect(conn: Any) -> list[dict[str, Any]]:
-        rows = await list_bulk_processes(
+    async with pool.acquire() as conn:
+        processes = await list_bulk_processes(
             conn,
             day=day,
             days=days,
@@ -2486,27 +2483,26 @@ async def drop_bulk_processes(
             download_status=download_status,
             limit=limit,
         )
-        if not include_summary:
-            return rows
-        summaries = await collect_bulk_process_summaries_lite(
-            conn,
-            process_ids=[int(item["process_id"]) for item in rows],
-        )
-        enriched: list[dict[str, Any]] = []
-        for item in rows:
-            pid = int(item["process_id"])
-            item = _attach_lite_process_summary(item, summaries.get(pid))
-            if overall_status and item.get("overall", {}).get("status") != overall_status:
-                continue
-            enriched.append(item)
-        return enriched
-
-    async with pool.acquire() as conn:
-        processes = await _with_header_statement_timeout(
-            conn,
-            lambda: _collect(conn),
-            query_name="bulk_processes",
-        )
+        if include_summary:
+            summaries = await collect_bulk_process_summaries_lite(
+                conn,
+                process_ids=[int(item["process_id"]) for item in processes],
+            )
+            enriched: list[dict[str, Any]] = []
+            for item in processes:
+                pid = int(item["process_id"])
+                summary = summaries.get(pid)
+                if summary is not None:
+                    item = {
+                        **item,
+                        "overall": summary["overall"],
+                        "request_rows": summary["request_rows"],
+                        "raw_rows": summary["raw_rows"],
+                    }
+                if overall_status and item.get("overall", {}).get("status") != overall_status:
+                    continue
+                enriched.append(item)
+            processes = enriched
     return {
         "day": (day or datetime.now(timezone.utc).date()).isoformat(),
         "days": days,

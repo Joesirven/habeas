@@ -5,6 +5,11 @@ import type { ConnectorReminder, NeedsAttentionItem } from './api'
 import {
   buildInboxBatchStatusCrossGroups,
   buildInboxGroupingStacks,
+  bulkProcessCollapsedCounts,
+  bulkProcessCollapsedPercent,
+  bulkProcessCollapsedStatus,
+  bulkProcessCollapsedTitle,
+  bulkProcessSourceLabel,
   groupInboxByBatchStatusStep,
   groupInboxConnectorNotifications,
   groupInboxItemsByBatchStatus,
@@ -839,5 +844,98 @@ describe('inboxItemConnectorBlock', () => {
     )
     expect(block).toEqual({ kind: 'needs_connection', label: 'Needs connection' })
     expect(JSON.stringify(block)).not.toMatch(/cassandra/i)
+  })
+})
+
+describe('collapsed bulk-process row (lite snapshot)', () => {
+  test('bulkProcessSourceLabel maps drop to CA DROP — a source, not a system', () => {
+    expect(bulkProcessSourceLabel('drop')).toBe('CA DROP')
+    expect(bulkProcessSourceLabel('drop')).toBe(inboxIntakeSourceLabel('drop'))
+    expect(bulkProcessSourceLabel('drop')).not.toBe('cassandra')
+    expect(bulkProcessSourceLabel('drop')).not.toBe('drop')
+  })
+
+  test('title with process_at + intake_source drop includes a date and CA DROP', () => {
+    const { label: dateLabel } = localDateParts(AUG_21)
+    const title = bulkProcessCollapsedTitle({
+      process_at: AUG_21,
+      intake_source: 'drop',
+    })
+    expect(title).toContain(dateLabel)
+    expect(title).toContain('CA DROP')
+    expect(title).not.toBe('')
+    expect(title).not.toBe('—')
+  })
+
+  test('title with only label uses the label and is never empty', () => {
+    const title = bulkProcessCollapsedTitle({ label: 'Nightly intake' })
+    expect(title).toBe('Nightly intake')
+    expect(title).not.toBe('')
+    expect(title.trim().length).toBeGreaterThan(0)
+  })
+
+  test('title with nothing useful is an em dash, not an empty string', () => {
+    expect(bulkProcessCollapsedTitle({})).toBe('—')
+    expect(
+      bulkProcessCollapsedTitle({
+        process_at: null,
+        intake_source: '',
+        label: '',
+      }),
+    ).toBe('—')
+    expect(bulkProcessCollapsedTitle({})).not.toBe('')
+  })
+
+  test('counts include request_rows and req; missing request_rows is null', () => {
+    const counts = bulkProcessCollapsedCounts({ request_rows: 12 })
+    expect(counts).toContain('12')
+    expect(counts).toMatch(/req/i)
+    expect(bulkProcessCollapsedCounts({})).toBeNull()
+    expect(bulkProcessCollapsedCounts({ request_rows: undefined })).toBeNull()
+  })
+
+  test('status prefers overall.status, then download_status, else em dash', () => {
+    expect(
+      bulkProcessCollapsedStatus({
+        overall: { status: 'needs_attention', percent: 10, current_stage: 'review' },
+      }),
+    ).toBe('needs attention')
+    expect(bulkProcessCollapsedStatus({ download_status: 'in_flight' })).toMatch(
+      /in[_\s]flight/,
+    )
+    expect(bulkProcessCollapsedStatus({})).toBe('—')
+    expect(
+      bulkProcessCollapsedStatus({
+        overall: { status: '', percent: 0, current_stage: 'download' },
+        download_status: '',
+      }),
+    ).toBe('—')
+  })
+
+  test('percent comes from overall.percent; missing is null', () => {
+    const percent = bulkProcessCollapsedPercent({
+      overall: { percent: 47, current_stage: 'matching', status: 'in_progress' },
+    })
+    expect(percent).not.toBeNull()
+    expect(String(percent)).toMatch(/47/)
+    expect(bulkProcessCollapsedPercent({})).toBeNull()
+    expect(bulkProcessCollapsedPercent({ overall: undefined })).toBeNull()
+  })
+
+  test('CA DROP is the source label for intake drop only — never a connection name', () => {
+    expect(bulkProcessSourceLabel('drop')).toBe('CA DROP')
+    expect(bulkProcessSourceLabel('webform')).not.toBe('CA DROP')
+    expect(bulkProcessSourceLabel('csv')).not.toBe('CA DROP')
+    expect(bulkProcessSourceLabel('manual')).not.toBe('CA DROP')
+    expect(bulkProcessSourceLabel('mailchimp')).not.toBe('CA DROP')
+    expect(bulkProcessSourceLabel('cassandra')).not.toBe('CA DROP')
+    expect(bulkProcessSourceLabel('axios_hq')).not.toBe('CA DROP')
+    const titled = bulkProcessCollapsedTitle({
+      process_at: AUG_21,
+      intake_source: 'drop',
+      label: 'Auth0',
+    })
+    expect(titled).toContain('CA DROP')
+    expect(bulkProcessSourceLabel('drop')).toBe(inboxIntakeSourceLabel('drop'))
   })
 })

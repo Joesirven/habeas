@@ -18,7 +18,11 @@ from admin_api.roles import RolePrincipal, require_roles, settings as role_setti
 from habeas_privacy_core.auth import ROLE_SUPER_ADMIN
 from habeas_privacy_core.auth.roles import parse_email_allowlist
 from habeas_privacy_core.config import CoreSettings
-from habeas_privacy_core.connections.catalog import UPLOAD_ONLY_SYSTEMS
+from habeas_privacy_core.connections.catalog import (
+    UPLOAD_ONLY_SYSTEMS,
+    connection_method_label,
+    upload_allowed,
+)
 from habeas_privacy_core.connections.freshness import (
     gate_fields_from_parts,
     parse_stored_active_mode,
@@ -250,6 +254,8 @@ class SystemCatalogEntry(BaseModel):
     invite_allowed: bool = True
     credential_fields: list[SystemCredentialField] = Field(default_factory=list)
     trust_copy: str = ""
+    connection_method_label: str | None = None
+    upload_allowed: bool = False
 
 
 class SystemsCatalogResponse(BaseModel):
@@ -363,8 +369,22 @@ def _hardcoded_systems_catalog() -> SystemsCatalogResponse:
     return SystemsCatalogResponse(
         systems=[
             SystemCatalogEntry(
+                system_id="axios_hq",
+                display_label="Axios HQ",
+                invite_allowed=False,
+                credential_fields=[],
+                connection_method_label=None,
+                upload_allowed=True,
+                trust_copy=(
+                    "Axios HQ uses CSV upload every batch. "
+                    "Habeas does not store Axios HQ passwords or API keys."
+                ),
+            ),
+            SystemCatalogEntry(
                 system_id="paylocity",
                 display_label="Paylocity",
+                connection_method_label=connection_method_label("paylocity"),
+                upload_allowed=bool(upload_allowed("paylocity")),
                 credential_fields=[
                     SystemCredentialField(id="client_id", label="Client ID", required=True),
                     SystemCredentialField(
@@ -389,6 +409,8 @@ def _hardcoded_systems_catalog() -> SystemsCatalogResponse:
             SystemCatalogEntry(
                 system_id="lever",
                 display_label="Lever",
+                connection_method_label=connection_method_label("lever"),
+                upload_allowed=bool(upload_allowed("lever")),
                 credential_fields=[
                     SystemCredentialField(
                         id="api_key",
@@ -405,6 +427,8 @@ def _hardcoded_systems_catalog() -> SystemsCatalogResponse:
             SystemCatalogEntry(
                 system_id="auth0",
                 display_label="Auth0",
+                connection_method_label=connection_method_label("auth0"),
+                upload_allowed=bool(upload_allowed("auth0")),
                 credential_fields=[
                     SystemCredentialField(
                         id="domain",
@@ -425,6 +449,8 @@ def _hardcoded_systems_catalog() -> SystemsCatalogResponse:
             SystemCatalogEntry(
                 system_id="google_sheets",
                 display_label="Google Sheets",
+                connection_method_label=connection_method_label("google_sheets"),
+                upload_allowed=bool(upload_allowed("google_sheets")),
                 credential_fields=[
                     SystemCredentialField(
                         id="spreadsheet_url",
@@ -447,6 +473,8 @@ def _hardcoded_systems_catalog() -> SystemsCatalogResponse:
                 system_id="cassandra",
                 display_label="Cassandra",
                 invite_allowed=False,
+                connection_method_label=connection_method_label("cassandra"),
+                upload_allowed=bool(upload_allowed("cassandra")),
                 credential_fields=[],
                 trust_copy=(
                     "Cassandra connections are provisioned by infrastructure. "
@@ -458,8 +486,10 @@ def _hardcoded_systems_catalog() -> SystemsCatalogResponse:
 
 
 def _catalog_entry_from_system(system: Any) -> SystemCatalogEntry:
+    raw_id = str(system.system_id)
+    emit_id = "axios_hq" if raw_id == "axios_headquarters" else raw_id
     return SystemCatalogEntry(
-        system_id=str(system.system_id),
+        system_id=emit_id,
         display_label=str(system.display_label),
         invite_allowed=bool(system.invite_allowed),
         credential_fields=[
@@ -473,6 +503,8 @@ def _catalog_entry_from_system(system: Any) -> SystemCatalogEntry:
             for field in system.credential_fields
         ],
         trust_copy=str(system.trust_copy),
+        connection_method_label=connection_method_label(system.system_id),
+        upload_allowed=bool(upload_allowed(system.system_id)),
     )
 
 
@@ -497,6 +529,8 @@ def _load_systems_catalog() -> SystemsCatalogResponse:
 
 def _validate_system(system: str) -> str:
     normalized = system.strip().lower()
+    if normalized == "axios_hq":
+        return "axios_hq"
     if normalized not in VALID_SYSTEMS:
         raise HTTPException(status_code=422, detail="invalid system")
     return normalized
@@ -507,7 +541,9 @@ def _validate_active_mode(mode: str, system: str) -> str:
     if normalized not in {"live", "upload"}:
         raise HTTPException(status_code=422, detail="invalid mode")
     if normalized == "live" and (
-        system in UPLOAD_ONLY_SYSTEMS or system == _CASSANDRA_SYSTEM
+        system in UPLOAD_ONLY_SYSTEMS
+        or system in {"axios_hq", "axios_headquarters"}
+        or system == _CASSANDRA_SYSTEM
     ):
         raise HTTPException(status_code=422, detail="live mode not allowed for this system")
     return normalized
@@ -623,10 +659,10 @@ def _load_stored_credentials(secret_resource_name: str | None) -> dict[str, str]
         secrets_mod = importlib.import_module("habeas_privacy_core.connections.secrets")
     except ImportError:
         return None
-    get_writer = getattr(secrets_mod, "get_secret_writer", None)
-    if get_writer is None:
+    get_reader = getattr(secrets_mod, "get_secret_reader", None)
+    if get_reader is None:
         return None
-    store = get_writer()
+    store = get_reader()
     get_secret = getattr(store, "get_secret", None)
     if not callable(get_secret):
         return None

@@ -25,7 +25,7 @@ from admin_api.connection_tests.google_sheets import (
     list_drive_spreadsheets,
     list_spreadsheet_tabs,
 )
-from admin_api.drop_pipeline import _require_database
+from admin_api.drop_pipeline import _require_database, ops_fast_statement_scope
 from admin_api.lab_sheets_oauth import _OAUTH_SCOPES, settings as lab_oauth_settings
 from admin_api.roles import ConnectorReminderOut, RolePrincipal, require_roles
 from admin_api.vertical_assignments import fetch_principal_verticals, require_vertical_access
@@ -535,8 +535,8 @@ async def _find_connection_for_system(
         else [system]
     )
     row = await conn.fetchrow(
-        """
-        SELECT id
+        f"""
+        SELECT {connections_db._CONNECTION_SELECT}
           FROM integration_connections
          WHERE system = ANY($1::text[])
            AND metadata->>'vertical_id' = $2
@@ -548,7 +548,7 @@ async def _find_connection_for_system(
     )
     if row is None:
         return None
-    return await connections_db.get_connection(conn, row["id"])
+    return connections_db._row_to_connection(row)
 
 
 async def _resolve_connection(
@@ -1207,26 +1207,27 @@ async def list_owner_connectors(
     pool = get_pool()
     connectors: list[ConnectorSystemOut] = []
     async with pool.acquire() as conn:
-        for binding in bindings:
-            if binding.system == "cassandra":
-                continue
-            connection = await _find_connection_for_system(
-                conn, vertical_id=vertical_id, system=binding.system
-            )
-            try:
-                from habeas_privacy_core.connections.systems import get_system
-
-                display_name = get_system(binding.system).display_label
-            except Exception:  # noqa: BLE001
-                display_name = binding.system
-            connectors.append(
-                _connection_to_out(
-                    system=binding.system,
-                    allowed_approaches=sorted(binding.allowed_approaches),
-                    connection=connection,
-                    display_name=display_name,
+        async with ops_fast_statement_scope(conn):
+            for binding in bindings:
+                if binding.system == "cassandra":
+                    continue
+                connection = await _find_connection_for_system(
+                    conn, vertical_id=vertical_id, system=binding.system
                 )
-            )
+                try:
+                    from habeas_privacy_core.connections.systems import get_system
+
+                    display_name = get_system(binding.system).display_label
+                except Exception:  # noqa: BLE001
+                    display_name = binding.system
+                connectors.append(
+                    _connection_to_out(
+                        system=binding.system,
+                        allowed_approaches=sorted(binding.allowed_approaches),
+                        connection=connection,
+                        display_name=display_name,
+                    )
+                )
     _ = principal
     return ConnectorListOut(
         vertical_id=vertical.vertical_id,

@@ -180,6 +180,82 @@ export function inboxBatchLabel(
   return inboxDateSourceLabel(item)
 }
 
+/** Lite snapshot / process-list fields for a collapsed pipeline row. */
+export type BulkProcessLiteRow = {
+  process_at?: string | null
+  intake_source?: string | null
+  label?: string | null
+  download_status?: string | null
+  request_rows?: number
+  raw_rows?: number
+  overall?: {
+    percent?: number
+    current_stage?: string
+    status?: string
+  } | null
+}
+
+function bulkProcessLocalDate(processAt: string | null | undefined): Date | null {
+  const raw = processAt?.trim() || ''
+  if (!raw) return null
+  const date = new Date(raw)
+  if (Number.isNaN(date.getTime())) return null
+  return date
+}
+
+/** inboxLocalDateLabel style plus year — `Aug 21, 2026`. */
+function bulkProcessLocalDateLabel(date: Date): string {
+  return date.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  })
+}
+
+/** drop → CA DROP via inboxIntakeSourceLabel. Empty → Unknown. */
+export function bulkProcessSourceLabel(intakeSource: string | null | undefined): string {
+  return inboxIntakeSourceLabel(intakeSource)
+}
+
+/**
+ * Human collapsed title. Prefer date · source (e.g. Aug 21, 2026 · CA DROP).
+ * Fall back to `label`, then source, then date, then '—' only if nothing exists.
+ * Never return empty string.
+ */
+export function bulkProcessCollapsedTitle(row: BulkProcessLiteRow): string {
+  const date = bulkProcessLocalDate(row.process_at)
+  const dateLabel = date ? bulkProcessLocalDateLabel(date) : ''
+  const sourceRaw = (row.intake_source ?? '').trim()
+  const sourceLabel = sourceRaw ? inboxIntakeSourceLabel(sourceRaw) : ''
+  const label = row.label?.trim() ?? ''
+
+  if (dateLabel && sourceLabel) return `${dateLabel} · ${sourceLabel}`
+  if (label) return label
+  if (sourceLabel) return sourceLabel
+  if (dateLabel) return dateLabel
+  return '—'
+}
+
+/** e.g. "1840000 req" when request_rows is a number; null if unknown. */
+export function bulkProcessCollapsedCounts(row: BulkProcessLiteRow): string | null {
+  if (typeof row.request_rows !== 'number') return null
+  return `${row.request_rows} req`
+}
+
+/** overall.status or download_status, underscores → spaces. '—' only if both missing. */
+export function bulkProcessCollapsedStatus(row: BulkProcessLiteRow): string {
+  const raw =
+    (row.overall?.status ?? '').trim() || (row.download_status ?? '').trim()
+  if (!raw) return '—'
+  return raw.replaceAll('_', ' ')
+}
+
+/** overall.percent if a number, else null */
+export function bulkProcessCollapsedPercent(row: BulkProcessLiteRow): number | null {
+  const percent = row.overall?.percent
+  return typeof percent === 'number' ? percent : null
+}
+
 /** Default stack identity for inbox grouping builders. */
 export function inboxDateSourceParts(
   item: Pick<NeedsAttentionItem, 'requested_at' | 'received_at' | 'intake_source'>,

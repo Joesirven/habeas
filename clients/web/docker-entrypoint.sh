@@ -170,7 +170,8 @@ if ! fetch_token_with_retry; then
   if [ -s "$TOKEN_FILE" ]; then
     echo "entrypoint: identity fetch failed after 30 attempts; keeping last-known token for /api proxy" >&2
   else
-    echo "entrypoint: could not obtain identity token after 30 attempts; serving static SPA without /api proxy" >&2
+    echo "entrypoint: could not obtain identity token after 30 attempts; refusing to start without /api proxy" >&2
+    exit 1
   fi
 fi
 

@@ -2,6 +2,8 @@
 
 User matching and block/revoke suppression via Auth0 Management API.
 
+Owner wizard method: Auth0 Management API. Upload is not a working path (no CSV template; API 422).
+
 Hash in worker → BigQuery hashed raw → [`transform/external_hash`](../../transform/external_hash/) dbt marts. Queue: `auth0_attempts` (`step` = `matching` | `suppression`).
 
 Cloud Run FastAPI app — health + step routes. Matching (`POST /matching/submit`) looks up the Auth0 mart; suppression still uses `adapters/stub.py`. Hash refresh runs the Auth0 **users-export job**, hashes emails in memory, writes hashed raw, then runs dbt. Depends on [`habeas-privacy-core`](../../libs/habeas-privacy-core/).

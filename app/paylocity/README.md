@@ -2,6 +2,8 @@
 
 Human resources system matching and suppression; approval gating per legal rules.
 
+Owner wizard method: Paylocity SFTP (connectivity ping). Matching uses mapped CSV upload.
+
 Hash in worker → BigQuery hashed raw → [`transform/external_hash`](../../transform/external_hash/) dbt marts. Queue: `paylocity_attempts` (`step` = `matching` | `suppression`).
 
 Cloud Run FastAPI app — matching looks up ``paylocity_email_hash__build`` and

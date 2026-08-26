@@ -227,9 +227,9 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
         ),
         trust_copy=_saas_trust_copy(
             extra=(
-                "Paylocity supports two approaches. Live mode: SFTP credentials from "
+                "Paylocity supports two approaches. Paylocity SFTP: credentials from "
                 "the Developer Portal integration app (partner.paylocity.com). A "
-                "successful live test confirms SFTP connectivity only; it does not "
+                "successful SFTP test confirms SFTP connectivity only; it does not "
                 "extract candidate emails from a directory listing. Matching uses "
                 "Upload until a named file schema is confirmed. Upload mode: download "
                 "the Habeas CSV template, fill required columns, and upload the file "
@@ -268,8 +268,8 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
             extra=(
                 "Lever: only a Super Admin can create API credentials. Use a dedicated "
                 "Habeas key with Users read/list — not your login password and not a "
-                "Postings-only API key. Users read/list is a live connection probe only; "
-                "it does not extract candidates. If the live connection fails, upload a "
+                "Postings-only API key. Users read/list is a Lever API probe only; "
+                "it does not extract candidates. If the Lever API connection fails, upload a "
                 "CSV and map columns — Habeas does not list Lever API endpoints for extract."
             ),
         ),
@@ -346,12 +346,11 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
         trust_copy=_saas_trust_copy(
             extra=(
                 "BizDev Contacts supports two approaches. Connect Google (owner "
-                "Google sign-in) to use the Contact Us sheet live — Habeas does "
-                "not ask you to share the file with a service account. Upload CSV "
-                "alternative: download the Habeas CSV template, reshape your "
-                "Contact Us export to match the required headers, select a "
-                "multi-value delimiter if needed, and upload the file. We never "
-                "ask for your Google password or a credentials JSON."
+                "Google sign-in) — Habeas does not ask you to share the file with "
+                "a service account. Upload CSV alternative: download the Habeas "
+                "CSV template, reshape your Contact Us export to match the required "
+                "headers, select a multi-value delimiter if needed, and upload the "
+                "file. We never ask for your Google password or a credentials JSON."
             ),
         ),
     ),
@@ -363,12 +362,12 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
         trust_copy=_saas_trust_copy(
             extra=(
                 "HR Alumni supports two approaches. Connect Google (owner Google "
-                "sign-in) to use the Alumni sheet live — Habeas does not ask you "
-                "to share the file with a service account. Upload CSV alternative: "
-                "download the Habeas CSV template, reshape your alumni list to "
-                "match the required headers, select a multi-value delimiter if "
-                "needed, and upload the file. We never ask for your Google "
-                "password or a credentials JSON."
+                "sign-in) — Habeas does not ask you to share the file with a "
+                "service account. Upload CSV alternative: download the Habeas "
+                "CSV template, reshape your alumni list to match the required "
+                "headers, select a multi-value delimiter if needed, and upload "
+                "the file. We never ask for your Google password or a "
+                "credentials JSON."
             ),
         ),
     ),

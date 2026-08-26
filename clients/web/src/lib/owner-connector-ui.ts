@@ -1225,6 +1225,32 @@ export function ownerConnectorsVerticalIds(input: {
   return out
 }
 
+/** Fail-soft budget for owner connector catalog / list fetches — flip pending to the existing error chrome. */
+export const OWNER_CONNECTORS_FAIL_SOFT_MS = 8_000
+
+/** Catalog still loading and we have no vertical ids yet — not the empty-assigned state. */
+export function ownerConnectorsListPhase(input: {
+  catalogPending: boolean
+  catalogError: boolean
+  verticals: readonly string[]
+}): 'pending' | 'empty' | 'ready' | 'error' {
+  if (input.verticals.length > 0) return 'ready'
+  if (input.catalogPending) return 'pending'
+  if (input.catalogError) return 'error'
+  return 'empty'
+}
+
+/**
+ * Load every vertical's connectors in parallel. Caller supplies the fetcher
+ * (typically listOwnerConnectors). Never sequential await-in-a-for-loop.
+ */
+export async function prefetchOwnerConnectorsParallel<T>(
+  verticalIds: readonly string[],
+  load: (verticalId: string) => Promise<T>,
+): Promise<T[]> {
+  return Promise.all(verticalIds.map((verticalId) => load(verticalId)))
+}
+
 /** Drop leftover demo / infra systems that must not appear as wizard cards. */
 export function filterOwnerWizardConnectors(
   connectors: readonly OwnerConnectorSystem[] | null | undefined,
