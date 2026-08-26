@@ -1586,6 +1586,7 @@ function BulkStageStrip({
   onSelectTab,
   expanded,
   summaryCurrentStage,
+  liteStages,
 }: {
   detail: BulkProcessDetail | undefined
   loading?: boolean
