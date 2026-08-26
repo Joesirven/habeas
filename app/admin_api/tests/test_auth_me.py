@@ -28,7 +28,9 @@ from habeas_privacy_core.auth import (
 )
 from habeas_privacy_core.connections.catalog import (
     VERTICAL_COMMUNICATIONS,
+    VERTICAL_DATA,
     VERTICAL_PEOPLE_HR,
+    list_verticals,
 )
 
 
@@ -70,6 +72,17 @@ def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _catalog_me_verticals() -> tuple[list[str], list[dict[str, str]]]:
+    entries = list_verticals()
+    ids = [entry.vertical_id for entry in entries]
+    labels = [
+        {"vertical_id": entry.vertical_id, "display_label": entry.display_label}
+        for entry in entries
+        if entry.vertical_id != VERTICAL_DATA
+    ]
+    return ids, labels
+
+
 def _base_me_payload(
     email: str,
     role: str,
@@ -83,6 +96,10 @@ def _base_me_payload(
     pending_settings: list[dict] | None = None,
 ) -> dict:
     local = email.split("@", 1)[0] if "@" in email else email
+    if verticals is None and role == ROLE_SUPER_ADMIN:
+        verticals, default_labels = _catalog_me_verticals()
+        if assigned_vertical_labels is None:
+            assigned_vertical_labels = default_labels
     return {
         "email": email,
         "role": role,

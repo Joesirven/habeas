@@ -18,6 +18,7 @@ from habeas_privacy_core.auth import (
     ROLE_LEGAL,
     ROLE_SUPER_ADMIN,
 )
+from habeas_privacy_core.connections.catalog import VERTICAL_DATA, list_verticals
 
 
 # Documented IAP OAuth client ID (infra/README). Tests only; production reads env.
@@ -67,6 +68,17 @@ def _invite_pending_setting(*, status: str = "pending") -> dict:
     }
 
 
+def _catalog_me_verticals() -> tuple[list[str], list[dict[str, str]]]:
+    entries = list_verticals()
+    ids = [entry.vertical_id for entry in entries]
+    labels = [
+        {"vertical_id": entry.vertical_id, "display_label": entry.display_label}
+        for entry in entries
+        if entry.vertical_id != VERTICAL_DATA
+    ]
+    return ids, labels
+
+
 def _me_payload(
     email: str,
     role: str,
@@ -75,13 +87,17 @@ def _me_payload(
     pending_settings: list[dict] | None = None,
 ) -> dict:
     local = email.split("@", 1)[0] if "@" in email else email
+    verticals: list[str] = []
+    labels: list[dict[str, str]] = []
+    if role == ROLE_SUPER_ADMIN:
+        verticals, labels = _catalog_me_verticals()
     return {
         "email": email,
         "role": role,
         "real_role": real_role if real_role is not None else role,
         "given_name": local,
-        "verticals": [],
-        "assigned_vertical_labels": [],
+        "verticals": verticals,
+        "assigned_vertical_labels": labels,
         "needs_connector_setup": False,
         "connector_reminders": [],
         "pending_settings": pending_settings if pending_settings is not None else [],

@@ -137,6 +137,16 @@ async def ensure_catalog_vertical(conn: Any, vertical_id: str) -> None:
         )
 
 
+def catalog_vertical_ids() -> list[str]:
+    """KD20 catalog ids in sort order — no database."""
+    return [entry.vertical_id for entry in list_verticals()]
+
+
+def principal_lists_all_catalog_verticals(role: str) -> bool:
+    """Super_admin (including View-as super_admin) sees every catalog vertical."""
+    return role == ROLE_SUPER_ADMIN
+
+
 async def fetch_principal_verticals(conn: Any, *, email: str) -> list[str]:
     """Return active vertical ids assigned to *email* (lowercased)."""
     rows = await conn.fetch(
@@ -150,6 +160,18 @@ async def fetch_principal_verticals(conn: Any, *, email: str) -> list[str]:
         email,
     )
     return [str(r["vertical_id"]) for r in rows]
+
+
+async def fetch_visible_verticals(
+    conn: Any,
+    *,
+    email: str,
+    role: str,
+) -> list[str]:
+    """Assignments for owners/users; full catalog for super_admin."""
+    if principal_lists_all_catalog_verticals(role):
+        return catalog_vertical_ids()
+    return await fetch_principal_verticals(conn, email=email)
 
 
 async def fetch_principal_assignment_role(conn: Any, *, email: str) -> str | None:
@@ -571,6 +593,47 @@ async def redeem_member_invite(
         "vertical_label": label,
         "role": ASSIGNMENT_ROLE_USER,
     }
+
+
+@owner_router.get("", response_model=list[VerticalOut])
+async def list_owner_visible_verticals(
+    principal: CatalogReadPrincipal,
+) -> list[VerticalOut]:
+    """Verticals the caller may open on /owner/connectors.
+
+    Super_admin gets the full KD20 catalog (not ``user_vertical_assignments``)
+    so a tech-only owner grant cannot hide People/HR / Communications / Test.
+    """
+    if principal_lists_all_catalog_verticals(principal.role):
+        return [
+            VerticalOut(
+                id=entry.vertical_id,
+                display_label=entry.display_label,
+                view_only=entry.view_only,
+                sort_order=entry.sort_order,
+            )
+            for entry in list_verticals()
+        ]
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        ids = await fetch_principal_verticals(conn, email=principal.email)
+    out: list[VerticalOut] = []
+    for vertical_id in ids:
+        try:
+            entry = get_vertical(vertical_id)
+        except ValueError:
+            continue
+        out.append(
+            VerticalOut(
+                id=entry.vertical_id,
+                display_label=entry.display_label,
+                view_only=entry.view_only,
+                sort_order=entry.sort_order,
+            )
+        )
+    out.sort(key=lambda item: (item.sort_order, item.id))
+    return out
 
 
 @owner_router.get("/{vertical_id}/members", response_model=list[VerticalMemberOut])
