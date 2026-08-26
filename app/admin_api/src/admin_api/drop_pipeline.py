@@ -797,33 +797,32 @@ async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
     probe snapshot only (never fans out on this path). ``ca_drop_schedule`` reuses
     the lite connector last-success query (no raw spine).
     """
-    open_requests, review_pending, last_connector_success = await asyncio.gather(
-        conn.fetchval(
-            """
-            SELECT COUNT(*)::bigint
-              FROM requests
-             WHERE intake_source = 'drop'
-            """
-        ),
-        conn.fetchval(
-            """
-            SELECT COUNT(*)::int
-              FROM approval_requests
-             WHERE action_type = $1
-               AND status = 'pending'
-            """,
-            MATCHING_REVIEW_ACTION,
-        ),
-        conn.fetchval(
-            """
-            SELECT completed_at
-              FROM drop_connector_attempts
-             WHERE status = 'success'
-               AND completed_at IS NOT NULL
-             ORDER BY completed_at DESC
-             LIMIT 1
-            """
-        ),
+    # asyncpg connections are not concurrent — never asyncio.gather on one conn.
+    open_requests = await conn.fetchval(
+        """
+        SELECT COUNT(*)::bigint
+          FROM requests
+         WHERE intake_source = 'drop'
+        """
+    )
+    review_pending = await conn.fetchval(
+        """
+        SELECT COUNT(*)::int
+          FROM approval_requests
+         WHERE action_type = $1
+           AND status = 'pending'
+        """,
+        MATCHING_REVIEW_ACTION,
+    )
+    last_connector_success = await conn.fetchval(
+        """
+        SELECT completed_at
+          FROM drop_connector_attempts
+         WHERE status = 'success'
+           AND completed_at IS NOT NULL
+         ORDER BY completed_at DESC
+         LIMIT 1
+        """
     )
     from admin_api.worker_schedules import ca_drop_schedule_payload
 
@@ -1459,6 +1458,83 @@ async def list_bulk_processes(
             }
         )
     return processes
+
+
+async def _snapshot_processes(
+    conn: Any,
+    *,
+    days: int = 7,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Bulk list head with lite summaries — ledger only, no raw spine."""
+    bounded_days = max(1, min(days, 30))
+    bounded_limit = max(1, min(limit, 100))
+    processes = await list_bulk_processes(
+        conn,
+        days=bounded_days,
+        limit=bounded_limit,
+    )
+    if processes:
+        summaries = await collect_bulk_process_summaries_lite(
+            conn,
+            process_ids=[int(item["process_id"]) for item in processes],
+        )
+        enriched: list[dict[str, Any]] = []
+        for item in processes:
+            pid = int(item["process_id"])
+            summary = summaries.get(pid)
+            if summary is not None:
+                item = {
+                    **item,
+                    "overall": summary["overall"],
+                    "request_rows": summary["request_rows"],
+                    "raw_rows": summary["raw_rows"],
+                }
+            enriched.append(item)
+        processes = enriched
+    return {
+        "day": datetime.now(timezone.utc).date().isoformat(),
+        "days": bounded_days,
+        "processes": processes,
+    }
+
+
+async def collect_console_snapshot(
+    conn: Any,
+    *,
+    process_days: int = 7,
+    process_limit: int = 50,
+    recent_days: int = 30,
+    recent_limit: int = 100,
+) -> dict[str, Any]:
+    """Unified Pipeline console paint — summary + matching + process heads.
+
+    Collectors run sequentially on one connection; asyncpg forbids concurrent
+    operations on a single connection (``asyncio.gather`` on one ``conn`` 500s).
+    """
+    summary = await collect_pipeline_summary(conn)
+    summary.pop("as_of", None)
+    matching_progress = await collect_matching_progress(conn)
+    processes = await _snapshot_processes(
+        conn,
+        days=process_days,
+        limit=process_limit,
+    )
+    recent_processes = await list_bulk_processes(
+        conn,
+        days=max(1, min(recent_days, 30)),
+        limit=max(1, min(recent_limit, 100)),
+    )
+    return {
+        "as_of": datetime.now(timezone.utc).isoformat(),
+        "summary": summary,
+        "matching_progress": matching_progress,
+        "processes": processes,
+        "recent_processes": {
+            "days": max(1, min(recent_days, 30)),
+            "processes": recent_processes,
+        },
+    }
 
 
 def _run_row(
@@ -2245,6 +2321,27 @@ async def drop_pipeline_summary(_principal: SuperAdminPrincipal):
     pool = get_pool()
     async with pool.acquire() as conn:
         return await collect_pipeline_summary(conn)
+
+
+@router.get("/console/snapshot")
+async def drop_console_snapshot(
+    _principal: SuperAdminPrincipal,
+    process_days: int = Query(default=7, ge=1, le=30),
+    process_limit: int = Query(default=50, ge=1, le=100),
+    recent_days: int = Query(default=30, ge=1, le=30),
+    recent_limit: int = Query(default=100, ge=1, le=100),
+):
+    """Unified Pipeline console paint — summary, matching, and process heads."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        return await collect_console_snapshot(
+            conn,
+            process_days=process_days,
+            process_limit=process_limit,
+            recent_days=recent_days,
+            recent_limit=recent_limit,
+        )
 
 
 @router.get("/pipeline")
