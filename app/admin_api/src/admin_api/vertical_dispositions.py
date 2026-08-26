@@ -253,6 +253,35 @@ def assignment_vertical_for_disposition(vertical: str) -> str:
     return resolved
 
 
+async def viewer_may_read_auth0_vendor_ids(conn: Any, viewer: RolePrincipal) -> bool:
+    """Legal / admin / super_admin may read Auth0 ids; operators need tech."""
+    if viewer.role in {ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL}:
+        return True
+    from admin_api.vertical_assignments import principal_has_vertical
+
+    return await principal_has_vertical(
+        conn,
+        email=viewer.email,
+        vertical_id=assignment_vertical_for_disposition(VERTICAL_AUTH0),
+        role=viewer.role,
+    )
+
+
+def _redact_auth0_vendor_ids(
+    response: VerticalDispositionsResponse,
+) -> VerticalDispositionsResponse:
+    """Drop Auth0 ``selected_vendor_record_ids`` — those can be email-shaped PII."""
+    redacted = [
+        (
+            item.model_copy(update={"selected_vendor_record_ids": []})
+            if item.vertical == VERTICAL_AUTH0
+            else item
+        )
+        for item in response.dispositions
+    ]
+    return response.model_copy(update={"dispositions": redacted})
+
+
 def matching_snapshot_lookup_keys(
     *,
     vertical: str,
@@ -763,7 +792,7 @@ async def is_identity_cleared(conn: Any, request_id: str | UUID) -> bool:
 @router.get("/{request_id}/dispositions", response_model=VerticalDispositionsResponse)
 async def get_vertical_dispositions(
     request_id: str,
-    _viewer: DispositionViewer,
+    viewer: DispositionViewer,
 ) -> VerticalDispositionsResponse:
     _require_database()
     try:
@@ -774,9 +803,12 @@ async def get_vertical_dispositions(
     pool = get_pool()
     async with pool.acquire() as conn:
         try:
-            return await list_vertical_dispositions(conn, request_id=request_id)
+            response = await list_vertical_dispositions(conn, request_id=request_id)
         except LookupError as exc:
             raise HTTPException(status_code=404, detail="request not found") from exc
+        if not await viewer_may_read_auth0_vendor_ids(conn, viewer):
+            return _redact_auth0_vendor_ids(response)
+        return response
 
 
 @router.put("/{request_id}/dispositions/{vertical}", response_model=VerticalDisposition)
@@ -920,4 +952,5 @@ __all__ = [
     "router",
     "upsert_vertical_disposition",
     "uses_vendor_record_ids",
+    "viewer_may_read_auth0_vendor_ids",
 ]

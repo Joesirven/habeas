@@ -9,6 +9,10 @@ Search is hard-gated by ``evaluate_vertical_matching_gate`` (system=auth0;
 catalog vertical resolved to ``tech``). Wizard incomplete, upload stale, or live rotation overdue
 blocks candidates: HTTP 409 ``gate_blocked`` (no vendor ids).
 
+Data owners need a ``tech`` assignment (``get_bindings_for_system("auth0")``),
+same 403 as remaining-vertical match-candidates. Super-admin / admin / legal
+skip assignment. Auth0 ``vendor_record_id`` values can be email-shaped PII.
+
 Never returns raw email, hashes, or vendor ids in logs/audit. Audit arguments
 are ``request_id`` + counts only, plus ``gate_code`` when the gate blocks.
 """
@@ -32,6 +36,7 @@ from habeas_privacy_core.auth import (
     resolve_actor,
 )
 from habeas_privacy_core.config import CoreSettings
+from habeas_privacy_core.connections.catalog import get_bindings_for_system
 from habeas_privacy_core.connections.freshness import GateResult
 from habeas_privacy_core.connections.matching_gate import (
     evaluate_vertical_matching_gate,
@@ -55,6 +60,7 @@ from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
 
 from admin_api.roles import RolePrincipal, require_roles
+from admin_api.vertical_assignments import fetch_principal_verticals
 
 logger = logging.getLogger(__name__)
 CANDIDATES_AUDIT_COMMAND = "request.auth0_match_candidates"
@@ -101,6 +107,20 @@ class Auth0MatchCandidatesStatusResponse(BaseModel):
 def _require_database() -> None:
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
+
+
+def _catalog_verticals_for_auth0() -> set[str]:
+    return {binding.vertical_id for binding in get_bindings_for_system("auth0")}
+
+
+async def _require_auth0_match_access(conn: Any, viewer: RolePrincipal) -> None:
+    """Super-admin / admin / legal may search; data owners need tech assignment."""
+    if viewer.role in {ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_LEGAL}:
+        return
+    assigned = set(await fetch_principal_verticals(conn, email=viewer.email))
+    if assigned & _catalog_verticals_for_auth0():
+        return
+    raise HTTPException(status_code=403, detail="vertical access denied")
 
 
 def _parse_request_id(request_id: str) -> None:
@@ -256,7 +276,7 @@ async def _audit_candidates(
 )
 async def get_auth0_match_candidates_status(
     request_id: str,
-    _viewer: Auth0MatchPrincipal,
+    viewer: Auth0MatchPrincipal,
 ) -> Auth0MatchCandidatesStatusResponse:
     """Lab probe: snapshot present + count + gated flag. No live BQ, no ids."""
     _require_database()
@@ -264,6 +284,7 @@ async def get_auth0_match_candidates_status(
 
     pool = get_pool()
     async with pool.acquire() as conn:
+        await _require_auth0_match_access(conn, viewer)
         record = await get_request(conn, request_id)
         if record is None:
             raise HTTPException(status_code=404, detail="request not found")
@@ -293,6 +314,7 @@ async def get_auth0_match_candidates(
 
     pool = get_pool()
     async with pool.acquire() as conn:
+        await _require_auth0_match_access(conn, viewer)
         record = await get_request(conn, request_id)
         if record is None:
             raise HTTPException(status_code=404, detail="request not found")
