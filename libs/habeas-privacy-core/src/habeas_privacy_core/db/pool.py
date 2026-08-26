@@ -45,3 +45,13 @@ async def ping(database_url: str | None = None) -> bool:
     async with pool.acquire() as conn:
         await conn.fetchval("SELECT 1")
     return True
+
+
+async def set_local_statement_timeout(conn, timeout_ms: int = 4000) -> None:
+    """Bound the next statements on this connection (SET LOCAL; does not leak if inside a transaction)."""
+    await conn.execute("SELECT set_config('statement_timeout', $1, true)", str(int(timeout_ms)))
+
+
+async def reset_statement_timeout(conn) -> None:
+    """Clear statement_timeout on this connection (required because asyncpg often autocommits)."""
+    await conn.execute("SELECT set_config('statement_timeout', '0', false)")

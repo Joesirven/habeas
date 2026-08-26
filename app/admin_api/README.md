@@ -13,11 +13,14 @@ IAP on this service. **Current prod web is not on GIS:** live 100% is `admin-web
 | Surface | Endpoints (representative) |
 |---------|----------------------------|
 | Pipeline status / spine proxies | `GET /ops/drop/pipeline`, download/land/promote/dispatch/match/fulfill proxies |
+| Cheap tickers | `GET /ops/drop/pipeline/summary`, `GET /ops/drop/console/snapshot`, `GET /ops/drop/matching-progress` |
 | Hash-index refresh | `POST .../hash-index-refresh/enqueue`, `.../enqueue-all`, `.../process` |
 | Matching results | list/detail (attempt history + allowlisted `audit_payload`), promote/decline (individual + bulk) |
 | Assign / escalate | `POST /ops/drop/workflow/assign`, `.../escalate`, `GET .../assignments` |
 | Health / fleet | `GET /ops/workers/fleet`, `GET /ops/drop/workers`, `GET /ops/health/queues`, `GET/PATCH /ops/health/retry-config`, `GET|PATCH /ops/workers/schedules`, attempt-table browser under `/ops/workers/attempt-tables*` |
 | Home summary | `GET /ops/drop/stats/global` |
+
+Header, snapshot, and matching-progress are cheap tickers: no `drop_raw_requests` spine; matching-progress is one `GROUP BY status` on `matching_attempts` only (no JOIN `requests`); sequential awaits on one asyncpg connection; `statement_timeout` 4s on those acquires. The prod hang on admin-api-prod-00078 was a DB stall (COUNT/JOIN over ~1.84M rows), not a missing route; `GET /me` stayed fast. Do not apply this budget to `GET /ops/drop/pipeline` full spine.
 
 Browser never calls workers — admin_api aggregates `/readyz` + Postgres queue depths.
 

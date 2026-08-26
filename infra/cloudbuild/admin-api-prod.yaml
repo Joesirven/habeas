@@ -15,6 +15,8 @@ substitutions:
   _PROJECT: example-gcp-project
   _SERVICE: admin-api-prod
   _TAG: latest
+  # Prove-then-flip: never steal 100% from a healthy pin (00077 hang rollback).
+  _REVISION_TAG: snapshot-hang
   _CLOUDSQL_INSTANCE: example-gcp-project:us-east4:dpra-prod
   _DROP_CONNECTOR_URL: https://drop-connector-prod-hsa55rg7ja-uk.a.run.app
   _DROP_INGESTOR_URL: https://drop-ingestor-prod-hsa55rg7ja-uk.a.run.app
@@ -87,6 +89,8 @@ steps:
       - --region=${_REGION}
       - --platform=managed
       - --no-allow-unauthenticated
+      - --no-traffic
+      - --tag=${_REVISION_TAG}
       - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
       - --timeout=3600
       - --cpu=2

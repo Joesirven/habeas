@@ -28,7 +28,11 @@ from habeas_privacy_core.auth.roles import (
     resolve_role_from_allowlists,
 )
 from habeas_privacy_core.config import CoreSettings
-from habeas_privacy_core.db.pool import get_pool
+from habeas_privacy_core.db.pool import (
+    get_pool,
+    reset_statement_timeout,
+    set_local_statement_timeout,
+)
 from habeas_privacy_core.db.request_resolver import request_resolver
 from habeas_privacy_core.db.vertical_matching import (
     AUTH0_VERTICAL,
@@ -731,16 +735,78 @@ def _rollup_raw_request_groups(
     return list_rows, status_rows
 
 
+_HEADER_STATEMENT_TIMEOUT_MS = 4000
+_HEADER_COUNT_TTL_SECONDS = 15.0
+_header_open_requests_cache: tuple[float, int] | None = None
+
+
+def clear_pipeline_header_cache() -> None:
+    """Drop cached DROP open_requests COUNT so callers can force SQL."""
+    global _header_open_requests_cache
+    _header_open_requests_cache = None
+
+
+def _is_statement_timeout_error(exc: BaseException) -> bool:
+    if type(exc).__name__ == "QueryCanceledError":
+        return True
+    return getattr(exc, "sqlstate", None) == "57014"
+
+
+def _log_header_query_timeout(query_name: str, started: float) -> None:
+    logger.warning(
+        "drop_pipeline_query_timeout",
+        extra={
+            "query": query_name,
+            "elapsed_ms": int((monotonic() - started) * 1000),
+        },
+    )
+
+
+async def _with_header_statement_timeout(
+    conn: Any,
+    collect: Any,
+    *,
+    query_name: str,
+) -> Any:
+    """Bound header/snapshot SQL at 4s; reset so the pooled conn is not left hot.
+
+    SET LOCAL only applies inside a transaction (asyncpg often autocommits).
+    Timeout/cancel returns HTTP 504 JSON — never hang with 0 bytes.
+    """
+    started = monotonic()
+    try:
+        async with conn.transaction():
+            await set_local_statement_timeout(conn, _HEADER_STATEMENT_TIMEOUT_MS)
+            return await collect()
+    except asyncio.CancelledError:
+        _log_header_query_timeout(query_name, started)
+        raise HTTPException(status_code=504, detail="query timeout") from None
+    except Exception as exc:
+        if _is_statement_timeout_error(exc):
+            _log_header_query_timeout(query_name, started)
+            raise HTTPException(status_code=504, detail="query timeout") from exc
+        raise
+    finally:
+        try:
+            await reset_statement_timeout(conn)
+        except Exception:
+            logger.info(
+                "drop_pipeline_timeout_reset_failed",
+                extra={"query": query_name},
+            )
+
+
 async def collect_matching_progress(conn: Any) -> dict[str, Any]:
-    """One GROUP BY on matching_attempts (DROP intake) plus drain lease. No PII."""
+    """One GROUP BY status on matching_attempts plus drain lease. No PII.
+
+    Do not JOIN ``requests`` — that scan over ~1.84M rows hung prod 00078.
+    """
     matching_attempt_rows = await conn.fetch(
         """
-        SELECT ma.status, COUNT(*)::int AS count
-          FROM matching_attempts ma
-          JOIN requests r ON r.id = ma.request_id
-         WHERE r.intake_source = 'drop'
-         GROUP BY ma.status
-         ORDER BY ma.status
+        SELECT status, COUNT(*)::int AS count
+          FROM matching_attempts
+         GROUP BY status
+         ORDER BY status
         """
     )
     matching_pending = 0
@@ -792,19 +858,38 @@ async def collect_matching_progress(conn: Any) -> dict[str, Any]:
 async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
     """Header counts for Pipeline console — no drop_raw_requests spine scan.
 
-    ``open_requests`` is DROP intake volume on ``requests`` only. ``review_pending``
-    is approval_requests.pending for matching.review. Worker-down uses the cached
+    ``open_requests`` is a cheap ``pg_class.reltuples`` estimate (not a
+    ``COUNT(*)`` of the 1.84M-row spine). ``review_pending`` is
+    approval_requests.pending for matching.review. Worker-down uses the cached
     probe snapshot only (never fans out on this path). ``ca_drop_schedule`` reuses
-    the lite connector last-success query (no raw spine).
+    the lite connector last-success query (no raw spine). ``clear_pipeline_header_cache``
+    forces the estimate SQL.
     """
     # asyncpg connections are not concurrent — never asyncio.gather on one conn.
-    open_requests = await conn.fetchval(
-        """
-        SELECT COUNT(*)::bigint
-          FROM requests
-         WHERE intake_source = 'drop'
-        """
-    )
+    global _header_open_requests_cache
+    cached = _header_open_requests_cache
+    stamp = monotonic()
+    if cached is not None and stamp - cached[0] < _HEADER_COUNT_TTL_SECONDS:
+        open_n = cached[1]
+    else:
+        count_started = monotonic()
+        try:
+            open_requests = await conn.fetchval(
+                """
+                SELECT GREATEST(reltuples::bigint, 0)
+                  FROM pg_class
+                 WHERE oid = 'public.requests'::regclass
+                """
+            )
+        except asyncio.CancelledError:
+            _log_header_query_timeout("open_requests", count_started)
+            raise
+        except Exception as exc:
+            if _is_statement_timeout_error(exc):
+                _log_header_query_timeout("open_requests", count_started)
+            raise
+        open_n = int(open_requests or 0)
+        _header_open_requests_cache = (stamp, open_n)
     review_pending = await conn.fetchval(
         """
         SELECT COUNT(*)::int
@@ -838,7 +923,6 @@ async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
         last_success_at=last_connector_success
     )
     now = datetime.now(timezone.utc)
-    open_n = int(open_requests or 0)
     review_n = int(review_pending or 0)
     return {
         "as_of": now.isoformat(),
@@ -2320,7 +2404,11 @@ async def drop_pipeline_summary(_principal: SuperAdminPrincipal):
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
-        return await collect_pipeline_summary(conn)
+        return await _with_header_statement_timeout(
+            conn,
+            lambda: collect_pipeline_summary(conn),
+            query_name="pipeline_summary",
+        )
 
 
 @router.get("/console/snapshot")
@@ -2335,12 +2423,16 @@ async def drop_console_snapshot(
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
-        return await collect_console_snapshot(
+        return await _with_header_statement_timeout(
             conn,
-            process_days=process_days,
-            process_limit=process_limit,
-            recent_days=recent_days,
-            recent_limit=recent_limit,
+            lambda: collect_console_snapshot(
+                conn,
+                process_days=process_days,
+                process_limit=process_limit,
+                recent_days=recent_days,
+                recent_limit=recent_limit,
+            ),
+            query_name="console_snapshot",
         )
 
 
@@ -2362,7 +2454,11 @@ async def drop_matching_progress(_principal: SuperAdminPrincipal):
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
-        return await collect_matching_progress(conn)
+        return await _with_header_statement_timeout(
+            conn,
+            lambda: collect_matching_progress(conn),
+            query_name="matching_progress",
+        )
 
 
 @router.get("/processes")

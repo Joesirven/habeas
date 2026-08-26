@@ -24,4 +24,5 @@ asyncpg connection pool and table helpers (`pool.py`, `requests.py`, `hash_index
   (single-flight reuse when non-terminal already exists).
 - State codes for enqueue/rematch use `habeas_privacy_core.geo.normalize_state_acronym`
   (USPS 50+DC allowlist; A10 until Jose confirms Q6).
+- Header collectors (pipeline summary / matching-progress / console snapshot) must set `statement_timeout` on the acquired connection and must not JOIN `requests` for matching-progress (`GROUP BY matching_attempts.status` only).
 - No vendor-specific logic in this module.

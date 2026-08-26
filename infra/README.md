@@ -176,6 +176,8 @@ done
 
 Compare the revision image digest to Artifact Registry `:latest` for the same service (they must match). Record revision names + digest in `tmp/2026-08-25-pipeline-perf-deploy.txt` (or the current deploy log). If prod still lags `master`, redeploy before perf QCQA.
 
+**Prove-then-flip (admin-api-prod):** Deploy with `--no-traffic` and a **new** tag — do not reuse hanging `admin-api-prod-00078` / `superadmin-verts` if that image is the hanging collector. Prove on the new revision (direct revision URL): `GET /ops/drop/console/snapshot` 200 **with bytes in < 8s**, `GET /me` 200 **< 2s**, `GET /ops/drop/pipeline/summary` 200. Only then shift 100%. If snapshot still hangs or returns 0 bytes, keep live **00077**. Do **not** flip 00078. No `allUsers`. No GIS flip. No `--to-latest`. Do not pin web 00031.
+
 **Requester state on promote:** `requestor_state` comes from `raw_payload.state` /
 `raw_payload.requestor_state`, else a USPS token in the CSV filename
 (e.g. `broker_TX_EMAIL.csv`). If both omit state, promote **fails closed** — it
