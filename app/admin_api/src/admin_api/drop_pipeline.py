@@ -431,7 +431,7 @@ _worker_health_refresh_task: asyncio.Task[Any] | None = None
 
 
 def _is_control_plane_health_target(name: str, base_url: str = "") -> bool:
-    """True for admin-web / admin-api / ops-ia-web — not worker outages."""
+    """True for admin-web / admin-api — not worker outages."""
     key = (name or "").strip().lower()
     if key in _CONTROL_PLANE_HEALTH_KEYS:
         return True

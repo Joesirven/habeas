@@ -34,7 +34,6 @@ CONTROL_PLANE_SERVICE_EXCLUDES: Final[frozenset[str]] = frozenset(
     {
         "admin-api",
         "admin-web",
-        "ops-ia-web",
     }
 )
 

@@ -3478,10 +3478,9 @@ async def test_not_deployed_404_is_not_workers_down(
     assert drop_pipeline._probe_counts_as_down(public) is False
 
 
-_FOURTEEN_FLEET_PROBE_TARGETS: list[tuple[str, str]] = [
+_THIRTEEN_FLEET_PROBE_TARGETS: list[tuple[str, str]] = [
     ("admin_web", "https://admin-web-prod.example.run.app"),
     ("admin_api", "https://admin-api-prod.example.run.app"),
-    ("ops_ia_web", "https://ops-ia-web.example.run.app"),
     ("drop_connector", "http://127.0.0.1:8081"),
     ("drop_ingestor", "http://127.0.0.1:8082"),
     ("request_dispatcher", "http://127.0.0.1:8083"),
@@ -3497,19 +3496,19 @@ _FOURTEEN_FLEET_PROBE_TARGETS: list[tuple[str, str]] = [
 
 
 @pytest.mark.asyncio
-async def test_get_pipeline_status_does_not_issue_fourteen_live_probes(
+async def test_get_pipeline_status_does_not_issue_thirteen_live_probes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Warm worker-health cache + control-plane skip: pipeline must not fan out 14 GETs."""
+    """Warm worker-health cache + control-plane skip: pipeline must not fan out 13 GETs."""
     from admin_api import worker_fleet
 
-    assert len(_FOURTEEN_FLEET_PROBE_TARGETS) == 14
+    assert len(_THIRTEEN_FLEET_PROBE_TARGETS) == 13
     _reset_worker_health_cache()
     _patch_worker_health_clock(monkeypatch, now=3_000.0)
     monkeypatch.setattr(
         worker_fleet,
         "discovered_worker_probe_targets",
-        lambda: list(_FOURTEEN_FLEET_PROBE_TARGETS),
+        lambda: list(_THIRTEEN_FLEET_PROBE_TARGETS),
     )
 
     def handler(url: str) -> _HealthResponse:
@@ -3519,12 +3518,12 @@ async def test_get_pipeline_status_does_not_issue_fourteen_live_probes(
 
     first = await drop_pipeline.collect_worker_health()
     cold_probes = len(seen)
-    assert cold_probes < 14
+    assert cold_probes < 13
     assert cold_probes > 0
     assert not any(
         token in url
         for url in seen
-        for token in ("admin-web", "admin-api", "ops-ia-web")
+        for token in ("admin-web", "admin-api")
     )
     assert "admin_web" not in first
     assert "admin_api" not in first

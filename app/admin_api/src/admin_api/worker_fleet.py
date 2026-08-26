@@ -227,7 +227,7 @@ def _prod_service_suffix(prefix: str) -> str:
 
 
 def _is_control_plane_slug(slug: str) -> bool:
-    """True for admin-api / admin-web / ops-ia-web, with or without env suffix."""
+    """True for admin-api / admin-web, with or without env suffix."""
     if is_excluded_service_slug(slug):
         return True
     for excluded in CONTROL_PLANE_SERVICE_EXCLUDES:

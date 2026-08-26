@@ -136,10 +136,6 @@ def test_fleet_gcp_merge_excludes_control_plane(monkeypatch: pytest.MonkeyPatch)
                     "uri": "https://admin-web-dev.example.run.app",
                 },
                 {
-                    "name": "projects/p/locations/us-east4/services/ops-ia-web-dev",
-                    "uri": "https://ops-ia-web-dev.example.run.app",
-                },
-                {
                     "name": "projects/p/locations/us-east4/services/matching-dev",
                     "uri": "https://matching-dev.example.run.app",
                 },
@@ -213,7 +209,6 @@ def test_fleet_gcp_merge_excludes_control_plane(monkeypatch: pytest.MonkeyPatch)
     assert "data_fulfillment" in keys
     assert "admin_api" not in keys
     assert "admin_web" not in keys
-    assert "ops_ia_web" not in keys
     assert "matching_prod" not in keys
     assert "test_probe_job" not in keys
 

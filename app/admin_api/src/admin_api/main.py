@@ -149,7 +149,6 @@ class AdminSettings(CoreSettings):
         "http://127.0.0.1:5173|http://localhost:5173|"
         "http://127.0.0.1:5174|http://localhost:5174|"
         "https://admin-web-dev-hsa55rg7ja-uk.a.run.app|"
-        "https://ops-ia-web-dev-hsa55rg7ja-uk.a.run.app|"
         "https://admin-web-prod-hsa55rg7ja-uk.a.run.app|"
         "https://example-gcp-project-dev.web.app|https://example-gcp-project-data-privacy-dev.web.app"
     )
