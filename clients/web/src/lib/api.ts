@@ -762,6 +762,9 @@ export type DropGlobalStats = {
 export type DropPipelineSummary = {
   drop_requests: { count: number }
   matching_review: { pending: number }
+  workers_down?: number | null
+  workers_total?: number
+  workers_stale?: boolean
   worker_health: Record<string, WorkerHealthProbe>
   ca_drop_schedule?: CaDropSchedule
 }

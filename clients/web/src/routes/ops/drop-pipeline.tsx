@@ -1224,13 +1224,13 @@ async function loadBatchRequestRuns(params: {
   intake: string
   downloadStatus: string
 }): Promise<BulkProcessesPayload> {
-  // Cheap list only — include_summary walks collect_bulk_process_progress per row (~60s each).
-  // overall_status is applied only when include_summary=true; do not send it here.
+  // Lite summaries batch connector + ingest ledgers — no per-row spine CTE.
   return listDropBulkProcesses({
     days: params.days,
     intake_source: params.intake || undefined,
     download_status: params.downloadStatus || undefined,
     limit: 50,
+    include_summary: true,
   })
 }
 
@@ -3178,7 +3178,7 @@ export function DropPipelinePage() {
   )
 }
 
-function DropPipelinePageInner() {
+export function DropPipelinePageInner() {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const { tab, process: processId, stage: focusedStage } = useSearch({ from: '/' })
@@ -3408,7 +3408,12 @@ function DropPipelinePageInner() {
     tab === 'hash_refresh' && fatPipelineEnabled && pipelineQuery.isPending && !data
   const hashPending = (data?.hash_index_refresh?.pending ?? 0) > 0
   const workerHealth =
-    summaryData?.worker_health ?? pipelineQuery.data?.worker_health
+    summaryData?.workers_stale === false
+      ? summaryData.worker_health
+      : (summaryData?.worker_health &&
+          Object.keys(summaryData.worker_health).length > 0
+          ? summaryData.worker_health
+          : pipelineQuery.data?.worker_health)
   const hashWorkerTone = workerHealth
     ? workerHealth.hash_index_refresh == null
       ? 'not_deployed'
@@ -3493,8 +3498,8 @@ function DropPipelinePageInner() {
       </header>
 
       <CompactOpsMetrics
-        openRequests={summaryData?.drop_requests.count ?? null}
-        reviewPending={summaryData?.matching_review.pending ?? null}
+        openRequests={summaryData?.drop_requests?.count ?? null}
+        reviewPending={summaryData?.matching_review?.pending ?? null}
         lastCaDrop={caSchedule?.last_success_at ?? null}
         nextCaDrop={caSchedule?.next_run_at ?? null}
         errorRateMonth={monthErrorRate}

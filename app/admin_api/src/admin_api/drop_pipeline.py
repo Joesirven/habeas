@@ -783,9 +783,10 @@ async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
 
     ``open_requests`` is DROP intake volume on ``requests`` only. ``review_pending``
     is approval_requests.pending for matching.review. Worker-down uses the cached
-    probe snapshot only (never fans out on this path).
+    probe snapshot only (never fans out on this path). ``ca_drop_schedule`` reuses
+    the lite connector last-success query (no raw spine).
     """
-    open_requests, review_pending = await asyncio.gather(
+    open_requests, review_pending, last_connector_success = await asyncio.gather(
         conn.fetchval(
             """
             SELECT COUNT(*)::bigint
@@ -802,10 +803,30 @@ async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
             """,
             MATCHING_REVIEW_ACTION,
         ),
+        conn.fetchval(
+            """
+            SELECT completed_at
+              FROM drop_connector_attempts
+             WHERE status = 'success'
+               AND completed_at IS NOT NULL
+             ORDER BY completed_at DESC
+             LIMIT 1
+            """
+        ),
     )
+    from admin_api.worker_schedules import ca_drop_schedule_payload
+
     health = peek_worker_health_snapshot()
     workers_down = _workers_down_from_health(health)
     workers_total = len(health) if health else len(WORKER_KEYS)
+    public_health = (
+        {name: _public_worker_health(probe) for name, probe in health.items()}
+        if health
+        else {}
+    )
+    ca_drop_schedule = await ca_drop_schedule_payload(
+        last_success_at=last_connector_success
+    )
     now = datetime.now(timezone.utc)
     open_n = int(open_requests or 0)
     review_n = int(review_pending or 0)
@@ -816,6 +837,8 @@ async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
         "workers_down": workers_down,
         "workers_total": workers_total,
         "workers_stale": health is None,
+        "worker_health": public_health,
+        "ca_drop_schedule": ca_drop_schedule,
         "drop_requests": {"count": open_n},
         "matching_review": {
             "action_type": MATCHING_REVIEW_ACTION,
