@@ -2073,14 +2073,25 @@ def test_matching_result_promote_and_decline_routes(monkeypatch: pytest.MonkeyPa
         response_status: int | None = None,
         dwids: list[str] | None = None,
         actor_role: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
     ) -> dict[str, Any]:
+        if not system:
+            raise ValueError("matching promote requires system")
         captured["promote"] = {
             "request_id": request_id,
             "decided_by": decided_by,
             "decision_reason": decision_reason,
             "dwids": dwids,
+            "vertical": vertical,
+            "system": system,
         }
-        return {"request_id": request_id, "review_status": "approved", "approval_id": 3}
+        return {
+            "request_id": request_id,
+            "vertical": vertical,
+            "review_status": "approved",
+            "approval_id": 3,
+        }
 
     async def fake_decline(
         conn: Any,
@@ -2088,12 +2099,23 @@ def test_matching_result_promote_and_decline_routes(monkeypatch: pytest.MonkeyPa
         request_id: str,
         decided_by: str,
         decision_reason: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
     ) -> dict[str, Any]:
+        if not system:
+            raise ValueError("matching decline requires system")
         captured["decline"] = {
             "request_id": request_id,
             "decided_by": decided_by,
+            "vertical": vertical,
+            "system": system,
         }
-        return {"request_id": request_id, "review_status": "rejected", "approval_id": 4}
+        return {
+            "request_id": request_id,
+            "vertical": vertical,
+            "review_status": "rejected",
+            "approval_id": 4,
+        }
 
     async def fake_legal_team(conn: Any) -> list[str]:
         return []
@@ -2119,23 +2141,47 @@ def test_matching_result_promote_and_decline_routes(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(drop_pipeline, "decline_matching_review_for_request", fake_decline)
 
     rid = "00000000-0000-0000-0000-000000000033"
+    headers = {"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"}
     with TestClient(app) as client:
         promote = client.post(
             f"/ops/drop/matching-results/{rid}/promote",
-            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
-            json={"decision_reason": "promote to fulfillment"},
+            headers=headers,
+            json={
+                "decision_reason": "promote to fulfillment",
+                "vertical": "auth0",
+                "system": "auth0",
+            },
         )
         decline = client.post(
             f"/ops/drop/matching-results/{rid}/decline",
-            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:ops@habeas.com"},
-            json={},
+            headers=headers,
+            json={"vertical": "auth0", "system": "auth0"},
+        )
+        omitted_promote = client.post(
+            f"/ops/drop/matching-results/{rid}/promote",
+            headers=headers,
+            json={"decision_reason": "promote to fulfillment", "vertical": "auth0"},
+        )
+        omitted_decline = client.post(
+            f"/ops/drop/matching-results/{rid}/decline",
+            headers=headers,
+            json={"vertical": "auth0"},
         )
 
     assert promote.status_code == 200
     assert promote.json()["status"] == "ok"
-    assert captured["promote"]["decided_by"] == "ops@habeas.com"
+    assert promote.json()["system"] == "auth0"
+    assert captured["promote"]["vertical"] == "auth0"
+    assert captured["promote"]["system"] == "auth0"
     assert decline.status_code == 200
     assert decline.json()["approval_id"] == 4
+    assert decline.json()["system"] == "auth0"
+    assert captured["decline"]["vertical"] == "auth0"
+    assert captured["decline"]["system"] == "auth0"
+    assert omitted_promote.status_code == 422
+    assert "system" in str(omitted_promote.json()).lower()
+    assert omitted_decline.status_code == 422
+    assert "system" in str(omitted_decline.json()).lower()
 
 
 def test_workflow_assign_escalate_and_list(monkeypatch: pytest.MonkeyPatch):

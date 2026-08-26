@@ -83,7 +83,14 @@ from admin_api.cloud_run_auth import auth_headers_for
 from admin_api.roles import RolePrincipal, require_roles
 from admin_api.roles import settings as role_settings
 from admin_api.sheets_intake_refresh import stamp_volatile_sheets_after_intake
-from admin_api.vertical_dispositions import normalize_dwids
+from admin_api.vertical_dispositions import (
+    VERTICAL_DATA,
+    VERTICAL_LABELS,
+    fetch_vertical_disposition,
+    matching_snapshot_lookup_keys,
+    normalize_dwids,
+    normalize_vertical,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +294,10 @@ class MatchingReviewDecisionBody(BaseModel):
     decision_reason: str | None = None
     response_status: int | None = Field(default=None, ge=3, le=5)
     dwids: list[str] | None = None
+    # Matching-results review item for this vertical — not the whole request.
+    vertical: str | None = Field(default=None, max_length=50)
+    # Inbox identity for one system inside the vertical — helper requires this.
+    system: str | None = Field(default=None, max_length=50)
 
 
 class AssignBody(BaseModel):
@@ -3406,6 +3417,294 @@ async def get_matching_result_detail(conn: Any, request_id: str) -> dict[str, An
     return detail
 
 
+def _matched_contacts_detail_for_role(
+    detail: dict[str, Any],
+    *,
+    role: str,
+) -> dict[str, Any]:
+    """Full matched person fields for disposition reviewers; redact for other roles."""
+    if role in (ROLE_SUPER_ADMIN, ROLE_ADMIN, ROLE_DATA_OWNER, ROLE_DATA_USER):
+        return detail
+    contacts = detail.get("matched_contacts")
+    if not contacts:
+        return detail
+    redacted: list[dict[str, Any]] = []
+    for contact in contacts:
+        redacted.append(
+            {
+                "dwid": contact["dwid"],
+                "state": contact["state"],
+                "first_initial": contact.get("first_initial"),
+                "last_initial": contact.get("last_initial"),
+                "last_name": None,
+                "dob": None,
+                "email": None,
+                "phones": [],
+            }
+        )
+    out = dict(detail)
+    out["matched_contacts"] = redacted
+    return out
+
+
+CA_DROP_SYSTEM = "cassandra"
+MATCH_SCOPE_REQUEST = "request"
+MATCH_SCOPE_SYSTEM = "system"
+RESULT_KIND_CA_DROP = "ca_drop"
+RESULT_KIND_SHEET_STUB = "sheet_stub"
+RESULT_KIND_SAAS_STUB = "saas_stub"
+
+
+def uses_drop_match_detail(*, vertical: str, system: str | None) -> bool:
+    """True only for CA DROP (cassandra) or the legacy omitted-system Data URL."""
+    system_norm = system.strip().lower() if system and str(system).strip() else None
+    vertical_norm = normalize_vertical(vertical)
+    if system_norm == CA_DROP_SYSTEM:
+        return True
+    return system_norm is None and vertical_norm == VERTICAL_DATA
+
+
+def matching_result_kind(*, vertical: str, system: str | None) -> str:
+    """ca_drop keeps hashed/person detail; sheet/SaaS systems stay catalog stubs."""
+    from habeas_privacy_core.connections.catalog import (
+        SHEET_SYSTEMS,
+        UPLOAD_ONLY_SYSTEMS,
+    )
+
+    if uses_drop_match_detail(vertical=vertical, system=system):
+        return RESULT_KIND_CA_DROP
+    system_norm = system.strip().lower() if system and str(system).strip() else None
+    # Alumni / Contact Us (and google_sheets) are SHEET_SYSTEMS, not upload-only.
+    # Axios HQ stays upload-only and still renders as a sheet stub.
+    if system_norm in SHEET_SYSTEMS or system_norm in UPLOAD_ONLY_SYSTEMS:
+        return RESULT_KIND_SHEET_STUB
+    return RESULT_KIND_SAAS_STUB
+
+
+def _not_live_match_reason(kind: str, system_label: str) -> str:
+    if kind == RESULT_KIND_SHEET_STUB:
+        return (
+            f"{system_label} is catalog-only — matching is not live. "
+            "Confirm or decline this inbox item; CA DROP people are not this system."
+        )
+    return (
+        f"{system_label} matching is not live. "
+        "Confirm or decline this inbox item without CA DROP people."
+    )
+
+
+def _apply_non_drop_match_stub(
+    payload: dict[str, Any],
+    *,
+    kind: str,
+    system_label: str,
+) -> dict[str, Any]:
+    """Strip request-wide DROP PII so sheet/SaaS items cannot inherit CA DROP people."""
+    payload["matched"] = False
+    payload["match_count"] = 0
+    payload["match_type"] = None
+    payload["matched_via"] = None
+    payload["matched_contacts"] = []
+    payload["matched_contacts_status"] = "not_live"
+    payload.pop("matched_contacts_error", None)
+    payload["matched_hashes"] = []
+    payload["matched_channels"] = []
+    payload["attempts"] = []
+    payload["not_live_reason"] = _not_live_match_reason(kind, system_label)
+    payload["vendor_record_ids"] = []
+    return payload
+
+
+def _ids_from_vertical_snapshot(snapshot: Any) -> tuple[int, list[str]]:
+    """Opaque vendor ids + count from a ``request_vertical_matching`` snapshot."""
+    if snapshot is None:
+        return 0, []
+    if isinstance(snapshot, dict):
+        raw_ids = snapshot.get("vendor_record_ids")
+        raw_count = snapshot.get("match_count")
+    else:
+        raw_ids = getattr(snapshot, "vendor_record_ids", None)
+        raw_count = getattr(snapshot, "match_count", None)
+    ids: list[str] = []
+    if isinstance(raw_ids, list):
+        seen: set[str] = set()
+        for item in raw_ids:
+            if item is None:
+                continue
+            value = str(item).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            ids.append(value)
+    match_count = int(raw_count) if raw_count is not None else len(ids)
+    return match_count, ids
+
+
+def _apply_vertical_matching_snapshot(
+    payload: dict[str, Any],
+    *,
+    snapshot: Any,
+) -> dict[str, Any]:
+    """Replace the not-live stub with opaque vendor ids and counts (no PII)."""
+    match_count, vendor_ids = _ids_from_vertical_snapshot(snapshot)
+    payload["matched"] = match_count > 0
+    payload["match_count"] = match_count
+    payload["match_type"] = None
+    payload["matched_via"] = None
+    payload["matched_contacts"] = []
+    payload["matched_contacts_status"] = "ok" if match_count else "none"
+    payload.pop("matched_contacts_error", None)
+    payload["matched_hashes"] = []
+    payload["matched_channels"] = []
+    payload["attempts"] = []
+    payload["not_live_reason"] = None
+    payload["vendor_record_ids"] = vendor_ids
+    return payload
+
+
+async def _fetch_owner_matching_snapshot(
+    conn: Any,
+    *,
+    request_id: str,
+    vertical: str,
+    system: str | None,
+) -> Any | None:
+    """First ``request_vertical_matching`` hit for catalog or bound-system keys."""
+    for key in matching_snapshot_lookup_keys(vertical=vertical, system=system):
+        try:
+            snapshot = await fetch_vertical_matching_snapshot(
+                conn, request_id=request_id, vertical=key
+            )
+        except Exception:
+            continue
+        if snapshot is not None:
+            return snapshot
+    return None
+
+
+def serialize_owner_vertical_matching_review(
+    detail: dict[str, Any],
+    *,
+    vertical: str,
+    role: str,
+    disposition: Any | None = None,
+    system: str | None = None,
+    snapshot: Any | None = None,
+) -> dict[str, Any]:
+    """Individual-review match fields for one owner vertical item.
+
+    CA DROP (``cassandra``, or legacy omitted-system Data) reuses
+    ``_matched_contacts_detail_for_role`` so authorized owners receive the same
+    DWID + identifier PII as ops/admin individual review. Sheet and SaaS
+    systems must not inherit request-wide DROP people or hashes. When a
+    ``request_vertical_matching`` snapshot exists, owners get opaque vendor
+    ids and counts — not the catalog ``not_live`` stub. Request-level
+    ``assignment`` / ``assigned_to`` are stripped — owner scope is
+    ``user_vertical_assignments``. Never log or audit this dict.
+    """
+    from habeas_privacy_core.connections.catalog import (
+        matching_system_color_token,
+        matching_system_label,
+    )
+
+    vertical_norm = normalize_vertical(vertical)
+    system_norm = system.strip().lower() if system and str(system).strip() else None
+    kind = matching_result_kind(vertical=vertical_norm, system=system_norm)
+    payload = dict(_matched_contacts_detail_for_role(detail, role=role))
+    payload["vertical"] = vertical_norm
+    payload["vertical_label"] = VERTICAL_LABELS.get(vertical_norm, vertical_norm)
+    system_label = vertical_norm
+    if system_norm:
+        payload["system"] = system_norm
+        payload["system_id"] = system_norm
+        system_label = matching_system_label(system_norm, vertical_id=vertical_norm)
+        payload["system_label"] = system_label
+        payload["color_token"] = matching_system_color_token(system_norm)
+    if kind == RESULT_KIND_CA_DROP:
+        payload.setdefault("matched_hashes", list(detail.get("matched_hashes") or []))
+        payload["match_scope"] = (
+            MATCH_SCOPE_SYSTEM if system_norm == CA_DROP_SYSTEM else MATCH_SCOPE_REQUEST
+        )
+        payload["not_live_reason"] = None
+    else:
+        _apply_non_drop_match_stub(payload, kind=kind, system_label=system_label)
+        payload["match_scope"] = MATCH_SCOPE_SYSTEM
+        if snapshot is not None:
+            _apply_vertical_matching_snapshot(payload, snapshot=snapshot)
+    payload["result_kind"] = kind
+    payload["assignment"] = None
+    payload.pop("assigned_to", None)
+    if disposition is not None:
+        payload["selected_dwids"] = list(disposition.selected_dwids)
+        payload["selected_dwid_count"] = int(disposition.selected_dwid_count)
+        payload["selected_vendor_record_ids"] = list(
+            getattr(disposition, "selected_vendor_record_ids", None) or []
+        )
+        payload["selected_vendor_record_id_count"] = int(
+            getattr(disposition, "selected_vendor_record_id_count", 0) or 0
+        )
+        payload["disposition_status"] = disposition.status
+    else:
+        payload["selected_dwids"] = []
+        payload["selected_dwid_count"] = 0
+        payload["selected_vendor_record_ids"] = []
+        payload["selected_vendor_record_id_count"] = 0
+        payload["disposition_status"] = None
+    return payload
+
+
+async def get_owner_vertical_matching_review(
+    conn: Any,
+    *,
+    request_id: str,
+    vertical: str,
+    role: str,
+    system: str | None = None,
+) -> dict[str, Any] | None:
+    """Load match detail for one ``(request, vertical, system)`` inbox item.
+
+    Sheet/SaaS skip DROP enrichment so CA DROP PII cannot leak onto a
+    Contact Us / Alumni / SaaS URL. A vertical matching snapshot replaces
+    the not-live stub with opaque vendor ids and counts. CA DROP still 404s
+    when no DROP result.
+    """
+    disposition = await fetch_vertical_disposition(
+        conn, request_id=request_id, vertical=vertical
+    )
+    if not uses_drop_match_detail(vertical=vertical, system=system):
+        snapshot = await _fetch_owner_matching_snapshot(
+            conn, request_id=request_id, vertical=vertical, system=system
+        )
+        return serialize_owner_vertical_matching_review(
+            {
+                "request_id": request_id,
+                "matched": False,
+                "match_count": 0,
+                "match_type": None,
+                "matched_contacts": [],
+                "matched_contacts_status": "not_live",
+                "matched_hashes": [],
+                "matched_channels": [],
+                "attempts": [],
+            },
+            vertical=vertical,
+            role=role,
+            disposition=disposition,
+            system=system,
+            snapshot=snapshot,
+        )
+    detail = await get_matching_result_detail(conn, request_id)
+    if detail is None:
+        return None
+    return serialize_owner_vertical_matching_review(
+        detail,
+        vertical=vertical,
+        role=role,
+        disposition=disposition,
+        system=system,
+    )
+
+
 @router.get("/matching-contacts/search")
 async def drop_matching_contacts_search(
     _principal: MatchingReviewPrincipal,
@@ -3579,6 +3878,19 @@ async def drop_matching_results_bulk_decline(
     return {"status": "ok", **result}
 
 
+def _echo_matching_review_system(
+    payload: dict[str, Any],
+    system: str | None,
+) -> dict[str, Any]:
+    """Echo inbox system on promote/decline JSON when the client sent one."""
+    if system is None:
+        return payload
+    text = str(system).strip().lower()
+    if text:
+        payload["system"] = text
+    return payload
+
+
 @router.post("/matching-results/{request_id}/promote")
 async def drop_matching_result_promote(
     request_id: str,
@@ -3629,6 +3941,8 @@ async def drop_matching_result_promote(
                 response_status=body.response_status,
                 dwids=dwids,
                 actor_role=actor_role,
+                vertical=body.vertical,
+                system=body.system,
             )
             from admin_api.legal_sla import SLA_STAGE_FULFILLMENT, apply_request_due_at_for_stage
 
@@ -3641,7 +3955,7 @@ async def drop_matching_result_promote(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"status": "ok", **result}
+    return _echo_matching_review_system({"status": "ok", **result}, body.system)
 
 
 @router.post("/matching-results/{request_id}/decline")
@@ -3661,10 +3975,14 @@ async def drop_matching_result_decline(
                 request_id=request_id,
                 decided_by=decided_by,
                 decision_reason=body.decision_reason,
+                vertical=body.vertical,
+                system=body.system,
             )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"status": "ok", **result}
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _echo_matching_review_system({"status": "ok", **result}, body.system)
 
 
 @router.get("/matching-results/{request_id}")
