@@ -150,6 +150,7 @@ class AdminSettings(CoreSettings):
         "http://127.0.0.1:5174|http://localhost:5174|"
         "https://admin-web-dev-hsa55rg7ja-uk.a.run.app|"
         "https://ops-ia-web-dev-hsa55rg7ja-uk.a.run.app|"
+        "https://admin-web-prod-hsa55rg7ja-uk.a.run.app|"
         "https://example-gcp-project-dev.web.app|https://example-gcp-project-data-privacy-dev.web.app"
     )
     # DROP pipeline worker proxies (ops console). Overridable via env.
@@ -216,6 +217,7 @@ app.add_middleware(
     allow_origins=_cors_origins or ["http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
+    # Preflight allows Authorization so Architecture B GIS user tokens work cross-origin.
     allow_headers=["*"],
 )
 app.add_middleware(AuditMiddleware)

@@ -5,6 +5,10 @@ const LABS = [
   { to: '/dev/sheets-cadence-lab', label: 'Sheets cadence lab' },
   { to: '/dev/pending-settings', label: 'Pending settings lab' },
   { to: '/dev/drop-prod-cutover', label: 'DROP prod cutover lab' },
+  {
+    to: '/dev/token-resource-server',
+    label: 'Token resource server (Architecture B)',
+  },
 ] as const
 
 export function DevLabsIndexPage() {
@@ -27,6 +31,12 @@ export function DevLabsIndexPage() {
           </li>
         ))}
       </ul>
+      <p className="text-xs text-slate-500">
+        <span className="font-mono">/dev/token-resource-server</span> is URL-only (not in
+        primary nav). It describes the intended B path (GIS + direct admin-api + IAP on
+        admin-web only). Current prod web is not on B — revision 00023 is nginx /api,
+        not GIS. The comms meeting used snapshot API + web 00023, not B.
+      </p>
     </section>
   )
 }

@@ -38,7 +38,10 @@ def _reset_fleet(monkeypatch: pytest.MonkeyPatch):
 
 
 def _headers(email: str = "ops@example.com") -> dict[str, str]:
-    return {"X-Goog-Authenticated-User-Email": f"accounts.google.com:{email}"}
+    return {
+        "X-Goog-Authenticated-User-Email": f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+    }
 
 
 def test_fleet_local_mode_from_env_urls(monkeypatch: pytest.MonkeyPatch):

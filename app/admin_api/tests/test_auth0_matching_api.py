@@ -13,6 +13,7 @@ from admin_api import auth0_matching, roles
 from admin_api import main as admin_main
 from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
+
 from habeas_privacy_core.connections.freshness import GateResult
 from habeas_privacy_core.models.intake import DropListType, DropMatchingPayload
 from habeas_privacy_core.models.request import IntakeSource
@@ -51,6 +52,15 @@ _LOG_STD_KEYS = frozenset(
 )
 
 
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
+
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
@@ -68,12 +78,12 @@ def _reset(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _owner_headers() -> dict[str, str]:
     roles.settings.admin_api_data_owners = "owner@example.com"
-    return {IAP_EMAIL_HEADER: "owner@example.com"}
+    return signed_headers("owner@example.com")
 
 
 def _legal_headers() -> dict[str, str]:
     roles.settings.admin_api_legals = "legal@example.com"
-    return {IAP_EMAIL_HEADER: "legal@example.com"}
+    return signed_headers("legal@example.com")
 
 
 def _drop_record(*, raw_record_id: int | None = 17) -> SimpleNamespace:
@@ -220,7 +230,7 @@ def test_unknown_email_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
     with TestClient(app) as client:
         response = client.get(
             f"/requests/{REQUEST_ID}/verticals/auth0/match-candidates",
-            headers={IAP_EMAIL_HEADER: "stranger@example.com"},
+            headers=signed_headers("stranger@example.com"),
         )
     assert response.status_code == 403
 

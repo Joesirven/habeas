@@ -211,6 +211,14 @@ function adcProxyAuthPlugin(options: {
   }
 }
 
+/**
+ * Architecture B image/build:
+ * - `vite build` inlines VITE_ADMIN_API_URL + VITE_GOOGLE_CLIENT_ID from env
+ *   (Docker ARG/ENV, Cloud Build --build-arg). Empty URL → same-origin /api.
+ * - This /api proxy stays for SSE (`EventSource` cannot set Authorization)
+ *   and for local JSON when the URL is unset. ADC mint is local-against-deployed
+ *   admin-api only — not the deployed SPA session.
+ */
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const proxyTarget = env.VITE_PROXY_TARGET || 'http://127.0.0.1:8000'
@@ -243,6 +251,8 @@ export default defineConfig(({ mode }) => {
       },
     },
     server: {
+      // Always proxy /api — live-events.ts hardcodes /api/live/events even when
+      // VITE_ADMIN_API_URL is an absolute Architecture B origin.
       proxy: {
         '/api': {
           target: proxyTarget,

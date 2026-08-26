@@ -14,8 +14,18 @@ from admin_api import drop_pipeline, main as admin_main, roles
 from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
 
-_SUPER_HEADERS = {IAP_EMAIL_HEADER: "accounts.google.com:ops@example.com"}
-_ADMIN_HEADERS = {IAP_EMAIL_HEADER: "accounts.google.com:admin@example.com"}
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
+
+
+_SUPER_HEADERS = signed_headers("ops@example.com")
+_ADMIN_HEADERS = signed_headers("admin@example.com")
 _STARTED = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
 
 _QUEUE_COLUMNS = [

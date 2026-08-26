@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1
 # Build context: clients/web/
-# Static admin SPA for Cloud Run. Prefer empty VITE_ADMIN_API_URL so the
-# browser uses same-origin /api (nginx proxies to admin-api with a SA token).
+# Static admin SPA for Cloud Run. Cloud Build bakes Architecture B via
+# --build-arg (see infra/cloudbuild/admin-web-*.yaml):
+#   VITE_ADMIN_API_URL     admin-api origin (empty = same-origin /api rollback)
+#   VITE_GOOGLE_CLIENT_ID  public GIS / IAP OAuth client (required when URL is set)
+# nginx /api stays at runtime for SSE (EventSource) — see docker-entrypoint.sh.
 
 FROM oven/bun:1.3 AS build
 WORKDIR /app
@@ -11,9 +14,15 @@ COPY index.html ./
 COPY public ./public
 COPY src ./src
 COPY tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts ./
-# Empty = same-origin /api (see api.ts). Cross-origin absolute URLs break under IAP.
+# Empty = same-origin /api (see api.ts). Absolute URL = Architecture B (direct admin-api).
 ARG VITE_ADMIN_API_URL=
 ENV VITE_ADMIN_API_URL=$VITE_ADMIN_API_URL
+# Public GIS / IAP OAuth client. Required when VITE_ADMIN_API_URL is set.
+ARG VITE_GOOGLE_CLIENT_ID=
+ENV VITE_GOOGLE_CLIENT_ID=$VITE_GOOGLE_CLIENT_ID
+# Labs are DEV-only. Default off so unlabeled / prod builds never bake /dev/*.
+ARG VITE_ENABLE_LABS=
+ENV VITE_ENABLE_LABS=$VITE_ENABLE_LABS
 RUN bun run build
 
 FROM nginx:1.27-alpine

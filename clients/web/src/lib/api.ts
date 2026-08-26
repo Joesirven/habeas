@@ -1,5 +1,81 @@
 // Empty string (Cloud Run same-origin front door) must fall back to /api — not ??.
-const API_BASE = import.meta.env.VITE_ADMIN_API_URL || '/api'
+export const API_BASE = import.meta.env.VITE_ADMIN_API_URL || '/api'
+
+/** Remint this far before JWT `exp` so Architecture B fetches do not send a dead token. */
+export const ADMIN_API_TOKEN_REFRESH_SKEW_MS = 60_000
+
+/** True when the SPA calls admin-api cross-origin (Architecture B). Empty URL stays `/api`. */
+export function usesDirectAdminApi(): boolean {
+  return API_BASE.startsWith('http://') || API_BASE.startsWith('https://')
+}
+
+/** GIS web client id from VITE_ only — never invent or hardcode a client id. */
+const GIS_CLIENT_ID = (
+  (import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined) ||
+  (import.meta.env.VITE_GIS_CLIENT_ID as string | undefined) ||
+  ''
+).trim()
+
+export function googleIdentityServicesClientId(): string {
+  return GIS_CLIENT_ID
+}
+
+function decodeJwtExpiryMs(token: string): number | null {
+  try {
+    const payload = token.split('.')[1]
+    if (!payload) return null
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const pad =
+      normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4))
+    const json = JSON.parse(globalThis.atob(normalized + pad)) as { exp?: unknown }
+    return typeof json.exp === 'number' ? json.exp * 1000 : null
+  } catch {
+    return null
+  }
+}
+
+/** In-memory user Google ID token (Architecture B). Not persisted. */
+let adminApiUserToken: string | null = null
+let adminApiUserTokenExpiresAt: number | null = null
+let adminApiUserTokenRefresher: (() => Promise<void>) | null = null
+
+export function setAdminApiUserToken(token: string | null): void {
+  const trimmed = token?.trim() ?? ''
+  if (trimmed.length === 0) {
+    adminApiUserToken = null
+    adminApiUserTokenExpiresAt = null
+    return
+  }
+  adminApiUserToken = trimmed
+  adminApiUserTokenExpiresAt = decodeJwtExpiryMs(trimmed)
+}
+
+export function getAdminApiUserToken(): string | null {
+  return adminApiUserToken
+}
+
+/**
+ * True when Architecture B should remint. Missing / non-JWT lab tokens are not
+ * treated as expired — initial mint is AuthProvider, not every fetch.
+ */
+export function adminApiUserTokenNeedsRefresh(now = Date.now()): boolean {
+  if (!adminApiUserToken || adminApiUserTokenExpiresAt == null) return false
+  return now >= adminApiUserTokenExpiresAt - ADMIN_API_TOKEN_REFRESH_SKEW_MS
+}
+
+/** GIS remint hook registered by auth.tsx. No-op unless VITE_ADMIN_API_URL is set. */
+export function registerAdminApiUserTokenRefresher(
+  fn: (() => Promise<void>) | null,
+): void {
+  adminApiUserTokenRefresher = fn
+}
+
+export async function refreshAdminApiUserTokenIfNeeded(): Promise<void> {
+  if (!usesDirectAdminApi()) return
+  if (!adminApiUserTokenNeedsRefresh()) return
+  if (!adminApiUserTokenRefresher) return
+  await adminApiUserTokenRefresher()
+}
 
 export type UserRole = 'super_admin' | 'admin' | 'legal' | 'data_owner' | 'data_user'
 
@@ -82,6 +158,28 @@ export function setStoredSimulateRole(role: UserRole | null) {
   }
 }
 
+/**
+ * Shared admin-api headers. Same-origin `/api` (empty VITE_ADMIN_API_URL) never
+ * attaches Authorization — nginx/Vite mint the invoker token. Direct admin-api
+ * attaches `Authorization: Bearer` only when a user ID token is in memory.
+ */
+export function adminApiAuthHeaders(
+  extra?: Record<string, string>,
+): Record<string, string> {
+  const headers: Record<string, string> = { ...extra }
+  const simulateRole = getStoredSimulateRole()
+  if (simulateRole) {
+    headers['X-Dev-Simulate-Role'] = simulateRole
+  }
+  if (usesDirectAdminApi()) {
+    const token = getAdminApiUserToken()
+    if (token) {
+      headers.Authorization = `Bearer ${token}`
+    }
+  }
+  return headers
+}
+
 /** Fast ops reads — lite pipeline, matching progress, header summary. */
 export const OPS_FAST_QUERY_TIMEOUT_MS = 8_000
 
@@ -129,15 +227,12 @@ export function adminApiAbortSignal(
 }
 
 export async function fetchAdminApi<T>(path: string, init?: AdminApiFetchInit): Promise<T> {
+  await refreshAdminApiUserTokenIfNeeded()
   const { timeoutMs, signal: callerSignal, ...rest } = init ?? {}
-  const headers: Record<string, string> = {
+  const headers = adminApiAuthHeaders({
     Accept: 'application/json',
     'Content-Type': 'application/json',
-  }
-  const simulateRole = getStoredSimulateRole()
-  if (simulateRole) {
-    headers['X-Dev-Simulate-Role'] = simulateRole
-  }
+  })
 
   let response: Response
   try {
@@ -216,7 +311,9 @@ export type ManualRequestInput = {
 }
 
 export async function getMe() {
-  const me = await fetchAdminApi<MePayload>('/me')
+  const me = await fetchAdminApi<MePayload>('/me', {
+    timeoutMs: OPS_FAST_QUERY_TIMEOUT_MS,
+  })
   return {
     ...me,
     real_role: me.real_role ?? me.role,
@@ -241,7 +338,9 @@ export type MeHomePayload = {
 }
 
 export function getMeHome(): Promise<MeHomePayload> {
-  return fetchAdminApi<MeHomePayload>('/me/home')
+  return fetchAdminApi<MeHomePayload>('/me/home', {
+    timeoutMs: OPS_FAST_QUERY_TIMEOUT_MS,
+  })
 }
 
 export function patchPendingSetting(body: { id: string; status: 'skipped' | 'done' }) {
@@ -348,11 +447,8 @@ export type AgentBatchUploadResult = {
 }
 
 export async function postAgentBatchUpload(file: File) {
-  const headers: Record<string, string> = { Accept: 'application/json' }
-  const simulateRole = getStoredSimulateRole()
-  if (simulateRole) {
-    headers['X-Dev-Simulate-Role'] = simulateRole
-  }
+  await refreshAdminApiUserTokenIfNeeded()
+  const headers = adminApiAuthHeaders({ Accept: 'application/json' })
   const form = new FormData()
   form.append('file', file)
   const response = await fetch(`${API_BASE}/requests/agent-batch`, {
@@ -780,6 +876,57 @@ export type DropMatchingProgress = {
     holder: string | null
     expires_at: string | null
   }
+}
+
+/** Unified paint payload — GET /ops/drop/console/snapshot. */
+export type DropConsoleSummary = {
+  as_of?: string
+  open_requests: number
+  review_pending: number
+  workers_down: number
+  workers_total: number
+  workers_stale: boolean
+  worker_health: Record<string, WorkerHealthProbe>
+  ca_drop_schedule?: CaDropSchedule
+  drop_requests: { count: number }
+  matching_review: { action_type: string; pending: number }
+}
+
+export type DropConsoleSnapshot = {
+  as_of: string
+  summary: DropConsoleSummary
+  matching_progress: DropMatchingProgress
+  processes: BulkProcessesPayload
+  recent_processes: {
+    days: number
+    processes: BulkProcessSummary[]
+  }
+}
+
+export function getDropConsoleSnapshot(params?: {
+  process_days?: number
+  process_limit?: number
+  recent_days?: number
+  recent_limit?: number
+}) {
+  const search = new URLSearchParams()
+  if (params?.process_days != null) {
+    search.set('process_days', String(params.process_days))
+  }
+  if (params?.process_limit != null) {
+    search.set('process_limit', String(params.process_limit))
+  }
+  if (params?.recent_days != null) {
+    search.set('recent_days', String(params.recent_days))
+  }
+  if (params?.recent_limit != null) {
+    search.set('recent_limit', String(params.recent_limit))
+  }
+  const query = search.toString()
+  return fetchAdminApi<DropConsoleSnapshot>(
+    `/ops/drop/console/snapshot${query ? `?${query}` : ''}`,
+    { timeoutMs: OPS_FAST_QUERY_TIMEOUT_MS },
+  )
 }
 
 export function getDropPipeline() {
@@ -2547,11 +2694,8 @@ export function listRequestDocuments(requestId: string) {
 }
 
 export async function uploadRequestDocument(requestId: string, file: File) {
-  const headers: Record<string, string> = { Accept: 'application/json' }
-  const simulateRole = getStoredSimulateRole()
-  if (simulateRole) {
-    headers['X-Dev-Simulate-Role'] = simulateRole
-  }
+  await refreshAdminApiUserTokenIfNeeded()
+  const headers = adminApiAuthHeaders({ Accept: 'application/json' })
   const form = new FormData()
   form.append('file', file)
   const response = await fetch(
@@ -2570,11 +2714,8 @@ export async function downloadRequestDocument(
   requestId: string,
   documentId: string,
 ): Promise<Blob> {
-  const headers: Record<string, string> = {}
-  const simulateRole = getStoredSimulateRole()
-  if (simulateRole) {
-    headers['X-Dev-Simulate-Role'] = simulateRole
-  }
+  await refreshAdminApiUserTokenIfNeeded()
+  const headers = adminApiAuthHeaders()
   const response = await fetch(
     `${API_BASE}/requests/${encodeURIComponent(requestId)}/documents/${encodeURIComponent(documentId)}/download`,
     { headers },
@@ -2591,11 +2732,8 @@ export async function deleteRequestDocument(
   requestId: string,
   documentId: string,
 ): Promise<void> {
-  const headers: Record<string, string> = { Accept: 'application/json' }
-  const simulateRole = getStoredSimulateRole()
-  if (simulateRole) {
-    headers['X-Dev-Simulate-Role'] = simulateRole
-  }
+  await refreshAdminApiUserTokenIfNeeded()
+  const headers = adminApiAuthHeaders({ Accept: 'application/json' })
   const response = await fetch(
     `${API_BASE}/requests/${encodeURIComponent(requestId)}/documents/${encodeURIComponent(documentId)}`,
     { method: 'DELETE', headers },
@@ -3141,11 +3279,8 @@ export async function uploadOwnerConnectorCsv(
   columnMapping?: Record<string, string> | null,
   formats?: { emailFormat?: string; phoneFormat?: string },
 ): Promise<OwnerUploadResult> {
-  const headers: Record<string, string> = { Accept: 'application/json' }
-  const simulateRole = getStoredSimulateRole()
-  if (simulateRole) {
-    headers['X-Dev-Simulate-Role'] = simulateRole
-  }
+  await refreshAdminApiUserTokenIfNeeded()
+  const headers = adminApiAuthHeaders({ Accept: 'application/json' })
   const form = new FormData()
   form.append('file', file)
   if (multiPiiDelimiter != null) {
@@ -3175,11 +3310,8 @@ export async function downloadOwnerUploadTemplate(
   verticalId: string,
   system: string,
 ): Promise<Blob> {
-  const headers: Record<string, string> = {}
-  const simulateRole = getStoredSimulateRole()
-  if (simulateRole) {
-    headers['X-Dev-Simulate-Role'] = simulateRole
-  }
+  await refreshAdminApiUserTokenIfNeeded()
+  const headers = adminApiAuthHeaders()
   const response = await fetch(
     `${API_BASE}/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/upload-template`,
     { headers },

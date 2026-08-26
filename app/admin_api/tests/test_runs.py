@@ -14,7 +14,17 @@ from admin_api import roles, runs
 from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER, ROLE_SUPER_ADMIN
 
-_SUPER_HEADERS = {IAP_EMAIL_HEADER: "accounts.google.com:ops@example.com"}
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
+
+
+_SUPER_HEADERS = signed_headers("ops@example.com")
 _STARTED = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
 _COMPLETED = datetime(2026, 7, 17, 12, 5, tzinfo=timezone.utc)
 _REQUEST_ID = "00000000-0000-0000-0000-000000000001"
@@ -232,7 +242,7 @@ def test_list_runs_rejects_invalid_process_id(mock_pool: MagicMock) -> None:
 def test_list_runs_forbidden_for_admin(mock_pool: MagicMock) -> None:
     roles.settings.admin_api_admins = "admin@example.com"
     roles.settings.admin_api_super_admins = ""
-    headers = {IAP_EMAIL_HEADER: "admin@example.com"}
+    headers = signed_headers("admin@example.com")
 
     with TestClient(app) as client:
         response = client.get("/ops/runs", headers=headers)
@@ -361,7 +371,7 @@ def test_get_run_detail_hash_index_includes_dbt_metrics(mock_pool: MagicMock) ->
 def test_get_run_detail_forbidden_for_data_owner(mock_pool: MagicMock) -> None:
     roles.settings.admin_api_data_owners = "owner@example.com"
     roles.settings.admin_api_super_admins = ""
-    headers = {IAP_EMAIL_HEADER: "owner@example.com"}
+    headers = signed_headers("owner@example.com")
 
     with TestClient(app) as client:
         response = client.get("/ops/runs/matching:1", headers=headers)

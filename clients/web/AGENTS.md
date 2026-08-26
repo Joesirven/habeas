@@ -12,9 +12,24 @@
 
 Vite · React · TypeScript · TanStack Router · TanStack Query · shadcn · Bun
 
+Labs (`/dev/*`) are DEV-only — Cloud Build sets `VITE_ENABLE_LABS=true` on `admin-web-dev` and `false` on `admin-web-prod`.
+
+## Identity (Architecture B — intended)
+
+admin-api is the **resource server**. Intended browser path: humans reach the SPA through **admin-web Identity-Aware Proxy** (Workspace SSO front door — page access only). Browser JSON calls admin-api cross-origin with an in-memory **Google Identity Services** user ID token (`Authorization: Bearer`). Cookie IAP (`credentials: 'include'`) is not the B API session. The token is not persisted. Client id comes from `VITE_GOOGLE_CLIENT_ID` or `VITE_GIS_CLIENT_ID` only — never hardcode.
+
+**Current prod web is not on B.** Live 100% is `admin-web-prod-00023-fnz` (nginx same-origin `/api`; IAP cookie; nginx mints a service-account Bearer and forwards `X-Goog-*`). Revision **00024** is the unused B bake (GIS + `VITE_ADMIN_API_URL`) at **0% traffic**. Do not treat 00023 as GIS. Do not claim prod already uses Google Identity Services. Do not flip 00024 until GIS `/me` is proven on DEV. `allUsers` invoker is **stripped** on `admin-api-prod` / `admin-api-dev` (compute SA + `jsirven@` only). GIS JWT `aud` is the OAuth client, not the Cloud Run URL — a 00024 flip today would **403** at Cloud Run IAM.
+
+Cloud Build yamls (`admin-web-dev.yaml` / `admin-web-prod.yaml`) bake `VITE_ADMIN_API_URL` and `VITE_GOOGLE_CLIENT_ID` into **00024** (same project brand as `IAP_OAUTH_CLIENT_ID` — not a secret). Bake ≠ cutover: `admin-web-prod.yaml` has no `--no-traffic`; 00024-at-0% is a **manual pin** to 00023. That is not what 00023 serves.
+
+**Server-Sent Events** stay same-origin `GET /api/live/events` (EventSource cannot set Authorization). nginx or Vite `/api` proxies that hop to admin-api `GET /live/events`. Empty `VITE_ADMIN_API_URL` is local / current-prod-00023 / rollback (all REST via `/api`). Do not move the event bus off admin-api.
+
+CLI Application Default Credentials (`habeas-cli auth login --adc`) and IAP login (`habeas-cli auth login`) stay unchanged. Do **not** re-run `infra/cloudbuild/admin-api-dev-iam.yaml` (re-enables Cloud Run IAP). Do **not** edit accepted SirvenOS architecture decision records from this repo.
+
+
 ## Realtime
 
-Connect to admin-api `GET /live/events` (Server-Sent Events). Invalidate TanStack Query cache on `privacy_events` payloads.
+Connect to admin-api `GET /live/events` via same-origin `/api/live/events` (Server-Sent Events). Invalidate TanStack Query cache on `privacy_events` payloads.
 
 ## Navigation (Ops IA — Request / Job / Run)
 
@@ -79,6 +94,7 @@ General Amigo frost: [`.agent/modules/design-taste.md`](../../.agent/modules/des
 
 ## Local admin-api proxy
 
+Local ADC proxy is **unchanged** (same as CLI `auth login --adc`). Leave `VITE_ADMIN_API_URL` unset so JSON and Server-Sent Events both use `/api` — this matches current prod 00023 (nginx `/api`), not the intended B browser session (GIS user token after a 00024+ traffic cutover).
 - Default: `VITE_PROXY_TARGET=http://127.0.0.1:8000` (no Identity-Aware Proxy).
 - Deployed admin-api-dev (`*.run.app`): Vite mints a Cloud Run ID token via Application
   Default Credentials (`google-auth-library` `getIdTokenClient`, audience = service origin).
@@ -87,7 +103,7 @@ General Amigo frost: [`.agent/modules/design-taste.md`](../../.agent/modules/des
   Optional `IAP_USER_EMAIL` only for SA impersonation fallback when ADC mint fails.
   Precedence: static `CLOUD_RUN_ID_TOKEN` / `IAP_ID_TOKEN` (correct aud) → ADC → gcloud SA impersonation.
 - Do not put an IAP OAuth-client audience token in `IAP_ID_TOKEN` — admin-api will 401.
-- Non-super_admin: use ops-ia IAP front door, not the local proxy.
+- Non-super_admin: use **admin-web-dev** (IAP), not the local proxy.
 - Super_admin can simulate effective role via banner `View as` → `X-Dev-Simulate-Role` (sessionStorage).
 
 ## Action feedback

@@ -1,6 +1,7 @@
 # Admin web IAP front door — same pattern as admin-web-dev.
-# Browser Google login via IAP; same-origin /api/*; nginx mints Cloud Run
-# invoker token and forwards X-Goog-Authenticated-User-* to admin-api.
+# Architecture B: SPA calls admin-api-prod cross-origin with a GIS user ID token.
+# Keep IAP on this service (human SSO). Labs stay off — /dev is not the prod page.
+# nginx ADMIN_API_UPSTREAM remains for same-origin /api (SSE + rollback).
 #
 # Post-deploy curl checklist (IAP session or super_admin ADC via /api):
 #   curl -sS -o /dev/null -w '%{http_code} %{time_total}s\n' \
@@ -12,10 +13,12 @@ substitutions:
   _PROJECT: example-gcp-project
   _SERVICE: admin-web-prod
   _TAG: latest
-  # Same-origin /api — do not bake a cross-origin admin-api URL.
-  # Absolute VITE_ADMIN_API_URL makes the browser call admin-api-prod directly;
-  # Cloud Run/IAP hide that response and GET /me fails with "Failed to fetch".
-  _VITE_ADMIN_API_URL: ""
+  # Architecture B — browser JSON goes to admin-api-prod (CORS already allows this origin).
+  _VITE_ADMIN_API_URL: "https://admin-api-prod-hsa55rg7ja-uk.a.run.app"
+  # Public GIS / IAP OAuth client (same project brand as IAP_OAUTH_CLIENT_ID). Safe to bake.
+  _VITE_GOOGLE_CLIENT_ID: "95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com"
+  # Labs are DEV-only — never enable on admin-web-prod.
+  _VITE_ENABLE_LABS: "false"
   _ADMIN_API_UPSTREAM: https://admin-api-prod-hsa55rg7ja-uk.a.run.app
 
 options:
@@ -30,6 +33,10 @@ steps:
       - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
       - --build-arg
       - VITE_ADMIN_API_URL=${_VITE_ADMIN_API_URL}
+      - --build-arg
+      - VITE_GOOGLE_CLIENT_ID=${_VITE_GOOGLE_CLIENT_ID}
+      - --build-arg
+      - VITE_ENABLE_LABS=${_VITE_ENABLE_LABS}
       - -f
       - clients/web/Dockerfile
       - clients/web

@@ -18,6 +18,15 @@ from habeas_privacy_core.queue.constants import STEP_MATCHING
 REQUEST_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
+
 def _app() -> FastAPI:
     """Mount the vertical-ops router only — main.py already includes it."""
     app = FastAPI()
@@ -102,7 +111,7 @@ def test_enqueue_forbidden_for_non_super_admin(monkeypatch: pytest.MonkeyPatch):
     with TestClient(_app()) as client:
         denied = client.post(
             "/ops/verticals/auth0/hash-refresh/enqueue",
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:admin@example.com"},
+            headers=signed_headers("admin@example.com"),
         )
 
     assert denied.status_code == 403
@@ -126,7 +135,7 @@ def test_enqueue_super_admin_when_iap_required(monkeypatch: pytest.MonkeyPatch):
         unauthenticated = client.post("/ops/verticals/auth0/hash-refresh/enqueue")
         allowed = client.post(
             "/ops/verticals/auth0/hash-refresh/enqueue",
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:ops@example.com"},
+            headers=signed_headers("ops@example.com"),
         )
 
     assert unauthenticated.status_code == 401
@@ -253,7 +262,7 @@ def test_process_forbidden_for_non_super_admin(monkeypatch: pytest.MonkeyPatch):
     with TestClient(_app()) as client:
         response = client.post(
             "/ops/verticals/auth0/hash-refresh/process",
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:owner@example.com"},
+            headers=signed_headers("owner@example.com"),
         )
 
     assert response.status_code == 403
@@ -321,12 +330,12 @@ def test_matching_enqueue_forbidden_for_non_super_admin(monkeypatch: pytest.Monk
         admin_denied = client.post(
             "/ops/verticals/auth0/matching/enqueue",
             json=_matching_enqueue_body(),
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:admin@example.com"},
+            headers=signed_headers("admin@example.com"),
         )
         legal_denied = client.post(
             "/ops/verticals/auth0/matching/enqueue",
             json=_matching_enqueue_body(),
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:legal@example.com"},
+            headers=signed_headers("legal@example.com"),
         )
 
     assert admin_denied.status_code == 403
@@ -352,7 +361,7 @@ def test_matching_enqueue_super_admin_when_iap_required(monkeypatch: pytest.Monk
         allowed = client.post(
             "/ops/verticals/auth0/matching/enqueue",
             json=_matching_enqueue_body(),
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:ops@example.com"},
+            headers=signed_headers("ops@example.com"),
         )
 
     assert unauthenticated.status_code == 401
@@ -519,11 +528,11 @@ def test_matching_process_forbidden_for_non_super_admin(monkeypatch: pytest.Monk
     with TestClient(_app()) as client:
         owner_denied = client.post(
             "/ops/verticals/auth0/matching/process",
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:owner@example.com"},
+            headers=signed_headers("owner@example.com"),
         )
         admin_denied = client.post(
             "/ops/verticals/auth0/matching/process",
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:admin@example.com"},
+            headers=signed_headers("admin@example.com"),
         )
 
     assert owner_denied.status_code == 403

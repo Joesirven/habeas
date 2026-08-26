@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import os
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
@@ -156,6 +157,11 @@ def _data_owner_allowlist() -> frozenset[str]:
     return parse_email_allowlist(settings.admin_api_data_owners)
 
 
+def _is_service_account_email(email: str) -> bool:
+    """True for Google service-account principals (ADC / Cloud Run SA)."""
+    return email.strip().lower().endswith(".gserviceaccount.com")
+
+
 def _email_local_part(email: str) -> str:
     """First segment of the mailbox before @ (fallback when IAP given_name absent)."""
     local = email.strip().split("@", 1)[0]
@@ -184,15 +190,18 @@ def _bearer_token(request: Request) -> str | None:
 
 
 def _verified_oidc_claims(request: Request) -> dict[str, Any] | None:
-    """Return verified Google OIDC claims from Bearer or IAP JWT assertion."""
+    """Return verified Google OIDC claims from Bearer or IAP JWT assertion.
+
+    ``email_verified`` must be True (same fail-closed rule as token identity).
+    """
     token = _bearer_token(request)
     if not token:
         token = request.headers.get(IAP_JWT_ASSERTION_HEADER, "").strip() or None
     if not token:
         return None
 
-    audience = _id_token_audience(request)
-    if not audience:
+    audiences = _id_token_audience_candidates(request)
+    if not audiences:
         return None
 
     try:
@@ -202,17 +211,24 @@ def _verified_oidc_claims(request: Request) -> dict[str, Any] | None:
         logger.warning("google-auth not installed; cannot resolve given_name from OIDC")
         return None
 
-    try:
-        info = id_token.verify_oauth2_token(
-            token,
-            google_requests.Request(),
-            audience=audience,
-        )
-    except Exception:
-        logger.debug("oidc_given_name_verify_failed", exc_info=True)
-        return None
-
-    return info if isinstance(info, dict) else None
+    transport = google_requests.Request()
+    for audience in audiences:
+        try:
+            info = id_token.verify_oauth2_token(
+                token,
+                transport,
+                audience=audience,
+            )
+        except Exception:
+            logger.debug("oidc_given_name_verify_failed", exc_info=True)
+            continue
+        if not isinstance(info, dict):
+            return None
+        # Fail closed: missing / null / unexpected types are unverified.
+        if info.get("email_verified") is not True:
+            return None
+        return info
+    return None
 
 
 def resolve_given_name(request: Request | None, email: str) -> str:
@@ -233,10 +249,49 @@ def needs_connector_setup(role: Role, reminders: list[ConnectorReminderOut]) -> 
     return any(reminder.code == "wizard_incomplete" for reminder in reminders)
 
 
+def _normalize_audience(value: str | None) -> str | None:
+    if not value:
+        return None
+    stripped = value.strip().rstrip("/")
+    return stripped or None
+
+
+def _pinned_cloud_run_audience() -> str | None:
+    return _normalize_audience(settings.admin_api_id_token_audience) or _normalize_audience(
+        os.environ.get("ADMIN_API_ID_TOKEN_AUDIENCE")
+    )
+
+
+def _oauth_client_audience() -> str | None:
+    return _normalize_audience(os.environ.get("IAP_OAUTH_CLIENT_ID"))
+
+
+def _id_token_audience_candidates(request: Request) -> list[str]:
+    """Pinned Cloud Run / GIS audiences, else request origin (Host fallback)."""
+    candidates: list[str] = []
+    for value in (_pinned_cloud_run_audience(), _oauth_client_audience()):
+        if value and value not in candidates:
+            candidates.append(value)
+    if candidates:
+        return candidates
+    parsed = urlparse(str(request.base_url))
+    if parsed.scheme and parsed.netloc:
+        return [f"{parsed.scheme}://{parsed.netloc}"]
+    return []
+
+
 def _id_token_audience(request: Request) -> str | None:
-    configured = settings.admin_api_id_token_audience.strip()
-    if configured:
-        return configured.rstrip("/")
+    """Cloud Run origin for ``resolve_actor``, or None when only GIS is pinned.
+
+    When ``ADMIN_API_ID_TOKEN_AUDIENCE`` or ``IAP_OAUTH_CLIENT_ID`` is set, Host
+    is never returned. Passing Host as the explicit ``audience`` would undo
+    iap.py's pin (explicit argument is always accepted).
+    """
+    pinned = _pinned_cloud_run_audience()
+    if pinned:
+        return pinned
+    if _oauth_client_audience():
+        return None
     parsed = urlparse(str(request.base_url))
     if parsed.scheme and parsed.netloc:
         return f"{parsed.scheme}://{parsed.netloc}"
@@ -271,7 +326,13 @@ def _effective_role(real_role: Role, request: Request) -> Role:
 
 
 async def get_role_principal(request: Request) -> RolePrincipal:
-    """Resolve caller email and role from IAP headers or verified Bearer JWT."""
+    """Resolve caller email and role from IAP headers or verified Bearer JWT.
+
+    Human Bearer uses the same allowlists and assignment fallback as IAP
+    header — GIS ``user_jwt`` and human Cloud Run ``bearer_jwt``. Service-account
+    Bearer alone stays on the ADC super_admin gate. SA Bearer + distinct user
+    header is ``iap_header`` (CLI ``auth login`` / nginx dual-run).
+    """
     resolved = resolve_actor(request, audience=_id_token_audience(request))
     email = resolved.email
     authenticated = is_authenticated_actor(email)
@@ -282,7 +343,7 @@ async def get_role_principal(request: Request) -> RolePrincipal:
             detail="Identity-Aware Proxy identity required",
         )
 
-    if resolved.source == "bearer_jwt":
+    if resolved.source == "bearer_jwt" and _is_service_account_email(email):
         normalized = email.strip().lower()
         if normalized not in _super_admin_allowlist():
             raise HTTPException(

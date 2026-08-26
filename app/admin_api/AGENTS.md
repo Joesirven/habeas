@@ -4,7 +4,13 @@
 
 **Kind:** control_plane
 
-Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Server-Sent Events live stream, mutation routes for web and Habeas CLI.
+Main control-plane FastAPI app. **Resource server** for web, CLI, and future clients. Dashboard, approvals, Server-Sent Events live stream, mutation routes.
+
+**Identity (Architecture B — intended, not live on prod web):** Cloud Run Identity-Aware Proxy (IAP) is **off** on admin-api (`--no-iap`). `REQUIRE_IAP_IDENTITY=true` requires a **verified Bearer**. Header-alone (`X-Goog-Authenticated-User-Email` without a verified Bearer) is **401**. Legal `resolve_actor` sources: `user_jwt` (GIS user token, `aud` = OAuth client `IAP_OAUTH_CLIENT_ID`), `bearer_jwt` (ADC / Cloud Run `aud` = `ADMIN_API_ID_TOKEN_AUDIENCE`), `iap_header` (verified Bearer **plus** IAP email). A verified user token (`user_jwt`) uses the same role allowlists as the IAP-header-plus-Bearer path. ADC Cloud Run tokens (`bearer_jwt`) stay on the super_admin gate.
+
+Humans use **admin-web IAP** as the SSO front door. **Intended B** browser JSON is a Google Identity Services user Bearer on this API. **Current prod web is not on B:** live 100% is `admin-web-prod-00023-fnz` (nginx `/api`, SA Bearer + IAP headers). Revision **00024** is the unused B bake at **0%** — do not flip until GIS `/me` is proven on DEV. Do not claim prod already uses GIS. Server-Sent Events stay same-origin `/api/live/events` (nginx mints a service-account Bearer and forwards IAP headers). `allUsers` `run.invoker` is **stripped** on `admin-api-prod` and `admin-api-dev` (remaining: compute SA + `jsirven@`). GIS JWT `aud` is the OAuth client, not this Cloud Run URL — Cloud Run IAM would reject GIS unless `allUsers`, which is off. A 00024 flip today would **403** at IAM (or **401** if `allUsers` were on but GIS fail-soft). Do not say `allUsers` stays so GIS can reach the API. Cloud Build admin-api yamls: `--no-allow-unauthenticated`, `--no-iap`, `REQUIRE_IAP_IDENTITY=true`, fail-closed `allUsers` strip (not `|| true`). CLI: `habeas-cli auth login --adc` or `auth login` — pin both `ADMIN_API_ID_TOKEN_AUDIENCE` and `IAP_OAUTH_CLIENT_ID`.
+
+Do **not** re-enable Cloud Run IAP on admin-api. Do **not** re-run `infra/cloudbuild/admin-api-dev-iam.yaml`. Do **not** edit accepted SirvenOS architecture decision records from this repo.
 
 - Routes: approvals, dashboard, admin rules, ops, `GET /live/events`
 - Unified Runs: `GET /ops/runs` — filters `job`, `status`, `request_id`, `process_id`
@@ -96,4 +102,4 @@ Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Serv
 
 - Vendor adapter code in `adapters/` inside this app only.
 - Schema in [`db/migrations/`](../../db/migrations/) — prefix `admin_` or `matching_` as appropriate.
-- Mutations IAP-protected + AuditMiddleware; matching-results payloads are ids/counts only (no PII).
+- Mutations require authenticated identity (`REQUIRE_IAP_IDENTITY` on deployed API) + AuditMiddleware; matching-results payloads are ids/counts only (no PII). Cloud Run IAP stays **off** on admin-api.

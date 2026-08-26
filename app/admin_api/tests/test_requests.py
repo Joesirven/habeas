@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from admin_api import roles
 from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER, ROLE_LEGAL
+
 from habeas_privacy_core.exceptions import DropAccessTypeRejectedError
 from habeas_privacy_core.models.intake import CreateRequestInput, clean_agent_batch_csv
 from habeas_privacy_core.models.request import IntakeSource
@@ -22,6 +23,15 @@ pytestmark_integration = pytest.mark.skipif(
     reason="DATABASE_URL required for admin API integration tests",
 )
 
+
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
 
 @pytest.fixture(autouse=True)
 def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,17 +123,17 @@ def test_agent_batch_upload_route(monkeypatch: pytest.MonkeyPatch):
     with TestClient(app) as client:
         ok = client.post(
             "/requests/agent-batch",
-            headers={IAP_EMAIL_HEADER: "legal@example.com"},
+            headers=signed_headers("legal@example.com"),
             files={"file": ("agents.csv", csv_bytes, "text/csv")},
         )
         empty = client.post(
             "/requests/agent-batch",
-            headers={IAP_EMAIL_HEADER: "legal@example.com"},
+            headers=signed_headers("legal@example.com"),
             files={"file": ("agents.csv", b"", "text/csv")},
         )
         forbidden = client.post(
             "/requests/agent-batch",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=signed_headers("owner@example.com"),
             files={"file": ("agents.csv", csv_bytes, "text/csv")},
         )
 
@@ -207,7 +217,7 @@ def test_requests_list_short_query_returns_400(monkeypatch: pytest.MonkeyPatch):
             return _Acquire()
 
     monkeypatch.setattr(admin_main, "get_pool", lambda: _Pool())
-    headers = {IAP_EMAIL_HEADER: "ops@example.com"}
+    headers = signed_headers("ops@example.com")
 
     with TestClient(admin_main.app) as client:
         response = client.get("/requests?q=a", headers=headers)
@@ -419,7 +429,7 @@ def test_requests_route_returns_paginated_envelope(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(admin_main, "get_pool", lambda: _Pool())
     monkeypatch.setattr(admin_main, "search_requests", fake_search_requests)
-    headers = {IAP_EMAIL_HEADER: "ops@example.com"}
+    headers = signed_headers("ops@example.com")
 
     with TestClient(admin_main.app) as client:
         response = client.get("/requests?limit=10&offset=20", headers=headers)

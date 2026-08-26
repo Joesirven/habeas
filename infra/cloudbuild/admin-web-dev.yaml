@@ -1,13 +1,17 @@
-# Admin web IAP front door — same pattern as ops-ia-web-dev.
-# Browser Google login via IAP; same-origin /api/*; nginx mints Cloud Run
-# invoker token and forwards X-Goog-Authenticated-User-* to admin-api.
+# Admin web IAP front door — browser Google login via IAP.
+# Architecture B: SPA calls admin-api-dev cross-origin via baked VITE_ADMIN_API_URL.
+# nginx ADMIN_API_UPSTREAM remains for same-origin /api fallback until the proxy is removed.
 substitutions:
   _REGION: us-east4
   _PROJECT: example-gcp-project
   _SERVICE: admin-web-dev
   _TAG: latest
-  # Same-origin /api — do not bake a cross-origin admin-api URL.
-  _VITE_ADMIN_API_URL: ""
+  # Architecture B — browser calls admin-api-dev directly (CORS already allows admin-web-dev).
+  _VITE_ADMIN_API_URL: "https://admin-api-dev-hsa55rg7ja-uk.a.run.app"
+  # Public GIS / IAP OAuth client (same project brand as IAP_OAUTH_CLIENT_ID). Safe to bake.
+  _VITE_GOOGLE_CLIENT_ID: "95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com"
+  # Bake /dev labs into this SPA only. admin-web-prod.yaml keeps this false.
+  _VITE_ENABLE_LABS: "true"
   _ADMIN_API_UPSTREAM: https://admin-api-dev-hsa55rg7ja-uk.a.run.app
 
 options:
@@ -22,6 +26,10 @@ steps:
       - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
       - --build-arg
       - VITE_ADMIN_API_URL=${_VITE_ADMIN_API_URL}
+      - --build-arg
+      - VITE_GOOGLE_CLIENT_ID=${_VITE_GOOGLE_CLIENT_ID}
+      - --build-arg
+      - VITE_ENABLE_LABS=${_VITE_ENABLE_LABS}
       - -f
       - clients/web/Dockerfile
       - clients/web

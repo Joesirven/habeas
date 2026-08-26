@@ -13,11 +13,21 @@ from fastapi.testclient import TestClient
 from admin_api import connections_redeem
 from admin_api.connections_admin import INVITE_ROUTE_GONE_DETAIL
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
+
 from habeas_privacy_core.connections.catalog import VERTICAL_TEST
 
 RAW_TOKEN = "test-invite-token"
 INVITEE_EMAIL = "user@example.com"
 
+
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
 
 def _fake_pool(conn: AsyncMock) -> MagicMock:
     return MagicMock(
@@ -128,7 +138,7 @@ def test_post_redeem_data_user_invite_succeeds(
     response = client.post(
         f"/connect/{RAW_TOKEN}",
         json={"credentials": {}},
-        headers={IAP_EMAIL_HEADER: f"accounts.google.com:{INVITEE_EMAIL}"},
+        headers=signed_headers(INVITEE_EMAIL),
     )
     assert response.status_code == 200
     payload = response.json()

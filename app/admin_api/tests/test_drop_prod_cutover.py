@@ -13,6 +13,7 @@ from admin_api import drop_prod_cutover, roles
 from admin_api import main as admin_main
 from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
+
 from habeas_privacy_core.connections.secrets import InMemorySecretWriter
 
 SECRET_VALUE = "super-secret-prod-drop-key-do-not-echo"
@@ -22,6 +23,15 @@ OTHER_VERTICAL_MARKERS = ("auth0", "paylocity", "lever", "mailchimp", "google_sh
 LANDABLE_GCS_URI = "gs://test-drop-intake/drop/intake/cutover.zip"
 FILE_GCS_URI = "file:///tmp/drop_connector/cutover.zip"
 
+
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
 
 class NotFound(Exception):
     pass
@@ -84,14 +94,14 @@ def _reset(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _super_admin_headers() -> dict[str, str]:
     roles.settings.admin_api_super_admins = "dev-owner-1@example.com"
-    return {IAP_EMAIL_HEADER: "dev-owner-1@example.com"}
+    return signed_headers("dev-owner-1@example.com")
 
 
 def _admin_headers() -> dict[str, str]:
     roles.settings.require_iap_identity = True
     roles.settings.admin_api_admins = "admin@example.com"
     roles.settings.admin_api_super_admins = "dev-owner-1@example.com"
-    return {IAP_EMAIL_HEADER: "accounts.google.com:admin@example.com"}
+    return signed_headers("admin@example.com")
 
 
 def _configured_prod_key() -> FakeGsmClient:

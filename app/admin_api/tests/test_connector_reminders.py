@@ -14,6 +14,7 @@ from admin_api import owner_connectors, roles
 from admin_api.main import app
 from admin_api.roles import ConnectorReminderOut, RolePrincipal
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER, ROLE_ADMIN, ROLE_DATA_OWNER
+
 from habeas_privacy_core.connections.catalog import VERTICAL_PEOPLE_HR
 from habeas_privacy_core.connections.freshness import ReminderCode, ReminderSeverity
 from habeas_privacy_core.connections.models import Connection
@@ -21,6 +22,15 @@ from habeas_privacy_core.connections.models import Connection
 CONNECTION_ID = UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 NOW = datetime(2026, 8, 12, 16, 0, 0, tzinfo=timezone.utc)
 
+
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
 
 @pytest.fixture(autouse=True)
 def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,7 +182,7 @@ def test_connector_reminders_endpoint_for_owner(monkeypatch: pytest.MonkeyPatch)
     with TestClient(app) as client:
         response = client.get(
             "/owner/connector-reminders",
-            headers={IAP_EMAIL_HEADER: "hr-owner@example.com"},
+            headers=signed_headers("hr-owner@example.com"),
         )
 
     assert response.status_code == 200
@@ -196,7 +206,7 @@ def test_connector_reminders_endpoint_empty_for_super_admin(
     with TestClient(app) as client:
         response = client.get(
             "/owner/connector-reminders",
-            headers={IAP_EMAIL_HEADER: "ops@example.com"},
+            headers=signed_headers("ops@example.com"),
         )
     assert response.status_code == 200
     assert response.json() == {"reminders": []}
@@ -267,7 +277,7 @@ def test_upload_template_returns_csv(monkeypatch: pytest.MonkeyPatch) -> None:
     with TestClient(app) as client:
         response = client.get(
             f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/upload-template",
-            headers={IAP_EMAIL_HEADER: "hr-owner@example.com"},
+            headers=signed_headers("hr-owner@example.com"),
         )
 
     assert response.status_code == 200
@@ -298,7 +308,7 @@ def test_upload_template_rejects_live_only_system(
     with TestClient(app) as client:
         response = client.get(
             f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/upload-template",
-            headers={IAP_EMAIL_HEADER: "hr-owner@example.com"},
+            headers=signed_headers("hr-owner@example.com"),
         )
 
     assert response.status_code == 422

@@ -82,7 +82,7 @@ If pre-merge → read [`.agent/modules/review-personas.md`](.agent/modules/revie
 
 - No personally identifiable information in logs or audit payloads.
 - **Mutations** only through `app/admin_api` (web and command-line write path).
-- Deployed admin-api requires authenticated identity (`REQUIRE_IAP_IDENTITY=true`): verified Bearer Google ID token (ADC / super_admin) or IAP email header path. CLI: `habeas-cli auth login --adc` (super_admin) or `auth login` (IAP; `IAP_OAUTH_CLIENT_ID` + SA impersonation) — see `infra/README.md` and [`.agent/modules/cli-agent-interface.md`](.agent/modules/cli-agent-interface.md). Never call workers directly; never grant user→worker `run.invoker`.
+- Deployed admin-api requires authenticated identity (`REQUIRE_IAP_IDENTITY=true`): a **verified Bearer** Google ID token. `resolve_actor` rejects IAP email header alone (header-alone → 401). Legal sources: `user_jwt` (GIS, `aud` = OAuth client), `bearer_jwt` (ADC / Cloud Run `aud`), `iap_header` (verified Bearer **plus** IAP email). CLI: `habeas-cli auth login --adc` (super_admin) or `auth login` (IAP); pin both `ADMIN_API_ID_TOKEN_AUDIENCE` and `IAP_OAUTH_CLIENT_ID` — see `infra/README.md` and [`.agent/modules/cli-agent-interface.md`](.agent/modules/cli-agent-interface.md). Never call workers directly; never grant user→worker `run.invoker`.
 - Command-line **SELECT-only** for ad-hoc analysis — no insert, update, delete, truncate.
 - No production writes without Jose approval.
 - No secrets in git.
@@ -93,11 +93,11 @@ If pre-merge → read [`.agent/modules/review-personas.md`](.agent/modules/revie
 
 ## Prod status (2026-08-25)
 
-On `example-gcp-project`: Cloud SQL `dpra-prod`, Secret Manager `database-url-prod`, and the DROP spine plus vertical workers are live — `admin-api-prod` (`_MATCHING_URL` → `data-vertical-matching-prod`, not legacy `matching-prod`; `max-instances=3`), `drop-connector-prod`, `drop-ingestor-prod`, `request-dispatcher-prod`, `data-vertical-matching-prod`, `hash-index-refresh-prod`, `data-fulfillment-dispatcher-prod`, `drop-notice-dispatcher-prod`, `reaper-prod`, and vertical workers `auth0-prod`, `google-sheets-prod`, `lever-prod`, `paylocity-prod`.
+On `example-gcp-project`: Cloud SQL `dpra-prod`, Secret Manager `database-url-prod`, and the DROP spine plus vertical workers are live — `admin-api-prod` (`_MATCHING_URL` → `data-vertical-matching-prod`, not legacy `matching-prod`; `max-instances=3`), `drop-connector-prod`, `drop-ingestor-prod`, `request-dispatcher-prod`, `data-vertical-matching-prod`, `hash-index-refresh-prod`, `data-fulfillment-dispatcher-prod`, `drop-notice-dispatcher-prod`, `reaper-prod`, and vertical workers `auth0-prod`, `axios-headquarters-prod`, `google-sheets-prod`, `lever-prod`, `paylocity-prod`.
 
 **DROP intake (complete):** first production CA DROP pull finished (~1.84M requests); Data-vertical matching is complete. Ops orchestration used `POST /ops/drop/prod/confirm-run` (admin-api spine: connector download → ingestor land/promote → dispatch → ensure-drain) — that is the cutover runbook endpoint, not an open blocker. Ongoing pulls use scheduled `drop-connector-prod` `/download`.
 
-**Still off in prod:** Cassandra (`cassandra-prod` stays stub / do-not-write). Mailchimp is retired (Communications vertical is Axios HQ). No ad-hoc production writes without Jose.
+**Still off in prod:** Cassandra (`cassandra-prod` stays stub / do-not-write). Mailchimp is retired (Communications vertical is Axios HQ). **Prod web is not on GIS** — live 100% is `admin-web-prod-00023-fnz` (nginx `/api`); `admin-web-prod-00024` exists at 0% and must not be flipped until GIS `/me` is proven on DEV. `allUsers` invoker is stripped on `admin-api-prod` and `admin-api-dev` (remaining: compute SA + `jsirven@`). No ad-hoc production writes without Jose.
 
 Runbook: [`infra/README.md`](infra/README.md) § Prod Cloud SQL + DROP cutover. Worker attach: [`app/AGENTS.md`](app/AGENTS.md).
 

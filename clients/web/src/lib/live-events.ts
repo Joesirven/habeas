@@ -3,8 +3,9 @@ import { useEffect } from 'react'
 
 import type { BulkProcessesPayload, BulkProcessSummary } from '@/lib/api'
 
-// Empty string must fall back to /api (same as api.ts) — ?? keeps "".
-const LIVE_EVENTS_PATH = `${import.meta.env.VITE_ADMIN_API_URL || '/api'}/live/events`
+// EventSource cannot set Authorization. Keep same-origin /api/live/events
+// (nginx/Vite proxy) even when JSON APIs go cross-origin via VITE_ADMIN_API_URL.
+export const LIVE_EVENTS_PATH = '/api/live/events'
 
 const MATCHING_PROGRESS_QUERY_KEY = ['admin-api', 'ops', 'drop-matching-progress'] as const
 const DROP_PROCESSES_QUERY_PREFIX = ['admin-api', 'ops', 'drop-processes'] as const
@@ -21,6 +22,18 @@ type DropMatchingProgress = {
     expires_at: string | null
   }
   matching_attempts?: DropMatchingProgress
+}
+
+/** Cache shape for GET /ops/drop/console/snapshot — ids/counts only. */
+type DropConsoleSnapshotCache = {
+  matching_progress?: DropMatchingProgress
+  processes?: {
+    processes?: BulkProcessSummary[]
+  }
+  recent_processes?: {
+    days?: number
+    processes?: BulkProcessSummary[]
+  }
 }
 
 type BulkProcessPatch = Partial<BulkProcessSummary> & Pick<BulkProcessSummary, 'process_id'>
@@ -69,6 +82,64 @@ function isBulkProcessListQuery(queryKey: readonly unknown[]): boolean {
   return segment === 'recent-30d' || segment === 'pipeline-list'
 }
 
+/** Pipeline paint key is `['admin-api','ops','drop-console','snapshot', …]`. */
+function isDropConsoleSnapshotQuery(queryKey: readonly unknown[]): boolean {
+  return (
+    queryKey[0] === 'admin-api' &&
+    queryKey[1] === 'ops' &&
+    queryKey[2] === 'drop-console' &&
+    queryKey[3] === 'snapshot'
+  )
+}
+
+function patchConsoleSnapshotMatchingProgress(
+  queryClient: ReturnType<typeof useQueryClient>,
+  payload: DropMatchingProgress,
+) {
+  queryClient.setQueriesData<DropConsoleSnapshotCache>(
+    { predicate: (query) => isDropConsoleSnapshotQuery(query.queryKey) },
+    (old) => {
+      if (!old) return old
+      const current = old.matching_progress
+      return {
+        ...old,
+        matching_progress: current ? { ...current, ...payload } : payload,
+      }
+    },
+  )
+}
+
+function patchConsoleSnapshotBulkProcess(
+  queryClient: ReturnType<typeof useQueryClient>,
+  patch: BulkProcessPatch,
+): boolean {
+  let patched = false
+  queryClient.setQueriesData<DropConsoleSnapshotCache>(
+    { predicate: (query) => isDropConsoleSnapshotQuery(query.queryKey) },
+    (old) => {
+      if (!old) return old
+      const nextProcesses = old.processes?.processes
+        ? patchBulkProcessList(old.processes.processes, patch)
+        : null
+      const nextRecent = old.recent_processes?.processes
+        ? patchBulkProcessList(old.recent_processes.processes, patch)
+        : null
+      if (!nextProcesses && !nextRecent) return old
+      patched = true
+      return {
+        ...old,
+        processes: nextProcesses
+          ? { ...old.processes, processes: nextProcesses }
+          : old.processes,
+        recent_processes: nextRecent
+          ? { ...old.recent_processes, processes: nextRecent }
+          : old.recent_processes,
+      }
+    },
+  )
+  return patched
+}
+
 export function useLiveEvents(enabled = true) {
   const queryClient = useQueryClient()
 
@@ -83,21 +154,17 @@ export function useLiveEvents(enabled = true) {
 
     source.addEventListener('matching_progress', (event) => {
       const payload = parseEventPayload((event as MessageEvent<string>).data)
-      if (isDropMatchingProgress(payload)) {
-        queryClient.setQueryData(MATCHING_PROGRESS_QUERY_KEY, payload)
-        return
-      }
-      void queryClient.invalidateQueries({ queryKey: MATCHING_PROGRESS_QUERY_KEY })
+      if (!isDropMatchingProgress(payload)) return
+
+      queryClient.setQueryData(MATCHING_PROGRESS_QUERY_KEY, payload)
+      patchConsoleSnapshotMatchingProgress(queryClient, payload)
     })
 
     source.addEventListener('bulk_process', (event) => {
       const payload = parseEventPayload((event as MessageEvent<string>).data)
-      if (!isBulkProcessPatch(payload)) {
-        void queryClient.invalidateQueries({ queryKey: DROP_PROCESSES_QUERY_PREFIX })
-        return
-      }
+      if (!isBulkProcessPatch(payload)) return
 
-      let patched = false
+      let patchedList = false
       queryClient.setQueriesData<BulkProcessesPayload>(
         {
           queryKey: DROP_PROCESSES_QUERY_PREFIX,
@@ -107,13 +174,17 @@ export function useLiveEvents(enabled = true) {
           if (!old?.processes) return old
           const next = patchBulkProcessList(old.processes, payload)
           if (!next) return old
-          patched = true
+          patchedList = true
           return { ...old, processes: next }
         },
       )
 
-      if (!patched) {
+      const patchedSnapshot = patchConsoleSnapshotBulkProcess(queryClient, payload)
+      if (!patchedList && !patchedSnapshot) {
         void queryClient.invalidateQueries({ queryKey: DROP_PROCESSES_QUERY_PREFIX })
+        void queryClient.invalidateQueries({
+          predicate: (query) => isDropConsoleSnapshotQuery(query.queryKey),
+        })
       }
     })
 
