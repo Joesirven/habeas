@@ -5,6 +5,7 @@
 # Keep IAM locked; do not re-grant allUsers in this pipeline. GIS
 # cutover is a separate pin, not this yaml. nginx ADMIN_API_UPSTREAM
 # on admin-web-prod remains for same-origin /api (SSE + rollback).
+# ops-ia-web is retired; do not re-add its CORS origin.
 # Worker URLs use suffix hsa55rg7ja-uk. intake_drop_poller has no app — URL empty.
 substitutions:
   _REGION: us-east4
@@ -26,8 +27,8 @@ substitutions:
   _IAP_OAUTH_CLIENT_ID: "95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com"
   # CLI / nginx ADC tokens have aud = this Cloud Run origin.
   _ADMIN_API_ID_TOKEN_AUDIENCE: "https://admin-api-prod-hsa55rg7ja-uk.a.run.app"
-  # Keep ops-ia-web-prod (current nginx /api) plus admin-web origins for Architecture B GIS.
-  _CORS_ORIGINS: "https://ops-ia-web-prod-hsa55rg7ja-uk.a.run.app|https://admin-web-prod-hsa55rg7ja-uk.a.run.app|https://admin-web-dev-hsa55rg7ja-uk.a.run.app|http://127.0.0.1:5174|http://localhost:5174|http://127.0.0.1:5173|http://localhost:5173|http://127.0.0.1:8080|http://localhost:8080"
+  # admin-web origins for Architecture B GIS. ops-ia-web is retired.
+  _CORS_ORIGINS: "https://admin-web-prod-hsa55rg7ja-uk.a.run.app|https://admin-web-dev-hsa55rg7ja-uk.a.run.app|http://127.0.0.1:5174|http://localhost:5174|http://127.0.0.1:5173|http://localhost:5173|http://127.0.0.1:8080|http://localhost:8080"
   _ADMIN_API_SUPER_ADMINS: "dev-owner-1@example.com|dev-owner-9@example.com|dev-owner-6@example.com|dev-owner-12@example.com|dev-owner-4@example.com"
   _ADMIN_API_ADMINS: "dev-owner-3@example.com|dev-owner-13@example.com"
   _ADMIN_API_LEGALS: "dev-owner-3@example.com|dev-owner-5@example.com"
@@ -99,14 +100,14 @@ steps:
       - -c
       - |
         set -euo pipefail
-        # Browser IAP belongs on ops-ia-web-prod / admin-web-prod, not here.
+        # Browser IAP belongs on admin-web-prod, not here.
         # cloud-sdk:slim already ships beta; do not run components install.
         # Fail closed: GIS user tokens cannot pass Cloud Run IAP.
         gcloud beta run services update ${_SERVICE} --region=${_REGION} --project=${_PROJECT} --no-iap --quiet
         PROJECT_NUMBER=95660886550
         COMPUTE_SA="$${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
         IAP_SA="service-$${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
-        # Compute SA is required: ops-ia-web-prod / admin-web-prod nginx mints its identity token.
+        # Compute SA is required: admin-web-prod nginx mints its identity token.
         # Fail the build if this grant does not stick (do not || true).
         gcloud run services add-iam-policy-binding ${_SERVICE} \
           --region=${_REGION} --project=${_PROJECT} \

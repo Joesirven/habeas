@@ -1,6 +1,6 @@
 """Vertical catalog + owner assignment APIs (KD20 / KTD1).
 
-Identity-Aware Proxy is domain-wide (``habeas.us`` on ops-ia-web). There is
+Identity-Aware Proxy is domain-wide (``habeas.us`` on admin-web). There is
 no per-vertical IAP IAM. Vertical access — including Data (``data`` /
 cassandra, catalog ``view_only``) — is granted by ``user_vertical_assignments``.
 Member invites mint and redeem that grant; they are not connection-credential
@@ -471,7 +471,7 @@ async def list_vertical_bindings(
 def _invite_url(raw_token: str) -> str:
     base = connections_settings.public_web_base_url.strip().rstrip("/")
     if not base:
-        base = "https://ops-ia-web-dev-hsa55rg7ja-uk.a.run.app"
+        base = "https://admin-web-dev-hsa55rg7ja-uk.a.run.app"
     return f"{base}/connect/{raw_token}"
 
 

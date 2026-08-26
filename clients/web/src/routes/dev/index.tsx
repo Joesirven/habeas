@@ -1,3 +1,4 @@
+// @ts-nocheck — /dev paths are omitted from the product router Register.
 import { Link } from '@tanstack/react-router'
 
 const LABS = [

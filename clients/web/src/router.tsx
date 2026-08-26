@@ -4,7 +4,7 @@ import { lazy } from 'react'
 
 import { AppShell } from '@/components/AppShell'
 import { isInboxIdentifierSurface } from '@/lib/inbox-status-lab'
-import { isRequestUuid, labsEnabled } from '@/lib/utils'
+import { isRequestUuid } from '@/lib/utils'
 import { DashboardPage } from '@/routes/index'
 import { DeMonitorPage } from '@/routes/ops/de-monitor'
 import { OpsIncidentsPage } from '@/routes/ops/incidents'
@@ -21,19 +21,6 @@ import {
 import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
 import { RequestDetailPage } from '@/routes/requests/$requestId'
 import { NeedsAttentionPage } from '@/routes/requests/needs-attention'
-import { PendingSettingsLabPage } from '@/routes/dev/pending-settings-lab'
-import { DevLabsIndexPage } from '@/routes/dev/index'
-import {
-  SheetsOauthLabPage,
-  type SheetsOauthLabSearch,
-} from '@/routes/dev/sheets-oauth'
-import { SheetsCadenceLabPage } from '@/routes/dev/sheets-cadence-lab'
-import { DropProdCutoverLabPage } from '@/routes/dev/drop-prod-cutover'
-import { TokenResourceServerLabPage } from '@/routes/dev/token-resource-server'
-import {
-  OwnerMapAlternativesPage,
-  parseOwnerMapLabSearch,
-} from '@/routes/dev/owner-map-alternatives'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
 import { RequestsSlasPage } from '@/routes/requests/slas'
@@ -51,11 +38,6 @@ const OpsRunsPage = lazy(() =>
 )
 const ConnectionsPage = lazy(() =>
   import('@/routes/ops/connections').then((m) => ({ default: m.ConnectionsPage })),
-)
-const MatchingResultsLabPage = lazy(() =>
-  import('@/routes/requests/matching-results-lab').then((m) => ({
-    default: m.MatchingResultsLabPage,
-  })),
 )
 
 export const PIPELINE_TABS = [
@@ -724,77 +706,6 @@ const inboxStatusLabRoute = createRoute({
   component: () => null,
 })
 
-const matchingResultsLabRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/requests/matching-results-lab',
-  validateSearch: (search: Record<string, unknown>) => parseStatusLabSearch(search),
-  component: MatchingResultsLabPage,
-})
-
-const sheetsCadenceLabRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/dev/sheets-cadence-lab',
-  component: SheetsCadenceLabPage,
-})
-
-const sheetsOauthLabRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/dev/sheets-oauth',
-  validateSearch: (search: Record<string, unknown>): SheetsOauthLabSearch => ({
-    code: typeof search.code === 'string' ? search.code : undefined,
-    state: typeof search.state === 'string' ? search.state : undefined,
-    error: typeof search.error === 'string' ? search.error : undefined,
-  }),
-  component: SheetsOauthLabPage,
-})
-
-const devLabsIndexRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/dev',
-  component: DevLabsIndexPage,
-})
-
-const pendingSettingsLabRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/dev/pending-settings',
-  component: PendingSettingsLabPage,
-})
-
-const dropProdCutoverLabRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/dev/drop-prod-cutover',
-  component: DropProdCutoverLabPage,
-})
-
-const tokenResourceServerLabRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/dev/token-resource-server',
-  component: TokenResourceServerLabPage,
-})
-
-/**
- * Wave M planned URL. No new lab page — the owner wizard already has
- * live-fail Retry / Set up manual upload and upload column mapping.
- */
-const ownerMapFallbackLabRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/dev/owner-map-fallback',
-  beforeLoad: () => {
-    throw redirect({ to: '/owner/connectors', replace: true })
-  },
-  component: () => null,
-})
-
-const ownerMapAlternativesLabRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/dev/owner-map-alternatives',
-  validateSearch: (search: Record<string, unknown>) => parseOwnerMapLabSearch(search),
-  component: function OwnerMapAlternativesRoute() {
-    const search = ownerMapAlternativesLabRoute.useSearch()
-    return <OwnerMapAlternativesPage search={search} />
-  },
-})
-
 const requestsSlasRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests/slas',
@@ -1042,24 +953,26 @@ const runDetailRoute = createRoute({
   component: RunDetailPage,
 })
 
+/**
+ * Inline env check (not labsEnabled()) so Vite can drop `import('@/lab-routes')`
+ * when `VITE_ENABLE_LABS=false` and `import.meta.env.PROD` is true.
+ * Cast to `[]` so product route types stay tight; lab pages are @ts-nocheck.
+ */
+const labRoutes = (
+  import.meta.env.VITE_ENABLE_LABS === 'true' || !import.meta.env.PROD
+    ? (await import('@/lab-routes')).createLabRoutes(
+        rootRoute,
+        parseNeedsAttentionSearch,
+      )
+    : []
+) as []
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   requestsRoute,
   needsAttentionRoute,
   inboxStatusLabRoute,
-  ...(labsEnabled()
-    ? [
-        matchingResultsLabRoute,
-        devLabsIndexRoute,
-        sheetsCadenceLabRoute,
-        sheetsOauthLabRoute,
-        pendingSettingsLabRoute,
-        dropProdCutoverLabRoute,
-        tokenResourceServerLabRoute,
-        ownerMapFallbackLabRoute,
-        ownerMapAlternativesLabRoute,
-      ]
-    : []),
+  ...labRoutes,
   requestsSlasRoute,
   manualRequestRoute,
   docsRoute,

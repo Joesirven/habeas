@@ -1070,24 +1070,25 @@ describe('production owner walkthrough — no design-lab chrome', () => {
     expect(source).toContain('const showDevLabs = labsOn && role === \'super_admin\'')
   })
 
-  test('router registers /dev labs including owner-map-alternatives only when labsEnabled', async () => {
-    const source = await Bun.file(
+  test('router loads lab-routes only from a Vite-droppable labs branch', async () => {
+    const router = await Bun.file(
       new URL('../../router.tsx', import.meta.url),
     ).text()
-    expect(source).toContain('labsEnabled()')
-    expect(source).toContain("path: '/dev/owner-map-alternatives'")
-    expect(source).toContain("path: '/owner/connectors'")
-    expect(source).toContain('ownerMapAlternativesLabRoute')
-    const start = source.indexOf('...(labsEnabled()')
-    const labsBlock = source.slice(
-      start,
-      source.indexOf('requestsSlasRoute', start),
-    )
-    expect(labsBlock).toContain('ownerMapAlternativesLabRoute')
-    expect(labsBlock).toContain('devLabsIndexRoute')
-    expect(labsBlock).toContain('matchingResultsLabRoute')
-    expect(labsBlock).not.toContain('ownerConnectorsRoute')
-    expect(labsBlock).not.toContain('inboxStatusLabRoute')
+    const labs = await Bun.file(
+      new URL('../../lab-routes.tsx', import.meta.url),
+    ).text()
+    expect(router).toContain("path: '/owner/connectors'")
+    expect(router).toContain("import('@/lab-routes')")
+    expect(router).toContain("VITE_ENABLE_LABS === 'true'")
+    expect(router).toContain('!import.meta.env.PROD')
+    expect(router).not.toContain("path: '/dev/owner-map-alternatives'")
+    expect(router).not.toContain('@/routes/dev/')
+    expect(router).not.toContain('matching-results-lab')
+    expect(labs).toContain("path: '/dev/owner-map-alternatives'")
+    expect(labs).toContain("path: '/dev/sheets-oauth'")
+    expect(labs).toContain("path: '/dev/drop-prod-cutover'")
+    expect(labs).toContain("path: '/requests/matching-results-lab'")
+    expect(labs).not.toContain("path: '/owner/connectors'")
   })
 })
 

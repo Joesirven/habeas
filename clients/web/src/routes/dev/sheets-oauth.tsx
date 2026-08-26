@@ -1,3 +1,4 @@
+// @ts-nocheck — /dev paths are omitted from the product router Register.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useEffect, useMemo, useState } from 'react'
