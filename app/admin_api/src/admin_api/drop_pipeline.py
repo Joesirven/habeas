@@ -1509,6 +1509,31 @@ async def list_bulk_processes(
     return processes
 
 
+def _attach_lite_process_summary(
+    item: dict[str, Any],
+    summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Copy lite list-head fields (ids/counts/timestamps only) onto a process row."""
+    if summary is None:
+        return item
+    attached = {
+        **item,
+        "overall": summary["overall"],
+        "request_rows": summary["request_rows"],
+        "raw_rows": summary["raw_rows"],
+    }
+    stages = summary.get("stages")
+    if isinstance(stages, dict):
+        lite_stages = {
+            key: stages[key]
+            for key in ("download", "land", "promote")
+            if key in stages
+        }
+        if lite_stages:
+            attached["stages"] = lite_stages
+    return attached
+
+
 async def _snapshot_processes(
     conn: Any,
     *,
@@ -1528,19 +1553,12 @@ async def _snapshot_processes(
             conn,
             process_ids=[int(item["process_id"]) for item in processes],
         )
-        enriched: list[dict[str, Any]] = []
-        for item in processes:
-            pid = int(item["process_id"])
-            summary = summaries.get(pid)
-            if summary is not None:
-                item = {
-                    **item,
-                    "overall": summary["overall"],
-                    "request_rows": summary["request_rows"],
-                    "raw_rows": summary["raw_rows"],
-                }
-            enriched.append(item)
-        processes = enriched
+        processes = [
+            _attach_lite_process_summary(
+                item, summaries.get(int(item["process_id"]))
+            )
+            for item in processes
+        ]
     return {
         "day": datetime.now(timezone.utc).date().isoformat(),
         "days": bounded_days,
@@ -1564,20 +1582,36 @@ async def collect_console_snapshot(
     summary = await collect_pipeline_summary(conn)
     summary.pop("as_of", None)
     matching_progress = await collect_matching_progress(conn)
-    # Process ledgers stay off this ticker — they 504d the 4s budget on 00091.
-    # Full process lists remain on GET /ops/drop/processes.
+    processes = await _snapshot_processes(
+        conn,
+        days=process_days,
+        limit=process_limit,
+    )
+    recent_days_bounded = max(1, min(recent_days, 30))
+    recent = await list_bulk_processes(
+        conn,
+        days=recent_days_bounded,
+        limit=recent_limit,
+    )
+    if recent:
+        recent_summaries = await collect_bulk_process_summaries_lite(
+            conn,
+            process_ids=[int(item["process_id"]) for item in recent],
+        )
+        recent = [
+            _attach_lite_process_summary(
+                item, recent_summaries.get(int(item["process_id"]))
+            )
+            for item in recent
+        ]
     return {
         "as_of": datetime.now(timezone.utc).isoformat(),
         "summary": summary,
         "matching_progress": matching_progress,
-        "processes": {
-            "day": datetime.now(timezone.utc).date().isoformat(),
-            "days": max(1, min(process_days, 30)),
-            "processes": [],
-        },
+        "processes": processes,
         "recent_processes": {
-            "days": max(1, min(recent_days, 30)),
-            "processes": [],
+            "days": recent_days_bounded,
+            "processes": recent,
         },
     }
 
@@ -2442,8 +2476,9 @@ async def drop_bulk_processes(
     """List DROP bulk processes keyed by intake type + datetime."""
     _require_database()
     pool = get_pool()
-    async with pool.acquire() as conn:
-        processes = await list_bulk_processes(
+
+    async def _collect(conn: Any) -> list[dict[str, Any]]:
+        rows = await list_bulk_processes(
             conn,
             day=day,
             days=days,
@@ -2451,26 +2486,27 @@ async def drop_bulk_processes(
             download_status=download_status,
             limit=limit,
         )
-        if include_summary:
-            summaries = await collect_bulk_process_summaries_lite(
-                conn,
-                process_ids=[int(item["process_id"]) for item in processes],
-            )
-            enriched: list[dict[str, Any]] = []
-            for item in processes:
-                pid = int(item["process_id"])
-                summary = summaries.get(pid)
-                if summary is not None:
-                    item = {
-                        **item,
-                        "overall": summary["overall"],
-                        "request_rows": summary["request_rows"],
-                        "raw_rows": summary["raw_rows"],
-                    }
-                if overall_status and item.get("overall", {}).get("status") != overall_status:
-                    continue
-                enriched.append(item)
-            processes = enriched
+        if not include_summary:
+            return rows
+        summaries = await collect_bulk_process_summaries_lite(
+            conn,
+            process_ids=[int(item["process_id"]) for item in rows],
+        )
+        enriched: list[dict[str, Any]] = []
+        for item in rows:
+            pid = int(item["process_id"])
+            item = _attach_lite_process_summary(item, summaries.get(pid))
+            if overall_status and item.get("overall", {}).get("status") != overall_status:
+                continue
+            enriched.append(item)
+        return enriched
+
+    async with pool.acquire() as conn:
+        processes = await _with_header_statement_timeout(
+            conn,
+            lambda: _collect(conn),
+            query_name="bulk_processes",
+        )
     return {
         "day": (day or datetime.now(timezone.utc).date()).isoformat(),
         "days": days,

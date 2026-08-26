@@ -44,6 +44,24 @@ function fetchCall(fetchMock: ReturnType<typeof mock>) {
   return { url: String(url), init: init ?? {} }
 }
 
+function dpraTimingLogs(infoMock: ReturnType<typeof mock>) {
+  const found: Array<Record<string, unknown>> = []
+  for (const args of infoMock.mock.calls) {
+    for (const arg of args) {
+      if (arg && typeof arg === 'object' && arg.prefix === 'dpra-timing') {
+        found.push(arg as Record<string, unknown>)
+      }
+    }
+  }
+  return found
+}
+
+function loggedStrings(infoMock: ReturnType<typeof mock>): string[] {
+  return infoMock.mock.calls.flatMap((args) =>
+    args.map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg))),
+  )
+}
+
 function installSessionStorage() {
   const store = new Map<string, string>()
   globalThis.sessionStorage = {
@@ -275,6 +293,158 @@ describe('Architecture B admin-api client', () => {
     await api.fetchAdminApi('/me')
     expect(refresher).not.toHaveBeenCalled()
     expect(headerValue(fetchCall(fetchMock).init.headers, 'Authorization')).toBeNull()
+  })
+
+  test('fetchAdminApi logs a dpra-timing fetch object for /me', async () => {
+    const originalInfo = console.info
+    const infoMock = mock(() => {})
+    console.info = infoMock
+    try {
+      const { fetchAdminApi } = await importApi(undefined)
+      await fetchAdminApi('/me')
+      const log = dpraTimingLogs(infoMock).find((entry) => entry.kind === 'fetch')
+      expect(log).toBeDefined()
+      expect(log?.prefix).toBe('dpra-timing')
+      expect(log?.kind).toBe('fetch')
+      expect(String(log?.url)).toContain('/me')
+      expect(typeof log?.duration_ms).toBe('number')
+      expect(Number.isFinite(log?.duration_ms)).toBe(true)
+      expect(log?.status).toBe(200)
+      expect(log?.abort).toBe(false)
+    } finally {
+      console.info = originalInfo
+    }
+  })
+
+  test('fetchAdminApi timing abort is true on AbortError', async () => {
+    const originalInfo = console.info
+    const infoMock = mock(() => {})
+    console.info = infoMock
+    fetchMock = mock(async () => {
+      throw new DOMException('The operation was aborted.', 'AbortError')
+    })
+    globalThis.fetch = fetchMock
+    try {
+      const { fetchAdminApi } = await importApi(undefined)
+      await expect(fetchAdminApi('/me')).rejects.toThrow()
+      const log = dpraTimingLogs(infoMock).find((entry) => entry.kind === 'fetch')
+      expect(log).toBeDefined()
+      expect(log?.prefix).toBe('dpra-timing')
+      expect(log?.kind).toBe('fetch')
+      expect(log?.abort).toBe(true)
+    } finally {
+      console.info = originalInfo
+    }
+  })
+
+  test('fetchAdminApi timing abort is true on TimeoutError', async () => {
+    const originalInfo = console.info
+    const infoMock = mock(() => {})
+    console.info = infoMock
+    fetchMock = mock(async () => {
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+    })
+    globalThis.fetch = fetchMock
+    try {
+      const { fetchAdminApi } = await importApi(undefined)
+      await expect(fetchAdminApi('/me', { timeoutMs: 8_000 })).rejects.toThrow(
+        /timed out after 8000ms: \/me/,
+      )
+      const log = dpraTimingLogs(infoMock).find((entry) => entry.kind === 'fetch')
+      expect(log).toBeDefined()
+      expect(log?.prefix).toBe('dpra-timing')
+      expect(log?.kind).toBe('fetch')
+      expect(log?.abort).toBe(true)
+    } finally {
+      console.info = originalInfo
+    }
+  })
+
+  test('listOwnerConnectors uses the 8s fast abort', async () => {
+    const { listOwnerConnectors, OPS_FAST_QUERY_TIMEOUT_MS } = await importApi(undefined)
+    expect(OPS_FAST_QUERY_TIMEOUT_MS).toBe(8_000)
+    await listOwnerConnectors('tech')
+    const { url, init } = fetchCall(fetchMock)
+    expect(url).toContain('/owner/verticals/tech/connectors')
+    expect(init.signal).toBeDefined()
+  })
+
+  test('fetchAdminApi timing redacts email path segments and logs no PII', async () => {
+    const originalInfo = console.info
+    const infoMock = mock(() => {})
+    console.info = infoMock
+    try {
+      const { fetchAdminApi } = await importApi(undefined)
+      await fetchAdminApi('/legal/team/ops@example.com')
+      for (const value of loggedStrings(infoMock)) {
+        expect(value).not.toContain('ops@example.com')
+        expect(value).not.toMatch(/[A-Za-z0-9._%+-]+@example\.com/)
+      }
+      const log = dpraTimingLogs(infoMock).find((entry) => entry.kind === 'fetch')
+      expect(log).toBeDefined()
+      expect(String(log?.url)).toContain('[redacted]')
+      expect(String(log?.url)).not.toContain('ops@example.com')
+    } finally {
+      console.info = originalInfo
+    }
+  })
+})
+
+describe('collapsedPipelineCardFields', () => {
+  test('maps complete overall, percent, and request rows', async () => {
+    const { collapsedPipelineCardFields } = await importApi(undefined)
+    const fields = collapsedPipelineCardFields({
+      process_id: 1,
+      intake_source: 'drop',
+      process_at: '2026-08-21T12:00:00Z',
+      completed_at: null,
+      download_status: 'success',
+      label: 'Aug 21 · CA DROP',
+      linkable: true,
+      overall: { percent: 100, status: 'complete', current_stage: 'fulfillment' },
+      request_rows: 12,
+    })
+    expect(fields.status).toBe('complete')
+    expect(fields.percent).toBe(100)
+    expect(fields.requestRows).toBe(12)
+    expect(fields.currentStage).toBe('fulfillment')
+  })
+
+  test('uses download_status and label when process_at is missing', async () => {
+    const { collapsedPipelineCardFields } = await importApi(undefined)
+    const fields = collapsedPipelineCardFields({
+      process_id: 2,
+      intake_source: 'drop',
+      process_at: null,
+      completed_at: null,
+      download_status: 'success',
+      label: 'Aug 21 · CA DROP',
+      linkable: true,
+    })
+    expect(fields.status).toBe('success')
+    expect(fields.title).toBe('Aug 21 · CA DROP')
+  })
+
+  test('never includes email fields', async () => {
+    const { collapsedPipelineCardFields } = await importApi(undefined)
+    const fields = collapsedPipelineCardFields({
+      process_id: 3,
+      intake_source: 'drop',
+      process_at: null,
+      completed_at: null,
+      download_status: 'success',
+      label: 'Aug 21 · CA DROP',
+      linkable: true,
+      email: 'ops@example.com',
+      contact_email: 'ops@example.com',
+    })
+    expect(fields).not.toHaveProperty('email')
+    expect(fields).not.toHaveProperty('contact_email')
+    for (const key of Object.keys(fields)) {
+      expect(key.toLowerCase()).not.toContain('email')
+    }
+    expect(JSON.stringify(fields)).not.toContain('ops@example.com')
+    expect(JSON.stringify(fields)).not.toMatch(/[A-Za-z0-9._%+-]+@example\.com/)
   })
 })
 

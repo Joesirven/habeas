@@ -33,7 +33,9 @@ import { actionToast } from '@/lib/action-toast'
 import { RoleGate, isSuperAdmin } from '@/lib/auth'
 import { cn } from '@/lib/utils'
 import {
+  collapsedPipelineCardFields,
   getDropBulkProcess,
+  getDropConsoleSnapshot,
   getDropMatchingProgress,
   getDropPipeline,
   getDropPipelineSummary,
@@ -210,19 +212,24 @@ function mergeStageCounts(
 function countsForStageTab(
   detail: BulkProcessDetail | undefined,
   tab: (typeof BULK_CARD_STAGE_TABS)[number],
+  liteStages?: BulkProcessSummary['stages'],
 ): BulkProcessStageCounts | undefined {
-  if (!detail) return undefined
-  // Matching % / Finished·Queued·Failed chips use matching_attempts only.
-  // Review is its own tab with request-spine counts from detail.stages.review.
-  if (tab.key === 'matching') {
-    return detail.stages.matching
+  if (detail) {
+    if (tab.key === 'matching') {
+      return detail.stages.matching
+    }
+    if (tab.key === 'review') {
+      return detail.stages.review
+    }
+    return mergeStageCounts(tab.stages.map((stage) => detail.stages[stage.key]))
   }
-  if (tab.key === 'review') {
-    return detail.stages.review
+  if (!liteStages) return undefined
+  if (tab.key === 'matching' || tab.key === 'review' || tab.key === 'fulfillment') {
+    return undefined
   }
-  // Ingest: land + promote are sequential CSV steps — merged success/total is a fair
-  // average across both sub-stages.
-  return mergeStageCounts(tab.stages.map((stage) => detail.stages[stage.key]))
+  return mergeStageCounts(
+    tab.stages.map((stage) => liteStages[stage.key as 'download' | 'land' | 'promote']),
+  )
 }
 
 function isStageTabCurrent(
@@ -1589,6 +1596,7 @@ function BulkStageStrip({
   expanded: boolean
   /** List-summary current stage — paints compact chips before per-row detail. */
   summaryCurrentStage?: string
+  liteStages?: BulkProcessSummary['stages']
 }) {
   return (
     <div
@@ -1597,7 +1605,8 @@ function BulkStageStrip({
       aria-label="Bulk process stages"
     >
       {BULK_CARD_STAGE_TABS.map((tab) => {
-        const waitingOnDetail = !detail && (expanded || loading)
+        const waitingOnDetail =
+          !detail && !liteStages && (expanded || loading)
         if (waitingOnDetail) {
           return (
             <div
@@ -1612,7 +1621,7 @@ function BulkStageStrip({
             </div>
           )
         }
-        const counts = countsForStageTab(detail, tab)
+        const counts = countsForStageTab(detail, tab, liteStages)
         const isCurrent = detail
           ? isStageTabCurrent(detail, tab)
           : tab.stages.some((stage) => stage.key === summaryCurrentStage)
@@ -2006,13 +2015,13 @@ function BatchProcessExpandRow({
     BULK_CARD_STAGE_TABS.find((tab) => tab.key === stageTab) ?? BULK_CARD_STAGE_TABS[0]
 
   const detail = detailQuery.data
+  const lite = collapsedPipelineCardFields(row)
   const running = isActiveBulkSummary(row) || isActiveBulkDetail(detail)
   const pending = !running && isPendingBulkSummary(row)
-  const percent = detail?.overall.percent ?? row.overall?.percent
-  const resolvedStatusKey =
-    detail?.overall.status ?? row.overall?.status ?? row.download_status
+  const percent = detail?.overall.percent ?? lite.percent
+  const resolvedStatusKey = detail?.overall.status ?? lite.status
   const status = resolvedStatusKey.replaceAll('_', ' ')
-  const requestRows = detail?.request_rows ?? row.request_rows
+  const requestRows = detail?.request_rows ?? lite.requestRows
   const completedAt = detail?.completed_at ?? row.completed_at
   const bulkDurationMs = durationMsBetween(
     row.process_at,
@@ -2065,7 +2074,7 @@ function BatchProcessExpandRow({
   const needsReview =
     resolvedStatusKey === 'needs_attention' || derived.reviewOpen > 0
   const reviewCount = derived.reviewOpen > 0 ? derived.reviewOpen : null
-  const activeTabCounts = countsForStageTab(detail, activeStage)
+  const activeTabCounts = countsForStageTab(detail, activeStage, row.stages)
   const activeIndicators = stageRunIndicators(activeTabCounts)
   const estCompletion = activeIndicators.percent
   const errorRate =
@@ -2100,7 +2109,7 @@ function BatchProcessExpandRow({
     setStageTab(next)
   }
 
-  const processName = formatBulkProcessName(row.process_at)
+  const processName = lite.title !== '—' ? lite.title : formatBulkProcessName(row.process_at)
   const rowTone = running
     ? 'border-b border-emerald-200/70 bg-emerald-50/30 last:border-b-0'
     : pending
@@ -2184,7 +2193,8 @@ function BatchProcessExpandRow({
             activeTab={stageTab}
             onSelectTab={selectStage}
             expanded={expanded}
-            summaryCurrentStage={row.overall?.current_stage}
+            summaryCurrentStage={lite.currentStage ?? row.overall?.current_stage}
+            liteStages={row.stages}
           />
         </div>
       </div>
@@ -2261,11 +2271,17 @@ function BatchRequestRunsList({
   selectedProcessId,
   focusedStage,
   onStageChange,
+  snapshotProcesses,
+  snapshotPending = false,
+  snapshotError = false,
 }: {
   onSelectProcess: (id: number) => void
   selectedProcessId?: number
   focusedStage?: PipelineStageTab
   onStageChange?: (stage: PipelineStageTab) => void
+  snapshotProcesses?: BulkProcessesPayload
+  snapshotPending?: boolean
+  snapshotError?: boolean
 }) {
   const [viewMode, setViewMode] = useState<'bulk' | 'individual'>('bulk')
   const [days, setDays] = useState(7)
@@ -2273,6 +2289,10 @@ function BatchRequestRunsList({
   const [downloadStatus, setDownloadStatus] = useState('')
   const [runStatusFilter, setRunStatusFilter] = useState('attention')
   const [expandedId, setExpandedId] = useState<number | null>(null)
+
+  const defaultFilters = days === 7 && intake === 'drop' && !downloadStatus
+  const snapshotRows = snapshotProcesses?.processes ?? []
+  const useSnapshotList = defaultFilters && snapshotRows.length > 0
 
   const listQuery = useQuery({
     queryKey: [
@@ -2290,17 +2310,29 @@ function BatchRequestRunsList({
         intake,
         downloadStatus,
       }),
-    refetchInterval: 10_000,
+    enabled: !useSnapshotList,
+    refetchInterval: useSnapshotList ? false : 10_000,
     placeholderData: (previous) => previous,
   })
 
-  const rows = listQuery.data?.processes ?? []
+  const rows = useSnapshotList
+    ? snapshotRows
+    : (listQuery.data?.processes ?? [])
+  const listPending =
+    (defaultFilters && snapshotPending && snapshotRows.length === 0 && !listQuery.data) ||
+    (!useSnapshotList && listQuery.isPending && !listQuery.data)
+  const listError =
+    !useSnapshotList && (listQuery.isError || (snapshotError && !listQuery.data))
   const activeCount = rows.filter((row) => isActiveBulkSummary(row)).length
   const pendingCount = rows.filter(
     (row) => !isActiveBulkSummary(row) && isPendingBulkSummary(row),
   ).length
   const errorMessage =
-    listQuery.error instanceof Error ? listQuery.error.message : 'Could not load batch runs.'
+    listQuery.error instanceof Error
+      ? listQuery.error.message
+      : snapshotError
+        ? 'Could not load pipeline console snapshot.'
+        : 'Could not load batch runs.'
 
   function toggle(processId: number) {
     setExpandedId((current) => {
@@ -2410,7 +2442,7 @@ function BatchRequestRunsList({
 
       <div className="min-h-[16rem]">
         {viewMode === 'individual' ? (
-          listQuery.isError ? (
+          listError ? (
             <div className="space-y-2 px-3 py-3">
               <p className="text-xs text-red-700">{errorMessage}</p>
               <Button
@@ -2438,7 +2470,7 @@ function BatchRequestRunsList({
               emptyLabel="No individual runs match the current filters."
             />
           )
-        ) : listQuery.isError ? (
+        ) : listError ? (
           <div className="space-y-2 px-3 py-3">
             <p className="text-xs text-red-700">{errorMessage}</p>
             <Button
@@ -2450,7 +2482,7 @@ function BatchRequestRunsList({
               Retry
             </Button>
           </div>
-        ) : listQuery.isPending && !listQuery.data ? (
+        ) : listPending ? (
           <div className="space-y-2 p-3" role="status" aria-label="Loading batch runs">
             {Array.from({ length: 5 }, (_, index) => (
               <Skeleton key={index} className="h-14 w-full" />
@@ -3266,15 +3298,32 @@ export function DropPipelinePageInner() {
     enabled: fatPipelineEnabled,
   })
 
+  const consoleSnapshotQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'drop-console', 'snapshot'],
+    queryFn: () =>
+      getDropConsoleSnapshot({
+        process_days: 7,
+        process_limit: 50,
+        recent_days: 30,
+        recent_limit: 50,
+      }),
+    refetchInterval: 15_000,
+    placeholderData: (previous) => previous,
+  })
+
   const processesQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-processes', 'recent-30d'],
     // Prefer recent window (not calendar "today") so older downloads still surface.
-    queryFn: () => listDropBulkProcesses({ days: 30, limit: 100 }),
+    queryFn: () =>
+      listDropBulkProcesses({ days: 30, limit: 100, include_summary: true }),
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
   })
 
-  const processList = processesQuery.data?.processes ?? []
+  const processList =
+    (consoleSnapshotQuery.data?.recent_processes?.processes?.length
+      ? consoleSnapshotQuery.data.recent_processes.processes
+      : processesQuery.data?.processes) ?? []
 
   // Auto-select only a recent process (48h) — older downloads are History/Inspect.
   useEffect(() => {
@@ -3537,6 +3586,9 @@ export function DropPipelinePageInner() {
           focusedStage={focusedStage}
           onSelectProcess={(id) => setProcess(id)}
           onStageChange={setStage}
+          snapshotProcesses={consoleSnapshotQuery.data?.processes}
+          snapshotPending={consoleSnapshotQuery.isPending}
+          snapshotError={consoleSnapshotQuery.isError}
         />
       ) : null}
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, AsyncIterator
@@ -13,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
 from sse_starlette.sse import EventSourceResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from admin_api.approvals import (
     MATCHING_REVIEW_ACTION,
@@ -196,6 +198,85 @@ class ApprovalRecord(BaseModel):
 
 settings = AdminSettings()
 
+_TIMING_SKIP_PATHS = frozenset({"/healthz", "/readyz"})
+_TIMING_EXACT_PATHS = frozenset({"/me", "/auth/me"})
+_TIMING_PATH_PREFIXES = ("/owner/", "/ops/drop/")
+
+
+def _sanitize_request_path(path: str) -> str:
+    """Replace segments that contain ``@`` so emails never appear in logs."""
+    return "/".join(
+        "[redacted]" if "@" in segment else segment for segment in path.split("/")
+    )
+
+
+def _should_log_request_timing(path: str) -> bool:
+    if path in _TIMING_SKIP_PATHS:
+        return False
+    if path in _TIMING_EXACT_PATHS:
+        return True
+    return path.startswith(_TIMING_PATH_PREFIXES)
+
+
+def _log_http_request(*, method: str, path: str, status_code: int, duration_ms: int) -> None:
+    logger.info(
+        "http_request",
+        extra={
+            "event": "http_request",
+            "method": method,
+            "path": path,
+            "status_code": status_code,
+            "duration_ms": duration_ms,
+        },
+    )
+
+
+class RequestTimingMiddleware:
+    """Log duration_ms for identity and page-load paths. Does not write audit rows.
+
+    Pure ASGI (not BaseHTTPMiddleware) so stacked audit/auth headers stay intact.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = str(scope.get("path") or "")
+        if not _should_log_request_timing(path):
+            await self.app(scope, receive, send)
+            return
+
+        sanitized = _sanitize_request_path(path)
+        method = str(scope.get("method") or "GET")
+        started = time.monotonic()
+        status_code = 500
+
+        async def send_wrapper(message: dict[str, Any]) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = int(message.get("status") or 500)
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except Exception:
+            _log_http_request(
+                method=method,
+                path=sanitized,
+                status_code=500,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            raise
+        _log_http_request(
+            method=method,
+            path=sanitized,
+            status_code=status_code,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -222,6 +303,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(AuditMiddleware)
+app.add_middleware(RequestTimingMiddleware)
 app.include_router(drop_pipeline_router)
 app.include_router(drop_prod_cutover_router)
 app.include_router(ops_health_router)

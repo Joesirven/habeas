@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock
 
 import pytest
@@ -382,6 +383,76 @@ def test_me_alias_matches_auth_me(monkeypatch: pytest.MonkeyPatch) -> None:
     assert me_response.status_code == 200
     assert auth_me_response.status_code == 200
     assert me_response.json() == auth_me_response.json()
+
+
+_STANDARD_LOG_RECORD_ATTRS = frozenset(logging.makeLogRecord({}).__dict__)
+
+
+def _http_request_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    records: list[logging.LogRecord] = []
+    for record in caplog.records:
+        if record.name != "admin_api.main":
+            continue
+        if record.getMessage() == "http_request" or getattr(record, "event", None) == "http_request":
+            records.append(record)
+    return records
+
+
+def _log_record_extras(record: logging.LogRecord) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in record.__dict__.items()
+        if key not in _STANDARD_LOG_RECORD_ATTRS
+    }
+
+
+def test_me_emits_http_request_duration_log(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
+
+    captured: list[dict[str, object]] = []
+
+    def _capture(**kwargs: object) -> None:
+        captured.append(kwargs)
+
+    monkeypatch.setattr(admin_main, "_log_http_request", _capture)
+    with TestClient(app) as client:
+        response = client.get("/me", headers=_signed_headers("ops@example.com"))
+
+    assert response.status_code == 200
+    assert captured, "expected http_request duration log from admin_api.main"
+    record = captured[-1]
+    duration_ms = record["duration_ms"]
+    assert isinstance(duration_ms, int)
+    assert duration_ms >= 0
+    assert record["path"] == "/me"
+    assert record["method"] == "GET"
+    assert record["status_code"] == 200
+
+
+def test_me_http_request_log_excludes_actor_email(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    actor_email = "ops@example.com"
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", actor_email)
+
+    captured: list[dict[str, object]] = []
+
+    def _capture(**kwargs: object) -> None:
+        captured.append(kwargs)
+
+    monkeypatch.setattr(admin_main, "_log_http_request", _capture)
+    with TestClient(app) as client:
+        response = client.get("/me", headers=_signed_headers(actor_email))
+
+    assert response.status_code == 200
+    assert captured, "expected http_request duration log from admin_api.main"
+    for record in captured:
+        extras_blob = " ".join(f"{key}={value}" for key, value in record.items())
+        assert actor_email not in extras_blob
 
 
 def test_resolve_given_name_falls_back_to_email_local_part() -> None:

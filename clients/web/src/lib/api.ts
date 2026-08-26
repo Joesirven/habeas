@@ -226,6 +226,103 @@ export function adminApiAbortSignal(
   return mergeAbortSignals(signal, AbortSignal.timeout(timeoutMs))
 }
 
+export const DPRA_TIMING_PREFIX = 'dpra-timing'
+
+export type DpraTimingEntry = {
+  prefix: 'dpra-timing'
+  kind: 'fetch' | 'query'
+  route: string
+  queryKey?: string
+  url?: string
+  start: string
+  ttfb_ms?: number
+  duration_ms: number
+  status: number
+  abort: boolean
+}
+
+function dpraNowMs(): number {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now()
+}
+
+function dpraTimingRoute(): string {
+  const loc = (globalThis as { location?: { pathname?: unknown } }).location
+  return typeof loc?.pathname === 'string' ? loc.pathname : ''
+}
+
+function pathSegmentContainsAt(segment: string): boolean {
+  if (!segment) return false
+  let decoded = segment
+  try {
+    decoded = decodeURIComponent(segment)
+  } catch {
+    decoded = segment
+  }
+  return decoded.includes('@') || /%40/i.test(segment)
+}
+
+/** Path + query keys only. Drops query values. Redacts path segments that contain `@`. */
+export function sanitizeDpraTimingUrl(path: string): string {
+  let pathname = path
+  let search = ''
+  if (/^https?:\/\//i.test(path)) {
+    try {
+      const parsed = new URL(path)
+      pathname = parsed.pathname
+      search = parsed.search.startsWith('?') ? parsed.search.slice(1) : ''
+    } catch {
+      const q = path.indexOf('?')
+      pathname = q >= 0 ? path.slice(0, q) : path
+      search = q >= 0 ? path.slice(q + 1) : ''
+    }
+  } else {
+    const hash = path.indexOf('#')
+    const withoutHash = hash >= 0 ? path.slice(0, hash) : path
+    const q = withoutHash.indexOf('?')
+    pathname = q >= 0 ? withoutHash.slice(0, q) : withoutHash
+    search = q >= 0 ? withoutHash.slice(q + 1) : ''
+  }
+
+  const redactedPath = pathname
+    .split('/')
+    .map((segment) => (pathSegmentContainsAt(segment) ? '[redacted]' : segment))
+    .join('/')
+
+  if (!search) return redactedPath
+  const keys: string[] = []
+  for (const part of search.split('&')) {
+    if (!part) continue
+    const key = part.split('=', 1)[0]
+    if (key) keys.push(key)
+  }
+  return keys.length > 0 ? `${redactedPath}?${keys.join('&')}` : redactedPath
+}
+
+function isDpraTimingAbort(error: unknown): boolean {
+  if (error == null || typeof error !== 'object') return false
+  const name = 'name' in error ? String(error.name) : ''
+  return name === 'AbortError' || name === 'TimeoutError'
+}
+
+/** Structured timing line. Never pass bodies, headers, Authorization, emails, or vendor ids. */
+export function logDpraTiming(entry: Omit<DpraTimingEntry, 'prefix'> & { prefix?: 'dpra-timing' }): void {
+  const line: DpraTimingEntry = {
+    prefix: DPRA_TIMING_PREFIX,
+    kind: entry.kind,
+    route: entry.route,
+    start: entry.start,
+    duration_ms: entry.duration_ms,
+    status: entry.status,
+    abort: entry.abort,
+  }
+  if (entry.queryKey != null) line.queryKey = entry.queryKey
+  if (entry.url != null) line.url = entry.url
+  if (entry.ttfb_ms != null) line.ttfb_ms = entry.ttfb_ms
+  console.info(line)
+}
+
 export async function fetchAdminApi<T>(path: string, init?: AdminApiFetchInit): Promise<T> {
   await refreshAdminApiUserTokenIfNeeded()
   const { timeoutMs, signal: callerSignal, ...rest } = init ?? {}
@@ -234,39 +331,62 @@ export async function fetchAdminApi<T>(path: string, init?: AdminApiFetchInit): 
     'Content-Type': 'application/json',
   })
 
-  let response: Response
+  const start = new Date().toISOString()
+  const startedAt = dpraNowMs()
+  let ttfbMs: number | undefined
+  let status = 0
+  let abort = false
+
   try {
-    response = await fetch(`${API_BASE}${path}`, {
-      ...rest,
-      signal: adminApiAbortSignal(timeoutMs, callerSignal),
-      headers: {
-        ...headers,
-        ...rest.headers,
-      },
-    })
+    let response: Response
+    try {
+      response = await fetch(`${API_BASE}${path}`, {
+        ...rest,
+        signal: adminApiAbortSignal(timeoutMs, callerSignal),
+        headers: {
+          ...headers,
+          ...rest.headers,
+        },
+      })
+    } finally {
+      ttfbMs = Math.round(dpraNowMs() - startedAt)
+    }
+    status = response.status
+
+    if (!response.ok) {
+      const detail = await response.text()
+      throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
+    }
+
+    // 204 No Content (e.g. DELETE assignment) — no JSON body.
+    if (response.status === 204) {
+      return undefined as T
+    }
+    const text = await response.text()
+    if (!text) {
+      return undefined as T
+    }
+    return JSON.parse(text) as T
   } catch (error) {
+    abort = isDpraTimingAbort(error)
     if (error instanceof DOMException && error.name === 'TimeoutError') {
       throw new Error(
         `Admin API timed out after ${timeoutMs ?? OPS_QUERY_TIMEOUT_MS}ms: ${path}`,
       )
     }
     throw error
+  } finally {
+    logDpraTiming({
+      kind: 'fetch',
+      route: dpraTimingRoute(),
+      url: sanitizeDpraTimingUrl(path),
+      start,
+      ttfb_ms: ttfbMs,
+      duration_ms: Math.round(dpraNowMs() - startedAt),
+      status,
+      abort,
+    })
   }
-
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`Admin API ${response.status}: ${detail || response.statusText}`)
-  }
-
-  // 204 No Content (e.g. DELETE assignment) — no JSON body.
-  if (response.status === 204) {
-    return undefined as T
-  }
-  const text = await response.text()
-  if (!text) {
-    return undefined as T
-  }
-  return JSON.parse(text) as T
 }
 
 export type HealthPayload = {
@@ -968,6 +1088,44 @@ export type BulkProcessSummary = {
   }
   request_rows?: number
   raw_rows?: number
+  /** Lite ledger stages (download/land/promote) — collapsed paint without expand. */
+  stages?: {
+    download?: BulkProcessStageCounts
+    land?: BulkProcessStageCounts
+    promote?: BulkProcessStageCounts
+  }
+}
+
+export type CollapsedPipelineCardFields = {
+  title: string
+  status: string
+  percent: number | null
+  requestRows: number | null
+  currentStage: string | null
+}
+
+/** Date / status / counts for a collapsed bulk row from lite list or snapshot fields. */
+export function collapsedPipelineCardFields(
+  row: BulkProcessSummary,
+): CollapsedPipelineCardFields {
+  let title = row.label?.trim() || '—'
+  if (row.process_at) {
+    const start = new Date(row.process_at)
+    if (!Number.isNaN(start.getTime())) {
+      title = start.toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      })
+    }
+  }
+  const status = row.overall?.status || row.download_status || '—'
+  const percent =
+    typeof row.overall?.percent === 'number' ? row.overall.percent : null
+  const requestRows =
+    typeof row.request_rows === 'number' ? row.request_rows : null
+  const currentStage = row.overall?.current_stage ?? null
+  return { title, status, percent, requestRows, currentStage }
 }
 
 export type BulkProcessStageCounts = {
@@ -3229,6 +3387,7 @@ export function listOwnerVisibleVerticals() {
 export function listOwnerConnectors(verticalId: string) {
   return fetchAdminApi<OwnerConnectorList>(
     `/owner/verticals/${encodeURIComponent(verticalId)}/connectors`,
+    { timeoutMs: OPS_FAST_QUERY_TIMEOUT_MS },
   )
 }
 
