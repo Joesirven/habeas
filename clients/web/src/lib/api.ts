@@ -2744,6 +2744,11 @@ export async function deleteRequestDocument(
   }
 }
 
+/**
+ * Catalog / write `system_id` values.
+ * Axios HQ is `axios_hq`. Retracted `axios_headquarters` is unknown on write
+ * paths (`unknown_system`) — display aliases it; do not send it on create/mode.
+ */
 export type IntegrationSystemId =
   | 'paylocity'
   | 'lever'
@@ -2755,6 +2760,26 @@ export type IntegrationSystemId =
   | 'hr_alumni'
   | 'axios_hq'
   | 'cassandra'
+
+/** Catalog/display system id for Axios HQ. */
+export const AXIOS_HQ_CATALOG_SYSTEM_ID: IntegrationSystemId = 'axios_hq'
+
+/** Retracted worker/legacy slug — not a write `system_id`. */
+export const AXIOS_HQ_RETRACTED_SYSTEM_ID = 'axios_headquarters'
+
+export function isRetractedConnectionSystem(system: string | null | undefined): boolean {
+  return (system ?? '').trim().toLowerCase() === AXIOS_HQ_RETRACTED_SYSTEM_ID
+}
+
+/**
+ * Display/catalog id. Maps retracted Axios HQ slug → `axios_hq`.
+ * Do not use the result as a create/mode write body when the input was retracted.
+ */
+export function catalogDisplaySystemId(system: string | null | undefined): string {
+  const id = (system ?? '').trim().toLowerCase()
+  if (id === AXIOS_HQ_RETRACTED_SYSTEM_ID) return AXIOS_HQ_CATALOG_SYSTEM_ID
+  return id
+}
 
 export type ConnectionDisplayStatus =
   | 'needs_setup'
@@ -2845,6 +2870,7 @@ export type ConnectTestDetailCode =
   | 'alumni_google_sheet_ok'
   | 'contact_us_google_sheet_ok'
   | 'axios_hq_ok'
+  | 'axios_headquarters_ok'
   | 'upload_ok'
   | 'auth_failed'
   | 'lever_unauthorized'
@@ -2885,6 +2911,7 @@ const CONNECT_TEST_SUCCESS_DESCRIPTIONS: Record<string, string> = {
   alumni_google_sheet_ok: 'HR alumni Google Sheet connection was verified successfully.',
   contact_us_google_sheet_ok: 'Contact Us Google Sheet connection was verified successfully.',
   axios_hq_ok: 'Axios HQ upload was validated successfully.',
+  axios_headquarters_ok: 'Axios HQ upload was validated successfully.',
   upload_ok: 'Upload file was validated successfully.',
   stub_ok: 'Connection test completed successfully.',
   ok: 'Connection test completed successfully.',
@@ -2916,11 +2943,26 @@ const CONNECT_TEST_FAILURE_MESSAGES: Record<string, string> = {
   upload_invalid_delimiter: 'The multi-value delimiter is not supported. Choose None, ;, |, or ,.',
 }
 
+/** Human label for a connection system id — Axios HQ for `axios_hq` and retracted alias. */
+export function connectionSystemDisplayLabel(
+  system: string | null | undefined,
+  fallback?: string | null,
+): string {
+  const catalogId = catalogDisplaySystemId(system)
+  if (catalogId === AXIOS_HQ_CATALOG_SYSTEM_ID) return 'Axios HQ'
+  if (catalogId in CONNECT_SYSTEM_LABELS) {
+    return CONNECT_SYSTEM_LABELS[catalogId as IntegrationSystemId]
+  }
+  if (catalogId) return catalogId.replaceAll('_', ' ')
+  const named = (fallback ?? '').trim()
+  return named || 'Unknown'
+}
+
 /** Human label for loading/success copy — prefers system id, falls back to display name. */
 export function connectRedeemSystemLabel(
   preview: Pick<ConnectPreviewPayload, 'system' | 'display_name'>,
 ): string {
-  return CONNECT_SYSTEM_LABELS[preview.system] ?? preview.display_name
+  return connectionSystemDisplayLabel(preview.system, preview.display_name)
 }
 
 /** Owner-safe success toast description from allowlisted redeem `detail`. */
@@ -2948,6 +2990,7 @@ export function listConnections() {
   return fetchAdminApi<{ connections: ConnectionRecord[] }>('/ops/connections')
 }
 
+/** Create a connection. Axios HQ writes use `axios_hq` — `axios_headquarters` is retracted. */
 export function createConnection(body: {
   system: IntegrationSystemId
   display_name: string

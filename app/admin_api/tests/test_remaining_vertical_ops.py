@@ -270,13 +270,84 @@ def test_hash_refresh_enqueue_rejects_mailchimp():
 
 
 @pytest.mark.parametrize(
-    "system", ("auth0", "google_sheets", "cassandra", "axios_hq", "unknown")
+    "system", ("auth0", "google_sheets", "cassandra", "unknown")
 )
 def test_hash_refresh_enqueue_rejects_out_of_scope(system: str):
     with TestClient(_app()) as client:
         response = client.post(f"/ops/verticals/{system}/hash-refresh/enqueue")
 
     assert response.status_code == 404
+
+
+def test_require_remaining_system_aliases_axios_hq():
+    assert remaining_vertical_ops._require_remaining_system("axios_hq") == (
+        "axios_headquarters"
+    )
+    assert remaining_vertical_ops._require_remaining_system("Axios_HQ") == (
+        "axios_headquarters"
+    )
+    assert remaining_vertical_ops._require_remaining_system("axios_headquarters") == (
+        "axios_headquarters"
+    )
+
+
+def test_axios_hq_is_not_a_second_worker_or_table():
+    assert "axios_hq" not in remaining_vertical_ops.REMAINING_VERTICAL_SYSTEMS
+    assert "axios_hq" not in remaining_vertical_ops.ATTEMPTS_TABLE_BY_SYSTEM
+    assert remaining_vertical_ops.REMAINING_VERTICAL_SYSTEM_ALIASES["axios_hq"] == (
+        "axios_headquarters"
+    )
+    assert remaining_vertical_ops._worker_url_for("axios_headquarters") == (
+        remaining_vertical_ops.settings.axios_headquarters_worker_url
+    )
+    assert remaining_vertical_ops.ATTEMPTS_TABLE_BY_SYSTEM["axios_headquarters"] == (
+        AXIOS_HEADQUARTERS_ATTEMPTS_TABLE
+    )
+    assert remaining_vertical_ops._worker_url_for("axios_hq") == (
+        remaining_vertical_ops.settings.axios_headquarters_worker_url
+    )
+
+
+def test_hash_refresh_enqueue_aliases_axios_hq(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_enqueue(conn: Any, *, system: str) -> int:
+        captured["system"] = system
+        return 17
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(
+        "habeas_privacy_core.db.vertical_hash_refresh.enqueue_vertical_hash_refresh",
+        fake_enqueue,
+    )
+
+    with TestClient(_app()) as client:
+        response = client.post("/ops/verticals/axios_hq/hash-refresh/enqueue")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "attempt_id": 17,
+        "system": "axios_headquarters",
+    }
+    assert captured["system"] == "axios_headquarters"
+
+
+def test_hash_refresh_process_aliases_axios_hq_to_headquarters_worker(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        httpx, "AsyncClient", FakeClient(captured, {"processed": False, "reason": "idle"})
+    )
+    monkeypatch.setattr(remaining_vertical_ops, "auth_headers_for", lambda _url: {})
+
+    with TestClient(_app()) as client:
+        response = client.post("/ops/verticals/axios_hq/hash-refresh/process")
+
+    assert response.status_code == 200
+    assert captured["url"] == "http://127.0.0.1:8082/hash-refresh/process"
+    assert captured["timeout"] == remaining_vertical_ops.HASH_REFRESH_PROXY_TIMEOUT
 
 
 def test_enqueue_requires_database(monkeypatch: pytest.MonkeyPatch):
@@ -485,6 +556,36 @@ def test_matching_enqueue_rejects_mailchimp():
     assert response.status_code == 404
 
 
+def test_matching_enqueue_aliases_axios_hq(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_enqueue(conn: Any, keyed: str, request_id: str) -> int:
+        captured["system"] = keyed
+        captured["request_id"] = request_id
+        return 21
+
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(
+        remaining_vertical_ops, "enqueue_remaining_matching", fake_enqueue
+    )
+
+    with TestClient(_app()) as client:
+        response = client.post(
+            "/ops/verticals/axios_hq/matching/enqueue",
+            json=_matching_enqueue_body(),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "attempt_id": 21,
+        "request_id": REQUEST_ID,
+        "step": STEP_MATCHING,
+        "system": "axios_headquarters",
+    }
+    assert captured == {"system": "axios_headquarters", "request_id": REQUEST_ID}
+
+
 def test_matching_enqueue_requires_database(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(remaining_vertical_ops.settings, "database_url", "")
 
@@ -603,6 +704,71 @@ async def test_enqueue_remaining_matching_uses_system_table(
 
 
 @pytest.mark.asyncio
+async def test_enqueue_remaining_matching_aliases_axios_hq_table(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    recorded: list[tuple[str, tuple[Any, ...]]] = []
+
+    class FakeConn:
+        async def fetchval(self, sql: str, *args: Any) -> Any:
+            recorded.append((sql, args))
+            if "INSERT" in sql:
+                return 44
+            return None
+
+    async def present(_conn: Any, _request_id: str) -> object:
+        return object()
+
+    monkeypatch.setattr(remaining_vertical_ops, "get_request", present)
+    attempt_id = await remaining_vertical_ops.enqueue_remaining_matching(
+        FakeConn(),  # type: ignore[arg-type]
+        "axios_hq",
+        REQUEST_ID,
+    )
+
+    assert attempt_id == 44
+    insert_sql = next(sql for sql, _args in recorded if "INSERT" in sql)
+    assert AXIOS_HEADQUARTERS_ATTEMPTS_TABLE in insert_sql
+    assert "axios_hq_attempts" not in insert_sql
+
+
+@pytest.mark.asyncio
+async def test_enqueue_remaining_hash_refresh_aliases_axios_hq(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, Any] = {}
+
+    async def fake_enqueue(conn: Any, *, system: str) -> int:
+        captured["system"] = system
+        return 9
+
+    monkeypatch.setattr(
+        "habeas_privacy_core.db.vertical_hash_refresh.enqueue_vertical_hash_refresh",
+        fake_enqueue,
+    )
+    attempt_id, key = await remaining_vertical_ops.enqueue_remaining_hash_refresh(
+        MagicMock(),
+        system="axios_hq",
+    )
+
+    assert attempt_id == 9
+    assert key == "axios_headquarters"
+    assert captured["system"] == "axios_headquarters"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_remaining_hash_refresh_rejects_cassandra():
+    with pytest.raises(HTTPException) as exc_info:
+        await remaining_vertical_ops.enqueue_remaining_hash_refresh(
+            MagicMock(),
+            system="cassandra",
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "not found"
+
+
+@pytest.mark.asyncio
 async def test_enqueue_remaining_matching_unknown_request_is_404(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -654,6 +820,23 @@ def test_matching_process_rejects_mailchimp(monkeypatch: pytest.MonkeyPatch):
     assert "url" not in captured
 
 
+def test_matching_process_aliases_axios_hq_to_headquarters_worker(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        httpx, "AsyncClient", FakeClient(captured, {"claimed": False})
+    )
+    monkeypatch.setattr(remaining_vertical_ops, "auth_headers_for", lambda _url: {})
+
+    with TestClient(_app()) as client:
+        response = client.post("/ops/verticals/axios_hq/matching/process")
+
+    assert response.status_code == 200
+    assert captured["url"] == "http://127.0.0.1:8082/matching/submit"
+    assert "evil.example" not in captured["url"]
+
+
 def test_matching_process_ignores_client_supplied_url(monkeypatch: pytest.MonkeyPatch):
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
@@ -699,6 +882,63 @@ def test_match_candidates_rejects_mailchimp():
         )
 
     assert response.status_code == 404
+
+
+def test_match_candidates_rejects_cassandra():
+    with TestClient(_app()) as client:
+        response = client.get(
+            f"/requests/{REQUEST_ID}/verticals/cassandra/match-candidates"
+        )
+
+    assert response.status_code == 404
+
+
+def test_match_candidates_aliases_axios_hq(monkeypatch: pytest.MonkeyPatch):
+    _install_candidates_pool(monkeypatch)
+    monkeypatch.setattr(
+        remaining_vertical_ops,
+        "fetch_principal_verticals",
+        AsyncMock(return_value=["communications"]),
+    )
+    monkeypatch.setattr(
+        remaining_vertical_ops,
+        "get_request",
+        AsyncMock(return_value=SimpleNamespace(id=REQUEST_ID)),
+    )
+    snapshot = AsyncMock(
+        return_value={
+            "match_count": 1,
+            "vendor_record_ids": [VENDOR_A],
+        }
+    )
+    monkeypatch.setattr(
+        remaining_vertical_ops, "fetch_vertical_matching_snapshot", snapshot
+    )
+    audits: list[dict[str, Any]] = []
+
+    async def _capture_audit(**kwargs: Any) -> int:
+        audits.append(kwargs)
+        return 1
+
+    monkeypatch.setattr(remaining_vertical_ops, "write_audit", _capture_audit)
+
+    with TestClient(_app()) as client:
+        response = client.get(
+            f"/requests/{REQUEST_ID}/verticals/axios_hq/match-candidates",
+            headers=_owner_headers(),
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["system"] == "axios_headquarters"
+    assert body["source"] == "snapshot"
+    assert body["candidates"] == [{"vendor_record_id": VENDOR_A}]
+    snapshot.assert_awaited()
+    assert snapshot.await_args.kwargs["vertical"] == "axios_headquarters"
+    assert audits[0]["arguments"]["system"] == "axios_headquarters"
+    assert "@" not in str(body)
+    assert EMAIL_HASH not in str(body)
+    assert "email" not in str(audits[0]["arguments"])
 
 
 @pytest.mark.parametrize("system", REMAINING)

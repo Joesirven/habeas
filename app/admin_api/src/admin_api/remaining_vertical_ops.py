@@ -1,11 +1,14 @@
 """Ops proxies for remaining vertical hash refresh and matching.
 
 Allowlisted systems: ``axios_headquarters``, ``paylocity``, ``lever``,
-``hr_alumni``, ``bizdev_contacts``. ``system=mailchimp`` (and any other
-slug, including ``axios_hq``) is 404.
+``hr_alumni``, ``bizdev_contacts``. Catalog ``axios_hq`` aliases to
+``axios_headquarters`` (same worker URL and attempts table — no second
+mart). ``system=mailchimp``, ``cassandra``, and any other slug is 404.
 
 Hash-refresh enqueue inserts a single-flight ``vertical_hash_refresh_attempts``
-row for the path system. Process proxies to ``POST /hash-refresh/process``.
+row for the canonical system. Process proxies to ``POST /hash-refresh/process``.
+Owner path should call ``enqueue_remaining_hash_refresh`` in-process (same
+core ``enqueue_vertical_hash_refresh``) — never a worker URL from the browser.
 
 Matching enqueue inserts a claim-ready attempts row (``step='matching'``).
 Process proxies to ``POST /matching/submit``. Worker URLs are settings-only
@@ -77,6 +80,12 @@ REMAINING_VERTICAL_SYSTEMS = frozenset(
         "bizdev_contacts",
     }
 )
+
+# Web / session catalog id → remaining-ops canonical system. Not a second
+# ConnectionSystem and not a second hashed-raw table.
+REMAINING_VERTICAL_SYSTEM_ALIASES: dict[str, str] = {
+    "axios_hq": "axios_headquarters",
+}
 
 ATTEMPTS_TABLE_BY_SYSTEM: dict[str, str] = {
     "axios_headquarters": AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
@@ -164,25 +173,31 @@ def _parse_request_id(raw: str) -> UUID:
         raise HTTPException(status_code=400, detail="invalid request_id") from exc
 
 
-def _require_remaining_system(system: str) -> str:
+def _canonical_remaining_system(system: str) -> str:
     key = system.strip().lower()
+    return REMAINING_VERTICAL_SYSTEM_ALIASES.get(key, key)
+
+
+def _require_remaining_system(system: str) -> str:
+    key = _canonical_remaining_system(system)
     if key == "mailchimp" or key not in REMAINING_VERTICAL_SYSTEMS:
         raise HTTPException(status_code=404, detail="not found")
     return key
 
 
 def _worker_url_for(system: str) -> str:
-    if system == "axios_headquarters":
+    key = _canonical_remaining_system(system)
+    if key == "axios_headquarters":
         return settings.axios_headquarters_worker_url
-    if system == "paylocity":
+    if key == "paylocity":
         return settings.paylocity_worker_url
-    if system == "lever":
+    if key == "lever":
         return settings.lever_worker_url
     return settings.google_sheets_worker_url
 
 
 def _attempts_table_for(system: str) -> str:
-    return ATTEMPTS_TABLE_BY_SYSTEM[system]
+    return ATTEMPTS_TABLE_BY_SYSTEM[_canonical_remaining_system(system)]
 
 
 def _catalog_verticals_for(system: str) -> set[str]:
@@ -201,6 +216,25 @@ async def _require_remaining_match_access(
     raise HTTPException(status_code=403, detail="vertical access denied")
 
 
+async def enqueue_remaining_hash_refresh(
+    conn: asyncpg.Connection, *, system: str
+) -> tuple[int, str]:
+    """Enqueue hash refresh in-process (no worker HTTP).
+
+    Resolves catalog aliases (``axios_hq`` → ``axios_headquarters``) then
+    calls core ``enqueue_vertical_hash_refresh``. Owner upload / wizard
+    complete should import this helper rather than posting a worker URL.
+    Returns ``(attempt_id, canonical_system)``.
+    """
+    from habeas_privacy_core.db.vertical_hash_refresh import (
+        enqueue_vertical_hash_refresh,
+    )
+
+    key = _require_remaining_system(system)
+    attempt_id = await enqueue_vertical_hash_refresh(conn, system=key)
+    return int(attempt_id), key
+
+
 async def enqueue_remaining_matching(
     conn: asyncpg.Connection, system: str, request_id: str
 ) -> int:
@@ -208,9 +242,11 @@ async def enqueue_remaining_matching(
 
     Columns match the reaper / ``enqueue_matching`` write path:
     ``request_id``, ``step``, ``attempt_number``, ``status``. Status ``pending``
-    is claim-ready for ``claim_next``.
+    is claim-ready for ``claim_next``. Catalog ``axios_hq`` writes the
+    ``axios_headquarters`` attempts table.
     """
-    table = _attempts_table_for(system)
+    key = _require_remaining_system(system)
+    table = _attempts_table_for(key)
     rid = _parse_request_id(request_id)
     record = await get_request(conn, str(rid))
     if record is None:
@@ -379,13 +415,11 @@ async def remaining_hash_refresh_enqueue(
     _principal: SuperAdminPrincipal,
 ):
     """Enqueue vertical hash refresh (single-flight per system)."""
-    from habeas_privacy_core.db.vertical_hash_refresh import enqueue_vertical_hash_refresh
-
-    key = _require_remaining_system(system)
+    _require_remaining_system(system)
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
-        attempt_id = await enqueue_vertical_hash_refresh(conn, system=key)
+        attempt_id, key = await enqueue_remaining_hash_refresh(conn, system=system)
     return {"status": "ok", "attempt_id": attempt_id, "system": key}
 
 
@@ -542,7 +576,9 @@ __all__ = [
     "AXIOS_HEADQUARTERS_ATTEMPTS_TABLE",
     "ATTEMPTS_TABLE_BY_SYSTEM",
     "CANDIDATES_AUDIT_COMMAND",
+    "REMAINING_VERTICAL_SYSTEM_ALIASES",
     "REMAINING_VERTICAL_SYSTEMS",
+    "enqueue_remaining_hash_refresh",
     "enqueue_remaining_matching",
     "router",
 ]

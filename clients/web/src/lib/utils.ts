@@ -5,6 +5,17 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+/**
+ * Dev / Vite labs (`/dev/*`, matching-results-lab, lab chrome).
+ * On unless this is a production build (`import.meta.env.PROD`).
+ * Bake `VITE_ENABLE_LABS=true` to keep labs on Cloud Run admin-web-dev.
+ */
+export function labsEnabled(): boolean {
+  return (
+    import.meta.env.VITE_ENABLE_LABS === 'true' || !import.meta.env.PROD
+  )
+}
+
 /** Matches admin-api `UUID(request_id)` validation for journey/detail routes. */
 const REQUEST_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i

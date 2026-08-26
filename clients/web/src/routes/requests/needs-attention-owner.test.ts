@@ -20,7 +20,7 @@ import {
   requestIdsFromSelectedReviewItems,
   selectedReviewTargets,
 } from '../../lib/inbox-status-lab'
-import { isRequestUuid } from '../../lib/utils'
+import { isRequestUuid, labsEnabled } from '../../lib/utils'
 import {
   matchingLabPeopleSource,
   matchingResultRowToInboxItem,
@@ -1038,6 +1038,9 @@ describe('Auth0 matching scope', () => {
 })
 
 describe('production owner walkthrough — no design-lab chrome', () => {
+  test('labsEnabled is on under bun test / Vite DEV', () => {
+    expect(labsEnabled()).toBe(true)
+  })
   test('inbox pins two-tier matching and does not mount the 10-way toolbar', async () => {
     const source = await Bun.file(
       new URL('./needs-attention.tsx', import.meta.url),
@@ -1055,13 +1058,36 @@ describe('production owner walkthrough — no design-lab chrome', () => {
       new URL('../../components/NavMenu.tsx', import.meta.url),
     ).text()
     expect(source).toContain('showDevLabs')
+    expect(source).toContain('labsEnabled()')
     expect(source).toContain("role === 'super_admin'")
     expect(source).not.toContain(
       "showResultsLab: !legalAdminNav && (showOps || role === 'data_owner' || role === 'data_user')",
     )
-    expect(source).toContain('showResultsLab: showOps && !legalAdminNav && !isOwnerPersona')
+    expect(source).toContain(
+      'showResultsLab: labsOn && showOps && !legalAdminNav && !isOwnerPersona',
+    )
     expect(source).toContain('settingsGroup(showOwnerConnectors, showDevLabs)')
-    expect(source).toContain("const showDevLabs = role === 'super_admin'")
+    expect(source).toContain('const showDevLabs = labsOn && role === \'super_admin\'')
+  })
+
+  test('router registers /dev labs including owner-map-alternatives only when labsEnabled', async () => {
+    const source = await Bun.file(
+      new URL('../../router.tsx', import.meta.url),
+    ).text()
+    expect(source).toContain('labsEnabled()')
+    expect(source).toContain("path: '/dev/owner-map-alternatives'")
+    expect(source).toContain("path: '/owner/connectors'")
+    expect(source).toContain('ownerMapAlternativesLabRoute')
+    const start = source.indexOf('...(labsEnabled()')
+    const labsBlock = source.slice(
+      start,
+      source.indexOf('requestsSlasRoute', start),
+    )
+    expect(labsBlock).toContain('ownerMapAlternativesLabRoute')
+    expect(labsBlock).toContain('devLabsIndexRoute')
+    expect(labsBlock).toContain('matchingResultsLabRoute')
+    expect(labsBlock).not.toContain('ownerConnectorsRoute')
+    expect(labsBlock).not.toContain('inboxStatusLabRoute')
   })
 })
 

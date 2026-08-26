@@ -61,7 +61,17 @@ import {
   isOwnerConnectorsHiddenVertical,
   isSheetsOwnerSystem,
   ownerConnectorDisplayName,
+  liveConnectFailureActions,
   liveConnectReady,
+  liveConnectSuccessFollowOn,
+  LIVE_CONNECT_FAILURE_HINT,
+  LIVE_CONNECT_RETRY_LABEL,
+  LIVE_CONNECT_SETUP_UPLOAD_LABEL,
+  LIVE_PING_NOT_EXTRACT_HINT,
+  liveMappingFollowOnStepId,
+  livePingIsNotMatchingExtract,
+  liveUploadFallbackStepId,
+  mappingFollowOnCopy,
   modeStepSystemHint,
   refreshCadenceFromCadenceOption,
   suggestUploadColumnMapping,
@@ -78,7 +88,9 @@ import {
   wizardProgressPercent,
   type CadenceOptionId,
   type CsvDocument,
+  type LiveConnectUploadFallback,
   type SheetsConnectMethod,
+  type VerticalWizardStep,
 } from '@/lib/owner-connector-ui'
 import { cn } from '@/lib/utils'
 
@@ -135,6 +147,7 @@ function systemsNeedingCadence(connectors: readonly OwnerConnectorSystem[]) {
     (connector) =>
       isSheetsOwnerSystem(connector.system) ||
       allowsUpload(connector.allowed_approaches) ||
+      livePingIsNotMatchingExtract(connector.system) ||
       connector.system === 'google_sheets' ||
       connector.system === 'alumni_google_sheet' ||
       connector.system === 'contact_us_google_sheet',
@@ -149,6 +162,63 @@ function wizardableConnectors(connectors: readonly OwnerConnectorSystem[]) {
       allowsLive(connector.allowed_approaches) ||
       allowsOauth(connector.allowed_approaches),
   )
+}
+
+/** Catalog may omit Upload (Lever until M10). Still expose mapping + CSV in the wizard. */
+function liveUploadOptInFallback(
+  connector: Pick<OwnerConnectorSystem, 'system' | 'allowed_approaches'>,
+): LiveConnectUploadFallback | null {
+  const fromCatalog = liveConnectFailureActions({
+    system: connector.system,
+    allowedApproaches: connector.allowed_approaches,
+  }).setupManualUpload
+  const pingOnly = livePingIsNotMatchingExtract(connector.system)
+  if (!fromCatalog && !pingOnly) return null
+  return {
+    label: LIVE_CONNECT_SETUP_UPLOAD_LABEL,
+    stepId: pingOnly
+      ? liveMappingFollowOnStepId(connector.system)
+      : (fromCatalog?.stepId ?? liveUploadFallbackStepId(connector.system)),
+  }
+}
+
+/**
+ * Variant A: after live-creds, mapping is the single upload+map step for
+ * Lever/Paylocity. Do not also walk howto-upload then a second Upload panel.
+ */
+function ensureLiveUploadOptInSteps(
+  steps: readonly VerticalWizardStep[],
+): VerticalWizardStep[] {
+  const ids = new Set(steps.map((step) => step.id))
+  const next: VerticalWizardStep[] = []
+  for (const step of steps) {
+    next.push(step)
+    const parsed = parseVerticalWizardStepId(step.id)
+    if (!parsed || parsed.kind !== 'live-creds') continue
+    if (!livePingIsNotMatchingExtract(parsed.system)) continue
+    const mappingId = liveMappingFollowOnStepId(parsed.system)
+    if (ids.has(mappingId)) continue
+    next.push({ id: mappingId })
+    ids.add(mappingId)
+  }
+  const pingSystemsWithMapping = new Set<string>()
+  for (const step of next) {
+    const parsed = parseVerticalWizardStepId(step.id)
+    if (
+      parsed &&
+      'system' in parsed &&
+      parsed.kind === 'mapping' &&
+      livePingIsNotMatchingExtract(parsed.system)
+    ) {
+      pingSystemsWithMapping.add(parsed.system)
+    }
+  }
+  return next.filter((step) => {
+    const parsed = parseVerticalWizardStepId(step.id)
+    if (!parsed || !('system' in parsed)) return true
+    if (!pingSystemsWithMapping.has(parsed.system)) return true
+    return parsed.kind !== 'howto-upload' && parsed.kind !== 'upload'
+  })
 }
 
 function cadenceSystemsUseSheetsCards(connectors: readonly OwnerConnectorSystem[]) {
@@ -1431,6 +1501,20 @@ function LiveConnectPanel({
 
   const preview = previewQuery.data
   const systemLabel = connectorTitle(verticalId, connector)
+  const failureActions = liveConnectFailureActions({
+    system: connector.system,
+    allowedApproaches: connector.allowed_approaches,
+  })
+  const successFollowOn = liveConnectSuccessFollowOn({
+    system: connector.system,
+    allowedApproaches: connector.allowed_approaches,
+  })
+  const setupManualUpload = liveUploadOptInFallback(connector)
+  const pingIsNotExtract = livePingIsNotMatchingExtract(connector.system)
+  const showUploadFallback = Boolean(onUseUpload && setupManualUpload)
+  const failHint = showUploadFallback
+    ? LIVE_CONNECT_FAILURE_HINT
+    : failureActions.hint
 
   const [credentials, setCredentials] = useState<Record<string, string>>({})
   const [clientError, setClientError] = useState<string | null>(null)
@@ -1471,7 +1555,10 @@ function LiveConnectPanel({
         setLiveTestOk(true)
         actionToast.success({
           title: 'Connection confirmed',
-          description: connectTestSuccessDescription(data.detail, systemLabel),
+          description:
+            pingIsNotExtract || successFollowOn.nextKind === 'mapping'
+              ? successFollowOn.hint
+              : connectTestSuccessDescription(data.detail, systemLabel),
         })
         return
       }
@@ -1479,7 +1566,7 @@ function LiveConnectPanel({
         title: 'Connection test failed',
         description: connectTestFailureMessage(data.detail),
         action: {
-          label: 'Retry',
+          label: LIVE_CONNECT_RETRY_LABEL,
           onClick: () => setConfirmTestOpen(true),
         },
       })
@@ -1490,7 +1577,7 @@ function LiveConnectPanel({
         title: 'Could not connect',
         description: ownerCredentialErrorMessage(error),
         action: {
-          label: 'Retry',
+          label: LIVE_CONNECT_RETRY_LABEL,
           onClick: () => setConfirmTestOpen(true),
         },
       })
@@ -1507,7 +1594,10 @@ function LiveConnectPanel({
         setLiveTestOk(true)
         actionToast.success({
           title: 'Connection confirmed',
-          description: connectTestSuccessDescription(data.detail, systemLabel),
+          description:
+            pingIsNotExtract || successFollowOn.nextKind === 'mapping'
+              ? successFollowOn.hint
+              : connectTestSuccessDescription(data.detail, systemLabel),
         })
         return
       }
@@ -1515,7 +1605,7 @@ function LiveConnectPanel({
         title: 'Connection test failed',
         description: connectTestFailureMessage(data.detail),
         action: {
-          label: 'Retry',
+          label: LIVE_CONNECT_RETRY_LABEL,
           onClick: () => setConfirmTestOpen(true),
         },
       })
@@ -1526,7 +1616,7 @@ function LiveConnectPanel({
         title: 'Could not connect',
         description: ownerCredentialErrorMessage(error),
         action: {
-          label: 'Retry',
+          label: LIVE_CONNECT_RETRY_LABEL,
           onClick: () => setConfirmTestOpen(true),
         },
       })
@@ -1651,7 +1741,15 @@ function LiveConnectPanel({
           <Badge
             variant={testing ? 'run' : testPassed ? 'ok' : testFailed ? 'fail' : 'wait'}
           >
-            {testing ? 'Testing…' : testPassed ? 'Passed' : testFailed ? 'Failed' : 'Ready to test'}
+            {testing
+              ? 'Testing…'
+              : testPassed
+                ? pingIsNotExtract
+                  ? 'Connected'
+                  : 'Passed'
+                : testFailed
+                  ? 'Failed'
+                  : 'Ready to test'}
           </Badge>
         </div>
         <p className="text-xs text-mute">
@@ -1666,19 +1764,50 @@ function LiveConnectPanel({
         >
           <p className="font-medium">Connection confirmed</p>
           <p className="mt-0.5">
-            {connectTestSuccessDescription(latestTest?.detail, systemLabel)}
+            {pingIsNotExtract || successFollowOn.nextKind === 'mapping'
+              ? successFollowOn.hint
+              : connectTestSuccessDescription(latestTest?.detail, systemLabel)}
           </p>
         </div>
       ) : null}
 
       {testFailed ? (
         <div
-          className="space-y-1 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-900"
+          className="space-y-2 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-900"
           role="alert"
         >
           <p className="font-medium">Connection test failed</p>
-          <p>{testFailureMessage}</p>
-          <p className="text-red-800/80">Fix the values above and test again.</p>
+          {testFailureMessage ? <p>{testFailureMessage}</p> : null}
+          <p className="text-red-800/80">{failHint}</p>
+          <div
+            className={
+              showUploadFallback
+                ? 'grid grid-cols-1 gap-2 sm:grid-cols-2'
+                : 'grid grid-cols-1 gap-2'
+            }
+          >
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="w-full"
+              disabled={!canStartTest}
+              onClick={() => setConfirmTestOpen(true)}
+            >
+              {LIVE_CONNECT_RETRY_LABEL}
+            </Button>
+            {showUploadFallback ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="w-full"
+                onClick={onUseUpload}
+              >
+                {setupManualUpload?.label ?? LIVE_CONNECT_SETUP_UPLOAD_LABEL}
+              </Button>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
@@ -1688,7 +1817,7 @@ function LiveConnectPanel({
         </p>
       ) : null}
 
-      {!testPassed ? (
+      {!testPassed && !testFailed ? (
         <p className="text-xs text-mute">
           Continue stays disabled until the connection test passes.
         </p>
@@ -1698,8 +1827,8 @@ function LiveConnectPanel({
         <Button type="button" size="sm" variant="ghost" onClick={onBack}>
           Back
         </Button>
-        <div className="flex gap-2">
-          {!testPassed ? (
+        <div className="flex flex-wrap justify-end gap-2">
+          {!testPassed && !testFailed ? (
             <Button
               type="button"
               size="sm"
@@ -1707,32 +1836,18 @@ function LiveConnectPanel({
               disabled={!canStartTest}
               onClick={() => setConfirmTestOpen(true)}
             >
-              {useStoredRetest
-                ? testFailed
-                  ? 'Retest stored credentials'
-                  : 'Test stored credentials'
-                : testFailed
-                  ? 'Test again'
-                  : 'Test connection'}
+              {useStoredRetest ? 'Test stored credentials' : 'Test connection'}
             </Button>
           ) : null}
-          <Button type="button" size="sm" disabled={!testPassed} onClick={onContinue}>
-            Continue
-          </Button>
+          {testPassed ? (
+            <Button type="button" size="sm" onClick={onContinue}>
+              {successFollowOn.nextKind === 'mapping' || pingIsNotExtract
+                ? 'Continue to mapping'
+                : 'Continue'}
+            </Button>
+          ) : null}
         </div>
       </div>
-      {onUseUpload ? (
-        <p className="text-xs text-mute">
-          Live test failed or the vendor is unavailable?{' '}
-          <button
-            type="button"
-            className="font-medium text-habeas-navy underline-offset-2 hover:underline"
-            onClick={onUseUpload}
-          >
-            Set up a CSV upload instead
-          </button>
-        </p>
-      ) : null}
 
       <ConfirmActionDialog
         open={confirmTestOpen}
@@ -1924,9 +2039,8 @@ function UploadConnectPanel({
         {connectorTitle(verticalId, connector)} · Upload CSV
       </h4>
       <p className="text-xs text-mute">
-        Upload your export as-is. Email alone or phone alone is enough. After upload, map columns
-        if the headers do not match. Rows that fail the selected email or phone format stay in this
-        step so you can clean them and resubmit.
+        {SYSTEM_COPY[connector.system]?.uploadHowto ??
+          'Upload your export as-is. Email alone or phone alone is enough. After upload, map columns if the headers do not match. Rows that fail the selected email or phone format stay in this step so you can clean them and resubmit.'}
       </p>
       <div className="flex flex-wrap gap-1.5">
         <Button
@@ -2229,6 +2343,12 @@ function CadenceStepPanel({
           Applies to upload and sheet sources in this vertical:{' '}
           {cadenceSystems.map((connector) => connectorTitle(verticalId, connector)).join(', ')}.
         </p>
+        {cadenceSystems.some((connector) => connector.system === 'axios_hq') ? (
+          <p className="mt-1 text-xs text-mute">
+            Axios HQ is upload-every-batch. After each upload, map identifier columns if the
+            headers differ. Email or phone is enough.
+          </p>
+        ) : null}
       </div>
 
       {sheetsCards ? (
@@ -2336,6 +2456,9 @@ function ConfirmStepPanel({
 }) {
   const cadenceSystems = systemsNeedingCadence(connectors)
   const liveSystems = connectors.filter((connector) => allowsLive(connector.allowed_approaches))
+  const pingOnlySystems = connectors.filter((connector) =>
+    livePingIsNotMatchingExtract(connector.system),
+  )
 
   return (
     <div className="space-y-3">
@@ -2383,6 +2506,13 @@ function ConfirmStepPanel({
         </p>
       ) : null}
 
+      {pingOnlySystems.length ? (
+        <p className="rounded-md border border-line bg-white px-3 py-2 text-xs text-ink-soft">
+          {LIVE_PING_NOT_EXTRACT_HINT} Applies to{' '}
+          {pingOnlySystems.map((connector) => connectorTitle(verticalId, connector)).join(', ')}.
+        </p>
+      ) : null}
+
       <div className="flex flex-wrap justify-between gap-2">
         <Button type="button" size="sm" variant="ghost" onClick={onBack}>
           Back
@@ -2415,14 +2545,16 @@ function VerticalWizard({
 
   const steps = useMemo(
     () =>
-      buildVerticalWizardSteps({
-        systems: list.connectors.map((connector) => ({
-          system: connector.system,
-          allowedApproaches: connector.allowed_approaches,
-          displayLabel: connectorTitle(verticalId, connector),
-        })),
-        viewOnly: list.view_only,
-      }),
+      ensureLiveUploadOptInSteps(
+        buildVerticalWizardSteps({
+          systems: list.connectors.map((connector) => ({
+            system: connector.system,
+            allowedApproaches: connector.allowed_approaches,
+            displayLabel: connectorTitle(verticalId, connector),
+          })),
+          viewOnly: list.view_only,
+        }),
+      ),
     [list.connectors, list.view_only],
   )
 
@@ -2599,11 +2731,74 @@ function VerticalWizard({
       await ensureMode(system, mode)
       goNext()
     } catch (error) {
+      if (mode === 'upload') {
+        actionToast.warning({
+          title: LIVE_CONNECT_SETUP_UPLOAD_LABEL,
+          description: actionToast.safeErrorMessage(
+            error,
+            'You can still map a CSV in this wizard until Jose enables Upload in the catalog.',
+          ),
+        })
+        goNext()
+        return
+      }
       actionToast.error({
         title: 'Could not save mode',
         description: actionToast.safeErrorMessage(error, 'Try again.'),
       })
     }
+  }
+
+  async function handleUseUpload(system: string, stepId: string) {
+    try {
+      await ensureMode(system, 'upload')
+    } catch (error) {
+      actionToast.warning({
+        title: LIVE_CONNECT_SETUP_UPLOAD_LABEL,
+        description: actionToast.safeErrorMessage(
+          error,
+          'You can still map a CSV in this wizard until Jose enables Upload in the catalog.',
+        ),
+      })
+    }
+    const pingOnly = livePingIsNotMatchingExtract(system)
+    const candidates = pingOnly
+      ? [
+          liveMappingFollowOnStepId(system),
+          stepId,
+          liveUploadFallbackStepId(system),
+          `${system}-upload`,
+        ]
+      : [
+          stepId,
+          liveUploadFallbackStepId(system),
+          liveMappingFollowOnStepId(system),
+          `${system}-upload`,
+        ]
+    for (const candidate of candidates) {
+      if (verticalWizardStepIndex(steps, candidate) >= 0) {
+        setCurrentStepId(candidate)
+        return
+      }
+    }
+  }
+
+  function handleLiveContinue(connector: OwnerConnectorSystem) {
+    const followOn = liveConnectSuccessFollowOn({
+      system: connector.system,
+      allowedApproaches: connector.allowed_approaches,
+    })
+    const mappingId = liveMappingFollowOnStepId(connector.system)
+    const preferred =
+      livePingIsNotMatchingExtract(connector.system) &&
+      verticalWizardStepIndex(steps, mappingId) >= 0
+        ? mappingId
+        : followOn.nextStepId
+    if (preferred && verticalWizardStepIndex(steps, preferred) >= 0) {
+      setCurrentStepId(preferred)
+      return
+    }
+    goNext()
   }
 
   function handleCadenceContinue() {
@@ -2642,6 +2837,20 @@ function VerticalWizard({
 
   const connector =
     'system' in parsedStep ? connectorBySystem[parsedStep.system] : undefined
+  const isSheetsConnector = Boolean(
+    connector && isSheetsOwnerSystem(connector.system),
+  )
+  const sheetsMappingStep =
+    isSheetsConnector &&
+    (parsedStep.kind === 'mapping-clean' ||
+      parsedStep.kind === 'clean' ||
+      parsedStep.kind === 'mapping')
+  const liveFollowOnMapping =
+    parsedStep.kind === 'mapping' && Boolean(connector) && !isSheetsConnector
+  const mappingCopy =
+    liveFollowOnMapping && connector
+      ? mappingFollowOnCopy(connectorTitle(verticalId, connector))
+      : null
 
   return (
     <div className="mt-3 rounded-md border border-line bg-canvas p-3 sm:p-4">
@@ -2689,8 +2898,7 @@ function VerticalWizard({
         />
       ) : null}
 
-      {(parsedStep.kind === 'mapping-clean' || parsedStep.kind === 'mapping' || parsedStep.kind === 'clean') &&
-      connector ? (
+      {sheetsMappingStep && connector ? (
         <SheetsMappingCleanPanel
           verticalId={verticalId}
           connector={connector}
@@ -2703,6 +2911,30 @@ function VerticalWizard({
           onContinue={goNext}
           invalidate={invalidate}
         />
+      ) : null}
+
+      {liveFollowOnMapping && connector && mappingCopy ? (
+        <div className="space-y-3">
+          <div>
+            <h4 className="text-sm font-medium text-ink">{mappingCopy.title}</h4>
+            <p className="mt-1 text-xs text-mute">{mappingCopy.intro}</p>
+          </div>
+          <UploadConnectPanel
+            verticalId={verticalId}
+            connector={connector}
+            delimiterKey={delimiterKeys[connector.system] ?? 'none'}
+            onDelimiterChange={(key) =>
+              setDelimiterKeys((current) => ({ ...current, [connector.system]: key }))
+            }
+            uploadOk={uploadOkBySystem[connector.system] === true}
+            onUploadOkChange={(ok) =>
+              setUploadOkBySystem((current) => ({ ...current, [connector.system]: ok }))
+            }
+            onBack={goBack}
+            onContinue={goNext}
+            invalidate={invalidate}
+          />
+        </div>
       ) : null}
 
       {parsedStep.kind === 'upload' && connector ? (
@@ -2747,12 +2979,14 @@ function VerticalWizard({
           connector={connector}
           invalidate={invalidate}
           onBack={goBack}
-          onContinue={goNext}
-          onUseUpload={
-            allowsUpload(connector.allowed_approaches)
-              ? () => setCurrentStepId(`${connector.system}-howto-upload`)
-              : undefined
-          }
+          onContinue={() => handleLiveContinue(connector)}
+          onUseUpload={() => {
+            const fallback = liveUploadOptInFallback(connector)
+            void handleUseUpload(
+              connector.system,
+              fallback?.stepId ?? liveUploadFallbackStepId(connector.system),
+            )
+          }}
         />
       ) : null}
 

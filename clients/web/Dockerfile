@@ -20,6 +20,7 @@ ENV VITE_ADMIN_API_URL=$VITE_ADMIN_API_URL
 # Public GIS / IAP OAuth client. Required when VITE_ADMIN_API_URL is set.
 ARG VITE_GOOGLE_CLIENT_ID=
 ENV VITE_GOOGLE_CLIENT_ID=$VITE_GOOGLE_CLIENT_ID
+
 # Labs are DEV-only. Default off so unlabeled / prod builds never bake /dev/*.
 ARG VITE_ENABLE_LABS=
 ENV VITE_ENABLE_LABS=$VITE_ENABLE_LABS

@@ -12,9 +12,11 @@ succeeded attempts stay in the append-only ledger and are ignored by the
 dispatcher because readiness is measured from the newest kickoff decision.
 
 After kickoff, assigned SaaS owners may PATCH owner-status (U17 · KD36 / KD37)
-for a live vertical only — Axios HQ / communications use the same live-only
-gate as kickoff HTTP. Data stays automatic — that path returns 422. Attempt
-rows for SaaS use
+for a live vertical only — Axios HQ (``axios_hq``), Lever, and Paylocity share
+the same live-only gate as kickoff HTTP (write keys ``communications`` /
+``people_hr``). The retracted worker slug ``axios_headquarters`` is unknown.
+Cassandra is suppress-only — not a matching kickoff vertical. Data stays
+automatic — that path returns 422. Attempt rows for SaaS use
 ``step=interim_upload`` plus ``audit_payload.vertical`` so the Data dispatcher
 does not treat owner completion as a Data suppression/reproduction success.
 
@@ -102,6 +104,19 @@ SAAS_CATALOG_VERTICALS = frozenset(
 )
 DATA_AUTOMATIC_VERTICALS = frozenset({VERTICAL_DATA, "cassandra"})
 
+# Wave M write keys beyond ``LIVE_VERTICALS`` (data + auth0). Cassandra is
+# suppress-only and must never join this set. Sheets / BizDev stay frozen.
+_WAVE_M_LIVE_WRITE_KEYS = frozenset({VERTICAL_COMMUNICATIONS, VERTICAL_PEOPLE_HR})
+# Session/web aliases → catalog write key. Do not include ``axios_headquarters``
+# (unknown) or ``hr_alumni`` / ``bizdev_contacts`` (Sheets not this wave).
+_KICKOFF_LIVE_ALIASES: dict[str, str] = {
+    "axios_hq": VERTICAL_COMMUNICATIONS,
+    "lever": VERTICAL_PEOPLE_HR,
+    "paylocity": VERTICAL_PEOPLE_HR,
+}
+_UNKNOWN_KICKOFF_VERTICALS = frozenset({"axios_headquarters"})
+_NON_MATCHING_KICKOFF_VERTICALS = frozenset({"cassandra"})
+
 
 class FulfillmentKickoffSettings(CoreSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -184,13 +199,39 @@ def _require_request_uuid(request_id: str) -> None:
         raise HTTPException(status_code=400, detail="invalid request_id") from exc
 
 
+def _kickoff_live_write_keys() -> frozenset[str]:
+    """Live kickoff write keys: ``LIVE_VERTICALS`` plus communications / people_hr."""
+    return frozenset(LIVE_VERTICALS) | _WAVE_M_LIVE_WRITE_KEYS
+
+
 def _require_live_vertical(vertical: str) -> str:
+    """Return the live write key, or 400 unknown / not-live.
+
+    Accepts ``communications`` / ``people_hr`` and session aliases ``axios_hq``,
+    ``lever``, ``paylocity``. ``axios_headquarters`` stays unknown. Cassandra
+    is never a matching kickoff vertical.
+    """
     vertical_norm = normalize_vertical(vertical)
-    if vertical_norm in LIVE_VERTICALS:
-        return vertical_norm
+    if vertical_norm in _UNKNOWN_KICKOFF_VERTICALS:
+        raise HTTPException(
+            status_code=400, detail=f"unknown vertical {vertical_norm!r}"
+        )
+    if (
+        vertical_norm in _NON_MATCHING_KICKOFF_VERTICALS
+        or _KICKOFF_LIVE_ALIASES.get(vertical_norm) in _NON_MATCHING_KICKOFF_VERTICALS
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"vertical {vertical_norm!r} is not live yet — no fulfillment kickoff"
+            ),
+        )
+    resolved = _KICKOFF_LIVE_ALIASES.get(vertical_norm, vertical_norm)
+    if resolved in _kickoff_live_write_keys():
+        return resolved
     detail = (
         f"vertical {vertical_norm!r} is not live yet — no fulfillment kickoff"
-        if vertical_norm in COMING_SOON_VERTICALS
+        if vertical_norm in COMING_SOON_VERTICALS or resolved in COMING_SOON_VERTICALS
         else f"unknown vertical {vertical_norm!r}"
     )
     raise HTTPException(status_code=400, detail=detail)
@@ -514,17 +555,25 @@ async def post_fulfillment_reopen(
 def _catalog_vertical_for_owner_path(vertical: str) -> tuple[str, str]:
     """Return ``(path_vertical, catalog_vertical)`` for a SaaS owner-status path.
 
-    Catalog ids (``communications``) and bound systems (``axios_hq``) are both
-    accepted for mapping. Writes still require a live vertical — Data /
-    Cassandra are automatic and rejected with 422.
+    Catalog ids (``communications``) and session aliases (``axios_hq``,
+    ``lever``, ``paylocity``) are accepted. The retracted worker slug
+    ``axios_headquarters`` is unknown. Writes still require a live vertical —
+    Data / Cassandra are automatic and rejected with 422.
     """
     path_vertical = normalize_vertical(vertical)
     if not path_vertical:
         raise HTTPException(status_code=400, detail="invalid vertical")
+    if path_vertical in _UNKNOWN_KICKOFF_VERTICALS:
+        raise HTTPException(
+            status_code=400, detail=f"unknown vertical {path_vertical!r}"
+        )
     if path_vertical in DATA_AUTOMATIC_VERTICALS:
         raise HTTPException(status_code=422, detail="data_vertical_automatic")
     if path_vertical in SAAS_CATALOG_VERTICALS:
         return path_vertical, path_vertical
+    aliased = _KICKOFF_LIVE_ALIASES.get(path_vertical)
+    if aliased is not None and aliased in SAAS_CATALOG_VERTICALS:
+        return path_vertical, aliased
     bindings = get_bindings_for_system(path_vertical)
     if bindings:
         catalog_id = bindings[0].vertical_id
@@ -535,25 +584,44 @@ def _catalog_vertical_for_owner_path(vertical: str) -> tuple[str, str]:
     raise HTTPException(status_code=400, detail=f"unknown vertical {path_vertical!r}")
 
 
+def _path_is_live_owner_status(path_vertical: str) -> bool:
+    """True when this owner-status path is a live write key or Wave M alias.
+
+    Bound Sheets systems (``hr_alumni``) must not inherit ``people_hr`` liveness.
+    Auth0's catalog id ``tech`` stays live with the ``auth0`` write key.
+    """
+    live_keys = _kickoff_live_write_keys()
+    if path_vertical in live_keys:
+        return True
+    if path_vertical == VERTICAL_TECH and "auth0" in live_keys:
+        return True
+    aliased = _KICKOFF_LIVE_ALIASES.get(path_vertical)
+    return aliased is not None and aliased in live_keys
+
+
 def _require_live_owner_status_vertical(
-    path_vertical: str, catalog_vertical: str
+    path_vertical: str, _catalog_vertical: str
 ) -> None:
-    """Same live-only gate as kickoff — Axios HQ / communications cannot write."""
-    candidates = {path_vertical, catalog_vertical}
-    candidates.update(
-        binding.system for binding in get_bindings_for_vertical(catalog_vertical)
-    )
-    if any(candidate in LIVE_VERTICALS for candidate in candidates):
+    """Same live-only gate as kickoff — Axios HQ / Lever / Paylocity may write.
+
+    Bound Sheets systems must not inherit ``people_hr`` liveness. Reject on the
+    path slug — do not re-run kickoff resolve against the catalog write key.
+    """
+    if _path_is_live_owner_status(path_vertical):
         return
-    shown = next(
-        (
-            candidate
-            for candidate in (path_vertical, catalog_vertical, *sorted(candidates))
-            if candidate in COMING_SOON_VERTICALS
-        ),
-        path_vertical,
+    if path_vertical in COMING_SOON_VERTICALS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"vertical {path_vertical!r} is not live yet — no fulfillment kickoff"
+            ),
+        )
+    # catalog_vertical is the assignment key; it must not promote a frozen
+    # bound system (hr_alumni → people_hr) into a live owner-status write.
+    raise HTTPException(
+        status_code=400,
+        detail=f"unknown vertical {path_vertical!r}",
     )
-    _require_live_vertical(shown)
 
 
 async def _saas_kickoff_approved(

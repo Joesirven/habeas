@@ -9,6 +9,27 @@ const LABS = [
     to: '/dev/token-resource-server',
     label: 'Token resource server (Architecture B)',
   },
+  {
+    to: '/dev/owner-map-fallback',
+    label: 'Owner map / live-fail fallback',
+  },
+  {
+    to: '/dev/owner-map-alternatives',
+    label: 'Owner map alternatives (8 variants)',
+  },
+] as const
+
+const OWNER_WIZARD_LINKS = [
+  {
+    vertical: 'people_hr',
+    label: 'People/HR wizard (Lever / Paylocity)',
+    note: 'Live fail → Retry connection or Set up manual upload, then map columns. Live ping is not candidate matching.',
+  },
+  {
+    vertical: 'communications',
+    label: 'Communications wizard (Axios HQ)',
+    note: 'Upload-every-batch. Map identifier columns if headers differ — email or phone is enough.',
+  },
 ] as const
 
 export function DevLabsIndexPage() {
@@ -37,6 +58,33 @@ export function DevLabsIndexPage() {
         admin-web only). Current prod web is not on B — revision 00023 is nginx /api,
         not GIS. The comms meeting used snapshot API + web 00023, not B.
       </p>
+      <p className="text-xs text-slate-500">
+        <span className="font-mono">/dev/owner-map-fallback</span> still redirects to the
+        owner wizard. Use{' '}
+        <span className="font-mono">/dev/owner-map-alternatives</span> for the eight-variant
+        switcher (default A). Cassandra has no mapping or hash; it is an infra card on{' '}
+        <Link className="underline underline-offset-2" to="/ops/connections">
+          /ops/connections
+        </Link>
+        .
+      </p>
+      <ul className="space-y-3 text-sm">
+        {OWNER_WIZARD_LINKS.map((lab) => (
+          <li key={lab.vertical}>
+            <Link
+              className="underline underline-offset-2"
+              to="/owner/connectors"
+              search={{ vertical: lab.vertical }}
+            >
+              {lab.label}
+            </Link>
+            <span className="ml-2 font-mono text-xs text-slate-500">
+              /owner/connectors?vertical={lab.vertical}
+            </span>
+            <p className="mt-0.5 text-xs text-slate-500">{lab.note}</p>
+          </li>
+        ))}
+      </ul>
     </section>
   )
 }

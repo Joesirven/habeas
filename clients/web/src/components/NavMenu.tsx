@@ -12,6 +12,7 @@ import {
 } from '@/lib/api'
 
 import { inboxPendingWorkUnitCount } from '@/lib/inbox-batch-status'
+import { labsEnabled } from '@/lib/utils'
 
 import { useQuery } from '@tanstack/react-query'
 import { Link, useRouter, useRouterState } from '@tanstack/react-router'
@@ -49,16 +50,25 @@ type NavGroup = {
 }
 
 /** Super-admin DROP ops — Pipeline umbrella; legal/admin keep Home · Requests ▾. */
-const PIPELINE_GROUP: NavGroup = {
-  label: 'Pipeline',
-  to: '/ops/drop-pipeline',
-  children: [
+function pipelineGroup(showLabs: boolean): NavGroup {
+  const children: NavChild[] = [
     { label: 'Workers', to: '/ops/workers' },
     { label: 'Settings', to: '/ops/workers/settings' },
     { label: 'Runs', to: '/ops/runs' },
     { label: 'Connections', to: '/ops/connections' },
-    { label: 'DROP prod cutover', to: '/dev/drop-prod-cutover', temp: true },
-  ],
+  ]
+  if (showLabs) {
+    children.push({
+      label: 'DROP prod cutover',
+      to: '/dev/drop-prod-cutover',
+      temp: true,
+    })
+  }
+  return {
+    label: 'Pipeline',
+    to: '/ops/drop-pipeline',
+    children,
+  }
 }
 
 function requestsGroup(opts: {
@@ -416,7 +426,8 @@ export function NavMenu() {
   const isOwnerPersona = role === 'data_owner' || role === 'data_user'
   const showOwnerConnectors =
     isOwnerPersona || role === 'admin' || role === 'super_admin'
-  const showDevLabs = role === 'super_admin'
+  const labsOn = labsEnabled()
+  const showDevLabs = labsOn && role === 'super_admin'
   const homeLabel = 'Home'
 
   return (
@@ -424,11 +435,15 @@ export function NavMenu() {
       className="flex flex-wrap items-center justify-end gap-x-5 gap-y-2 text-[0.8125rem]"
       aria-busy={isLoading}
     >
-      {showOps ? <NavDropdown group={PIPELINE_GROUP} /> : <NavLink to="/" label={homeLabel} exact />}
+      {showOps ? (
+        <NavDropdown group={pipelineGroup(labsOn)} />
+      ) : (
+        <NavLink to="/" label={homeLabel} exact />
+      )}
       <NavDropdown
         group={requestsGroup({
           legalAdmin: legalAdminNav,
-          showResultsLab: showOps && !legalAdminNav && !isOwnerPersona,
+          showResultsLab: labsOn && showOps && !legalAdminNav && !isOwnerPersona,
           inboxCount,
         })}
       />

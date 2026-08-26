@@ -54,7 +54,7 @@ Plan: [`docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md`](../.
 | List | `GET /requests/{request_id}/dispositions` |
 | Upsert | `PUT /requests/{request_id}/dispositions/{vertical}` (`status` 3/4/5, `dwids`, `vendor_record_ids`, `early_advance`) |
 
-Live verticals are `data` and `auth0`. Axios HQ (`axios_hq`), Lever, Paylocity, and Cassandra are catalog-only and rejected on write. Mailchimp is retired. Status 3/4 require a selection (`dwids` for `data`, defaulting to the matching result; `vendor_record_ids` for `auth0`); status 5 requires none. Matching promote upserts the `data` disposition and keeps `drop_raw_requests.response_status` in sync. Selected ids reach authorized callers only — audit records counts.
+Wave M live write keys are `data`, `auth0`, `communications`, and `people_hr`. Catalog systems Axios HQ (`axios_hq`), Lever, and Paylocity are treated live for write-gates (aliases → `communications` / `people_hr`) — not extra live write keys. Retracted slug `axios_headquarters` is unknown on disposition/kickoff writes. Cassandra and BizDev stay catalog-only and rejected on write. Mailchimp is retired. Cassandra is suppress-only — no matching, hash-refresh, or dbt. Status 3/4 require a selection (`dwids` for `data`, defaulting to the matching result; `vendor_record_ids` for Auth0 / Communications / People/HR); status 5 requires none. Matching promote upserts the `data` disposition and keeps `drop_raw_requests.response_status` in sync. Selected ids reach authorized callers only — audit records counts.
 
 ## Auth0 vertical
 
@@ -84,11 +84,24 @@ Disposition body may include `vendor_record_ids`. Status 3/4 require ≥1 vendor
 
 Numbered dev path: (1) hash-refresh enqueue / process, (2) DROP dispatch / ensure-drain on matching-dev, (3) verify `request_vertical_matching`, (4) GET candidates + PUT disposition. See [`app/matching/README.md`](../matching/README.md) § Auth0 vertical.
 
-Remaining-ops routes `/ops/verticals/axios_headquarters/*` (and paylocity / lever /
-sheets) exist on this tree. First Cloud Run for those workers is Jose-gated. Do not
-create `app/axios_headquarters` here — that worker lives in another checkout. Worker
-URLs are settings-only; do not invent `*.run.app` hosts.
+## Remaining verticals (Wave M)
 
+Matching runs **after a mapped upload** (owner CSV + `column_mapping` → `gcs_uri` hash extract → `{system}_hashed_raw` → dbt mart → remaining matching enqueue). Live connection fail: **Retry connection** or **Set up manual upload**. Do not treat a successful live ping as ready-to-match.
+
+Display **Axios HQ**. Remaining-ops aliases `axios_hq` → worker slug `axios_headquarters`. Retracted slug `axios_headquarters` is unknown on disposition/kickoff writes — not a second catalog system. Do not invent `axios_hashed_raw` (table stays `axios_headquarters_hashed_raw`).
+
+Cassandra is **suppress-only** (Data-vertical DWID). Not on remaining-ops (404). No matching, hash-refresh, dbt, or mapping wizard. Prod worker stays stub / do-not-write until Jose.
+
+Do **not** invent vendor APIs: Axios HQ is upload-every-batch (no HTTP); Lever S01 **no-go** (`GET /v1/users` is staff, not candidates); Paylocity S02 **no-go** (SFTP `listdir` is not a file schema). Memos: [`tmp/lever-email-extract-research.md`](../../tmp/lever-email-extract-research.md), [`tmp/paylocity-email-extract-research.md`](../../tmp/paylocity-email-extract-research.md). matching-dev stays DROP-only — remaining-vertical matching does not go through matching-dev.
+
+| Surface | Endpoints | Role |
+|---------|-----------|------|
+| Hash refresh | `POST /ops/verticals/{system}/hash-refresh/enqueue`, `POST .../process` | `super_admin` |
+| Matching enqueue / process | `POST /ops/verticals/{system}/matching/enqueue`, `POST .../process` | `super_admin` |
+| Match candidates | `GET /requests/{request_id}/verticals/{system}/match-candidates` | `data_owner`, `admin`, `legal`, `super_admin` |
+| Lab probe | `GET .../match-candidates/status` | same |
+
+Allowlisted `{system}`: `axios_headquarters` (alias `axios_hq`), `paylocity`, `lever`, `hr_alumni`, `bizdev_contacts`. Sheets / `bizdev` stay not live for journey write-gates. Worker URLs are settings-only; do not invent `*.run.app` hosts.
 
 ## Local
 

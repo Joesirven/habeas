@@ -1,14 +1,15 @@
-"""Hash extract from connection upload — hashed rows only, no PII in logs."""
+"""Hash extract from mapped Lever upload — hashed rows only, no PII in logs."""
 
 from __future__ import annotations
 
+import inspect
 import logging
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from habeas_privacy_core.vertical_hash import HashedVendorRecord, email_hash_from_raw
-from paylocity.hash_extract import (
+from lever.hash_extract import (
     DEFAULT_BQ_TABLE,
     SYSTEM,
     HashExtractError,
@@ -19,7 +20,7 @@ RAW_EMAIL = "Anna.Smith@Domain.com"
 RAW_EMAIL_2 = "danielle.johnson12@example.com"
 HASH_1 = "hashed-one"
 HASH_2 = "hashed-two"
-GCS_URI = "gs://uploads/connections/paylocity/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/upload.csv"
+GCS_URI = "gs://uploads/connections/lever/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/upload.csv"
 
 
 def _hasher_map(mapping: dict[str, str | None]):
@@ -80,6 +81,18 @@ def _assert_error_has_no_pii(exc: BaseException, *tokens: str) -> None:
         assert token.lower() not in blob.lower()
 
 
+def test_hash_extract_does_not_call_lever_rest():
+    """S01: staff GET /v1/users is not a candidate extract."""
+    import lever.hash_extract as module
+
+    source = inspect.getsource(module)
+    assert "api.lever.co" not in source
+    assert "/v1/users" not in source
+    assert "/v1/opportunities" not in source
+    assert "httpx" not in source
+    assert "requests" not in source
+
+
 @pytest.mark.asyncio
 async def test_run_hash_extract_writes_hashed_rows_not_raw_email():
     content = _csv_bytes(
@@ -102,14 +115,14 @@ async def test_run_hash_extract_writes_hashed_rows_not_raw_email():
     assert hasher.calls == [RAW_EMAIL, RAW_EMAIL_2]
     assert reader.last == (
         "uploads",
-        "connections/paylocity/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/upload.csv",
+        "connections/lever/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/upload.csv",
     )
     assert writer.captured["table_id"] == DEFAULT_BQ_TABLE
     records = writer.captured["records"]
     payloads = _record_payloads(records)
     assert [row["email_hash"] for row in payloads] == [HASH_1, HASH_2]
     assert [row["vendor_record_id"] for row in payloads] == ["E-1", "E-2"]
-    assert all(row["system"] == SYSTEM == "paylocity" for row in payloads)
+    assert all(row["system"] == SYSTEM == "lever" for row in payloads)
     _assert_no_raw_email(records, RAW_EMAIL, RAW_EMAIL_2)
 
 
@@ -127,6 +140,51 @@ async def test_run_hash_extract_uses_connection_metadata_gcs_uri():
 
     assert rows == 1
     assert writer.captured["records"][0].vendor_record_id == "E-9"
+
+
+@pytest.mark.asyncio
+async def test_run_hash_extract_applies_stored_column_mapping():
+    """Mapped non-alias headers (Wave M) — do not invent Lever column names."""
+    content = _csv_bytes(
+        "Work Email Address,Candidate Number",
+        f"{RAW_EMAIL},OPP-41",
+    )
+    writer = _writer_capture()
+
+    rows = await run_hash_extract(
+        gcs_uri=GCS_URI,
+        metadata={
+            "column_mapping": {
+                "email": "Work Email Address",
+                "employee_id": "Candidate Number",
+            }
+        },
+        email_hash_fn=_hasher_map({RAW_EMAIL: HASH_1}),
+        write_hashed_raw_fn=writer,
+        read_object_fn=_read_bytes(content),
+    )
+
+    assert rows == 1
+    record = writer.captured["records"][0]
+    assert record.email_hash == HASH_1
+    assert record.vendor_record_id == "OPP-41"
+    _assert_no_raw_email([record], RAW_EMAIL)
+
+
+@pytest.mark.asyncio
+async def test_run_hash_extract_uses_existing_email_header_aliases():
+    content = _csv_bytes("email_address,emp_id", f"{RAW_EMAIL},E-alias")
+    writer = _writer_capture()
+
+    rows = await run_hash_extract(
+        gcs_uri=GCS_URI,
+        email_hash_fn=_hasher_map({RAW_EMAIL: HASH_1}),
+        write_hashed_raw_fn=writer,
+        read_object_fn=_read_bytes(content),
+    )
+
+    assert rows == 1
+    assert writer.captured["records"][0].vendor_record_id == "E-alias"
 
 
 @pytest.mark.asyncio
@@ -218,6 +276,23 @@ async def test_run_hash_extract_missing_gcs_uri_fails():
 
     writer.assert_not_called()
     _assert_error_has_no_pii(raised.value, RAW_EMAIL)
+
+
+@pytest.mark.asyncio
+async def test_run_hash_extract_unmapped_non_alias_header_fails():
+    writer = MagicMock()
+    content = _csv_bytes("Work Email Address", RAW_EMAIL)
+
+    with pytest.raises(HashExtractError, match="missing email column") as raised:
+        await run_hash_extract(
+            gcs_uri=GCS_URI,
+            metadata={},
+            write_hashed_raw_fn=writer,
+            read_object_fn=_read_bytes(content),
+        )
+
+    writer.assert_not_called()
+    _assert_error_has_no_pii(raised.value, RAW_EMAIL, "Work Email")
 
 
 @pytest.mark.asyncio
@@ -314,189 +389,3 @@ async def test_run_hash_extract_loads_connection_metadata():
     assert loader.await_args.kwargs["connection_id"] == (
         "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     )
-
-
-@pytest.mark.asyncio
-async def test_run_hash_extract_applies_column_mapping_for_non_alias_headers():
-    content = _csv_bytes("Work Email,Emp #", f"{RAW_EMAIL},E-mapped")
-    writer = _writer_capture()
-
-    rows = await run_hash_extract(
-        metadata={
-            "gcs_uri": GCS_URI,
-            "column_mapping": {"email": "Work Email", "employee_id": "Emp #"},
-        },
-        email_hash_fn=_hasher_map({RAW_EMAIL: HASH_1}),
-        write_hashed_raw_fn=writer,
-        read_object_fn=_read_bytes(content),
-    )
-
-    assert rows == 1
-    record = writer.captured["records"][0]
-    assert record.vendor_record_id == "E-mapped"
-    assert record.email_hash == HASH_1
-    _assert_no_raw_email([record], RAW_EMAIL)
-
-
-@pytest.mark.asyncio
-async def test_run_hash_extract_mapping_wins_over_alias_email_column():
-    content = _csv_bytes(
-        "email,Work Email,employee_id",
-        f"ignore@example.com,{RAW_EMAIL},E-win",
-    )
-    hasher = _hasher_map({RAW_EMAIL: HASH_1, "ignore@example.com": HASH_2})
-    writer = _writer_capture()
-
-    rows = await run_hash_extract(
-        gcs_uri=GCS_URI,
-        metadata={"column_mapping": {"email": "Work Email"}},
-        email_hash_fn=hasher,
-        write_hashed_raw_fn=writer,
-        read_object_fn=_read_bytes(content),
-    )
-
-    assert rows == 1
-    assert hasher.calls == [RAW_EMAIL]
-    assert writer.captured["records"][0].vendor_record_id == "E-win"
-    _assert_no_raw_email(writer.captured["records"], RAW_EMAIL, "ignore@example.com")
-
-
-@pytest.mark.asyncio
-async def test_run_hash_extract_applies_json_string_column_mapping():
-    content = _csv_bytes("Work Email", RAW_EMAIL)
-    writer = _writer_capture()
-
-    rows = await run_hash_extract(
-        metadata={
-            "gcs_uri": GCS_URI,
-            "column_mapping": '{"email": "Work Email"}',
-        },
-        email_hash_fn=_hasher_map({RAW_EMAIL: HASH_1}),
-        write_hashed_raw_fn=writer,
-        read_object_fn=_read_bytes(content),
-    )
-
-    assert rows == 1
-    assert writer.captured["records"][0].email_hash == HASH_1
-
-
-@pytest.mark.asyncio
-async def test_run_hash_extract_applies_mapping_from_loaded_connection():
-    content = _csv_bytes("Work Email,Emp #", f"{RAW_EMAIL},E-7")
-    writer = _writer_capture()
-    loader = AsyncMock(
-        return_value={
-            "gcs_uri": GCS_URI,
-            "column_mapping": {"Email": "Work Email", "employee_id": "Emp #"},
-        }
-    )
-
-    rows = await run_hash_extract(
-        conn=object(),
-        load_connection_fn=loader,
-        write_hashed_raw_fn=writer,
-        read_object_fn=_read_bytes(content),
-        email_hash_fn=_hasher_map({RAW_EMAIL: HASH_1}),
-    )
-
-    assert rows == 1
-    assert writer.captured["records"][0].vendor_record_id == "E-7"
-    loader.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_run_hash_extract_missing_mapped_email_column_fails():
-    writer = MagicMock()
-    content = _csv_bytes("email,employee_id", f"{RAW_EMAIL},E-1")
-
-    with pytest.raises(HashExtractError, match="missing email column") as raised:
-        await run_hash_extract(
-            gcs_uri=GCS_URI,
-            metadata={"column_mapping": {"email": "Work Email"}},
-            email_hash_fn=_hasher_map({RAW_EMAIL: HASH_1}),
-            write_hashed_raw_fn=writer,
-            read_object_fn=_read_bytes(content),
-        )
-
-    writer.assert_not_called()
-    _assert_error_has_no_pii(raised.value, RAW_EMAIL, "Work Email")
-
-
-@pytest.mark.asyncio
-async def test_run_hash_extract_sftp_metadata_without_gcs_uri_is_not_extract():
-    writer = MagicMock()
-    reader = AsyncMock()
-
-    with pytest.raises(HashExtractError, match="upload missing") as raised:
-        await run_hash_extract(
-            metadata={
-                "host": "sftp.example.com",
-                "port": "22",
-                "directory": "/inbound/habeas",
-                "username": "pay-user",
-            },
-            write_hashed_raw_fn=writer,
-            read_object_fn=reader,
-        )
-
-    writer.assert_not_called()
-    reader.assert_not_called()
-    _assert_error_has_no_pii(
-        raised.value, "sftp.example.com", "pay-user", "/inbound/habeas"
-    )
-
-
-@pytest.mark.asyncio
-async def test_run_hash_extract_ignores_sftp_fields_when_gcs_uri_present():
-    content = _csv_bytes("email,employee_id", f"{RAW_EMAIL},E-sftp-ignored")
-    writer = _writer_capture()
-    reader = _read_bytes(content)
-
-    rows = await run_hash_extract(
-        metadata={
-            "gcs_uri": GCS_URI,
-            "host": "sftp.example.com",
-            "directory": "/inbound/habeas",
-        },
-        email_hash_fn=_hasher_map({RAW_EMAIL: HASH_1}),
-        write_hashed_raw_fn=writer,
-        read_object_fn=reader,
-    )
-
-    assert rows == 1
-    assert reader.last == (
-        "uploads",
-        "connections/paylocity/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/upload.csv",
-    )
-    assert writer.captured["records"][0].vendor_record_id == "E-sftp-ignored"
-
-
-@pytest.mark.asyncio
-async def test_run_hash_extract_rejects_sftp_uri():
-    writer = MagicMock()
-    reader = AsyncMock()
-
-    with pytest.raises(HashExtractError, match="upload uri is invalid") as raised:
-        await run_hash_extract(
-            gcs_uri="sftp://sftp.example.com/inbound/employees.csv",
-            write_hashed_raw_fn=writer,
-            read_object_fn=reader,
-        )
-
-    writer.assert_not_called()
-    reader.assert_not_called()
-    _assert_error_has_no_pii(
-        raised.value, "sftp.example.com", "employees.csv", "inbound"
-    )
-
-
-def test_hash_extract_module_has_no_sftp_client():
-    from pathlib import Path
-
-    import paylocity.hash_extract as mod
-
-    source = Path(mod.__file__).read_text()
-    assert "import paramiko" not in source
-    assert "open_sftp" not in source
-    assert "sftp.get" not in source
-    assert "sftp.listdir" not in source

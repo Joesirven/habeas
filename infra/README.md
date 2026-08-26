@@ -211,7 +211,7 @@ gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
 
 | Service | URL |
 |---------|-----|
-| `ops-ia-web-dev` (browser IAP — Habeas Platform) | `https://ops-ia-web-dev-hsa55rg7ja-uk.a.run.app` |
+| `admin-web-dev` (browser IAP — Habeas Platform) | `https://admin-web-dev-hsa55rg7ja-uk.a.run.app` |
 | `admin-api-dev` (API — IAP off; app-level identity) | `https://admin-api-dev-hsa55rg7ja-uk.a.run.app` |
 
 | Surface | Invoker |
@@ -319,7 +319,7 @@ bun run dev   # leave VITE_ADMIN_API_URL unset so the app uses /api
 # Banner "View as" sends X-Dev-Simulate-Role when real_role is super_admin
 ```
 
-Non–super_admin browsers: use the ops-ia IAP front door, not the ADC Vite proxy.
+Non–super_admin browsers: use the admin-web-dev IAP front door, not the ADC Vite proxy.
 
 **Residual:**
 
@@ -478,7 +478,7 @@ Pull-based inventory joins Cloud Scheduler ∪ Cloud Run (no worker heartbeat). 
 
 #### Excludes
 
-**EXCLUDE_SERVICES (non-workers):** `admin-api-dev`, `admin-web-dev`, `ops-ia-web-dev` (+ any future `*-web-dev`).
+**EXCLUDE_SERVICES (non-workers):** `admin-api-dev`, `admin-web-dev` (+ any future `*-web-dev`).
 
 **EXCLUDE_JOBS:** `test-probe-job`, any job not prefixed `dpra-dev-`.
 

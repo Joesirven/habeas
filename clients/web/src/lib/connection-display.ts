@@ -1,18 +1,30 @@
-import type {
-  ConnectorReminder,
-  ConnectionDisplayStatus,
-  ConnectionRecord,
-  IntegrationSystemId,
-  MatchingAttemptRow,
-  MePayload,
-  NeedsAttentionItem,
+import {
+  catalogDisplaySystemId,
+  connectionSystemDisplayLabel,
+  isRetractedConnectionSystem,
+  type ConnectorReminder,
+  type ConnectionDisplayStatus,
+  type ConnectionRecord,
+  type MatchingAttemptRow,
+  type MePayload,
+  type NeedsAttentionItem,
 } from './api'
 
-/** Upload-only systems — no Live credential invite (KD14). */
-export const UPLOAD_ONLY_SYSTEMS: ReadonlySet<IntegrationSystemId> = new Set([
-  'axios_hq' as IntegrationSystemId,
+/**
+ * Upload-only (no Live invite) — Axios HQ catalog id `axios_hq`.
+ * Retracted `axios_headquarters` aliases to `axios_hq` in `isUploadOnlySystem`.
+ * Sheets stay owner-wizard (no ops Live invite).
+ */
+export const UPLOAD_ONLY_SYSTEMS: ReadonlySet<string> = new Set([
+  'axios_hq',
   'bizdev_contacts',
   'hr_alumni',
+])
+
+/** Wave M live+upload — Lever / Paylocity may show upload fallback after live fail. */
+export const LIVE_AND_UPLOAD_SYSTEMS: ReadonlySet<string> = new Set([
+  'lever',
+  'paylocity',
 ])
 
 const DISPLAY_STATUS_LABELS: Record<ConnectionDisplayStatus, string> = {
@@ -68,12 +80,28 @@ export function connectionDisplayStatusVariant(
 }
 
 export function isUploadOnlySystem(system: string | null | undefined): boolean {
-  return UPLOAD_ONLY_SYSTEMS.has(system as IntegrationSystemId)
+  return UPLOAD_ONLY_SYSTEMS.has(catalogDisplaySystemId(system))
+}
+
+export function isLiveAndUploadSystem(system: string | null | undefined): boolean {
+  return LIVE_AND_UPLOAD_SYSTEMS.has(catalogDisplaySystemId(system))
 }
 
 /**
- * Ops invite minting — disabled for Cassandra, upload-only systems, and
- * systems with no credential fields (owner upload path instead).
+ * Upload is available: Axios HQ upload-only, or Wave M live+upload fallback
+ * (Lever / Paylocity). Cassandra has no upload path.
+ */
+export function connectionAllowsUploadFallback(
+  system: string | null | undefined,
+): boolean {
+  const id = (system ?? '').trim().toLowerCase()
+  if (!id || id === 'cassandra') return false
+  return isUploadOnlySystem(id) || isLiveAndUploadSystem(id)
+}
+
+/**
+ * Ops invite minting — disabled for Cassandra, retracted Axios HQ slug,
+ * upload-only systems, and systems with no credential fields.
  */
 export function connectionInviteAllowed(options: {
   system?: string | null
@@ -82,6 +110,7 @@ export function connectionInviteAllowed(options: {
 }): boolean {
   const system = options.system?.trim()
   if (!system || system === 'cassandra') return false
+  if (isRetractedConnectionSystem(system)) return false
   if (isUploadOnlySystem(system)) return false
   if (options.inviteAllowed === false) return false
   if (options.credentialFieldCount != null && options.credentialFieldCount <= 0) {
@@ -90,13 +119,17 @@ export function connectionInviteAllowed(options: {
   return true
 }
 
-/** Hide retired Google Sheets and infra-only cassandra from new-connection pickers. */
+/**
+ * Hide retired Google Sheets, infra-only cassandra, and retracted
+ * `axios_headquarters` from new-connection pickers. Axios HQ creates as `axios_hq`.
+ */
 export function isCreatableConnectionSystem(options: {
   system_id: string
   invite_allowed: boolean
 }): boolean {
   if (options.system_id === 'google_sheets') return false
   if (options.system_id === 'cassandra') return false
+  if (isRetractedConnectionSystem(options.system_id)) return false
   if (isUploadOnlySystem(options.system_id)) return true
   return options.invite_allowed
 }
@@ -397,7 +430,7 @@ export function matchingConnectorGateBannerCopy(gate: MatchingConnectorGate): {
   description: string
 } {
   const chip = matchingConnectorGateChip(gate)
-  const systemLabel = gate.system?.replaceAll('_', ' ') ?? 'connector'
+  const systemLabel = connectionSystemDisplayLabel(gate.system, 'connector')
   if (gate.displayStatus === 'needs_setup' || gate.gateCode === 'wizard_incomplete') {
     return {
       title: `${chip.label} — matching gated`,

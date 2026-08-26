@@ -1,12 +1,17 @@
-"""Lever Cloud Run worker — matching + suppression."""
+"""Lever Cloud Run worker — matching + suppression + hash refresh."""
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
+import os
+import subprocess
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -40,6 +45,7 @@ from habeas_privacy_core.workflow.approval import fetch_active_rule
 from fastapi import FastAPI, HTTPException
 from pydantic_settings import SettingsConfigDict
 
+from lever.hash_extract import run_hash_extract
 from lever.vertical_match import ADAPTER, VerticalMatchOutcome, run_lever_vertical_match
 
 logger = logging.getLogger(__name__)
@@ -47,6 +53,9 @@ logger = logging.getLogger(__name__)
 SYSTEM = "lever"
 ATTEMPTS_TABLE = LEVER_ATTEMPTS_TABLE
 SUPPRESS_LEVER_ACTION = "suppress.lever"
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_DEFAULT_EXTERNAL_HASH_DBT_DIR = _REPO_ROOT / "transform" / "external_hash"
+LEVER_DBT_SELECT = ("stg_lever_hashed", "mart_lever_email_hash")
 
 
 class Settings(CoreSettings):
@@ -55,6 +64,13 @@ class Settings(CoreSettings):
     service_name: str = "lever"
     port: int = 8080
     worker_id: str = "lever-dev"
+
+    lever_connection_id: str | None = None
+    external_hash_dbt_dir: str = str(_DEFAULT_EXTERNAL_HASH_DBT_DIR)
+    hashed_raw_table: str = "lever_hashed_raw"
+    dbt_timeout_seconds: int = 3600
+    skip_external_hash_dbt: bool = False
+    hash_refresh_lease_minutes: int = 60
 
 
 settings = Settings()
@@ -334,17 +350,110 @@ async def suppression_collect():
     return {"collected": 0}
 
 
-EXTRACT_NOT_CONFIGURED = "extract_not_configured"
+@dataclass(frozen=True)
+class DbtRunResult:
+    ok: bool
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+class _HashRefreshFailed(Exception):
+    """Pipeline refused success. Message is an allowlisted error_code only."""
+
+    def __init__(self, code: str, *, rows_written: int = 0) -> None:
+        self.code = code
+        self.rows_written = rows_written
+        super().__init__(code)
+
+
+async def _await_if_needed(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def run_external_hash_dbt_build(
+    *,
+    dbt_dir: str | Path,
+    timeout_seconds: int,
+) -> DbtRunResult:
+    """Run ``dbt build`` for Lever staging + email-hash mart."""
+    cwd = Path(dbt_dir)
+    cmd = ["dbt", "build", "--select", *LEVER_DBT_SELECT]
+    env = {
+        **os.environ,
+        "DBT_PROFILES_DIR": os.environ.get("DBT_PROFILES_DIR", str(cwd)),
+    }
+    completed = subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+        env=env,
+    )
+    return DbtRunResult(
+        ok=completed.returncode == 0,
+        returncode=completed.returncode,
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
+    )
+
+
+async def _run_hash_refresh_pipeline() -> int:
+    """Upload GCS → hash extract → optional external_hash dbt. Returns rows written.
+
+    Does not call Lever REST. ``GET /v1/users`` is staff-only and is not a
+    candidate extract (S01). Source is the mapped owner upload ``gcs_uri``.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows_written = await _await_if_needed(
+            run_hash_extract(
+                conn=conn,
+                connection_id=settings.lever_connection_id or None,
+                bq_table=settings.hashed_raw_table,
+            )
+        )
+    count = int(rows_written)
+    if count <= 0:
+        raise _HashRefreshFailed("empty_extract", rows_written=count)
+
+    if settings.skip_external_hash_dbt:
+        return count
+
+    try:
+        dbt_result = await _await_if_needed(
+            run_external_hash_dbt_build(
+                dbt_dir=settings.external_hash_dbt_dir,
+                timeout_seconds=settings.dbt_timeout_seconds,
+            )
+        )
+    except subprocess.TimeoutExpired:
+        raise _HashRefreshFailed("dbt_timeout", rows_written=count) from None
+    if not getattr(dbt_result, "ok", False):
+        raise _HashRefreshFailed("dbt_failed", rows_written=count)
+    return count
+
+
+def _hash_refresh_error_code(exc: BaseException) -> str:
+    if isinstance(exc, _HashRefreshFailed):
+        return exc.code
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "dbt_timeout"
+    name = type(exc).__name__
+    return name[:50]
 
 
 @app.post("/hash-refresh/process")
 async def hash_refresh_process():
-    """Claim vertical_hash_refresh for Lever; live extract is not configured.
+    """Claim vertical_hash_refresh for Lever; hash mapped upload then optional dbt.
 
-    The onboarding tester only probes ``GET /v1/users?limit=1``. Opportunity /
-    candidate email extract is not wired, so this route fails closed with
-    ``extract_not_configured`` instead of a silent stub success. Matching still
-    looks up ``lever_email_hash__build``.
+    The onboarding tester only probes ``GET /v1/users?limit=1`` (staff). That
+    path is never used as a candidate extract. Hash refresh reads
+    ``metadata.gcs_uri`` and applies stored ``column_mapping``.
     """
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="database not configured")
@@ -355,30 +464,52 @@ async def hash_refresh_process():
             conn,
             system=SYSTEM,
             worker_id=settings.worker_id,
+            lease_minutes=settings.hash_refresh_lease_minutes,
         )
         if claim is None:
             return {"processed": False, "reason": "idle"}
 
         attempt_id = int(claim["id"])
-        started_at = datetime.now(UTC)
         await mark_vertical_hash_refresh_in_flight(conn, attempt_id)
 
-        finished_at = datetime.now(UTC)
-        error_code = EXTRACT_NOT_CONFIGURED
-        error_message = redact_error_text(error_code)
+    started_at = datetime.now(UTC)
+    rows_written = 0
+    status = "success"
+    error_code: str | None = None
+    error_message: str | None = None
+
+    try:
+        rows_written = await _run_hash_refresh_pipeline()
+    except _HashRefreshFailed as exc:
+        status = "submit_error"
+        error_code = exc.code
+        rows_written = exc.rows_written
+        error_message = redact_error_text(exc.code)
         logger.error(
             "hash refresh failed attempt_id=%s error_code=%s rows_written=%s",
             attempt_id,
             error_code,
-            0,
+            rows_written,
         )
+    except Exception as exc:
+        status = "submit_error"
+        error_code = _hash_refresh_error_code(exc)
+        error_message = redact_error_text(f"{error_code}: {type(exc).__name__}")
+        logger.error(
+            "hash refresh failed attempt_id=%s error_code=%s",
+            attempt_id,
+            error_code,
+        )
+
+    finished_at = datetime.now(UTC)
+    async with pool.acquire() as conn:
         await record_vertical_hash_refresh_run(
             conn,
             attempt_id=attempt_id,
-            status="submit_error",
+            status=status,
             started_at=started_at,
             finished_at=finished_at,
-            rows_written=0,
+            rows_written=rows_written,
             error_message=error_message,
         )
         await conn.execute(
@@ -388,23 +519,24 @@ async def hash_refresh_process():
                    completed_at = NOW(),
                    error_code = $3,
                    error_message = $4
-             WHERE id = $1
-               AND status = 'in_flight'
+             WHERE id = $1 AND status = 'in_flight'
             """,
             attempt_id,
-            "submit_error",
+            status,
             error_code,
             error_message,
         )
 
-    return {
+    payload: dict[str, Any] = {
         "processed": True,
         "attempt_id": attempt_id,
         "system": SYSTEM,
-        "status": "submit_error",
-        "rows_written": 0,
-        "reason": EXTRACT_NOT_CONFIGURED,
+        "status": status,
+        "rows_written": rows_written,
     }
+    if error_code is not None:
+        payload["reason"] = error_code
+    return payload
 
 
 def run() -> None:

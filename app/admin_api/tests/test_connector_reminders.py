@@ -289,7 +289,7 @@ def test_upload_template_returns_csv(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "email" in text
 
 
-def test_upload_template_rejects_live_only_system(
+def test_upload_template_allows_lever_csv_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     roles.settings.admin_api_data_owners = "hr-owner@example.com"
@@ -302,6 +302,7 @@ def test_upload_template_rejects_live_only_system(
 
     from admin_api import vertical_assignments
 
+    monkeypatch.setattr(owner_connectors, "_require_database", lambda: None)
     monkeypatch.setattr(vertical_assignments, "_require_database", lambda: None)
     monkeypatch.setattr(vertical_assignments, "get_pool", lambda: FakePool())
 
@@ -311,4 +312,10 @@ def test_upload_template_rejects_live_only_system(
             headers=signed_headers("hr-owner@example.com"),
         )
 
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "lever_upload_template.csv" in response.headers["content-disposition"]
+    text = response.content.decode("utf-8")
+    assert "first_name" in text
+    assert "last_name" in text
+    assert "email" in text

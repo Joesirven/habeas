@@ -75,6 +75,11 @@ function readCadenceOverride(metadata: Record<string, unknown> | undefined): num
   return null
 }
 
+/** Ops may force Upload on any non-Cassandra system (admin-api validates). */
+function systemAllowsOpsUpload(system: IntegrationSystemId | undefined): boolean {
+  return system != null && system !== 'cassandra'
+}
+
 export function ConnectionInvitePanel({
   connectionId,
   system,
@@ -108,20 +113,27 @@ export function ConnectionInvitePanel({
   const [localLastTestOk, setLocalLastTestOk] = useState(lastTestOk)
   const [localLastTestDetail, setLocalLastTestDetail] = useState(lastTestDetail)
   const [localLastTestedAt, setLocalLastTestedAt] = useState(lastTestedAt)
+  const [forcedMode, setForcedMode] = useState<'live' | 'upload' | null>(null)
 
   const chipStatus = resolveConnectionChipStatus({
     status: status ?? 'pending',
     display_status: displayStatus,
   })
-  const activeMode = readActiveMode(metadata)
+  const activeMode = forcedMode ?? readActiveMode(metadata)
   const cadenceOverride = readCadenceOverride(metadata)
   const triageCopy = leverTriageCopy(localLastTestDetail)
+  const canOfferManualUpload = systemAllowsOpsUpload(system)
+  const liveFailed = canRetest && localLastTestOk === false
 
   useEffect(() => {
     setLocalLastTestOk(lastTestOk)
     setLocalLastTestDetail(lastTestDetail)
     setLocalLastTestedAt(lastTestedAt)
   }, [lastTestOk, lastTestDetail, lastTestedAt])
+
+  useEffect(() => {
+    setForcedMode(null)
+  }, [connectionId])
 
   useEffect(() => {
     setCadenceInput(cadenceOverride != null ? String(cadenceOverride) : '')
@@ -177,7 +189,9 @@ export function ConnectionInvitePanel({
       } else {
         actionToast.error({
           title: 'Connection test failed',
-          description: connectTestFailureMessage(result.detail),
+          description: canOfferManualUpload
+            ? `${connectTestFailureMessage(result.detail)} Retry, or force Upload so the owner can set up a manual CSV.`
+            : connectTestFailureMessage(result.detail),
           action: {
             label: 'Retry',
             onClick: () => setConfirmTestOpen(true),
@@ -187,11 +201,14 @@ export function ConnectionInvitePanel({
       onUpdated?.()
     } catch (err) {
       setConfirmTestOpen(false)
+      setLocalLastTestOk(false)
       const message = actionToast.safeErrorMessage(err, 'Could not run connection test')
       setError(message)
       actionToast.error({
         title: 'Could not run connection test',
-        description: message,
+        description: canOfferManualUpload
+          ? `${message} Retry, or force Upload so the owner can set up a manual CSV.`
+          : message,
         action: {
           label: 'Retry',
           onClick: () => setConfirmTestOpen(true),
@@ -202,14 +219,21 @@ export function ConnectionInvitePanel({
     }
   }
 
-  async function handleForceMode(mode: 'live' | 'upload') {
+  async function handleForceMode(mode: 'live' | 'upload', reason?: string) {
     setForcingMode(true)
     setError(null)
     try {
-      await forceConnectionMode(connectionId, { mode })
+      await forceConnectionMode(
+        connectionId,
+        reason ? { mode, reason } : { mode },
+      )
+      setForcedMode(mode)
       actionToast.success({
         title: mode === 'live' ? 'Forced Live mode' : 'Forced Upload mode',
-        description: 'Active mode updated for this connection.',
+        description:
+          mode === 'upload' && reason === 'live_test_failed'
+            ? 'The owner can set up a manual CSV in Connectors until live is fixed. Mapping stays in the owner wizard.'
+            : 'Active mode updated for this connection.',
       })
       onUpdated?.()
     } catch (err) {
@@ -221,7 +245,7 @@ export function ConnectionInvitePanel({
         action: {
           label: 'Retry',
           onClick: () => {
-            void handleForceMode(mode)
+            void handleForceMode(mode, reason)
           },
         },
       })
@@ -345,7 +369,7 @@ export function ConnectionInvitePanel({
           type="button"
           size="sm"
           variant="outline"
-          disabled={busy}
+          disabled={busy || activeMode === 'upload'}
           onClick={() => void handleForceMode('upload')}
         >
           Force Upload
@@ -519,16 +543,36 @@ export function ConnectionInvitePanel({
       ) : null}
 
       {canRetest ? (
-        <div className="flex flex-wrap gap-2 border-t border-line pt-3">
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            onClick={() => setConfirmTestOpen(true)}
-          >
-            {testing ? 'Testing…' : 'Test connection'}
-          </Button>
+        <div className="space-y-2 border-t border-line pt-3">
+          {liveFailed ? (
+            <p className="text-xs text-ink-soft">
+              {activeMode === 'upload'
+                ? 'Upload is already the active mode. The owner can set up a manual CSV in Connectors. Retry live when credentials are fixed.'
+                : 'Live connection failed. Retry stored credentials, or force Upload so the owner can set up a manual CSV until live is fixed.'}
+            </p>
+          ) : null}
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              onClick={() => setConfirmTestOpen(true)}
+            >
+              {testing ? 'Testing…' : liveFailed ? 'Retry connection' : 'Test connection'}
+            </Button>
+            {liveFailed && canOfferManualUpload && activeMode !== 'upload' ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={busy}
+                onClick={() => void handleForceMode('upload', 'live_test_failed')}
+              >
+                {forcingMode ? 'Forcing…' : 'Force Upload'}
+              </Button>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
@@ -557,9 +601,9 @@ export function ConnectionInvitePanel({
           if (testing) return
           setConfirmTestOpen(open)
         }}
-        title="Test this connection?"
+        title={liveFailed ? 'Retry this connection?' : 'Test this connection?'}
         description="Habeas will read the stored secret and verify authentication with the provider. Secret values are never shown here."
-        confirmLabel="Yes, test now"
+        confirmLabel={liveFailed ? 'Yes, retry now' : 'Yes, test now'}
         cancelLabel="Cancel"
         confirming={testing}
         onConfirm={() => {

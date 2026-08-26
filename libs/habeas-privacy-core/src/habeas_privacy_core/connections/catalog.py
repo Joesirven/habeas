@@ -54,6 +54,7 @@ UPLOAD_TEMPLATE_REQUIRED_HEADERS: Final[dict[str, tuple[str, ...]]] = {
     "axios_headquarters": ("first_name", "last_name", "email"),
     "bizdev_contacts": ("first_name", "last_name", "email"),
     "hr_alumni": ("first_name", "last_name", "email"),
+    "lever": ("first_name", "last_name", "email"),
     "paylocity": ("first_name", "last_name", "email"),
 }
 
@@ -72,7 +73,8 @@ UPLOAD_TEMPLATE_OPTIONAL_HEADERS: Final[dict[str, tuple[str, ...]]] = {
     "paylocity": ("employee_id", "dob", "phone", "city", "state"),
 }
 
-# Systems that accept template CSV Upload (includes Paylocity Upload mode).
+# Systems that accept template CSV Upload (Paylocity Upload mode + Lever
+# live-fail CSV fallback). Identifier headers only — not a Lever REST extract.
 UPLOAD_SYSTEMS: Final[frozenset[str]] = frozenset(UPLOAD_TEMPLATE_REQUIRED_HEADERS)
 # Upload-only systems — no Live approach. Axios HQ stays upload-every-batch.
 # Alumni and Contact Us allow Live via owner Google OAuth (not service-account share).
@@ -163,7 +165,7 @@ CATALOG_BINDINGS: Final[tuple[VerticalSystemBinding, ...]] = (
     VerticalSystemBinding(
         VERTICAL_PEOPLE_HR,
         "lever",
-        frozenset({APPROACH_LIVE}),
+        frozenset({APPROACH_UPLOAD, APPROACH_LIVE}),
     ),
     VerticalSystemBinding(
         VERTICAL_PEOPLE_HR,

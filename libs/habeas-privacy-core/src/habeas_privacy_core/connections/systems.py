@@ -227,12 +227,15 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
         ),
         trust_copy=_saas_trust_copy(
             extra=(
-                "Paylocity supports two approaches. Upload mode: download the Habeas "
-                "CSV template, fill required columns, and upload the file on your chosen "
-                "refresh cadence — no Developer Portal credentials needed for Upload. "
-                "Live mode: use SFTP credentials from the Developer Portal integration app "
-                "(partner.paylocity.com). HR or IT usually creates the app. Never use a "
-                "personal Web Pay login."
+                "Paylocity supports two approaches. Live mode: SFTP credentials from "
+                "the Developer Portal integration app (partner.paylocity.com). A "
+                "successful live test confirms SFTP connectivity only; it does not "
+                "extract candidate emails from a directory listing. Matching uses "
+                "Upload until a named file schema is confirmed. Upload mode: download "
+                "the Habeas CSV template, fill required columns, and upload the file "
+                "on your chosen refresh cadence — no Developer Portal credentials needed "
+                "for Upload. HR or IT usually creates the SFTP app. Never use a personal "
+                "Web Pay login."
             ),
         ),
     ),
@@ -256,7 +259,8 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
                     "5. Click Generate key → Copy Key immediately (shown only once) → Done.\n"
                     "6. Paste that key here.\n"
                     "Do not paste your Lever password or the Postings API key. "
-                    "Habeas probes GET /v1/users — the key must allow Users read/list."
+                    "Habeas probes GET /v1/users — the key must allow Users read/list. "
+                    "That probe is a connectivity check only; it does not extract candidates."
                 ),
             ),
         ),
@@ -264,7 +268,9 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
             extra=(
                 "Lever: only a Super Admin can create API credentials. Use a dedicated "
                 "Habeas key with Users read/list — not your login password and not a "
-                "Postings-only API key."
+                "Postings-only API key. Users read/list is a live connection probe only; "
+                "it does not extract candidates. If the live connection fails, upload a "
+                "CSV and map columns — Habeas does not list Lever API endpoints for extract."
             ),
         ),
     ),
@@ -373,13 +379,13 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
         credential_fields=(),
         trust_copy=_saas_trust_copy(
             extra=(
-                "Axios HQ uses Upload mode only. Habeas does not store Axios HQ "
-                "passwords. Export a contact or subscriber list from Axios HQ as CSV "
-                "with first_name, last_name, and email (optional columns are listed in "
-                "the catalog). Download the Habeas CSV template, reshape your export "
-                "to match the required headers, select a multi-value delimiter if "
-                "needed, and upload the file. No API credentials or Google Sheets "
-                "sharing is required."
+                "Axios HQ uses Upload mode only — upload a mapped CSV for every batch. "
+                "Habeas does not store Axios HQ passwords or API keys. Export a "
+                "contact or subscriber list from Axios HQ as CSV with first_name, "
+                "last_name, and email (optional columns are listed in the catalog). "
+                "Download the Habeas CSV template, reshape your export to match the "
+                "required headers, select a multi-value delimiter if needed, and upload "
+                "the file. No API credentials or Google Sheets sharing is required."
             ),
         ),
     ),
@@ -393,6 +399,8 @@ _SYSTEMS: dict[str, ConnectionSystem] = {
             "Habeas Infrastructure (INF) provisions TLS, service accounts, and network "
             "egress. Ops marks the connection infra_pending until INF confirms the path "
             "is live.\n\n"
+            "Cassandra is suppress-only on Data-vertical DWID. There is no matching, "
+            "hash extract, mapping step, or dbt mart for this connection.\n\n"
             "As a data owner, use the privacy app for request review only — not this form "
             "for secrets. Runtime credentials stay in Google Cloud Secret Manager after "
             "INF setup."

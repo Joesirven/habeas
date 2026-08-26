@@ -396,32 +396,42 @@ async def test_kickoff_rejects_silent_status_change_after_kickoff():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("vertical", ["lever", "axios_hq"])
-async def test_endpoint_rejects_coming_soon_vertical(
+@pytest.mark.parametrize(
+    "vertical,write_key",
+    [
+        ("communications", "communications"),
+        ("axios_hq", "communications"),
+        ("Axios_hq", "communications"),
+        ("people_hr", "people_hr"),
+        ("lever", "people_hr"),
+        ("paylocity", "people_hr"),
+    ],
+)
+async def test_endpoint_accepts_live_communications_and_people_hr_aliases(
     monkeypatch: pytest.MonkeyPatch,
     vertical: str,
+    write_key: str,
 ):
-    """Catalog coming-soon ids (Lever, Axios HQ) share the not-live kickoff gate."""
+    """Wave M — Axios HQ / Lever / Paylocity kickoff the catalog write key."""
     conn = FakeConn(disposition=_disposition_row())
     fake_pool(monkeypatch, conn)
 
-    with pytest.raises(HTTPException) as exc:
-        await fk.post_fulfillment_kickoff(
-            REQUEST_ID,
-            fk.FulfillmentKickoffBody(vertical=vertical),
-            _fake_request(),
-            LEGAL,
-        )
-    assert exc.value.status_code == 400
-    assert "not live yet" in str(exc.value.detail)
-    assert conn.kickoff_contexts == []
+    result = await fk.post_fulfillment_kickoff(
+        REQUEST_ID,
+        fk.FulfillmentKickoffBody(vertical=vertical),
+        _fake_request(),
+        LEGAL,
+    )
+    assert result.kickoff_status == "approved"
+    assert result.vertical == write_key
+    assert conn.kickoff_contexts[0]["vertical"] == write_key
 
 
 @pytest.mark.asyncio
 async def test_endpoint_rejects_retracted_axios_headquarters_as_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Retracted slug is unknown — catalog id axios_hq stays coming-soon."""
+    """Retracted worker slug is unknown — session/web uses axios_hq."""
     conn = FakeConn(disposition=_disposition_row())
     fake_pool(monkeypatch, conn)
 
@@ -437,6 +447,26 @@ async def test_endpoint_rejects_retracted_axios_headquarters_as_unknown(
     assert "unknown vertical" in detail
     assert "axios_headquarters" in detail
     assert "not live yet" not in detail
+    assert conn.kickoff_contexts == []
+
+
+@pytest.mark.asyncio
+async def test_endpoint_rejects_cassandra_as_not_live(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Cassandra is suppress-only — not a matching kickoff vertical."""
+    conn = FakeConn(disposition=_disposition_row())
+    fake_pool(monkeypatch, conn)
+
+    with pytest.raises(HTTPException) as exc:
+        await fk.post_fulfillment_kickoff(
+            REQUEST_ID,
+            fk.FulfillmentKickoffBody(vertical="cassandra"),
+            _fake_request(),
+            LEGAL,
+        )
+    assert exc.value.status_code == 400
+    assert "not live yet" in str(exc.value.detail)
     assert conn.kickoff_contexts == []
 
 
@@ -891,6 +921,41 @@ async def test_owner_status_super_admin_overrides_unassigned_owner(
     assert result.attempt_id == 901
 
 
+def test_require_live_vertical_accepts_wave_m_aliases():
+    assert fk._require_live_vertical("data") == "data"
+    assert fk._require_live_vertical("auth0") == "auth0"
+    assert fk._require_live_vertical("communications") == "communications"
+    assert fk._require_live_vertical("axios_hq") == "communications"
+    assert fk._require_live_vertical("people_hr") == "people_hr"
+    assert fk._require_live_vertical("lever") == "people_hr"
+    assert fk._require_live_vertical("paylocity") == "people_hr"
+
+
+def test_require_live_vertical_rejects_axios_headquarters_and_cassandra():
+    with pytest.raises(HTTPException) as unknown:
+        fk._require_live_vertical("axios_headquarters")
+    assert unknown.value.status_code == 400
+    assert "unknown vertical" in str(unknown.value.detail)
+    assert "not live yet" not in str(unknown.value.detail)
+
+    with pytest.raises(HTTPException) as not_live:
+        fk._require_live_vertical("cassandra")
+    assert not_live.value.status_code == 400
+    assert "not live yet" in str(not_live.value.detail)
+
+
+def test_require_live_vertical_does_not_lift_sheets_or_bizdev():
+    with pytest.raises(HTTPException) as sheets:
+        fk._require_live_vertical("hr_alumni")
+    assert sheets.value.status_code == 400
+    assert "unknown vertical" in str(sheets.value.detail)
+
+    with pytest.raises(HTTPException) as bizdev:
+        fk._require_live_vertical("bizdev")
+    assert bizdev.value.status_code == 400
+    assert "not live yet" in str(bizdev.value.detail)
+
+
 def test_catalog_vertical_for_owner_path_accepts_aliases():
     assert fk._catalog_vertical_for_owner_path("communications") == (
         "communications",
@@ -903,6 +968,11 @@ def test_catalog_vertical_for_owner_path_accepts_aliases():
     assert fk._catalog_vertical_for_owner_path("Axios_hq") == (
         "axios_hq",
         "communications",
+    )
+    assert fk._catalog_vertical_for_owner_path("lever") == ("lever", "people_hr")
+    assert fk._catalog_vertical_for_owner_path("paylocity") == (
+        "paylocity",
+        "people_hr",
     )
     with pytest.raises(HTTPException) as exc:
         fk._catalog_vertical_for_owner_path("axios_headquarters")
@@ -937,30 +1007,43 @@ async def test_owner_status_accepts_live_catalog_and_system_aliases(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path_vertical", ["communications", "axios_hq"])
-async def test_owner_status_rejects_coming_soon_even_with_kickoff(
+@pytest.mark.parametrize(
+    "path_vertical,assigned,catalog",
+    [
+        ("communications", "communications", "communications"),
+        ("axios_hq", "communications", "communications"),
+        ("people_hr", "people_hr", "people_hr"),
+        ("lever", "people_hr", "people_hr"),
+        ("paylocity", "people_hr", "people_hr"),
+    ],
+)
+async def test_owner_status_accepts_live_saas_paths(
     monkeypatch: pytest.MonkeyPatch,
     path_vertical: str,
+    assigned: str,
+    catalog: str,
 ):
-    """Axios HQ maps to communications, but neither is live — no attempt write."""
+    """Axios HQ / Lever / Paylocity owner-status writes after Legal kickoff."""
     conn = FakeConn(
         kickoff_approved=True,
-        assigned_verticals=frozenset({"communications"}),
+        assigned_verticals=frozenset({assigned}),
     )
     fake_pool(monkeypatch, conn)
 
-    with pytest.raises(HTTPException) as exc:
-        await fk.patch_fulfillment_owner_status(
-            REQUEST_ID,
-            path_vertical,
-            fk.OwnerFulfillmentStatusBody(status="completed_in_source"),
-            _fake_request(),
-            DATA_OWNER,
-        )
-    assert exc.value.status_code == 400
-    assert "not live yet" in str(exc.value.detail)
-    assert conn.inserted_attempts == []
-    assert conn.updated_attempts == []
+    result = await fk.patch_fulfillment_owner_status(
+        REQUEST_ID,
+        path_vertical,
+        fk.OwnerFulfillmentStatusBody(status="completed_in_source"),
+        _fake_request(),
+        DATA_OWNER,
+    )
+    assert result.vertical == catalog
+    assert result.owner_status == "completed_in_source"
+    assert result.attempt_status == "success"
+    assert conn.inserted_attempts
+    payload = json.loads(conn.inserted_attempts[0]["audit_payload"])
+    assert payload["vertical"] == catalog
+    assert "comment" not in payload
 
 
 @pytest.mark.asyncio
@@ -987,5 +1070,48 @@ async def test_owner_status_rejects_retracted_axios_headquarters_as_unknown(
     assert "unknown vertical" in detail
     assert "axios_headquarters" in detail
     assert "not live yet" not in detail
+    assert conn.inserted_attempts == []
+    assert conn.updated_attempts == []
+
+
+@pytest.mark.asyncio
+async def test_owner_status_422_for_cassandra(monkeypatch: pytest.MonkeyPatch):
+    """Cassandra stays automatic / not a matching owner-status path."""
+    conn = FakeConn(kickoff_approved=True)
+    fake_pool(monkeypatch, conn)
+
+    with pytest.raises(HTTPException) as exc:
+        await fk.patch_fulfillment_owner_status(
+            REQUEST_ID,
+            "cassandra",
+            fk.OwnerFulfillmentStatusBody(status="completed_in_source"),
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 422
+    assert exc.value.detail == "data_vertical_automatic"
+    assert conn.inserted_attempts == []
+
+
+@pytest.mark.asyncio
+async def test_owner_status_does_not_lift_sheets_via_people_hr(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Alumni Sheet binds to people_hr but is not a Wave M live owner path."""
+    conn = FakeConn(
+        kickoff_approved=True,
+        assigned_verticals=frozenset({"people_hr"}),
+    )
+    fake_pool(monkeypatch, conn)
+
+    with pytest.raises(HTTPException) as exc:
+        await fk.patch_fulfillment_owner_status(
+            REQUEST_ID,
+            "hr_alumni",
+            fk.OwnerFulfillmentStatusBody(status="completed_in_source"),
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 400
     assert conn.inserted_attempts == []
     assert conn.updated_attempts == []

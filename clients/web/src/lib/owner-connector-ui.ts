@@ -1,6 +1,6 @@
 /**
  * Owner connector wizard helpers — delimiter options, gated display status,
- * soft reminder banners (pure; no React).
+ * soft reminder banners, live-connect mapping follow-on (pure; no React).
  */
 
 import type { ConnectorReminder, ConnectionDisplayStatus, OwnerConnectorSystem } from '@/lib/api'
@@ -197,9 +197,9 @@ export type VerticalWizardSystemInput = {
   allowedApproaches: string[]
   displayLabel?: string
   /**
-   * Sheets only — include the mapping/clean step after connect.
-   * Defaults to true for `hr_alumni` / `bizdev_contacts`. Pass false when
-   * columns already map and no rows need cleaning.
+   * Include mapping after connect (sheets `mapping-clean`) or after live-creds
+   * (Lever / Paylocity `{system}-mapping` when upload is allowed).
+   * Defaults to true. Pass false when columns already map and no rows need cleaning.
    */
   needsMappingClean?: boolean
 }
@@ -238,6 +238,209 @@ export function shouldIncludeSheetsMappingClean(input?: {
     (input.mapping ? uploadMappingComplete(input.mapping) : false)
   const rejects = input.rejectedRowCount ?? 0
   return !complete || rejects > 0
+}
+
+/**
+ * Live ping is connectivity only — not a hashed extract (Wave M S01/S02).
+ * Matching still needs a mapped upload. Auth0 live extract is not in this set.
+ */
+export const LIVE_PING_NOT_EXTRACT_SYSTEMS = ['lever', 'paylocity'] as const
+
+export type LivePingNotExtractSystemId =
+  (typeof LIVE_PING_NOT_EXTRACT_SYSTEMS)[number]
+
+export function livePingIsNotMatchingExtract(
+  system: string | null | undefined,
+): boolean {
+  const normalized = normalizeSystemId(system ?? '')
+  return (
+    normalized === 'lever' ||
+    normalized === 'paylocity'
+  )
+}
+
+export function liveMappingFollowOnStepId(system: string): string {
+  return `${normalizeSystemId(system)}-mapping`
+}
+
+export function liveUploadFallbackStepId(system: string): string {
+  return `${normalizeSystemId(system)}-howto-upload`
+}
+
+/**
+ * After live-creds, include `{system}-mapping` when upload is allowed and the
+ * Live ping is not a matching extract (reuse sheets mapping completeness).
+ */
+export function shouldIncludeLiveMappingFollowOn(input: {
+  system: string
+  allowedApproaches: readonly string[] | null | undefined
+  needsMappingClean?: boolean
+  mapping?: Record<string, string> | null
+  mappingComplete?: boolean
+  rejectedRowCount?: number
+}): boolean {
+  const normalized = normalizeSystemId(input.system)
+  if (isSheetsOwnerSystem(normalized)) return false
+  if (isOwnerWizardHiddenSystem(normalized)) return false
+  if (!livePingIsNotMatchingExtract(normalized)) return false
+  if (!allowsUpload(input.allowedApproaches)) return false
+  if (!(allowsLive(input.allowedApproaches) || allowsOauth(input.allowedApproaches))) {
+    return false
+  }
+  if (input.needsMappingClean === false) return false
+  if (input.needsMappingClean === true) return true
+  return shouldIncludeSheetsMappingClean({
+    mapping: input.mapping,
+    mappingComplete: input.mappingComplete,
+    rejectedRowCount: input.rejectedRowCount,
+  })
+}
+
+export const LIVE_CONNECT_RETRY_LABEL = 'Retry connection'
+export const LIVE_CONNECT_SETUP_UPLOAD_LABEL = 'Set up manual upload'
+
+export const LIVE_CONNECT_SUCCESS_MAPPING_HINT =
+  'Connection confirmed. Next, map identifier columns if the headers differ. Email or phone is enough. A Live test does not start matching by itself.'
+
+export const LIVE_CONNECT_FAILURE_HINT =
+  'Connection test failed. Retry the connection, or set up a manual upload and map identifier columns if the headers differ. Email or phone is enough.'
+
+export const LIVE_CONNECT_FAILURE_RETRY_ONLY_HINT =
+  'Connection test failed. Retry the connection.'
+
+export const LIVE_PING_NOT_EXTRACT_HINT =
+  'A successful Live test only checks connectivity. Matching still needs a mapped upload. Map identifier columns if the headers differ — email or phone is enough.'
+
+export type LiveConnectUploadFallback = {
+  label: string
+  stepId: string
+}
+
+export type LiveConnectFailureActions = {
+  retryLabel: string
+  setupManualUpload: LiveConnectUploadFallback | null
+  hint: string
+}
+
+export type LiveConnectSuccessFollowOn = {
+  /** Wizard step after a passing Live test — mapping when upload is allowed. */
+  nextStepId: string | null
+  nextKind: 'mapping' | 'howto-upload' | 'continue'
+  hint: string
+  /** Still offer upload because Live ping is not extract (Lever / Paylocity). */
+  setupManualUpload: LiveConnectUploadFallback | null
+}
+
+/**
+ * Show Retry / Set up manual upload when Live fails and upload is allowed.
+ * Cassandra never offers upload.
+ */
+export function liveConnectOffersUploadFallback(
+  allowedApproaches: readonly string[] | null | undefined,
+  system?: string | null,
+): boolean {
+  if (system && isOwnerWizardHiddenSystem(system)) return false
+  return allowsUpload(allowedApproaches)
+}
+
+/** Live-fail CTAs: always Retry; Set up manual upload only when upload is allowed. */
+export function liveConnectFailureActions(input: {
+  system: string
+  allowedApproaches: readonly string[] | null | undefined
+}): LiveConnectFailureActions {
+  const normalized = normalizeSystemId(input.system)
+  const canUpload = liveConnectOffersUploadFallback(
+    input.allowedApproaches,
+    normalized,
+  )
+  return {
+    retryLabel: LIVE_CONNECT_RETRY_LABEL,
+    setupManualUpload: canUpload
+      ? {
+          label: LIVE_CONNECT_SETUP_UPLOAD_LABEL,
+          stepId: liveUploadFallbackStepId(normalized),
+        }
+      : null,
+    hint: canUpload
+      ? LIVE_CONNECT_FAILURE_HINT
+      : LIVE_CONNECT_FAILURE_RETRY_ONLY_HINT,
+  }
+}
+
+/**
+ * After a passing Live test: continue to mapping when that follow-on is in
+ * the wizard; otherwise the next linear step. Lever/Paylocity still expose
+ * Set up manual upload because the ping is not a hashed extract.
+ */
+export function liveConnectSuccessFollowOn(input: {
+  system: string
+  allowedApproaches: readonly string[] | null | undefined
+  needsMappingClean?: boolean
+  mapping?: Record<string, string> | null
+  mappingComplete?: boolean
+  rejectedRowCount?: number
+}): LiveConnectSuccessFollowOn {
+  const normalized = normalizeSystemId(input.system)
+  const includeMapping = shouldIncludeLiveMappingFollowOn({
+    system: normalized,
+    allowedApproaches: input.allowedApproaches,
+    needsMappingClean: input.needsMappingClean,
+    mapping: input.mapping,
+    mappingComplete: input.mappingComplete,
+    rejectedRowCount: input.rejectedRowCount,
+  })
+  const canUpload = liveConnectOffersUploadFallback(
+    input.allowedApproaches,
+    normalized,
+  )
+  const pingOnly = livePingIsNotMatchingExtract(normalized)
+  const setupManualUpload =
+    canUpload && pingOnly
+      ? {
+          label: LIVE_CONNECT_SETUP_UPLOAD_LABEL,
+          stepId: liveUploadFallbackStepId(normalized),
+        }
+      : null
+
+  if (includeMapping) {
+    return {
+      nextStepId: liveMappingFollowOnStepId(normalized),
+      nextKind: 'mapping',
+      hint: pingOnly
+        ? LIVE_PING_NOT_EXTRACT_HINT
+        : LIVE_CONNECT_SUCCESS_MAPPING_HINT,
+      setupManualUpload,
+    }
+  }
+  if (canUpload) {
+    return {
+      nextStepId: liveUploadFallbackStepId(normalized),
+      nextKind: 'howto-upload',
+      hint: pingOnly
+        ? LIVE_PING_NOT_EXTRACT_HINT
+        : LIVE_CONNECT_SUCCESS_MAPPING_HINT,
+      setupManualUpload,
+    }
+  }
+  return {
+    nextStepId: null,
+    nextKind: 'continue',
+    hint: pingOnly
+      ? LIVE_PING_NOT_EXTRACT_HINT
+      : LIVE_CONNECT_SUCCESS_MAPPING_HINT,
+    setupManualUpload,
+  }
+}
+
+export function mappingFollowOnCopy(displayName: string): {
+  title: string
+  intro: string
+} {
+  const label = (displayName ?? '').trim() || 'this system'
+  return {
+    title: `Map columns for ${label}`,
+    intro: `Map identifier columns if the headers differ. Email or phone is enough. A Live connection does not skip this step.`,
+  }
 }
 
 const WIZARD_STEP_SUFFIXES = [
@@ -306,6 +509,15 @@ function wizardSystemStepsForBinding(
   if (allowsLive(allowedApproaches) || allowsOauth(allowedApproaches)) {
     steps.push({ id: `${normalized}-howto-live` })
     steps.push({ id: `${normalized}-live-creds` })
+    if (
+      shouldIncludeLiveMappingFollowOn({
+        system: normalized,
+        allowedApproaches,
+        needsMappingClean: options?.needsMappingClean,
+      })
+    ) {
+      steps.push({ id: liveMappingFollowOnStepId(normalized) })
+    }
   }
   if (allowsUpload(allowedApproaches)) {
     steps.push({ id: `${normalized}-howto-upload` })
@@ -461,51 +673,53 @@ export type SystemWizardCopy = {
 export const SYSTEM_COPY: Record<string, SystemWizardCopy> = {
   axios_hq: {
     uploadHowto:
-      'Export a contact or subscriber list from Axios HQ as CSV. Upload the file, then map first name, last name, and email if the column names differ. Habeas does not connect to Axios HQ directly.',
+      'Export a contact or subscriber list from Axios HQ as CSV. Upload a fresh file every batch, then map identifier columns if the headers differ. Email or phone is enough. Habeas does not connect to Axios HQ directly.',
   },
   hr_alumni: {
     howto:
-      'Connect the Alumni Google Sheet with Google OAuth, or upload a CSV if you cannot grant sheet access. Map first name, last name, and email if the headers differ, then choose how often this list should stay current.',
+      'Connect the Alumni Google Sheet with Google OAuth, or upload a CSV if you cannot grant sheet access. Map identifier columns if the headers differ — email or phone is enough — then choose how often this list should stay current.',
     oauthHowto:
       'Sign in with Google (OAuth) to grant Habeas access to the Alumni sheet, then paste the spreadsheet URL. Habeas tests metadata access before you continue.',
     uploadHowto:
-      'If Google OAuth is not available, upload the alumni list as CSV and map first name, last name, and email.',
+      'If Google OAuth is not available, upload the alumni list as CSV and map identifier columns if the headers differ. Email or phone is enough.',
   },
   bizdev_contacts: {
     howto:
-      'Connect the Contact Us Google Sheet with Google OAuth, or upload a CSV if you cannot grant sheet access. Map first name, last name, and email if the headers differ, then choose how often this list should stay current.',
+      'Connect the Contact Us Google Sheet with Google OAuth, or upload a CSV if you cannot grant sheet access. Map identifier columns if the headers differ — email or phone is enough — then choose how often this list should stay current.',
     oauthHowto:
       'Sign in with Google (OAuth) to grant Habeas access to the Contact Us sheet, then paste the spreadsheet URL. Habeas tests metadata access before you continue.',
     uploadHowto:
-      'If Google OAuth is not available, upload Contact Us rows as CSV and map first name, last name, and email.',
+      'If Google OAuth is not available, upload Contact Us rows as CSV and map identifier columns if the headers differ. Email or phone is enough.',
   },
   alumni_google_sheet: {
     liveHowto:
       'Sign in with Google to grant Habeas access to the Alumni sheet, then paste the spreadsheet URL. Sharing with a service account is not required.',
     uploadHowto:
-      'If Google OAuth is not available, upload the alumni list as CSV and map first name, last name, and email.',
+      'If Google OAuth is not available, upload the alumni list as CSV and map identifier columns if the headers differ. Email or phone is enough.',
   },
   contact_us_google_sheet: {
     liveHowto:
       'Sign in with Google to grant Habeas access to the Contact Us sheet, then paste the spreadsheet URL. Sharing with a service account is not required.',
     uploadHowto:
-      'If Google OAuth is not available, upload Contact Us rows as CSV and map first name, last name, and email.',
+      'If Google OAuth is not available, upload Contact Us rows as CSV and map identifier columns if the headers differ. Email or phone is enough.',
   },
   paylocity: {
     liveHowto:
-      'Follow the numbered steps under each field to create Paylocity integration credentials, paste them, then run a connection test.',
+      'Follow the numbered steps under each field to create Paylocity SFTP credentials, paste them, then run a connection test. Live is SFTP, not an API. If the test fails, retry the connection or set up a manual upload.',
     uploadHowto:
-      'If Live credentials fail, upload a Paylocity CSV and map first name, last name, and email.',
+      'If Live credentials fail, upload a Paylocity CSV and map identifier columns if the headers differ. Email or phone is enough.',
   },
   lever: {
     liveHowto:
-      'Follow the numbered steps to create a Lever API key, paste it, then run a connection test.',
+      'Follow the numbered steps to create a Lever API key, paste it, then run a connection test. A passing test only checks Users read/list — it does not extract candidates. If Live fails, retry the connection or set up a manual upload.',
+    uploadHowto:
+      'Export a CSV, then map identifier columns if the headers differ. Email or phone is enough.',
   },
   auth0: {
     liveHowto:
       'Follow the numbered steps to create an Auth0 Machine-to-Machine app, paste Domain, Client ID, and Client Secret, then run a connection test.',
     uploadHowto:
-      'If Live credentials fail, export Auth0 users as CSV, upload, then map first name, last name, and email.',
+      'If Live credentials fail, export Auth0 users as CSV, upload, then map identifier columns if the headers differ. Email or phone is enough.',
   },
 }
 
@@ -539,7 +753,7 @@ export type ModeDefinitionCardCopy = {
 export const MODE_UPLOAD_DEFINITION_CARD: ModeDefinitionCardCopy = {
   mode: 'upload',
   title: 'Upload',
-  definition: `You upload your existing export to ${PLATFORM_NAME}, then map columns to first name, last name, and email if the headers differ.`,
+  definition: `You upload your existing export to ${PLATFORM_NAME}, then map identifier columns if the headers differ. Email or phone is enough.`,
 }
 
 export const MODE_LIVE_DEFINITION_CARD: ModeDefinitionCardCopy = {
@@ -575,28 +789,30 @@ const MODE_SYSTEM_HINTS: Record<
 > = {
   paylocity: {
     upload:
-      'Upload a Paylocity export and map first name, last name, and email — no Developer Portal credentials needed.',
+      'Upload a Paylocity export and map identifier columns if the headers differ. Email or phone is enough — no Developer Portal credentials needed.',
     live:
-      'Paylocity will deliver employee files through SFTP — not an API connection.',
+      'Paylocity will deliver employee files through SFTP — not an API connection. If Live fails, set up a manual upload.',
   },
   lever: {
+    upload:
+      'Export a CSV, then map identifier columns if the headers differ. Email or phone is enough. Habeas does not invent Lever column names.',
     live:
-      'Habeas pulls recruiting candidate data from Lever using an API key with Users read/list.',
+      'Habeas tests Lever with an API key that has Users read/list. A passing ping is not candidate matching — map an upload next.',
   },
   auth0: {
     upload:
-      'Export Auth0 users as CSV, upload the file, then map first name, last name, and email.',
+      'Export Auth0 users as CSV, upload the file, then map identifier columns if the headers differ. Email or phone is enough.',
     live: 'Habeas pulls user records from Auth0 using Machine-to-Machine API credentials.',
   },
   bizdev_contacts: {
     upload:
-      'Upload Contact Us contacts as CSV, then map first name, last name, and email.',
+      'Upload Contact Us contacts as CSV, then map identifier columns if the headers differ. Email or phone is enough.',
     live:
       'Connect the Contact Us Google Sheet with Google OAuth. Habeas does not use a service-account share.',
   },
   hr_alumni: {
     upload:
-      'Upload your alumni list as CSV, then map first name, last name, and email.',
+      'Upload your alumni list as CSV, then map identifier columns if the headers differ. Email or phone is enough.',
     live:
       'Connect the Alumni Google Sheet with Google OAuth. Habeas does not use a service-account share.',
   },
@@ -606,11 +822,9 @@ const DISALLOWED_MODE_REASONS: Record<
   string,
   Partial<Record<ConnectorApproachMode, string>>
 > = {
-  lever: {
-    upload: 'Lever only supports Live — Habeas connects via the Lever API.',
-  },
   paylocity: {
-    live: 'Paylocity only supports Upload — Habeas receives employee files through SFTP.',
+    live:
+      'Paylocity Live uses SFTP. When Live is not configured, use Upload and map identifier columns if the headers differ. Email or phone is enough.',
   },
 }
 
@@ -643,9 +857,16 @@ export function modeStepIntroCopy(displayName: string): string {
 function modeDefinitionForSystem(
   systemId: string,
   mode: ConnectorApproachMode,
+  allowedApproaches?: readonly string[],
 ): string {
   const normalized = normalizeSystemId(systemId)
   if (normalized === 'paylocity' && mode === 'live') {
+    const liveAllowed = allowedApproaches
+      ? isModeAllowed('live', allowedApproaches, normalized)
+      : false
+    if (liveAllowed) {
+      return `${PLATFORM_NAME} will receive Paylocity employee files through SFTP. This is not an API connection. If Live fails, retry the connection or set up a manual upload.`
+    }
     return `${PLATFORM_NAME} will receive Paylocity employee files through SFTP. This is not an API connection — use Upload today.`
   }
   const card = MODE_DEFINITION_CARDS.find((entry) => entry.mode === mode)
@@ -696,7 +917,11 @@ export function buildModeStepCards(input: {
     return {
       mode: card.mode,
       title: card.title,
-      definition: modeDefinitionForSystem(normalized, card.mode),
+      definition: modeDefinitionForSystem(
+        normalized,
+        card.mode,
+        input.allowedApproaches,
+      ),
       hint: allowed ? modeStepSystemHint(normalized, card.mode) : null,
       allowed,
       disabledReason: allowed
