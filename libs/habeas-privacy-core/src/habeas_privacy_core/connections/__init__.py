@@ -2,6 +2,7 @@
 
 from habeas_privacy_core.connections.gcp_secret_reader import (
     GcpSecretReader,
+    GcpSecretWriter,
     gsm_secret_id,
 )
 from habeas_privacy_core.connections.catalog import (
@@ -16,10 +17,6 @@ from habeas_privacy_core.connections.freshness import (
     GateResult,
     effective_cadence_days,
     evaluate_connection_gate,
-)
-from habeas_privacy_core.connections.gcp_secret_reader import (
-    GcpSecretReader,
-    gsm_secret_id,
 )
 from habeas_privacy_core.connections.models import (
     Connection,
@@ -52,6 +49,7 @@ __all__ = [
     "ConnectionSystem",
     "GateResult",
     "GcpSecretReader",
+    "GcpSecretWriter",
     "InMemorySecretWriter",
     "Invite",
     "SecretReader",

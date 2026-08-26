@@ -51,29 +51,58 @@ class InMemorySecretWriter:
 
 _default_writer: InMemorySecretWriter | None = None
 _default_gcp_reader: SecretReader | None = None
+_default_gcp_writer: SecretWriter | None = None
 _default_gcp_project: str | None = None
+_default_gcp_writer_project: str | None = None
 
 
 def get_secret_writer() -> SecretWriter:
-    """Return the default secret writer (in-memory until GSM wiring lands)."""
-    global _default_writer
-    if _default_writer is None:
-        _default_writer = InMemorySecretWriter()
-    return _default_writer
+    """Return the default secret writer.
+
+    Uses the production GSM writer when ``GCP_PROJECT`` is set and
+    ``SECRET_READER`` / ``SECRET_WRITER`` is not ``memory``. Otherwise
+    returns the process-local in-memory store.
+    """
+    if not _use_gcp_secret_writer():
+        global _default_writer
+        if _default_writer is None:
+            _default_writer = InMemorySecretWriter()
+        return _default_writer
+
+    project = os.environ.get("GCP_PROJECT", "").strip()
+    global _default_gcp_writer, _default_gcp_writer_project
+    if _default_gcp_writer is None or _default_gcp_writer_project != project:
+        from habeas_privacy_core.connections.gcp_secret_reader import GcpSecretWriter
+
+        _default_gcp_writer = GcpSecretWriter(project_id=project)
+        _default_gcp_writer_project = project
+    return _default_gcp_writer
 
 
 def reset_secret_reader_cache() -> None:
-    """Drop the cached GCP reader so tests can change ``GCP_PROJECT``."""
+    """Drop cached GCP reader/writer so tests can change ``GCP_PROJECT``."""
     global _default_gcp_reader, _default_gcp_project
+    global _default_gcp_writer, _default_gcp_writer_project
     _default_gcp_reader = None
     _default_gcp_project = None
+    _default_gcp_writer = None
+    _default_gcp_writer_project = None
+
+
+def _memory_secret_backend() -> bool:
+    reader_mode = os.environ.get("SECRET_READER", "").strip().lower()
+    writer_mode = os.environ.get("SECRET_WRITER", "").strip().lower()
+    return reader_mode == "memory" or writer_mode == "memory"
 
 
 def _use_gcp_secret_reader() -> bool:
-    mode = os.environ.get("SECRET_READER", "").strip().lower()
-    if mode == "memory":
+    if _memory_secret_backend():
         return False
     return bool(os.environ.get("GCP_PROJECT", "").strip())
+
+
+def _use_gcp_secret_writer() -> bool:
+    return _use_gcp_secret_reader()
 
 
 def get_secret_reader() -> SecretReader:
