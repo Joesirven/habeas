@@ -16,6 +16,7 @@ from admin_api import roles
 from admin_api.main import app
 from admin_api.roles import RolePrincipal
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER, ROLE_DATA_OWNER, ROLE_SUPER_ADMIN
+
 from habeas_privacy_core.auth.roles import ROLE_ADMIN
 from habeas_privacy_core.connections.catalog import (
     VERTICAL_COMMUNICATIONS,
@@ -38,6 +39,15 @@ COMM_OWNER = RolePrincipal(
     real_role=ROLE_DATA_OWNER,
 )
 
+
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
 
 def _fake_pool(conn: AsyncMock) -> MagicMock:
     return MagicMock(
@@ -208,7 +218,7 @@ def test_list_catalog_verticals_via_test_client(monkeypatch: pytest.MonkeyPatch)
     with TestClient(app) as client:
         response = client.get(
             "/ops/verticals",
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:super@example.com"},
+            headers=signed_headers("super@example.com"),
         )
 
     assert response.status_code == 200
@@ -497,7 +507,7 @@ def test_post_data_vertical_member_invite_via_test_client(
         response = client.post(
             f"/owner/verticals/{VERTICAL_DATA}/member-invites",
             json={"email": "user@example.com"},
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:super@example.com"},
+            headers=signed_headers("super@example.com"),
         )
 
     assert response.status_code == 201

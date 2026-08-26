@@ -116,7 +116,10 @@ def _reset_scheduler(monkeypatch: pytest.MonkeyPatch):
 
 
 def _headers(email: str = "ops@example.com") -> dict[str, str]:
-    return {"X-Goog-Authenticated-User-Email": f"accounts.google.com:{email}"}
+    return {
+        "X-Goog-Authenticated-User-Email": f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+    }
 
 
 def test_get_schedules_defaults_when_scheduler_disabled():

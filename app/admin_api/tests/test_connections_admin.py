@@ -16,8 +16,18 @@ from admin_api import main as admin_main
 from admin_api.main import app
 from admin_api.roles import RolePrincipal
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER, ROLE_SUPER_ADMIN
+
 from habeas_privacy_core.connections.models import Connection
 
+
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
 
 @pytest.fixture(autouse=True)
 def _reset_role_settings(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
@@ -45,12 +55,12 @@ def _reset_role_settings(monkeypatch: pytest.MonkeyPatch, request: pytest.Fixtur
 
 def _super_admin_headers() -> dict[str, str]:
     roles.settings.admin_api_super_admins = "ops@example.com"
-    return {IAP_EMAIL_HEADER: "ops@example.com"}
+    return signed_headers("ops@example.com")
 
 
 def _admin_headers() -> dict[str, str]:
     roles.settings.admin_api_admins = "admin@example.com"
-    return {IAP_EMAIL_HEADER: "admin@example.com"}
+    return signed_headers("admin@example.com")
 
 
 def _fake_pool(conn: AsyncMock) -> MagicMock:
@@ -123,7 +133,7 @@ def test_owner_candidates_union_of_role_allowlists() -> None:
     with TestClient(app) as client:
         response = client.get(
             "/ops/connections/owner-candidates",
-            headers={IAP_EMAIL_HEADER: "ops@example.com"},
+            headers=signed_headers("ops@example.com"),
         )
 
     assert response.status_code == 200
@@ -696,7 +706,7 @@ def test_create_connection_integration() -> None:
     with TestClient(app) as client:
         response = client.post(
             "/ops/connections",
-            headers={IAP_EMAIL_HEADER: "ops@example.com"},
+            headers=signed_headers("ops@example.com"),
             json={
                 "system": "axios_hq",
                 "display_name": "Communications list",
@@ -721,7 +731,7 @@ def test_create_invite_integration() -> None:
     with TestClient(app) as client:
         create_response = client.post(
             "/ops/connections",
-            headers={IAP_EMAIL_HEADER: "ops@example.com"},
+            headers=signed_headers("ops@example.com"),
             json={
                 "system": "axios_hq",
                 "display_name": "Invite flow",
@@ -733,7 +743,7 @@ def test_create_invite_integration() -> None:
 
         invite_response = client.post(
             f"/ops/connections/{connection_id}/invites",
-            headers={IAP_EMAIL_HEADER: "ops@example.com"},
+            headers=signed_headers("ops@example.com"),
             json={},
         )
 

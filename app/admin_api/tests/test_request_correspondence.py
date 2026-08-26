@@ -14,6 +14,7 @@ from admin_api import request_correspondence, roles
 from admin_api.main import app
 from admin_api.roles import RolePrincipal
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
+
 from habeas_privacy_core.auth.roles import (
     ROLE_ADMIN,
     ROLE_DATA_OWNER,
@@ -32,6 +33,15 @@ SUPER_ADMIN = RolePrincipal(
 
 REQUEST_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
+
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
 
 class _FakeConn:
     """Routes calls by SQL fragment for the identity/KD13 gate paths."""
@@ -69,6 +79,8 @@ class _FakeConn:
             return 1 if self.request_exists else None
         if "FROM data_fulfillment_attempts" in query:
             return 1 if self.pack_ready else None
+        if "FROM request_vertical_matching" in query:
+            return None
         raise AssertionError(f"unexpected fetchval: {query}")
 
     async def fetch(self, query: str, *args: Any) -> Any:
@@ -456,7 +468,7 @@ def test_legal_cannot_put_email_template() -> None:
     with TestClient(app) as client:
         response = client.put(
             "/requests/email-templates/access_delivery",
-            headers={IAP_EMAIL_HEADER: "legal@example.com"},
+            headers=signed_headers("legal@example.com"),
             json={"subject": "Hi", "body": "Body", "placeholder_schema": []},
         )
     assert response.status_code == 403
@@ -507,7 +519,7 @@ def test_documents_endpoint_allows_every_authenticated_role(
     with TestClient(app) as client:
         response = client.get(
             f"/requests/{REQUEST_ID}/documents",
-            headers={IAP_EMAIL_HEADER: "person@example.com"},
+            headers=signed_headers("person@example.com"),
         )
     assert response.status_code == 200, (role, response.text)
     assert response.json() == []
@@ -520,7 +532,7 @@ def test_documents_endpoint_rejects_unlisted_email_when_allowlists_configured() 
     with TestClient(app) as client:
         response = client.get(
             f"/requests/{REQUEST_ID}/documents",
-            headers={IAP_EMAIL_HEADER: "stranger@example.com"},
+            headers=signed_headers("stranger@example.com"),
         )
     assert response.status_code == 403
 

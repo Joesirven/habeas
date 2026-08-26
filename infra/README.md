@@ -141,13 +141,13 @@ Land/promote only — no `DROP_API_KEY`. Needs `DATABASE_URL`.
 |------|---------|
 | [`cloudbuild/admin-web-dev.yaml`](cloudbuild/admin-web-dev.yaml) | Build/push/deploy `admin-web-dev` |
 
-Bun/Vite multi-stage build → nginx on port 8080. `VITE_ADMIN_API_URL` is a **build arg** (default: dev admin-api Cloud Run URL). No runtime secrets.
+Bun/Vite multi-stage build → nginx on port 8080. `VITE_ADMIN_API_URL` and `VITE_GOOGLE_CLIENT_ID` are **build args**. **Architecture B (intended):** yamls bake the admin-api origin so a B revision can call the API as a resource server (`admin-web-dev.yaml` → admin-api-dev; `admin-web-prod.yaml` → admin-api-prod) and bake the public Google Identity Services / IAP OAuth client as `VITE_GOOGLE_CLIENT_ID` (same project brand as `IAP_OAUTH_CLIENT_ID` — not a secret). **Current prod web is not on B:** live 100% is `admin-web-prod-00023-fnz` (nginx `/api`); **00024** is the unused B bake at **0%**. Do not claim prod already uses GIS. Do not flip 00024 until GIS `/me` is proven on DEV. **Bake ≠ cutover:** `admin-web-prod.yaml` has no `--no-traffic`; 00024-at-0% is a **manual pin** to 00023. `allUsers` is **off** on admin-api — a GIS bake at 100% would **403** at Cloud Run IAM. CORS already lists both web origins. nginx `ADMIN_API_UPSTREAM` stays for same-origin `/api` — **Server-Sent Events** (`GET /api/live/events`) and empty-VITE / 00023. No runtime secrets. Labs (`VITE_ENABLE_LABS`) are DEV-only: `true` on `admin-web-dev`, `false` on `admin-web-prod`.
 
 ```bash
 gcloud builds submit --config=infra/cloudbuild/admin-web-dev.yaml --project=example-gcp-project .
 ```
 
-After first deploy, append the `admin-web-dev` `*.run.app` origin to `admin-api-dev` `_CORS_ORIGINS` and redeploy admin-api so the browser can call the API cross-origin.
+`admin-api-dev` / `admin-api-prod` `_CORS_ORIGINS` already include both `admin-web-*` origins. After a new web origin, append it there and redeploy admin-api.
 
 ### Post-deploy revision verify (admin-api-prod / admin-web-prod)
 
@@ -205,6 +205,8 @@ gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
 
 ### Cloud Run auth (dev)
 
+**Architecture B (intended):** admin-api is the **resource server** (Cloud Run IAP **off**; app-level `REQUIRE_IAP_IDENTITY`). Humans use **admin-web IAP** as the SSO front door. Intended browser JSON uses a Google Identity Services user ID token (`Authorization: Bearer`, `aud` = OAuth client `IAP_OAUTH_CLIENT_ID`). **Current prod web is not on B:** live 100% is `admin-web-prod-00023-fnz` (nginx `/api`, SA Bearer + `X-Goog-*`); **00024** is the unused B bake at **0%**. Do not claim prod already uses GIS. Do not flip 00024 until GIS `/me` is proven on DEV. Server-Sent Events stay same-origin `/api/live/events` (nginx mints a service-account Bearer and forwards IAP headers). CLI: `habeas-cli auth login --adc` or `auth login` — pin both `ADMIN_API_ID_TOKEN_AUDIENCE` and `IAP_OAUTH_CLIENT_ID`. `allUsers` `run.invoker` is **stripped** on `admin-api-prod` and `admin-api-dev` (remaining: compute SA + `jsirven@`). GIS JWT `aud` is the OAuth client, not the Cloud Run URL — Cloud Run IAM would reject GIS unless `allUsers`, which is off. A 00024 flip today would **403** at IAM (or **401** if `allUsers` were on but GIS fail-soft). Do not say `allUsers` stays so GIS can reach the API. Cloud Build admin-api yamls: `--no-allow-unauthenticated`, `--no-iap`, `REQUIRE_IAP_IDENTITY=true`, fail-closed `allUsers` strip (not `|| true`). `resolve_actor` rejects IAP email header alone (needs verified Bearer; header-alone → 401). Do **not** re-enable Cloud Run IAP on admin-api. Do **not** re-run [`admin-api-dev-iam.yaml`](cloudbuild/admin-api-dev-iam.yaml) (turns IAP on). Do **not** edit accepted SirvenOS architecture decision records from this repo.
+
 **Dev URLs (not prod):**
 
 | Service | URL |
@@ -214,8 +216,9 @@ gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
 
 | Surface | Invoker |
 |---------|---------|
-| `admin-api-dev` | Compute SA + allowlisted user invokers; Cloud Run **IAP off** (`--no-iap`); app-level `REQUIRE_IAP_IDENTITY` accepts IAP email header **or** verified Bearer Google ID token (ADC) |
-| `admin-web-dev` / `ops-ia-web-dev` | Public Cloud Run + browser IAP front door (see `admin-web-dev.yaml` / `ops-ia-web-dev.yaml`); prefer **ops-ia-web-dev** for DROP ops + owner connector flows |
+| `admin-api-dev` | Compute SA + `jsirven@` invoker only — **`allUsers` stripped** (GIS tokens cannot pass Cloud Run IAM); Cloud Run **IAP off** (`--no-iap`); app-level `REQUIRE_IAP_IDENTITY` requires a verified Bearer (`user_jwt` / `bearer_jwt` / `iap_header` = Bearer **plus** IAP email). Header-alone → 401 |
+| `admin-web-dev` / `ops-ia-web-dev` | Public Cloud Run + browser IAP front door (see `admin-web-dev.yaml` / `ops-ia-web-dev.yaml`); prefer **ops-ia-web-dev** for current nginx `/api` DROP ops + owner connector flows. Intended B front door is **admin-web-dev** |
+
 | Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `data-vertical-matching-dev`, `hash-index-refresh-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) — never user/IAP direct |
 
 Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Operators never call workers directly — process/enqueue goes through admin-api. Localhost worker URLs skip auth.
@@ -226,9 +229,9 @@ Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admi
 |--------|------|
 | super_admin (CLI / local Vite) | ADC Cloud Run ID token (`habeas-cli auth login --adc` or Vite ADC proxy); email must be on `ADMIN_API_SUPER_ADMINS` |
 | admin / data_owner (CLI) | `habeas-cli auth login` (Cloud Run audience token via ADC + email header bound to gcloud account) |
-| Browser SSO | ops-ia / admin-web IAP front door (unchanged) |
+| Browser SSO | admin-web IAP front door (human page access). Intended B API session is a Google Identity Services user Bearer. Current prod 00023 API session is nginx `/api` (IAP + SA Bearer). Server-Sent Events use the `/api` proxy |
 
-Do **not** re-run [`admin-api-dev-iam.yaml`](cloudbuild/admin-api-dev-iam.yaml) for the ADC workflow — it re-enables Cloud Run IAP and strips user invoker.
+Do **not** re-run [`admin-api-dev-iam.yaml`](cloudbuild/admin-api-dev-iam.yaml) for the ADC / Architecture B workflow — it re-enables Cloud Run IAP and strips user invoker.
 
 #### DROP mutation identity (app layer)
 
@@ -247,7 +250,7 @@ Map IAP email → role (pipe- or comma-separated). Highest privilege wins if an 
 | `DROP_OPS_DATA_OWNER_EMAILS` | `data_owner` | Same review paths as `admin` |
 | `DROP_OPS_LOCAL_ROLE` | any of the three | Local-only default when `REQUIRE_IAP_IDENTITY` is false (default `super_admin`) |
 
-**Web session contract:** `GET /me` → `{ "email", "role", "real_role" }` (`role` is effective after optional `X-Dev-Simulate-Role`; `real_role` is the allowlist role). `GET /auth/me` is the same probe.
+**Web session contract:** `GET /me` maps the verified actor (`user_jwt` GIS Bearer, `bearer_jwt` ADC / Cloud Run `aud`, or `iap_header` = verified Bearer **plus** IAP email) → `{ "email", "role", "real_role" }` (`role` is effective after optional `X-Dev-Simulate-Role`; `real_role` is the allowlist role). Header-alone is not an identity. `GET /auth/me` is the same probe.
 
 #### Calling admin-api (CLI) — preferred paths
 
@@ -294,8 +297,8 @@ Prerequisites Jose must keep granted:
 |-------|-----------|----------|
 | `roles/iam.serviceAccountTokenCreator` | `user:jsirven@…` (agents) | ops SA (`95660886550-compute@…`) |
 | `roles/run.admin` | Cloud Build executor (`95660886550-compute@…`) | project — so `admin-api-dev.yaml` `auth-front-door` can `run.services.setIamPolicy` (re-assert compute SA `run.invoker`, keep IAP off) |
-| `roles/run.invoker` | compute SA + allowlisted users (e.g. `user:jsirven@…`) | `admin-api-dev` (Cloud Run IAP **off**) |
-| `ADMIN_API_SUPER_ADMINS` / admins / data_owners env | operator emails | Cloud Run env on admin-api (Bearer ADC → super_admins only) |
+| `roles/run.invoker` | compute SA + `jsirven@` only (`allUsers` **stripped**; GIS tokens cannot pass Cloud Run IAM) | `admin-api-dev` / `admin-api-prod` (Cloud Run IAP **off**; app-layer `REQUIRE_IAP_IDENTITY` requires a verified Bearer) |
+| `ADMIN_API_SUPER_ADMINS` / admins / data_owners env | operator emails | Cloud Run env on admin-api (ADC Cloud Run Bearer → super_admins only; Google Identity Services `user_jwt` uses full allowlists) |
 | Worker `roles/run.invoker` | **only** admin-api runtime SA | `hash-index-refresh-dev`, `data-vertical-matching-dev`, … |
 | `roles/cloudscheduler.admin` | admin-api runtime SA (`95660886550-compute@…`) | project (live schedule GET/PATCH) |
 | `roles/iam.serviceAccountAdmin` | admin-api runtime SA (`95660886550-compute@…`) | project — live **per-connection Google Sheets SA** create on connection create (`CONNECTIONS_SHEETS_SA_PROVISION=live`) |
@@ -320,9 +323,9 @@ Non–super_admin browsers: use the ops-ia IAP front door, not the ADC Vite prox
 
 **Residual:**
 
-1. IAP email header path still trusts the header when present (Bearer path verifies Google ID tokens — see `habeas_privacy_core.auth` README).
-2. Deployed SPA→admin-api is cross-origin; cookie IAP is best-effort (`credentials: 'include'`). Prefer CLI auth login for mutations until a same-origin `/api` BFF exists.
-3. Do **not** re-run `admin-api-dev-iam.yaml` for the ADC workflow (re-enables Cloud Run IAP). Worker invoker lock:
+1. `resolve_actor` rejects IAP email header alone. Identity requires a verified Bearer. `iap_header` means verified Bearer **plus** IAP email (nginx `/api` Server-Sent Events / rollback and CLI `auth login` send both). Header-alone → 401 when `REQUIRE_IAP_IDENTITY`.
+2. **Architecture B (intended):** admin-api is the resource server; intended browser JSON uses a Google Identity Services user-delegated Google ID token. **Current prod web is `admin-web-prod-00023-fnz` nginx `/api` (100%); 00024 is the unused B bake at 0% — not GIS. Do not flip until GIS `/me` is proven on DEV.** `allUsers` is stripped — a flip today would 403 at IAM. IAP stays on admin-web for humans. Server-Sent Events stay on `/api/live/events`. CLI ADC + IAP login unchanged. Cookie IAP (`credentials: 'include'`) is not the B API session. Empty `VITE_ADMIN_API_URL` is local / current-prod-00023 / rollback.
+3. Do **not** re-run `admin-api-dev-iam.yaml` for the ADC / Architecture B workflow (re-enables Cloud Run IAP). Worker invoker lock:
 
 ```bash
 gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev-iam.yaml \

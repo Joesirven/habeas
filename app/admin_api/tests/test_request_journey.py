@@ -28,6 +28,7 @@ from admin_api.vertical_dispositions import (
     VerticalDispositionsResponse,
 )
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
+
 from habeas_privacy_core.db.migrations import run_migrations
 from habeas_privacy_core.workflow.approval import (
     MATCHING_REVIEW_ACTION,
@@ -43,6 +44,15 @@ pytestmark_integration = pytest.mark.skipif(
     reason="DATABASE_URL required for request journey integration tests",
 )
 
+
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
 
 @pytest.fixture(autouse=True)
 def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1208,7 +1218,7 @@ def test_owner_vertical_matching_results_includes_dwid_and_pii(
     with TestClient(app) as client:
         response = client.get(
             f"/ops/requests/{request_id}/verticals/data/matching-results?system=cassandra",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=signed_headers("owner@example.com"),
         )
 
     assert response.status_code == 200
@@ -1282,7 +1292,7 @@ def test_owner_vertical_matching_results_sheet_system_strips_drop_pii(
     with TestClient(app) as client:
         response = client.get(
             f"/ops/requests/{request_id}/verticals/people_hr/matching-results?system=hr_alumni",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=signed_headers("owner@example.com"),
         )
 
     assert response.status_code == 200
@@ -1321,7 +1331,7 @@ def test_owner_vertical_matching_results_forbids_unassigned_vertical(
     with TestClient(app) as client:
         response = client.get(
             f"/ops/requests/{request_id}/verticals/paylocity/matching-results",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=signed_headers("owner@example.com"),
         )
 
     assert response.status_code == 403
@@ -1478,7 +1488,7 @@ def test_legal_can_read_needs_attention(monkeypatch: pytest.MonkeyPatch) -> None
     with TestClient(app) as client:
         response = client.get(
             "/ops/requests/needs-attention?kind=triage",
-            headers={IAP_EMAIL_HEADER: "legal@example.com"},
+            headers=signed_headers("legal@example.com"),
         )
 
     assert response.status_code == 200
@@ -1498,7 +1508,7 @@ def test_journey_requires_role_when_iap_enforced(monkeypatch: pytest.MonkeyPatch
 def test_journey_denies_unknown_email(monkeypatch: pytest.MonkeyPatch) -> None:
     roles.settings.require_iap_identity = True
     roles.settings.admin_api_admins = "admin@example.com"
-    headers = {IAP_EMAIL_HEADER: "stranger@example.com"}
+    headers = signed_headers("stranger@example.com")
 
     with TestClient(app) as client:
         response = client.get(
@@ -1619,7 +1629,7 @@ def test_infer_pipeline_never_overwrites_failed() -> None:
 
 def test_journey_allows_data_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     roles.settings.admin_api_data_owners = "owner@example.com"
-    headers = {IAP_EMAIL_HEADER: "owner@example.com"}
+    headers = signed_headers("owner@example.com")
 
     async def fake_build(conn: Any, *, request_id: str) -> request_journey.RequestJourneyResponse:
         return request_journey.RequestJourneyResponse(

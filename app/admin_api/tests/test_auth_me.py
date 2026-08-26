@@ -32,6 +32,27 @@ from habeas_privacy_core.connections.catalog import (
 )
 
 
+# Documented IAP OAuth client ID (infra/README). Tests only; production reads env.
+_IAP_OAUTH_CLIENT_ID = (
+    "95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com"
+)
+_CLOUD_RUN_ORIGIN = "https://admin-api.example.run.app"
+
+
+def _echo_bearer_verify(token: str, request: object, audience: str) -> dict[str, object]:
+    """Default verify: Bearer token string is the email (header-alone is not identity)."""
+    return {"email": token, "email_verified": True}
+
+
+def _signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
+
+
 @pytest.fixture(autouse=True)
 def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
@@ -41,6 +62,12 @@ def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(roles.settings, "admin_api_id_token_audience", "")
     monkeypatch.setattr(roles.settings, "require_iap_identity", False)
     monkeypatch.setattr(admin_main.settings, "database_url", "")
+    monkeypatch.delenv("IAP_OAUTH_CLIENT_ID", raising=False)
+    monkeypatch.delenv("ADMIN_API_ID_TOKEN_AUDIENCE", raising=False)
+    monkeypatch.setattr(
+        "google.oauth2.id_token.verify_oauth2_token",
+        _echo_bearer_verify,
+    )
 
 
 def _base_me_payload(
@@ -95,7 +122,7 @@ def test_auth_me_with_iap_header(monkeypatch: pytest.MonkeyPatch) -> None:
     with TestClient(app) as client:
         response = client.get(
             "/auth/me",
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:dev-owner-1@example.com"},
+            headers=_signed_headers("dev-owner-1@example.com"),
         )
 
     assert response.status_code == 200
@@ -104,6 +131,96 @@ def test_auth_me_with_iap_header(monkeypatch: pytest.MonkeyPatch) -> None:
         ROLE_SUPER_ADMIN,
         given_name="jsirven",
     )
+
+
+def test_auth_me_user_bearer_matches_me(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Architecture B: /me and /auth/me agree on a verified human ID token."""
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "admin@example.com")
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+
+    def _fake_verify(token: str, request: object, audience: str) -> dict[str, object]:
+        return {
+            "email": "admin@example.com",
+            "email_verified": True,
+            "given_name": "Ada",
+        }
+
+    monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", _fake_verify)
+    headers = {"Authorization": "Bearer fake-token"}
+
+    with TestClient(app) as client:
+        me_response = client.get("/me", headers=headers)
+        auth_me_response = client.get("/auth/me", headers=headers)
+
+    expected = _base_me_payload(
+        "admin@example.com",
+        ROLE_ADMIN,
+        given_name="Ada",
+    )
+    assert me_response.status_code == 200
+    assert auth_me_response.status_code == 200
+    assert me_response.json() == expected
+    assert auth_me_response.json() == expected
+
+
+def test_auth_me_user_jwt_matches_me(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GIS OAuth-client token (user_jwt) agrees on /me and /auth/me."""
+    monkeypatch.setenv("IAP_OAUTH_CLIENT_ID", _IAP_OAUTH_CLIENT_ID)
+    monkeypatch.setenv("ADMIN_API_ID_TOKEN_AUDIENCE", _CLOUD_RUN_ORIGIN)
+    monkeypatch.setattr(roles.settings, "admin_api_id_token_audience", _CLOUD_RUN_ORIGIN)
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "admin@example.com")
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+
+    def _fake_verify(token: str, request: object, audience: str) -> dict[str, object]:
+        if audience != _IAP_OAUTH_CLIENT_ID:
+            raise ValueError("wrong audience")
+        return {
+            "email": "admin@example.com",
+            "email_verified": True,
+            "given_name": "Ada",
+        }
+
+    monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", _fake_verify)
+    headers = {"Authorization": "Bearer fake-token"}
+
+    with TestClient(app) as client:
+        me_response = client.get("/me", headers=headers)
+        auth_me_response = client.get("/auth/me", headers=headers)
+
+    expected = _base_me_payload(
+        "admin@example.com",
+        ROLE_ADMIN,
+        given_name="Ada",
+    )
+    assert me_response.status_code == 200
+    assert auth_me_response.status_code == 200
+    assert me_response.json() == expected
+    assert auth_me_response.json() == expected
+
+
+def test_auth_me_user_jwt_unknown_email_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("IAP_OAUTH_CLIENT_ID", _IAP_OAUTH_CLIENT_ID)
+    monkeypatch.setenv("ADMIN_API_ID_TOKEN_AUDIENCE", _CLOUD_RUN_ORIGIN)
+    monkeypatch.setattr(roles.settings, "admin_api_id_token_audience", _CLOUD_RUN_ORIGIN)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+
+    def _fake_verify(token: str, request: object, audience: str) -> dict[str, object]:
+        if audience != _IAP_OAUTH_CLIENT_ID:
+            raise ValueError("wrong audience")
+        return {"email": "stranger@example.com", "email_verified": True}
+
+    monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", _fake_verify)
+    headers = {"Authorization": "Bearer fake-token"}
+
+    with TestClient(app) as client:
+        me_response = client.get("/me", headers=headers)
+        auth_me_response = client.get("/auth/me", headers=headers)
+
+    assert me_response.status_code == 403
+    assert auth_me_response.status_code == 403
+    assert me_response.json()["detail"] == "role not permitted"
+    assert auth_me_response.json()["detail"] == "role not permitted"
 
 
 def test_auth_me_given_name_from_verified_bearer(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -154,7 +271,7 @@ def test_auth_me_includes_assigned_vertical_labels(monkeypatch: pytest.MonkeyPat
     with TestClient(app) as client:
         response = client.get(
             "/auth/me",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=_signed_headers("owner@example.com"),
         )
 
     assert response.status_code == 200
@@ -204,7 +321,7 @@ def test_auth_me_needs_connector_setup_when_wizard_incomplete(
     with TestClient(app) as client:
         response = client.get(
             "/auth/me",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=_signed_headers("owner@example.com"),
         )
 
     assert response.status_code == 200
@@ -228,7 +345,7 @@ def test_auth_me_needs_connector_setup_false_for_super_admin(
     with TestClient(app) as client:
         response = client.get(
             "/auth/me",
-            headers={IAP_EMAIL_HEADER: "ops@example.com"},
+            headers=_signed_headers("ops@example.com"),
         )
 
     assert response.status_code == 200
@@ -239,10 +356,10 @@ def test_me_alias_matches_auth_me(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
 
     with TestClient(app) as client:
-        me_response = client.get("/me", headers={IAP_EMAIL_HEADER: "ops@example.com"})
+        me_response = client.get("/me", headers=_signed_headers("ops@example.com"))
         auth_me_response = client.get(
             "/auth/me",
-            headers={IAP_EMAIL_HEADER: "ops@example.com"},
+            headers=_signed_headers("ops@example.com"),
         )
 
     assert me_response.status_code == 200
@@ -264,7 +381,7 @@ def test_me_pending_settings_invite_when_owner_has_no_teammates(
     with TestClient(app) as client:
         response = client.get(
             "/me",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=_signed_headers("owner@example.com"),
         )
 
     assert response.status_code == 200
@@ -288,7 +405,7 @@ def test_me_pending_settings_short_circuits_stored_status(
     with TestClient(app) as client:
         response = client.get(
             "/me",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=_signed_headers("owner@example.com"),
         )
 
     assert response.status_code == 200
@@ -318,7 +435,7 @@ def test_patch_pending_settings_skip_or_done(
     with TestClient(app) as client:
         response = client.patch(
             "/me/pending-settings",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=_signed_headers("owner@example.com"),
             json={"id": PENDING_SETTING_INVITE_USERS, "status": patch_status},
         )
 
@@ -347,7 +464,7 @@ def test_me_pending_settings_empty_for_non_owner(
     monkeypatch.setattr(admin_main, "owner_has_data_users", teammate_check)
 
     with TestClient(app) as client:
-        response = client.get("/me", headers={IAP_EMAIL_HEADER: email})
+        response = client.get("/me", headers=_signed_headers(email))
 
     assert response.status_code == 200
     assert response.json()["role"] == role
@@ -365,10 +482,10 @@ def test_me_pending_settings_empty_for_data_user(
     with TestClient(app) as client:
         response = client.get(
             "/me",
-            headers={
-                IAP_EMAIL_HEADER: "ops@example.com",
-                roles.DEV_SIMULATE_ROLE_HEADER: ROLE_DATA_USER,
-            },
+            headers=_signed_headers(
+                "ops@example.com",
+                **{roles.DEV_SIMULATE_ROLE_HEADER: ROLE_DATA_USER},
+            ),
         )
 
     assert response.status_code == 200
@@ -380,12 +497,12 @@ def test_me_pending_settings_empty_for_data_user(
 @pytest.mark.parametrize(
     "headers",
     [
-        {IAP_EMAIL_HEADER: "ops@example.com"},
-        {IAP_EMAIL_HEADER: "legal@example.com"},
-        {
-            IAP_EMAIL_HEADER: "ops@example.com",
-            roles.DEV_SIMULATE_ROLE_HEADER: ROLE_DATA_USER,
-        },
+        _signed_headers("ops@example.com"),
+        _signed_headers("legal@example.com"),
+        _signed_headers(
+            "ops@example.com",
+            **{roles.DEV_SIMULATE_ROLE_HEADER: ROLE_DATA_USER},
+        ),
     ],
 )
 def test_patch_pending_settings_forbidden_for_non_owner(
@@ -418,7 +535,7 @@ def test_patch_pending_settings_unknown_id_unprocessable(
     with TestClient(app) as client:
         response = client.patch(
             "/me/pending-settings",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=_signed_headers("owner@example.com"),
             json={"id": "not_a_real_setting", "status": "skipped"},
         )
 
@@ -461,7 +578,7 @@ def test_me_home_data_owner_shape_and_given_name(monkeypatch: pytest.MonkeyPatch
     with TestClient(app) as client:
         response = client.get(
             "/me/home",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=_signed_headers("owner@example.com"),
         )
 
     assert response.status_code == 200
@@ -530,7 +647,7 @@ def test_me_home_data_owner_scoped_to_assigned_verticals(
     with TestClient(app) as client:
         response = client.get(
             "/me/home",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=_signed_headers("owner@example.com"),
         )
 
     assert response.status_code == 200
@@ -554,7 +671,7 @@ def test_me_home_super_admin_still_200(monkeypatch: pytest.MonkeyPatch) -> None:
     with TestClient(app) as client:
         response = client.get(
             "/me/home",
-            headers={IAP_EMAIL_HEADER: "ops@example.com"},
+            headers=_signed_headers("ops@example.com"),
         )
 
     assert response.status_code == 200
@@ -675,10 +792,33 @@ def test_me_home_requires_iap_identity_like_me(monkeypatch: pytest.MonkeyPatch) 
     assert home_response.status_code == 401
 
 
+def test_me_header_only_allowlisted_email_is_401_when_identity_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsigned IAP email header is not a principal when identity is required."""
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    headers = {IAP_EMAIL_HEADER: "accounts.google.com:ops@example.com"}
+
+    with TestClient(app) as client:
+        me_response = client.get("/me", headers=headers)
+        auth_me_response = client.get("/auth/me", headers=headers)
+        home_response = client.get("/me/home", headers=headers)
+
+    assert me_response.status_code == 401
+    assert auth_me_response.status_code == 401
+    assert home_response.status_code == 401
+
+
 def test_me_home_denies_unknown_email_like_me(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
     monkeypatch.setattr(roles.settings, "require_iap_identity", True)
-    headers = {IAP_EMAIL_HEADER: "stranger@example.com"}
+
+    def _fake_verify(token: str, request: object, audience: str) -> dict[str, object]:
+        return {"email": "stranger@example.com", "email_verified": True}
+
+    monkeypatch.setattr("google.oauth2.id_token.verify_oauth2_token", _fake_verify)
+    headers = {"Authorization": "Bearer fake-token"}
 
     with TestClient(app) as client:
         me_response = client.get("/me", headers=headers)

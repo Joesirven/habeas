@@ -16,7 +16,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { LegalChromeActions } from '@/components/UploadMenu'
-import { useMe, isLegalAdminPersona } from '@/lib/auth'
+import { RoleGate, useMe, isLegalAdminPersona } from '@/lib/auth'
 import {
   getDropGlobalStats,
   getDropPipelineLite,
@@ -710,16 +710,8 @@ function DashboardHomeSkeleton() {
   )
 }
 
-export function DashboardPage() {
-  const { isSuperAdmin, isLoading, me, role } = useMe()
-  const authBlocking = isLoading && !me
-
-  useEffect(() => {
-    // Warm Pipeline Console chunk while /me resolves so super_admin shell paints fast.
-    if (authBlocking || isSuperAdmin) {
-      void import('@/routes/ops/drop-pipeline')
-    }
-  }, [authBlocking, isSuperAdmin])
+function DashboardHomeByRole() {
+  const { isSuperAdmin, role } = useMe()
 
   if (isSuperAdmin) {
     return (
@@ -727,10 +719,6 @@ export function DashboardPage() {
         <DropPipelinePage />
       </Suspense>
     )
-  }
-
-  if (authBlocking) {
-    return <DashboardHomeSkeleton />
   }
 
   if (isLegalAdminPersona(role)) {
@@ -742,4 +730,22 @@ export function DashboardPage() {
   }
 
   return <OperatorDashboardHome />
+}
+
+export function DashboardPage() {
+  const { isSuperAdmin, isLoading, me } = useMe()
+  const authBlocking = isLoading && !me
+
+  useEffect(() => {
+    // Warm Pipeline Console chunk while /me resolves so super_admin shell paints fast.
+    if (authBlocking || isSuperAdmin) {
+      void import('@/routes/ops/drop-pipeline')
+    }
+  }, [authBlocking, isSuperAdmin])
+
+  return (
+    <RoleGate allow={() => true}>
+      <DashboardHomeByRole />
+    </RoleGate>
+  )
 }

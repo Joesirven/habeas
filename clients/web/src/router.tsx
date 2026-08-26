@@ -29,6 +29,7 @@ import {
 } from '@/routes/dev/sheets-oauth'
 import { SheetsCadenceLabPage } from '@/routes/dev/sheets-cadence-lab'
 import { DropProdCutoverLabPage } from '@/routes/dev/drop-prod-cutover'
+import { TokenResourceServerLabPage } from '@/routes/dev/token-resource-server'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
 import { RequestsSlasPage } from '@/routes/requests/slas'
@@ -761,6 +762,12 @@ const dropProdCutoverLabRoute = createRoute({
   component: DropProdCutoverLabPage,
 })
 
+const tokenResourceServerLabRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/dev/token-resource-server',
+  component: TokenResourceServerLabPage,
+})
+
 const requestsSlasRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests/slas',
@@ -1019,6 +1026,7 @@ const routeTree = rootRoute.addChildren([
   sheetsOauthLabRoute,
   pendingSettingsLabRoute,
   dropProdCutoverLabRoute,
+  tokenResourceServerLabRoute,
   requestsSlasRoute,
   manualRequestRoute,
   docsRoute,

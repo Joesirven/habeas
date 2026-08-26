@@ -67,6 +67,15 @@ WRONG_OWNER_VERTICAL = {
 }
 
 
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
+
 def _app() -> FastAPI:
     app = FastAPI()
     app.include_router(remaining_vertical_ops.router)
@@ -149,12 +158,12 @@ def _install_candidates_pool(
 
 def _owner_headers() -> dict[str, str]:
     roles.settings.admin_api_data_owners = "owner@example.com"
-    return {IAP_EMAIL_HEADER: "owner@example.com"}
+    return signed_headers("owner@example.com")
 
 
 def _legal_headers() -> dict[str, str]:
     roles.settings.admin_api_legals = "legal@example.com"
-    return {IAP_EMAIL_HEADER: "legal@example.com"}
+    return signed_headers("legal@example.com")
 
 
 class FakeResponse:
@@ -288,7 +297,7 @@ def test_enqueue_forbidden_for_non_super_admin(monkeypatch: pytest.MonkeyPatch):
     with TestClient(_app()) as client:
         denied = client.post(
             "/ops/verticals/lever/hash-refresh/enqueue",
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:admin@example.com"},
+            headers=signed_headers("admin@example.com"),
         )
 
     assert denied.status_code == 403
@@ -314,7 +323,7 @@ def test_enqueue_super_admin_when_iap_required(monkeypatch: pytest.MonkeyPatch):
         )
         allowed = client.post(
             "/ops/verticals/axios_headquarters/hash-refresh/enqueue",
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:ops@example.com"},
+            headers=signed_headers("ops@example.com"),
         )
 
     assert unauthenticated.status_code == 401
@@ -426,7 +435,7 @@ def test_process_forbidden_for_non_super_admin(monkeypatch: pytest.MonkeyPatch):
     with TestClient(_app()) as client:
         response = client.post(
             "/ops/verticals/bizdev_contacts/hash-refresh/process",
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:owner@example.com"},
+            headers=signed_headers("owner@example.com"),
         )
 
     assert response.status_code == 403
@@ -511,17 +520,17 @@ def test_matching_enqueue_forbidden_for_non_super_admin(monkeypatch: pytest.Monk
         admin_denied = client.post(
             "/ops/verticals/axios_headquarters/matching/enqueue",
             json=_matching_enqueue_body(),
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:admin@example.com"},
+            headers=signed_headers("admin@example.com"),
         )
         legal_denied = client.post(
             "/ops/verticals/axios_headquarters/matching/enqueue",
             json=_matching_enqueue_body(),
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:legal@example.com"},
+            headers=signed_headers("legal@example.com"),
         )
         owner_denied = client.post(
             "/ops/verticals/axios_headquarters/matching/enqueue",
             json=_matching_enqueue_body(),
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:owner@example.com"},
+            headers=signed_headers("owner@example.com"),
         )
 
     assert admin_denied.status_code == 403
@@ -551,7 +560,7 @@ def test_matching_enqueue_super_admin_when_iap_required(monkeypatch: pytest.Monk
         allowed = client.post(
             "/ops/verticals/hr_alumni/matching/enqueue",
             json=_matching_enqueue_body(),
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:ops@example.com"},
+            headers=signed_headers("ops@example.com"),
         )
 
     assert unauthenticated.status_code == 401
@@ -672,11 +681,11 @@ def test_matching_process_forbidden_for_non_super_admin(monkeypatch: pytest.Monk
     with TestClient(_app()) as client:
         owner_denied = client.post(
             "/ops/verticals/paylocity/matching/process",
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:owner@example.com"},
+            headers=signed_headers("owner@example.com"),
         )
         admin_denied = client.post(
             "/ops/verticals/paylocity/matching/process",
-            headers={IAP_EMAIL_HEADER: "accounts.google.com:admin@example.com"},
+            headers=signed_headers("admin@example.com"),
         )
 
     assert owner_denied.status_code == 403

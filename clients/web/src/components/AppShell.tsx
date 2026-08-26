@@ -218,7 +218,16 @@ function RoleStatusBanner() {
   const { me, isError, error, isLoading, realRole } = useAuth()
   const queryClient = useQueryClient()
   const [simulateRole, setSimulateRole] = useState<UserRole | null>(() => getStoredSimulateRole())
-  if (isLoading) return null
+  if (isLoading) {
+    return (
+      <div
+        className="border-b border-line bg-paper px-4 py-2 text-center text-xs text-mute"
+        role="status"
+      >
+        Checking identity…
+      </div>
+    )
+  }
   if (isError) {
     return (
       <div

@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from admin_api import drop_pipeline, roles
 from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
+
 from habeas_privacy_core.workflow.approval import (
     assert_matching_promote_allowed_for_role,
     escalate_to_legal_with_fanout,
@@ -20,6 +21,15 @@ from habeas_privacy_core.workflow.approval import (
     is_legal_persona_for_promote_gate,
 )
 
+
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
 
 def test_assert_matching_promote_blocks_legal_without_assignment():
     with pytest.raises(ValueError, match="assignment to legal"):
@@ -228,7 +238,7 @@ def test_workflow_escalate_to_legal_fans_out_and_writes_comment(
     client = TestClient(app)
     response = client.post(
         "/ops/drop/workflow/escalate",
-        headers={IAP_EMAIL_HEADER: "accounts.google.com:owner@example.com"},
+        headers=signed_headers("owner@example.com"),
         json={
             "request_ids": [request_id],
             "target_role": "legal",
@@ -272,7 +282,7 @@ def test_matching_promote_blocks_legal_team_member_without_assignment(
     client = TestClient(app)
     response = client.post(
         f"/ops/drop/matching-results/{request_id}/promote",
-        headers={IAP_EMAIL_HEADER: f"accounts.google.com:{team_email}"},
+        headers=signed_headers(team_email),
         json={"decision_reason": "promote"},
     )
 
@@ -301,7 +311,7 @@ def test_matching_promote_blocks_legal_without_assignment(monkeypatch: pytest.Mo
     client = TestClient(app)
     response = client.post(
         f"/ops/drop/matching-results/{request_id}/promote",
-        headers={IAP_EMAIL_HEADER: "accounts.google.com:legal@example.com"},
+        headers=signed_headers("legal@example.com"),
         json={"decision_reason": "promote"},
     )
 

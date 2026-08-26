@@ -6,10 +6,9 @@ React admin UI for Legal, Operations, and Data Owners.
 
 Deploy targets:
 
-- **Dev (browser):** Cloud Run `ops-ia-web-dev` — IAP front door for **Habeas Platform** chrome
-  ([`https://ops-ia-web-dev-hsa55rg7ja-uk.a.run.app`](https://ops-ia-web-dev-hsa55rg7ja-uk.a.run.app)).
-  Legacy `admin-web-dev` remains for nginx-only smoke; prefer ops-ia for DROP ops + owner flows.
-- **Prod path:** Firebase Hosting in front of Identity-Aware Proxy (`.firebaserc` / `firebase.json`) — not live in this repo doc.
+- **Dev (browser):** Cloud Run `admin-web-dev` — IAP front door for **Habeas Platform** chrome
+  ([`https://admin-web-dev-hsa55rg7ja-uk.a.run.app`](https://admin-web-dev-hsa55rg7ja-uk.a.run.app)).
+- **Prod (browser):** Cloud Run `admin-web-prod`. Live 100% is revision **00023-fnz** (nginx same-origin `/api`). Revision **00024** (GIS bake) is at **0%** and must not be flipped until GIS `/me` is proven on DEV. Do not claim prod uses Google Identity Services. There is no Firebase Hosting front door.
 
 All browser mutations go through **admin-api** only — the SPA never calls worker URLs directly.
 

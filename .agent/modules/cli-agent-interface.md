@@ -10,18 +10,32 @@
 | Analysis reads (SELECT, joins, state inspection) | Postgres **read-only role** via Cloud SQL Auth Proxy |
 | Forbidden | insert, update, delete, truncate, data definition language; direct user→worker Cloud Run calls; `DATABASE_URL` as a mutation path |
 
-## Auth to deployed admin-api
+## Auth to deployed admin-api (CLI path current; browser GIS intended / not prod 00023)
 
-`admin-api-dev` runs with Cloud Run **IAP off** (`--no-iap`) and app-level
-`REQUIRE_IAP_IDENTITY=true`. Identity is either a verified Google ID token
-(ADC / Cloud Run invoker) or an IAP-style email header plus bearer.
+admin-api is the **resource server**. Cloud Run Identity-Aware Proxy (IAP) is
+**off** (`--no-iap`). App-level `REQUIRE_IAP_IDENTITY=true` requires a verified
+Google ID token Bearer. Header-alone (`X-Goog-Authenticated-User-Email` without
+a verified Bearer) is **401**. Legal sources: `user_jwt` (GIS — browser only),
+`bearer_jwt` (ADC / Cloud Run `aud`), `iap_header` (verified Bearer **plus**
+IAP email). `allUsers` invoker is **stripped** on `admin-api-prod` and
+`admin-api-dev` (remaining: compute SA + `jsirven@`).
+
+CLI Application Default Credentials (ADC) and IAP login are **unchanged**. Do
+**not** invent a Google Identity Services command, a browser-token login, or an
+audience flag. Browser Google Identity Services is a **third client** (user
+Bearer, `aud` = `IAP_OAUTH_CLIENT_ID`) — not a CLI path, and **not live on
+prod web** (100% is `admin-web-prod-00023-fnz` nginx `/api`; 00024 at 0%).
 
 | Who | How |
 |-----|-----|
 | **super_admin** | `habeas-cli auth login --adc` (or `ADMIN_API_AUTH=adc`) — ADC Cloud Run ID token only; email from JWT; must be on `ADMIN_API_SUPER_ADMINS` |
 | **admin / data_owner** | `habeas-cli auth login` — same Cloud Run audience token via ADC **plus** `X-Goog-Authenticated-User-Email` bound to active `gcloud` account (`@habeas.us`); full allowlists |
 
-Both paths mint audience = `ADMIN_API_URL` origin (Cloud Run IAP is off on admin-api-dev).
+Both CLI paths mint `aud` = `ADMIN_API_URL` origin (Cloud Run service URL, no
+path). Deployed admin-api verifies that token against
+`ADMIN_API_ID_TOKEN_AUDIENCE` (same origin). The API must pin **both**
+`ADMIN_API_ID_TOKEN_AUDIENCE` and `IAP_OAUTH_CLIENT_ID` — OAuth-client-only pin
+drops the Cloud Run audience and ADC CLI gets **401**.
 
 ```bash
 export ADMIN_API_URL=https://admin-api-dev-hsa55rg7ja-uk.a.run.app

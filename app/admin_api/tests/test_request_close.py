@@ -19,6 +19,15 @@ pytestmark_integration = pytest.mark.skipif(
 )
 
 
+
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """CLI / nginx shape: verified Bearer + matching IAP email header."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
+
 @pytest.fixture(autouse=True)
 def _reset_role_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(roles.settings, "admin_api_super_admins", "")
@@ -97,12 +106,12 @@ def test_post_request_close_route(monkeypatch: pytest.MonkeyPatch) -> None:
     with TestClient(app) as client:
         ok = client.post(
             "/ops/requests/00000000-0000-0000-0000-000000000099/close",
-            headers={IAP_EMAIL_HEADER: "legal@example.com"},
+            headers=signed_headers("legal@example.com"),
             json={"note": "Closed from test"},
         )
         forbidden = client.post(
             "/ops/requests/00000000-0000-0000-0000-000000000099/close",
-            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+            headers=signed_headers("owner@example.com"),
             json={},
         )
 

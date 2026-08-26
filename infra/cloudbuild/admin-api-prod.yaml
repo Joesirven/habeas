@@ -1,8 +1,10 @@
-# admin-api-prod — twin of admin-api-dev.
-# Browser SSO front door is ops-ia-web-prod / admin-web-prod (IAP).
-# This service stays IAM-locked (no allUsers) and WITHOUT Cloud Run IAP so the
-# web nginx proxy can invoke it with a service-account identity token and
-# forward X-Goog-Authenticated-User-* headers from the user's IAP session.
+# admin-api-prod — twin of admin-api-dev. Architecture B resource server.
+# Browser SSO front door is admin-web-prod (IAP). This service stays
+# IAM-locked (no allUsers) and WITHOUT Cloud Run IAP so the web nginx
+# proxy can invoke it with a service-account identity token.
+# Keep IAM locked; do not re-grant allUsers in this pipeline. GIS
+# cutover is a separate pin, not this yaml. nginx ADMIN_API_UPSTREAM
+# on admin-web-prod remains for same-origin /api (SSE + rollback).
 # Worker URLs use suffix hsa55rg7ja-uk. intake_drop_poller has no app — URL empty.
 substitutions:
   _REGION: us-east4
@@ -18,9 +20,14 @@ substitutions:
   _HASH_INDEX_REFRESH_URL: https://hash-index-refresh-prod-hsa55rg7ja-uk.a.run.app
   _REAPER_URL: https://reaper-prod-hsa55rg7ja-uk.a.run.app
   _INTAKE_DROP_POLLER_URL: ""
-  # App-level identity required (headers from web proxy after IAP).
+  # App-level identity required (Bearer Google ID token or IAP headers).
   _REQUIRE_IAP_IDENTITY: "true"
-  _CORS_ORIGINS: "https://ops-ia-web-prod-hsa55rg7ja-uk.a.run.app|https://admin-web-prod-hsa55rg7ja-uk.a.run.app|http://127.0.0.1:5174|http://localhost:5174|http://127.0.0.1:5173|http://localhost:5173|http://127.0.0.1:8080|http://localhost:8080"
+  # Browser GIS user ID tokens have aud = this OAuth client (same as VITE_GOOGLE_CLIENT_ID).
+  _IAP_OAUTH_CLIENT_ID: "95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com"
+  # CLI / nginx ADC tokens have aud = this Cloud Run origin.
+  _ADMIN_API_ID_TOKEN_AUDIENCE: "https://admin-api-prod-hsa55rg7ja-uk.a.run.app"
+  # Keep ops-ia-web-prod (current nginx /api) plus admin-web origins for Architecture B GIS.
+  _CORS_ORIGINS: "https://ops-ia-web-prod-hsa55rg7ja-uk.a.run.app|https://admin-web-prod-hsa55rg7ja-uk.a.run.app|https://admin-web-dev-hsa55rg7ja-uk.a.run.app|http://127.0.0.1:5174|http://localhost:5174|http://127.0.0.1:5173|http://localhost:5173|http://127.0.0.1:8080|http://localhost:8080"
   _ADMIN_API_SUPER_ADMINS: "dev-owner-1@example.com|dev-owner-9@example.com|dev-owner-6@example.com|dev-owner-12@example.com|dev-owner-4@example.com"
   _ADMIN_API_ADMINS: "dev-owner-3@example.com|dev-owner-13@example.com"
   _ADMIN_API_LEGALS: "dev-owner-3@example.com|dev-owner-5@example.com"
@@ -83,7 +90,7 @@ steps:
       - --max-instances=3
       - --min-instances=1
       - --concurrency=40
-      - --set-env-vars=SERVICE_NAME=admin-api,WORKER_ID=admin-api-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},DROP_CONNECTOR_URL=${_DROP_CONNECTOR_URL},DROP_INGESTOR_URL=${_DROP_INGESTOR_URL},REQUEST_DISPATCHER_URL=${_REQUEST_DISPATCHER_URL},MATCHING_URL=${_MATCHING_URL},DATA_FULFILLMENT_URL=${_DATA_FULFILLMENT_URL},HASH_INDEX_REFRESH_URL=${_HASH_INDEX_REFRESH_URL},REAPER_URL=${_REAPER_URL},INTAKE_DROP_POLLER_URL=${_INTAKE_DROP_POLLER_URL},AUTH0_URL=${_AUTH0_URL},AUTH0_WORKER_URL=${_AUTH0_WORKER_URL},PAYLOCITY_URL=${_PAYLOCITY_URL},PAYLOCITY_WORKER_URL=${_PAYLOCITY_WORKER_URL},LEVER_URL=${_LEVER_URL},LEVER_WORKER_URL=${_LEVER_WORKER_URL},GOOGLE_SHEETS_URL=${_GOOGLE_SHEETS_URL},GOOGLE_SHEETS_WORKER_URL=${_GOOGLE_SHEETS_WORKER_URL},DROP_NOTICE_URL=${_DROP_NOTICE_URL},AXIOS_HEADQUARTERS_WORKER_URL=${_AXIOS_HEADQUARTERS_WORKER_URL},AXIOS_HEADQUARTERS_URL=${_AXIOS_HEADQUARTERS_URL},REQUIRE_IAP_IDENTITY=${_REQUIRE_IAP_IDENTITY},CORS_ORIGINS=${_CORS_ORIGINS},ADMIN_API_SUPER_ADMINS=${_ADMIN_API_SUPER_ADMINS},ADMIN_API_ADMINS=${_ADMIN_API_ADMINS},ADMIN_API_LEGALS=${_ADMIN_API_LEGALS},ADMIN_API_DATA_OWNERS=${_ADMIN_API_DATA_OWNERS},CLOUD_SCHEDULER_ENABLED=${_CLOUD_SCHEDULER_ENABLED},CLOUD_SCHEDULER_LOCATION=${_CLOUD_SCHEDULER_LOCATION},CLOUD_SCHEDULER_JOB_PREFIX=${_CLOUD_SCHEDULER_JOB_PREFIX},GCS_TRANSPORT=${_GCS_TRANSPORT},GCS_SIGNING_SERVICE_ACCOUNT=${_GCS_SIGNING_SERVICE_ACCOUNT}
+      - --set-env-vars=SERVICE_NAME=admin-api,WORKER_ID=admin-api-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},DROP_CONNECTOR_URL=${_DROP_CONNECTOR_URL},DROP_INGESTOR_URL=${_DROP_INGESTOR_URL},REQUEST_DISPATCHER_URL=${_REQUEST_DISPATCHER_URL},MATCHING_URL=${_MATCHING_URL},DATA_FULFILLMENT_URL=${_DATA_FULFILLMENT_URL},HASH_INDEX_REFRESH_URL=${_HASH_INDEX_REFRESH_URL},REAPER_URL=${_REAPER_URL},INTAKE_DROP_POLLER_URL=${_INTAKE_DROP_POLLER_URL},AUTH0_URL=${_AUTH0_URL},AUTH0_WORKER_URL=${_AUTH0_WORKER_URL},PAYLOCITY_URL=${_PAYLOCITY_URL},PAYLOCITY_WORKER_URL=${_PAYLOCITY_WORKER_URL},LEVER_URL=${_LEVER_URL},LEVER_WORKER_URL=${_LEVER_WORKER_URL},GOOGLE_SHEETS_URL=${_GOOGLE_SHEETS_URL},GOOGLE_SHEETS_WORKER_URL=${_GOOGLE_SHEETS_WORKER_URL},DROP_NOTICE_URL=${_DROP_NOTICE_URL},AXIOS_HEADQUARTERS_WORKER_URL=${_AXIOS_HEADQUARTERS_WORKER_URL},AXIOS_HEADQUARTERS_URL=${_AXIOS_HEADQUARTERS_URL},REQUIRE_IAP_IDENTITY=${_REQUIRE_IAP_IDENTITY},IAP_OAUTH_CLIENT_ID=${_IAP_OAUTH_CLIENT_ID},ADMIN_API_ID_TOKEN_AUDIENCE=${_ADMIN_API_ID_TOKEN_AUDIENCE},CORS_ORIGINS=${_CORS_ORIGINS},ADMIN_API_SUPER_ADMINS=${_ADMIN_API_SUPER_ADMINS},ADMIN_API_ADMINS=${_ADMIN_API_ADMINS},ADMIN_API_LEGALS=${_ADMIN_API_LEGALS},ADMIN_API_DATA_OWNERS=${_ADMIN_API_DATA_OWNERS},CLOUD_SCHEDULER_ENABLED=${_CLOUD_SCHEDULER_ENABLED},CLOUD_SCHEDULER_LOCATION=${_CLOUD_SCHEDULER_LOCATION},CLOUD_SCHEDULER_JOB_PREFIX=${_CLOUD_SCHEDULER_JOB_PREFIX},GCS_TRANSPORT=${_GCS_TRANSPORT},GCS_SIGNING_SERVICE_ACCOUNT=${_GCS_SIGNING_SERVICE_ACCOUNT}
 
   - id: auth-front-door
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
@@ -94,7 +101,8 @@ steps:
         set -euo pipefail
         # Browser IAP belongs on ops-ia-web-prod / admin-web-prod, not here.
         # cloud-sdk:slim already ships beta; do not run components install.
-        gcloud beta run services update ${_SERVICE} --region=${_REGION} --project=${_PROJECT} --no-iap --quiet || true
+        # Fail closed: GIS user tokens cannot pass Cloud Run IAP.
+        gcloud beta run services update ${_SERVICE} --region=${_REGION} --project=${_PROJECT} --no-iap --quiet
         PROJECT_NUMBER=95660886550
         COMPUTE_SA="$${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
         IAP_SA="service-$${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
@@ -106,9 +114,17 @@ steps:
         gcloud run services add-iam-policy-binding ${_SERVICE} \
           --region=${_REGION} --project=${_PROJECT} \
           --member="user:dev-owner-1@example.com" --role=roles/run.invoker --quiet || true
-        gcloud run services remove-iam-policy-binding ${_SERVICE} \
+        # Strip leftover public invoker. Binding already gone is success;
+        # any other error fails the build (do not || true).
+        strip_out=$$(gcloud run services remove-iam-policy-binding ${_SERVICE} \
           --region=${_REGION} --project=${_PROJECT} \
-          --member=allUsers --role=roles/run.invoker --quiet || true
+          --member=allUsers --role=roles/run.invoker --quiet 2>&1) && strip_rc=0 || strip_rc=$$?
+        if [[ $${strip_rc} -ne 0 ]]; then
+          if [[ "$${strip_out}" != *"Policy binding"* || "$${strip_out}" != *"not found"* ]]; then
+            echo "$${strip_out}" >&2
+            exit $${strip_rc}
+          fi
+        fi
         # Stale IAP-SA invoker is unused once --no-iap; ignore failures.
         gcloud run services remove-iam-policy-binding ${_SERVICE} \
           --region=${_REGION} --project=${_PROJECT} \

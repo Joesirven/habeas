@@ -1,6 +1,14 @@
 # Local iteration for admin web.
 #   docker compose up web-dev   # hot reload on :5173
 #   docker compose up web       # production-like nginx on :8080
+#
+# Architecture B: default VITE_ADMIN_API_URL is empty so local JSON + SSE stay
+# on same-origin /api (Vite → :8000). Do not default this file to admin-api-prod
+# (or admin-api-dev) — that breaks local unless GIS + a user token are present.
+# Cloud Build bakes the real origin + VITE_GOOGLE_CLIENT_ID. To mimic that:
+#   VITE_ADMIN_API_URL=https://admin-api-dev-hsa55rg7ja-uk.a.run.app \
+#   VITE_GOOGLE_CLIENT_ID=<public GIS client> docker compose up web
+# SSE still uses same-origin /api. nginx ADMIN_API_UPSTREAM is runtime-only.
 
 services:
   web-dev:
@@ -10,7 +18,10 @@ services:
     ports:
       - "5173:5173"
     environment:
-      VITE_ADMIN_API_URL: ${VITE_ADMIN_API_URL:-https://admin-api-dev-hsa55rg7ja-uk.a.run.app}
+      # Empty overrides Dockerfile.dev ENV so local `/api` is the default.
+      VITE_ADMIN_API_URL: ${VITE_ADMIN_API_URL:-}
+      VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID:-}
+      VITE_PROXY_TARGET: ${VITE_PROXY_TARGET:-http://127.0.0.1:8000}
     volumes:
       # Live-edit source without reinstalling deps inside the VM
       - ./src:/app/src
@@ -23,6 +34,10 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        VITE_ADMIN_API_URL: ${VITE_ADMIN_API_URL:-https://admin-api-dev-hsa55rg7ja-uk.a.run.app}
+        VITE_ADMIN_API_URL: ${VITE_ADMIN_API_URL:-}
+        VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID:-}
+        VITE_ENABLE_LABS: ${VITE_ENABLE_LABS:-true}
+    environment:
+      ADMIN_API_UPSTREAM: ${ADMIN_API_UPSTREAM:-https://admin-api-dev-hsa55rg7ja-uk.a.run.app}
     ports:
       - "8080:8080"

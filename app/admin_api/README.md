@@ -1,7 +1,12 @@
 # Admin API
 
-Main control-plane FastAPI app. Identity-Aware Proxy, dashboard, approvals, Server-Sent Events
-live stream, mutation routes for web and Habeas CLI.
+Main control-plane FastAPI app. **Resource server** for web, CLI, and future clients.
+Dashboard, approvals, Server-Sent Events live stream, mutation routes.
+
+Cloud Run IAP is **off** (`--no-iap`). Deployed identity is app-level `REQUIRE_IAP_IDENTITY=true`:
+a verified Bearer is required; IAP email header alone is **401**. Do **not** re-enable Cloud Run
+IAP on this service. **Current prod web is not on GIS:** live 100% is `admin-web-prod-00023-fnz`
+(nginx `/api`); **00024** is the unused B bake at 0% — do not flip until GIS `/me` is proven on DEV.
 
 ## DROP ops (Wave B)
 
@@ -18,10 +23,11 @@ Browser never calls workers — admin_api aggregates `/readyz` + Postgres queue 
 
 ## Vertical connectors
 
-Owner onboarding is **vertical assignment + IAP login** — not invite links. Super_admin assigns
+Owner onboarding is **vertical assignment + authenticated login** — not invite links. Super_admin assigns
 owners via `/ops/verticals/assignments`; owners complete setup in the `/owner/connectors` wizard
-(Mode → in-wizard connect+test → cadence → confirm). Invite mint/redeem (`/connect/{token}`) is
-retired.
+(Mode → in-wizard connect+test → cadence → confirm). Connection-credential invite mint/redeem
+(`POST .../invites`) is retired (**410**). `data_user` teammate invite handlers exist
+(`GET/POST /connect/{token}`) but `owner_router` is **not mounted** — do not claim teammate invites shipped.
 
 | Surface | Endpoints (representative) |
 |---------|----------------------------|
@@ -31,8 +37,11 @@ retired.
 | Session | `GET /me` — `given_name`, `assigned_vertical_labels`, `needs_connector_setup`, `connector_reminders` |
 
 Secrets write to Secret Manager only (`dpra/connections/{system}/{connection_id}`). Connection
-tests return allowlisted `detail` codes — never echo credentials. All mutations are IAP-gated on
-deployed admin-api; browser reaches admin-api through the ops-ia IAP front door or CLI auth.
+tests return allowlisted `detail` codes — never echo credentials. All mutations require a
+verified Bearer on deployed admin-api (`REQUIRE_IAP_IDENTITY`). Browser 00023 reaches admin-api
+through admin-web nginx `/api` (SA Bearer + IAP headers). Intended B is a GIS user Bearer after
+a DEV-proven 00024 cutover — not live on prod web. CLI: `habeas-cli auth login --adc` or
+`auth login` (`ADMIN_API_ID_TOKEN_AUDIENCE` + `IAP_OAUTH_CLIENT_ID`).
 
 Plan: [`docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md`](../../docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md).
 
