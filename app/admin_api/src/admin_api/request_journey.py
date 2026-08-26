@@ -66,10 +66,25 @@ from admin_api.vertical_dispositions import (
     access_packs_ready_for_notice,
     all_live_verticals_disposed,
     list_vertical_dispositions,
+    matching_snapshot_lookup_keys,
     normalize_vertical,
+    resolve_disposition_vertical,
 )
 
 AUTH0_VERTICAL = "auth0"
+# Wave M hash matchers — workbench matching-cluster ids. Catalog worker slug
+# ``axios_headquarters`` is retracted/unknown on this rail (web/session uses
+# ``axios_hq``). Cassandra is suppress-only, not a hash matcher.
+_JOURNEY_HASH_MATCHERS: tuple[str, ...] = ("axios_hq", "lever", "paylocity")
+_RETRACTED_UNKNOWN_SYSTEMS: frozenset[str] = frozenset({"axios_headquarters"})
+_SNAPSHOT_MATCHING_VERTICALS: frozenset[str] = frozenset(
+    {AUTH0_VERTICAL, *_JOURNEY_HASH_MATCHERS}
+)
+# Write keys that fan out to hash-matcher system rows on Matching.
+_MATCHING_CLUSTER_SKIP_WRITE_KEYS: frozenset[str] = frozenset(
+    {"communications", "people_hr"}
+)
+_CATALOG_ONLY_MATCHING_BLOCKER = "Catalog-only — matching is not live"
 
 NeedsAttentionItemKind = Literal[
     "matching",
@@ -1158,17 +1173,71 @@ def _journey_live_verticals() -> tuple[str, ...]:
 
 
 def _vertical_affects_stage_rollup(row: WorkbenchVerticalRow) -> bool:
-    """Auth0 joins matching rollup only after a snapshot or owner confirm exists.
+    """Snapshot-backed matchers join matching rollup only after a snapshot or confirm.
 
-    Requests without an Auth0 lookup must not stall a completed DROP rail.
+    Auth0 / Axios HQ / Lever / Paylocity rows carry a ``matching`` summary.
+    Requests without a lookup must not stall a completed DROP rail. Write-key
+    rows (Data, or a simulated second live vertical) have ``matching is None``
+    and always participate when live.
     """
     if not row.live:
         return False
-    if row.vertical != AUTH0_VERTICAL:
+    if row.matching is None:
         return True
     decided = row.disposition is not None and row.disposition.decided
-    has_snapshot = row.matching is not None and row.matching.match_count is not None
+    has_snapshot = row.matching.match_count is not None
     return decided or has_snapshot
+
+
+def _hash_matcher_chrome(system: str) -> tuple[str, str, str]:
+    """System id, display label, and color token for a matching-cluster row."""
+    label = VERTICAL_LABELS.get(system) or matching_system_label(system)
+    color_system = "axios_headquarters" if system == "axios_hq" else system
+    return system, label, matching_system_color_token(color_system)
+
+
+def _snapshot_matcher_status(
+    *,
+    disposition: Any,
+    snapshot: dict[str, Any] | None,
+    ops_by_stage: dict[str, JourneyStage],
+) -> tuple[StageStatus, str | None]:
+    """Matching status for Auth0-style snapshot rows (no DROP match/review inherit)."""
+    if disposition is not None:
+        return "complete", None
+    if snapshot is not None:
+        return "waiting", "Pending Data Owner Review"
+    match = ops_by_stage.get("match")
+    if match is not None and match.status == "failed":
+        return "failed", match.blocker
+    if match is not None and match.status == "in_progress":
+        return "in_progress", None
+    return "not_started", None
+
+
+async def _fetch_hash_matcher_snapshot(
+    conn: Any, *, request_id: str, system: str
+) -> dict[str, Any] | None:
+    """Read ``request_vertical_matching`` via existing lookup keys (no new API)."""
+    for key in matching_snapshot_lookup_keys(vertical=system):
+        snap = await fetch_vertical_matching_snapshot(
+            conn, request_id=request_id, vertical=key
+        )
+        if snap is not None:
+            return snap
+    return None
+
+
+def _disposition_for_cluster_vertical(
+    disposed_by_vertical: dict[str, Any], vertical: str
+) -> Any:
+    found = disposed_by_vertical.get(vertical)
+    if found is not None:
+        return found
+    resolved = resolve_disposition_vertical(vertical)
+    if resolved != vertical:
+        return disposed_by_vertical.get(resolved)
+    return None
 
 
 async def fetch_vertical_matching_snapshot(
@@ -1334,30 +1403,36 @@ async def _build_vertical_rows(
                 decided=disposition is not None,
                 selected_vendor_record_ids=auth0_vendor_ids,
             )
-        matching_cluster.append(
-            WorkbenchVerticalRow(
-                vertical=vertical,
-                label=label,
-                live=True,
-                actionable=True,
-                matching_status=matching_status,
-                disposition_status=(
-                    disposition.status if disposition else legacy_status
-                ),
-                selected_dwid_count=(
-                    disposition.selected_dwid_count if disposition else None
-                ),
-                blocker=matching_blocker,
-                system=live_system.system if live_system else None,
-                system_label=live_system.system_label if live_system else None,
-                color_token=live_system.color_token if live_system else None,
-                matching=matching_summary,
-                disposition=disposition_summary,
+        if vertical not in _MATCHING_CLUSTER_SKIP_WRITE_KEYS:
+            matching_cluster.append(
+                WorkbenchVerticalRow(
+                    vertical=vertical,
+                    label=label,
+                    live=True,
+                    actionable=True,
+                    matching_status=matching_status,
+                    disposition_status=(
+                        disposition.status if disposition else legacy_status
+                    ),
+                    selected_dwid_count=(
+                        disposition.selected_dwid_count if disposition else None
+                    ),
+                    blocker=matching_blocker,
+                    system=live_system.system if live_system else None,
+                    system_label=live_system.system_label if live_system else None,
+                    color_token=live_system.color_token if live_system else None,
+                    matching=matching_summary,
+                    disposition=disposition_summary,
+                )
             )
-        )
 
         # Auth0 is confirm-only this wave — matching cluster only, no fulfillment worker.
         if vertical == AUTH0_VERTICAL:
+            continue
+        # Communications / People/HR join Fulfillment only after a disposition
+        # (same snapshot-or-confirm gate as Auth0 matching rollup). Empty rows
+        # must not stall a Data kickoff as waiting.
+        if vertical in _MATCHING_CLUSTER_SKIP_WRITE_KEYS and disposition is None:
             continue
 
         # Fulfillment cluster — only live verticals ever run fulfillment (KD3).
@@ -1443,7 +1518,67 @@ async def _build_vertical_rows(
             )
         )
 
+    emitted = {row.vertical for row in matching_cluster}
+    for system in _JOURNEY_HASH_MATCHERS:
+        if system in emitted:
+            continue
+        disposition = _disposition_for_cluster_vertical(disposed_by_vertical, system)
+        snapshot = await _fetch_hash_matcher_snapshot(
+            conn, request_id=request_id, system=system
+        )
+        vendor_ids = await fetch_selected_vendor_record_ids(
+            conn, request_id=request_id, vertical=system
+        )
+        if not vendor_ids:
+            resolved = resolve_disposition_vertical(system)
+            if resolved != system:
+                vendor_ids = await fetch_selected_vendor_record_ids(
+                    conn, request_id=request_id, vertical=resolved
+                )
+        matching_status, matching_blocker = _snapshot_matcher_status(
+            disposition=disposition,
+            snapshot=snapshot,
+            ops_by_stage=ops_by_stage,
+        )
+        _, matcher_label, color_token = _hash_matcher_chrome(system)
+        matching_cluster.append(
+            WorkbenchVerticalRow(
+                vertical=system,
+                label=matcher_label,
+                live=True,
+                actionable=True,
+                matching_status=matching_status,
+                disposition_status=(
+                    disposition.status if disposition is not None else None
+                ),
+                selected_dwid_count=(
+                    disposition.selected_dwid_count if disposition is not None else None
+                ),
+                blocker=matching_blocker,
+                system=system,
+                system_label=matcher_label,
+                color_token=color_token,
+                matching=WorkbenchVerticalMatchingSummary(
+                    match_count=(
+                        int(snapshot["match_count"]) if snapshot is not None else None
+                    )
+                ),
+                disposition=WorkbenchVerticalDispositionSummary(
+                    status=disposition.status if disposition is not None else None,
+                    decided=disposition is not None,
+                    selected_vendor_record_ids=vendor_ids,
+                ),
+            )
+        )
+        emitted.add(system)
+
     for entry in dispositions.coming_soon:
+        if entry.vertical in emitted:
+            continue
+        if entry.vertical in _RETRACTED_UNKNOWN_SYSTEMS:
+            continue
+        if entry.vertical in _SNAPSHOT_MATCHING_VERTICALS:
+            continue
         matching_cluster.append(
             WorkbenchVerticalRow(
                 vertical=entry.vertical,
@@ -1451,7 +1586,7 @@ async def _build_vertical_rows(
                 live=False,
                 actionable=False,
                 matching_status="not_started",
-                blocker="Coming soon",
+                blocker=_CATALOG_ONLY_MATCHING_BLOCKER,
                 system=entry.vertical,
                 system_label=matching_system_label(entry.vertical),
                 color_token=matching_system_color_token(entry.vertical),

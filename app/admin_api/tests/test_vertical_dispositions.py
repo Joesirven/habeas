@@ -222,12 +222,27 @@ async def test_upsert_rejects_unknown_vertical():
     assert conn.upserts == []
 
 
-@pytest.mark.parametrize("path", ["axios_headquarters", "axios_hq"])
 @pytest.mark.asyncio
-async def test_put_rejects_axios_aliases_as_coming_soon(
-    monkeypatch: pytest.MonkeyPatch, path: str
+async def test_upsert_rejects_cassandra_as_not_live():
+    """Cassandra stays suppress-only — not a matching write vertical."""
+    conn = FakeConn()
+    with pytest.raises(ValueError, match="is not live yet"):
+        await vd.upsert_vertical_disposition(
+            conn,
+            request_id=REQUEST_ID,
+            vertical="cassandra",
+            status=5,
+            dwids=[],
+            decided_by="owner@example.com",
+        )
+    assert conn.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_put_rejects_retracted_axios_headquarters_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    """``axios_headquarters`` is coming-soon; historical ``axios_hq`` is read-only."""
+    """Retracted slug stays 400 unknown — do not reintroduce as a live system_id."""
     conn = FakeConn()
     fake_pool(monkeypatch, conn)
     _stub_has_vertical(monkeypatch, {"communications"})
@@ -236,13 +251,39 @@ async def test_put_rejects_axios_aliases_as_coming_soon(
     with pytest.raises(HTTPException) as exc:
         await vd.put_vertical_disposition(
             REQUEST_ID,
-            path,
+            "axios_headquarters",
             vd.VerticalDispositionBody(status=3, vendor_record_ids=["opaque-1"]),
             _fake_request(),
             DATA_OWNER,
         )
     assert exc.value.status_code == 400
-    assert "coming soon" in str(exc.value.detail)
+    assert "unknown vertical" in str(exc.value.detail)
+    assert "coming soon" not in str(exc.value.detail)
+    assert conn.upserts == []
+    assert conn.drop_syncs == []
+
+
+@pytest.mark.asyncio
+async def test_put_rejects_hr_alumni_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Alumni Sheets stays frozen — PUT must not inherit live People/HR."""
+    conn = FakeConn()
+    fake_pool(monkeypatch, conn)
+    _stub_has_vertical(monkeypatch, {"people_hr"})
+    monkeypatch.setattr(vd, "write_audit", _noop_audit())
+
+    with pytest.raises(HTTPException) as exc:
+        await vd.put_vertical_disposition(
+            REQUEST_ID,
+            "hr_alumni",
+            vd.VerticalDispositionBody(status=3, vendor_record_ids=["opaque-1"]),
+            _fake_request(),
+            DATA_OWNER,
+        )
+    assert exc.value.status_code == 400
+    assert "unknown vertical" in str(exc.value.detail)
+    assert "coming soon" not in str(exc.value.detail)
     assert conn.upserts == []
     assert conn.drop_syncs == []
 
@@ -281,14 +322,63 @@ async def test_put_accepts_live_auth0_catalog_paths(
 
 
 @pytest.mark.parametrize(
+    ("path", "stored", "assignment"),
+    [
+        ("communications", "communications", "communications"),
+        ("axios_hq", "communications", "communications"),
+        ("people_hr", "people_hr", "people_hr"),
+        ("lever", "people_hr", "people_hr"),
+        ("paylocity", "people_hr", "people_hr"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_put_accepts_live_communications_and_people_hr_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    stored: str,
+    assignment: str,
+):
+    """Axios HQ / Lever / Paylocity write-gates store the catalog vertical.
+
+    Matching write-gate only — this does not claim vendor HTTP extract.
+    """
+    conn = FakeConn()
+    fake_pool(monkeypatch, conn)
+    _stub_has_vertical(monkeypatch, {assignment})
+    captured: list[dict[str, Any]] = []
+
+    async def capture_audit(**kwargs: Any) -> int:
+        captured.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(vd, "write_audit", capture_audit)
+
+    result = await vd.put_vertical_disposition(
+        REQUEST_ID,
+        path,
+        vd.VerticalDispositionBody(status=5),
+        _fake_request(),
+        DATA_OWNER,
+    )
+    assert result.vertical == stored
+    assert result.status == 5
+    assert result.live is True
+    assert conn.upserts[0]["vertical"] == stored
+    assert conn.drop_syncs == []
+    assert captured
+    arguments = captured[0]["arguments"]
+    assert arguments["vertical"] == stored
+    assert arguments["selected_dwid_count"] == 0
+    assert arguments["selected_vendor_record_id_count"] == 0
+    assert "vendor_record_ids" not in arguments
+    assert "dwids" not in arguments
+    assert "email" not in arguments
+
+
+@pytest.mark.parametrize(
     "path",
     [
-        "communications",
-        "people_hr",
         "bizdev",
-        "axios_headquarters",
-        "paylocity",
-        "lever",
         "cassandra",
         "bizdev_contacts",
     ],
@@ -544,7 +634,7 @@ async def test_get_lists_dispositions_with_coming_soon_catalog(
 async def test_historical_axios_hq_row_reads_as_communications(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Stored ``axios_hq`` rows alias to communications — read-only, not live."""
+    """Stored ``axios_hq`` rows alias to communications — now a live write-gate."""
     conn = FakeConn(
         rows=[
             {
@@ -564,7 +654,7 @@ async def test_historical_axios_hq_row_reads_as_communications(
     response = await vd.get_vertical_dispositions(REQUEST_ID, DATA_OWNER)
     assert [item.vertical for item in response.dispositions] == ["communications"]
     assert response.dispositions[0].label == "Communications"
-    assert response.dispositions[0].live is False
+    assert response.dispositions[0].live is True
     assert vd.VERTICAL_LABELS["axios_hq"] == "Axios HQ"
     assert vd.VERTICAL_LABELS["axios_headquarters"] == "Axios HQ"
 
@@ -1109,7 +1199,10 @@ async def test_bulk_approve_one_system_leaves_sibling_and_gate_open(
 async def test_promote_live_saas_system_records_disposition(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """People/HR Paylocity confirm is system-only — no invented live disposition."""
+    """People/HR Paylocity confirm writes the live vertical disposition.
+
+    Matching write-gate only — this does not invent vendor HTTP extract.
+    """
     conn = FakeConn()
     _patch_promote_internals(monkeypatch, conn)
 
@@ -1118,49 +1211,71 @@ async def test_promote_live_saas_system_records_disposition(
         request_id=REQUEST_ID,
         decided_by="owner@example.com",
         response_status=3,
-        dwids=["dwid-9"],
+        dwids=["opaque-9"],
+        actor_role=ROLE_DATA_OWNER,
         vertical="people_hr",
         system="paylocity",
     )
     assert result["review_status"] == "pending"
     assert result["system"] == "paylocity"
     assert result["vertical"] == "people_hr"
-    assert result["recorded"] is False
-    assert "non-live" in result["reason"]
-    assert conn.upserts == []
+    assert result["disposition"] == {
+        "vertical": "people_hr",
+        "status": 3,
+        "recorded": True,
+        "selected_dwid_count": 0,
+        "selected_vendor_record_id_count": 1,
+        "actor_role": ROLE_DATA_OWNER,
+    }
+    assert "selected_vendor_record_ids" not in result["disposition"]
+    assert conn.upserts[0]["vertical"] == "people_hr"
     assert conn.approval_context.get("confirmed_systems") == ["people_hr::paylocity"]
+    assert conn.drop_syncs == []
 
 
-def test_production_live_verticals_are_data_and_auth0_only():
-    """Data + Auth0 are live. Remaining catalog / system slugs stay coming-soon."""
-    assert vd.LIVE_VERTICALS == ("data", "auth0")
+def test_production_live_verticals_include_communications_and_people_hr():
+    """Data + Auth0 + Communications + People/HR. Cassandra stays suppress-only."""
+    assert vd.LIVE_VERTICALS == ("data", "auth0", "communications", "people_hr")
     assert "tech" not in vd.LIVE_VERTICALS
     assert vd.COMING_SOON_VERTICALS == (
-        "axios_headquarters",
-        "lever",
-        "paylocity",
         "cassandra",
-        "communications",
-        "people_hr",
         "bizdev",
     )
     assert "axios_hq" not in vd.COMING_SOON_VERTICALS
     assert "axios_hq" not in vd.LIVE_VERTICALS
+    assert "lever" not in vd.LIVE_VERTICALS
+    assert "paylocity" not in vd.LIVE_VERTICALS
+    assert "axios_headquarters" not in vd.LIVE_VERTICALS
+    assert "axios_headquarters" not in vd.COMING_SOON_VERTICALS
+    assert "axios_headquarters" in vd.RETRACTED_VERTICAL_PATHS
+    assert "hr_alumni" not in vd.LIVE_VERTICALS
+    assert "hr_alumni" not in vd.COMING_SOON_VERTICALS
+    assert "hr_alumni" in vd.RETRACTED_VERTICAL_PATHS
+    assert "cassandra" not in vd.LIVE_VERTICALS
     assert "test" not in vd.LIVE_VERTICALS
     assert vd.is_live_vertical("data") is True
     assert vd.is_live_vertical("auth0") is True
     assert vd.is_live_vertical("tech") is True
-    assert vd.is_live_vertical("communications") is False
-    assert vd.is_live_vertical("people_hr") is False
+    assert vd.is_live_vertical("communications") is True
+    assert vd.is_live_vertical("people_hr") is True
     assert vd.is_live_vertical("bizdev") is False
-    assert vd.is_live_vertical("axios_headquarters") is False
-    assert vd.is_live_vertical("axios_hq") is False
+    assert vd.is_live_vertical("axios_headquarters") is True
+    assert vd.is_live_vertical("axios_hq") is True
+    assert vd.is_live_vertical("lever") is True
+    assert vd.is_live_vertical("paylocity") is True
+    assert vd.is_live_vertical("cassandra") is False
     assert vd.is_live_vertical("test") is False
     assert vd.is_matching_writable_vertical("test") is True
+    assert vd.is_matching_writable_vertical("cassandra") is False
     assert "test" in vd.MATCHING_WRITABLE_VERTICALS
     assert vd.VERTICAL_LABELS[VERTICAL_TEST] == "Test vertical"
     assert vd.VERTICAL_LABELS["axios_headquarters"] == "Axios HQ"
     assert vd.VERTICAL_LABELS["axios_hq"] == "Axios HQ"
+    assert vd.VERTICAL_LABELS["communications"] == "Communications"
+    assert vd.VERTICAL_LABELS["people_hr"] == "People/HR"
+    assert vd.VERTICAL_LABELS["lever"] == "Lever"
+    assert vd.VERTICAL_LABELS["paylocity"] == "Paylocity"
+    assert vd.VERTICAL_LABELS["cassandra"] == "Cassandra"
     assert vd.resolve_disposition_vertical("axios_headquarters") == "communications"
     assert vd.resolve_disposition_vertical("axios_hq") == "communications"
     assert vd.resolve_disposition_vertical("paylocity") == "people_hr"
@@ -1191,7 +1306,12 @@ def test_live_disposition_lookup_keys_include_historical_tech():
     assert keys[0] == "data"
     assert "auth0" in keys
     assert "tech" in keys
-    assert vd.LIVE_VERTICALS == ("data", "auth0")
+    assert "communications" in keys
+    assert "people_hr" in keys
+    assert "axios_hq" in keys
+    assert "lever" in keys
+    assert "paylocity" in keys
+    assert vd.LIVE_VERTICALS == ("data", "auth0", "communications", "people_hr")
     assert "tech" not in vd.LIVE_VERTICALS
     assert "tech" not in vd.COMING_SOON_VERTICALS
     assert vd.is_matching_writable_vertical("tech") is False
@@ -1251,11 +1371,25 @@ async def test_in_scope_auth0_system_slug_snapshot_joins():
 
 
 @pytest.mark.asyncio
-async def test_coming_soon_snapshot_does_not_join_live_scope():
-    """Axios HQ / communications snapshots must not invent a live sibling."""
+async def test_communications_snapshot_joins_live_scope():
+    """Axios HQ / communications snapshots join Communications once it is live."""
     conn = FakeConn(
         rows=[_disposition_row(5)],
         matching_snapshot_verticals={"axios_headquarters", "communications", "axios_hq"},
+    )
+    scoped = await vd.in_scope_live_verticals(
+        conn, request_id=REQUEST_ID, decided_verticals={"data"}
+    )
+    assert scoped == ("data", "communications")
+    assert await vd.all_live_verticals_disposed(conn, REQUEST_ID) is False
+
+
+@pytest.mark.asyncio
+async def test_cassandra_snapshot_does_not_join_live_scope():
+    """Cassandra stays suppress-only — snapshots must not invent a live sibling."""
+    conn = FakeConn(
+        rows=[_disposition_row(5)],
+        matching_snapshot_verticals={"cassandra"},
     )
     scoped = await vd.in_scope_live_verticals(
         conn, request_id=REQUEST_ID, decided_verticals={"data"}
@@ -1278,30 +1412,24 @@ async def test_matching_complete_false_when_auth0_snapshot_pending(
     assert await vd.all_live_verticals_disposed(conn, REQUEST_ID) is False
 
 
-def test_owner_matching_results_use_snapshot_not_not_live_stub():
-    """Sheet/SaaS matching-results return opaque ids + counts when a snapshot exists."""
-    from admin_api import drop_pipeline
-    from habeas_privacy_core.auth import ROLE_DATA_OWNER
+@pytest.mark.asyncio
+async def test_people_hr_snapshot_joins_live_scope_not_not_live_stub():
+    """People/HR matching write-gate: a Lever/Paylocity snapshot joins live scope.
 
-    payload = drop_pipeline.serialize_owner_vertical_matching_review(
-        {
-            "request_id": REQUEST_ID,
-            "matched": True,
-            "match_count": 2,
-            "matched_contacts": [{"dwid": "1001", "email": "hidden@example.com"}],
-        },
-        vertical="people_hr",
-        role=ROLE_DATA_OWNER,
-        system="hr_alumni",
-        snapshot={"match_count": 2, "vendor_record_ids": ["opaque-a", "opaque-b"]},
+    Matching write-gate only — this does not invent vendor HTTP extract.
+    """
+    assert vd.is_live_vertical("people_hr") is True
+    assert vd.is_live_vertical("lever") is True
+    assert vd.is_live_vertical("paylocity") is True
+    conn = FakeConn(
+        rows=[_disposition_row(5)],
+        matching_snapshot_verticals={"lever", "paylocity", "people_hr"},
     )
-    assert payload["matched"] is True
-    assert payload["match_count"] == 2
-    assert payload["vendor_record_ids"] == ["opaque-a", "opaque-b"]
-    assert payload["matched_contacts"] == []
-    assert payload["matched_contacts_status"] == "ok"
-    assert payload["not_live_reason"] is None
-    assert "hidden@example.com" not in str(payload)
+    scoped = await vd.in_scope_live_verticals(
+        conn, request_id=REQUEST_ID, decided_verticals={"data"}
+    )
+    assert scoped == ("data", "people_hr")
+    assert await vd.all_live_verticals_disposed(conn, REQUEST_ID) is False
 
 
 @pytest.mark.asyncio
@@ -1341,14 +1469,17 @@ async def test_promote_paylocity_keeps_gate_pending_when_data_disposed(
         request_id=REQUEST_ID,
         decided_by="owner@example.com",
         response_status=3,
-        dwids=["dwid-9"],
+        dwids=["opaque-9"],
         vertical="people_hr",
         system="paylocity",
     )
     assert result["review_status"] == "pending"
     assert result["system"] == "paylocity"
     assert conn.approval_context.get("confirmed_systems") == ["people_hr::paylocity"]
-    assert [row["vertical"] for row in conn.upserts] == []
+    assert [row["vertical"] for row in conn.upserts] == ["people_hr"]
+    assert result["disposition"]["recorded"] is True
+    assert result["disposition"]["vertical"] == "people_hr"
+    assert "selected_vendor_record_ids" not in result["disposition"]
     assert decisions == []
 
 

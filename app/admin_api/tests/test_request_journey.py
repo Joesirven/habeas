@@ -309,16 +309,17 @@ async def test_list_owner_matching_needs_attention_test_vertical_cassandra() -> 
     """Assigned owner of ``test`` sees System A + System B as two review rows.
 
     Labels are never CA DROP or Alumni. CA DROP stays the request source
-    (``intake_source``). Production live set is data plus Auth0.
+    (``intake_source``). Test vertical stays assignment-scoped; Cassandra is
+    not a live hash matcher.
     """
     from admin_api.request_journey import NeedsAttentionItem
     from admin_api.vertical_dispositions import LIVE_VERTICALS
 
-    assert LIVE_VERTICALS == ("data", "auth0")
     assert request_journey.LIVE_VERTICALS == LIVE_VERTICALS
     assert "test" not in LIVE_VERTICALS
-    assert "communications" not in LIVE_VERTICALS
-    assert "people_hr" not in LIVE_VERTICALS
+    assert "cassandra" not in LIVE_VERTICALS
+    assert "data" in LIVE_VERTICALS
+    assert "auth0" in LIVE_VERTICALS
 
     request_id = _WORKBENCH_REQUEST_ID
     base = NeedsAttentionItem(
@@ -687,10 +688,10 @@ async def test_list_owner_matching_test_vertical_two_systems_one_row() -> None:
     from admin_api.request_journey import NeedsAttentionItem
     from admin_api.vertical_dispositions import LIVE_VERTICALS
 
-    assert LIVE_VERTICALS == ("data", "auth0")
     assert "test" not in LIVE_VERTICALS
-    assert "communications" not in LIVE_VERTICALS
-    assert "people_hr" not in LIVE_VERTICALS
+    assert "cassandra" not in LIVE_VERTICALS
+    assert "data" in LIVE_VERTICALS
+    assert "auth0" in LIVE_VERTICALS
 
     base = NeedsAttentionItem(
         request_id=_WORKBENCH_REQUEST_ID,
@@ -763,10 +764,10 @@ async def test_needs_attention_filter_systems_test_vertical_cassandra_and_alumni
     """Scoped ``test`` owner sees System A and System B as two review rows."""
     from admin_api.vertical_dispositions import LIVE_VERTICALS
 
-    assert LIVE_VERTICALS == ("data", "auth0")
     assert "test" not in LIVE_VERTICALS
-    assert "communications" not in LIVE_VERTICALS
-    assert "people_hr" not in LIVE_VERTICALS
+    assert "cassandra" not in LIVE_VERTICALS
+    assert "data" in LIVE_VERTICALS
+    assert "auth0" in LIVE_VERTICALS
 
     conn = AsyncMock()
     conn.fetch = AsyncMock(return_value=[])
@@ -2570,8 +2571,8 @@ async def test_workbench_coming_soon_verticals_not_actionable(
                 dispositions=[],
                 live_verticals=["data"],
                 coming_soon=[
-                    VerticalCatalogEntry(vertical="axios_hq", label="Axios HQ"),
-                    VerticalCatalogEntry(vertical="lever", label="Lever"),
+                    VerticalCatalogEntry(vertical="cassandra", label="Cassandra"),
+                    VerticalCatalogEntry(vertical="bizdev", label="BizDev"),
                 ],
                 matching_complete=False,
             )
@@ -2585,8 +2586,8 @@ async def test_workbench_coming_soon_verticals_not_actionable(
     result = await build_request_journey_workbench(conn, request_id=_WORKBENCH_REQUEST_ID)
 
     coming_soon_rows = [row for row in result.matching_cluster if not row.live]
-    assert {row.vertical for row in coming_soon_rows} == {"axios_hq", "lever"}
-    assert {row.label for row in coming_soon_rows} == {"Axios HQ", "Lever"}
+    assert {row.vertical for row in coming_soon_rows} == {"cassandra", "bizdev"}
+    assert {row.label for row in coming_soon_rows} == {"Cassandra", "BizDev"}
     assert all(row.actionable is False for row in coming_soon_rows)
     assert all(
         row.blocker == "Catalog-only — matching is not live"
@@ -2821,20 +2822,45 @@ async def test_fetch_vertical_matching_snapshot_missing_row_is_none() -> None:
 
 
 def _coming_soon_catalog() -> list[VerticalCatalogEntry]:
+    """Catalog-lag fixture: Wave M hash matchers may still be listed here.
+
+    Workbench must treat axios_hq / lever / paylocity as live anyway.
+    ``axios_headquarters`` is retracted/unknown. Cassandra stays catalog-only.
+    """
     return [
         VerticalCatalogEntry(vertical="axios_hq", label="Axios HQ"),
         VerticalCatalogEntry(vertical="lever", label="Lever"),
         VerticalCatalogEntry(vertical="paylocity", label="Paylocity"),
         VerticalCatalogEntry(vertical="auth0", label="Auth0"),
         VerticalCatalogEntry(vertical="cassandra", label="Cassandra"),
+        VerticalCatalogEntry(vertical="axios_headquarters", label="Axios HQ"),
+        VerticalCatalogEntry(vertical="bizdev", label="BizDev"),
     ]
 
 
+def _snapshot_for_vertical(
+    wanted: str, payload: dict[str, Any] | None
+) -> Any:
+    async def fake(_conn: Any, *, request_id: str, vertical: str = "auth0"):
+        del _conn, request_id
+        return payload if vertical == wanted else None
+
+    return fake
+
+
+def _vendor_ids_for_vertical(wanted: str, ids: list[str]) -> Any:
+    async def fake(_conn: Any, *, request_id: str, vertical: str = "auth0"):
+        del _conn, request_id
+        return ids if vertical == wanted else []
+
+    return fake
+
+
 @pytest.mark.asyncio
-async def test_workbench_auth0_is_live_axios_hq_remains_coming_soon(
+async def test_workbench_auth0_and_hash_matchers_are_live_cassandra_catalog_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Auth0 is a live matching cluster row; Axios HQ and other catalog verticals stay coming soon."""
+    """Auth0 + Axios HQ / Lever / Paylocity are live matching rows; Cassandra is not."""
     ops = _ops_journey(
         [
             JourneyStage(stage="received", label="Received", status="complete"),
@@ -2891,18 +2917,32 @@ async def test_workbench_auth0_is_live_axios_hq_remains_coming_soon(
         decided=False,
         selected_vendor_record_ids=[],
     )
-    assert by_vertical["axios_hq"].live is False
-    assert by_vertical["axios_hq"].actionable is False
-    assert by_vertical["axios_hq"].label == "Axios HQ"
-    assert by_vertical["axios_hq"].blocker == (
-        "Catalog-only — matching is not live"
-    )
+    for name, label in (
+        ("axios_hq", "Axios HQ"),
+        ("lever", "Lever"),
+        ("paylocity", "Paylocity"),
+    ):
+        row = by_vertical[name]
+        assert row.live is True
+        assert row.actionable is True
+        assert row.label == label
+        assert row.blocker != "Catalog-only — matching is not live"
+        assert row.blocker != "Coming soon"
+        assert row.matching == request_journey.WorkbenchVerticalMatchingSummary(
+            match_count=None
+        )
+        assert row.system == name
+    assert "axios_headquarters" not in by_vertical
+    cassandra = by_vertical["cassandra"]
+    assert cassandra.live is False
+    assert cassandra.actionable is False
+    assert cassandra.label == "Cassandra"
+    assert cassandra.blocker == "Catalog-only — matching is not live"
+    # Confirm-only this wave — Auth0 / hash matchers do not join fulfillment.
     assert all(
-        by_vertical[name].live is False
-        for name in ("axios_hq", "lever", "paylocity", "cassandra")
+        row.vertical not in {"auth0", "axios_hq", "lever", "paylocity"}
+        for row in result.fulfillment_cluster
     )
-    # Confirm-only this wave — Auth0 does not join the fulfillment cluster.
-    assert all(row.vertical != "auth0" for row in result.fulfillment_cluster)
     assert_no_pii_keys(result.model_dump())
 
 
@@ -2958,14 +2998,15 @@ async def test_workbench_auth0_matching_count_and_confirmed_vendor_id(
     monkeypatch.setattr(
         request_journey,
         "fetch_vertical_matching_snapshot",
-        AsyncMock(
-            return_value={"match_count": 1, "vendor_record_ids": [_AUTH0_VENDOR_ID]}
+        _snapshot_for_vertical(
+            "auth0",
+            {"match_count": 1, "vendor_record_ids": [_AUTH0_VENDOR_ID]},
         ),
     )
     monkeypatch.setattr(
         request_journey,
         "fetch_selected_vendor_record_ids",
-        AsyncMock(return_value=[_AUTH0_VENDOR_ID]),
+        _vendor_ids_for_vertical("auth0", [_AUTH0_VENDOR_ID]),
     )
 
     conn = _MetaConn(intake_source="manual", request_type="delete")
@@ -3024,12 +3065,15 @@ async def test_workbench_auth0_snapshot_without_disposition_is_waiting(
     monkeypatch.setattr(
         request_journey,
         "fetch_vertical_matching_snapshot",
-        AsyncMock(return_value={"match_count": 2, "vendor_record_ids": ["auth0|a", "auth0|b"]}),
+        _snapshot_for_vertical(
+            "auth0",
+            {"match_count": 2, "vendor_record_ids": ["auth0|a", "auth0|b"]},
+        ),
     )
     monkeypatch.setattr(
         request_journey,
         "fetch_selected_vendor_record_ids",
-        AsyncMock(return_value=[]),
+        _vendor_ids_for_vertical("auth0", []),
     )
 
     conn = _MetaConn(intake_source="manual", request_type="delete")
@@ -3102,8 +3146,81 @@ async def test_workbench_auth0_absent_snapshot_does_not_stall_matching_rollup(
     assert auth0.matching_status == "not_started"
     assert auth0.matching is not None
     assert auth0.matching.match_count is None
+    for name in ("axios_hq", "lever", "paylocity"):
+        row = next(r for r in result.matching_cluster if r.vertical == name)
+        assert row.live is True
+        assert row.matching_status == "not_started"
+        assert row.matching is not None
+        assert row.matching.match_count is None
     by_stage = {stage.stage: stage for stage in result.stages}
     assert by_stage["matching"].status == "complete"
     assert by_stage["fulfillment"].status == "complete"
     assert result.current_stage == "notice"
     assert_no_pii_keys(result.model_dump())
+
+
+@pytest.mark.asyncio
+async def test_workbench_axios_hq_snapshot_without_disposition_is_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Axios HQ follows Auth0: snapshot without owner confirm stays waiting."""
+    ops = _ops_journey(
+        [
+            JourneyStage(stage="received", label="Received", status="complete"),
+            JourneyStage(stage="download", label="Download", status="skipped"),
+            JourneyStage(stage="land", label="Land", status="skipped"),
+            JourneyStage(stage="promote", label="Promote", status="skipped"),
+            JourneyStage(stage="match", label="Match", status="complete"),
+            JourneyStage(stage="review", label="Review", status="complete"),
+            JourneyStage(stage="fulfill", label="Fulfill", status="waiting"),
+        ]
+    )
+    monkeypatch.setattr(request_journey, "build_request_journey", AsyncMock(return_value=ops))
+    monkeypatch.setattr(
+        request_journey,
+        "list_vertical_dispositions",
+        AsyncMock(
+            return_value=VerticalDispositionsResponse(
+                request_id=_WORKBENCH_REQUEST_ID,
+                dispositions=[],
+                live_verticals=["data"],
+                coming_soon=_coming_soon_catalog(),
+                matching_complete=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        request_journey, "is_vertical_kickoff_approved", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(
+        request_journey,
+        "fetch_vertical_matching_snapshot",
+        _snapshot_for_vertical(
+            "axios_hq",
+            {"match_count": 1, "vendor_record_ids": ["axios-opaque-1"]},
+        ),
+    )
+    monkeypatch.setattr(
+        request_journey,
+        "fetch_selected_vendor_record_ids",
+        _vendor_ids_for_vertical("axios_hq", []),
+    )
+
+    conn = _MetaConn(intake_source="manual", request_type="delete")
+    result = await build_request_journey_workbench(conn, request_id=_WORKBENCH_REQUEST_ID)
+
+    axios_hq = next(row for row in result.matching_cluster if row.vertical == "axios_hq")
+    assert axios_hq.live is True
+    assert axios_hq.actionable is True
+    assert axios_hq.matching_status == "waiting"
+    assert axios_hq.blocker == "Pending Data Owner Review"
+    assert axios_hq.matching is not None
+    assert axios_hq.matching.match_count == 1
+    assert axios_hq.disposition is not None
+    assert axios_hq.disposition.decided is False
+    assert axios_hq.disposition.selected_vendor_record_ids == []
+    dumped = result.model_dump()
+    assert_no_pii_keys(dumped)
+    serialized = json.dumps(dumped)
+    for forbidden in ("email", "phone", "first_name", "last_name", "hash_value"):
+        assert forbidden not in serialized

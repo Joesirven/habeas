@@ -47,27 +47,38 @@ from habeas_privacy_core.workflow.approval import (
     is_vertical_kickoff_approved,
 )
 
-# Live write keys: CA DROP (Data) and Auth0. Do not list ``tech`` here —
-# that catalog id is an Auth0 path alias, not a second live vertical.
-# ``test`` is assignment-scoped matching review only — not a global live vertical.
-# Request-level Matching / KD13 require Data always; Auth0 joins only when a
-# ``request_vertical_matching`` snapshot exists or a disposition was already
-# written — DROP-only / never-run Auth0 complete on Data alone.
+# Live write keys: CA DROP (Data), Auth0, Communications (Axios HQ), and
+# People/HR (Lever / Paylocity). Matching write-gates only — this is not
+# vendor HTTP extract. Do not list ``tech`` here — that catalog id is an
+# Auth0 path alias, not a second live vertical. ``test`` is assignment-scoped
+# matching review only — not a global live vertical. Cassandra stays
+# suppress-only (coming-soon for matching/disposition writes).
+# Request-level Matching / KD13 require Data always; sibling live verticals
+# join only when a ``request_vertical_matching`` snapshot exists or a
+# disposition was already written.
 VERTICAL_DATA = "data"
 VERTICAL_AUTH0 = "auth0"
-LIVE_VERTICALS: tuple[str, ...] = (VERTICAL_DATA, VERTICAL_AUTH0)
-MATCHING_WRITABLE_VERTICALS: frozenset[str] = frozenset({*LIVE_VERTICALS, VERTICAL_TEST})
-# Systems that still do not match. Catalog ids sit beside bound slugs so PUT
-# ``/communications`` (etc.) returns coming-soon, not unknown. Historical
-# ``axios_hq`` is a read alias only — not a live write key.
-COMING_SOON_VERTICALS: tuple[str, ...] = (
-    "axios_headquarters",
-    "lever",
-    "paylocity",
-    "cassandra",
+LIVE_VERTICALS: tuple[str, ...] = (
+    VERTICAL_DATA,
+    VERTICAL_AUTH0,
     VERTICAL_COMMUNICATIONS,
     VERTICAL_PEOPLE_HR,
+)
+MATCHING_WRITABLE_VERTICALS: frozenset[str] = frozenset({*LIVE_VERTICALS, VERTICAL_TEST})
+# Matching/disposition writes still blocked. Cassandra is suppress-only.
+# BizDev / Sheets stay catalog-only. Retracted slugs are not listed here —
+# PUT returns unknown, not coming-soon.
+COMING_SOON_VERTICALS: tuple[str, ...] = (
+    "cassandra",
     VERTICAL_BIZDEV,
+)
+# Retracted catalog slugs — 400 unknown on PUT. Do not reintroduce as live
+# write keys. Historical rows / snapshot lookup still alias via
+# ``_DISPOSITION_SYSTEM_ALIASES``. Live Axios HQ writes use ``axios_hq``
+# or ``communications``. Alumni Sheets (``hr_alumni``) stays frozen — Wave M
+# does not lift Sheets even though the read alias points at People/HR.
+RETRACTED_VERTICAL_PATHS: frozenset[str] = frozenset(
+    {"axios_headquarters", "hr_alumni"}
 )
 VENDOR_RECORD_ID_VERTICALS: frozenset[str] = frozenset(
     {
@@ -78,9 +89,12 @@ VENDOR_RECORD_ID_VERTICALS: frozenset[str] = frozenset(
         VERTICAL_TECH,
     }
 )
-# Owner path aliases → stored vertical. Historical ``axios_hq`` reads as
-# communications; it is never a live write key. Historical ``tech`` reads as
-# Auth0 for KD13 lookup only — ``tech`` is not a live write key.
+# Owner path aliases → stored vertical. ``axios_hq`` writes as communications
+# (live matching write-gate). Retracted ``axios_headquarters`` and frozen
+# ``hr_alumni`` still map on read / snapshot lookup; PUT rejects them as
+# unknown. Lever / Paylocity map to People/HR (live write-gate). Historical
+# ``tech`` reads as Auth0 for KD13 lookup only — ``tech`` is not a live
+# write key.
 _DISPOSITION_SYSTEM_ALIASES: dict[str, str] = {
     "axios_headquarters": VERTICAL_COMMUNICATIONS,
     "axios_hq": VERTICAL_COMMUNICATIONS,
@@ -197,11 +211,12 @@ def normalize_vertical(vertical: str) -> str:
 def resolve_disposition_vertical(vertical: str) -> str:
     """Map an owner path (catalog id or bound system) to the stored vertical.
 
-    Catalog ids (``communications``) stay as-is. Bound systems
-    (``axios_headquarters``; historical ``axios_hq``) resolve to their catalog
-    vertical. Tech / Auth0 store as ``auth0`` so snapshots and dispositions
-    share one key. Cassandra stays ``cassandra`` (Data CA DROP writes go
-    through ``data``).
+    Catalog ids (``communications``) stay as-is. Bound systems (``axios_hq``,
+    ``lever``, ``paylocity``) resolve to their catalog vertical. Retracted
+    ``axios_headquarters`` and frozen ``hr_alumni`` still map on read /
+    snapshot lookup; PUT rejects them as unknown. Tech / Auth0 store as
+    ``auth0`` so snapshots and dispositions share one key. Cassandra stays
+    ``cassandra`` (Data CA DROP writes go through ``data``).
     """
     path = normalize_vertical(vertical)
     if not path:
@@ -780,6 +795,10 @@ async def put_vertical_disposition(
         raise HTTPException(status_code=400, detail="invalid request_id") from exc
 
     path_vertical = normalize_vertical(vertical)
+    if path_vertical in RETRACTED_VERTICAL_PATHS:
+        raise HTTPException(
+            status_code=400, detail=f"unknown vertical {path_vertical!r}"
+        )
     vertical_norm = resolve_disposition_vertical(path_vertical)
     if not is_matching_writable_vertical(vertical_norm):
         coming_soon = (
@@ -868,6 +887,7 @@ __all__ = [
     "FULFILLMENT_KICKOFF_ACTION",
     "LIVE_VERTICALS",
     "MATCHING_WRITABLE_VERTICALS",
+    "RETRACTED_VERTICAL_PATHS",
     "STATUS_REQUIRING_DWIDS",
     "STATUS_REQUIRING_VENDOR_RECORD_IDS",
     "VENDOR_RECORD_ID_VERTICALS",

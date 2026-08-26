@@ -245,7 +245,9 @@ def test_hash_refresh_success_records_extract_rows(client):
     assert body["rows_written"] == _EXTRACT_ROWS
     _assert_no_pii(body)
     extract.assert_awaited()
-    assert extract.await_args.kwargs["bq_table"] == "paylocity_hashed_raw"
+    extract_kwargs = extract.await_args.kwargs
+    assert extract_kwargs["bq_table"] == "paylocity_hashed_raw"
+    assert all("sftp" not in str(key).lower() for key in extract_kwargs)
     dbt.assert_called_once()
     _assert_success_persisted(mocks, attempt_id=99, rows_written=_EXTRACT_ROWS)
 

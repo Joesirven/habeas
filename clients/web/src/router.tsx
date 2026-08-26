@@ -4,7 +4,7 @@ import { lazy } from 'react'
 
 import { AppShell } from '@/components/AppShell'
 import { isInboxIdentifierSurface } from '@/lib/inbox-status-lab'
-import { isRequestUuid } from '@/lib/utils'
+import { isRequestUuid, labsEnabled } from '@/lib/utils'
 import { DashboardPage } from '@/routes/index'
 import { DeMonitorPage } from '@/routes/ops/de-monitor'
 import { OpsIncidentsPage } from '@/routes/ops/incidents'
@@ -30,6 +30,10 @@ import {
 import { SheetsCadenceLabPage } from '@/routes/dev/sheets-cadence-lab'
 import { DropProdCutoverLabPage } from '@/routes/dev/drop-prod-cutover'
 import { TokenResourceServerLabPage } from '@/routes/dev/token-resource-server'
+import {
+  OwnerMapAlternativesPage,
+  parseOwnerMapLabSearch,
+} from '@/routes/dev/owner-map-alternatives'
 import { ManualRequestPage } from '@/routes/requests/new'
 import { RequestsPage } from '@/routes/requests/index'
 import { RequestsSlasPage } from '@/routes/requests/slas'
@@ -768,6 +772,29 @@ const tokenResourceServerLabRoute = createRoute({
   component: TokenResourceServerLabPage,
 })
 
+/**
+ * Wave M planned URL. No new lab page — the owner wizard already has
+ * live-fail Retry / Set up manual upload and upload column mapping.
+ */
+const ownerMapFallbackLabRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/dev/owner-map-fallback',
+  beforeLoad: () => {
+    throw redirect({ to: '/owner/connectors', replace: true })
+  },
+  component: () => null,
+})
+
+const ownerMapAlternativesLabRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/dev/owner-map-alternatives',
+  validateSearch: (search: Record<string, unknown>) => parseOwnerMapLabSearch(search),
+  component: function OwnerMapAlternativesRoute() {
+    const search = ownerMapAlternativesLabRoute.useSearch()
+    return <OwnerMapAlternativesPage search={search} />
+  },
+})
+
 const requestsSlasRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/requests/slas',
@@ -1020,13 +1047,19 @@ const routeTree = rootRoute.addChildren([
   requestsRoute,
   needsAttentionRoute,
   inboxStatusLabRoute,
-  matchingResultsLabRoute,
-  devLabsIndexRoute,
-  sheetsCadenceLabRoute,
-  sheetsOauthLabRoute,
-  pendingSettingsLabRoute,
-  dropProdCutoverLabRoute,
-  tokenResourceServerLabRoute,
+  ...(labsEnabled()
+    ? [
+        matchingResultsLabRoute,
+        devLabsIndexRoute,
+        sheetsCadenceLabRoute,
+        sheetsOauthLabRoute,
+        pendingSettingsLabRoute,
+        dropProdCutoverLabRoute,
+        tokenResourceServerLabRoute,
+        ownerMapFallbackLabRoute,
+        ownerMapAlternativesLabRoute,
+      ]
+    : []),
   requestsSlasRoute,
   manualRequestRoute,
   docsRoute,

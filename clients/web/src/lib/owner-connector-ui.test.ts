@@ -35,6 +35,7 @@ import {
   liveConnectReady,
   MODE_DEFINITION_CARDS,
   MODE_STEP_CONNECTING_NOT_MATCHING_FOOTNOTE,
+  MODE_UPLOAD_DEFINITION_CARD,
   modeStepIntroCopy,
   modeStepSystemHint,
   refreshCadenceFromCadenceOption,
@@ -54,6 +55,21 @@ import {
   isOwnerWizardHiddenSystem,
   filterOwnerWizardConnectors,
   ownerConnectorDisplayName,
+  LIVE_CONNECT_FAILURE_HINT,
+  LIVE_CONNECT_FAILURE_RETRY_ONLY_HINT,
+  LIVE_CONNECT_RETRY_LABEL,
+  LIVE_CONNECT_SETUP_UPLOAD_LABEL,
+  LIVE_CONNECT_SUCCESS_MAPPING_HINT,
+  LIVE_PING_NOT_EXTRACT_HINT,
+  LIVE_PING_NOT_EXTRACT_SYSTEMS,
+  liveConnectFailureActions,
+  liveConnectOffersUploadFallback,
+  liveConnectSuccessFollowOn,
+  liveMappingFollowOnStepId,
+  livePingIsNotMatchingExtract,
+  liveUploadFallbackStepId,
+  mappingFollowOnCopy,
+  shouldIncludeLiveMappingFollowOn,
 } from './owner-connector-ui'
 
 describe('MULTI_PII_DELIMITER_OPTIONS (AE10 UI)', () => {
@@ -318,13 +334,14 @@ describe('vertical wizard steps', () => {
     })
   })
 
-  test('paylocity live first then upload fallback', () => {
+  test('paylocity live first then mapping then upload fallback', () => {
     const steps = buildVerticalWizardSteps({
       systems: [{ system: 'paylocity', allowedApproaches: ['upload', 'live'] }],
     })
     expect(steps.map((step) => step.id)).toEqual([
       'paylocity-howto-live',
       'paylocity-live-creds',
+      'paylocity-mapping',
       'paylocity-howto-upload',
       'paylocity-upload',
       'cadence',
@@ -343,6 +360,7 @@ describe('vertical wizard steps', () => {
     expect(steps.map((step) => step.id)).toEqual([
       'paylocity-howto-live',
       'paylocity-live-creds',
+      'paylocity-mapping',
       'paylocity-howto-upload',
       'paylocity-upload',
       'lever-howto-live',
@@ -441,6 +459,75 @@ describe('vertical wizard steps', () => {
     ).toBe(false)
   })
 
+  test('lever live-only has no mapping follow-on until upload is allowed', () => {
+    const steps = buildVerticalWizardSteps({
+      systems: [{ system: 'lever', allowedApproaches: ['live'] }],
+    })
+    expect(steps.map((step) => step.id)).toEqual([
+      'lever-howto-live',
+      'lever-live-creds',
+      'cadence',
+      'confirm',
+    ])
+    expect(shouldIncludeLiveMappingFollowOn({
+      system: 'lever',
+      allowedApproaches: ['live'],
+    })).toBe(false)
+  })
+
+  test('lever live+upload inserts mapping after live-creds', () => {
+    const steps = buildVerticalWizardSteps({
+      systems: [{ system: 'lever', allowedApproaches: ['live', 'upload'] }],
+    })
+    expect(steps.map((step) => step.id)).toEqual([
+      'lever-howto-live',
+      'lever-live-creds',
+      'lever-mapping',
+      'lever-howto-upload',
+      'lever-upload',
+      'cadence',
+      'confirm',
+    ])
+    expect(parseVerticalWizardStepId('lever-mapping')).toEqual({
+      kind: 'mapping',
+      system: 'lever',
+    })
+  })
+
+  test('auth0 live extract does not add a mapping step after live-creds', () => {
+    const steps = buildVerticalWizardSteps({
+      systems: [{ system: 'auth0', allowedApproaches: ['live', 'upload'] }],
+    })
+    expect(steps.map((step) => step.id)).toEqual([
+      'auth0-howto-live',
+      'auth0-live-creds',
+      'auth0-howto-upload',
+      'auth0-upload',
+      'cadence',
+      'confirm',
+    ])
+  })
+
+  test('omits live mapping follow-on when the caller says mapping is complete', () => {
+    const steps = buildVerticalWizardSteps({
+      systems: [
+        {
+          system: 'paylocity',
+          allowedApproaches: ['live', 'upload'],
+          needsMappingClean: false,
+        },
+      ],
+    })
+    expect(steps.map((step) => step.id)).toEqual([
+      'paylocity-howto-live',
+      'paylocity-live-creds',
+      'paylocity-howto-upload',
+      'paylocity-upload',
+      'cadence',
+      'confirm',
+    ])
+  })
+
   test('viewOnly vertical yields no steps', () => {
     expect(
       buildVerticalWizardSteps({
@@ -455,6 +542,151 @@ describe('vertical wizard steps', () => {
     expect(wizardProgressPercent(3, 4)).toBe(100)
     expect(wizardProgressPercent(0, 0)).toBe(0)
     expect(wizardProgressPercent(-1, 5)).toBe(0)
+  })
+})
+
+describe('live connect mapping follow-on (Wave M)', () => {
+  test('live ping is not extract for Lever and Paylocity only', () => {
+    expect(LIVE_PING_NOT_EXTRACT_SYSTEMS).toEqual(['lever', 'paylocity'])
+    expect(livePingIsNotMatchingExtract('lever')).toBe(true)
+    expect(livePingIsNotMatchingExtract('Paylocity')).toBe(true)
+    expect(livePingIsNotMatchingExtract('auth0')).toBe(false)
+    expect(livePingIsNotMatchingExtract('axios_hq')).toBe(false)
+    expect(livePingIsNotMatchingExtract('cassandra')).toBe(false)
+  })
+
+  test('step ids are mapping after live and howto-upload for fallback', () => {
+    expect(liveMappingFollowOnStepId('Paylocity')).toBe('paylocity-mapping')
+    expect(liveUploadFallbackStepId('LEVER')).toBe('lever-howto-upload')
+  })
+
+  test('shouldIncludeLiveMappingFollowOn requires live ping-not-extract plus upload', () => {
+    expect(
+      shouldIncludeLiveMappingFollowOn({
+        system: 'paylocity',
+        allowedApproaches: ['live', 'upload'],
+      }),
+    ).toBe(true)
+    expect(
+      shouldIncludeLiveMappingFollowOn({
+        system: 'lever',
+        allowedApproaches: ['live', 'upload'],
+        mappingComplete: true,
+        rejectedRowCount: 0,
+      }),
+    ).toBe(false)
+    expect(
+      shouldIncludeLiveMappingFollowOn({
+        system: 'auth0',
+        allowedApproaches: ['live', 'upload'],
+      }),
+    ).toBe(false)
+    expect(
+      shouldIncludeLiveMappingFollowOn({
+        system: 'axios_hq',
+        allowedApproaches: ['upload'],
+      }),
+    ).toBe(false)
+    expect(
+      shouldIncludeLiveMappingFollowOn({
+        system: 'cassandra',
+        allowedApproaches: ['live', 'upload'],
+      }),
+    ).toBe(false)
+  })
+
+  test('live fail offers Retry connection and Set up manual upload when upload is allowed', () => {
+    const paylocity = liveConnectFailureActions({
+      system: 'paylocity',
+      allowedApproaches: ['live', 'upload'],
+    })
+    expect(paylocity.retryLabel).toBe(LIVE_CONNECT_RETRY_LABEL)
+    expect(paylocity.setupManualUpload).toEqual({
+      label: LIVE_CONNECT_SETUP_UPLOAD_LABEL,
+      stepId: 'paylocity-howto-upload',
+    })
+    expect(paylocity.hint).toBe(LIVE_CONNECT_FAILURE_HINT)
+    expect(paylocity.hint.toLowerCase()).toContain('retry')
+    expect(paylocity.hint.toLowerCase()).toContain('manual upload')
+    expect(paylocity.hint.toLowerCase()).toContain('email or phone')
+    expect(paylocity.hint.toLowerCase()).not.toContain(
+      'first name, last name, and email',
+    )
+    expect(paylocity.hint.toLowerCase()).not.toContain('coming soon')
+
+    const leverLiveOnly = liveConnectFailureActions({
+      system: 'lever',
+      allowedApproaches: ['live'],
+    })
+    expect(leverLiveOnly.retryLabel).toBe(LIVE_CONNECT_RETRY_LABEL)
+    expect(leverLiveOnly.setupManualUpload).toBeNull()
+    expect(leverLiveOnly.hint).toBe(LIVE_CONNECT_FAILURE_RETRY_ONLY_HINT)
+    expect(leverLiveOnly.hint.toLowerCase()).toContain('retry')
+    expect(leverLiveOnly.hint.toLowerCase()).not.toContain('manual upload')
+    expect(liveConnectOffersUploadFallback(['live'], 'lever')).toBe(false)
+    expect(liveConnectOffersUploadFallback(['upload'], 'cassandra')).toBe(false)
+  })
+
+  test('live success next step is mapping when upload is allowed', () => {
+    const paylocity = liveConnectSuccessFollowOn({
+      system: 'paylocity',
+      allowedApproaches: ['live', 'upload'],
+    })
+    expect(paylocity.nextKind).toBe('mapping')
+    expect(paylocity.nextStepId).toBe('paylocity-mapping')
+    expect(paylocity.hint).toBe(LIVE_PING_NOT_EXTRACT_HINT)
+    expect(paylocity.setupManualUpload?.label).toBe(LIVE_CONNECT_SETUP_UPLOAD_LABEL)
+    expect(paylocity.setupManualUpload?.stepId).toBe('paylocity-howto-upload')
+
+    const leverMapped = liveConnectSuccessFollowOn({
+      system: 'lever',
+      allowedApproaches: ['live', 'upload'],
+      mappingComplete: true,
+      rejectedRowCount: 0,
+    })
+    expect(leverMapped.nextKind).toBe('howto-upload')
+    expect(leverMapped.nextStepId).toBe('lever-howto-upload')
+
+    const auth0 = liveConnectSuccessFollowOn({
+      system: 'auth0',
+      allowedApproaches: ['live', 'upload'],
+    })
+    expect(auth0.nextKind).toBe('howto-upload')
+    expect(auth0.nextStepId).toBe('auth0-howto-upload')
+    expect(auth0.setupManualUpload).toBeNull()
+    expect(auth0.hint).toBe(LIVE_CONNECT_SUCCESS_MAPPING_HINT)
+
+    const leverPingOnly = liveConnectSuccessFollowOn({
+      system: 'lever',
+      allowedApproaches: ['live'],
+    })
+    expect(leverPingOnly.nextKind).toBe('continue')
+    expect(leverPingOnly.nextStepId).toBeNull()
+    expect(leverPingOnly.hint).toBe(LIVE_PING_NOT_EXTRACT_HINT)
+    expect(leverPingOnly.setupManualUpload).toBeNull()
+  })
+
+  test('mapping follow-on copy uses identifier fields only', () => {
+    const copy = mappingFollowOnCopy('Paylocity')
+    expect(copy.title).toContain('Paylocity')
+    expect(copy.intro.toLowerCase()).toContain('identifier')
+    expect(copy.intro.toLowerCase()).toContain('headers differ')
+    expect(copy.intro.toLowerCase()).toContain('email or phone')
+    expect(copy.intro.toLowerCase()).not.toContain(
+      'first name, last name, and email',
+    )
+    expect(LIVE_CONNECT_SUCCESS_MAPPING_HINT.toLowerCase()).toContain(
+      'email or phone',
+    )
+    expect(LIVE_CONNECT_SUCCESS_MAPPING_HINT.toLowerCase()).not.toContain(
+      'first name, last name, and email',
+    )
+    expect(LIVE_PING_NOT_EXTRACT_HINT.toLowerCase()).toContain('email or phone')
+    expect(LIVE_PING_NOT_EXTRACT_HINT.toLowerCase()).not.toContain(
+      'first name, last name, and email',
+    )
+    expect(copy.intro.toLowerCase()).not.toContain('opportunity')
+    expect(copy.intro.toLowerCase()).not.toContain('department')
   })
 })
 
@@ -538,13 +770,37 @@ describe('cadence option mapping', () => {
 })
 
 describe('SYSTEM_COPY', () => {
-  test('axios_hq upload how-to copy is CSV-only', () => {
+  test('axios_hq upload how-to copy is CSV-only and every-batch', () => {
     expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).toContain('axios hq')
     expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).not.toContain('mailchimp')
     expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).toContain('csv')
+    expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).toContain('every batch')
     expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).not.toContain(
       'coming soon',
     )
+    expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).not.toContain('api')
+  })
+
+  test('lever upload how-to maps identifiers without requiring first last email', () => {
+    expect(SYSTEM_COPY.lever.uploadHowto?.toLowerCase()).toContain('csv')
+    expect(SYSTEM_COPY.lever.uploadHowto?.toLowerCase()).toContain('identifier')
+    expect(SYSTEM_COPY.lever.uploadHowto?.toLowerCase()).toContain('headers differ')
+    expect(SYSTEM_COPY.lever.uploadHowto?.toLowerCase()).toContain('email or phone')
+    expect(SYSTEM_COPY.lever.uploadHowto?.toLowerCase()).not.toContain(
+      'first name, last name, and email',
+    )
+    expect(SYSTEM_COPY.lever.uploadHowto?.toLowerCase()).not.toContain('opportunities')
+    expect(SYSTEM_COPY.lever.uploadHowto?.toLowerCase()).not.toContain('/v1/')
+    expect(SYSTEM_COPY.lever.liveHowto?.toLowerCase()).toContain('retry')
+    expect(SYSTEM_COPY.lever.liveHowto?.toLowerCase()).toContain('manual upload')
+  })
+
+  test('paylocity how-to keeps SFTP honesty and live-fail upload', () => {
+    expect(SYSTEM_COPY.paylocity.liveHowto?.toLowerCase()).toContain('sftp')
+    expect(SYSTEM_COPY.paylocity.liveHowto?.toLowerCase()).toContain('not an api')
+    expect(SYSTEM_COPY.paylocity.liveHowto?.toLowerCase()).toContain('manual upload')
+    expect(SYSTEM_COPY.paylocity.uploadHowto?.toLowerCase()).toContain('fail')
+    expect(SYSTEM_COPY.paylocity.uploadHowto?.toLowerCase()).toContain('map')
   })
 
   test('sheets howto covers oauth or upload and does not mention service-account share', () => {
@@ -556,6 +812,94 @@ describe('SYSTEM_COPY', () => {
       expect(copy.oauthHowto?.toLowerCase()).not.toContain('service account')
       expect(copy.uploadHowto?.toLowerCase()).toContain('csv')
     }
+  })
+})
+
+const REQUIRED_TRIO_PHRASE =
+  /first name,\s*last name,?\s+and email|map columns to first name/i
+
+function alwaysVisibleIdentifierCopy(): Array<{ label: string; text: string }> {
+  const surfaces: Array<{ label: string; text: string }> = [
+    {
+      label: 'MODE_UPLOAD_DEFINITION_CARD',
+      text: MODE_UPLOAD_DEFINITION_CARD.definition,
+    },
+    {
+      label: 'DISALLOWED_MODE_REASONS.paylocity.live',
+      text: disallowedModeReason('paylocity', 'live', {
+        displayName: 'Paylocity',
+        allowedApproaches: ['upload'],
+      }),
+    },
+  ]
+  for (const [system, copy] of Object.entries(SYSTEM_COPY)) {
+    for (const [field, text] of Object.entries(copy)) {
+      if (text) surfaces.push({ label: `SYSTEM_COPY.${system}.${field}`, text })
+    }
+  }
+  for (const system of [
+    'paylocity',
+    'auth0',
+    'hr_alumni',
+    'bizdev_contacts',
+    'lever',
+  ]) {
+    const hint = modeStepSystemHint(system, 'upload')
+    if (hint) {
+      surfaces.push({ label: `MODE_SYSTEM_HINTS.${system}.upload`, text: hint })
+    }
+  }
+  return surfaces
+}
+
+describe('identifier mapping copy (no required trio)', () => {
+  test('always-visible upload copy does not require first+last+email', () => {
+    const surfaces = alwaysVisibleIdentifierCopy()
+    expect(surfaces.length).toBeGreaterThan(10)
+    for (const { label, text } of surfaces) {
+      expect(REQUIRED_TRIO_PHRASE.test(text), `${label}: ${text}`).toBe(false)
+    }
+  })
+
+  test('upload definition and system how-tos say email or phone is enough', () => {
+    expect(MODE_UPLOAD_DEFINITION_CARD.definition.toLowerCase()).toContain(
+      'email or phone',
+    )
+    expect(MODE_UPLOAD_DEFINITION_CARD.definition.toLowerCase()).toContain(
+      'headers differ',
+    )
+    for (const system of [
+      'axios_hq',
+      'hr_alumni',
+      'bizdev_contacts',
+      'alumni_google_sheet',
+      'contact_us_google_sheet',
+      'paylocity',
+      'auth0',
+      'lever',
+    ]) {
+      const howto = SYSTEM_COPY[system].uploadHowto
+      expect(howto, system).toBeDefined()
+      expect(howto?.toLowerCase(), system).toContain('email or phone')
+      expect(howto?.toLowerCase(), system).not.toMatch(REQUIRED_TRIO_PHRASE)
+    }
+    expect(modeStepSystemHint('paylocity', 'upload')?.toLowerCase()).toContain(
+      'email or phone',
+    )
+    expect(modeStepSystemHint('auth0', 'upload')?.toLowerCase()).toContain(
+      'email or phone',
+    )
+    expect(modeStepSystemHint('hr_alumni', 'upload')?.toLowerCase()).toContain(
+      'email or phone',
+    )
+    expect(
+      modeStepSystemHint('bizdev_contacts', 'upload')?.toLowerCase(),
+    ).toContain('email or phone')
+    expect(
+      disallowedModeReason('paylocity', 'live', {
+        allowedApproaches: ['upload'],
+      }).toLowerCase(),
+    ).toContain('email or phone')
   })
 })
 
@@ -635,9 +979,27 @@ describe('mode step explainer (KD25)', () => {
     expect(disallowedModeReason('hr_alumni', 'live')).toBe('')
   })
 
-  test('lever greys Upload with live-only reason', () => {
-    const reason = disallowedModeReason('lever', 'upload')
-    expect(reason.toLowerCase()).toContain('live')
+  test('lever allows Upload when catalog includes it', () => {
+    const cards = buildModeStepCards({
+      systemId: 'lever',
+      displayName: 'Lever',
+      allowedApproaches: ['live', 'upload'],
+    })
+    expect(cards.find((card) => card.mode === 'upload')?.allowed).toBe(true)
+    expect(cards.find((card) => card.mode === 'upload')?.disabledReason).toBeNull()
+    expect(cards.find((card) => card.mode === 'upload')?.hint?.toLowerCase()).toContain(
+      'map',
+    )
+    expect(modeStepSystemHint('lever', 'live')).toContain('Users read/list')
+  })
+
+  test('lever greys Upload only when catalog omits it', () => {
+    const reason = disallowedModeReason('lever', 'upload', {
+      displayName: 'Lever',
+      allowedApproaches: ['live'],
+    })
+    expect(reason.toLowerCase()).toContain('not available')
+    expect(reason.toLowerCase()).not.toContain('only supports live')
     const cards = buildModeStepCards({
       systemId: 'lever',
       displayName: 'Lever',
@@ -669,10 +1031,13 @@ describe('mode step explainer (KD25)', () => {
       allowedApproaches: ['live', 'upload'],
     }).find((card) => card.mode === 'live')
     expect(liveAllowed?.definition.toLowerCase()).toContain('sftp')
-    expect(liveAllowed?.definition.toLowerCase()).toContain('upload today')
+    expect(liveAllowed?.definition.toLowerCase()).toContain('manual upload')
+    expect(liveAllowed?.definition.toLowerCase()).not.toContain('use upload today')
+    expect(liveAllowed?.definition.toLowerCase()).not.toContain('only supports')
     expect(liveAllowed?.definition.toLowerCase()).not.toContain('coming soon')
     expect(liveAllowed?.hint?.toLowerCase()).toContain('sftp')
     expect(liveAllowed?.hint?.toLowerCase()).toContain('not an api')
+    expect(liveAllowed?.hint?.toLowerCase()).toContain('manual upload')
     expect(liveAllowed?.hint?.toLowerCase()).not.toContain('coming soon')
   })
 })

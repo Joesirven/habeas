@@ -1,8 +1,14 @@
-"""Hash Paylocity upload emails in memory and write hashed-raw rows.
+"""Hash Paylocity owner-upload emails in memory and write hashed-raw rows.
 
-Pipeline: connection ``metadata.gcs_uri`` → GCS download → DROP email hash via
-``habeas_privacy_core.vertical_hash`` → BigQuery hashed-raw. Raw emails are
-never persisted or logged. Live API extract is out of scope for this path.
+Pipeline: connection ``metadata.gcs_uri`` → GCS download → apply persisted
+``column_mapping`` (canonical → source header names) → DROP email hash via
+``habeas_privacy_core.vertical_hash`` → BigQuery hashed-raw.
+
+This path is **upload only**. Live SFTP is connectivity (directory listing),
+not employee extract — do not download or parse SFTP files here (research S02
+no-go until a named file + header-only sample exists out of git). Matching
+uses the upload mart. Raw emails are never persisted or logged. Do not invent
+CSV columns; mapping plus existing header aliases are the contract.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ WriteHashedRawFn = Callable[[str, list[HashedVendorRecord]], object]
 ReadObjectFn = Callable[[str, str], object]
 LoadConnectionFn = Callable[..., object]
 
+# Existing upload-template aliases only — do not invent Paylocity SFTP columns.
 _EMAIL_ALIASES = frozenset({"email", "email_address", "e_mail", "mail"})
 _EMPLOYEE_ID_ALIASES = frozenset({"employee_id", "employeeid", "emp_id"})
 
@@ -135,12 +142,21 @@ def _column_mapping(metadata: dict[str, Any] | None) -> dict[str, str] | None:
     if not metadata:
         return None
     raw = metadata.get("column_mapping")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
     if not isinstance(raw, dict):
         return None
     out: dict[str, str] = {}
     for key, value in raw.items():
-        if key and value:
-            out[str(key)] = str(value)
+        if value is None:
+            continue
+        canonical = _normalize_header(str(key))
+        source = str(value).strip()
+        if canonical and source:
+            out[canonical] = source
     return out or None
 
 
@@ -241,6 +257,8 @@ async def _resolve_source(
             raise HashExtractError("paylocity connection resolve failed") from None
         resolved_meta = _as_metadata(loaded)
 
+    # SFTP host/directory (and any other live-connectivity keys) are ignored.
+    # Extract source is mapped GCS upload only.
     uri = (gcs_uri or "").strip() or gcs_uri_from_metadata(resolved_meta)
     if not uri:
         raise HashExtractError("paylocity upload missing")
@@ -259,7 +277,11 @@ async def run_hash_extract(
     write_hashed_raw_fn: WriteHashedRawFn | None = None,
     email_hash_fn: EmailHashFn | None = None,
 ) -> int:
-    """Hash Paylocity upload emails in memory and write hashed-raw rows.
+    """Hash Paylocity **upload** emails in memory and write hashed-raw rows.
+
+    Source is ``gcs_uri`` (argument or ``metadata.gcs_uri``). SFTP credential
+    fields are not an extract. ``column_mapping`` selects email / employee_id
+    headers; aliases fill gaps only when mapping omits that canonical key.
 
     Returns the number of hashed rows passed to the BigQuery writer. Rows
     without a vendor id or a hashable email are skipped. ``system`` is always

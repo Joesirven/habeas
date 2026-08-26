@@ -36,6 +36,16 @@ PAYLOCITY_CSV = (
     b"first_name,last_name,email\n"
     b"Ada,Lovelace,ada@example.com\n"
 )
+# Non-alias headers — mapping must persist for hash extract (M05 / M-D6).
+MAPPED_PAYLOCITY_CSV = (
+    b"Given Name,Family Name,Work Mail\n"
+    b"Ada,Lovelace,ada@example.com\n"
+)
+MAPPED_PAYLOCITY_COLUMNS = {
+    "first_name": "Given Name",
+    "last_name": "Family Name",
+    "email": "Work Mail",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -134,7 +144,14 @@ def _patch_owner_access(
     merged = merge_result or resolved
     merge_mock = AsyncMock(return_value=merged)
     monkeypatch.setattr(owner_connectors, "_merge_metadata", merge_mock)
-    return {"conn": conn, "merge": merge_mock, "resolved": resolved}
+    enqueue_mock = AsyncMock(return_value=42)
+    monkeypatch.setattr(owner_connectors, "_enqueue_owner_hash_refresh", enqueue_mock)
+    return {
+        "conn": conn,
+        "merge": merge_mock,
+        "resolved": resolved,
+        "enqueue": enqueue_mock,
+    }
 
 
 def test_happy_people_hr_paylocity_upload_wizard_complete(
@@ -207,6 +224,9 @@ def test_happy_people_hr_paylocity_upload_wizard_complete(
         assert meta["active_mode"] == "upload"
         assert meta.get("upload_row_count", 0) >= 1
         assert meta.get("gcs_uri")
+        assert meta.get("column_mapping") is None
+        helpers["enqueue"].assert_awaited()
+        assert helpers["enqueue"].await_args.kwargs["system"] == "paylocity"
 
         complete = client.post(
             f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/wizard/complete",
@@ -214,6 +234,7 @@ def test_happy_people_hr_paylocity_upload_wizard_complete(
         )
         assert complete.status_code == 200
         assert meta.get("wizard_completed_at")
+        assert helpers["enqueue"].await_count >= 2
 
     gate = evaluate_connection_gate(
         SimpleNamespace(
@@ -430,6 +451,291 @@ def test_upload_rejected_when_active_mode_is_live(monkeypatch: pytest.MonkeyPatc
     assert upload.status_code == 422
     assert "live" in upload.json()["detail"].lower()
     helpers["merge"].assert_not_awaited()
+    helpers["enqueue"].assert_not_awaited()
+
+
+def _patch_ingest_writes(
+    monkeypatch: pytest.MonkeyPatch, current: Connection
+) -> None:
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "set_test_result",
+        AsyncMock(return_value=current),
+    )
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "update_connection_status",
+        AsyncMock(return_value=current),
+    )
+
+
+def test_mapped_upload_persists_column_mapping_and_enqueues_hash_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "upload"}
+    current = _connection(metadata=meta)
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        current.status = "connected"
+        current.last_test_ok = True
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    _patch_ingest_writes(monkeypatch, current)
+
+    caplog.set_level("INFO")
+    with TestClient(app) as client:
+        upload = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/upload",
+            headers=_owner_headers(),
+            data={
+                "multi_pii_delimiter": "",
+                "column_mapping": json.dumps(MAPPED_PAYLOCITY_COLUMNS),
+            },
+            files={"file": ("mapped.csv", MAPPED_PAYLOCITY_CSV, "text/csv")},
+        )
+    assert upload.status_code == 200
+    assert upload.json()["ok"] is True
+    assert meta["column_mapping"] == MAPPED_PAYLOCITY_COLUMNS
+    assert meta.get("gcs_uri")
+    helpers["enqueue"].assert_awaited_once()
+    assert helpers["enqueue"].await_args.kwargs["system"] == "paylocity"
+    joined = " ".join(record.getMessage() for record in caplog.records)
+    assert "ada@example.com" not in joined
+    assert "Work Mail" not in joined
+    assert "Given Name" not in joined
+    assert "Family Name" not in joined
+
+
+def test_wizard_complete_enqueues_hash_refresh_when_gcs_uri_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meta: dict = {
+        "vertical_id": VERTICAL_PEOPLE_HR,
+        "active_mode": "upload",
+        "last_successful_upload_at": NOW.isoformat(),
+        "refresh_cadence": "weekly",
+        "gcs_uri": "memory://uploads/paylocity/" + str(CONNECTION_ID),
+        "column_mapping": dict(MAPPED_PAYLOCITY_COLUMNS),
+    }
+    current = _connection(metadata=meta, status="connected", last_test_ok=True)
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/wizard/complete",
+            headers=_owner_headers(),
+        )
+    assert response.status_code == 200
+    helpers["enqueue"].assert_awaited_once()
+    assert helpers["enqueue"].await_args.kwargs["system"] == "paylocity"
+
+
+def test_live_failed_then_mapped_upload_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "live"}
+    current = _connection(
+        metadata=meta,
+        status="failed",
+        last_test_ok=False,
+    )
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        current.status = "connected"
+        current.last_test_ok = True
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    _patch_ingest_writes(monkeypatch, current)
+
+    with TestClient(app) as client:
+        upload = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/upload",
+            headers=_owner_headers(),
+            data={
+                "multi_pii_delimiter": "",
+                "column_mapping": json.dumps(MAPPED_PAYLOCITY_COLUMNS),
+            },
+            files={"file": ("mapped.csv", MAPPED_PAYLOCITY_CSV, "text/csv")},
+        )
+    assert upload.status_code == 200
+    assert upload.json()["ok"] is True
+    assert meta["active_mode"] == "upload"
+    assert meta["column_mapping"] == MAPPED_PAYLOCITY_COLUMNS
+    helpers["enqueue"].assert_awaited_once()
+
+
+def test_live_credentials_fail_does_not_stamp_active_mode_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR}
+    current = _connection(system="lever", metadata=meta, status="pending")
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    monkeypatch.setattr(
+        owner_connectors,
+        "test_connection",
+        AsyncMock(return_value=(False, "auth_failed")),
+    )
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "get_connection",
+        AsyncMock(return_value=current),
+    )
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "set_test_result",
+        AsyncMock(return_value=current),
+    )
+    update_status = AsyncMock(return_value=current)
+    monkeypatch.setattr(
+        owner_connectors.connections_db,
+        "update_connection_status",
+        update_status,
+    )
+
+    with TestClient(app) as client:
+        save = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/credentials",
+            headers=_owner_headers(),
+            json={"credentials": {"api_key": "bad-key"}},
+        )
+    assert save.status_code == 200
+    assert save.json()["ok"] is False
+    assert "active_mode" not in meta
+    assert "credentials_rotated_at" not in meta
+    failed_status_calls = [
+        call for call in update_status.await_args_list if call.args[2] == "failed"
+    ]
+    assert failed_status_calls
+    helpers["enqueue"].assert_not_awaited()
+
+
+def test_lever_upload_follows_catalog_upload_allowance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lever upload is 422 until catalog allows it (M10). Do not invent columns."""
+    from habeas_privacy_core.connections.catalog import (
+        APPROACH_UPLOAD,
+        is_approach_allowed,
+    )
+
+    current = _connection(
+        system="lever",
+        metadata={"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "upload"},
+    )
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    _patch_ingest_writes(monkeypatch, current)
+
+    with TestClient(app) as client:
+        upload = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/upload",
+            headers=_owner_headers(),
+            data={"multi_pii_delimiter": ""},
+            files={"file": ("lever.csv", PAYLOCITY_CSV, "text/csv")},
+        )
+    if is_approach_allowed(VERTICAL_PEOPLE_HR, "lever", APPROACH_UPLOAD):
+        assert upload.status_code == 200
+        helpers["enqueue"].assert_awaited()
+    else:
+        assert upload.status_code == 422
+        assert "upload" in upload.json()["detail"].lower()
+        helpers["merge"].assert_not_awaited()
+        helpers["enqueue"].assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("inbound", "core_system"),
+    [
+        ("paylocity", "paylocity"),
+        ("axios_hq", "axios_headquarters"),
+        ("axios_headquarters", "axios_headquarters"),
+    ],
+)
+async def test_enqueue_owner_hash_refresh_uses_remaining_helper(
+    monkeypatch: pytest.MonkeyPatch,
+    inbound: str,
+    core_system: str,
+) -> None:
+    captured: dict[str, str] = {}
+
+    async def fake_core(_conn: object, *, system: str) -> int:
+        captured["system"] = system
+        return 99
+
+    monkeypatch.setattr(
+        "habeas_privacy_core.db.vertical_hash_refresh.enqueue_vertical_hash_refresh",
+        fake_core,
+    )
+    attempt_id = await owner_connectors._enqueue_owner_hash_refresh(
+        AsyncMock(), system=inbound
+    )
+    assert attempt_id == 99
+    assert captured["system"] == core_system
+
+
+@pytest.mark.asyncio
+async def test_enqueue_owner_hash_refresh_does_not_return_canonical_slug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_remaining(_conn: object, *, system: str) -> tuple[int, str]:
+        assert system == "axios_hq"
+        return 17, "axios_headquarters"
+
+    monkeypatch.setattr(
+        "admin_api.remaining_vertical_ops.enqueue_remaining_hash_refresh",
+        fake_remaining,
+    )
+    result = await owner_connectors._enqueue_owner_hash_refresh(
+        AsyncMock(), system="axios_hq"
+    )
+    assert result == 17
+    assert result != "axios_headquarters"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_owner_hash_refresh_skips_cassandra() -> None:
+    conn = AsyncMock()
+    attempt_id = await owner_connectors._enqueue_owner_hash_refresh(
+        conn, system="cassandra"
+    )
+    assert attempt_id is None
+    conn.fetchval.assert_not_awaited()
+
+
+def test_persistable_column_mapping_keeps_header_names_only() -> None:
+    mapping = owner_connectors._persistable_column_mapping(
+        {
+            "email": "Work Mail",
+            "first_name": "Given Name",
+            "invented_column": "Secret",
+            "": "skip",
+        }
+    )
+    assert mapping == {"email": "Work Mail", "first_name": "Given Name"}
+    assert owner_connectors._persistable_column_mapping(None) is None
 
 
 @pytest.mark.asyncio
@@ -661,6 +967,8 @@ def test_live_credentials_failed_test_allows_retry_without_wizard_complete(
         assert complete.status_code == 422
         assert "live credentials required" in complete.json()["detail"]
         assert "wizard_completed_at" not in meta
+        assert meta.get("active_mode") == "live"
+        helpers["enqueue"].assert_not_awaited()
 
 
 def test_cross_vertical_live_credentials_forbidden(
@@ -929,6 +1237,7 @@ def test_wizard_complete_accepts_refresh_cadence_body(
     assert meta["refresh_cadence"] == "weekly"
     assert "cadence_days" not in meta
     assert meta.get("wizard_completed_at")
+    helpers["enqueue"].assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -1318,6 +1627,8 @@ def test_sheets_oauth_extract_persists_like_upload(
     extract.assert_awaited_once()
     assert extract.await_args.args[1] == "sheet-1"
     assert extract.await_args.args[2] == "Sheet1"
+    helpers["enqueue"].assert_awaited_once()
+    assert helpers["enqueue"].await_args.kwargs["system"] == "hr_alumni"
 
 
 def test_sheets_oauth_extract_returns_mapping_like_upload(

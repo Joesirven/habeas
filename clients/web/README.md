@@ -8,6 +8,7 @@ Deploy targets:
 
 - **Dev (browser):** Cloud Run `admin-web-dev` — IAP front door for **Habeas Platform** chrome
   ([`https://admin-web-dev-hsa55rg7ja-uk.a.run.app`](https://admin-web-dev-hsa55rg7ja-uk.a.run.app)).
+  `/dev` labs (including `/dev/owner-map-alternatives`) ship on `admin-web-dev` only (`VITE_ENABLE_LABS=true`); `admin-web-prod` stays clean — the product wizard `/owner/connectors` may ship on prod.
 - **Prod (browser):** Cloud Run `admin-web-prod`. Live 100% is revision **00023-fnz** (nginx same-origin `/api`). Revision **00024** (GIS bake) is at **0%** and must not be flipped until GIS `/me` is proven on DEV. Do not claim prod uses Google Identity Services. There is no Firebase Hosting front door.
 
 All browser mutations go through **admin-api** only — the SPA never calls worker URLs directly.
@@ -72,7 +73,7 @@ Optional: copy `.env.example` to `.env` and set `VITE_ADMIN_API_URL` when not us
 
 Owner access is **vertical assignment + IAP login** — there are **no invite URLs** and no
 `/connect/{token}` redeem flow. Super_admin assigns owners to verticals under Ops
-**Connections** (`/ops/connections`); assigned owners sign in through the **ops-ia-web-dev**
+**Connections** (`/ops/connections`); assigned owners sign in through the **admin-web-dev**
 IAP front door and land in **Habeas Platform** chrome (welcome uses IAP `given_name`).
 
 - **Owner wizard:** `/owner/connectors` — Mode explainer → in-wizard Live credentials + test (or
@@ -83,7 +84,7 @@ IAP front door and land in **Habeas Platform** chrome (welcome uses IAP `given_n
 - **Thin client:** all writes via admin-api (`/ops/connections*`, `/ops/verticals*`, `/owner/*`);
   secrets stay in Secret Manager; UI uses `actionToast` and allowlisted test `detail` codes only.
 
-Non–super_admin browsers: use the **ops-ia** IAP front door — not the ADC Vite proxy. Plan:
+Non–super_admin browsers: use the **admin-web-dev** IAP front door — not the ADC Vite proxy. Plan:
 [`docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md`](../../docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md).
 
 ### Local DROP pipeline stack (ports)

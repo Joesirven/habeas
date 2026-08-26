@@ -10,6 +10,7 @@ from habeas_privacy_core.connections.catalog import (
     CATALOG_BINDINGS,
     CATALOG_VERTICALS,
     UPLOAD_ONLY_SYSTEMS,
+    UPLOAD_SYSTEMS,
     UPLOAD_TEMPLATE_OPTIONAL_HEADERS,
     UPLOAD_TEMPLATE_REQUIRED_HEADERS,
     VERTICAL_BIZDEV,
@@ -65,6 +66,12 @@ class TestCatalog:
         assert system.invite_allowed is False
         assert system.credential_fields == ()
 
+    def test_axios_hq_is_not_a_duplicate_system(self) -> None:
+        # Web/session may use axios_hq; remaining-ops alias (not a second catalog entry).
+        assert "axios_hq" not in SYSTEM_IDS
+        with pytest.raises(ValueError, match="unknown connection system"):
+            get_system("axios_hq")
+
     def test_get_system_mailchimp_is_not_live(self) -> None:
         assert "mailchimp" not in SYSTEM_IDS
         with pytest.raises(ValueError, match="unknown connection system"):
@@ -104,6 +111,8 @@ class TestVerticalCatalog:
             {APPROACH_UPLOAD, APPROACH_LIVE}
         )
         assert bindings["paylocity"].allowed_approaches == frozenset({APPROACH_UPLOAD, APPROACH_LIVE})
+        assert bindings["lever"].allowed_approaches == frozenset({APPROACH_UPLOAD, APPROACH_LIVE})
+        assert APPROACH_LIVE in bindings["lever"].allowed_approaches
 
     def test_bizdev_upload_or_live_binding(self) -> None:
         bindings = get_bindings_for_vertical(VERTICAL_BIZDEV)
@@ -116,6 +125,8 @@ class TestVerticalCatalog:
         assert is_approach_allowed("bizdev", "bizdev_contacts", APPROACH_UPLOAD) is True
         assert is_approach_allowed("people_hr", "hr_alumni", APPROACH_LIVE) is True
         assert is_approach_allowed("people_hr", "hr_alumni", APPROACH_UPLOAD) is True
+        assert is_approach_allowed("people_hr", "lever", APPROACH_LIVE) is True
+        assert is_approach_allowed("people_hr", "lever", APPROACH_UPLOAD) is True
         assert is_approach_allowed("data", "cassandra", APPROACH_UPLOAD) is False
 
     def test_get_bindings_for_system(self) -> None:
@@ -138,6 +149,8 @@ class TestUploadSystems:
         assert system.invite_allowed is False
         assert system.credential_fields == ()
         assert "Upload mode only" in system.trust_copy
+        assert "every batch" in system.trust_copy
+        assert "API keys" in system.trust_copy
         assert "Axios HQ" in system.trust_copy
         assert UPLOAD_ONLY_SYSTEMS == frozenset({"axios_headquarters"})
 
@@ -162,6 +175,12 @@ class TestUploadSystems:
         assert "Upload mode only" not in system.trust_copy
         assert validate_credentials(system, {}) == {}
 
+    def test_lever_upload_fallback_not_upload_only(self) -> None:
+        assert "lever" in UPLOAD_SYSTEMS
+        assert "lever" not in UPLOAD_ONLY_SYSTEMS
+        assert is_approach_allowed("people_hr", "lever", APPROACH_UPLOAD) is True
+        assert is_approach_allowed("people_hr", "lever", APPROACH_LIVE) is True
+
     def test_upload_template_headers(self) -> None:
         assert UPLOAD_TEMPLATE_REQUIRED_HEADERS["axios_headquarters"] == (
             "first_name",
@@ -176,6 +195,15 @@ class TestUploadSystems:
         )
         assert "phone" in UPLOAD_TEMPLATE_OPTIONAL_HEADERS["hr_alumni"]
         assert "employee_id" in UPLOAD_TEMPLATE_OPTIONAL_HEADERS["paylocity"]
+        assert UPLOAD_TEMPLATE_REQUIRED_HEADERS["lever"] == (
+            "first_name",
+            "last_name",
+            "email",
+        )
+        assert UPLOAD_TEMPLATE_REQUIRED_HEADERS["lever"] == UPLOAD_TEMPLATE_REQUIRED_HEADERS[
+            "paylocity"
+        ]
+        assert "lever" not in UPLOAD_TEMPLATE_OPTIONAL_HEADERS
 
 
 class TestInvitePolicy:
@@ -200,25 +228,52 @@ class TestInvitePolicy:
     def test_lever_help_requires_users_read_list(self) -> None:
         system = get_system("lever")
         field = system.credential_fields[0]
+        assert field.id == "api_key"
+        assert tuple(f.id for f in system.credential_fields) == ("api_key",)
         assert field.help is not None
         assert "Users read/list" in field.help
         assert "Postings" in field.help
+        assert "does not extract candidates" in field.help
         assert "Users read/list" in system.trust_copy
+        assert "probe" in system.trust_copy.lower()
+        assert "does not extract candidates" in system.trust_copy
+        assert "upload a csv" in system.trust_copy.lower()
+        assert "/v1/opportunities" not in system.trust_copy
+        assert "/v1/opportunities" not in (field.help or "")
 
 
 class TestFieldSchemas:
     def test_paylocity_fields(self) -> None:
         fields = {field.id: field for field in get_system("paylocity").credential_fields}
-        assert set(fields) == {"client_id", "client_secret", "company_id", "environment"}
-        assert fields["client_secret"].input_type is CredentialInputType.PASSWORD
-        assert fields["company_id"].input_type is CredentialInputType.TEXT
-        assert fields["environment"].required is True
+        assert set(fields) == {
+            "host",
+            "port",
+            "directory",
+            "username",
+            "auth_method",
+            "password",
+            "private_key",
+        }
+        assert fields["password"].input_type is CredentialInputType.PASSWORD
+        assert fields["private_key"].input_type is CredentialInputType.PASSWORD
+        assert fields["host"].required is True
+        assert fields["port"].required is True
+        assert fields["username"].required is True
+        assert fields["auth_method"].required is True
+        assert fields["directory"].required is False
+        assert "client_id" not in fields
+        assert "client_secret" not in fields
+        assert "company_id" not in fields
+        assert "environment" not in fields
 
     def test_paylocity_trust_copy_documents_upload_and_live(self) -> None:
         copy = get_system("paylocity").trust_copy
         assert "Upload mode" in copy
         assert "Live mode" in copy
         assert "SFTP" in copy
+        assert "does not extract candidate emails" in copy
+        assert "Matching uses Upload" in copy
+        assert "listdir" not in copy.lower()
 
     def test_auth0_fields(self) -> None:
         fields = {field.id: field for field in get_system("auth0").credential_fields}
@@ -256,15 +311,66 @@ class TestFieldSchemas:
         copy = get_system("cassandra").trust_copy
         assert "INF" in copy or "Infrastructure" in copy
         assert "infra_pending" in copy
+        assert "suppress-only" in copy
+        assert "no matching" in copy.lower()
+        assert "hash extract" in copy.lower()
+        assert "mapping" in copy.lower()
 
 
 class TestValidateCredentials:
     def test_paylocity_requires_all_fields(self) -> None:
         system = get_system("paylocity")
-        with pytest.raises(ValueError, match="missing required credential field: client_secret"):
+        with pytest.raises(ValueError, match="missing required credential field: host"):
             validate_credentials(
                 system,
-                {"client_id": "cid", "company_id": "co-1"},
+                {
+                    "port": "22",
+                    "username": "sftp-user",
+                    "auth_method": "password",
+                    "password": "x",
+                },
+            )
+
+    def test_paylocity_password_auth_requires_password(self) -> None:
+        system = get_system("paylocity")
+        with pytest.raises(ValueError, match="missing required credential field: password"):
+            validate_credentials(
+                system,
+                {
+                    "host": "sftp.example.com",
+                    "port": "22",
+                    "username": "sftp-user",
+                    "auth_method": "password",
+                },
+            )
+
+    def test_paylocity_port_must_be_22(self) -> None:
+        system = get_system("paylocity")
+        with pytest.raises(ValueError, match="credential field port must be 22"):
+            validate_credentials(
+                system,
+                {
+                    "host": "sftp.example.com",
+                    "port": "2222",
+                    "username": "sftp-user",
+                    "auth_method": "password",
+                    "password": "x",
+                },
+            )
+
+    def test_paylocity_rejects_rest_oauth_fields(self) -> None:
+        system = get_system("paylocity")
+        with pytest.raises(ValueError, match="unknown credential fields"):
+            validate_credentials(
+                system,
+                {
+                    "host": "sftp.example.com",
+                    "port": "22",
+                    "username": "sftp-user",
+                    "auth_method": "password",
+                    "password": "x",
+                    "client_id": "cid",
+                },
             )
 
     def test_google_sheets_validates_url(self) -> None:

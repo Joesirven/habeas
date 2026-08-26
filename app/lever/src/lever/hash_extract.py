@@ -1,10 +1,11 @@
-"""Hash AxiosHeadquarters upload emails in memory and write hashed-raw rows.
+"""Hash Lever upload emails in memory and write hashed-raw rows.
 
-Pipeline: connection ``metadata.gcs_uri`` → GCS download → apply persisted
-``metadata.column_mapping`` (canonical → source header names) → DROP email hash
-via ``habeas_privacy_core.vertical_hash`` → BigQuery hashed-raw. Raw emails are
-never persisted or logged. Live API extract is out of scope for this path.
-Mapping is the column contract — source headers are never invented.
+Pipeline: connection ``metadata.gcs_uri`` → GCS download → DROP email hash via
+``habeas_privacy_core.vertical_hash`` → BigQuery hashed-raw. Raw emails are
+never persisted or logged.
+
+Live Lever REST is out of scope: the onboarding staff-directory ping is not a
+candidate extract (S01 no-go). Matching uses a mapped owner upload.
 """
 
 from __future__ import annotations
@@ -26,12 +27,12 @@ __all__ = [
     "DEFAULT_BQ_TABLE",
     "HashExtractError",
     "SYSTEM",
-    "load_axios_headquarters_connection_metadata",
+    "load_lever_connection_metadata",
     "run_hash_extract",
 ]
 
-SYSTEM = "axios_headquarters"
-DEFAULT_BQ_TABLE = "axios_headquarters_hashed_raw"
+SYSTEM = "lever"
+DEFAULT_BQ_TABLE = "lever_hashed_raw"
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +41,9 @@ WriteHashedRawFn = Callable[[str, list[HashedVendorRecord]], object]
 ReadObjectFn = Callable[[str, str], object]
 LoadConnectionFn = Callable[..., object]
 
+# Existing upload header aliases (upload_templates.HEADER_ALIASES) — do not invent.
 _EMAIL_ALIASES = frozenset({"email", "email_address", "e_mail", "mail"})
-_EMPLOYEE_ID_ALIASES = frozenset(
-    {"employee_id", "employeeid", "emp_id", "row_id", "id", "subscriber_id", "contact_id"}
-)
+_EMPLOYEE_ID_ALIASES = frozenset({"employee_id", "employeeid", "emp_id"})
 
 
 class HashExtractError(RuntimeError):
@@ -97,11 +97,11 @@ def gcs_uri_from_metadata(metadata: dict[str, Any] | None) -> str | None:
 
 def _split_gcs_uri(gcs_uri: str) -> tuple[str, str]:
     if not gcs_uri.startswith("gs://"):
-        raise HashExtractError("axios_headquarters upload uri is invalid")
+        raise HashExtractError("lever upload uri is invalid")
     without_scheme = gcs_uri[5:]
     slash = without_scheme.find("/")
     if slash <= 0 or slash == len(without_scheme) - 1:
-        raise HashExtractError("axios_headquarters upload uri is invalid")
+        raise HashExtractError("lever upload uri is invalid")
     return without_scheme[:slash], without_scheme[slash + 1 :]
 
 
@@ -135,35 +135,16 @@ def _split_list(value: str, delimiter: str | None) -> list[str]:
     return [part.strip() for part in value.split(delimiter) if part.strip()]
 
 
-def _canonical_mapping_key(key: str) -> str:
-    """Normalize a persisted mapping key to a canonical template field."""
-    norm = _normalize_header(key)
-    if norm in _EMAIL_ALIASES:
-        return "email"
-    if norm in _EMPLOYEE_ID_ALIASES:
-        return "employee_id"
-    return norm
-
-
 def _column_mapping(metadata: dict[str, Any] | None) -> dict[str, str] | None:
     if not metadata:
         return None
     raw = metadata.get("column_mapping")
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except json.JSONDecodeError:
-            return None
     if not isinstance(raw, dict):
         return None
     out: dict[str, str] = {}
     for key, value in raw.items():
-        if not key or value is None:
-            continue
-        source = str(value).strip()
-        if not source:
-            continue
-        out[_canonical_mapping_key(str(key))] = source
+        if key and value:
+            out[str(key)] = str(value)
     return out or None
 
 
@@ -175,18 +156,18 @@ def _iter_upload_rows(
     try:
         text = content.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
-        raise HashExtractError("axios_headquarters upload decode failed") from exc
+        raise HashExtractError("lever upload decode failed") from exc
 
     try:
         delimiter = parse_multi_pii_delimiter(
             None if metadata is None else metadata.get("multi_pii_delimiter")
         )
     except ValueError:
-        raise HashExtractError("axios_headquarters upload delimiter is invalid") from None
+        raise HashExtractError("lever upload delimiter is invalid") from None
 
     reader = csv.DictReader(io.StringIO(text))
     if reader.fieldnames is None:
-        raise HashExtractError("axios_headquarters upload is missing headers")
+        raise HashExtractError("lever upload is missing headers")
 
     fieldnames = [name for name in reader.fieldnames if name]
     mapping = _column_mapping(metadata)
@@ -197,7 +178,7 @@ def _iter_upload_rows(
         fieldnames, _EMPLOYEE_ID_ALIASES, mapping=mapping, canonical="employee_id"
     )
     if email_col is None:
-        raise HashExtractError("axios_headquarters upload is missing email column")
+        raise HashExtractError("lever upload is missing email column")
 
     rows: list[tuple[str, str | None]] = []
     for row in reader:
@@ -212,19 +193,19 @@ def _iter_upload_rows(
     return rows
 
 
-async def load_axios_headquarters_connection_metadata(
+async def load_lever_connection_metadata(
     conn: Any,
     *,
     connection_id: str | None = None,
 ) -> dict[str, Any]:
-    """Load metadata for the newest (or named) non-revoked AxiosHeadquarters connection."""
+    """Load metadata for the newest (or named) non-revoked Lever connection."""
     if connection_id:
         row = await conn.fetchrow(
             """
             SELECT metadata
               FROM integration_connections
              WHERE id = $1
-               AND system = 'axios_headquarters'
+               AND system = 'lever'
                AND status <> 'revoked'
             """,
             UUID(str(connection_id)),
@@ -234,14 +215,14 @@ async def load_axios_headquarters_connection_metadata(
             """
             SELECT metadata
               FROM integration_connections
-             WHERE system = 'axios_headquarters'
+             WHERE system = 'lever'
                AND status <> 'revoked'
              ORDER BY updated_at DESC
              LIMIT 1
             """
         )
     if row is None:
-        raise HashExtractError("axios_headquarters connection missing")
+        raise HashExtractError("lever connection missing")
     return _as_metadata(row["metadata"])
 
 
@@ -255,18 +236,18 @@ async def _resolve_source(
 ) -> tuple[str, dict[str, Any]]:
     resolved_meta = dict(metadata or {})
     if not resolved_meta and (conn is not None or load_connection_fn is not None):
-        loader = load_connection_fn or load_axios_headquarters_connection_metadata
+        loader = load_connection_fn or load_lever_connection_metadata
         try:
             loaded = await _maybe_await(loader(conn, connection_id=connection_id))
         except HashExtractError:
             raise
         except Exception:
-            raise HashExtractError("axios_headquarters connection resolve failed") from None
+            raise HashExtractError("lever connection resolve failed") from None
         resolved_meta = _as_metadata(loaded)
 
     uri = (gcs_uri or "").strip() or gcs_uri_from_metadata(resolved_meta)
     if not uri:
-        raise HashExtractError("axios_headquarters upload missing")
+        raise HashExtractError("lever upload missing")
     return uri, resolved_meta
 
 
@@ -282,11 +263,11 @@ async def run_hash_extract(
     write_hashed_raw_fn: WriteHashedRawFn | None = None,
     email_hash_fn: EmailHashFn | None = None,
 ) -> int:
-    """Hash AxiosHeadquarters upload emails in memory and write hashed-raw rows.
+    """Hash Lever upload emails in memory and write hashed-raw rows.
 
     Returns the number of hashed rows passed to the BigQuery writer. Rows
     without a vendor id or a hashable email are skipped. ``system`` is always
-    ``axios_headquarters``. The writer is called only after parse completes and at least
+    ``lever``. The writer is called only after parse completes and at least
     one hashed row exists — never with an empty list. Wrapped failures use
     ``from None`` so emails and URIs never appear on ``HashExtractError.__cause__``.
     """
@@ -306,17 +287,17 @@ async def run_hash_extract(
     except HashExtractError:
         raise
     except Exception:
-        raise HashExtractError("axios_headquarters upload resolve failed") from None
+        raise HashExtractError("lever upload resolve failed") from None
 
     try:
         content = await _maybe_await(reader(bucket, path))
     except HashExtractError:
         raise
     except Exception:
-        raise HashExtractError("axios_headquarters upload read failed") from None
+        raise HashExtractError("lever upload read failed") from None
 
     if not isinstance(content, (bytes, bytearray)):
-        raise HashExtractError("axios_headquarters upload read failed")
+        raise HashExtractError("lever upload read failed")
 
     extracted_at = datetime.now(UTC)
     records: list[HashedVendorRecord] = []
@@ -342,25 +323,25 @@ async def run_hash_extract(
     except HashExtractError:
         raise
     except Exception:
-        raise HashExtractError("axios_headquarters upload parse failed") from None
+        raise HashExtractError("lever upload parse failed") from None
 
     if not records:
         logger.info(
-            "axios_headquarters hash extract produced no hashed rows",
+            "lever hash extract produced no hashed rows",
             extra={"rows_written": 0, "rows_skipped": skipped, "system": SYSTEM},
         )
-        raise HashExtractError("axios_headquarters hash extract produced no hashed rows")
+        raise HashExtractError("lever hash extract produced no hashed rows")
 
     try:
         await _maybe_await(writer(bq_table, records))
     except HashExtractError:
         raise
     except Exception:
-        raise HashExtractError("axios_headquarters hashed-raw write failed") from None
+        raise HashExtractError("lever hashed-raw write failed") from None
 
     rows_written = len(records)
     logger.info(
-        "axios_headquarters hash extract wrote hashed rows",
+        "lever hash extract wrote hashed rows",
         extra={"rows_written": rows_written, "rows_skipped": skipped, "system": SYSTEM},
     )
     return rows_written

@@ -62,6 +62,7 @@ Privacy: toast copy must not include personally identifiable information, hashes
 ## Rules
 
 - Thin client — no business rules in browser; all authorization on admin-api.
+- `/dev` labs (including `/dev/owner-map-alternatives`) ship on `admin-web-dev` only (`VITE_ENABLE_LABS=true`); `admin-web-prod` stays clean — the product wizard `/owner/connectors` may ship on prod.
 - Not Next.js — single-page app on Cloud Run (`admin-web-*`) behind Identity-Aware Proxy (human SSO). Intended B API session is a Google Identity Services user Bearer. Current prod 00023 session is nginx `/api`.
 - Mutations never bypass admin-api.
 - After a user-triggered mutation settles, give feedback with an **action toast** (see above) — not silent success and not a one-off alert pattern.

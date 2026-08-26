@@ -2,10 +2,18 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  catalogDisplaySystemId,
+  connectionSystemDisplayLabel,
+  connectRedeemSystemLabel,
+  isRetractedConnectionSystem,
+} from './api'
+import {
+  connectionAllowsUploadFallback,
   connectionDisplayStatusLabel,
   connectionDisplayStatusVariant,
   connectionInviteAllowed,
   isCreatableConnectionSystem,
+  isLiveAndUploadSystem,
   isUploadOnlySystem,
   leverTriageCopy,
   matchingConnectorGateBannerCopy,
@@ -81,6 +89,7 @@ describe('connection-display (AE8 / KD18)', () => {
   test('invite rules for cassandra / upload-only / empty credentials', () => {
     expect(connectionInviteAllowed({ system: 'cassandra' })).toBe(false)
     expect(connectionInviteAllowed({ system: 'axios_hq' })).toBe(false)
+    expect(connectionInviteAllowed({ system: 'axios_headquarters' })).toBe(false)
     expect(connectionInviteAllowed({ system: 'bizdev_contacts' })).toBe(false)
     expect(connectionInviteAllowed({ system: 'hr_alumni' })).toBe(false)
     expect(
@@ -96,9 +105,23 @@ describe('connection-display (AE8 / KD18)', () => {
     expect(
       connectionInviteAllowed({ system: 'google_sheets', inviteAllowed: false }),
     ).toBe(false)
+    expect(
+      connectionInviteAllowed({
+        system: 'lever',
+        inviteAllowed: true,
+        credentialFieldCount: 1,
+      }),
+    ).toBe(true)
+    expect(
+      connectionInviteAllowed({
+        system: 'paylocity',
+        inviteAllowed: true,
+        credentialFieldCount: 1,
+      }),
+    ).toBe(true)
   })
 
-  test('create picker hides retired google_sheets and infra cassandra', () => {
+  test('create picker hides retired google_sheets, infra cassandra, retracted axios_headquarters', () => {
     expect(
       isCreatableConnectionSystem({ system_id: 'google_sheets', invite_allowed: false }),
     ).toBe(false)
@@ -106,15 +129,66 @@ describe('connection-display (AE8 / KD18)', () => {
       isCreatableConnectionSystem({ system_id: 'cassandra', invite_allowed: false }),
     ).toBe(false)
     expect(
+      isCreatableConnectionSystem({ system_id: 'cassandra', invite_allowed: true }),
+    ).toBe(false)
+    expect(
       isCreatableConnectionSystem({ system_id: 'bizdev_contacts', invite_allowed: true }),
     ).toBe(true)
     expect(
       isCreatableConnectionSystem({ system_id: 'axios_hq', invite_allowed: false }),
     ).toBe(true)
+    expect(
+      isCreatableConnectionSystem({
+        system_id: 'axios_headquarters',
+        invite_allowed: false,
+      }),
+    ).toBe(false)
+    expect(
+      isCreatableConnectionSystem({
+        system_id: 'axios_headquarters',
+        invite_allowed: true,
+      }),
+    ).toBe(false)
+    expect(
+      isCreatableConnectionSystem({ system_id: 'lever', invite_allowed: true }),
+    ).toBe(true)
+    expect(
+      isCreatableConnectionSystem({ system_id: 'paylocity', invite_allowed: true }),
+    ).toBe(true)
     expect(isUploadOnlySystem('bizdev_contacts')).toBe(true)
     expect(isUploadOnlySystem('axios_hq')).toBe(true)
-    expect(isUploadOnlySystem('axios_headquarters')).toBe(false)
+    expect(isUploadOnlySystem('axios_headquarters')).toBe(true)
     expect(isUploadOnlySystem('mailchimp')).toBe(false)
+    expect(isUploadOnlySystem('lever')).toBe(false)
+    expect(isUploadOnlySystem('paylocity')).toBe(false)
+  })
+
+  test('Wave M live+upload fallback for Lever / Paylocity; Axios HQ upload-only', () => {
+    expect(isLiveAndUploadSystem('lever')).toBe(true)
+    expect(isLiveAndUploadSystem('paylocity')).toBe(true)
+    expect(isLiveAndUploadSystem('axios_hq')).toBe(false)
+    expect(isLiveAndUploadSystem('cassandra')).toBe(false)
+    expect(connectionAllowsUploadFallback('lever')).toBe(true)
+    expect(connectionAllowsUploadFallback('paylocity')).toBe(true)
+    expect(connectionAllowsUploadFallback('axios_hq')).toBe(true)
+    expect(connectionAllowsUploadFallback('axios_headquarters')).toBe(true)
+    expect(connectionAllowsUploadFallback('cassandra')).toBe(false)
+    expect(connectionAllowsUploadFallback(null)).toBe(false)
+  })
+
+  test('catalog display id is axios_hq; retracted slug aliases for display only', () => {
+    expect(catalogDisplaySystemId('axios_hq')).toBe('axios_hq')
+    expect(catalogDisplaySystemId('axios_headquarters')).toBe('axios_hq')
+    expect(isRetractedConnectionSystem('axios_headquarters')).toBe(true)
+    expect(isRetractedConnectionSystem('axios_hq')).toBe(false)
+    expect(connectionSystemDisplayLabel('axios_hq')).toBe('Axios HQ')
+    expect(connectionSystemDisplayLabel('axios_headquarters')).toBe('Axios HQ')
+    expect(
+      connectRedeemSystemLabel({
+        system: 'axios_hq',
+        display_name: 'ignored',
+      }),
+    ).toBe('Axios HQ')
   })
 
   test('Lever triage copy for ops', () => {
@@ -265,6 +339,27 @@ describe('connection-display (AE8 / KD18)', () => {
     })
     expect(copy.title).toContain('Needs refresh')
     expect(copy.description).toContain('stale')
+  })
+
+  test('matching gate banner labels Axios HQ for catalog and retracted slugs', () => {
+    const catalog = matchingConnectorGateBannerCopy({
+      blocked: true,
+      displayStatus: 'needs_refresh',
+      gateCode: 'upload_stale',
+      system: 'axios_hq',
+      source: 'reminder',
+    })
+    expect(catalog.description).toContain('Axios HQ')
+    expect(catalog.description.toLowerCase()).not.toContain('axios_headquarters')
+    const retracted = matchingConnectorGateBannerCopy({
+      blocked: true,
+      displayStatus: 'needs_refresh',
+      gateCode: 'upload_stale',
+      system: 'axios_headquarters',
+      source: 'reminder',
+    })
+    expect(retracted.description).toContain('Axios HQ')
+    expect(retracted.description).not.toContain('axios headquarters')
   })
 
   test('matchingConnectorGateChip never labels Connected when blocked (KD18)', () => {

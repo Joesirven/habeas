@@ -83,16 +83,40 @@ Do **not** re-enable Cloud Run IAP on admin-api. Do **not** re-run `infra/cloudb
 - Per-vertical dispositions (U1): `request_vertical_dispositions` is the source of
   record for the gates fulfillment reads — `GET /requests/{request_id}/dispositions`,
   `PUT /requests/{request_id}/dispositions/{vertical}` (`status` 3/4/5, `dwids`,
-  `vendor_record_ids`, `early_advance`). `LIVE_VERTICALS` is `data` + `auth0`. Coming-soon write
-  keys (**Axios HQ** `axios_headquarters`, `lever`, `paylocity`, `cassandra`,
-  `communications`, `people_hr`, `bizdev`) are catalog-only and rejected on
-  write. Mailchimp is retired from the catalog — not a coming-soon write
-  vertical. Historical `tech` is an Auth0 read alias, not a second live write
-  key. Status 3/4 require a selection (`dwids` for `data`, defaulting to the
-  matching result; `vendor_record_ids` for `auth0`); status 5 requires none.
-  Matching promote upserts the `data` disposition and keeps
+  `vendor_record_ids`, `early_advance`). Wave M `LIVE_VERTICALS` is `data` +
+  `auth0` + `communications` + `people_hr`. Catalog systems **Axios HQ**
+  (`axios_hq`), `lever`, and `paylocity` are treated live for write-gates
+  (aliases → `communications` / `people_hr`) — not extra live write keys.
+  Retracted slug `axios_headquarters` is **unknown** on disposition/kickoff
+  write paths (not coming-soon). Coming-soon write keys (`cassandra`, `bizdev`)
+  stay catalog-only and rejected on write. Mailchimp is retired from the
+  catalog — not a coming-soon write vertical. Historical `tech` is an Auth0
+  read alias, not a second live write key. Cassandra is **suppress-only** —
+  no matching, hash-refresh, or dbt; keep it out of `LIVE_VERTICALS`. Status
+  3/4 require a selection (`dwids` for `data`, defaulting to the matching
+  result; `vendor_record_ids` for Auth0 / Communications / People/HR); status
+  5 requires none. Matching promote upserts the `data` disposition and keeps
   `drop_raw_requests.response_status` in sync. Selected ids reach authorized
   callers only — audit records counts.
+- Remaining verticals (Wave M): matching after a **mapped upload** (persist
+  `column_mapping` + `gcs_uri` → existing hash-refresh → dbt mart → remaining
+  matching enqueue). Super_admin
+  `POST /ops/verticals/{system}/hash-refresh/enqueue|process` and
+  `.../matching/enqueue|process`; candidates
+  `GET /requests/{request_id}/verticals/{system}/match-candidates`. Allowlist
+  `axios_headquarters`, `paylocity`, `lever`, `hr_alumni`, `bizdev_contacts`.
+  Display Axios HQ; remaining-ops aliases `axios_hq` → worker slug
+  `axios_headquarters`. Cassandra is **not** on that allowlist (404).
+  matching-dev stays DROP-only — do not invent matching-dev vertical lookup.
+  Worker URLs are settings-only; do not invent `*.run.app` hosts.
+- Live connection fail: owner **Retry connection** or **Set up manual
+  upload** until live is fixed in the wizard. Do not treat Lever
+  `GET /v1/users` or Paylocity SFTP `listdir` as candidate extract (S01/S02
+  **no-go**: [`tmp/lever-email-extract-research.md`](../../tmp/lever-email-extract-research.md),
+  [`tmp/paylocity-email-extract-research.md`](../../tmp/paylocity-email-extract-research.md)).
+  Do not invent Axios HTTP, Lever `/v1/opportunities`, Paylocity REST/SFTP
+  parse, `axios_hashed_raw`, or CSV columns beyond existing templates +
+  owner `column_mapping` headers.
 - Journey fulfillment gates (plan `2026-07-29-001`): do **not** enqueue
   fulfillment solely from `matching.review` — require **Legal kickoff** per
   approved vertical; Access packs/notice require identity status + **required

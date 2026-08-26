@@ -714,6 +714,54 @@ def _parse_column_mapping(column_mapping: str | None) -> dict[str, str] | None:
     }
 
 
+def _persistable_column_mapping(mapping: dict[str, str] | None) -> dict[str, str] | None:
+    """Canonical field → source header names only. Never cell values."""
+    if not mapping:
+        return None
+    from admin_api.upload_templates import HEADER_ALIASES
+
+    out: dict[str, str] = {}
+    for raw_key, raw_value in mapping.items():
+        canonical = str(raw_key).strip()
+        source = str(raw_value).strip()
+        if not canonical or not source:
+            continue
+        if canonical not in HEADER_ALIASES:
+            continue
+        out[canonical] = source
+    return out or None
+
+
+def _live_test_failed(connection: Connection) -> bool:
+    """True when the last live test failed — upload fallback may proceed."""
+    if connection.last_test_ok is False:
+        return True
+    return connection.status == "failed"
+
+
+async def _enqueue_owner_hash_refresh(conn: Any, *, system: str) -> int | None:
+    """Enqueue remaining-vertical hash-refresh in-process. No worker HTTP.
+
+    Uses ``enqueue_remaining_hash_refresh`` so catalog ``axios_hq`` aliases to
+    the worker slug before core enqueue. Discard the returned canonical slug —
+    do not persist it on connection metadata (catalog write id stays ``axios_hq``).
+    Remaining matching is per-request with no bulk fan-out.
+    """
+    from admin_api.remaining_vertical_ops import enqueue_remaining_hash_refresh
+
+    try:
+        attempt_id, _canonical = await enqueue_remaining_hash_refresh(
+            conn, system=system
+        )
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            logger.info("owner_hash_refresh_skip system=%s", system)
+            return None
+        raise
+    logger.info("owner_hash_refresh_enqueued system=%s attempt_id=%s", system, attempt_id)
+    return int(attempt_id)
+
+
 def _upload_failure_out(
     *,
     connection_id: UUID,
@@ -782,7 +830,8 @@ async def _ingest_owner_csv(
         )
         connection_id = UUID(str(connection.id))
         current_mode = parse_stored_active_mode(dict(connection.metadata or {}))
-        if current_mode == APPROACH_LIVE and not allow_live_mode:
+        live_failed = _live_test_failed(connection)
+        if current_mode == APPROACH_LIVE and not allow_live_mode and not live_failed:
             raise HTTPException(
                 status_code=422,
                 detail="upload not allowed while active_mode is live",
@@ -823,10 +872,11 @@ async def _ingest_owner_csv(
             "last_successful_upload_at": uploaded_at,
             "last_successful_refresh_at": uploaded_at,
             "upload_row_count": row_count,
+            "column_mapping": _persistable_column_mapping(column_mapping),
         }
         if extra_metadata:
             patch.update(extra_metadata)
-        if current_mode != APPROACH_LIVE:
+        if current_mode != APPROACH_LIVE or live_failed:
             patch["active_mode"] = APPROACH_UPLOAD
         updated = await _merge_metadata(conn, connection_id, patch)
         if updated is None:
@@ -844,6 +894,7 @@ async def _ingest_owner_csv(
             detail=safe_detail,
             tested_at=datetime.now(timezone.utc),
         )
+        await _enqueue_owner_hash_refresh(conn, system=system)
 
     logger.info(
         "%s_ok connection_id=%s system=%s row_count=%s",
@@ -897,6 +948,7 @@ async def _apply_live_test_outcome(
             owner_email=principal_email,
         )
         return updated
+    # Live fail: keep status=failed and do not stamp active_mode=live.
     await connections_db.update_connection_status(
         conn,
         connection_id,
@@ -1451,6 +1503,9 @@ async def complete_system_wizard(
         )
         if updated is None:
             raise HTTPException(status_code=404, detail="connection not found")
+        gcs_uri = (updated.metadata or {}).get("gcs_uri")
+        if isinstance(gcs_uri, str) and gcs_uri.strip():
+            await _enqueue_owner_hash_refresh(conn, system=system)
     logger.info(
         "owner_wizard_complete connection_id=%s system=%s vertical_id=%s",
         connection.id,

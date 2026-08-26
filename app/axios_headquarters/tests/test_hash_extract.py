@@ -314,3 +314,127 @@ async def test_run_hash_extract_loads_connection_metadata():
     assert loader.await_args.kwargs["connection_id"] == (
         "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     )
+
+
+_REMAP = {"email": "Work Email", "employee_id": "Staff ID"}
+_REMAP_CSV = _csv_bytes(
+    "Given,Family,Work Email,Staff ID",
+    f"Anna,Smith,{RAW_EMAIL},E-map",
+)
+
+
+@pytest.mark.asyncio
+async def test_run_hash_extract_applies_persisted_column_mapping():
+    hasher = _hasher_map({RAW_EMAIL: HASH_1})
+    writer = _writer_capture()
+
+    rows = await run_hash_extract(
+        metadata={"gcs_uri": GCS_URI, "column_mapping": _REMAP},
+        email_hash_fn=hasher,
+        write_hashed_raw_fn=writer,
+        read_object_fn=_read_bytes(_REMAP_CSV),
+    )
+
+    assert rows == 1
+    assert hasher.calls == [RAW_EMAIL]
+    record = writer.captured["records"][0]
+    assert record.vendor_record_id == "E-map"
+    assert record.email_hash == HASH_1
+    assert record.system == SYSTEM
+    _assert_no_raw_email([record], RAW_EMAIL)
+
+
+@pytest.mark.asyncio
+async def test_run_hash_extract_without_mapping_does_not_invent_work_email():
+    writer = MagicMock()
+
+    with pytest.raises(HashExtractError, match="missing email column") as raised:
+        await run_hash_extract(
+            metadata={"gcs_uri": GCS_URI},
+            email_hash_fn=_hasher_map({RAW_EMAIL: HASH_1}),
+            write_hashed_raw_fn=writer,
+            read_object_fn=_read_bytes(_REMAP_CSV),
+        )
+
+    writer.assert_not_called()
+    _assert_error_has_no_pii(raised.value, RAW_EMAIL, "Work Email")
+
+
+@pytest.mark.asyncio
+async def test_run_hash_extract_mapping_beats_alias_email_column():
+    content = _csv_bytes(
+        "email,Work Email,employee_id",
+        f"decoy@example.com,{RAW_EMAIL},E-real",
+    )
+    hasher = _hasher_map({RAW_EMAIL: HASH_1, "decoy@example.com": HASH_2})
+    writer = _writer_capture()
+
+    rows = await run_hash_extract(
+        gcs_uri=GCS_URI,
+        metadata={"column_mapping": {"email": "Work Email", "employee_id": "employee_id"}},
+        email_hash_fn=hasher,
+        write_hashed_raw_fn=writer,
+        read_object_fn=_read_bytes(content),
+    )
+
+    assert rows == 1
+    assert hasher.calls == [RAW_EMAIL]
+    assert writer.captured["records"][0].vendor_record_id == "E-real"
+    _assert_no_raw_email(writer.captured["records"], RAW_EMAIL, "decoy@example.com")
+
+
+@pytest.mark.asyncio
+async def test_run_hash_extract_loads_column_mapping_from_connection():
+    writer = _writer_capture()
+    loader = AsyncMock(
+        return_value={"gcs_uri": GCS_URI, "column_mapping": _REMAP},
+    )
+
+    rows = await run_hash_extract(
+        conn=object(),
+        connection_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        load_connection_fn=loader,
+        write_hashed_raw_fn=writer,
+        read_object_fn=_read_bytes(_REMAP_CSV),
+        email_hash_fn=_hasher_map({RAW_EMAIL: HASH_1}),
+    )
+
+    assert rows == 1
+    assert writer.captured["records"][0].vendor_record_id == "E-map"
+    loader.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_hash_extract_normalizes_mapping_keys_and_json_string():
+    writer = _writer_capture()
+
+    rows = await run_hash_extract(
+        metadata={
+            "gcs_uri": GCS_URI,
+            "column_mapping": '{"Email": "Work Email", "Employee ID": "Staff ID"}',
+        },
+        email_hash_fn=_hasher_map({RAW_EMAIL: HASH_1}),
+        write_hashed_raw_fn=writer,
+        read_object_fn=_read_bytes(_REMAP_CSV),
+    )
+
+    assert rows == 1
+    assert writer.captured["records"][0].vendor_record_id == "E-map"
+
+
+@pytest.mark.asyncio
+async def test_run_hash_extract_mapped_column_missing_does_not_write():
+    content = _csv_bytes("email,employee_id", f"{RAW_EMAIL},E-1")
+    writer = MagicMock()
+
+    with pytest.raises(HashExtractError, match="missing email column") as raised:
+        await run_hash_extract(
+            gcs_uri=GCS_URI,
+            metadata={"column_mapping": {"email": "Work Email"}},
+            email_hash_fn=_hasher_map({RAW_EMAIL: HASH_1}),
+            write_hashed_raw_fn=writer,
+            read_object_fn=_read_bytes(content),
+        )
+
+    writer.assert_not_called()
+    _assert_error_has_no_pii(raised.value, RAW_EMAIL, "Work Email", GCS_URI)
