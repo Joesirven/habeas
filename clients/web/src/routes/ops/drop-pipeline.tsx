@@ -2577,7 +2577,7 @@ function CompactOpsMetrics({
   }[] = [
     {
       key: 'open',
-      label: 'Open',
+      label: 'Open in pipeline',
       value: openRequests == null ? '—' : String(openRequests),
       viz: (
         <MiniRing
@@ -2588,7 +2588,12 @@ function CompactOpsMetrics({
       detail: (
         <>
           <p className="text-xs text-ink-soft">
-            Review queue <span className="tabular-nums text-ink">{reviewPending ?? '—'}</span>
+            DROP requests not yet noticed or still in lifecycle (excludes closed
+            and notice-approved).
+          </p>
+          <p className="mt-2 text-xs text-ink-soft">
+            Review queue{' '}
+            <span className="tabular-nums text-ink">{reviewPending ?? '—'}</span>
           </p>
           <Link
             to="/requests/needs-attention"

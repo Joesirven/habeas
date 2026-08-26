@@ -548,7 +548,7 @@ def test_dispatch_proxy_forwards_drain_all(monkeypatch: pytest.MonkeyPatch):
 
 
 def _is_drop_request_cardinality_sql(sql: str) -> bool:
-    """True for index-only COUNT of DROP requests — not raw GROUP BY or recent LIMIT."""
+    """True for index-only COUNT of all DROP requests — not open join or recent LIMIT."""
     return (
         "COUNT(*)" in sql
         and "FROM requests" in sql
@@ -556,6 +556,19 @@ def _is_drop_request_cardinality_sql(sql: str) -> bool:
         and "matching_attempts" not in sql
         and "drop_raw_requests" not in sql
         and "LIMIT" not in sql
+    )
+
+
+def _is_open_drop_requests_count_sql(sql: str) -> bool:
+    """True for bounded open-in-pipeline COUNT (join + closure/notice gates)."""
+    return (
+        sql.strip() == drop_pipeline._OPEN_DROP_REQUESTS_COUNT_SQL.strip()
+        or (
+            "JOIN drop_raw_requests" in sql
+            and "request_closures" in sql
+            and "notice_review_status" in sql
+            and "GROUP BY" not in sql
+        )
     )
 
 
@@ -589,6 +602,8 @@ async def test_collect_pipeline_counts_shape():
 
     async def fetchval(sql: str, *args: Any) -> Any:
         fetchval_sqls.append(sql)
+        if _is_open_drop_requests_count_sql(sql):
+            return 5
         if _is_drop_request_cardinality_sql(sql):
             return 7
         if "approaching_sla:" in sql:
@@ -623,7 +638,8 @@ async def test_collect_pipeline_counts_shape():
     assert result["fulfillment"]["response_status_null"] == 3
     assert result["fulfillment"]["by_response_status"][1]["response_status"] == 3
     assert result["raw_requests_by_list_type"][0]["total"] == 4
-    assert result["drop_requests"]["count"] == 7
+    assert result["drop_requests"]["count"] == 5
+    assert any(_is_open_drop_requests_count_sql(sql) for sql in fetchval_sqls)
     assert any(_is_drop_request_cardinality_sql(sql) for sql in fetchval_sqls)
     assert result["matching_attempts"]["pending"] == 2
     assert result["matching_attempts"]["success"] == 5
@@ -650,9 +666,10 @@ async def test_collect_pipeline_counts_shape():
 
 
 @pytest.mark.asyncio
-async def test_collect_pipeline_counts_drop_requests_count_is_request_cardinality() -> None:
-    """drop_requests.count is COUNT(*) on DROP requests, not sum of raw GROUP BY totals."""
+async def test_collect_pipeline_counts_drop_requests_count_is_open_not_raw_total() -> None:
+    """drop_requests.count is open-in-pipeline COUNT, not raw GROUP BY totals or spine total."""
     cardinality_sqls: list[str] = []
+    open_sqls: list[str] = []
 
     async def fetch(sql: str, *args: Any) -> list[_Row]:
         if _is_drop_request_cardinality_sql(sql):
@@ -680,6 +697,9 @@ async def test_collect_pipeline_counts_drop_requests_count_is_request_cardinalit
         return []
 
     async def fetchval(sql: str, *args: Any) -> Any:
+        if _is_open_drop_requests_count_sql(sql):
+            open_sqls.append(sql)
+            return 5
         if _is_drop_request_cardinality_sql(sql):
             cardinality_sqls.append(sql)
             return 7
@@ -701,9 +721,12 @@ async def test_collect_pipeline_counts_drop_requests_count_is_request_cardinalit
 
     result = await drop_pipeline.collect_pipeline_counts(conn)
     assert result["raw_requests_by_list_type"][0]["total"] == 4
-    assert result["drop_requests"]["count"] == 7
+    assert result["drop_requests"]["count"] == 5
     assert result["drop_requests"]["count"] != 4
-    assert len(cardinality_sqls) >= 1
+    assert result["drop_requests"]["count"] != 7
+    assert len(open_sqls) == 1
+    assert len(cardinality_sqls) == 1
+    assert all(_is_open_drop_requests_count_sql(sql) for sql in open_sqls)
     assert all(_is_drop_request_cardinality_sql(sql) for sql in cardinality_sqls)
 
 
@@ -997,10 +1020,27 @@ def test_retry_config_get_and_patch_floor(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_drop_stats_global(monkeypatch: pytest.MonkeyPatch):
+    from admin_api import main as admin_main
+
+    issued: list[str] = []
+
     class _Acquire:
         async def __aenter__(self):
             conn = MagicMock()
-            conn.fetchval = AsyncMock(side_effect=[10, 3, 1, 2])
+
+            async def fetchval(sql: str, *args: Any) -> Any:
+                issued.append(sql)
+                if _is_open_drop_requests_count_sql(sql):
+                    return 10
+                if "approval_requests" in sql:
+                    return 3
+                if "matching_attempts" in sql:
+                    return 1
+                if "hash_index_refresh_attempts" in sql:
+                    return 2
+                return 0
+
+            conn.fetchval = AsyncMock(side_effect=fetchval)
             return conn
 
         async def __aexit__(self, *args: Any) -> None:
@@ -1013,6 +1053,7 @@ def test_drop_stats_global(monkeypatch: pytest.MonkeyPatch):
     async def fake_health() -> dict[str, Any]:
         return {"matching": {"ok": True}, "drop_connector": {"ok": False}}
 
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
     monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
     monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
     monkeypatch.setattr(drop_pipeline, "collect_worker_health", fake_health)
@@ -1024,6 +1065,7 @@ def test_drop_stats_global(monkeypatch: pytest.MonkeyPatch):
     with TestClient(app) as client:
         response = client.get("/ops/drop/stats/global")
     assert response.status_code == 200
+    assert any(_is_open_drop_requests_count_sql(sql) for sql in issued)
     body = response.json()
     assert body["open_drop_requests"] == 10
     assert body["matching_review_pending"] == 3
@@ -3577,8 +3619,12 @@ async def test_collect_pipeline_counts_single_raw_group_by_no_second_scan() -> N
         return []
 
     request_count_sqls: list[str] = []
+    open_count_sqls: list[str] = []
 
     async def fetchval(sql: str, *args: Any) -> Any:
+        if _is_open_drop_requests_count_sql(sql):
+            open_count_sqls.append(sql)
+            return 9
         if _is_drop_request_cardinality_sql(sql):
             request_count_sqls.append(sql)
             return 11
@@ -3617,8 +3663,9 @@ async def test_collect_pipeline_counts_single_raw_group_by_no_second_scan() -> N
     assert statuses[None] == 5
     assert statuses[3] == 1
     assert result["fulfillment"]["ready"] == 0
-    assert result["drop_requests"]["count"] == 11
+    assert result["drop_requests"]["count"] == 9
     assert len(request_count_sqls) == 1
+    assert len(open_count_sqls) == 1
 
 
 @pytest.mark.asyncio
@@ -3896,15 +3943,15 @@ def test_matching_progress_sql_is_attempts_group_by_only(
 
 
 def _capturing_pipeline_summary_conn() -> tuple[MagicMock, list[str]]:
-    """Conn that records summary SQL — must stay off the drop_raw_requests spine."""
+    """Conn that records summary SQL — bounded open COUNT, no raw spine GROUP BY."""
     issued: list[str] = []
 
     async def fetchval(sql: str, *args: Any) -> Any:
         issued.append(sql)
-        if "drop_raw_requests" in sql:
-            raise AssertionError("pipeline summary must not scan drop_raw_requests")
-        if "FROM requests" in sql and "intake_source = 'drop'" in sql:
-            return 1_843_251
+        if "drop_raw_requests" in sql and "GROUP BY" in sql:
+            raise AssertionError("pipeline summary must not GROUP BY drop_raw_requests")
+        if "drop_raw_requests" in sql and "COUNT" in sql:
+            return 412_887
         if "approval_requests" in sql and "status = 'pending'" in sql:
             return 17
         if "drop_connector_attempts" in sql and "completed_at" in sql:
@@ -3946,21 +3993,23 @@ async def _fake_ca_drop_schedule_payload(
 
 def _assert_pipeline_summary_sql(issued: list[str]) -> None:
     assert len(issued) == 3
-    assert all("drop_raw_requests" not in sql for sql in issued)
-    open_sql = next(sql for sql in issued if "FROM requests" in sql)
+    assert all("GROUP BY" not in sql for sql in issued)
+    open_sql = next(sql for sql in issued if "drop_raw_requests" in sql)
     review_sql = next(sql for sql in issued if "approval_requests" in sql)
     connector_sql = next(sql for sql in issued if "drop_connector_attempts" in sql)
     assert "intake_source = 'drop'" in open_sql
+    assert "request_closures" in open_sql
+    assert "response_status IS NULL" in open_sql
+    assert "notice_review_status" in open_sql
     assert "COUNT(*)" in open_sql
     assert "status = 'pending'" in review_sql
     assert "status = 'success'" in connector_sql
-    assert "GROUP BY" not in " ".join(issued)
 
 
 def _assert_pipeline_summary_body(body: dict[str, Any]) -> None:
-    assert body["open_requests"] == 1_843_251
+    assert body["open_requests"] == 412_887
     assert body["review_pending"] == 17
-    assert body["drop_requests"]["count"] == 1_843_251
+    assert body["drop_requests"]["count"] == 412_887
     assert body["matching_review"]["pending"] == 17
     assert body["workers_total"] == len(drop_pipeline.WORKER_KEYS)
     assert "as_of" in body
@@ -3974,10 +4023,33 @@ def _assert_pipeline_summary_body(body: dict[str, Any]) -> None:
 
 
 @pytest.mark.asyncio
+async def test_count_open_drop_requests_sql_shape() -> None:
+    """Open count uses indexed join + closure/notice gates — no spine GROUP BY."""
+    issued: list[str] = []
+
+    async def fetchval(sql: str, *args: Any) -> int:
+        issued.append(sql)
+        return 99
+
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(side_effect=fetchval)
+    count = await drop_pipeline.count_open_drop_requests(conn)
+    assert count == 99
+    assert len(issued) == 1
+    sql = issued[0]
+    assert sql.strip() == drop_pipeline._OPEN_DROP_REQUESTS_COUNT_SQL.strip()
+    assert "JOIN drop_raw_requests" in sql
+    assert "request_closures" in sql
+    assert "response_status IS NULL" in sql
+    assert "notice_review_status" in sql
+    assert "GROUP BY" not in sql
+
+
+@pytest.mark.asyncio
 async def test_collect_pipeline_summary_bounded_sql_no_raw_spine(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Header summary counts requests + review pending only — no raw spine."""
+    """Header summary counts open pipeline rows + review pending — no spine GROUP BY."""
     monkeypatch.setattr(
         "admin_api.worker_schedules.ca_drop_schedule_payload",
         _fake_ca_drop_schedule_payload,
@@ -3992,7 +4064,7 @@ async def test_collect_pipeline_summary_bounded_sql_no_raw_spine(
 def test_pipeline_summary_route_no_drop_raw_requests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """GET /ops/drop/pipeline/summary stays off drop_raw_requests."""
+    """GET /ops/drop/pipeline/summary uses bounded open COUNT, not spine GROUP BY."""
     from admin_api import main as admin_main
 
     conn, issued = _capturing_pipeline_summary_conn()

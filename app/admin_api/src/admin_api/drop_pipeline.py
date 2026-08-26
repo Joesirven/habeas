@@ -118,6 +118,28 @@ _TERMINAL_FAIL_STATUSES = (
 )
 _OPEN_ATTEMPT_STATUSES = ("pending", "claimed", "in_flight")
 
+# DROP requests still in pipeline: not closed, disposition unset or notice pending.
+_OPEN_DROP_REQUESTS_COUNT_SQL = """
+SELECT COUNT(*)::bigint
+  FROM requests r
+  JOIN drop_raw_requests drr ON drr.id = r.raw_record_id
+ WHERE r.intake_source = 'drop'
+   AND NOT EXISTS (
+         SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id
+       )
+   AND (
+     drr.response_status IS NULL
+     OR drr.notice_review_status <> 'approved'
+   )
+"""
+
+
+async def count_open_drop_requests(conn: Any) -> int:
+    """Count DROP spine rows open in pipeline (not closed, not fully noticed)."""
+    value = await conn.fetchval(_OPEN_DROP_REQUESTS_COUNT_SQL)
+    return int(value or 0)
+
+
 # Approaching-SLA MVP (R8 / AE2): age-policy thresholds on open queue rows.
 # No DROP legal-deadline column exists yet — these are ops attention windows
 # derived from stage-family expectations (automation stages shorter than the
@@ -779,21 +801,15 @@ async def collect_matching_progress(conn: Any) -> dict[str, Any]:
 
 
 async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
-    """Header counts for Pipeline console — no drop_raw_requests spine scan.
+    """Header counts for Pipeline console — bounded open count, no raw spine GROUP BY.
 
-    ``open_requests`` is DROP intake volume on ``requests`` only. ``review_pending``
-    is approval_requests.pending for matching.review. Worker-down uses the cached
-    probe snapshot only (never fans out on this path). ``ca_drop_schedule`` reuses
-    the lite connector last-success query (no raw spine).
+    ``open_requests`` counts DROP rows still in pipeline (not closed, not fully
+    noticed). ``review_pending`` is approval_requests.pending for matching.review.
+    Worker-down uses the cached probe snapshot only (never fans out on this path).
+    ``ca_drop_schedule`` reuses the lite connector last-success query.
     """
     open_requests, review_pending, last_connector_success = await asyncio.gather(
-        conn.fetchval(
-            """
-            SELECT COUNT(*)::bigint
-              FROM requests
-             WHERE intake_source = 'drop'
-            """
-        ),
+        count_open_drop_requests(conn),
         conn.fetchval(
             """
             SELECT COUNT(*)::int
@@ -884,6 +900,7 @@ async def collect_pipeline_counts(
         response_status_rows: list[dict[str, Any]] = []
         recent_drop_requests = []
         drop_request_count = None
+        drop_request_total = None
         matching_pending = 0
         matching_claimed = 0
         matching_success = 0
@@ -919,13 +936,14 @@ async def collect_pipeline_counts(
              LIMIT 20
             """
         )
-        drop_request_count = await conn.fetchval(
+        drop_request_total = await conn.fetchval(
             """
             SELECT COUNT(*)::bigint
               FROM requests
              WHERE intake_source = 'drop'
             """
         )
+        drop_request_count = await count_open_drop_requests(conn)
         matching_progress = await collect_matching_progress(conn)
         matching_pending = int(matching_progress["pending"])
         matching_claimed = int(matching_progress["claimed"])
@@ -1105,7 +1123,12 @@ async def collect_pipeline_counts(
         if r["step"] == "promote" and r["status"] == "pending"
     )
     raw_total = sum(int(r["total"]) for r in raw_rows)
-    request_rows = int(drop_request_count or 0)
+    open_request_rows = int(drop_request_count or 0)
+    spine_request_rows = int(
+        (drop_request_total if drop_request_total is not None else 0)
+        if not lite
+        else 0
+    )
     drain_active = bool(matching_drain["active"])
     ops_flags = _ops_flags_snapshot(
         drain_active=drain_active,
@@ -1114,7 +1137,7 @@ async def collect_pipeline_counts(
         matching_failed_terminal=matching_failed_terminal,
         last_fail_status=last_fail_status,
         promote_pending=promote_pending,
-        request_rows=request_rows,
+        request_rows=spine_request_rows,
         raw_rows=raw_total,
     )
 
@@ -1156,7 +1179,7 @@ async def collect_pipeline_counts(
             ],
         },
         "drop_requests": {
-            "count": int(drop_request_count or 0),
+            "count": open_request_rows,
             "recent": [
                 {
                     "id": r["id"],
@@ -4154,15 +4177,7 @@ async def drop_stats_global(_principal: SuperAdminPrincipal):
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
-        open_drop = await conn.fetchval(
-            """
-            SELECT COUNT(*)::int
-              FROM requests r
-              JOIN drop_raw_requests d ON d.id = r.raw_record_id
-             WHERE r.intake_source = 'drop'
-               AND d.response_status IS NULL
-            """
-        )
+        open_drop = await count_open_drop_requests(conn)
         review_pending = await conn.fetchval(
             """
             SELECT COUNT(*)::int
