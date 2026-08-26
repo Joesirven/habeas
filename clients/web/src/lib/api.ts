@@ -782,6 +782,57 @@ export type DropMatchingProgress = {
   }
 }
 
+/** Unified paint payload — GET /ops/drop/console/snapshot. */
+export type DropConsoleSummary = {
+  as_of?: string
+  open_requests: number
+  review_pending: number
+  workers_down: number
+  workers_total: number
+  workers_stale: boolean
+  worker_health: Record<string, WorkerHealthProbe>
+  ca_drop_schedule?: CaDropSchedule
+  drop_requests: { count: number }
+  matching_review: { action_type: string; pending: number }
+}
+
+export type DropConsoleSnapshot = {
+  as_of: string
+  summary: DropConsoleSummary
+  matching_progress: DropMatchingProgress
+  processes: BulkProcessesPayload
+  recent_processes: {
+    days: number
+    processes: BulkProcessSummary[]
+  }
+}
+
+export function getDropConsoleSnapshot(params?: {
+  process_days?: number
+  process_limit?: number
+  recent_days?: number
+  recent_limit?: number
+}) {
+  const search = new URLSearchParams()
+  if (params?.process_days != null) {
+    search.set('process_days', String(params.process_days))
+  }
+  if (params?.process_limit != null) {
+    search.set('process_limit', String(params.process_limit))
+  }
+  if (params?.recent_days != null) {
+    search.set('recent_days', String(params.recent_days))
+  }
+  if (params?.recent_limit != null) {
+    search.set('recent_limit', String(params.recent_limit))
+  }
+  const query = search.toString()
+  return fetchAdminApi<DropConsoleSnapshot>(
+    `/ops/drop/console/snapshot${query ? `?${query}` : ''}`,
+    { timeoutMs: OPS_FAST_QUERY_TIMEOUT_MS },
+  )
+}
+
 export function getDropPipeline() {
   return fetchAdminApi<DropPipelineStatus>('/ops/drop/pipeline', {
     timeoutMs: OPS_QUERY_TIMEOUT_MS,

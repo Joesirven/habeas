@@ -165,7 +165,7 @@ class DropPipelineSettings(CoreSettings):
     hash_index_refresh_url: str = "http://127.0.0.1:8086"
     reaper_url: str = "http://127.0.0.1:8087"
     auth0_url: str = "http://127.0.0.1:8088"
-    mailchimp_url: str = "http://127.0.0.1:8089"
+    axios_headquarters_url: str = "http://127.0.0.1:8089"
     paylocity_url: str = "http://127.0.0.1:8090"
     lever_url: str = "http://127.0.0.1:8091"
     google_sheets_url: str = "http://127.0.0.1:8092"
@@ -237,7 +237,7 @@ WORKER_KEYS = (
     ("hash_index_refresh", "hash_index_refresh_url"),
     ("reaper", "reaper_url"),
     ("auth0", "auth0_url"),
-    ("mailchimp", "mailchimp_url"),
+    ("axios_headquarters", "axios_headquarters_url"),
     ("paylocity", "paylocity_url"),
     ("lever", "lever_url"),
     ("google_sheets", "google_sheets_url"),
@@ -742,7 +742,39 @@ def _rollup_raw_request_groups(
     return list_rows, status_rows
 
 
-async def collect_matching_progress(conn: Any) -> dict[str, Any]:
+_MATCHING_PROGRESS_TTL_SECONDS = 2.0
+_MATCHING_PROGRESS_DRAIN_TTL_SECONDS = 4.0
+_matching_progress_cache: tuple[float, dict[str, Any]] | None = None
+_matching_progress_refresh_lock: asyncio.Lock | None = None
+
+
+def _matching_progress_lock() -> asyncio.Lock:
+    global _matching_progress_refresh_lock
+    if _matching_progress_refresh_lock is None:
+        _matching_progress_refresh_lock = asyncio.Lock()
+    return _matching_progress_refresh_lock
+
+
+def _matching_progress_ttl_seconds(result: dict[str, Any]) -> float:
+    if result.get("drain", {}).get("active"):
+        return _MATCHING_PROGRESS_DRAIN_TTL_SECONDS
+    return _MATCHING_PROGRESS_TTL_SECONDS
+
+
+def _matching_progress_cache_hit(
+    *,
+    now: float | None = None,
+) -> dict[str, Any] | None:
+    if _matching_progress_cache is None:
+        return None
+    cached_at, cached_result = _matching_progress_cache
+    stamp = now if now is not None else monotonic()
+    if stamp - cached_at >= _matching_progress_ttl_seconds(cached_result):
+        return None
+    return cached_result
+
+
+async def _fetch_matching_progress(conn: Any) -> dict[str, Any]:
     """One GROUP BY on matching_attempts (DROP intake) plus drain lease. No PII."""
     matching_attempt_rows = await conn.fetch(
         """
@@ -752,6 +784,17 @@ async def collect_matching_progress(conn: Any) -> dict[str, Any]:
          WHERE r.intake_source = 'drop'
          GROUP BY ma.status
          ORDER BY ma.status
+        """
+    )
+    drain_lease_row = await conn.fetchrow(
+        """
+        SELECT holder,
+               acquired_at,
+               expires_at,
+               (holder IS NOT NULL AND expires_at IS NOT NULL AND expires_at >= NOW())
+                 AS active
+          FROM matching_drain_lease
+         WHERE id = 1
         """
     )
     matching_pending = 0
@@ -768,17 +811,6 @@ async def collect_matching_progress(conn: Any) -> dict[str, Any]:
         elif row["status"] == "claimed":
             matching_claimed = item["count"]
 
-    drain_lease_row = await conn.fetchrow(
-        """
-        SELECT holder,
-               acquired_at,
-               expires_at,
-               (holder IS NOT NULL AND expires_at IS NOT NULL AND expires_at >= NOW())
-                 AS active
-          FROM matching_drain_lease
-         WHERE id = 1
-        """
-    )
     return {
         "pending": matching_pending,
         "claimed": matching_claimed,
@@ -800,6 +832,25 @@ async def collect_matching_progress(conn: Any) -> dict[str, Any]:
     }
 
 
+async def collect_matching_progress(conn: Any) -> dict[str, Any]:
+    """Return cached matching progress; refresh at most once per ~2s (~4s during drain).
+
+    Pipeline / matching-progress polls (~750ms during drain) must not each pay the
+    full matching_attempts GROUP BY cost (~8s p95 on prod).
+    """
+    hit = _matching_progress_cache_hit()
+    if hit is not None:
+        return hit
+    async with _matching_progress_lock():
+        hit = _matching_progress_cache_hit()
+        if hit is not None:
+            return hit
+        result = await _fetch_matching_progress(conn)
+        global _matching_progress_cache
+        _matching_progress_cache = (monotonic(), result)
+        return result
+
+
 async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
     """Header counts for Pipeline console — bounded open count, no raw spine GROUP BY.
 
@@ -808,27 +859,26 @@ async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
     Worker-down uses the cached probe snapshot only (never fans out on this path).
     ``ca_drop_schedule`` reuses the lite connector last-success query.
     """
-    open_requests, review_pending, last_connector_success = await asyncio.gather(
-        count_open_drop_requests(conn),
-        conn.fetchval(
-            """
-            SELECT COUNT(*)::int
-              FROM approval_requests
-             WHERE action_type = $1
-               AND status = 'pending'
-            """,
-            MATCHING_REVIEW_ACTION,
-        ),
-        conn.fetchval(
-            """
-            SELECT completed_at
-              FROM drop_connector_attempts
-             WHERE status = 'success'
-               AND completed_at IS NOT NULL
-             ORDER BY completed_at DESC
-             LIMIT 1
-            """
-        ),
+    # asyncpg connections are not concurrent — never asyncio.gather on one conn.
+    open_requests = await count_open_drop_requests(conn)
+    review_pending = await conn.fetchval(
+        """
+        SELECT COUNT(*)::int
+          FROM approval_requests
+         WHERE action_type = $1
+           AND status = 'pending'
+        """,
+        MATCHING_REVIEW_ACTION,
+    )
+    last_connector_success = await conn.fetchval(
+        """
+        SELECT completed_at
+          FROM drop_connector_attempts
+         WHERE status = 'success'
+           AND completed_at IS NOT NULL
+         ORDER BY completed_at DESC
+         LIMIT 1
+        """
     )
     from admin_api.worker_schedules import ca_drop_schedule_payload
 
@@ -1471,6 +1521,83 @@ async def list_bulk_processes(
             }
         )
     return processes
+
+
+async def _snapshot_processes(
+    conn: Any,
+    *,
+    days: int = 7,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Bulk list head with lite summaries — ledger only, no raw spine."""
+    bounded_days = max(1, min(days, 30))
+    bounded_limit = max(1, min(limit, 100))
+    processes = await list_bulk_processes(
+        conn,
+        days=bounded_days,
+        limit=bounded_limit,
+    )
+    if processes:
+        summaries = await collect_bulk_process_summaries_lite(
+            conn,
+            process_ids=[int(item["process_id"]) for item in processes],
+        )
+        enriched: list[dict[str, Any]] = []
+        for item in processes:
+            pid = int(item["process_id"])
+            summary = summaries.get(pid)
+            if summary is not None:
+                item = {
+                    **item,
+                    "overall": summary["overall"],
+                    "request_rows": summary["request_rows"],
+                    "raw_rows": summary["raw_rows"],
+                }
+            enriched.append(item)
+        processes = enriched
+    return {
+        "day": datetime.now(timezone.utc).date().isoformat(),
+        "days": bounded_days,
+        "processes": processes,
+    }
+
+
+async def collect_console_snapshot(
+    conn: Any,
+    *,
+    process_days: int = 7,
+    process_limit: int = 50,
+    recent_days: int = 30,
+    recent_limit: int = 100,
+) -> dict[str, Any]:
+    """Unified Pipeline console paint — summary + matching + process heads.
+
+    Collectors run sequentially on one connection; asyncpg forbids concurrent
+    operations on a single connection (``asyncio.gather`` on one ``conn`` 500s).
+    """
+    summary = await collect_pipeline_summary(conn)
+    summary.pop("as_of", None)
+    matching_progress = await collect_matching_progress(conn)
+    processes = await _snapshot_processes(
+        conn,
+        days=process_days,
+        limit=process_limit,
+    )
+    recent_processes = await list_bulk_processes(
+        conn,
+        days=max(1, min(recent_days, 30)),
+        limit=max(1, min(recent_limit, 100)),
+    )
+    return {
+        "as_of": datetime.now(timezone.utc).isoformat(),
+        "summary": summary,
+        "matching_progress": matching_progress,
+        "processes": processes,
+        "recent_processes": {
+            "days": max(1, min(recent_days, 30)),
+            "processes": recent_processes,
+        },
+    }
 
 
 def _run_row(
@@ -2257,6 +2384,27 @@ async def drop_pipeline_summary(_principal: SuperAdminPrincipal):
     pool = get_pool()
     async with pool.acquire() as conn:
         return await collect_pipeline_summary(conn)
+
+
+@router.get("/console/snapshot")
+async def drop_console_snapshot(
+    _principal: SuperAdminPrincipal,
+    process_days: int = Query(default=7, ge=1, le=30),
+    process_limit: int = Query(default=50, ge=1, le=100),
+    recent_days: int = Query(default=30, ge=1, le=30),
+    recent_limit: int = Query(default=100, ge=1, le=100),
+):
+    """Unified Pipeline console paint — summary, matching, and process heads."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        return await collect_console_snapshot(
+            conn,
+            process_days=process_days,
+            process_limit=process_limit,
+            recent_days=recent_days,
+            recent_limit=recent_limit,
+        )
 
 
 @router.get("/pipeline")

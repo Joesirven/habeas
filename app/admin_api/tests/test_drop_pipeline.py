@@ -3224,6 +3224,10 @@ def _reset_worker_health_cache() -> None:
     drop_pipeline._worker_health_refresh_task = None
 
 
+def _reset_matching_progress_cache() -> None:
+    drop_pipeline._matching_progress_cache = None
+
+
 def _patch_worker_health_clock(
     monkeypatch: pytest.MonkeyPatch, *, now: float = 1_800_000_000.0
 ) -> dict[str, float]:
@@ -3899,6 +3903,7 @@ def test_worker_keys_excludes_intake_drop_poller() -> None:
 @pytest.mark.asyncio
 async def test_collect_matching_progress_sql_is_attempts_group_by_only() -> None:
     """GET matching-progress SQL is one GROUP BY on matching_attempts — no raws."""
+    _reset_matching_progress_cache()
     conn, issued = _capturing_matching_progress_conn()
     result = await drop_pipeline.collect_matching_progress(conn)
     _assert_matching_progress_sql(issued)
@@ -3907,12 +3912,44 @@ async def test_collect_matching_progress_sql_is_attempts_group_by_only() -> None
     assert conn.fetchrow.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_collect_matching_progress_uses_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Second collect_matching_progress within TTL must not re-query Postgres."""
+    _reset_matching_progress_cache()
+    clock = {"now": 5_000.0}
+    monkeypatch.setattr(drop_pipeline, "monotonic", lambda: clock["now"])
+    conn, issued = _capturing_matching_progress_conn()
+
+    first = await drop_pipeline.collect_matching_progress(conn)
+    _assert_matching_progress_body(first)
+    assert conn.fetch.await_count == 1
+    assert conn.fetchrow.await_count == 1
+    first_sql_count = len(issued)
+
+    clock["now"] += 1.0
+    second = await drop_pipeline.collect_matching_progress(conn)
+    assert second == first
+    assert conn.fetch.await_count == 1
+    assert conn.fetchrow.await_count == 1
+    assert len(issued) == first_sql_count
+
+    clock["now"] += drop_pipeline._MATCHING_PROGRESS_DRAIN_TTL_SECONDS
+    third = await drop_pipeline.collect_matching_progress(conn)
+    assert third == first
+    assert conn.fetch.await_count == 2
+    assert conn.fetchrow.await_count == 2
+    assert len(issued) > first_sql_count
+
+
 def test_matching_progress_sql_is_attempts_group_by_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """GET /ops/drop/matching-progress issues attempts GROUP BY only — hermetic."""
     from admin_api import main as admin_main
 
+    _reset_matching_progress_cache()
     conn, issued = _capturing_matching_progress_conn()
 
     class _Acquire:
@@ -4102,6 +4139,76 @@ def test_pipeline_summary_route_no_drop_raw_requests(
     assert response.status_code == 200
     _assert_pipeline_summary_sql(issued)
     _assert_pipeline_summary_body(response.json())
+
+
+def test_console_snapshot_route_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GET /ops/drop/console/snapshot returns unified paint payload."""
+    from admin_api import main as admin_main
+
+    conn, issued = _capturing_pipeline_summary_conn()
+
+    class _Acquire:
+        async def __aenter__(self):
+            return conn
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        issued.append(sql)
+        if "matching_attempts" in sql and "GROUP BY" in sql:
+            return [_Row(status="pending", count=1)]
+        if "drop_connector_attempts" in sql and "step = 'download'" in sql:
+            return []
+        if "drop_ingest_attempts" in sql:
+            return []
+        return []
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        issued.append(sql)
+        if "matching_drain_lease" in sql:
+            return _Row(holder=None, acquired_at=None, expires_at=None, active=False)
+        return None
+
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    drop_pipeline._matching_progress_cache = None
+
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(
+        "admin_api.worker_schedules.ca_drop_schedule_payload",
+        _fake_ca_drop_schedule_payload,
+    )
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/drop/console/snapshot",
+            headers={IAP_EMAIL_HEADER: "accounts.google.com:ops@example.com"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "summary" in body
+    assert "matching_progress" in body
+    assert "processes" in body
+    assert "recent_processes" in body
+    assert body["summary"]["open_requests"] == 412_887
+    assert all(
+        not ("drop_raw_requests" in sql and "GROUP BY" in sql) for sql in issued
+    )
 
 
 @pytest.mark.asyncio
@@ -4326,3 +4433,118 @@ async def test_iter_live_pipeline_events_emits_typed_events(
     assert collected[2]["event"] == "bulk_process"
     assert json.loads(collected[2]["data"]) == bulk_summary
     assert sleep_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_collect_console_snapshot_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshot merges summary, matching, and process heads."""
+    monkeypatch.setattr(
+        "admin_api.worker_schedules.ca_drop_schedule_payload",
+        _fake_ca_drop_schedule_payload,
+    )
+    conn, _issued = _capturing_pipeline_summary_conn()
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        if "matching_attempts" in sql and "GROUP BY" in sql:
+            return [_Row(status="pending", count=3), _Row(status="success", count=9)]
+        if "drop_connector_attempts" in sql and "ANY($1::bigint[])" in sql:
+            return [
+                _Row(
+                    id=10,
+                    status="success",
+                    attempted_at=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc),
+                    completed_at=datetime(2026, 8, 25, 12, 5, tzinfo=timezone.utc),
+                    gcs_uri="gs://bucket/a.zip",
+                )
+            ]
+        if "drop_connector_attempts" in sql and "step = 'download'" in sql:
+            return [
+                _Row(
+                    id=10,
+                    status="success",
+                    attempted_at=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc),
+                    completed_at=datetime(2026, 8, 25, 12, 5, tzinfo=timezone.utc),
+                    has_uri=True,
+                )
+            ]
+        if "drop_ingest_attempts" in sql:
+            return []
+        return []
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        if "matching_drain_lease" in sql:
+            return _Row(holder=None, acquired_at=None, expires_at=None, active=False)
+        return None
+
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    drop_pipeline._matching_progress_cache = None
+
+    body = await drop_pipeline.collect_console_snapshot(
+        conn,
+        process_days=7,
+        process_limit=50,
+        recent_days=30,
+        recent_limit=100,
+    )
+
+    assert "as_of" in body
+    assert "as_of" not in body["summary"]
+    assert body["summary"]["open_requests"] == 412_887
+    assert body["matching_progress"]["pending"] == 3
+    assert body["processes"]["days"] == 7
+    assert len(body["processes"]["processes"]) == 1
+    assert body["processes"]["processes"][0]["process_id"] == 10
+    assert body["recent_processes"]["days"] == 30
+    assert len(body["recent_processes"]["processes"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_collect_console_snapshot_sql_no_raw_spine_group_by(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshot paint path never GROUP BY drop_raw_requests."""
+    monkeypatch.setattr(
+        "admin_api.worker_schedules.ca_drop_schedule_payload",
+        _fake_ca_drop_schedule_payload,
+    )
+    issued: list[str] = []
+
+    async def fetchval(sql: str, *args: Any) -> Any:
+        issued.append(sql)
+        if "drop_raw_requests" in sql and "COUNT" in sql:
+            return 100
+        if "approval_requests" in sql:
+            return 2
+        if "drop_connector_attempts" in sql and "completed_at" in sql:
+            return datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+        return 0
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        issued.append(sql)
+        if "GROUP BY" in sql and "drop_raw_requests" in sql:
+            raise AssertionError("snapshot must not GROUP BY drop_raw_requests")
+        if "matching_attempts" in sql:
+            return [_Row(status="pending", count=1)]
+        if "drop_connector_attempts" in sql and "step = 'download'" in sql:
+            return []
+        return []
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        issued.append(sql)
+        if "matching_drain_lease" in sql:
+            return _Row(holder=None, acquired_at=None, expires_at=None, active=False)
+        return None
+
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(side_effect=fetchval)
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    drop_pipeline._matching_progress_cache = None
+
+    await drop_pipeline.collect_console_snapshot(conn)
+    assert all(
+        not ("drop_raw_requests" in sql and "GROUP BY" in sql) for sql in issued
+    )
