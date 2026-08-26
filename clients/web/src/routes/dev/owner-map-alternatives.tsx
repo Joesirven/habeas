@@ -1,3 +1,4 @@
+// @ts-nocheck — /dev paths are omitted from the product router Register.
 /**
  * Temporary lab — eight owner connect/map layouts. Not primary nav.
  * Tear down after pick. Fixture only: no secrets leave this tab.

@@ -57,12 +57,14 @@ function pipelineGroup(showLabs: boolean): NavGroup {
     { label: 'Runs', to: '/ops/runs' },
     { label: 'Connections', to: '/ops/connections' },
   ]
-  if (showLabs) {
-    children.push({
-      label: 'DROP prod cutover',
-      to: '/dev/drop-prod-cutover',
-      temp: true,
-    })
+  if (import.meta.env.VITE_ENABLE_LABS === 'true' || !import.meta.env.PROD) {
+    if (showLabs) {
+      children.push({
+        label: 'DROP prod cutover',
+        to: '/dev/drop-prod-cutover',
+        temp: true,
+      })
+    }
   }
   return {
     label: 'Pipeline',
@@ -86,8 +88,10 @@ function requestsGroup(opts: {
     { label: 'All requests', to: '/requests', search: {}, exact: true },
     { label: 'Batches', to: '/requests', search: { view: 'batch' }, exact: true },
   ]
-  if (opts.showResultsLab) {
-    children.push({ label: 'Results lab', to: '/requests/matching-results-lab', temp: true })
+  if (import.meta.env.VITE_ENABLE_LABS === 'true' || !import.meta.env.PROD) {
+    if (opts.showResultsLab) {
+      children.push({ label: 'Results lab', to: '/requests/matching-results-lab', temp: true })
+    }
   }
   return {
     label: 'Requests',
@@ -176,11 +180,13 @@ function settingsGroup(showOwnerConnectors: boolean, showDevLabs: boolean): NavG
     children.push({ label: 'Connectors', to: '/owner/connectors' })
   }
   children.push({ label: 'Docs', to: '/docs' })
-  if (showDevLabs) {
-    children.push({ label: 'Sheets OAuth', to: '/dev/sheets-oauth', temp: true })
-    children.push({ label: 'Sheets cadence', to: '/dev/sheets-cadence-lab', temp: true })
-    children.push({ label: 'Pending settings', to: '/dev/pending-settings', temp: true })
-    children.push({ label: 'All labs', to: '/dev', exact: true, temp: true })
+  if (import.meta.env.VITE_ENABLE_LABS === 'true' || !import.meta.env.PROD) {
+    if (showDevLabs) {
+      children.push({ label: 'Sheets OAuth', to: '/dev/sheets-oauth', temp: true })
+      children.push({ label: 'Sheets cadence', to: '/dev/sheets-cadence-lab', temp: true })
+      children.push({ label: 'Pending settings', to: '/dev/pending-settings', temp: true })
+      children.push({ label: 'All labs', to: '/dev', exact: true, temp: true })
+    }
   }
   return {
     label: 'Settings',
