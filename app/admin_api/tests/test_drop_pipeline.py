@@ -18,6 +18,15 @@ from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
 
 
+def signed_headers(email: str, **extra: str) -> dict[str, str]:
+    """Verified Bearer + matching IAP email — header-alone is 401 on master."""
+    return {
+        IAP_EMAIL_HEADER: f"accounts.google.com:{email}",
+        "Authorization": f"Bearer {email}",
+        **extra,
+    }
+
+
 def test_next_scheduled_retrieval_utc_rolls_forward():
     now = datetime(2026, 7, 21, 15, 0, tzinfo=timezone.utc)
     nxt = drop_pipeline.next_scheduled_retrieval_utc(now=now, schedule_hhmm="14:00")
@@ -1932,15 +1941,19 @@ def test_data_owner_cannot_read_pipeline_console(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(drop_pipeline, "get_pipeline_status", fake_status)
 
+    owner_headers = signed_headers("owner@habeas.com")
+
     with TestClient(app) as client:
         response = client.get(
             "/ops/drop/pipeline",
-            headers={
-                "X-Goog-Authenticated-User-Email": "accounts.google.com:owner@habeas.com"
-            },
+            headers=owner_headers,
         )
+        snapshot = client.get("/ops/drop/console/snapshot", headers=owner_headers)
+        summary = client.get("/ops/drop/pipeline/summary", headers=owner_headers)
 
     assert response.status_code == 403
+    assert snapshot.status_code == 403
+    assert summary.status_code == 403
 
 
 def test_decided_by_for_mutation_helpers():
@@ -4075,6 +4088,247 @@ def test_pipeline_summary_route_no_drop_raw_requests(
     assert response.status_code == 200
     _assert_pipeline_summary_sql(issued)
     _assert_pipeline_summary_body(response.json())
+
+
+def _sql_uses_raw_spine_for_open(sql: str) -> bool:
+    compact = " ".join(sql.split()).lower()
+    if "drop_raw_requests" not in compact:
+        return False
+    return "group by" in compact or "join" in compact
+
+
+def _snapshot_process_row(process_id: int = 12) -> dict[str, Any]:
+    return {
+        "process_id": process_id,
+        "intake_source": "drop",
+        "process_at": "2026-08-25T18:00:00+00:00",
+        "completed_at": None,
+        "download_status": "success",
+        "label": f"drop · {process_id}",
+        "linkable": True,
+    }
+
+
+async def _fake_snapshot_list_bulk_processes(
+    _conn: Any, **_kwargs: Any
+) -> list[dict[str, Any]]:
+    return [_snapshot_process_row(12)]
+
+
+async def _fake_snapshot_lite_summaries(
+    _conn: Any, *, process_ids: list[int]
+) -> dict[int, dict[str, Any]]:
+    return {
+        pid: {
+            "process_id": pid,
+            "overall": {
+                "status": "running",
+                "current_stage": "land",
+                "percent": 25,
+            },
+            "raw_rows": 0,
+            "request_rows": 0,
+            "stages": {
+                "download": {"success": 1, "failed": 0, "open": 0, "total": 1},
+                "land": {"success": 0, "failed": 0, "open": 1, "total": 1},
+                "promote": {"success": 0, "failed": 0, "open": 0, "total": 0},
+            },
+        }
+        for pid in process_ids
+    }
+
+
+def _capturing_console_snapshot_conn() -> tuple[MagicMock, list[str]]:
+    """Conn that records snapshot SQL — summary fetchval + matching fetch."""
+    issued: list[str] = []
+
+    async def fetchval(sql: str, *args: Any) -> Any:
+        issued.append(sql)
+        if _sql_uses_raw_spine_for_open(sql):
+            raise AssertionError(
+                "console snapshot open count must not GROUP BY / JOIN drop_raw_requests"
+            )
+        if "FROM requests" in sql and "intake_source = 'drop'" in sql:
+            return 1_843_251
+        if "approval_requests" in sql and "status = 'pending'" in sql:
+            return 17
+        if "drop_connector_attempts" in sql and "completed_at" in sql:
+            return datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+        return 0
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        issued.append(sql)
+        if _sql_uses_raw_spine_for_open(sql):
+            raise AssertionError(
+                "console snapshot open count must not GROUP BY / JOIN drop_raw_requests"
+            )
+        if "matching_attempts" in sql:
+            return [
+                _Row(status="pending", count=10),
+                _Row(status="claimed", count=3),
+                _Row(status="success", count=100),
+                _Row(status="failed", count=1),
+            ]
+        return []
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        issued.append(sql)
+        if _sql_uses_raw_spine_for_open(sql):
+            raise AssertionError(
+                "console snapshot open count must not GROUP BY / JOIN drop_raw_requests"
+            )
+        if "matching_drain_lease" in sql:
+            return _Row(
+                holder="matching-drain-1",
+                acquired_at=datetime(2026, 8, 25, 22, 40, tzinfo=timezone.utc),
+                expires_at=datetime(2026, 8, 25, 23, 0, tzinfo=timezone.utc),
+                active=True,
+            )
+        return None
+
+    conn = MagicMock()
+    conn.fetchval = AsyncMock(side_effect=fetchval)
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    return conn, issued
+
+
+def _assert_console_snapshot_sql(issued: list[str]) -> None:
+    assert issued, "console snapshot issued no SQL"
+    assert all(not _sql_uses_raw_spine_for_open(sql) for sql in issued)
+    assert all("drop_raw_requests" not in sql for sql in issued)
+
+
+def _assert_console_snapshot_body(body: dict[str, Any]) -> None:
+    """Web getDropConsoleSnapshot — DropConsoleSnapshot shape."""
+    for key in (
+        "as_of",
+        "summary",
+        "matching_progress",
+        "processes",
+        "recent_processes",
+    ):
+        assert key in body
+    assert isinstance(body["as_of"], str)
+    summary = body["summary"]
+    assert summary["open_requests"] == 1_843_251
+    assert summary["review_pending"] == 17
+    assert summary["drop_requests"]["count"] == 1_843_251
+    assert summary["matching_review"]["pending"] == 17
+    assert isinstance(summary["matching_review"]["action_type"], str)
+    assert "workers_down" in summary
+    assert "workers_total" in summary
+    assert "workers_stale" in summary
+    assert isinstance(summary["worker_health"], dict)
+    assert "ca_drop_schedule" in summary
+    assert summary["ca_drop_schedule"]["next_run_at"]
+    assert "as_of" not in summary
+    _assert_matching_progress_body(body["matching_progress"])
+    processes = body["processes"]
+    assert isinstance(processes, dict)
+    assert isinstance(processes["day"], str)
+    assert isinstance(processes.get("days"), int)
+    assert isinstance(processes["processes"], list)
+    assert processes["processes"][0]["process_id"] == 12
+    assert processes["processes"][0]["intake_source"] == "drop"
+    assert "label" in processes["processes"][0]
+    recent = body["recent_processes"]
+    assert isinstance(recent, dict)
+    assert recent["days"] == 30
+    assert isinstance(recent["processes"], list)
+    assert recent["processes"][0]["process_id"] == 12
+    blob = json.dumps(body).lower()
+    assert "email" not in blob
+    assert "consumer_id" not in blob
+    assert "drop_raw_requests" not in blob
+
+
+def _install_console_snapshot_process_mocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        drop_pipeline, "list_bulk_processes", _fake_snapshot_list_bulk_processes
+    )
+    monkeypatch.setattr(
+        drop_pipeline,
+        "collect_bulk_process_summaries_lite",
+        _fake_snapshot_lite_summaries,
+    )
+
+
+@pytest.mark.asyncio
+async def test_collect_console_snapshot_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshot merges summary, matching, and process heads (DropConsoleSnapshot)."""
+    monkeypatch.setattr(
+        "admin_api.worker_schedules.ca_drop_schedule_payload",
+        _fake_ca_drop_schedule_payload,
+    )
+    _install_console_snapshot_process_mocks(monkeypatch)
+    conn, issued = _capturing_console_snapshot_conn()
+    body = await drop_pipeline.collect_console_snapshot(conn)
+    _assert_console_snapshot_sql(issued)
+    _assert_console_snapshot_body(body)
+    assert conn.fetchval.await_count == 3
+
+
+def test_console_snapshot_route_registered() -> None:
+    """GET /ops/drop/console/snapshot must be on the mounted drop router."""
+    openapi_paths = app.openapi()["paths"]
+    assert "/ops/drop/console/snapshot" in openapi_paths
+    methods = openapi_paths["/ops/drop/console/snapshot"]
+    assert "get" in methods
+    names = {param["name"] for param in methods["get"].get("parameters", [])}
+    assert {"process_days", "process_limit", "recent_days", "recent_limit"} <= names
+
+
+def test_console_snapshot_route_no_drop_raw_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GET /ops/drop/console/snapshot stays off drop_raw_requests."""
+    from admin_api import main as admin_main
+
+    conn, issued = _capturing_console_snapshot_conn()
+
+    class _Acquire:
+        async def __aenter__(self):
+            return conn
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(
+        "admin_api.worker_schedules.ca_drop_schedule_payload",
+        _fake_ca_drop_schedule_payload,
+    )
+    _install_console_snapshot_process_mocks(monkeypatch)
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/drop/console/snapshot",
+            params={
+                "process_days": 7,
+                "process_limit": 50,
+                "recent_days": 30,
+                "recent_limit": 100,
+            },
+            headers=signed_headers("ops@example.com"),
+        )
+
+    assert response.status_code == 200
+    _assert_console_snapshot_sql(issued)
+    _assert_console_snapshot_body(response.json())
 
 
 @pytest.mark.asyncio
