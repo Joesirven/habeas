@@ -6,6 +6,39 @@ import { createRoot } from 'react-dom/client'
 import { router } from '@/router'
 import './index.css'
 
+const queryFetchStarts = new Map<string, number>()
+
+function redactQueryKey(queryKey: readonly unknown[]): string {
+  const safe = queryKey.map((part) =>
+    typeof part === 'string' && part.includes('@') ? '[redacted]' : part,
+  )
+  return JSON.stringify(safe)
+}
+
+function isAbortLike(error: unknown): boolean {
+  const name =
+    error && typeof error === 'object' && 'name' in error
+      ? String((error as { name?: unknown }).name)
+      : ''
+  return name === 'AbortError' || name === 'TimeoutError'
+}
+
+function logQueryTiming(fields: {
+  queryKey: string
+  start: number
+  duration_ms: number
+  status: 'pending' | 'success' | 'error'
+  abort: boolean
+}): void {
+  console.info({
+    prefix: 'dpra-timing',
+    kind: 'query',
+    route: globalThis.location?.pathname ?? '',
+    url: '',
+    ...fields,
+  })
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -13,6 +46,40 @@ const queryClient = new QueryClient({
       retry: 1,
     },
   },
+})
+
+queryClient.getQueryCache().subscribe((event) => {
+  if (event.type !== 'updated') return
+  const { query, action } = event
+  const queryKey = redactQueryKey(query.queryKey)
+  const hash = query.queryHash
+
+  if (action.type === 'fetch') {
+    const start = Date.now()
+    queryFetchStarts.set(hash, start)
+    logQueryTiming({
+      queryKey,
+      start,
+      duration_ms: 0,
+      status: 'pending',
+      abort: false,
+    })
+    return
+  }
+
+  if (action.type !== 'success' && action.type !== 'error') return
+
+  const start = queryFetchStarts.get(hash) ?? 0
+  queryFetchStarts.delete(hash)
+  const duration_ms = start > 0 ? Date.now() - start : 0
+  const abort = action.type === 'error' && isAbortLike(action.error)
+  logQueryTiming({
+    queryKey,
+    start,
+    duration_ms,
+    status: action.type,
+    abort,
+  })
 })
 
 type ErrorBoundaryProps = {

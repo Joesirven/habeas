@@ -4309,6 +4309,29 @@ def _assert_console_snapshot_sql(issued: list[str]) -> None:
     assert all("drop_raw_requests" not in sql for sql in issued)
 
 
+def _assert_lite_process_item(
+    item: dict[str, Any], *, expect_lite: bool = True
+) -> None:
+    """Collapsed card fields: head + lite overall / request_rows (optional stages)."""
+    assert isinstance(item, dict)
+    assert item.get("process_id") is not None
+    assert item.get("process_at") or item.get("label")
+    has_download = item.get("download_status") is not None
+    overall = item.get("overall")
+    has_overall_status = isinstance(overall, dict) and overall.get("status")
+    assert has_download or has_overall_status
+    if not expect_lite:
+        return
+    assert isinstance(overall, dict)
+    assert overall.get("status")
+    assert "request_rows" in item
+    stages = item.get("stages")
+    if stages is not None:
+        assert isinstance(stages, dict)
+        assert {"download", "land", "promote"} <= set(stages)
+        assert set(stages) <= {"download", "land", "promote"}
+
+
 def _assert_console_snapshot_body(body: dict[str, Any]) -> None:
     """Web getDropConsoleSnapshot — DropConsoleSnapshot shape."""
     for key in (
@@ -4338,11 +4361,15 @@ def _assert_console_snapshot_body(body: dict[str, Any]) -> None:
     assert isinstance(processes, dict)
     assert isinstance(processes["day"], str)
     assert isinstance(processes.get("days"), int)
-    assert processes["processes"] == []
+    assert processes["processes"], "snapshot processes.processes must be non-empty with list/lite mocks"
+    for item in processes["processes"]:
+        _assert_lite_process_item(item)
     recent = body["recent_processes"]
     assert isinstance(recent, dict)
     assert recent["days"] == 30
-    assert recent["processes"] == []
+    assert recent["processes"], "snapshot recent_processes.processes must be non-empty with list/lite mocks"
+    for item in recent["processes"]:
+        _assert_lite_process_item(item)
     blob = json.dumps(body).lower()
     assert "email" not in blob
     assert "consumer_id" not in blob
@@ -4681,8 +4708,13 @@ def test_processes_include_summary_uses_lite_bulk_not_spine_per_row(
     assert progress_calls == []
     assert lite_calls == [[10, 11, 12]]
     assert len(body["processes"]) == 3
-    assert all(item["overall"]["status"] == "running" for item in body["processes"])
-    assert all(item["request_rows"] == 0 for item in body["processes"])
+    for item in body["processes"]:
+        _assert_lite_process_item(item)
+        assert item["overall"]["status"] == "running"
+        assert item["request_rows"] == 0
+        assert item["stages"]["download"]["success"] == 1
+        assert item["stages"]["land"]["success"] == 1
+        assert item["stages"]["promote"]["total"] == 0
 
 
 @pytest.mark.asyncio
