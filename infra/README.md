@@ -149,6 +149,33 @@ gcloud builds submit --config=infra/cloudbuild/admin-web-dev.yaml --project=exam
 
 After first deploy, append the `admin-web-dev` `*.run.app` origin to `admin-api-dev` `_CORS_ORIGINS` and redeploy admin-api so the browser can call the API cross-origin.
 
+### Post-deploy revision verify (admin-api-prod / admin-web-prod)
+
+After Jose-gated `gcloud builds submit` for [`admin-api-prod.yaml`](cloudbuild/admin-api-prod.yaml) or [`admin-web-prod.yaml`](cloudbuild/admin-web-prod.yaml), confirm the live Cloud Run revision is serving the image you just built — `_TAG: latest` alone does not record which git SHA is live.
+
+```bash
+PROJECT=example-gcp-project
+REGION=us-east4
+EXPECTED_SHA="$(git rev-parse --short HEAD)"   # commit you intended to ship
+
+for SVC in admin-api-prod admin-web-prod; do
+  echo "=== ${SVC} (expected git ${EXPECTED_SHA}) ==="
+  REV="$(gcloud run services describe "${SVC}" \
+    --region="${REGION}" --project="${PROJECT}" \
+    --format='value(status.latestReadyRevisionName)')"
+  IMAGE="$(gcloud run revisions describe "${REV}" \
+    --region="${REGION}" --project="${PROJECT}" \
+    --format='value(spec.containers[0].image)')"
+  echo "revision=${REV}"
+  echo "image=${IMAGE}"
+  gcloud artifacts docker images describe "${IMAGE}" \
+    --project="${PROJECT}" \
+    --format='table(image_summary.digest,image_summary.build_time)'
+done
+```
+
+Compare the revision image digest to Artifact Registry `:latest` for the same service (they must match). Record revision names + digest in `tmp/2026-08-25-pipeline-perf-deploy.txt` (or the current deploy log). If prod still lags `master`, redeploy before perf QCQA.
+
 **Requester state on promote:** `requestor_state` comes from `raw_payload.state` /
 `raw_payload.requestor_state`, else a USPS token in the CSV filename
 (e.g. `broker_TX_EMAIL.csv`). If both omit state, promote **fails closed** — it

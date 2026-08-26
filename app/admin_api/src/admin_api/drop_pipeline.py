@@ -8,6 +8,7 @@ import logging
 import os
 from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 import httpx
@@ -640,6 +641,24 @@ async def collect_worker_health() -> dict[str, Any]:
     return await _refresh_worker_health_cache(targets)
 
 
+def peek_worker_health_snapshot() -> dict[str, Any] | None:
+    """Return the module worker-health cache without probe fan-out or refresh."""
+    targets = _worker_probe_targets()
+    unpacked = _unpack_worker_health_cache(_worker_health_cache)
+    if unpacked is None:
+        return None
+    _cached_at, cached_key, cached_result = unpacked
+    if cached_key is not None and cached_key != tuple(targets):
+        return None
+    return cached_result
+
+
+def _workers_down_from_health(health: dict[str, Any] | None) -> int | None:
+    if health is None:
+        return None
+    return sum(1 for probe in health.values() if _probe_counts_as_down(probe))
+
+
 def _record_has(row: Any, key: str) -> bool:
     """True when an asyncpg Record or mapping exposes ``key``."""
     if row is None:
@@ -755,6 +774,52 @@ async def collect_matching_progress(conn: Any) -> dict[str, Any]:
                 if drain_lease_row and drain_lease_row["expires_at"] is not None
                 else None
             ),
+        },
+    }
+
+
+async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
+    """Header counts for Pipeline console — no drop_raw_requests spine scan.
+
+    ``open_requests`` is DROP intake volume on ``requests`` only. ``review_pending``
+    is approval_requests.pending for matching.review. Worker-down uses the cached
+    probe snapshot only (never fans out on this path).
+    """
+    open_requests, review_pending = await asyncio.gather(
+        conn.fetchval(
+            """
+            SELECT COUNT(*)::bigint
+              FROM requests
+             WHERE intake_source = 'drop'
+            """
+        ),
+        conn.fetchval(
+            """
+            SELECT COUNT(*)::int
+              FROM approval_requests
+             WHERE action_type = $1
+               AND status = 'pending'
+            """,
+            MATCHING_REVIEW_ACTION,
+        ),
+    )
+    health = peek_worker_health_snapshot()
+    workers_down = _workers_down_from_health(health)
+    workers_total = len(health) if health else len(WORKER_KEYS)
+    now = datetime.now(timezone.utc)
+    open_n = int(open_requests or 0)
+    review_n = int(review_pending or 0)
+    return {
+        "as_of": now.isoformat(),
+        "open_requests": open_n,
+        "review_pending": review_n,
+        "workers_down": workers_down,
+        "workers_total": workers_total,
+        "workers_stale": health is None,
+        "drop_requests": {"count": open_n},
+        "matching_review": {
+            "action_type": MATCHING_REVIEW_ACTION,
+            "pending": review_n,
         },
     }
 
@@ -1641,12 +1706,195 @@ async def collect_worker_trends(
     }
 
 
+def _accumulate_ingest_ledger_rows(
+    ingest_rows: list[Any],
+) -> tuple[
+    dict[str, int],
+    dict[str, int],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    land = _empty_stage_counts()
+    promote = _empty_stage_counts()
+    land_by_list: list[dict[str, Any]] = []
+    promote_by_list: list[dict[str, Any]] = []
+    for row in ingest_rows:
+        n = int(row["count"])
+        step = str(row["step"])
+        status = str(row["status"])
+        target = land if step == "land" else promote if step == "promote" else None
+        if target is None:
+            continue
+        _accumulate_status(target, status, n)
+        by_list = land_by_list if step == "land" else promote_by_list
+        by_list.append(
+            {
+                "list_type": row["list_type"],
+                "status": status,
+                "count": n,
+            }
+        )
+    return land, promote, land_by_list, promote_by_list
+
+
+def _bulk_process_ledger_stages(
+    head: Any,
+    ingest_rows: list[Any],
+) -> tuple[
+    dict[str, int],
+    dict[str, int],
+    dict[str, int],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    download = _empty_stage_counts()
+    _accumulate_status(download, str(head["status"]), 1)
+    land, promote, land_by_list, promote_by_list = _accumulate_ingest_ledger_rows(
+        ingest_rows
+    )
+    return download, land, promote, land_by_list, promote_by_list
+
+
+def _assemble_bulk_process_payload(
+    head: Any,
+    *,
+    download: dict[str, int],
+    land: dict[str, int],
+    promote: dict[str, int],
+    land_by_list: list[dict[str, Any]],
+    promote_by_list: list[dict[str, Any]],
+    matching: dict[str, int],
+    review: dict[str, int],
+    fulfillment: dict[str, int],
+    raw_rows: int,
+    request_rows: int,
+) -> dict[str, Any]:
+    stages = {
+        "download": download,
+        "land": {**land, "by_list_type": land_by_list},
+        "promote": {**promote, "by_list_type": promote_by_list},
+        "matching": matching,
+        "review": review,
+        "fulfillment": fulfillment,
+    }
+    overall = _derive_overall(
+        {
+            "download": download,
+            "land": land,
+            "promote": promote,
+            "matching": matching,
+            "review": review,
+            "fulfillment": fulfillment,
+        }
+    )
+    attempted_at = head["attempted_at"]
+    return {
+        "process_id": int(head["id"]),
+        "intake_source": "drop",
+        "process_at": attempted_at.isoformat() if attempted_at else None,
+        "completed_at": (
+            head["completed_at"].isoformat() if head["completed_at"] else None
+        ),
+        "label": _process_label(intake_source="drop", process_at=attempted_at),
+        "download_status": str(head["status"]),
+        "raw_rows": raw_rows,
+        "request_rows": request_rows,
+        "promote_stale": (
+            int(promote.get("open", 0)) > 0
+            and request_rows > 0
+            and raw_rows > 0
+            and request_rows >= raw_rows
+        ),
+        "stages": stages,
+        "overall": overall,
+    }
+
+
+async def collect_bulk_process_summaries_lite(
+    conn: Any,
+    *,
+    process_ids: list[int],
+) -> dict[int, dict[str, Any]]:
+    """Ledger-only bulk summaries for list paint — no drop_raw_requests spine."""
+    if not process_ids:
+        return {}
+    ids = list(dict.fromkeys(int(pid) for pid in process_ids))
+    heads = await conn.fetch(
+        """
+        SELECT id, status, attempted_at, completed_at, gcs_uri
+          FROM drop_connector_attempts
+         WHERE id = ANY($1::bigint[])
+           AND step = 'download'
+        """,
+        ids,
+    )
+    gcs_uris = [
+        str(row["gcs_uri"])
+        for row in heads
+        if row["gcs_uri"] is not None and str(row["gcs_uri"]).strip()
+    ]
+    ingest_by_uri: dict[str, list[Any]] = {}
+    if gcs_uris:
+        ingest_rows = await conn.fetch(
+            """
+            SELECT gcs_uri, step, status, list_type, COUNT(*)::int AS count
+              FROM drop_ingest_attempts
+             WHERE gcs_uri = ANY($1::text[])
+             GROUP BY gcs_uri, step, status, list_type
+            """,
+            gcs_uris,
+        )
+        for row in ingest_rows:
+            uri = str(row["gcs_uri"])
+            ingest_by_uri.setdefault(uri, []).append(row)
+
+    summaries: dict[int, dict[str, Any]] = {}
+    for head in heads:
+        pid = int(head["id"])
+        uri = head["gcs_uri"]
+        ledger_rows = ingest_by_uri.get(str(uri), []) if uri else []
+        download, land, promote, land_by_list, promote_by_list = _bulk_process_ledger_stages(
+            head, ledger_rows
+        )
+        payload = _assemble_bulk_process_payload(
+            head,
+            download=download,
+            land=land,
+            promote=promote,
+            land_by_list=land_by_list,
+            promote_by_list=promote_by_list,
+            matching=_empty_stage_counts(),
+            review=_empty_stage_counts(),
+            fulfillment=_empty_stage_counts(),
+            raw_rows=0,
+            request_rows=0,
+        )
+        summaries[pid] = {
+            "process_id": pid,
+            "overall": payload["overall"],
+            "raw_rows": payload["raw_rows"],
+            "request_rows": payload["request_rows"],
+            "stages": {
+                "download": payload["stages"]["download"],
+                "land": payload["stages"]["land"],
+                "promote": payload["stages"]["promote"],
+            },
+        }
+    return summaries
+
+
 async def collect_bulk_process_progress(
     conn: Any,
     *,
     process_id: int,
+    detail: str = "full",
 ) -> dict[str, Any] | None:
-    """Stage progress for one DROP download-keyed bulk process (counts only)."""
+    """Stage progress for one DROP download-keyed bulk process (counts only).
+
+    ``detail=lite`` uses connector + ingest ledgers only; the spine CTE runs on
+    ``detail=full`` (detail endpoint).
+    """
+    lite = detail == "lite"
     head = await conn.fetchrow(
         """
         SELECT id, status, attempted_at, completed_at, gcs_uri
@@ -1659,15 +1907,8 @@ async def collect_bulk_process_progress(
     if head is None:
         return None
 
-    download = _empty_stage_counts()
-    _accumulate_status(download, str(head["status"]), 1)
-
     gcs_uri = head["gcs_uri"]
-    land = _empty_stage_counts()
-    promote = _empty_stage_counts()
-    land_by_list: list[dict[str, Any]] = []
-    promote_by_list: list[dict[str, Any]] = []
-
+    ingest_rows: list[Any] = []
     if gcs_uri:
         ingest_rows = await conn.fetch(
             """
@@ -1678,24 +1919,18 @@ async def collect_bulk_process_progress(
             """,
             gcs_uri,
         )
-        for row in ingest_rows:
-            n = int(row["count"])
-            step = str(row["step"])
-            status = str(row["status"])
-            target = land if step == "land" else promote if step == "promote" else None
-            if target is None:
-                continue
-            _accumulate_status(target, status, n)
-            by_list = land_by_list if step == "land" else promote_by_list
-            by_list.append(
-                {
-                    "list_type": row["list_type"],
-                    "status": status,
-                    "count": n,
-                }
-            )
+    download, land, promote, land_by_list, promote_by_list = _bulk_process_ledger_stages(
+        head, ingest_rows
+    )
 
-        # Matching scoped by this download's gcs_uri via successful land.
+    matching = _empty_stage_counts()
+    review = _empty_stage_counts()
+    fulfillment = _empty_stage_counts()
+    raw_rows = 0
+    request_rows = 0
+    land_csv_count = 0
+    request_stats = None
+    if not lite and gcs_uri:
         # drop_raw_requests has source_csv_filename (ZIP-internal Email/
         # Phone/NDZ names) and no download id. Joining that name to *any*
         # land attempt — including a failed file:// land — copies the same
@@ -1770,15 +2005,7 @@ async def collect_bulk_process_progress(
             list(_TERMINAL_FAIL_STATUSES),
             MATCHING_REVIEW_ACTION,
         )
-    else:
-        request_stats = None
 
-    matching = _empty_stage_counts()
-    review = _empty_stage_counts()
-    fulfillment = _empty_stage_counts()
-    raw_rows = 0
-    request_rows = 0
-    land_csv_count = 0
     if request_stats is not None:
         raw_rows = int(request_stats["raw_rows"] or 0)
         request_rows = int(request_stats["request_rows"] or 0)
@@ -1843,45 +2070,19 @@ async def collect_bulk_process_progress(
         review = _empty_stage_counts()
         fulfillment = _empty_stage_counts()
 
-    stages = {
-        "download": download,
-        "land": {**land, "by_list_type": land_by_list},
-        "promote": {**promote, "by_list_type": promote_by_list},
-        "matching": matching,
-        "review": review,
-        "fulfillment": fulfillment,
-    }
-    overall = _derive_overall(
-        {
-            "download": download,
-            "land": land,
-            "promote": promote,
-            "matching": matching,
-            "review": review,
-            "fulfillment": fulfillment,
-        }
+    return _assemble_bulk_process_payload(
+        head,
+        download=download,
+        land=land,
+        promote=promote,
+        land_by_list=land_by_list,
+        promote_by_list=promote_by_list,
+        matching=matching,
+        review=review,
+        fulfillment=fulfillment,
+        raw_rows=raw_rows,
+        request_rows=request_rows,
     )
-    attempted_at = head["attempted_at"]
-    return {
-        "process_id": int(head["id"]),
-        "intake_source": "drop",
-        "process_at": attempted_at.isoformat() if attempted_at else None,
-        "completed_at": (
-            head["completed_at"].isoformat() if head["completed_at"] else None
-        ),
-        "label": _process_label(intake_source="drop", process_at=attempted_at),
-        "download_status": str(head["status"]),
-        "raw_rows": raw_rows,
-        "request_rows": request_rows,
-        "promote_stale": (
-            int(promote.get("open", 0)) > 0
-            and request_rows > 0
-            and raw_rows > 0
-            and request_rows >= raw_rows
-        ),
-        "stages": stages,
-        "overall": overall,
-    }
 
 
 async def get_pipeline_status(*, detail: str = "full") -> dict[str, Any]:
@@ -1905,6 +2106,55 @@ async def get_pipeline_status(*, detail: str = "full") -> dict[str, Any]:
         name: _public_worker_health(probe) for name, probe in worker_health.items()
     }
     return {**counts, "worker_health": public_health, "detail": "full"}
+
+
+_LIVE_EVENTS_MATCHING_INTERVAL_SECONDS = 1.5
+_LIVE_EVENTS_BULK_INTERVAL_SECONDS = 5.0
+
+
+async def iter_live_pipeline_events() -> AsyncIterator[dict[str, str]]:
+    """SSE resource events — counts-only patches, not full pipeline refresh."""
+    yield {"event": "ready", "data": "connected"}
+    if not settings.database_url:
+        while True:
+            await asyncio.sleep(30.0)
+            yield {"event": "heartbeat", "data": "no_database"}
+    pool = get_pool()
+    last_matching: str | None = None
+    last_bulk: str | None = None
+    last_bulk_at = 0.0
+    while True:
+        try:
+            async with pool.acquire() as conn:
+                matching = await collect_matching_progress(conn)
+                matching_json = json.dumps(matching, separators=(",", ":"), sort_keys=True)
+                if matching_json != last_matching:
+                    last_matching = matching_json
+                    yield {"event": "matching_progress", "data": matching_json}
+
+                now = monotonic()
+                if now - last_bulk_at >= _LIVE_EVENTS_BULK_INTERVAL_SECONDS:
+                    last_bulk_at = now
+                    processes = await list_bulk_processes(conn, days=7, limit=1)
+                    if processes:
+                        pid = int(processes[0]["process_id"])
+                        summaries = await collect_bulk_process_summaries_lite(
+                            conn, process_ids=[pid]
+                        )
+                        bulk_payload = summaries.get(pid)
+                        if bulk_payload is not None:
+                            bulk_json = json.dumps(
+                                bulk_payload, separators=(",", ":"), sort_keys=True
+                            )
+                            if bulk_json != last_bulk:
+                                last_bulk = bulk_json
+                                yield {"event": "bulk_process", "data": bulk_json}
+        except Exception:
+            logger.exception(
+                "live_events_poll_failed",
+                extra={"event": "live_events_poll_failed"},
+            )
+        await asyncio.sleep(_LIVE_EVENTS_MATCHING_INTERVAL_SECONDS)
 
 
 async def proxy_post_payload(
@@ -1952,6 +2202,15 @@ async def proxy_post(
 def _model_dump_nonzero(model: BaseModel) -> dict[str, Any]:
     data = model.model_dump(exclude_none=True)
     return data
+
+
+@router.get("/pipeline/summary")
+async def drop_pipeline_summary(_principal: SuperAdminPrincipal):
+    """Cheap header counts — no drop_raw_requests spine or worker fan-out."""
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        return await collect_pipeline_summary(conn)
 
 
 @router.get("/pipeline")
@@ -2005,27 +2264,20 @@ async def drop_bulk_processes(
             limit=limit,
         )
         if include_summary:
+            summaries = await collect_bulk_process_summaries_lite(
+                conn,
+                process_ids=[int(item["process_id"]) for item in processes],
+            )
             enriched: list[dict[str, Any]] = []
             for item in processes:
-                try:
-                    detail = await collect_bulk_process_progress(
-                        conn, process_id=int(item["process_id"])
-                    )
-                except Exception:
-                    logger.exception(
-                        "bulk_process_summary_failed",
-                        extra={
-                            "event": "bulk_process_summary_failed",
-                            "process_id": int(item["process_id"]),
-                        },
-                    )
-                    detail = None
-                if detail is not None:
+                pid = int(item["process_id"])
+                summary = summaries.get(pid)
+                if summary is not None:
                     item = {
                         **item,
-                        "overall": detail["overall"],
-                        "request_rows": detail["request_rows"],
-                        "raw_rows": detail["raw_rows"],
+                        "overall": summary["overall"],
+                        "request_rows": summary["request_rows"],
+                        "raw_rows": summary["raw_rows"],
                     }
                 if overall_status and item.get("overall", {}).get("status") != overall_status:
                     continue

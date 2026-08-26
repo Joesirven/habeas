@@ -23,6 +23,7 @@ from admin_api.approvals import (
 )
 from admin_api.drop_pipeline import APPROACHING_SLA_THRESHOLD_HOURS, MatchingReviewPrincipal
 from admin_api.drop_pipeline import health_router as ops_health_router
+from admin_api.drop_pipeline import iter_live_pipeline_events
 from admin_api.drop_pipeline import router as drop_pipeline_router
 from admin_api.drop_prod_cutover import router as drop_prod_cutover_router
 from admin_api.fulfillment_kickoff import router as fulfillment_kickoff_router
@@ -940,12 +941,9 @@ async def readyz():
 
 @app.get("/live/events")
 async def live_events():
-    """Server-Sent Events stream — Postgres LISTEN bridge wired in a follow-up change."""
+    """Server-Sent Events — matching_progress and bulk_process count patches."""
 
-    async def event_generator():
-        yield {"event": "ready", "data": "connected"}
-
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(iter_live_pipeline_events())
 
 
 @app.get("/requests", response_model=RequestListPage)

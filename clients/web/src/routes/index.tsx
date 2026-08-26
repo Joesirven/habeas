@@ -715,10 +715,11 @@ export function DashboardPage() {
   const authBlocking = isLoading && !me
 
   useEffect(() => {
-    if (authBlocking) {
+    // Warm Pipeline Console chunk while /me resolves so super_admin shell paints fast.
+    if (authBlocking || isSuperAdmin) {
       void import('@/routes/ops/drop-pipeline')
     }
-  }, [authBlocking])
+  }, [authBlocking, isSuperAdmin])
 
   if (isSuperAdmin) {
     return (

@@ -82,7 +82,13 @@ export function setStoredSimulateRole(role: UserRole | null) {
   }
 }
 
-/** Default abort for slow ops reads (pipeline, matching progress, …). */
+/** Fast ops reads — lite pipeline, matching progress, header summary. */
+export const OPS_FAST_QUERY_TIMEOUT_MS = 8_000
+
+/** Bulk process row expand — spine walk may take tens of seconds. */
+export const OPS_EXPAND_DETAIL_TIMEOUT_MS = 45_000
+
+/** Default abort for slow ops reads (full pipeline, worker trends, …). */
 export const OPS_QUERY_TIMEOUT_MS = 30_000
 
 export type AdminApiFetchInit = RequestInit & {
@@ -752,6 +758,27 @@ export type DropGlobalStats = {
   workers_total: number
 }
 
+/** Cheap header counters — no raw-spine scan (GET /ops/drop/pipeline/summary). */
+export type DropPipelineSummary = {
+  drop_requests: { count: number }
+  matching_review: { pending: number }
+  worker_health: Record<string, WorkerHealthProbe>
+  ca_drop_schedule?: CaDropSchedule
+}
+
+/** Live matching counters — GET /ops/drop/matching-progress. */
+export type DropMatchingProgress = {
+  pending: number
+  claimed: number
+  success: number
+  by_status: { status: string; count: number }[]
+  drain: {
+    active: boolean
+    holder: string | null
+    expires_at: string | null
+  }
+}
+
 export function getDropPipeline() {
   return fetchAdminApi<DropPipelineStatus>('/ops/drop/pipeline', {
     timeoutMs: OPS_QUERY_TIMEOUT_MS,
@@ -760,7 +787,19 @@ export function getDropPipeline() {
 
 export function getDropPipelineLite() {
   return fetchAdminApi<DropPipelineStatus>('/ops/drop/pipeline?detail=lite', {
-    timeoutMs: OPS_QUERY_TIMEOUT_MS,
+    timeoutMs: OPS_FAST_QUERY_TIMEOUT_MS,
+  })
+}
+
+export function getDropPipelineSummary() {
+  return fetchAdminApi<DropPipelineSummary>('/ops/drop/pipeline/summary', {
+    timeoutMs: OPS_FAST_QUERY_TIMEOUT_MS,
+  })
+}
+
+export function getDropMatchingProgress() {
+  return fetchAdminApi<DropMatchingProgress>('/ops/drop/matching-progress', {
+    timeoutMs: OPS_FAST_QUERY_TIMEOUT_MS,
   })
 }
 
@@ -897,7 +936,9 @@ export function listDropBulkProcesses(params?: {
 }
 
 export function getDropBulkProcess(processId: number) {
-  return fetchAdminApi<BulkProcessDetail>(`/ops/drop/processes/${processId}`)
+  return fetchAdminApi<BulkProcessDetail>(`/ops/drop/processes/${processId}`, {
+    timeoutMs: OPS_EXPAND_DETAIL_TIMEOUT_MS,
+  })
 }
 
 export function listDropBulkProcessRuns(params: {
