@@ -1,11 +1,14 @@
-# Matching drain Job — Method E shell (5 parallel tasks).
-# Deploy matching-dev image first (or use this after matching-dev.yaml build/push).
-# ensure-drain on matching-dev starts executions when MATCHING_DRAIN_JOB_NAME is set.
+# Data Vertical Matching drain Job — Method E shell (5 parallel tasks).
+# DROP hash + future MDR plaintext; not Auth0/Axios.
+# Deploy data-vertical-matching-dev image first (or use this after
+# data-vertical-matching-dev.yaml build/push).
+# ensure-drain on data-vertical-matching-dev starts executions when
+# MATCHING_DRAIN_JOB_NAME is set.
 substitutions:
   _REGION: us-east4
   _PROJECT: example-gcp-project
-  _JOB: matching-drain-dev
-  _SERVICE_IMAGE: matching-dev
+  _JOB: data-vertical-matching-drain-dev
+  _SERVICE_IMAGE: data-vertical-matching-dev
   _TAG: latest
   _TASK_COUNT: "5"
   _CLOUDSQL_INSTANCE: example-gcp-project:us-east4:dpra-dev-temp
@@ -35,10 +38,10 @@ steps:
           --set-cloudsql-instances="${_CLOUDSQL_INSTANCE}" \
           --command=python \
           --args=-m,matching.chunk_drain \
-          --set-env-vars="SERVICE_NAME=matching-drain,WORKER_ID=matching-drain-dev,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},MATCHING_DRAIN_MAX_CHUNKS=50,MATCHING_DRAIN_TASK_COUNT=${_TASK_COUNT},MATCHING_DRAIN_LEASE_HOLDER=matching-drain-job,PYTHONPATH=/app/app/matching/src" \
+          --set-env-vars="SERVICE_NAME=matching-drain,WORKER_ID=data-vertical-matching-drain-dev,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},MATCHING_DRAIN_MAX_CHUNKS=50,MATCHING_DRAIN_TASK_COUNT=${_TASK_COUNT},MATCHING_DRAIN_LEASE_HOLDER=matching-drain-job,PYTHONPATH=/app/app/matching/src" \
           --quiet
 
-        # matching-dev runtime SA must execute this Job from /ensure-drain.
+        # data-vertical-matching-dev runtime SA must execute this Job from /ensure-drain.
         gcloud run jobs add-iam-policy-binding "${_JOB}" \
           --project="${_PROJECT}" \
           --region="${_REGION}" \

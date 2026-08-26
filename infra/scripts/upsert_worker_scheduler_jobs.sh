@@ -92,11 +92,23 @@ fi
 DROP_CONNECTOR_URL="$(service_url "drop-connector${SUFFIX}")"
 DROP_INGESTOR_URL="$(service_url "drop-ingestor${SUFFIX}")"
 REQUEST_DISPATCHER_URL="$(service_url "request-dispatcher${SUFFIX}")"
-MATCHING_URL="$(service_url "matching${SUFFIX}")"
 DATA_FULFILLMENT_URL="$(service_url "data-fulfillment-dispatcher${SUFFIX}")"
 REAPER_URL="$(service_url "reaper${SUFFIX}")"
 
-for label in DROP_CONNECTOR_URL DROP_INGESTOR_URL REQUEST_DISPATCHER_URL MATCHING_URL DATA_FULFILLMENT_URL REAPER_URL; do
+# Jose-gated dual-run: prefer data-vertical-matching, fall back to matching while
+# the old service still exists. Job id stays ${PREFIX}-matching.
+MATCHING_SERVICE=""
+MATCHING_URL="$(service_url "data-vertical-matching${SUFFIX}")"
+if [[ -n "${MATCHING_URL}" ]]; then
+  MATCHING_SERVICE="data-vertical-matching${SUFFIX}"
+else
+  MATCHING_URL="$(service_url "matching${SUFFIX}")"
+  if [[ -n "${MATCHING_URL}" ]]; then
+    MATCHING_SERVICE="matching${SUFFIX}"
+  fi
+fi
+
+for label in DROP_CONNECTOR_URL DROP_INGESTOR_URL REQUEST_DISPATCHER_URL DATA_FULFILLMENT_URL REAPER_URL; do
   if [[ -z "${!label}" ]]; then
     echo "WARN: ${label} unresolved — using placeholder; describe services before apply." >&2
     eval "${label}=https://PLACEHOLDER.invalid"
@@ -104,6 +116,20 @@ for label in DROP_CONNECTOR_URL DROP_INGESTOR_URL REQUEST_DISPATCHER_URL MATCHIN
     echo "${label}=${!label}"
   fi
 done
+
+if [[ -z "${MATCHING_URL}" || "${MATCHING_URL}" == "https://PLACEHOLDER.invalid" ]]; then
+  if [[ "${DRY_RUN}" -eq 0 ]]; then
+    echo "ERROR: MATCHING_URL unresolved (tried data-vertical-matching${SUFFIX}, then matching${SUFFIX}). Refuse apply — describe the live Cloud Run service before CONFIRM=yes. Do not write a placeholder URI." >&2
+    exit 1
+  fi
+  echo "WARN: MATCHING_URL unresolved — using placeholder; describe services before apply." >&2
+  MATCHING_URL="https://PLACEHOLDER.invalid"
+  echo "MATCHING_SERVICE="
+  echo "MATCHING_URL=${MATCHING_URL}"
+else
+  echo "MATCHING_SERVICE=${MATCHING_SERVICE}"
+  echo "MATCHING_URL=${MATCHING_URL}"
+fi
 
 CONNECTOR_BODY='{"interval_days":15,"source":"cloud_scheduler"}'
 
@@ -118,7 +144,7 @@ upsert_http_job "${PREFIX}-drop-ingestor-promote" \
 upsert_http_job "${PREFIX}-request-dispatcher" \
   "${REQUEST_DISPATCHER_URL}/dispatch" "*/5 * * * *"
 upsert_http_job "${PREFIX}-matching" \
-  "${MATCHING_URL}/process" "*/5 * * * *"
+  "${MATCHING_URL}/ensure-drain" "*/5 * * * *"
 upsert_http_job "${PREFIX}-data-fulfillment" \
   "${DATA_FULFILLMENT_URL}/fulfill" "*/5 * * * *"
 
@@ -128,10 +154,14 @@ for svc in \
   "drop-connector${SUFFIX}" \
   "drop-ingestor${SUFFIX}" \
   "request-dispatcher${SUFFIX}" \
-  "matching${SUFFIX}" \
+  "${MATCHING_SERVICE}" \
   "data-fulfillment-dispatcher${SUFFIX}" \
   "reaper${SUFFIX}"
 do
+  if [[ -z "${svc}" ]]; then
+    echo "WARN: MATCHING_SERVICE unresolved — skipping matching invoker grant." >&2
+    continue
+  fi
   run gcloud run services add-iam-policy-binding "${svc}" \
     --project="${PROJECT}" \
     --region="${REGION}" \

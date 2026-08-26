@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 
 import {
@@ -15,11 +15,8 @@ import { Button } from '@/components/ui/button'
 import type { MatchedPersonContact, MatchingResultDetail, NeedsAttentionItem } from '@/lib/api'
 import { suggestedDropResponseStatus } from '@/lib/api'
 import {
-  matchingConnectorGateBannerCopy,
-  matchingConnectorGateChip,
   matchingGateFromAttempts,
   ownerConnectorsSearch,
-  type MatchingConnectorGate,
 } from '@/lib/connection-display'
 import {
   inboxIntakeSourceLabel,
@@ -33,6 +30,8 @@ import {
   applyNeedsPeople,
   ResultApplyBar,
   ResultContactPii,
+  ResultPeopleSearch,
+  ResultSystemLabel,
   resultViewEmpty,
 } from '../matching-results-lab/ResultViewChrome'
 import type { MatchingResultsViewProps } from '../matching-results-lab/matching-results-lab-types'
@@ -339,35 +338,6 @@ function personSurfaceRows(
   ]
 }
 
-const DIRECTORY_SEARCH_DEBOUNCE_MS = 200
-const DIRECTORY_SEARCH_MIN_CHARS = 2
-
-type PeopleSearchPending = { title: string; support: string }
-
-function peopleSearchLockCopy(
-  blocked: MatchingConnectorGate | null | undefined,
-  pending: PeopleSearchPending | null | undefined,
-): { label: string; support: string } | null {
-  if (blocked?.blocked) {
-    const chip = matchingConnectorGateChip(blocked)
-    const label =
-      chip.label === 'Connected' || chip.label === 'Needs setup'
-        ? 'Needs connection'
-        : chip.label
-    return {
-      label,
-      support: matchingConnectorGateBannerCopy(blocked).description,
-    }
-  }
-  if (pending) {
-    return {
-      label: pending.title === 'Connected' ? 'Needs connection' : pending.title,
-      support: pending.support,
-    }
-  }
-  return null
-}
-
 function unifyPeople(contacts: MatchedPersonContact[]): MatchedPersonContact[] {
   const people: MatchedPersonContact[] = []
   const indexByDwid = new Map<string, number>()
@@ -507,46 +477,9 @@ export function OwnerMatchingReviewV06({
   pending,
   onApply,
   onSearchPeople,
-  peopleSearchBlocked,
-  peopleSearchPending,
-}: MatchingResultsViewProps & {
-  peopleSearchBlocked?: MatchingConnectorGate | null
-  peopleSearchPending?: PeopleSearchPending | null
-}) {
-  const [search, setSearch] = useState('')
+}: MatchingResultsViewProps) {
   const [removedDwids, setRemovedDwids] = useState<string[]>([])
   const [addedPeople, setAddedPeople] = useState<MatchedPersonContact[]>([])
-  const [directoryHits, setDirectoryHits] = useState<MatchedPersonContact[]>([])
-  const [directoryPending, setDirectoryPending] = useState(false)
-  const [directoryFailed, setDirectoryFailed] = useState(false)
-  const searchPeopleRef = useRef(onSearchPeople)
-  searchPeopleRef.current = onSearchPeople
-
-  const localBlocked = blockedMatchingStatus({ item, detail })
-  const searchLock =
-    peopleSearchLockCopy(
-      peopleSearchBlocked?.blocked ? peopleSearchBlocked : null,
-      peopleSearchPending,
-    ) ??
-    (!onSearchPeople
-      ? {
-          label: 'Needs connection',
-          support: 'Connect this system before people can be searched.',
-        }
-      : null)
-  const blocked: BlockedMatchingStatus | null = searchLock
-    ? {
-        title: searchLock.label,
-        chipLabel: searchLock.label,
-        description: searchLock.support,
-      }
-    : localBlocked
-  const searchLocked =
-    Boolean(disabled || pending) ||
-    Boolean(peopleSearchBlocked?.blocked) ||
-    Boolean(peopleSearchPending) ||
-    Boolean(blocked) ||
-    !onSearchPeople
 
   const rosterKey = [
     item?.request_id ?? '',
@@ -558,46 +491,12 @@ export function OwnerMatchingReviewV06({
   ].join('::')
 
   useEffect(() => {
-    setSearch('')
     setRemovedDwids([])
     setAddedPeople([])
-    setDirectoryHits([])
   }, [rosterKey])
 
-  useEffect(() => {
-    const needle = search.trim()
-    const searchFn = searchPeopleRef.current
-    if (searchLocked || !searchFn || needle.length < DIRECTORY_SEARCH_MIN_CHARS) {
-      setDirectoryHits([])
-      setDirectoryPending(false)
-      setDirectoryFailed(false)
-      return
-    }
-    let cancelled = false
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        setDirectoryPending(true)
-        setDirectoryFailed(false)
-        try {
-          const result = await searchFn(needle)
-          if (!cancelled) setDirectoryHits(result)
-        } catch {
-          if (!cancelled) {
-            setDirectoryHits([])
-            setDirectoryFailed(true)
-          }
-        } finally {
-          if (!cancelled) setDirectoryPending(false)
-        }
-      })()
-    }, DIRECTORY_SEARCH_DEBOUNCE_MS)
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-  }, [search, searchLocked])
-
   const empty = resultViewEmpty(loading, Boolean(item))
+  const blocked = blockedMatchingStatus({ item, detail })
   const peopleCleared = statusId === STATUS_NOT_FOUND
   const locked = Boolean(disabled || pending || blocked)
   const copy = matchingDispositionCopy(ownerLanguage ? 'data_owner' : 'ops')
@@ -644,15 +543,6 @@ export function OwnerMatchingReviewV06({
   )
   const emphasizeDelete = suggested === STATUS_DELETE
   const emphasizeOptIn = suggested === STATUS_OPT_IN
-  const query = search.trim()
-  const visibleIds = new Set(
-    visiblePeople.map((contact) => contact.dwid?.trim() || '').filter(Boolean),
-  )
-  const searchHits = directoryHits.filter((contact) => {
-    const dwid = contact.dwid?.trim() || ''
-    return Boolean(dwid) && !visibleIds.has(dwid)
-  })
-
   function includePerson(dwid: string, nextStatus: string) {
     if (!dwid) return
     setRemovedDwids((current) => current.filter((id) => id !== dwid))
@@ -674,8 +564,6 @@ export function OwnerMatchingReviewV06({
     const alreadyKnown = pool.some((row) => row.dwid?.trim() === dwid)
     if (!alreadyKnown) setAddedPeople((current) => [...current, contact])
     includePerson(dwid, statusId === STATUS_OPT_IN ? STATUS_OPT_IN : STATUS_DELETE)
-    setSearch('')
-    setDirectoryHits([])
   }
 
   if (empty) return empty
@@ -690,9 +578,12 @@ export function OwnerMatchingReviewV06({
           <h2 className="text-xl font-semibold text-ink">
             {activeSystemLabel({ item, detail })}
           </h2>
-          <Badge variant="default" className="normal-case tracking-normal">
-            {matchTypeLabel(matchType, ownerLanguage)}
-          </Badge>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <ResultSystemLabel item={item} detail={detail} />
+            <Badge variant="default" className="normal-case tracking-normal">
+              {matchTypeLabel(matchType, ownerLanguage)}
+            </Badge>
+          </div>
         </div>
       </header>
 
@@ -800,11 +691,11 @@ export function OwnerMatchingReviewV06({
             <p className="text-xs text-ink-soft">
               Person records are unavailable for this system.
             </p>
-          ) : visiblePeople.length === 0 && !query ? (
+          ) : visiblePeople.length === 0 ? (
             <p className="text-xs text-ink-soft">
               {matchType === 'not_found' || peopleCleared
                 ? 'No matched people for this system.'
-                : 'No person records on this system. Search below to add someone from this match set.'}
+                : 'No person records on this system. Search below to add someone.'}
             </p>
           ) : (
             <ul className="space-y-2">
@@ -830,62 +721,18 @@ export function OwnerMatchingReviewV06({
             </ul>
           )}
 
-          <div className="space-y-1.5 border-t border-line pt-2">
-            <label className="block">
-              <span className="flex flex-wrap items-center gap-1.5 text-[0.55rem] font-medium uppercase tracking-wide text-mute">
-                Add from this system
-                {searchLock ? (
-                  <Badge variant="fail" className="normal-case tracking-normal">
-                    {searchLock.label}
-                  </Badge>
-                ) : null}
-              </span>
-              <input
-                type="search"
-                value={search}
-                disabled={searchLocked || peopleCleared}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search this system’s matched people"
-                className="mt-1 h-8 w-full rounded-md border border-line bg-paper px-2 text-xs text-ink outline-none focus-visible:ring-2 focus-visible:ring-habeas-mid disabled:opacity-50"
-              />
-            </label>
-            {searchLock ? (
-              <p className="text-[0.7rem] text-ink-soft">{searchLock.support}</p>
-            ) : directoryPending ? (
-              <p className="text-[0.65rem] text-mute">Searching this system…</p>
-            ) : directoryFailed ? (
-              <p className="text-[0.7rem] text-ink-soft">
-                Could not search this system. Try again.
-              </p>
-            ) : query.length < DIRECTORY_SEARCH_MIN_CHARS ? (
-              <p className="text-[0.65rem] text-mute">
-                Type at least two characters to search this system.
-              </p>
-            ) : searchHits.length > 0 ? (
-              <ul className="space-y-1">
-                {searchHits.map((contact) => {
-                  const dwid = contact.dwid?.trim() || ''
-                  const onRoster = Boolean(dwid) && !removedDwids.includes(dwid)
-                  return (
-                    <li key={dwid || formatMatchedContactLabel(contact)}>
-                      <button
-                        type="button"
-                        disabled={searchLocked || peopleCleared || !dwid || onRoster}
-                        onClick={() => addPerson(contact)}
-                        className="flex w-full items-center justify-between rounded-md border border-line bg-canvas px-2 py-1.5 text-left text-xs text-ink disabled:opacity-50"
-                      >
-                        <span className="truncate">{formatMatchedContactLabel(contact)}</span>
-                        <span className="shrink-0 text-[0.65rem] text-mute">
-                          {onRoster ? 'On list' : 'Add'}
-                        </span>
-                      </button>
-                    </li>
-                  )
-                })}
-              </ul>
-            ) : (
-              <p className="text-[0.7rem] text-ink-soft">No persons match that search.</p>
-            )}
+          <div className="border-t border-line pt-2">
+            <ResultPeopleSearch
+              onSearchPeople={onSearchPeople}
+              localContacts={pool}
+              excludeDwids={visiblePeople
+                .map((contact) => contact.dwid?.trim() || '')
+                .filter(Boolean)}
+              onAddPerson={addPerson}
+              disabled={locked || peopleCleared}
+              item={item}
+              detail={detail}
+            />
           </div>
         </section>
       </div>

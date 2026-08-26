@@ -1,4 +1,4 @@
-"""matching — consumer record matching, one MatchingPipeline adapter per intake source."""
+"""Data Vertical Matching — one MatchingPipeline adapter per intake source in this app (DROP hash index; plaintext MDR)."""
 
 from matching.models import IntakeSource, MatchRequest, MatchResult
 from matching.pipeline import MatchingPipeline

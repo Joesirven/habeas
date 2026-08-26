@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 
 import {
-  formatMatchedContactLabel,
   formatMatchedContactsSummary,
   matchedChannelsFromDetail,
   matchingDispositionCopy,
@@ -10,7 +9,6 @@ import {
 } from '@/components/requests/RequestTriageDialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import type { MatchedPersonContact } from '@/lib/api'
 import { useMe } from '@/lib/auth'
 import {
   isDataCatalogVertical,
@@ -31,11 +29,15 @@ import {
   inboxReviewItemVerticalLabel,
   type InboxItemChannel,
 } from '@/lib/inbox-status-lab'
+import type { MatchedPersonContact } from '@/lib/api'
 import { catalogSystemDisplayLabel } from '@/lib/legalJourneyLabels'
 import { cn } from '@/lib/utils'
 
 import {
   applyNeedsPeople,
+  ResultContactPii,
+  ResultPeopleSearch,
+  ResultSystemLabel,
   resultViewEmpty,
 } from '../matching-results-lab/ResultViewChrome'
 import {
@@ -169,25 +171,6 @@ function guideSteps(blocked: boolean): { id: GuideStep; n: number; label: string
   ]
 }
 
-function contactSearchHaystack(contact: {
-  dwid: string
-  first_initial?: string | null
-  last_initial?: string | null
-  last_name?: string | null
-  state?: string | null
-}): string {
-  return [
-    formatMatchedContactLabel(contact),
-    contact.last_name,
-    contact.first_initial,
-    contact.last_initial,
-    contact.state,
-  ]
-    .filter((value): value is string => Boolean(value?.trim()))
-    .join(' ')
-    .toLowerCase()
-}
-
 function safeGateCopy(gate: MatchingConnectorGate, systemName: string): {
   title: string
   description: string
@@ -198,40 +181,6 @@ function safeGateCopy(gate: MatchingConnectorGate, systemName: string): {
     title: copy.title.replace(/cassandra/gi, systemName),
     description: copy.description.replace(/cassandra/gi, systemName),
   }
-}
-
-/** Search chrome: Needs refresh / Needs connection — never Connected. */
-function peopleSearchNotice(
-  blocked?: MatchingConnectorGate | null,
-  pending?: { title: string; support: string } | null,
-): { title: string; support: string } | null {
-  if (blocked?.blocked) {
-    const refresh =
-      blocked.displayStatus === 'needs_refresh' || blocked.gateCode === 'upload_stale'
-    return {
-      title: refresh ? 'Needs refresh' : 'Needs connection',
-      support: pending?.support ?? '',
-    }
-  }
-  if (!pending) return null
-  const title = pending.title.trim() === 'Connected' ? 'Needs connection' : pending.title
-  return { title, support: pending.support }
-}
-
-function mergePeopleByDwid(
-  ...lists: Array<readonly MatchedPersonContact[] | undefined>
-): MatchedPersonContact[] {
-  const seen = new Set<string>()
-  const merged: MatchedPersonContact[] = []
-  for (const list of lists) {
-    for (const contact of list ?? []) {
-      const dwid = contact.dwid?.trim()
-      if (!dwid || seen.has(dwid)) continue
-      seen.add(dwid)
-      merged.push(contact)
-    }
-  }
-  return merged
 }
 
 function connectorsVerticalId(
@@ -264,17 +213,22 @@ function OwnerMatchingGuide({
   pending,
   onApply,
   onSearchPeople,
-  peopleSearchBlocked,
-  peopleSearchPending,
 }: MatchingResultsViewProps) {
   const { me } = useMe()
   const [extraContacts, setExtraContacts] = useState<MatchedPersonContact[]>([])
-  const [directoryHits, setDirectoryHits] = useState<MatchedPersonContact[]>([])
-  const [searchBusy, setSearchBusy] = useState(false)
-  const [searchFailed, setSearchFailed] = useState(false)
-  const searchRef = useRef(onSearchPeople)
-  searchRef.current = onSearchPeople
-  const people = mergePeopleByDwid(safeMatchedContacts(contacts), extraContacts)
+  const people = useMemo(() => {
+    const seen = new Set<string>()
+    const rows: MatchedPersonContact[] = []
+    for (const contact of [...safeMatchedContacts(contacts), ...extraContacts]) {
+      const dwid = contact.dwid?.trim()
+      if (dwid) {
+        if (seen.has(dwid)) continue
+        seen.add(dwid)
+      }
+      rows.push(contact)
+    }
+    return rows
+  }, [contacts, extraContacts])
   const gate = useMemo(
     () =>
       resolveMatchingConnectorGate({
@@ -292,8 +246,6 @@ function OwnerMatchingGuide({
   const [peopleAction, setPeopleAction] = useState<PeopleAction>(
     statusId === '4' ? '4' : '3',
   )
-  const [peopleQuery, setPeopleQuery] = useState('')
-
   const source = inboxIntakeSourceLabel(item?.intake_source)
   const requestId = shortRequestId(item?.request_id)
   const due = dueFacts(item)
@@ -309,55 +261,9 @@ function OwnerMatchingGuide({
   const applyBlocked =
     disabled || pending || matchingBlocked || draftStatus == null || peopleRequired
   const includedPeople = people.filter((contact) => selectedDwids.includes(contact.dwid))
-  const searchNotice = peopleSearchNotice(peopleSearchBlocked, peopleSearchPending)
-  const searchLocked = Boolean(disabled || pending || matchingBlocked || searchNotice)
-  const addablePeople = useMemo(() => {
-    const needle = peopleQuery.trim().toLowerCase()
-    const selected = new Set(selectedDwids)
-    const local = people.filter((contact) => {
-      if (!contact.dwid || selected.has(contact.dwid)) return false
-      if (!needle) return true
-      return contactSearchHaystack(contact).includes(needle)
-    })
-    return mergePeopleByDwid(directoryHits, local).filter(
-      (contact) => Boolean(contact.dwid) && !selected.has(contact.dwid),
-    )
-  }, [directoryHits, people, peopleQuery, selectedDwids])
   const connectorsVertical = connectorsVerticalId(item, detail)
   const gateChip = gate ? matchingConnectorGateChip(gate) : null
   const gateCopy = gate ? safeGateCopy(gate, systemName) : null
-
-  useEffect(() => {
-    const needle = peopleQuery.trim()
-    if (searchLocked || !onSearchPeople || needle.length < 2) {
-      setDirectoryHits([])
-      setSearchBusy(false)
-      setSearchFailed(false)
-      return
-    }
-    let cancelled = false
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        setSearchBusy(true)
-        setSearchFailed(false)
-        try {
-          const result = await searchRef.current?.(needle)
-          if (!cancelled) setDirectoryHits(result ?? [])
-        } catch {
-          if (!cancelled) {
-            setDirectoryHits([])
-            setSearchFailed(true)
-          }
-        } finally {
-          if (!cancelled) setSearchBusy(false)
-        }
-      })()
-    }, 200)
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-  }, [onSearchPeople, peopleQuery, searchLocked])
 
   useEffect(() => {
     if (matchingBlocked && (step === 'system' || step === 'people')) {
@@ -425,13 +331,12 @@ function OwnerMatchingGuide({
   }
 
   function addPerson(contact: MatchedPersonContact) {
-    const dwid = contact.dwid
+    const dwid = contact.dwid?.trim()
     if (!dwid || selectedDwids.includes(dwid)) return
-    if (!people.some((row) => row.dwid === dwid)) {
-      setExtraContacts((previous) => [...previous, contact])
+    if (!contacts.some((row) => row.dwid?.trim() === dwid)) {
+      setExtraContacts((current) => [...current, contact])
     }
     onSelectedDwidsChange([...selectedDwids, dwid])
-    setPeopleQuery('')
   }
 
   function commitAndApply() {
@@ -549,6 +454,9 @@ function OwnerMatchingGuide({
           <div className="rounded-md border border-habeas-navy/20 bg-habeas-navy/[0.03] px-3 py-2">
             <p className="text-[0.65rem] text-mute">System</p>
             <p className="text-sm font-medium text-habeas-navy">{systemName}</p>
+            <div className="mt-1.5">
+              <ResultSystemLabel item={item} detail={detail} />
+            </div>
           </div>
           {alsoSystems.length > 0 ? (
             <p className="text-[0.65rem] text-ink-soft">
@@ -648,8 +556,7 @@ function OwnerMatchingGuide({
           {people.length === 0 ? (
             <>
               <p className="text-xs text-ink-soft">
-                No people matched in {systemName}. Search to add someone, or continue to record
-                that this is not a match.
+                No people matched in {systemName}. Continue to record that this is not a match.
               </p>
               {surfaceList ? (
                 <p className="text-[0.65rem] text-mute">Found on {surfaceList} — one match.</p>
@@ -677,9 +584,7 @@ function OwnerMatchingGuide({
                       className="flex items-center justify-between gap-2 rounded px-1 py-1 text-xs"
                     >
                       <span className="min-w-0">
-                        <span className="block truncate text-ink">
-                          {formatMatchedContactLabel(contact)}
-                        </span>
+                        <ResultContactPii contact={contact} compact />
                         {surfaceList ? (
                           <span className="block text-[0.65rem] text-mute">{surfaceList}</span>
                         ) : null}
@@ -697,74 +602,22 @@ function OwnerMatchingGuide({
                   ))}
                 </ul>
               )}
+              <ResultPeopleSearch
+                onSearchPeople={onSearchPeople}
+                localContacts={people}
+                excludeDwids={selectedDwids}
+                onAddPerson={addPerson}
+                disabled={disabled || pending}
+                item={item}
+                detail={detail}
+              />
+              <p className="text-[0.65rem] text-mute">
+                {selectedDwids.length === 0
+                  ? 'Select at least one person, or leave none to record not a match.'
+                  : formatMatchedContactsSummary(people, selectedDwids)}
+              </p>
             </>
           )}
-          <div className="space-y-1.5">
-            <label className="block text-[0.65rem] font-medium uppercase tracking-wide text-mute">
-              Add from this system
-            </label>
-            <input
-              type="search"
-              value={peopleQuery}
-              onChange={(event) => setPeopleQuery(event.target.value)}
-              placeholder={searchNotice ? searchNotice.title : 'Search people in this system…'}
-              disabled={searchLocked}
-              className="h-7 w-full rounded-md border border-line bg-paper px-2 text-xs text-ink outline-none placeholder:text-mute focus-visible:ring-2 focus-visible:ring-habeas-mid disabled:opacity-50"
-              aria-label="Search people in this system"
-              autoComplete="off"
-              spellCheck={false}
-            />
-            {searchNotice ? (
-              <p className="text-[0.65rem] text-ink-soft" role="status">
-                {searchNotice.title}
-                {searchNotice.support ? ` — ${searchNotice.support}` : ''}
-              </p>
-            ) : null}
-            {searchBusy ? (
-              <p className="text-[0.65rem] text-mute" role="status">
-                Searching this system…
-              </p>
-            ) : null}
-            {searchFailed ? (
-              <p className="text-[0.65rem] text-red-800">
-                Could not search this system. Try again.
-              </p>
-            ) : null}
-            {searchNotice ? null : addablePeople.length === 0 ? (
-              <p className="text-[0.65rem] text-mute">
-                {peopleQuery.trim()
-                  ? onSearchPeople && peopleQuery.trim().length < 2
-                    ? 'Type at least 2 characters to search this system.'
-                    : 'No people in this system match that search.'
-                  : people.length > 0 && people.every((contact) => selectedDwids.includes(contact.dwid))
-                    ? 'Every matched person in this system is already included.'
-                    : 'No other people returned for this system.'}
-              </p>
-            ) : (
-              <ul className="space-y-0.5 rounded-md border border-line px-2 py-1">
-                {addablePeople.map((contact) => (
-                  <li key={contact.dwid}>
-                    <button
-                      type="button"
-                      disabled={searchLocked || !contact.dwid}
-                      onClick={() => addPerson(contact)}
-                      className="flex w-full items-center justify-between gap-2 rounded px-1 py-1 text-left text-xs text-ink hover:bg-canvas"
-                    >
-                      <span className="truncate">{formatMatchedContactLabel(contact)}</span>
-                      <span className="shrink-0 text-[0.65rem] text-habeas-navy">Add</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-          {people.length > 0 || selectedDwids.length > 0 ? (
-            <p className="text-[0.65rem] text-mute">
-              {selectedDwids.length === 0
-                ? 'Select at least one person, or leave none to record not a match.'
-                : formatMatchedContactsSummary(people, selectedDwids)}
-            </p>
-          ) : null}
           <div className="flex gap-1.5">
             <Button type="button" size="sm" disabled={disabled || pending} onClick={goNext}>
               Continue

@@ -299,6 +299,42 @@ def test_conventions_alias_and_exclude_via_merge():
     assert "drop_ingestor" in keys or "drop_ingestor_land" in keys
 
 
+def test_data_vertical_matching_alias_first_wins_via_merge():
+    inventory = merge_fleet_inventory(
+        env_prefix="dpra-dev",
+        discovery_mode="gcp",
+        services=[
+            CloudRunServiceInput(
+                name="projects/p/locations/us-east4/services/matching-dev",
+                url="https://matching-dev.example.run.app",
+            ),
+            CloudRunServiceInput(
+                name=(
+                    "projects/p/locations/us-east4/services/"
+                    "data-vertical-matching-dev"
+                ),
+                url="https://data-vertical-matching-dev.example.run.app",
+            ),
+        ],
+        jobs=[
+            SchedulerJobInput(
+                name="projects/p/locations/us-east4/jobs/dpra-dev-matching"
+            ),
+        ],
+        service_suffix=service_suffix_from_prefix("dpra-dev"),
+    )
+    keys = {w.worker_key for w in inventory.workers}
+    assert "matching" in keys
+    assert "data_vertical_matching" not in keys
+    matching_rows = [w for w in inventory.workers if w.worker_key == "matching"]
+    assert len(matching_rows) == 1
+    matching = matching_rows[0]
+    assert matching.scheduled is True
+    assert "matching" in matching.schedule_job_keys
+    assert matching.deployed is True
+    assert matching.service_name == "matching-dev"
+
+
 @pytest.mark.asyncio
 async def test_collect_worker_health_uses_discovery(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(

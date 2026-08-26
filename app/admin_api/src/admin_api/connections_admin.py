@@ -363,55 +363,27 @@ def _hardcoded_systems_catalog() -> SystemsCatalogResponse:
     return SystemsCatalogResponse(
         systems=[
             SystemCatalogEntry(
-                system_id="axios_hq",
-                display_label="Axios HQ",
-                invite_allowed=False,
-                credential_fields=[],
-                trust_copy=(
-                    "Axios HQ uses Upload mode only. Export a contact or subscriber "
-                    "list as CSV and upload it. No API credentials are required."
-                ),
-            ),
-            SystemCatalogEntry(
                 system_id="paylocity",
                 display_label="Paylocity",
                 credential_fields=[
-                    SystemCredentialField(id="host", label="Server / host name", required=True),
+                    SystemCredentialField(id="client_id", label="Client ID", required=True),
                     SystemCredentialField(
-                        id="port",
-                        label="Port",
-                        required=True,
-                        help="Must be 22",
-                    ),
-                    SystemCredentialField(
-                        id="directory",
-                        label="Directory",
-                        required=False,
-                        help="Optional folder on the SFTP host",
-                    ),
-                    SystemCredentialField(id="username", label="User name", required=True),
-                    SystemCredentialField(
-                        id="auth_method",
-                        label="Authentication method",
-                        required=True,
-                        help="password or key",
-                    ),
-                    SystemCredentialField(
-                        id="password",
-                        label="Password",
+                        id="client_secret",
+                        label="Client secret",
                         input_type="password",
-                        required=False,
+                        required=True,
                     ),
+                    SystemCredentialField(id="company_id", label="Company ID", required=True),
                     SystemCredentialField(
-                        id="private_key",
-                        label="Private key (PEM)",
-                        input_type="password",
-                        required=False,
+                        id="environment",
+                        label="Environment",
+                        required=True,
+                        help="sandbox or production",
                     ),
                 ],
                 trust_copy=(
-                    "Paylocity uses SFTP (port 22) with a dedicated username and "
-                    "password or key file. Paste those integration credentials only."
+                    "Paylocity uses OAuth client credentials from the Developer Portal. "
+                    "Paste the integration client ID, secret, company ID, and environment."
                 ),
             ),
             SystemCatalogEntry(
@@ -675,14 +647,14 @@ async def _run_connection_test(
     credentials: dict[str, str],
     *,
     impersonate_service_account: str | None = None,
-) -> tuple[bool, str, dict]:
+) -> tuple[bool, str]:
     try:
         testers_mod = importlib.import_module("admin_api.connection_testers")
     except ImportError:
-        return True, "stub_ok", {"detail": "stub_ok"}
+        return True, "stub_ok"
     test_fn = getattr(testers_mod, "test_connection", None)
     if test_fn is None:
-        return True, "stub_ok", {"detail": "stub_ok"}
+        return True, "stub_ok"
     result = test_fn(
         system,
         credentials,
@@ -690,20 +662,12 @@ async def _run_connection_test(
     )
     if inspect.isawaitable(result):
         result = await result
-    if isinstance(result, tuple) and len(result) == 3:
-        ok, detail, triage = result
-        return bool(ok), str(detail), dict(triage or {})
     if isinstance(result, tuple) and len(result) == 2:
         ok, detail = result
-        return bool(ok), str(detail), {"detail": str(detail)}
+        return bool(ok), str(detail)
     if isinstance(result, dict):
-        return (
-            bool(result.get("ok", False)),
-            str(result.get("detail", "")),
-            dict(result.get("triage") or {"detail": str(result.get("detail", ""))}),
-        )
-    return bool(result), "ok" if result else "failed", {}
-
+        return bool(result.get("ok", False)), str(result.get("detail", ""))
+    return bool(result), "ok" if result else "failed"
 
 
 @router.get("", response_model=ConnectionListResponse)
@@ -915,7 +879,7 @@ async def test_connection(connection_id: UUID, _principal: SuperAdminPrincipal):
             raw_sa = meta.get("service_account_email")
             if isinstance(raw_sa, str) and raw_sa.strip():
                 share_sa = raw_sa.strip()
-        ok, detail, triage = await _run_connection_test(
+        ok, detail = await _run_connection_test(
             connection.system,
             credentials,
             impersonate_service_account=share_sa,
@@ -923,20 +887,12 @@ async def test_connection(connection_id: UUID, _principal: SuperAdminPrincipal):
         safe_detail = sanitize_test_detail(detail) or "unknown_error"
         tested_at = datetime.now(timezone.utc)
         if connections_db is not None:
-            sanitize_triage = None
-            try:
-                testers_mod = importlib.import_module("admin_api.connection_testers")
-                sanitize_triage = getattr(testers_mod, "sanitize_triage", None)
-            except ImportError:
-                sanitize_triage = None
-            safe_triage = sanitize_triage(triage) if callable(sanitize_triage) else dict(triage or {})
             await connections_db.set_test_result(
                 conn,
                 connection_id,
                 ok=ok,
                 detail=safe_detail,
                 tested_at=tested_at,
-                triage=safe_triage or {"detail": safe_detail},
             )
             await connections_db.update_connection_status(
                 conn,
@@ -951,12 +907,6 @@ async def test_connection(connection_id: UUID, _principal: SuperAdminPrincipal):
                        last_test_ok = $3,
                        last_test_detail = $4,
                        status = CASE WHEN $3 THEN 'connected' ELSE 'failed' END,
-                       metadata = jsonb_set(
-                           COALESCE(metadata, '{}'::jsonb),
-                           '{last_test_triage}',
-                           $5::jsonb,
-                           true
-                       ),
                        updated_at = NOW()
                  WHERE id = $1
                 """,
@@ -964,7 +914,6 @@ async def test_connection(connection_id: UUID, _principal: SuperAdminPrincipal):
                 tested_at,
                 ok,
                 safe_detail,
-                json.dumps(triage or {"detail": safe_detail}),
             )
     return ConnectionTestResponse(ok=ok, detail=safe_detail)
 

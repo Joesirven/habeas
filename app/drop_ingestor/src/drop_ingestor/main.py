@@ -169,6 +169,20 @@ async def ingest_promote(body: PromoteRequest | None = None):
         except Exception:
             logger.exception("drop_promote_failed", extra={"event": "drop_promote_failed"})
             raise HTTPException(status_code=500, detail="promote failed") from None
+        if result.request_ids:
+            from habeas_privacy_core.db.connections import (
+                stamp_intake_batch_on_connections,
+            )
+
+            stamped = await stamp_intake_batch_on_connections(conn)
+            if stamped:
+                logger.info(
+                    "drop_promote_intake_stamp_ok",
+                    extra={
+                        "event": "drop_promote_intake_stamp_ok",
+                        "count": stamped,
+                    },
+                )
 
     return {
         "status": "ok" if result.promoted or result.promote_attempt_id else "idle",

@@ -217,6 +217,7 @@ async def process_next():
                     "reason": "bq_lookup_error",
                     "retry_after": retry_after.isoformat(),
                 }
+            # DROP-only: Auth0 matching lives on the auth0 worker, not matching-dev.
             audit = build_matching_audit_payload(
                 started_at=started_at,
                 attempt_number=attempt_number,

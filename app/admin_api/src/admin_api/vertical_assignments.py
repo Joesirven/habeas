@@ -1,4 +1,11 @@
-"""Vertical catalog + owner assignment APIs (KD20 / KTD1)."""
+"""Vertical catalog + owner assignment APIs (KD20 / KTD1).
+
+Identity-Aware Proxy is domain-wide (``habeas.us`` on ops-ia-web). There is
+no per-vertical IAP IAM. Vertical access — including Data (``data`` /
+cassandra, catalog ``view_only``) — is granted by ``user_vertical_assignments``.
+Member invites mint and redeem that grant; they are not connection-credential
+invites and must not reject Data because the wizard is view-only.
+"""
 
 from __future__ import annotations
 
@@ -626,7 +633,11 @@ async def mint_member_invite(
     body: MemberInviteCreate,
     principal: OwnerConfigPrincipal,
 ) -> MemberInviteOut:
-    """Owner mints a data_user invite — reuses connection invite token helpers."""
+    """Owner mints a data_user invite — reuses connection invite token helpers.
+
+    Catalog ``view_only`` (Data / cassandra) does not block this route. IAP
+    stays domain-wide; the invite writes ``user_vertical_assignments`` on redeem.
+    """
     if principal.role == ROLE_DATA_USER:
         raise HTTPException(status_code=403, detail="insufficient role")
     known_ids = {v.vertical_id for v in CATALOG_VERTICALS}

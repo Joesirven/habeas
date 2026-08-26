@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from admin_api.upload_templates import parse_upload_csv, suggest_column_mapping
+from admin_api.upload_templates import (
+    EMAIL_FORMAT_STRICT,
+    PHONE_FORMAT_E164,
+    parse_upload_csv,
+    suggest_column_mapping,
+)
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "upload_mapping"
 
@@ -29,7 +34,7 @@ def test_success_fixture_matches_canonical_headers() -> None:
 
 def test_email_only_fixture_succeeds() -> None:
     ok, detail, stats = parse_upload_csv(
-        system="axios_hq",
+        system="axios_headquarters",
         content=_bytes("success_email_only.csv"),
         multi_pii_delimiter=None,
     )
@@ -62,7 +67,7 @@ def test_names_without_email_are_usable() -> None:
 
 def test_autobind_fixture_maps_display_aliases_without_user_map() -> None:
     ok, detail, stats = parse_upload_csv(
-        system="axios_hq",
+        system="axios_headquarters",
         content=_bytes("autobind.csv"),
         multi_pii_delimiter=None,
     )
@@ -101,7 +106,7 @@ def test_remap_wrong_map_still_fails() -> None:
         column_mapping={"email": "Department"},
     )
     assert ok is False
-    assert detail == "upload_no_usable_rows"
+    assert detail == "upload_rows_rejected"
 
 
 def test_failure_no_identifier_needs_mapping() -> None:
@@ -115,15 +120,97 @@ def test_failure_no_identifier_needs_mapping() -> None:
     assert stats["detected_header_count"] == 2
 
 
-def test_failure_no_usable_rows() -> None:
+def test_failure_no_usable_rows_are_rejected_with_row_indexes() -> None:
     ok, detail, stats = parse_upload_csv(
         system="hr_alumni",
         content=_bytes("failure_no_usable_rows.csv"),
         multi_pii_delimiter=None,
     )
     assert ok is False
-    assert detail == "upload_no_usable_rows"
+    assert detail == "upload_rows_rejected"
     assert stats["row_count"] == 1
+    assert stats["rejected_row_count"] == 1
+    assert stats["rejected_rows"] == [
+        {"row": 1, "codes": ["email_invalid", "phone_invalid"]},
+    ]
+
+
+def test_corrupted_emails_fixture_rejects_each_row() -> None:
+    ok, detail, stats = parse_upload_csv(
+        system="axios_headquarters",
+        content=_bytes("corrupted_emails.csv"),
+        multi_pii_delimiter=None,
+    )
+    assert ok is False
+    assert detail == "upload_rows_rejected"
+    assert stats["rejected_row_count"] == 3
+    assert [item["row"] for item in stats["rejected_rows"]] == [1, 2, 3]
+    assert all("email_invalid" in item["codes"] for item in stats["rejected_rows"])
+
+
+def test_corrupted_phones_fixture_rejects_each_row() -> None:
+    ok, detail, stats = parse_upload_csv(
+        system="paylocity",
+        content=_bytes("corrupted_phones.csv"),
+        multi_pii_delimiter=None,
+    )
+    assert ok is False
+    assert detail == "upload_rows_rejected"
+    assert stats["rejected_row_count"] == 3
+    assert all("phone_invalid" in item["codes"] for item in stats["rejected_rows"])
+
+
+def test_mixed_good_and_corrupt_keeps_accepted_count_and_indexes() -> None:
+    ok, detail, stats = parse_upload_csv(
+        system="hr_alumni",
+        content=_bytes("mixed_good_and_corrupt.csv"),
+        multi_pii_delimiter=None,
+    )
+    assert ok is False
+    assert detail == "upload_rows_rejected"
+    assert stats["accepted_row_count"] == 1
+    assert stats["rejected_row_count"] == 2
+    assert stats["rejected_rows"] == [
+        {"row": 2, "codes": ["email_invalid"]},
+        {"row": 3, "codes": ["phone_invalid"]},
+    ]
+
+
+def test_e164_phone_format_rejects_unprefixed_us_number() -> None:
+    ok, detail, stats = parse_upload_csv(
+        system="paylocity",
+        content=_bytes("success_phone_only.csv"),
+        multi_pii_delimiter=None,
+        phone_format=PHONE_FORMAT_E164,
+    )
+    assert ok is False
+    assert detail == "upload_rows_rejected"
+    assert stats["rejected_rows"][0]["codes"] == ["phone_invalid"]
+
+
+def test_strict_email_rejects_single_letter_tld() -> None:
+    content = b"email\nuser@example.c\n"
+    ok, detail, stats = parse_upload_csv(
+        system="axios_headquarters",
+        content=content,
+        multi_pii_delimiter=None,
+        email_format=EMAIL_FORMAT_STRICT,
+    )
+    assert ok is False
+    assert detail == "upload_rows_rejected"
+    assert stats["rejected_rows"][0]["codes"] == ["email_invalid"]
+
+
+def test_invalid_format_code() -> None:
+    ok, detail, stats = parse_upload_csv(
+        system="axios_headquarters",
+        content=_bytes("success_email_only.csv"),
+        multi_pii_delimiter=None,
+        email_format="not-a-format",
+    )
+    assert ok is False
+    assert detail == "upload_invalid_format"
+    assert stats == {}
 
 
 def test_suggest_column_mapping_autobind_headers() -> None:

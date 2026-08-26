@@ -31,8 +31,8 @@ import {
   matchingLabRequestId,
   matchingLabResolveSystemId,
   matchingLabTarget,
-  matchingResultRowToInboxItem,
   parseDropStatusId,
+  type MatchingLabPeopleSource,
   type MatchingResultsViewProps,
   type SearchPeopleFn,
 } from '@/components/matching-results-lab/matching-results-lab-types'
@@ -53,20 +53,16 @@ import {
   DROP_RESPONSE_STATUS_OPTIONS,
   fetchOwnerVerticalMatchingDetailOptional,
   getAuth0MatchCandidates,
-  getDropMatchingResults,
+  getNeedsAttention,
   getOwnerMatchingNeedsAttention,
-  listOwnerConnectors,
   postDropMatchingResultPromote,
   searchMdrPeople,
   suggestedDropResponseStatus,
   type Auth0MatchCandidate,
-  type ConnectionRecord,
-  type MatchTypeFilter,
   type MatchedPersonContact,
   type MdrPeopleSearchPayload,
   type NeedsAttentionItem,
 } from '@/lib/api'
-import { resolveMatchingConnectorGate } from '@/lib/connection-display'
 import { actionToast } from '@/lib/action-toast'
 import {
   buildInboxGroupingStacks,
@@ -156,6 +152,15 @@ function OwnerMatchingReviewVariation({
   return <Component {...viewProps} />
 }
 
+function peopleSourceFromVertical(
+  vertical: string | null | undefined,
+): MatchingLabPeopleSource | null {
+  const id = vertical?.trim().toLowerCase()
+  if (id === 'data' || id === 'cassandra') return 'mdr'
+  if (id === 'auth0') return 'auth0'
+  return null
+}
+
 function contactsFromMdrSearch(payload: MdrPeopleSearchPayload): MatchedPersonContact[] {
   return Array.isArray(payload.contacts) ? payload.contacts : []
 }
@@ -238,46 +243,34 @@ export function MatchingResultsLabPage() {
   const verticalFilter = search.vertical?.trim() || undefined
   const systemFilter = search.system?.trim() || undefined
   const inboxFetchLimit = Math.min(1000, page * INBOX_PAGE_SIZE)
-  const opsMatchType: MatchTypeFilter | undefined =
-    !dataOwnerPersona &&
-    (matchFilter === 'single_match' ||
-      matchFilter === 'multi_match' ||
-      matchFilter === 'not_found')
-      ? matchFilter
-      : undefined
 
   const queueQuery = useQuery({
     queryKey: [
       'admin-api',
       'ops',
-      dataOwnerPersona ? 'requests' : 'drop',
-      dataOwnerPersona ? 'needs-attention' : 'matching-results',
+      'requests',
+      'needs-attention',
       'matching-results-lab',
       dataOwnerPersona ? 'data-owner' : 'ops',
       inboxFetchLimit,
       verticalFilter ?? null,
       systemFilter ?? null,
-      opsMatchType ?? null,
     ],
-    queryFn: async () => {
-      if (dataOwnerPersona) {
-        return getOwnerMatchingNeedsAttention({
-          limit: inboxFetchLimit,
-          offset: 0,
-          vertical: verticalFilter,
-          system: systemFilter,
-        })
-      }
-      const payload = await getDropMatchingResults({
-        limit: inboxFetchLimit,
-        ...(opsMatchType ? { match_type: opsMatchType } : {}),
-      })
-      const results = payload.results ?? []
-      return {
-        items: results.map(matchingResultRowToInboxItem),
-        total: payload.stats?.total ?? results.length,
-      }
-    },
+    queryFn: () =>
+      dataOwnerPersona
+        ? getOwnerMatchingNeedsAttention({
+            limit: inboxFetchLimit,
+            offset: 0,
+            vertical: verticalFilter,
+            system: systemFilter,
+          })
+        : getNeedsAttention({
+            limit: inboxFetchLimit,
+            offset: 0,
+            kind: 'matching',
+            vertical: verticalFilter,
+            system: systemFilter,
+          }),
     enabled: canAccessOpsSurfaces(role),
     refetchInterval: 10_000,
     placeholderData: (previous) => previous,
@@ -574,78 +567,27 @@ export function MatchingResultsLabPage() {
 
   const detail = matchingQuery.data ?? null
   const contacts = detail?.matched_contacts ?? []
-  const peopleVertical = ownerVertical ?? activeItem?.vertical ?? detail?.vertical
-  const peopleSystem = ownerSystem ?? matchingLabResolveSystemId(activeItem, detail)
-  const peopleSource = matchingLabPeopleSource(peopleSystem, peopleVertical)
+  const peopleSource =
+    matchingLabPeopleSource(
+      ownerSystem ?? matchingLabResolveSystemId(activeItem, detail),
+    ) ?? peopleSourceFromVertical(ownerVertical ?? activeItem?.vertical ?? detail?.vertical)
   const searchRequestId = activeItem ? matchingLabRequestId(activeItem.request_id) : null
-  const gateVertical = peopleVertical?.trim() || null
-  const gateVerticalId = gateVertical?.toLowerCase() ?? ''
-  const isDataMdrSearch = peopleSource === 'mdr' || gateVerticalId === 'data'
-  const fetchOwnerConnectors =
-    Boolean(dataOwnerPersona && gateVertical && gateVerticalId !== 'data')
-
-  const connectorsQuery = useQuery({
-    queryKey: ['admin-api', 'owner', 'connectors', gateVertical, 'results-lab-gate'],
-    queryFn: () => listOwnerConnectors(gateVertical!),
-    enabled: fetchOwnerConnectors,
-    staleTime: 60_000,
-    retry: false,
-  })
-
-  const matchingGateReminders = useMemo(() => {
-    return (me?.connector_reminders ?? []).filter((reminder) => {
-      if (peopleSystem && reminder.system && reminder.system !== peopleSystem) return false
-      if (gateVertical && reminder.vertical_id && reminder.vertical_id !== gateVertical) {
-        return false
-      }
-      return true
-    })
-  }, [gateVertical, me?.connector_reminders, peopleSystem])
-
-  const matchingGateConnections = useMemo((): ConnectionRecord[] | null => {
-    if (!fetchOwnerConnectors) return null
-    const rows = connectorsQuery.data?.connectors ?? []
-    const scoped = peopleSystem
-      ? rows.filter((row) => row.system === peopleSystem)
-      : rows
-    return scoped as unknown as ConnectionRecord[]
-  }, [connectorsQuery.data?.connectors, fetchOwnerConnectors, peopleSystem])
-
-  const peopleSearchPending =
-    peopleSource == null
-      ? {
-          title: 'Needs connection',
-          support: 'matching is not live on this system',
-        }
-      : null
-
-  const peopleSearchBlocked = useMemo(() => {
-    if (isDataMdrSearch || peopleSource == null) return null
-    return resolveMatchingConnectorGate({
-      attempts: detail?.attempts,
-      reminders: matchingGateReminders,
-      connections: matchingGateConnections,
-    })
-  }, [
-    detail?.attempts,
-    isDataMdrSearch,
-    matchingGateConnections,
-    matchingGateReminders,
-    peopleSource,
-  ])
 
   const searchPeople = useCallback<SearchPeopleFn>(
     async (query) => {
       const needle = query.trim()
       if (!needle) return []
       if (peopleSource === 'mdr') {
-        const requestorState = activeItem?.requestor_state?.trim()
-        if (!requestorState) return []
-        return contactsFromMdrSearch(
-          await searchMdrPeople(needle, {
-            state: requestorState,
-          }),
-        )
+        // Request-wide GET /ops/drop/matching-contacts/search 403s data_owner.
+        if (dataOwnerPersona) {
+          actionToast.info({
+            id: 'matching-lab-mdr-search-ops-only',
+            title: 'Person search is ops-only',
+            description: 'Vertical review shows counts and codes only — no PII.',
+          })
+          return []
+        }
+        return contactsFromMdrSearch(await searchMdrPeople(needle))
       }
       if (peopleSource === 'auth0') {
         if (!searchRequestId) return []
@@ -657,7 +599,7 @@ export function MatchingResultsLabPage() {
       }
       return []
     },
-    [activeItem?.requestor_state, peopleSource, searchRequestId],
+    [dataOwnerPersona, peopleSource, searchRequestId],
   )
 
   useEffect(() => {
@@ -898,10 +840,7 @@ export function MatchingResultsLabPage() {
     onUseBatchDefaultChange: setUseBatchDefault,
     selectedCount: selectedKeys.size,
     onApplySelection: () => applyMutation.mutate({ mode: 'selection' }),
-    onSearchPeople:
-      peopleSource && !peopleSearchBlocked ? searchPeople : undefined,
-    peopleSearchBlocked,
-    peopleSearchPending,
+    onSearchPeople: peopleSource ? searchPeople : undefined,
   }
 
   const reviewTitle = activeItem ? inboxItemTitle(activeItem) : null

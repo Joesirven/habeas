@@ -10,12 +10,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, HTTPException
-
-from auth0.config import settings
-from auth0.credentials import load_auth0_credentials
-from auth0.dbt_runner import run_external_hash_dbt_build
-from auth0.hash_extract import run_hash_extract
 from habeas_privacy_core.audit.redaction import redact_error_text
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
 from habeas_privacy_core.db.vertical_hash_refresh import (
@@ -34,6 +28,13 @@ from habeas_privacy_core.queue.constants import (
     VERTICAL_HASH_REFRESH_ATTEMPTS_TABLE,
 )
 from habeas_privacy_core.vertical_hash.audit import build_vertical_audit_payload
+from fastapi import FastAPI, HTTPException
+
+from auth0.config import settings
+from auth0.credentials import load_auth0_credentials
+from auth0.dbt_runner import run_external_hash_dbt_build
+from auth0.hash_extract import run_hash_extract
+from auth0.vertical_match import ADAPTER, VerticalMatchOutcome, run_auth0_vertical_match
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,53 @@ async def _complete_stub(
     return {"attempt_id": attempt_id, "step": step, "status": status}
 
 
+async def _complete_matching(
+    conn: Any,
+    attempt_id: int,
+    outcome: VerticalMatchOutcome,
+) -> dict[str, Any]:
+    """Terminal matching transition — count-only audit, never hashes or vendor ids."""
+    status = "success" if outcome.ok else "submit_error"
+    error_detail = outcome.error_detail
+    audit = json.dumps(
+        build_vertical_audit_payload(
+            adapter=ADAPTER,
+            step=STEP_MATCHING,
+            system=SYSTEM,
+            matched=outcome.ok and outcome.match_count > 0,
+            error_code=outcome.error_code,
+            error_class=outcome.error_class,
+            error_detail=error_detail,
+        )
+    )
+    await conn.execute(
+        f"""
+        UPDATE {AUTH0_ATTEMPTS_TABLE}
+           SET status = $2,
+               completed_at = NOW(),
+               error_code = $4,
+               error_message = $5,
+               audit_payload = COALESCE(audit_payload, '{{}}'::jsonb) || $3::jsonb
+         WHERE id = $1 AND status = 'claimed'
+        """,
+        attempt_id,
+        status,
+        audit,
+        outcome.error_code,
+        redact_error_text(error_detail) if error_detail else None,
+    )
+    payload: dict[str, Any] = {
+        "attempt_id": attempt_id,
+        "step": STEP_MATCHING,
+        "status": status,
+    }
+    if outcome.ok:
+        payload["match_count"] = outcome.match_count
+    elif outcome.error_code is not None:
+        payload["reason"] = outcome.error_code
+    return payload
+
+
 @app.post("/matching/submit")
 async def matching_submit():
     if not settings.database_url:
@@ -132,16 +180,32 @@ async def matching_submit():
     row = await _claim(STEP_MATCHING)
     if row is None:
         return {"claimed": False}
-    from auth0.adapters.stub import StubMatchAdapter
 
+    attempt_id = int(row["id"])
     request_id = str(row["request_id"])
-    match = await StubMatchAdapter().match(request_id)
-    result = await _complete_stub(
-        int(row["id"]),
-        STEP_MATCHING,
-        matched=match.matched,
-        matched_external_id=match.auth0_user_id,
-    )
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        try:
+            outcome = await run_auth0_vertical_match(
+                conn,
+                request_id=request_id,
+                attempt_id=attempt_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "auth0_matching_submit_failed",
+                extra={
+                    "event": "auth0_matching_submit_failed",
+                    "error_summary": redact_error_text(str(exc)),
+                },
+            )
+            outcome = VerticalMatchOutcome(
+                ok=False,
+                error_code="auth0_lookup_error",
+                error_class=type(exc).__name__,
+                error_detail=redact_error_text(str(exc)),
+            )
+        result = await _complete_matching(conn, attempt_id, outcome)
     return {"claimed": True, **result}
 
 

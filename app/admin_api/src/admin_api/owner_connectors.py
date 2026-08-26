@@ -2,18 +2,31 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
 import os
+import secrets
+import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Annotated, Any, Protocol
+from urllib.parse import urlencode, urlparse
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from admin_api.connection_testers import test_connection
+from admin_api.connection_tests.google_sheets import (
+    extract_sheet_values_csv,
+    list_drive_spreadsheets,
+    list_spreadsheet_tabs,
+)
 from admin_api.drop_pipeline import _require_database
+from admin_api.lab_sheets_oauth import _OAUTH_SCOPES, settings as lab_oauth_settings
 from admin_api.roles import ConnectorReminderOut, RolePrincipal, require_roles
 from admin_api.vertical_assignments import fetch_principal_verticals, require_vertical_access
 from habeas_privacy_core.auth import (
@@ -34,6 +47,7 @@ from habeas_privacy_core.connections.freshness import (
     connection_gate_input,
     evaluate_connection_reminder,
     gate_fields_from_parts,
+    parse_refresh_cadence,
     parse_stored_active_mode,
     validate_multi_pii_delimiter,
 )
@@ -44,6 +58,9 @@ from habeas_privacy_core.db import connections as connections_db
 from habeas_privacy_core.db.pool import get_pool
 
 logger = logging.getLogger(__name__)
+
+# Owner CSV cap — persist internally; never echo the storage URI to the client.
+MAX_OWNER_UPLOAD_BYTES = 10 * 1024 * 1024
 
 router = APIRouter(prefix="/owner", tags=["owner-connectors"])
 
@@ -73,6 +90,14 @@ _CANONICAL_REFRESH_CADENCES = frozenset(
     }
 )
 
+_OWNER_SHEETS_OAUTH_SYSTEMS = frozenset({"hr_alumni", "bizdev_contacts"})
+_OWNER_CONNECTORS_PATH = "/owner/connectors"
+_TOKEN_URL = "https://oauth2.googleapis.com/token"
+_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
+_OAUTH_SESSION_TTL_SECONDS = 3600
+_HABEAS_EMAIL_DOMAIN = "habeas.us"
+
 
 class CadenceBody(BaseModel):
     cadence_days: int | None = Field(default=None, ge=1, le=3650)
@@ -100,16 +125,23 @@ class ConnectorListOut(BaseModel):
     connectors: list[ConnectorSystemOut]
 
 
+class RejectedUploadRowOut(BaseModel):
+    row: int
+    codes: list[str]
+
+
 class UploadResultOut(BaseModel):
     ok: bool
     detail: str
     connection_id: str
     upload_row_count: int | None = None
-    gcs_uri: str | None = None
     missing_count: int | None = None
     detected_header_count: int | None = None
     detected_headers: list[str] | None = None
     required_headers: list[str] | None = None
+    accepted_row_count: int | None = None
+    rejected_row_count: int | None = None
+    rejected_rows: list[RejectedUploadRowOut] | None = None
 
 
 class CredentialsBody(BaseModel):
@@ -120,6 +152,53 @@ class LiveConnectResultOut(BaseModel):
     ok: bool
     detail: str
     connection_id: str
+
+
+class SheetsOauthStartBody(BaseModel):
+    redirect_uri: str = Field(min_length=8, max_length=512)
+
+
+class SheetsOauthStartOut(BaseModel):
+    session_id: str
+    authorize_url: str
+    state: str
+
+
+class SheetsOauthRedeemBody(BaseModel):
+    session_id: str = Field(min_length=8, max_length=128)
+    code: str = Field(min_length=8, max_length=4096)
+    state: str = Field(min_length=8, max_length=256)
+
+
+class SheetsOauthRedeemOut(BaseModel):
+    ok: bool
+    detail: str
+    connection_id: str | None = None
+    google_email_domain: str | None = None
+
+
+class SheetsOauthTabOut(BaseModel):
+    title: str
+    sheet_id: int | None = None
+
+
+class SheetsOauthFileOut(BaseModel):
+    spreadsheet_id: str
+    name: str
+    tabs: list[SheetsOauthTabOut] = Field(default_factory=list)
+
+
+class SheetsOauthFilesOut(BaseModel):
+    files: list[SheetsOauthFileOut]
+
+
+class SheetsOauthExtractBody(BaseModel):
+    spreadsheet_id: str = Field(min_length=1, max_length=256)
+    tab: str = Field(min_length=1, max_length=256)
+    multi_pii_delimiter: str | None = None
+    column_mapping: dict[str, str] | None = None
+    email_format: str | None = None
+    phone_format: str | None = None
 
 
 class CredentialFieldOut(BaseModel):
@@ -263,6 +342,30 @@ def _reject_owner_mutations(vertical_id: str, principal: RolePrincipal) -> None:
     _reject_data_user_config(principal)
 
 
+_ALLOWED_REJECT_CODES = frozenset({"email_invalid", "phone_invalid", "no_identifier"})
+
+
+def _rejected_rows_out(raw: Any) -> list[RejectedUploadRowOut] | None:
+    if not isinstance(raw, list):
+        return None
+    out: list[RejectedUploadRowOut] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            row = int(item.get("row"))
+        except (TypeError, ValueError):
+            continue
+        codes_raw = item.get("codes")
+        if not isinstance(codes_raw, list):
+            continue
+        codes = [str(code) for code in codes_raw if str(code) in _ALLOWED_REJECT_CODES]
+        if row < 1 or not codes:
+            continue
+        out.append(RejectedUploadRowOut(row=row, codes=codes))
+    return out or None
+
+
 def _validate_vertical(vertical_id: str) -> None:
     try:
         get_vertical(vertical_id)
@@ -285,29 +388,10 @@ def _normalize_mode(mode: str) -> str:
 
 
 def _cadence_metadata_from_canonical(cadence: str) -> dict[str, Any]:
-    """Map canonical ``refresh_cadence`` to persisted metadata fields."""
-    if cadence == REFRESH_CADENCE_RARELY:
-        return {
-            "refresh_cadence": REFRESH_CADENCE_RARELY,
-            "refresh_policy": "static",
-            "min_refresh_interval_hours": 0,
-            "cadence_days": 3650,
-        }
-    if cadence == REFRESH_CADENCE_WITH_NEW_BATCHES:
-        return {
-            "refresh_cadence": REFRESH_CADENCE_WITH_NEW_BATCHES,
-            "refresh_policy": "volatile",
-            "min_refresh_interval_hours": 12,
-            "cadence_days": 1,
-        }
-    if cadence == REFRESH_CADENCE_WEEKLY:
-        return {
-            "refresh_cadence": REFRESH_CADENCE_WEEKLY,
-            "refresh_policy": "volatile",
-            "min_refresh_interval_hours": 0,
-            "cadence_days": 7,
-        }
-    raise HTTPException(status_code=422, detail="invalid_refresh_cadence")
+    """Persist only canonical ``refresh_cadence``; legacy fields stay read-only."""
+    if cadence not in _CANONICAL_REFRESH_CADENCES:
+        raise HTTPException(status_code=422, detail="invalid_refresh_cadence")
+    return {"refresh_cadence": cadence}
 
 
 def _cadence_body_has_input(body: CadenceBody) -> bool:
@@ -500,6 +584,282 @@ def _load_stored_credentials(secret_resource_name: str | None) -> dict[str, str]
     return None
 
 
+@dataclass
+class _OwnerOauthSession:
+    state: str
+    code_verifier: str
+    redirect_uri: str
+    actor_email: str
+    vertical_id: str
+    system: str
+    created_at: float = field(default_factory=time.monotonic)
+
+
+_oauth_sessions: dict[str, _OwnerOauthSession] = {}
+
+
+def _clear_oauth_sessions_for_tests() -> None:
+    _oauth_sessions.clear()
+
+
+def _oauth_client_id() -> str:
+    return lab_oauth_settings.sheets_lab_oauth_client_id.strip()
+
+
+def _oauth_client_secret() -> str:
+    return lab_oauth_settings.sheets_lab_oauth_client_secret.strip()
+
+
+def _oauth_configured() -> bool:
+    return bool(_oauth_client_id() and _oauth_client_secret())
+
+
+def _purge_oauth_sessions() -> None:
+    now = time.monotonic()
+    expired = [
+        sid
+        for sid, session in _oauth_sessions.items()
+        if now - session.created_at > _OAUTH_SESSION_TTL_SECONDS
+    ]
+    for sid in expired:
+        _oauth_sessions.pop(sid, None)
+
+
+def _pkce_pair() -> tuple[str, str]:
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return verifier, challenge
+
+
+def _normalize_redirect_uri(uri: str) -> str:
+    parsed = urlparse(uri.strip())
+    path = parsed.path.rstrip("/") or "/"
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
+def _allowed_owner_redirects() -> set[str]:
+    allowed = {
+        f"http://127.0.0.1:5173{_OWNER_CONNECTORS_PATH}",
+        f"http://localhost:5173{_OWNER_CONNECTORS_PATH}",
+        f"http://127.0.0.1:5174{_OWNER_CONNECTORS_PATH}",
+        f"http://localhost:5174{_OWNER_CONNECTORS_PATH}",
+    }
+    raw = lab_oauth_settings.sheets_lab_allowed_redirect_uris.replace(",", "|")
+    for part in raw.split("|"):
+        part = part.strip()
+        if not part:
+            continue
+        parsed = urlparse(part)
+        if parsed.scheme and parsed.netloc:
+            allowed.add(f"{parsed.scheme}://{parsed.netloc}{_OWNER_CONNECTORS_PATH}")
+    return allowed
+
+
+def _reject_non_sheets_oauth(system: str) -> None:
+    if system not in _OWNER_SHEETS_OAUTH_SYSTEMS:
+        raise HTTPException(
+            status_code=422,
+            detail="sheets oauth not allowed for this system",
+        )
+
+
+def _refresh_token_from_credentials(credentials: dict[str, str] | None) -> str | None:
+    if not credentials:
+        return None
+    raw = credentials.get("refresh_token")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
+async def _access_token_from_refresh(refresh_token: str) -> str:
+    payload = {
+        "client_id": _oauth_client_id(),
+        "client_secret": _oauth_client_secret(),
+        "refresh_token": refresh_token,
+        "grant_type": "refresh_token",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(_TOKEN_URL, data=payload)
+    except httpx.RequestError:
+        logger.info("owner_sheets_oauth step=refresh_token detail=unreachable")
+        raise HTTPException(status_code=502, detail="token_unreachable") from None
+    if resp.status_code >= 400:
+        logger.info(
+            "owner_sheets_oauth step=refresh_token status_class=%s",
+            f"{resp.status_code // 100}xx",
+        )
+        raise HTTPException(status_code=401, detail="auth_failed")
+    access = resp.json().get("access_token")
+    if not isinstance(access, str) or not access:
+        raise HTTPException(status_code=401, detail="auth_failed")
+    return access
+
+
+def _parse_column_mapping(column_mapping: str | None) -> dict[str, str] | None:
+    if not isinstance(column_mapping, str) or not column_mapping.strip():
+        return None
+    try:
+        raw_map = json.loads(column_mapping)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail="invalid column_mapping") from exc
+    if not isinstance(raw_map, dict):
+        raise HTTPException(status_code=422, detail="invalid column_mapping")
+    return {
+        str(key): str(value)
+        for key, value in raw_map.items()
+        if str(key).strip() and str(value).strip()
+    }
+
+
+def _upload_failure_out(
+    *,
+    connection_id: UUID,
+    safe_detail: str,
+    stats: dict[str, Any],
+) -> UploadResultOut:
+    detected_raw = stats.get("detected_headers")
+    required_raw = stats.get("required_headers")
+    return UploadResultOut(
+        ok=False,
+        detail=safe_detail,
+        connection_id=str(connection_id),
+        missing_count=stats.get("missing_count"),
+        detected_header_count=stats.get("detected_header_count"),
+        detected_headers=(
+            [str(h) for h in detected_raw if str(h).strip()]
+            if isinstance(detected_raw, list)
+            else None
+        ),
+        required_headers=(
+            [str(h) for h in required_raw if str(h).strip()]
+            if isinstance(required_raw, list)
+            else None
+        ),
+        accepted_row_count=stats.get("accepted_row_count"),
+        rejected_row_count=stats.get("rejected_row_count"),
+        rejected_rows=_rejected_rows_out(stats.get("rejected_rows")),
+    )
+
+
+async def _ingest_owner_csv(
+    *,
+    vertical_id: str,
+    system: str,
+    principal: RolePrincipal,
+    content: bytes,
+    delimiter: str | None,
+    column_mapping: dict[str, str] | None,
+    email_format: str | None,
+    phone_format: str | None,
+    allow_live_mode: bool,
+    extra_metadata: dict[str, Any] | None = None,
+    log_event: str = "owner_upload",
+) -> UploadResultOut:
+    """Validate CSV via parse_upload_csv and persist on success (upload or extract)."""
+    from admin_api.connection_tests.upload_csv import test_upload_system
+
+    ok, detail, stats = await test_upload_system(
+        system,
+        content=content,
+        multi_pii_delimiter=delimiter,
+        column_mapping=column_mapping,
+        email_format=email_format,
+        phone_format=phone_format,
+    )
+    safe_detail = sanitize_test_detail(detail) or "unknown_error"
+
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        connection = await _resolve_connection(
+            conn,
+            vertical_id=vertical_id,
+            system=system,
+            created_by=principal.email,
+        )
+        connection_id = UUID(str(connection.id))
+        current_mode = parse_stored_active_mode(dict(connection.metadata or {}))
+        if current_mode == APPROACH_LIVE and not allow_live_mode:
+            raise HTTPException(
+                status_code=422,
+                detail="upload not allowed while active_mode is live",
+            )
+        if not ok:
+            if safe_detail not in {"upload_needs_mapping", "upload_rows_rejected"}:
+                await connections_db.set_test_result(
+                    conn,
+                    connection_id,
+                    ok=False,
+                    detail=safe_detail,
+                    tested_at=datetime.now(timezone.utc),
+                )
+            logger.info(
+                "%s_failed connection_id=%s system=%s detail=%s",
+                log_event,
+                connection_id,
+                system,
+                safe_detail,
+            )
+            return _upload_failure_out(
+                connection_id=connection_id,
+                safe_detail=safe_detail,
+                stats=stats,
+            )
+
+        gcs_uri = await persist_upload_object(
+            system=system,
+            connection_id=connection_id,
+            content=content,
+        )
+        uploaded_at = datetime.now(timezone.utc).isoformat()
+        row_count = int(stats.get("row_count") or 0)
+        patch: dict[str, Any] = {
+            "vertical_id": vertical_id,
+            "gcs_uri": gcs_uri,
+            "multi_pii_delimiter": delimiter,
+            "last_successful_upload_at": uploaded_at,
+            "last_successful_refresh_at": uploaded_at,
+            "upload_row_count": row_count,
+        }
+        if extra_metadata:
+            patch.update(extra_metadata)
+        if current_mode != APPROACH_LIVE:
+            patch["active_mode"] = APPROACH_UPLOAD
+        updated = await _merge_metadata(conn, connection_id, patch)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="connection not found")
+        await connections_db.update_connection_status(
+            conn,
+            connection_id,
+            "connected",
+            owner_email=principal.email,
+        )
+        await connections_db.set_test_result(
+            conn,
+            connection_id,
+            ok=True,
+            detail=safe_detail,
+            tested_at=datetime.now(timezone.utc),
+        )
+
+    logger.info(
+        "%s_ok connection_id=%s system=%s row_count=%s",
+        log_event,
+        connection_id,
+        system,
+        row_count,
+    )
+    return UploadResultOut(
+        ok=True,
+        detail=safe_detail,
+        connection_id=str(connection_id),
+        upload_row_count=row_count,
+    )
+
+
 async def _apply_live_test_outcome(
     conn: Any,
     *,
@@ -553,8 +913,8 @@ def _wizard_ready(connection: Connection) -> None:
     active_mode = parse_stored_active_mode(dict(meta))
     if active_mode not in {APPROACH_LIVE, APPROACH_UPLOAD}:
         raise HTTPException(status_code=422, detail="active_mode required")
-    if meta.get("cadence_days") is None:
-        raise HTTPException(status_code=422, detail="cadence_days required")
+    if parse_refresh_cadence(dict(meta)) is None and meta.get("cadence_days") is None:
+        raise HTTPException(status_code=422, detail="refresh_cadence required")
     if active_mode == APPROACH_UPLOAD:
         if not meta.get("last_successful_upload_at"):
             raise HTTPException(status_code=422, detail="successful upload required")
@@ -824,6 +1184,8 @@ async def upload_system_csv(
     file: UploadFile = File(...),
     multi_pii_delimiter: str | None = Form(default=None),
     column_mapping: str | None = Form(default=None),
+    email_format: str | None = Form(default=None),
+    phone_format: str | None = Form(default=None),
 ) -> UploadResultOut:
     """Multipart CSV upload → U5 tester → stub/GCS writer → freshness metadata."""
     _validate_vertical(vertical_id)
@@ -843,128 +1205,21 @@ async def upload_system_csv(
     content = await file.read()
     if not content:
         raise HTTPException(status_code=422, detail="empty upload")
+    if len(content) > MAX_OWNER_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="upload_too_large")
 
-    parsed_mapping: dict[str, str] | None = None
-    if isinstance(column_mapping, str) and column_mapping.strip():
-        try:
-            raw_map = json.loads(column_mapping)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=422, detail="invalid column_mapping") from exc
-        if not isinstance(raw_map, dict):
-            raise HTTPException(status_code=422, detail="invalid column_mapping")
-        parsed_mapping = {
-            str(key): str(value)
-            for key, value in raw_map.items()
-            if str(key).strip() and str(value).strip()
-        }
-
-    from admin_api.connection_tests.upload_csv import test_upload_system
-
-    ok, detail, stats = await test_upload_system(
-        system,
+    parsed_mapping = _parse_column_mapping(column_mapping)
+    return await _ingest_owner_csv(
+        vertical_id=vertical_id,
+        system=system,
+        principal=principal,
         content=content,
-        multi_pii_delimiter=delimiter,
+        delimiter=delimiter,
         column_mapping=parsed_mapping,
-    )
-    safe_detail = sanitize_test_detail(detail) or "unknown_error"
-
-    _require_database()
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        connection = await _resolve_connection(
-            conn,
-            vertical_id=vertical_id,
-            system=system,
-            created_by=principal.email,
-        )
-        connection_id = UUID(str(connection.id))
-        current_mode = parse_stored_active_mode(dict(connection.metadata or {}))
-        if current_mode == APPROACH_LIVE:
-            raise HTTPException(
-                status_code=422,
-                detail="upload not allowed while active_mode is live",
-            )
-        if not ok:
-            if safe_detail != "upload_needs_mapping":
-                await connections_db.set_test_result(
-                    conn,
-                    connection_id,
-                    ok=False,
-                    detail=safe_detail,
-                    tested_at=datetime.now(timezone.utc),
-                )
-            logger.info(
-                "owner_upload_failed connection_id=%s system=%s detail=%s",
-                connection_id,
-                system,
-                safe_detail,
-            )
-            detected_raw = stats.get("detected_headers")
-            required_raw = stats.get("required_headers")
-            return UploadResultOut(
-                ok=False,
-                detail=safe_detail,
-                connection_id=str(connection_id),
-                missing_count=stats.get("missing_count"),
-                detected_header_count=stats.get("detected_header_count"),
-                detected_headers=(
-                    [str(h) for h in detected_raw if str(h).strip()]
-                    if isinstance(detected_raw, list)
-                    else None
-                ),
-                required_headers=(
-                    [str(h) for h in required_raw if str(h).strip()]
-                    if isinstance(required_raw, list)
-                    else None
-                ),
-            )
-
-        gcs_uri = await persist_upload_object(
-            system=system,
-            connection_id=connection_id,
-            content=content,
-        )
-        uploaded_at = datetime.now(timezone.utc).isoformat()
-        row_count = int(stats.get("row_count") or 0)
-        patch: dict[str, Any] = {
-            "vertical_id": vertical_id,
-            "gcs_uri": gcs_uri,
-            "multi_pii_delimiter": delimiter,
-            "last_successful_upload_at": uploaded_at,
-            "last_successful_refresh_at": uploaded_at,
-            "upload_row_count": row_count,
-        }
-        if current_mode != APPROACH_LIVE:
-            patch["active_mode"] = APPROACH_UPLOAD
-        updated = await _merge_metadata(conn, connection_id, patch)
-        if updated is None:
-            raise HTTPException(status_code=404, detail="connection not found")
-        await connections_db.update_connection_status(
-            conn,
-            connection_id,
-            "connected",
-            owner_email=principal.email,
-        )
-        await connections_db.set_test_result(
-            conn,
-            connection_id,
-            ok=True,
-            detail=safe_detail,
-            tested_at=datetime.now(timezone.utc),
-        )
-
-    logger.info(
-        "owner_upload_ok connection_id=%s system=%s row_count=%s",
-        connection_id,
-        system,
-        row_count,
-    )
-    return UploadResultOut(
-        ok=True,
-        detail=safe_detail,
-        connection_id=str(connection_id),
-        upload_row_count=row_count,
-        gcs_uri=gcs_uri,
+        email_format=email_format,
+        phone_format=phone_format,
+        allow_live_mode=False,
+        log_event="owner_upload",
     )
 
 
@@ -1207,4 +1462,364 @@ async def complete_system_wizard(
         allowed_approaches=sorted(binding.allowed_approaches),
         connection=updated,
         display_name=updated.display_name,
+    )
+
+
+def _sheets_oauth_guards(
+    vertical_id: str,
+    system: str,
+    principal: RolePrincipal,
+) -> Any:
+    _validate_vertical(vertical_id)
+    _reject_owner_mutations(vertical_id, principal)
+    _reject_non_sheets_oauth(system)
+    return _binding_or_404(vertical_id, system)
+
+
+@router.post(
+    "/verticals/{vertical_id}/systems/{system}/sheets-oauth/start",
+    response_model=SheetsOauthStartOut,
+)
+async def start_owner_sheets_oauth(
+    vertical_id: str,
+    system: str,
+    body: SheetsOauthStartBody,
+    principal: VerticalAccessPrincipal,
+    _role: OwnerRolePrincipal,
+) -> SheetsOauthStartOut:
+    """Start PKCE OAuth; Google redirects back to ``/owner/connectors``."""
+    _sheets_oauth_guards(vertical_id, system, principal)
+    _purge_oauth_sessions()
+    if not _oauth_configured():
+        raise HTTPException(status_code=503, detail="sheets_oauth_not_configured")
+
+    redirect_uri = _normalize_redirect_uri(body.redirect_uri)
+    if redirect_uri not in _allowed_owner_redirects():
+        raise HTTPException(status_code=400, detail="redirect_uri_not_allowed")
+    parsed = urlparse(redirect_uri)
+    if parsed.path.rstrip("/") != _OWNER_CONNECTORS_PATH:
+        raise HTTPException(status_code=400, detail="redirect_uri_not_allowed")
+
+    verifier, challenge = _pkce_pair()
+    state = secrets.token_urlsafe(24)
+    session_id = secrets.token_urlsafe(18)
+    _oauth_sessions[session_id] = _OwnerOauthSession(
+        state=state,
+        code_verifier=verifier,
+        redirect_uri=redirect_uri,
+        actor_email=principal.email,
+        vertical_id=vertical_id,
+        system=system,
+    )
+    params = {
+        "client_id": _oauth_client_id(),
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": " ".join(_OAUTH_SCOPES),
+        "state": state,
+        "access_type": "offline",
+        "prompt": "consent",
+        "include_granted_scopes": "true",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    }
+    authorize_url = f"{_AUTH_URL}?{urlencode(params)}"
+    logger.info(
+        "owner_sheets_oauth_start system=%s vertical_id=%s session=%s",
+        system,
+        vertical_id,
+        session_id[:8],
+    )
+    return SheetsOauthStartOut(
+        session_id=session_id,
+        authorize_url=authorize_url,
+        state=state,
+    )
+
+
+@router.post(
+    "/verticals/{vertical_id}/systems/{system}/sheets-oauth/redeem",
+    response_model=SheetsOauthRedeemOut,
+)
+async def redeem_owner_sheets_oauth(
+    vertical_id: str,
+    system: str,
+    body: SheetsOauthRedeemBody,
+    principal: VerticalAccessPrincipal,
+    _role: OwnerRolePrincipal,
+) -> SheetsOauthRedeemOut:
+    """Exchange the authorization code and store the refresh token in Secret Manager."""
+    _sheets_oauth_guards(vertical_id, system, principal)
+    _purge_oauth_sessions()
+    if not _oauth_configured():
+        raise HTTPException(status_code=503, detail="sheets_oauth_not_configured")
+
+    session = _oauth_sessions.get(body.session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="oauth_session_not_found")
+    if session.actor_email != principal.email:
+        raise HTTPException(status_code=403, detail="oauth_session_actor_mismatch")
+    if session.vertical_id != vertical_id or session.system != system:
+        raise HTTPException(status_code=404, detail="oauth_session_not_found")
+    if body.state != session.state:
+        raise HTTPException(status_code=400, detail="state_mismatch")
+
+    token_payload = {
+        "client_id": _oauth_client_id(),
+        "client_secret": _oauth_client_secret(),
+        "code": body.code,
+        "code_verifier": session.code_verifier,
+        "grant_type": "authorization_code",
+        "redirect_uri": session.redirect_uri,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            token_resp = await client.post(_TOKEN_URL, data=token_payload)
+    except httpx.RequestError:
+        logger.info("owner_sheets_oauth_redeem step=token detail=unreachable")
+        raise HTTPException(status_code=502, detail="token_unreachable") from None
+
+    if token_resp.status_code >= 400:
+        logger.info(
+            "owner_sheets_oauth_redeem step=token status_class=%s",
+            f"{token_resp.status_code // 100}xx",
+        )
+        raise HTTPException(status_code=400, detail="token_exchange_failed")
+
+    token_json: dict[str, Any] = token_resp.json()
+    refresh_token = token_json.get("refresh_token")
+    access_token = token_json.get("access_token")
+    if not isinstance(access_token, str) or not access_token:
+        raise HTTPException(status_code=400, detail="token_exchange_failed")
+    if not isinstance(refresh_token, str) or not refresh_token:
+        raise HTTPException(status_code=400, detail="refresh_token_missing")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            info_resp = await client.get(
+                _USERINFO_URL,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+    except httpx.RequestError:
+        logger.info("owner_sheets_oauth_redeem step=userinfo detail=unreachable")
+        raise HTTPException(status_code=400, detail="google_userinfo_unavailable") from None
+
+    if info_resp.status_code >= 300:
+        logger.info(
+            "owner_sheets_oauth_redeem step=userinfo status_class=%s",
+            f"{info_resp.status_code // 100}xx",
+        )
+        raise HTTPException(status_code=400, detail="google_userinfo_unavailable")
+
+    email_val = info_resp.json().get("email")
+    google_email: str | None = None
+    if isinstance(email_val, str) and email_val.strip() and "@" in email_val:
+        google_email = email_val.strip().lower()
+    if google_email is None:
+        logger.info("owner_sheets_oauth_redeem step=userinfo detail=missing_email")
+        raise HTTPException(status_code=400, detail="google_userinfo_unavailable")
+
+    domain = google_email.split("@", 1)[1]
+    if domain != _HABEAS_EMAIL_DOMAIN:
+        logger.info("owner_sheets_oauth_redeem detail=non_habeas_domain")
+        raise HTTPException(status_code=403, detail="google_email_domain_not_allowed")
+
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        connection = await _resolve_connection(
+            conn,
+            vertical_id=vertical_id,
+            system=system,
+            created_by=principal.email,
+        )
+        connection_id = UUID(str(connection.id))
+        secret_name = connections_db.secret_resource_name(system, str(connection_id))
+        writer = get_secret_writer()
+        writer.put_secret(
+            secret_name,
+            json.dumps(
+                {"auth_mode": "oauth", "refresh_token": refresh_token},
+                sort_keys=True,
+            ),
+        )
+        rotated_at = datetime.now(timezone.utc).isoformat()
+        updated = await _merge_metadata(
+            conn,
+            connection_id,
+            {
+                "vertical_id": vertical_id,
+                "active_mode": APPROACH_LIVE,
+                "credentials_rotated_at": rotated_at,
+                "google_email_domain": domain,
+            },
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="connection not found")
+        await connections_db.update_connection_status(
+            conn,
+            connection_id,
+            "invited",
+            owner_email=principal.email,
+            secret_resource_name=secret_name,
+        )
+
+    session.code_verifier = ""
+    session.state = secrets.token_urlsafe(8)
+    logger.info(
+        "owner_sheets_oauth_redeem ok system=%s vertical_id=%s connection_id=%s domain=%s",
+        system,
+        vertical_id,
+        connection_id,
+        domain,
+    )
+    return SheetsOauthRedeemOut(
+        ok=True,
+        detail="refresh_token_stored",
+        connection_id=str(connection_id),
+        google_email_domain=domain,
+    )
+
+
+@router.get(
+    "/verticals/{vertical_id}/systems/{system}/sheets-oauth/files",
+    response_model=SheetsOauthFilesOut,
+)
+async def list_owner_sheets_oauth_files(
+    vertical_id: str,
+    system: str,
+    principal: VerticalAccessPrincipal,
+    _role: OwnerRolePrincipal,
+) -> SheetsOauthFilesOut:
+    """List Drive spreadsheets (and tabs) visible to the stored owner refresh token."""
+    _sheets_oauth_guards(vertical_id, system, principal)
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        connection = await _resolve_connection(
+            conn,
+            vertical_id=vertical_id,
+            system=system,
+            created_by=principal.email,
+        )
+    credentials = _load_stored_credentials(connection.secret_resource_name)
+    refresh_token = _refresh_token_from_credentials(credentials)
+    if not refresh_token:
+        raise HTTPException(status_code=400, detail="secret not stored")
+
+    access_token = await _access_token_from_refresh(refresh_token)
+    ok, detail, files = await list_drive_spreadsheets(access_token)
+    if not ok:
+        status = 401 if detail == "auth_failed" else 502
+        raise HTTPException(status_code=status, detail=detail)
+
+    out: list[SheetsOauthFileOut] = []
+    for item in files:
+        spreadsheet_id = str(item.get("id") or "").strip()
+        if not spreadsheet_id:
+            continue
+        tabs_out: list[SheetsOauthTabOut] = []
+        tabs_ok, _tabs_detail, tabs = await list_spreadsheet_tabs(
+            access_token, spreadsheet_id
+        )
+        if tabs_ok:
+            for tab in tabs:
+                title = tab.get("title")
+                if not isinstance(title, str) or not title.strip():
+                    continue
+                raw_sheet_id = tab.get("sheet_id")
+                tabs_out.append(
+                    SheetsOauthTabOut(
+                        title=title,
+                        sheet_id=raw_sheet_id if isinstance(raw_sheet_id, int) else None,
+                    )
+                )
+        out.append(
+            SheetsOauthFileOut(
+                spreadsheet_id=spreadsheet_id,
+                name=str(item.get("name") or ""),
+                tabs=tabs_out,
+            )
+        )
+    logger.info(
+        "owner_sheets_oauth_files connection_id=%s system=%s file_count=%s",
+        connection.id,
+        system,
+        len(out),
+    )
+    return SheetsOauthFilesOut(files=out)
+
+
+@router.post(
+    "/verticals/{vertical_id}/systems/{system}/sheets-oauth/extract",
+    response_model=UploadResultOut,
+)
+async def extract_owner_sheets_oauth(
+    vertical_id: str,
+    system: str,
+    body: SheetsOauthExtractBody,
+    principal: VerticalAccessPrincipal,
+    _role: OwnerRolePrincipal,
+) -> UploadResultOut:
+    """Extract a selected file+tab and persist through the CSV upload path."""
+    _sheets_oauth_guards(vertical_id, system, principal)
+
+    raw_delimiter = body.multi_pii_delimiter
+    if isinstance(raw_delimiter, str) and raw_delimiter.strip() == "":
+        raw_delimiter = None
+    try:
+        delimiter = validate_multi_pii_delimiter(raw_delimiter)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid multi_pii_delimiter") from exc
+
+    parsed_mapping: dict[str, str] | None = None
+    if body.column_mapping:
+        parsed_mapping = {
+            str(key): str(value)
+            for key, value in body.column_mapping.items()
+            if str(key).strip() and str(value).strip()
+        } or None
+
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        connection = await _resolve_connection(
+            conn,
+            vertical_id=vertical_id,
+            system=system,
+            created_by=principal.email,
+        )
+    credentials = _load_stored_credentials(connection.secret_resource_name)
+    refresh_token = _refresh_token_from_credentials(credentials)
+    if not refresh_token:
+        raise HTTPException(status_code=400, detail="secret not stored")
+
+    access_token = await _access_token_from_refresh(refresh_token)
+    ok, detail, content = await extract_sheet_values_csv(
+        access_token,
+        body.spreadsheet_id.strip(),
+        body.tab.strip(),
+    )
+    if not ok:
+        status = 401 if detail == "auth_failed" else 400
+        raise HTTPException(status_code=status, detail=detail)
+    if not content:
+        raise HTTPException(status_code=422, detail="empty upload")
+    if len(content) > MAX_OWNER_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="upload_too_large")
+
+    return await _ingest_owner_csv(
+        vertical_id=vertical_id,
+        system=system,
+        principal=principal,
+        content=content,
+        delimiter=delimiter,
+        column_mapping=parsed_mapping,
+        email_format=body.email_format,
+        phone_format=body.phone_format,
+        allow_live_mode=True,
+        extra_metadata={
+            "spreadsheet_id": body.spreadsheet_id.strip(),
+        },
+        log_event="owner_sheets_extract",
     )

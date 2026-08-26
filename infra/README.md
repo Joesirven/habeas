@@ -106,7 +106,7 @@ gcloud builds submit --config=infra/cloudbuild/reaper-dev.yaml \
   --project=example-gcp-project \
   --substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@/postgres?host=/cloudsql/example-gcp-project:us-east4:dpra-dev-temp'
 
-gcloud builds submit --config=infra/cloudbuild/matching-dev.yaml \
+gcloud builds submit --config=infra/cloudbuild/data-vertical-matching-dev.yaml \
   --project=example-gcp-project \
   --substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@/postgres?host=/cloudsql/example-gcp-project:us-east4:dpra-dev-temp'
 
@@ -168,91 +168,12 @@ logs `drop_promote_requestor_state_default` (no PII) with `sandbox_override=true
 |------|---------|
 | [`cloudbuild/hash-index-refresh-dev.yaml`](cloudbuild/hash-index-refresh-dev.yaml) | Build/push/deploy `hash-index-refresh-dev` |
 
-Runs dbt under `transform/drop_hash/` against BigQuery `drop_hash_index`. Needs `DATABASE_URL` + workload identity with BigQuery **jobUser** and dataset write on `example-gcp-project.drop_hash_index` (read on MDR source datasets). Matching remains **select-only** on the three DROP serving marts (`email_hash`, `phone_hash`, `ndz_hash`) plus table-level read on the Auth0 mart (below).
+Runs dbt under `transform/drop_hash/` against BigQuery `drop_hash_index`. Needs `DATABASE_URL` + workload identity with BigQuery **jobUser** and dataset write on `example-gcp-project.drop_hash_index` (read on MDR source datasets). Matching SA remains **select-only** on the three serving marts (`email_hash`, `phone_hash`, `ndz_hash`).
 
 ```bash
 gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
   --project=example-gcp-project \
   --substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@/postgres?host=/cloudsql/example-gcp-project:us-east4:dpra-dev-temp'
-```
-
-### auth0-dev hash refresh (ops follow-up — not automated)
-
-**`auth0-dev` is live on DEV.** Cloud Build: [`cloudbuild/auth0-dev.yaml`](cloudbuild/auth0-dev.yaml). Service URL (from `gcloud run services describe`): `https://auth0-dev-hsa55rg7ja-uk.a.run.app`. `admin-api-dev` `AUTH0_WORKER_URL` is this URL (not `127.0.0.1`). Invoker is the admin-api runtime SA only.
-
-```bash
-gcloud builds submit --config=infra/cloudbuild/auth0-dev.yaml \
-  --project=example-gcp-project \
-  --substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@/postgres?host=/cloudsql/example-gcp-project:us-east4:dpra-dev-temp'
-```
-
-IAM below is still an **ops follow-up** (dedicated SA if missing — same gap as `hash-index-refresh`):
-
-| Grant | Resource |
-|-------|----------|
-| `roles/secretmanager.secretAccessor` | GSM secret id `dpra-connections-auth0-{connection_id}` (logical path `dpra/connections/auth0/{connection_id}`; slashes → hyphens — GSM ids cannot contain `/`. `{connection_id}` is `integration_connections.id`) |
-| `roles/bigquery.jobUser` | Project `example-gcp-project` (load + dbt jobs) |
-| `roles/bigquery.dataEditor` | **Table-level only:** `example-gcp-project.external_hash_index.auth0_hashed_raw` and `auth0_email_hash__build`. Do **not** grant dataset-wide `dataEditor` on `external_hash_index` — that dataset also holds Mailchimp hashed raw / marts; dataset-wide write can truncate sibling tables. |
-
-Empty `WRITE_TRUNCATE` of hashed raw is being removed in the writer (do not treat an empty extract as an acceptable full-replace of Auth0 or any sibling table).
-
-Invoker: admin-api runtime SA only — never user/IAP `run.invoker`. Hash refresh is **not** auto-scheduled (ops enqueue/process via admin-api `POST /ops/verticals/auth0/hash-refresh/*`).
-
-Worker extract + dbt runbook: [`app/auth0/README.md`](../app/auth0/README.md). dbt project: [`transform/external_hash/README.md`](../transform/external_hash/README.md).
-
-### matching-dev Auth0 mart read (Jose-gated, dev only)
-
-After DROP email match, `matching-dev` and Job `matching-drain-dev` SELECT
-`example-gcp-project.external_hash_index.auth0_email_hash__build`. They need project
-**jobUser** plus **table-level** `dataViewer` — not dataset-wide access, and not
-write on hashed raw.
-
-**Runtime identity:** do **not** invent a dedicated matching SA. Cloud Build still
-deploys `matching-dev` / `matching-drain-dev` as the compute SA already set in
-[`matching-dev.yaml`](cloudbuild/matching-dev.yaml)
-(`95660886550-compute@developer.gserviceaccount.com`). Resolve the live identity
-before apply; override `_MATCHING_RUNTIME_SA` only if that describe output differs.
-
-```bash
-gcloud run services describe matching-dev --region=us-east4 --project=example-gcp-project \
-  --format='value(spec.template.spec.serviceAccountName)'
-```
-
-| Grant | Resource |
-|-------|----------|
-| `roles/bigquery.jobUser` | Project `example-gcp-project` (query jobs) |
-| `roles/bigquery.dataViewer` | **Table-level only:** `example-gcp-project.external_hash_index.auth0_email_hash__build` |
-
-| Auth0 table | matching-dev |
-|-------------|--------------|
-| `auth0_email_hash__build` | **read** (`dataViewer`) — lookup target |
-| `auth0_hashed_raw` | **none** — writer path is `auth0-dev` / local extract |
-
-Do **not** grant dataset-wide `dataViewer` or `dataEditor` on `external_hash_index`
-(Mailchimp hashed raw / marts share that dataset). Do **not** apply these binds
-on prod. Mart table must exist (Auth0 hash refresh / dbt) before table IAM.
-
-| File | Purpose |
-|------|---------|
-| [`cloudbuild/matching-dev-iam.yaml`](cloudbuild/matching-dev-iam.yaml) | One-shot: jobUser + Auth0 mart `dataViewer` for the matching-dev runtime SA |
-
-**Jose-gated apply (dev only)** — ask Jose before submit (project IAM + table IAM):
-
-```bash
-gcloud builds submit --config=infra/cloudbuild/matching-dev-iam.yaml \
-  --project=example-gcp-project
-```
-
-Verify after bind:
-
-```bash
-gcloud projects get-iam-policy example-gcp-project \
-  --flatten='bindings[].members' \
-  --filter='bindings.role:roles/bigquery.jobUser AND bindings.members:serviceAccount:95660886550-compute@developer.gserviceaccount.com' \
-  --format='table(bindings.role)'
-
-bq get-iam-policy --table=true \
-  example-gcp-project:external_hash_index.auth0_email_hash__build
 ```
 
 ### Cloud Run auth (dev)
@@ -268,7 +189,7 @@ bq get-iam-policy --table=true \
 |---------|---------|
 | `admin-api-dev` | Compute SA + allowlisted user invokers; Cloud Run **IAP off** (`--no-iap`); app-level `REQUIRE_IAP_IDENTITY` accepts IAP email header **or** verified Bearer Google ID token (ADC) |
 | `admin-web-dev` / `ops-ia-web-dev` | Public Cloud Run + browser IAP front door (see `admin-web-dev.yaml` / `ops-ia-web-dev.yaml`); prefer **ops-ia-web-dev** for DROP ops + owner connector flows |
-| Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `matching-dev`, `hash-index-refresh-dev`, `auth0-dev`, `axios-hq-dev`, `lever-dev`, `paylocity-dev`, `cassandra-dev`, `google-sheets-alumni-dev`, `google-sheets-contact-us-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) — never user/IAP direct. Do **not** treat `google-sheets-dev` as a matcher (scaffold 503). |
+| Workers (`drop-connector-dev`, `drop-ingestor-dev`, `request-dispatcher-dev`, `data-fulfillment-dispatcher-dev`, `data-vertical-matching-dev`, `hash-index-refresh-dev`) | Runtime SA of admin-api only (`95660886550-compute@developer.gserviceaccount.com`) — never user/IAP direct |
 
 Admin-api attaches a Google ID token when proxying to `*.run.app` workers (`admin_api.cloud_run_auth`). Operators never call workers directly — process/enqueue goes through admin-api. Localhost worker URLs skip auth.
 
@@ -348,7 +269,7 @@ Prerequisites Jose must keep granted:
 | `roles/run.admin` | Cloud Build executor (`95660886550-compute@…`) | project — so `admin-api-dev.yaml` `auth-front-door` can `run.services.setIamPolicy` (re-assert compute SA `run.invoker`, keep IAP off) |
 | `roles/run.invoker` | compute SA + allowlisted users (e.g. `user:jsirven@…`) | `admin-api-dev` (Cloud Run IAP **off**) |
 | `ADMIN_API_SUPER_ADMINS` / admins / data_owners env | operator emails | Cloud Run env on admin-api (Bearer ADC → super_admins only) |
-| Worker `roles/run.invoker` | **only** admin-api runtime SA | `hash-index-refresh-dev`, `matching-dev`, … |
+| Worker `roles/run.invoker` | **only** admin-api runtime SA | `hash-index-refresh-dev`, `data-vertical-matching-dev`, … |
 | `roles/cloudscheduler.admin` | admin-api runtime SA (`95660886550-compute@…`) | project (live schedule GET/PATCH) |
 | `roles/iam.serviceAccountAdmin` | admin-api runtime SA (`95660886550-compute@…`) | project — live **per-connection Google Sheets SA** create on connection create (`CONNECTIONS_SHEETS_SA_PROVISION=live`) |
 | `roles/iam.serviceAccountTokenCreator` | admin-api runtime SA | on each Sheets share SA (auto on provision; also on named `dpra-sheets-bizdev@` / `dpra-sheets-hr@` for DWD prep) |
@@ -379,26 +300,23 @@ Non–super_admin browsers: use the ops-ia IAP front door, not the ADC Vite prox
 ```bash
 gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev-iam.yaml \
   --project=example-gcp-project
-# Auth0 mart read (Jose-gated, separate from invoker lock):
-# gcloud builds submit --config=infra/cloudbuild/matching-dev-iam.yaml --project=example-gcp-project
 ```
 
 #### Workload identity least privilege (hash-index vs matching) — go-live
 
 Cloud Build does **not** yet attach dedicated runtime service accounts (same gap as other workers besides `reaper`). Before production:
 
-| Workload | Runtime SA (create if missing) | BigQuery / secrets |
-|----------|--------------------------------|--------------------|
+| Workload | Runtime SA (create if missing) | BigQuery |
+|----------|--------------------------------|----------|
 | `hash-index-refresh` | dedicated SA | `roles/bigquery.jobUser` + dataset write on `drop_hash_index` + read on MDR sources |
-| `matching` | distinct SA (today: compute SA on `matching-dev.yaml` — do not invent an email) | **select-only** on DROP `email_hash` / `phone_hash` / `ndz_hash`; **table-level** `roles/bigquery.dataViewer` on `external_hash_index.auth0_email_hash__build` + project `roles/bigquery.jobUser` (see matching-dev Auth0 mart read). Not dataset-wide on `external_hash_index`. |
-| `auth0` (`auth0-dev` — live; URL `https://auth0-dev-hsa55rg7ja-uk.a.run.app`) | dedicated SA still missing (default compute SA today) | **ops follow-up (not automated):** `roles/bigquery.jobUser` on project; **table-level** `roles/bigquery.dataEditor` on `auth0_hashed_raw` / `auth0_email_hash__build` only — **not** dataset-wide `external_hash_index` (Mailchimp shares that dataset); `roles/secretmanager.secretAccessor` on GSM id `dpra-connections-auth0-{connection_id}` (logical `dpra/connections/auth0/{connection_id}`) |
+| `matching` | distinct SA | **select-only** on `email_hash` / `phone_hash` / `ndz_hash` (e.g. `roles/bigquery.dataViewer` at dataset or table) |
 
 Verify after bind:
 
 ```bash
 gcloud run services describe hash-index-refresh-dev --region=us-east4 --project=example-gcp-project \
   --format='value(spec.template.spec.serviceAccountName)'
-gcloud run services describe matching-dev --region=us-east4 --project=example-gcp-project \
+gcloud run services describe data-vertical-matching-dev --region=us-east4 --project=example-gcp-project \
   --format='value(spec.template.spec.serviceAccountName)'
 # Confirm invoker is admin-api SA only (no allUsers):
 gcloud run services get-iam-policy hash-index-refresh-dev --region=us-east4 --project=example-gcp-project
@@ -501,7 +419,7 @@ CONFIRM=yes ENV=dev ./infra/scripts/upsert_worker_scheduler_jobs.sh
 # CONFIRM=yes ENV=prod ./infra/scripts/upsert_worker_scheduler_jobs.sh  # Jose only
 ```
 
-Hash-index refresh is **not** auto-scheduled (manual/ops enqueue). Auth0 hash refresh is also **not** auto-scheduled (see `auth0-dev` follow-up above).
+Hash-index refresh is **not** auto-scheduled (manual/ops enqueue).
 
 ### Fleet discovery naming conventions
 
@@ -511,9 +429,9 @@ Pull-based inventory joins Cloud Scheduler ∪ Cloud Run (no worker heartbeat). 
 
 | Concept | Form | Examples |
 |---------|------|----------|
-| **worker_key** | `snake_case` stable app id | `matching`, `data_fulfillment`, `axios_hq`, `google_sheets` |
-| **Cloud Run service name** | `{service_slug}{-dev\|}` | `matching-dev`, `data-fulfillment-dispatcher-dev`, `google-sheets-dev` |
-| **worker_id** (runtime env) | `{service_slug}-dev` (dev) | `axios-hq-dev`, `admin-api-dev` |
+| **worker_key** | `snake_case` stable app id | `matching`, `data_fulfillment`, `auth0`, `google_sheets` |
+| **Cloud Run service name** | `{service_slug}{-dev\|}` | `data-vertical-matching-dev`, `data-fulfillment-dispatcher-dev`, `google-sheets-dev` |
+| **worker_id** (runtime env) | `{service_slug}-dev` (dev) | `auth0-dev`, `admin-api-dev` |
 | **Scheduler job id** | `dpra-{env}-{job_slug}` | `dpra-dev-matching`, `dpra-dev-drop-connector-download` |
 | **job_key** (admin-api) | `snake_case`; becomes job slug via `_` → `-` | `drop_connector_download` → `dpra-dev-drop-connector-download` |
 
@@ -534,7 +452,7 @@ Pull-based inventory joins Cloud Scheduler ∪ Cloud Run (no worker heartbeat). 
 
 **EXCLUDE_JOBS:** `test-probe-job`, any job not prefixed `dpra-dev-`.
 
-Do **not** treat Cloud Run **Jobs** (`matching-drain-dev`) as fleet workers; surface drain as metadata on `matching` if needed.
+Do **not** treat Cloud Run **Jobs** (`data-vertical-matching-drain-dev`) as fleet workers; surface drain as metadata on `matching` if needed.
 
 #### Service slug ↔ worker_key aliases
 
@@ -543,29 +461,28 @@ Do **not** treat Cloud Run **Jobs** (`matching-drain-dev`) as fleet workers; sur
 | `drop_connector` | `drop-connector-dev` | |
 | `drop_ingestor` | `drop-ingestor-dev` | two scheduler jobs (land / promote) |
 | `request_dispatcher` | `request-dispatcher-dev` | |
-| `matching` | `matching-dev` | drain is a Job, not a Scheduler upsert |
+| `matching` | `data-vertical-matching-dev` | app slug stays `matching`; drain is Job `data-vertical-matching-drain-dev`, not a Scheduler upsert |
 | `data_fulfillment` | `data-fulfillment-dispatcher-dev` | **alias:** strip `-dispatcher` before snake |
 | `hash_index_refresh` | `hash-index-refresh-dev` | not auto-scheduled |
 | `reaper` | `reaper-dev` | |
 | `intake_drop_poller` | `intake-drop-poller-dev` | discover-only until scheduled |
 | `drop_notice_dispatcher` | `drop-notice-dispatcher-dev` | not live yet |
 
-**Connection / vertical workers (DEV Cloud Run names):**
+**Jose-gated cutover:** live traffic is still `matching-dev` (`https://matching-dev-hsa55rg7ja-uk.a.run.app`). `data-vertical-matching-dev` is deployed and Ready (`https://data-vertical-matching-dev-hsa55rg7ja-uk.a.run.app`, invoker = admin-api runtime SA only; drain Job `data-vertical-matching-drain-dev` Ready). Keep admin-api-dev `_MATCHING_URL` on `matching-dev` until Jose flips it to the described `data-vertical-matching-dev` URL. Do **not** submit `data-vertical-matching-prod.yaml` until Jose approves prod cutover.
 
-| worker_key | service_name (dev) | Notes |
-|------------|-------------------|-------|
-| `axios_hq` | `axios-hq-dev` | Axios HQ — yaml and Cloud Run still absent; do not invent `*.run.app` |
-| `paylocity` | `paylocity-dev` | live; no `/ops/verticals/paylocity/*` |
-| `lever` | `lever-dev` | live; no `/ops/verticals/lever/*` |
-| `auth0` | `auth0-dev` | live; `admin-api-dev` `AUTH0_WORKER_URL` |
-| `google_sheets` | `google-sheets-dev` | **scaffold only — do not deploy as matcher** (process 503) |
-| *(connection-scoped)* | `google-sheets-alumni-dev` | first-app; bind `GOOGLE_SHEETS_CONNECTION_ID` (real UUID) or process 503 |
-| *(connection-scoped)* | `google-sheets-contact-us-dev` | first-app; same connection-id bind |
-| `cassandra` | `cassandra-dev` | first-app; default `CASSANDRA_TRANSPORT=stub`; live writes need Direct VPC + secrets |
+**Connection / vertical workers (lock before first Cloud Run create):**
+
+| worker_key | service_name (dev) |
+|------------|-------------------|
+| `paylocity` | `paylocity-dev` |
+| `lever` | `lever-dev` |
+| `auth0` | `auth0-dev` |
+| `google_sheets` | `google-sheets-dev` |
+| `cassandra` | `cassandra-dev` |
+
+Axios HQ Cloud Build yaml and worker live on the other checkout (`agent/connection-error-triage`) — do not first-create `axios-headquarters-dev` or `mailchimp-dev` from this tree.
 
 Rules: service name = kebab-case + `-dev`; `google_sheets` → `google-sheets-dev` (hyphen), worker_key stays underscore. Health probe path is always `GET {service_url}/readyz`.
-
-Sibling first-app yamls: [`lever-dev.yaml`](cloudbuild/lever-dev.yaml), [`paylocity-dev.yaml`](cloudbuild/paylocity-dev.yaml), [`cassandra-dev.yaml`](cloudbuild/cassandra-dev.yaml), [`google-sheets-alumni-dev.yaml`](cloudbuild/google-sheets-alumni-dev.yaml), [`google-sheets-contact-us-dev.yaml`](cloudbuild/google-sheets-contact-us-dev.yaml). Submit from repo root with the same `_DATABASE_URL` socket form as other `*-dev.yaml` files. Axios HQ (`worker_key` `axios_hq`, service `axios-hq-dev`) has no yaml and no Cloud Run yet — do not add `cloudbuild/axios-hq-dev.yaml`.
 
 **Discover-only this wave:** do **not** expand `upsert_worker_scheduler_jobs.sh` for undeployed connection workers. Discovery must work for scheduled DROP workers, unscheduled deployed workers (`hash-index-refresh`, `intake-drop-poller`), and future `*-dev` services as soon as they appear.
 
@@ -574,194 +491,3 @@ Sibling first-app yamls: [`lever-dev.yaml`](cloudbuild/lever-dev.yaml), [`payloc
 ```bash
 gcloud builds submit --config=infra/cloudbuild/reaper.yaml --project=example-gcp-project .
 ```
-
-## Prod Cloud SQL + first DROP pull
-
-First CA DROP **production** pull. Jose-gated ([prod-write-gate](../.agent/modules/prod-write-gate.md)). Lab first — not primary Pipeline nav. No secrets in git, logs, toasts, or this README (ids/counts only).
-
-### Scope this run
-
-| In | Out |
-|----|-----|
-| Prod Cloud SQL `example-gcp-project:us-east4:dpra-prod` + on-demand backup before first pull | Cassandra prod writes (`:9042` / `restricted_person_id`) |
-| `admin-api-prod` + intake/match workers | DROP `upload` / `amend` |
-| Lab **Confirm**: download → land → promote → dispatch → Data ensure-drain | Mailchimp / Auth0 / Paylocity matching |
-| `DROP_ENV=production` → `https://api.drop.privacy.ca.gov` | Scheduled prod DROP download (hold until after first Confirm) |
-| **Data** vertical hash matching only | People / HR matching (later, after marts) |
-
-`DROP_ENV=sandbox` must not point at the production host. `DROP_ALLOW_DEFAULT_REQUESTOR_STATE` stays **off** on deployed prod. Fulfillment does not start from matching.review (Legal kickoff unchanged). Browser never calls workers.
-
-### Provision + backup
-
-[`matching-prod.yaml`](cloudbuild/matching-prod.yaml) already assumes instance `example-gcp-project:us-east4:dpra-prod`. **Check first** — do not create if the instance exists.
-
-| Script | Purpose |
-|--------|---------|
-| [`scripts/provision_dpra_prod_sql.sh`](scripts/provision_dpra_prod_sql.sh) | Create `dpra-prod` if missing |
-| [`scripts/backup_dpra_prod_sql.sh`](scripts/backup_dpra_prod_sql.sh) | Separate on-demand backup **before** the first pull |
-
-```bash
-gcloud sql instances describe dpra-prod --project=example-gcp-project
-
-# Prints gcloud / [dry-run] only (CONFIRM defaults to no)
-./infra/scripts/provision_dpra_prod_sql.sh
-./infra/scripts/backup_dpra_prod_sql.sh
-
-# Live mutate. Prod requires Jose approval (prod-write-gate).
-# CLOUD_SQL_ROOT_PASSWORD required only for live create; never print it.
-CONFIRM=yes ./infra/scripts/provision_dpra_prod_sql.sh   # Jose only
-CONFIRM=yes ./infra/scripts/backup_dpra_prod_sql.sh      # Jose only
-```
-
-Store the prod `DATABASE_URL` in Secret Manager under the id the provision script already names (`database-url-prod`). Never commit it, never paste the URL or password here.
-
-### Hard-stop — do not deploy or Confirm until
-
-> **Do not deploy or Confirm until all of the following are true.**
->
-> 1. `dpra-prod` exists.
-> 2. On-demand backup succeeded (`CONFIRM=yes` on the backup script).
-> 3. Production DROP key exists in GSM (`drop-prod-api-key:latest` — lab paste creates it) and is mounted via `--set-secrets=DROP_API_KEY=drop-prod-api-key:latest` (already in `drop-connector-prod.yaml`). Connector runtime SA has `secretmanager.secretAccessor` on that secret (fail-closed if missing — do not invent a project-wide admin grant).
-> 4. Ops-named `DROP_INTAKE_GCS_BUCKET` is set at connector submit (`_DROP_INTAKE_GCS_BUCKET`). Name is **UNKNOWN** — do not invent; do **not** reuse `FULFILLMENT_GCS_BUCKET` / `privacy-fulfillment-dev`. Empty substitution → `file://` → Confirm refuses after download.
-> 5. `dbmate up` on `dpra-prod` (Jose chooses method — do not invent a migrate one-liner).
-> 6. admin-api runtime SA (`95660886550-compute@developer.gserviceaccount.com`) has `roles/run.invoker` on `drop-connector-prod` **and** `matching-prod`. Connector yaml grants connector after deploy; it does **not** cover matching-prod.
-
-### Required order (do not skip ahead)
-
-`--set-secrets=DROP_API_KEY=drop-prod-api-key:latest` **fails** if the secret or `:latest` does not exist. Lab paste creates it. An operator who submits the connector first will fail closed — still a wasted deploy.
-
-1. Submit `admin-api-prod` (and `admin-web-prod`, or point local Vite at admin-api-prod).
-2. Jose pastes the CA DROP portal production key in **`/dev/drop-prod-cutover`**. GSM `drop-prod-api-key` (and `:latest`) now exists.
-3. Then submit `drop-connector-prod` (and the other intake/match workers).
-
-### admin-api-prod submit
-
-Twin of `admin-api-dev`. [`admin-web-prod.yaml`](cloudbuild/admin-web-prod.yaml) leaves `_VITE_ADMIN_API_URL` empty so the SPA uses same-origin `/api`; nginx proxies to `admin-api-prod` via `ADMIN_API_UPSTREAM`. Do not bake a cross-origin admin-api URL — Cloud Run/IAP hide that fetch as `Failed to fetch`.
-
-`admin-api-prod.yaml` is **still missing** — retarget [`admin-api-dev.yaml`](cloudbuild/admin-api-dev.yaml) (`_SERVICE=admin-api-prod`, `_CLOUDSQL_INSTANCE=example-gcp-project:us-east4:dpra-prod`). That yaml interpolates `${_DATABASE_URL}` into Cloud Run `--set-env-vars` and does **not** default it in `substitutions:`. Submit without `--substitutions=_DATABASE_URL=…` deploys an empty URL.
-
-**Do not** copy the temp-dev `--substitutions=_DATABASE_URL='postgres://postgres:PASSWORD@…'` shape. Cloud Build substitutions appear in **build logs** (and then in Cloud Run env). Read the secret at submit time — do not `echo` it, do not `set -x` around this line, do not paste the value into this file or chat:
-
-```bash
-# Jose-approved first deploy only.
-# Value is captured, never printed. Secret id is from provision_dpra_prod_sql.sh.
-gcloud builds submit --config=infra/cloudbuild/admin-api-dev.yaml \
-  --project=example-gcp-project \
-  --substitutions=_SERVICE=admin-api-prod,_CLOUDSQL_INSTANCE=example-gcp-project:us-east4:dpra-prod,_DATABASE_URL="$(gcloud secrets versions access latest --secret=database-url-prod --project=example-gcp-project)"
-```
-
-`admin-web-prod` must be rebuilt so `/dev/drop-prod-cutover` is reachable, or use local Vite pointed at admin-api-prod. Do **not** submit `drop-connector-prod` yet.
-
-### Lab paste — GSM secret must exist before connector submit
-
-Super-admin lab: **`/dev/drop-prod-cutover`** (not in primary nav). Control-plane notes: [`app/admin_api/README.md`](../app/admin_api/README.md) § Prod DROP cutover (lab).
-
-**Prod API key path (one path):** lab → Secret Manager `drop-prod-api-key`. Jose pastes the portal key; admin-api writes GSM and the response never echoes it. Do **not** pass `_DROP_API_KEY` (or any key value) as a Cloud Build substitution — those land in build logs. `drop-connector-prod.yaml` binds `DROP_API_KEY=drop-prod-api-key:latest` via `--set-secrets`. The lab GSM secret is the intended key; do not add a second path.
-
-The connector runtime SA needs `secretmanager.secretAccessor` on `drop-prod-api-key`. Missing accessor → revision fail / empty mount (fail-closed). Do not invent a project-wide admin grant or a new IAM yaml.
-
-### Intake/match workers — after paste
-
-Same `_DATABASE_URL` GSM-read as admin-api-prod. Do **not** pass `_DROP_API_KEY` on any of these submits. Set `_DROP_INTAKE_GCS_BUCKET` to the ops-named intake bucket — do **not** invent a name (including `privacy-drop-intake-prod`); do **not** reuse `FULFILLMENT_GCS_BUCKET` / `privacy-fulfillment-dev`. Empty substitution → `file://` → Confirm refuses after download.
-
-```bash
-# After Jose pastes the key (GSM drop-prod-api-key:latest exists).
-# _DATABASE_URL is captured, never printed. Do not pass _DROP_API_KEY.
-# Replace <ops-named-intake-bucket> with the real ops name — do not invent one.
-gcloud builds submit --config=infra/cloudbuild/drop-connector-prod.yaml \
-  --project=example-gcp-project \
-  --substitutions=_DATABASE_URL="$(gcloud secrets versions access latest --secret=database-url-prod --project=example-gcp-project)",_DROP_INTAKE_GCS_BUCKET='<ops-named-intake-bucket>'
-```
-
-Prod intake/match workers for this cutover:
-
-| File | Notes |
-|------|-------|
-| [`cloudbuild/drop-connector-prod.yaml`](cloudbuild/drop-connector-prod.yaml) | `DROP_ENV=production`, `DROP_API_BASE_URL=https://api.drop.privacy.ca.gov`. `--set-secrets` for the key. Set `_DROP_INTAKE_GCS_BUCKET` at submit (ops-named; empty default). Post-deploy admin-api SA invoker. |
-| [`cloudbuild/drop-ingestor-dev.yaml`](cloudbuild/drop-ingestor-dev.yaml) retarget (`_SERVICE=drop-ingestor-prod`) | Land / promote only — no DROP key. `drop-ingestor-prod.yaml` is **still missing**. |
-| [`cloudbuild/request-dispatcher-prod.yaml`](cloudbuild/request-dispatcher-prod.yaml) | Dispatch after promote |
-| [`cloudbuild/matching-prod.yaml`](cloudbuild/matching-prod.yaml) | Data drain Job `matching-drain-prod`; **deployed** (Cloud SQL `dpra-prod` exists). Needs admin-api SA `roles/run.invoker` (connector yaml does **not** grant this). |
-
-Do **not** upsert / enable `dpra-prod-drop-connector-download` (or any prod DROP download schedule) until after the first confirmed run.
-
-### Cassandra stays off
-
-Keep `CASSANDRA_TRANSPORT` **non-live** on prod. Do not enable `:9042` / `person_db.restricted_person_id` writes. Prod NAT IP is reserved (see [Cassandra egress](#cassandra-egress--cloud-nat-2026-07-29)); cutover is a later explicit decision.
-
-### First run — lab Confirm
-
-After admin-api-prod, paste, and worker submit above. Super-admin lab: **`/dev/drop-prod-cutover`**.
-
-1. Confirm dialog: download → land → promote → dispatch → Data `ensure-drain`. Explicit **Confirm**.
-2. Monitor via `GET /ops/drop/pipeline` + action toasts (ids/counts only — no PII).
-
-Promote fail-closes when CA DROP prod CSVs omit `requestor_state`. Do not set `DROP_ALLOW_DEFAULT_REQUESTOR_STATE` on prod (sandbox CA override stays off).
-
-Mutations only through admin-api.
-
-### Data matching only — People later
-
-This pull matches the **Data** vertical only. Do **not** run People / HR matching until marts are ready (later meeting). Do not run Mailchimp, Auth0, or Paylocity matching on this first pull.
-
-### Other agents — attach a worker to prod
-
-Scaffolding is live (2026-08-25). Do not invent a second Cloud SQL instance, a different URL hash, or `DROP_INTAKE_GCS_BUCKET`. [Hard-stop](#hard-stop--do-not-deploy-or-confirm-until) and [paste-before-connector order](#required-order-do-not-skip-ahead) above still apply.
-
-**Already up** (`example-gcp-project` / `us-east4`):
-
-| Service | Observed URL |
-|---------|--------------|
-| `admin-api-prod` | `https://admin-api-prod-hsa55rg7ja-uk.a.run.app` |
-| `drop-ingestor-prod` | `https://drop-ingestor-prod-hsa55rg7ja-uk.a.run.app` |
-| `request-dispatcher-prod` | `https://request-dispatcher-prod-hsa55rg7ja-uk.a.run.app` |
-| `matching-prod` + Job `matching-drain-prod` | `https://matching-prod-hsa55rg7ja-uk.a.run.app` |
-| `reaper-prod` | `https://reaper-prod-hsa55rg7ja-uk.a.run.app` |
-
-This project’s prod Cloud Run URLs use suffix **`hsa55rg7ja-uk`**. Do not invent a different hash.
-
-**Checklist to attach another worker:**
-
-1. Retarget the matching `*-dev.yaml` when `*-prod.yaml` is missing (`admin-api-prod.yaml` and `drop-ingestor-prod.yaml` are still missing — see [reaper-prod attached](#reaper-prod-attached-2026-08-25)). Set `_SERVICE=<name>-prod` and `_CLOUDSQL_INSTANCE=example-gcp-project:us-east4:dpra-prod`.
-2. Submit with GSM-read `database-url-prod` — same capture-never-print shape as [admin-api-prod submit](#admin-api-prod-submit). Do not put `DATABASE_URL` in git or type a password into `--substitutions`.
-3. Post-deploy `grant-admin-api-invoker`: admin-api runtime SA (`95660886550-compute@developer.gserviceaccount.com`) only. Never `allUsers`. Never user/IAP `run.invoker`.
-4. After the service is Ready, wire it by retargeting [`admin-api-dev.yaml`](cloudbuild/admin-api-dev.yaml) at `https://<service>-prod-hsa55rg7ja-uk.a.run.app`, then Jose-approved **redeploy `admin-api-prod`**. The eight substitutions that already exist: `_DROP_CONNECTOR_URL`, `_DROP_INGESTOR_URL`, `_REQUEST_DISPATCHER_URL`, `_MATCHING_URL`, `_DATA_FULFILLMENT_URL`, `_HASH_INDEX_REFRESH_URL`, `_REAPER_URL`, `_INTAKE_DROP_POLLER_URL`. **Override** only if the worker is already one of those. There is no `_AUTH0_URL`, Axios HQ URL key (`_AXIOS_URL` / `_AXIOS_HQ_URL`), or other vertical `_…_URL` — if the key does not exist, **add** the substitution and env mapping. Do not invent a missing key and call it an override. `intake_drop_poller` has **no app** — do not deploy a poller or invent a URL. Do **not** invent a fulfillment-prod bucket.
-
-**Still held:**
-
-| Hold | Why |
-|------|-----|
-| `drop-connector-prod` | Lab paste + ops-named `DROP_INTAKE_GCS_BUCKET` first. Do **not** invent a bucket name. |
-| Cassandra live writes | Stay stub / non-live. No `cassandra-prod`. |
-| Lab Confirm / first DROP pull | Connector + prod key + named intake bucket still missing. |
-| `dpra-prod-*` Scheduler | Do not flip until after first Confirm. |
-| `intake_drop_poller` | No app — retired. Do not deploy. |
-| fulfillment-prod bucket | Do not invent. Only `privacy-fulfillment-dev` is named. |
-
-Jose-gated ([prod-write-gate](../.agent/modules/prod-write-gate.md)). Mutations still only through admin-api.
-
-### reaper-prod attached (2026-08-25)
-
-Jose-authorized. `reaper-prod` is attached on `example-gcp-project` / `us-east4` by **retargeting** [`reaper-dev.yaml`](cloudbuild/reaper-dev.yaml) — there is no `reaper-prod.yaml`.
-
-| Substitution | Value |
-|--------------|-------|
-| `_SERVICE` | `reaper-prod` |
-| `_CLOUDSQL_INSTANCE` | `example-gcp-project:us-east4:dpra-prod` |
-| `_DATABASE_URL` | GSM `database-url-prod` (capture-never-print) |
-
-```bash
-# Jose-approved. Value is captured, never printed. Do not echo / set -x / paste the URL.
-gcloud builds submit --config=infra/cloudbuild/reaper-dev.yaml \
-  --project=example-gcp-project \
-  --substitutions=_SERVICE=reaper-prod,_CLOUDSQL_INSTANCE=example-gcp-project:us-east4:dpra-prod,_DATABASE_URL="$(gcloud secrets versions access latest --secret=database-url-prod --project=example-gcp-project)"
-```
-
-Observed URL: `https://reaper-prod-hsa55rg7ja-uk.a.run.app`. Post-deploy invoker: admin-api runtime SA (`95660886550-compute@developer.gserviceaccount.com`) only. Override `_REAPER_URL` on the next admin-api-prod retarget.
-
-**Missing `*-prod.yaml` — retarget `*-dev.yaml`:** `admin-api-prod.yaml` and `drop-ingestor-prod.yaml` are **still missing**. Do not invent those files. Submit [`admin-api-dev.yaml`](cloudbuild/admin-api-dev.yaml) / [`drop-ingestor-dev.yaml`](cloudbuild/drop-ingestor-dev.yaml) with `_SERVICE=admin-api-prod` / `_SERVICE=drop-ingestor-prod`, `_CLOUDSQL_INSTANCE=example-gcp-project:us-east4:dpra-prod`, and GSM `database-url-prod`. Same capture-never-print rule.
-
-**Do not invent a fulfillment-prod bucket.** The only named fulfillment bucket is `privacy-fulfillment-dev`. Do not invent `privacy-fulfillment-prod` or any other prod fulfillment name.
-
-**`intake_drop_poller` has no app.** `app/intake_drop_poller/` is retired. Do not deploy `intake-drop-poller-prod` and do not invent a poller yaml. `_INTAKE_DROP_POLLER_URL` on admin-api-dev is a leftover substitution.
-
-Cassandra stays **off** (see [Cassandra stays off](#cassandra-stays-off)).

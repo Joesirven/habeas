@@ -1,6 +1,8 @@
 """Allowlisted matching attempt audit JSONB builder (KTD4).
 
-Never include hashes, dwids, emails, phones, or raw consumer payloads.
+Never include hashes, dwids, emails, phones, vendor ids, or raw consumer
+payloads. matching-dev drain is DROP-only; Auth0 count/dataset/error keys
+stay allowlisted if a leftover caller passes them, but must not carry PII.
 """
 
 from __future__ import annotations

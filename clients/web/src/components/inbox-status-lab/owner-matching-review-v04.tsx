@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 
 import {
   applyNeedsPeople,
+  ResultContactPii,
+  ResultPeopleSearch,
+  ResultSystemLabel,
   resultViewEmpty,
 } from '@/components/matching-results-lab/ResultViewChrome'
 import {
@@ -10,7 +13,6 @@ import {
   type MatchingResultsViewProps,
 } from '@/components/matching-results-lab/matching-results-lab-types'
 import {
-  formatMatchedContactLabel,
   matchedChannelsFromDetail,
   useMatchingConnectorGate,
 } from '@/components/requests/RequestTriageDialog'
@@ -190,35 +192,6 @@ function gateForThisSystem(
   return gate
 }
 
-const DIRECTORY_SEARCH_DEBOUNCE_MS = 200
-const DIRECTORY_SEARCH_MIN_CHARS = 2
-
-type PeopleSearchPending = { title: string; support: string }
-
-function peopleSearchLockCopy(
-  blocked: MatchingConnectorGate | null | undefined,
-  pending: PeopleSearchPending | null | undefined,
-): { label: string; support: string } | null {
-  if (blocked?.blocked) {
-    const chip = matchingConnectorGateChip(blocked)
-    const label =
-      chip.label === 'Connected' || chip.label === 'Needs setup'
-        ? 'Needs connection'
-        : chip.label
-    return {
-      label,
-      support: matchingConnectorGateBannerCopy(blocked).description,
-    }
-  }
-  if (pending) {
-    return {
-      label: pending.title === 'Connected' ? 'Needs connection' : pending.title,
-      support: pending.support,
-    }
-  }
-  return null
-}
-
 /**
  * Owner matching review — legal/compliance case file.
  * Numbered sections, evidence tone, people as exhibits. No lifecycle rail.
@@ -239,12 +212,7 @@ export function OwnerMatchingReviewV04({
   pending,
   onApply,
   onSearchPeople,
-  peopleSearchBlocked,
-  peopleSearchPending,
-}: MatchingResultsViewProps & {
-  peopleSearchBlocked?: MatchingConnectorGate | null
-  peopleSearchPending?: PeopleSearchPending | null
-}) {
+}: MatchingResultsViewProps) {
   const { me } = useMe()
   const connectorGate = useMatchingConnectorGate({
     attempts: detail?.attempts,
@@ -254,28 +222,6 @@ export function OwnerMatchingReviewV04({
   const [exhibitDwids, setExhibitDwids] = useState<string[]>([])
   const [findings, setFindings] = useState<Record<string, PersonFinding>>({})
   const [addedPeople, setAddedPeople] = useState<MatchedPersonContact[]>([])
-  const [addQuery, setAddQuery] = useState('')
-  const [directoryHits, setDirectoryHits] = useState<MatchedPersonContact[]>([])
-  const [directoryPending, setDirectoryPending] = useState(false)
-  const [directoryFailed, setDirectoryFailed] = useState(false)
-  const searchPeopleRef = useRef(onSearchPeople)
-  searchPeopleRef.current = onSearchPeople
-
-  const locked = Boolean(disabled || pending)
-  const blockedGate =
-    gateForThisSystem(connectorGate, item) ??
-    (peopleSearchBlocked?.blocked ? peopleSearchBlocked : null)
-  const matchingBlocked = Boolean(blockedGate)
-  const searchLock =
-    peopleSearchLockCopy(blockedGate, peopleSearchPending) ??
-    (!onSearchPeople
-      ? {
-          label: 'Needs connection',
-          support: 'Connect this system before people can be searched.',
-        }
-      : null)
-  const recordLocked = locked || matchingBlocked
-  const searchLocked = recordLocked || Boolean(searchLock)
 
   const contactKey = contacts
     .map((contact) => contact.dwid)
@@ -291,16 +237,12 @@ export function OwnerMatchingReviewV04({
       setExhibitDwids([])
       setFindings({})
       setAddedPeople([])
-      setAddQuery('')
-      setDirectoryHits([])
       return
     }
     const finding = suggestedPersonFinding(matchType, matchCount)
     setExhibitDwids(ids)
     setFindings(Object.fromEntries(ids.map((id) => [id, finding])))
     setAddedPeople([])
-    setAddQuery('')
-    setDirectoryHits([])
   }, [
     item?.request_id,
     item?.system,
@@ -312,51 +254,21 @@ export function OwnerMatchingReviewV04({
     matchCount,
   ])
 
-  useEffect(() => {
-    const needle = addQuery.trim()
-    const search = searchPeopleRef.current
-    if (searchLocked || !search || needle.length < DIRECTORY_SEARCH_MIN_CHARS) {
-      setDirectoryHits([])
-      setDirectoryPending(false)
-      setDirectoryFailed(false)
-      return
-    }
-    let cancelled = false
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        setDirectoryPending(true)
-        setDirectoryFailed(false)
-        try {
-          const result = await search(needle)
-          if (!cancelled) setDirectoryHits(result)
-        } catch {
-          if (!cancelled) {
-            setDirectoryHits([])
-            setDirectoryFailed(true)
-          }
-        } finally {
-          if (!cancelled) setDirectoryPending(false)
-        }
-      })()
-    }, DIRECTORY_SEARCH_DEBOUNCE_MS)
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-  }, [addQuery, searchLocked])
-
   const contactByDwid = useMemo(() => {
     const map = new Map<string, MatchedPersonContact>()
     for (const contact of [...contacts, ...addedPeople]) {
       if (contact.dwid) map.set(contact.dwid, contact)
     }
     return map
-  }, [contacts, addedPeople])
+  }, [addedPeople, contacts])
 
   const empty = resultViewEmpty(loading, Boolean(item))
   if (empty) return empty
   if (!item) return empty
 
+  const locked = Boolean(disabled || pending)
+  const blockedGate = gateForThisSystem(connectorGate, item)
+  const matchingBlocked = Boolean(blockedGate)
   const peopleCleared = statusId === '5'
   const notLive =
     detail?.matched_contacts_status === 'not_live' ||
@@ -393,10 +305,7 @@ export function OwnerMatchingReviewV04({
   const exhibits = exhibitDwids
     .map((dwid) => contactByDwid.get(dwid))
     .filter((contact): contact is MatchedPersonContact => Boolean(contact))
-  const addHits = directoryHits.filter((contact) => {
-    const dwid = contact.dwid?.trim()
-    return Boolean(dwid) && !exhibitDwids.includes(dwid)
-  })
+  const directoryPool = [...contactByDwid.values()]
   const exhibitFinding = agreedPersonFinding(exhibitDwids, findings)
   const findingsDisagree = exhibitDwids.length > 1 && exhibitFinding == null
   const emphasizedFinding = suggestedPersonFinding(matchType, matchCount)
@@ -417,6 +326,7 @@ export function OwnerMatchingReviewV04({
         exhibits: '04',
         disposition: '05',
       }
+  const recordLocked = locked || matchingBlocked
   const recordBlocked =
     recordLocked ||
     statusId == null ||
@@ -471,13 +381,13 @@ export function OwnerMatchingReviewV04({
   function addExhibit(contact: MatchedPersonContact) {
     const dwid = contact.dwid?.trim()
     if (!dwid || matchingBlocked || exhibitDwids.includes(dwid)) return
-    setAddedPeople((current) =>
-      current.some((row) => row.dwid?.trim() === dwid) ? current : [...current, contact],
-    )
+    if (!contacts.some((row) => row.dwid === dwid)) {
+      setAddedPeople((current) =>
+        current.some((row) => row.dwid === dwid) ? current : [...current, contact],
+      )
+    }
     const finding = findings[dwid] ?? exhibitFinding ?? emphasizedFinding
     syncCase([...exhibitDwids, dwid], { ...findings, [dwid]: finding })
-    setAddQuery('')
-    setDirectoryHits([])
   }
 
   function recordDisposition() {
@@ -531,7 +441,10 @@ export function OwnerMatchingReviewV04({
                     {row.label}
                   </span>
                   {row.current ? (
-                    <span className="text-[0.65rem] text-mute">this review</span>
+                    <span className="inline-flex flex-wrap items-center gap-1.5">
+                      <span className="text-[0.65rem] text-mute">this review</span>
+                      <ResultSystemLabel item={item} detail={detail} />
+                    </span>
                   ) : null}
                 </li>
               ))}
@@ -628,7 +541,7 @@ export function OwnerMatchingReviewV04({
                           Remove exhibit
                         </button>
                       </div>
-                      <p className="text-xs text-ink">{formatMatchedContactLabel(contact)}</p>
+                      <ResultContactPii contact={contact} />
                       <dl className="space-y-0.5">
                         <Fact label="State" value={contact.state || '—'} />
                         {SURFACE_ORDER.map((surface) => (
@@ -680,61 +593,19 @@ export function OwnerMatchingReviewV04({
               })}
             </ul>
           )}
-          <div className="space-y-1.5 pt-1">
-              <label className="block space-y-1">
-                <span className="flex flex-wrap items-center gap-1.5 text-[0.65rem] text-mute">
-                  Add exhibit from this system
-                  {searchLock ? (
-                    <Badge variant="fail" className="normal-case tracking-normal">
-                      {searchLock.label}
-                    </Badge>
-                  ) : null}
-                </span>
-                <input
-                  type="search"
-                  value={addQuery}
-                  disabled={searchLocked}
-                  onChange={(event) => setAddQuery(event.target.value)}
-                  placeholder="Search persons on this system…"
-                  className="h-7 w-full rounded-md border border-line bg-paper px-2 text-xs text-ink outline-none placeholder:text-mute focus-visible:border-habeas-navy disabled:opacity-50"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </label>
-              {searchLock ? (
-                <p className="text-[0.65rem] text-mute">{searchLock.support}</p>
-              ) : directoryPending ? (
-                <p className="text-[0.65rem] text-mute">Searching this system…</p>
-              ) : directoryFailed ? (
-                <p className="text-[0.65rem] text-ink-soft">
-                  Could not search this system. Try again.
-                </p>
-              ) : addQuery.trim().length < DIRECTORY_SEARCH_MIN_CHARS ? (
-                <p className="text-[0.65rem] text-mute">
-                  Type at least two characters to search this system.
-                </p>
-              ) : (
-                <ul className="max-h-36 space-y-0.5 overflow-y-auto">
-                  {addHits.length === 0 ? (
-                    <li className="text-[0.65rem] text-mute">No persons match that search.</li>
-                  ) : (
-                    addHits.map((contact) => (
-                      <li key={contact.dwid}>
-                        <button
-                          type="button"
-                          disabled={searchLocked || !contact.dwid}
-                          className="flex w-full items-center justify-between gap-2 rounded-md px-1.5 py-1 text-left text-[0.65rem] text-ink hover:bg-panel disabled:opacity-50"
-                          onClick={() => addExhibit(contact)}
-                        >
-                          <span className="truncate">{formatMatchedContactLabel(contact)}</span>
-                          <span className="shrink-0 text-mute">Enter</span>
-                        </button>
-                      </li>
-                    ))
-                  )}
-                </ul>
-              )}
+          {!notLive ? (
+            <div className="space-y-1.5 pt-1">
+              <ResultPeopleSearch
+                onSearchPeople={onSearchPeople}
+                localContacts={directoryPool}
+                excludeDwids={exhibitDwids}
+                onAddPerson={addExhibit}
+                disabled={recordLocked}
+                item={item}
+                detail={detail}
+              />
             </div>
+          ) : null}
         </CaseSection>
 
         <CaseSection number={section.disposition} title="Disposition">

@@ -127,6 +127,14 @@ def test_journey_routes_registered() -> None:
     assert any(param.get("name") == "assignee" for param in needs_params)
     assert any(param.get("name") == "offset" for param in needs_params)
     assert any(param.get("name") == "limit" for param in needs_params)
+    assert any(param.get("name") == "vertical" for param in needs_params)
+    assert any(param.get("name") == "system" for param in needs_params)
+
+    owner_match_path = (
+        "/ops/requests/{request_id}/verticals/{vertical}/matching-results"
+    )
+    owner_match_params = openapi_paths[owner_match_path]["get"]["parameters"]
+    assert any(param.get("name") == "system" for param in owner_match_params)
 
     requests_params = openapi_paths["/requests"]["get"]["parameters"]
     assert any(param.get("name") == "offset" for param in requests_params)
@@ -225,6 +233,7 @@ async def test_list_needs_attention_assignee_filter() -> None:
         ),
     )
     conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
     with patch(
         "admin_api.request_journey.list_matching_needs_attention",
         new_callable=AsyncMock,
@@ -233,7 +242,1090 @@ async def test_list_needs_attention_assignee_filter() -> None:
         response = await request_journey.list_needs_attention(
             conn, limit=50, kind="matching", assignee="rev@habeas.com"
         )
-    assert [item.request_id for item in response.items] == [mine.request_id]
+    assert {item.request_id for item in response.items} == {mine.request_id}
+    assert all(item.assignment and item.assignment.assignee_identity == "rev@habeas.com" for item in response.items)
+    assert {item.system for item in response.items} >= {"hr_alumni", "bizdev_contacts"}
+
+
+@pytest.mark.asyncio
+async def test_list_owner_matching_needs_attention_scopes_verticals() -> None:
+    from admin_api.request_journey import NeedsAttentionAssignment, NeedsAttentionItem
+
+    request_id = _WORKBENCH_REQUEST_ID
+    base = NeedsAttentionItem(
+        request_id=request_id,
+        reason="matching.review",
+        kind="matching",
+        current_stage="review",
+        intake_source="drop",
+        received_at="2026-08-01T00:00:00Z",
+        requested_at="2026-08-01T00:00:00Z",
+        assignment=NeedsAttentionAssignment(
+            target_role="reviewer",
+            kind="assign",
+            assignee_identity="legal-a@example.com",
+        ),
+    )
+
+    async def fake_matching(_conn: Any, *, limit: int) -> list[NeedsAttentionItem]:
+        del limit
+        return [base]
+
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        new_callable=AsyncMock,
+        side_effect=fake_matching,
+    ):
+        items = await request_journey.list_owner_matching_needs_attention(
+            conn,
+            owner_verticals=["data"],
+            limit=50,
+        )
+
+    assert len(items) == 1
+    assert items[0].request_id == request_id
+    assert items[0].vertical == "data"
+    assert items[0].vertical_label == "Data"
+    assert items[0].system == "cassandra"
+    assert items[0].system_label == "CA DROP"
+    assert items[0].assignment is None
+
+
+@pytest.mark.asyncio
+async def test_list_owner_matching_needs_attention_test_vertical_cassandra() -> None:
+    """Assigned owner of ``test`` sees System A + System B as two review rows.
+
+    Labels are never CA DROP or Alumni. CA DROP stays the request source
+    (``intake_source``). Production live set is data plus Auth0.
+    """
+    from admin_api.request_journey import NeedsAttentionItem
+    from admin_api.vertical_dispositions import LIVE_VERTICALS
+
+    assert LIVE_VERTICALS == ("data", "auth0")
+    assert request_journey.LIVE_VERTICALS == LIVE_VERTICALS
+    assert "test" not in LIVE_VERTICALS
+    assert "communications" not in LIVE_VERTICALS
+    assert "people_hr" not in LIVE_VERTICALS
+
+    request_id = _WORKBENCH_REQUEST_ID
+    base = NeedsAttentionItem(
+        request_id=request_id,
+        reason="matching.review",
+        kind="matching",
+        current_stage="review",
+        intake_source="drop",
+        received_at="2026-08-01T00:00:00Z",
+        requested_at="2026-08-01T00:00:00Z",
+    )
+
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        new_callable=AsyncMock,
+        return_value=[base],
+    ):
+        items = await request_journey.list_owner_matching_needs_attention(
+            conn,
+            owner_verticals=["test"],
+            limit=50,
+        )
+
+    assert len(items) == 2
+    assert {item.request_id for item in items} == {request_id}
+    assert {item.vertical for item in items} == {"test"}
+    assert {item.vertical_label for item in items} == {"Test vertical"}
+    assert all(item.intake_source == "drop" for item in items)
+    labels = {item.system: item.system_label for item in items}
+    assert labels == {"cassandra": "System A", "hr_alumni": "System B"}
+    assert "CA DROP" not in labels.values()
+    assert "Alumni Google Sheet" not in labels.values()
+    assert all(item.assignment is None for item in items)
+    dumped = [item.model_dump() for item in items]
+    request_journey.assert_no_pii_keys(dumped)
+
+
+@pytest.mark.asyncio
+async def test_list_owner_matching_needs_attention_excludes_unassigned_vertical() -> None:
+    from admin_api.request_journey import NeedsAttentionItem
+
+    base = NeedsAttentionItem(
+        request_id=_WORKBENCH_REQUEST_ID,
+        reason="matching.review",
+        kind="matching",
+        current_stage="review",
+        intake_source="drop",
+        received_at=None,
+    )
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        new_callable=AsyncMock,
+        return_value=[base],
+    ):
+        items = await request_journey.list_owner_matching_needs_attention(
+            conn,
+            owner_verticals=["communications"],
+            limit=50,
+        )
+
+    assert [item.system for item in items] == ["axios_headquarters"]
+    assert all(item.vertical == "communications" for item in items)
+
+
+@pytest.mark.asyncio
+async def test_list_needs_attention_owner_kind_all_returns_only_matching() -> None:
+    """Data-owner ``kind=all`` (HTTP default) must not union Legal queues.
+
+    Matching is scoped to ``user_vertical_assignments``. Triage / escalations /
+    notice / delivery are unscoped and carry ``assignee_identity`` emails.
+    """
+    from admin_api.request_journey import (
+        NeedsAttentionAssignment,
+        NeedsAttentionItem,
+    )
+
+    matching_item = NeedsAttentionItem(
+        request_id=_WORKBENCH_REQUEST_ID,
+        reason="matching.review",
+        kind="matching",
+        current_stage="review",
+        intake_source="drop",
+        received_at="2026-08-01T00:00:00Z",
+        requested_at="2026-08-01T00:00:00Z",
+        vertical="people_hr",
+        system="paylocity",
+    )
+    leak_assignment = NeedsAttentionAssignment(
+        target_role="legal",
+        kind="triage",
+        assignee_identity="legal-unscoped@example.com",
+    )
+    other_vertical_id = "aaaaaaaa-1111-2222-3333-444444444444"
+    leak_items = [
+        NeedsAttentionItem(
+            request_id=other_vertical_id,
+            reason=WORKFLOW_ASSIGNMENT_ACTION,
+            kind="triage",
+            current_stage="triage",
+            intake_source="drop",
+            received_at="2026-08-02T00:00:00Z",
+            requested_at="2026-08-02T00:00:00Z",
+            assignment=leak_assignment,
+        ),
+        NeedsAttentionItem(
+            request_id=other_vertical_id,
+            reason=NOTICE_REVIEW_ACTION,
+            kind="notice",
+            current_stage="notice",
+            intake_source="drop",
+            received_at="2026-08-03T00:00:00Z",
+            requested_at="2026-08-03T00:00:00Z",
+            assignment=leak_assignment,
+        ),
+        NeedsAttentionItem(
+            request_id=other_vertical_id,
+            reason="access.delivery",
+            kind="delivery",
+            current_stage="delivery",
+            intake_source="drop",
+            received_at="2026-08-04T00:00:00Z",
+            requested_at="2026-08-04T00:00:00Z",
+            assignment=leak_assignment,
+        ),
+    ]
+
+    conn = AsyncMock()
+    with (
+        patch(
+            "admin_api.request_journey.list_owner_matching_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[matching_item],
+        ) as owner_list,
+        patch(
+            "admin_api.request_journey.list_matching_needs_attention",
+            new_callable=AsyncMock,
+        ) as global_matching,
+        patch(
+            "admin_api.request_journey.list_assignment_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[leak_items[0]],
+        ) as assignment_list,
+        patch(
+            "admin_api.request_journey.list_notice_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[leak_items[1]],
+        ) as notice_list,
+        patch(
+            "admin_api.request_journey.list_delivery_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[leak_items[2]],
+        ) as delivery_list,
+    ):
+        response = await request_journey.list_needs_attention(
+            conn,
+            limit=50,
+            kind="all",
+            owner_verticals=["people_hr"],
+        )
+        triage_only = await request_journey.list_needs_attention(
+            conn,
+            limit=50,
+            kind="triage",
+            owner_verticals=["people_hr"],
+        )
+
+    owner_list.assert_awaited_once()
+    global_matching.assert_not_called()
+    assignment_list.assert_not_called()
+    notice_list.assert_not_called()
+    delivery_list.assert_not_called()
+
+    assert response.kind == "all"
+    assert [item.request_id for item in response.items] == [_WORKBENCH_REQUEST_ID]
+    assert all(item.kind == "matching" for item in response.items)
+    assert all(item.vertical == "people_hr" for item in response.items)
+    assert {item.system for item in response.items} <= {
+        "paylocity",
+        "lever",
+        "hr_alumni",
+    }
+    assert len({item.request_id for item in response.items}) == len(response.items)
+    assert all(item.assignment is None for item in response.items)
+    dumped = [item.model_dump() for item in response.items]
+    request_journey.assert_no_pii_keys(dumped)
+    assert all(
+        (item.assignment is None)
+        or item.assignment.assignee_identity != "legal-unscoped@example.com"
+        for item in response.items
+    )
+    assert other_vertical_id not in {item.request_id for item in response.items}
+    assert triage_only.items == []
+    assert triage_only.kind == "triage"
+
+
+@pytest.mark.asyncio
+async def test_list_needs_attention_owner_verticals_use_owner_listing() -> None:
+    from admin_api.request_journey import NeedsAttentionItem
+
+    owner_item = NeedsAttentionItem(
+        request_id=_WORKBENCH_REQUEST_ID,
+        reason="matching.review",
+        kind="matching",
+        current_stage="review",
+        intake_source="drop",
+        received_at=None,
+        vertical="data",
+    )
+    conn = AsyncMock()
+    with (
+        patch(
+            "admin_api.request_journey.list_owner_matching_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[owner_item],
+        ) as owner_list,
+        patch(
+            "admin_api.request_journey.list_matching_needs_attention",
+            new_callable=AsyncMock,
+        ) as global_list,
+    ):
+        response = await request_journey.list_needs_attention(
+            conn,
+            limit=50,
+            kind="matching",
+            owner_verticals=["data"],
+        )
+
+    owner_list.assert_awaited_once()
+    global_list.assert_not_called()
+    assert response.items[0].vertical == "data"
+
+
+@pytest.mark.asyncio
+async def test_list_owner_matching_needs_attention_owner_of_a_does_not_get_b() -> None:
+    """Owner assigned to vertical A must not receive vertical B inbox rows.
+
+    Owner matching is scoped by ``user_vertical_assignments``, not request-level
+    ``assigned_to`` / ``workflow.assignment``.
+    """
+    from admin_api.request_journey import NeedsAttentionItem
+
+    base = NeedsAttentionItem(
+        request_id=_WORKBENCH_REQUEST_ID,
+        reason="matching.review",
+        kind="matching",
+        current_stage="review",
+        intake_source="drop",
+        received_at="2026-08-01T00:00:00Z",
+        requested_at="2026-08-01T00:00:00Z",
+    )
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        new_callable=AsyncMock,
+        return_value=[base],
+    ):
+        data_items = await request_journey.list_owner_matching_needs_attention(
+            conn,
+            owner_verticals=["data"],
+            limit=50,
+        )
+        people_items = await request_journey.list_owner_matching_needs_attention(
+            conn,
+            owner_verticals=["people_hr"],
+            limit=50,
+        )
+
+    assert [item.vertical for item in data_items] == ["data"]
+    assert {item.vertical for item in people_items} == {"people_hr"}
+    assert {item.system for item in people_items} == {"paylocity", "lever", "hr_alumni"}
+    alumni = next(item for item in people_items if item.system == "hr_alumni")
+    assert alumni.system_label == "Alumni Google Sheet"
+    for item in (*data_items, *people_items):
+        dumped = item.model_dump()
+        assert item.assignment is None
+        assert "assigned_to" not in dumped
+    sqls = [call.args[0] for call in conn.fetch.await_args_list]
+    assert any("request_vertical_dispositions" in sql for sql in sqls)
+    assert all("assigned_to" not in sql for sql in sqls)
+    assert all("workflow.assignment" not in sql for sql in sqls)
+
+
+@pytest.mark.asyncio
+async def test_list_owner_matching_needs_attention_two_verticals_two_rows() -> None:
+    """One owner assigned to two catalog verticals gets one row per system."""
+    from admin_api.request_journey import NeedsAttentionItem
+
+    base = NeedsAttentionItem(
+        request_id=_WORKBENCH_REQUEST_ID,
+        reason="matching.review",
+        kind="matching",
+        current_stage="review",
+        intake_source="drop",
+        received_at="2026-08-01T00:00:00Z",
+        requested_at="2026-08-01T00:00:00Z",
+    )
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        new_callable=AsyncMock,
+        return_value=[base],
+    ):
+        items = await request_journey.list_owner_matching_needs_attention(
+            conn,
+            owner_verticals=["data", "communications"],
+            limit=50,
+        )
+
+    assert {(item.vertical, item.system) for item in items} == {
+        ("data", "cassandra"),
+        ("communications", "axios_headquarters"),
+    }
+    assert {item.request_id for item in items} == {_WORKBENCH_REQUEST_ID}
+    assert all(item.assignment is None for item in items)
+
+
+@pytest.mark.asyncio
+async def test_list_owner_matching_two_systems_in_one_vertical_one_row() -> None:
+    """People/HR has multiple systems — one matching-review row per system."""
+    from admin_api.request_journey import NeedsAttentionItem
+
+    base = NeedsAttentionItem(
+        request_id=_WORKBENCH_REQUEST_ID,
+        reason="matching.review",
+        kind="matching",
+        current_stage="review",
+        intake_source="drop",
+        received_at="2026-08-01T00:00:00Z",
+        requested_at="2026-08-01T00:00:00Z",
+    )
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        new_callable=AsyncMock,
+        return_value=[base],
+    ):
+        items = await request_journey.list_owner_matching_needs_attention(
+            conn,
+            owner_verticals=["people_hr"],
+            limit=50,
+        )
+
+    assert len(items) == 3
+    assert {item.request_id for item in items} == {_WORKBENCH_REQUEST_ID}
+    assert {item.vertical for item in items} == {"people_hr"}
+    assert {item.system for item in items} == {"paylocity", "lever", "hr_alumni"}
+    alumni = next(item for item in items if item.system == "hr_alumni")
+    assert alumni.system_label == "Alumni Google Sheet"
+
+
+@pytest.mark.asyncio
+async def test_list_owner_matching_test_vertical_two_systems_one_row() -> None:
+    """Test vertical has two data systems — two matching-review rows."""
+    from admin_api.request_journey import NeedsAttentionItem
+    from admin_api.vertical_dispositions import LIVE_VERTICALS
+
+    assert LIVE_VERTICALS == ("data", "auth0")
+    assert "test" not in LIVE_VERTICALS
+    assert "communications" not in LIVE_VERTICALS
+    assert "people_hr" not in LIVE_VERTICALS
+
+    base = NeedsAttentionItem(
+        request_id=_WORKBENCH_REQUEST_ID,
+        reason="matching.review",
+        kind="matching",
+        current_stage="review",
+        intake_source="drop",
+        received_at="2026-08-01T00:00:00Z",
+        requested_at="2026-08-01T00:00:00Z",
+    )
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        new_callable=AsyncMock,
+        return_value=[base],
+    ):
+        items = await request_journey.list_owner_matching_needs_attention(
+            conn,
+            owner_verticals=["test"],
+            limit=50,
+        )
+
+    assert len(items) == 2
+    assert {item.request_id for item in items} == {_WORKBENCH_REQUEST_ID}
+    assert {item.vertical for item in items} == {"test"}
+    assert all(item.intake_source == "drop" for item in items)
+    labels = {item.system: item.system_label for item in items}
+    assert labels == {"cassandra": "System A", "hr_alumni": "System B"}
+    assert "CA DROP" not in labels.values()
+    assert "Alumni Google Sheet" not in labels.values()
+
+
+@pytest.mark.asyncio
+async def test_list_needs_attention_owner_cannot_filter_unowned_vertical() -> None:
+    conn = AsyncMock()
+    with pytest.raises(request_journey.OwnerVerticalForbidden):
+        await request_journey.list_needs_attention(
+            conn,
+            limit=50,
+            kind="matching",
+            owner_verticals=["people_hr"],
+            vertical="communications",
+        )
+
+
+@pytest.mark.asyncio
+async def test_needs_attention_filter_systems_include_contact_us_and_alumni() -> None:
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        new_callable=AsyncMock,
+        return_value=[],
+    ):
+        response = await request_journey.list_needs_attention(
+            conn, limit=50, kind="matching"
+        )
+    system_ids = {entry.id for entry in response.filter_systems}
+    assert "bizdev_contacts" in system_ids
+    assert "hr_alumni" in system_ids
+    labels = {entry.id: entry.label for entry in response.filter_systems}
+    assert labels["bizdev_contacts"] == "Contact Us Google Sheet"
+    assert labels["hr_alumni"] == "Alumni Google Sheet"
+
+
+@pytest.mark.asyncio
+async def test_needs_attention_filter_systems_test_vertical_cassandra_and_alumni() -> None:
+    """Scoped ``test`` owner sees System A and System B as two review rows."""
+    from admin_api.vertical_dispositions import LIVE_VERTICALS
+
+    assert LIVE_VERTICALS == ("data", "auth0")
+    assert "test" not in LIVE_VERTICALS
+    assert "communications" not in LIVE_VERTICALS
+    assert "people_hr" not in LIVE_VERTICALS
+
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        new_callable=AsyncMock,
+        return_value=[_matching_inbox_base()],
+    ):
+        response = await request_journey.list_needs_attention(
+            conn,
+            limit=50,
+            kind="matching",
+            owner_verticals=["test"],
+        )
+
+    assert {entry.id for entry in response.filter_verticals} == {"test"}
+    assert {entry.id for entry in response.filter_systems} == {"cassandra", "hr_alumni"}
+    filter_labels = {entry.id: entry.label for entry in response.filter_systems}
+    assert filter_labels == {"cassandra": "System A", "hr_alumni": "System B"}
+    assert all(entry.vertical == "test" for entry in response.filter_systems)
+    assert len(response.items) == 2
+    assert {item.vertical for item in response.items} == {"test"}
+    labels = {item.system: item.system_label for item in response.items}
+    assert labels == {"cassandra": "System A", "hr_alumni": "System B"}
+    dumped = [item.model_dump() for item in response.items]
+    request_journey.assert_no_pii_keys(dumped)
+
+
+def _matching_inbox_base(*, request_id: str | None = None) -> Any:
+    from admin_api.request_journey import NeedsAttentionItem
+
+    return NeedsAttentionItem(
+        request_id=request_id or _WORKBENCH_REQUEST_ID,
+        reason=MATCHING_REVIEW_ACTION,
+        kind="matching",
+        current_stage="review",
+        intake_source="drop",
+        received_at="2026-08-01T00:00:00Z",
+        requested_at="2026-08-01T00:00:00Z",
+        match_count=1,
+        match_type="single_match",
+        matched=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_needs_attention_ops_fans_out_all_catalog_systems() -> None:
+    from habeas_privacy_core.connections.catalog import list_matching_review_systems
+
+    base = _matching_inbox_base()
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        new_callable=AsyncMock,
+        return_value=[base],
+    ):
+        response = await request_journey.list_needs_attention(
+            conn, limit=50, kind="matching"
+        )
+
+    catalog = list_matching_review_systems()
+    assert {(item.vertical, item.system) for item in response.items} == {
+        (row.vertical_id, row.system) for row in catalog
+    }
+    cassandra = next(item for item in response.items if item.system == "cassandra")
+    assert cassandra.match_count == 1
+    assert cassandra.match_type == "single_match"
+    assert cassandra.system_id == "cassandra"
+    assert cassandra.system_label == "CA DROP"
+    assert cassandra.color_token
+    assert {entry.id for entry in response.filter_verticals} >= {
+        "data",
+        "people_hr",
+        "bizdev",
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_owner_matching_people_hr_hides_bizdev() -> None:
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        new_callable=AsyncMock,
+        return_value=[_matching_inbox_base()],
+    ):
+        items = await request_journey.list_owner_matching_needs_attention(
+            conn,
+            owner_verticals=["people_hr"],
+            limit=50,
+        )
+
+    assert {item.system for item in items} == {"paylocity", "lever", "hr_alumni"}
+    assert "bizdev_contacts" not in {item.system for item in items}
+    assert all(item.vertical == "people_hr" for item in items)
+
+
+@pytest.mark.asyncio
+async def test_list_owner_matching_bizdev_sees_contact_us() -> None:
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        new_callable=AsyncMock,
+        return_value=[_matching_inbox_base()],
+    ):
+        items = await request_journey.list_owner_matching_needs_attention(
+            conn,
+            owner_verticals=["bizdev"],
+            limit=50,
+        )
+
+    assert len(items) == 1
+    assert items[0].vertical == "bizdev"
+    assert items[0].system == "bizdev_contacts"
+    assert items[0].system_id == "bizdev_contacts"
+    assert items[0].system_label == "Contact Us Google Sheet"
+
+
+@pytest.mark.asyncio
+async def test_list_needs_attention_filters_matching_items_only() -> None:
+    from admin_api.request_journey import NeedsAttentionItem
+
+    notice_item = NeedsAttentionItem(
+        request_id="bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        reason="notice.review",
+        kind="notice",
+        current_stage="notice",
+        intake_source="drop",
+        received_at="2026-08-02T00:00:00Z",
+        requested_at="2026-08-02T00:00:00Z",
+    )
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+    with (
+        patch(
+            "admin_api.request_journey.list_matching_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[_matching_inbox_base()],
+        ),
+        patch(
+            "admin_api.request_journey.list_assignment_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "admin_api.request_journey.list_notice_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[notice_item],
+        ),
+        patch(
+            "admin_api.request_journey.list_delivery_needs_attention",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        by_vertical = await request_journey.list_needs_attention(
+            conn, limit=50, kind="all", vertical="bizdev"
+        )
+        by_system = await request_journey.list_needs_attention(
+            conn, limit=50, kind="matching", system="cassandra"
+        )
+        owner_scoped = await request_journey.list_needs_attention(
+            conn,
+            limit=50,
+            kind="matching",
+            owner_verticals=["people_hr"],
+        )
+
+    matching_vertical = [item for item in by_vertical.items if item.kind == "matching"]
+    assert [item.system for item in matching_vertical] == ["bizdev_contacts"]
+    assert any(item.kind == "notice" for item in by_vertical.items)
+    assert [item.system for item in by_system.items] == ["cassandra"]
+    assert all(item.vertical == "data" for item in by_system.items)
+    assert {entry.id for entry in owner_scoped.filter_verticals} == {"people_hr"}
+    assert {entry.id for entry in owner_scoped.filter_systems} == {
+        "paylocity",
+        "lever",
+        "hr_alumni",
+    }
+    assert "bizdev_contacts" not in {entry.id for entry in owner_scoped.filter_systems}
+
+
+@pytest.mark.asyncio
+async def test_list_needs_attention_filtered_total_not_clamped_to_limit() -> None:
+    """Ops ``system=`` / ``vertical=`` must not collapse ``total`` to page size.
+
+    Matching SQL is request-space. After fan-out a ``system=`` filter leaves
+    about one inbox row per request. Fetching only ``limit`` requests then
+    setting ``total = len(filtered)`` hides the rest of the queue from clients
+    that stop when ``offset + len(items) >= total``.
+    """
+    request_count = 5
+    page_size = 2
+    bases = [
+        _matching_inbox_base(request_id=f"aaaaaaaa-0000-0000-0000-{index:012d}")
+        for index in range(request_count)
+    ]
+    captured_limits: list[int] = []
+
+    async def fake_matching(_conn: Any, *, limit: int) -> list[Any]:
+        captured_limits.append(limit)
+        return bases[:limit]
+
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        side_effect=fake_matching,
+    ):
+        page1 = await request_journey.list_needs_attention(
+            conn, limit=page_size, offset=0, kind="matching", system="cassandra"
+        )
+        page2 = await request_journey.list_needs_attention(
+            conn, limit=page_size, offset=page_size, kind="matching", system="cassandra"
+        )
+        by_vertical = await request_journey.list_needs_attention(
+            conn, limit=page_size, offset=0, kind="matching", vertical="data"
+        )
+
+    assert captured_limits
+    assert all(fetched == 1000 for fetched in captured_limits)
+    assert page1.total == request_count
+    assert page1.total > page_size
+    assert len(page1.items) == page_size
+    assert all(item.system == "cassandra" for item in page1.items)
+    assert page2.total == request_count
+    assert len(page2.items) == page_size
+    assert {item.request_id for item in page1.items}.isdisjoint(
+        {item.request_id for item in page2.items}
+    )
+    assert by_vertical.total == request_count
+    assert by_vertical.total > by_vertical.limit
+    assert all(item.vertical == "data" for item in by_vertical.items)
+
+
+@pytest.mark.asyncio
+async def test_list_needs_attention_owner_fan_out_total_not_clamped_to_limit() -> None:
+    """Owner matching ``total`` is the filtered fan-out, not ``items[:limit]``."""
+    request_count = 4
+    page_size = 2
+    bases = [
+        _matching_inbox_base(request_id=f"bbbbbbbb-0000-0000-0000-{index:012d}")
+        for index in range(request_count)
+    ]
+
+    async def fake_matching(_conn: Any, *, limit: int) -> list[Any]:
+        return bases[:limit]
+
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+    with patch(
+        "admin_api.request_journey.list_matching_needs_attention",
+        side_effect=fake_matching,
+    ):
+        unfiltered = await request_journey.list_needs_attention(
+            conn,
+            limit=page_size,
+            offset=0,
+            kind="matching",
+            owner_verticals=["people_hr"],
+        )
+        by_system = await request_journey.list_needs_attention(
+            conn,
+            limit=page_size,
+            offset=0,
+            kind="matching",
+            owner_verticals=["people_hr"],
+            system="lever",
+        )
+        page2 = await request_journey.list_needs_attention(
+            conn,
+            limit=page_size,
+            offset=page_size,
+            kind="matching",
+            owner_verticals=["people_hr"],
+            system="lever",
+        )
+
+    # people_hr fans out to paylocity + lever + hr_alumni
+    assert unfiltered.total == request_count * 3
+    assert unfiltered.total > page_size
+    assert len(unfiltered.items) == page_size
+    assert by_system.total == request_count
+    assert by_system.total > page_size
+    assert len(by_system.items) == page_size
+    assert all(item.system == "lever" for item in by_system.items)
+    assert page2.total == request_count
+    assert len(page2.items) == page_size
+    assert {item.request_id for item in by_system.items}.isdisjoint(
+        {item.request_id for item in page2.items}
+    )
+
+
+def test_fan_out_skips_decided_and_legacy_single_system() -> None:
+    from habeas_privacy_core.connections.catalog import list_matching_review_systems
+
+    base = _matching_inbox_base()
+    systems = list_matching_review_systems()
+    items = request_journey.fan_out_matching_inbox_items(
+        [base],
+        systems,
+        disposed_by_request={base.request_id: {"data"}},
+        declined_by_request={base.request_id: {"bizdev", "people_hr"}},
+        decided_systems_by_request={base.request_id: {"people_hr::lever"}},
+        clear_assignment=False,
+    )
+    pairs = {(item.vertical, item.system) for item in items}
+    assert ("data", "cassandra") not in pairs
+    assert ("bizdev", "bizdev_contacts") not in pairs
+    assert ("people_hr", "lever") not in pairs
+    assert ("people_hr", "paylocity") in pairs
+    assert ("people_hr", "hr_alumni") in pairs
+    assert ("communications", "axios_headquarters") in pairs
+    assert ("test", "cassandra") not in pairs
+    assert ("test", "hr_alumni") not in pairs
+
+
+def test_fan_out_test_vertical_two_systems_legacy_dispose_does_not_hide_sibling() -> None:
+    """Two catalog systems on ``test`` — vertical-level dispose must not hide both."""
+    from habeas_privacy_core.connections.catalog import list_matching_review_systems
+
+    base = _matching_inbox_base()
+    systems = list_matching_review_systems(vertical_ids=frozenset({"test"}))
+    assert {row.system for row in systems} == {"cassandra", "hr_alumni"}
+    items = request_journey.fan_out_matching_inbox_items(
+        [base],
+        systems,
+        disposed_by_request={base.request_id: {"test"}},
+        declined_by_request={},
+        decided_systems_by_request={base.request_id: {"test::cassandra"}},
+        clear_assignment=True,
+    )
+    pairs = {(item.vertical, item.system) for item in items}
+    assert pairs == {("test", "hr_alumni")}
+    assert all(item.assignment is None for item in items)
+    dumped = [item.model_dump() for item in items]
+    request_journey.assert_no_pii_keys(dumped)
+
+
+def test_group_owner_matching_one_item_systems_are_connections() -> None:
+    """Owner matching review fans out System A and System B — never merges."""
+    from habeas_privacy_core.connections.catalog import list_matching_review_systems
+
+    base = _matching_inbox_base()
+    systems = list_matching_review_systems(vertical_ids=frozenset({"test"}))
+    items = request_journey.group_owner_matching_inbox_items(
+        [base],
+        systems,
+        disposed_by_request={},
+        declined_by_request={},
+        decided_systems_by_request={},
+        clear_assignment=True,
+    )
+    assert len(items) == 2
+    assert {item.request_id for item in items} == {base.request_id}
+    assert {item.vertical for item in items} == {"test"}
+    labels = {item.system: item.system_label for item in items}
+    assert labels == {"cassandra": "System A", "hr_alumni": "System B"}
+    assert "CA DROP" not in labels.values()
+    assert "Alumni Google Sheet" not in labels.values()
+
+    remaining = request_journey.group_owner_matching_inbox_items(
+        [base],
+        systems,
+        disposed_by_request={base.request_id: {"test"}},
+        declined_by_request={},
+        decided_systems_by_request={base.request_id: {"test::cassandra"}},
+        clear_assignment=True,
+    )
+    assert len(remaining) == 1
+    assert remaining[0].system == "hr_alumni"
+    assert remaining[0].system_label == "System B"
+    dumped = [item.model_dump() for item in items]
+    request_journey.assert_no_pii_keys(dumped)
+
+
+def _owner_matching_review_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Acquire:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class _Pool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(request_journey.settings, "database_url", "postgres://local")
+    monkeypatch.setattr(request_journey, "get_pool", lambda: _Pool())
+
+
+def test_owner_vertical_matching_results_includes_dwid_and_pii(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Assigned owner of that vertical item receives individual-review PII."""
+    roles.settings.require_iap_identity = True
+    roles.settings.admin_api_data_owners = "owner@example.com"
+    request_id = "00000000-0000-0000-0000-000000000099"
+    _owner_matching_review_pool(monkeypatch)
+
+    async def fake_has_vertical(
+        conn: Any, *, email: str, vertical_id: str, role: str
+    ) -> bool:
+        del conn, role
+        assert email == "owner@example.com"
+        return vertical_id == "data"
+
+    async def fake_review(
+        conn: Any, *, request_id: str, vertical: str, role: str, system: str | None = None
+    ) -> dict[str, Any]:
+        del conn
+        from admin_api.drop_pipeline import serialize_owner_vertical_matching_review
+
+        return serialize_owner_vertical_matching_review(
+            {
+                "request_id": request_id,
+                "matched": True,
+                "match_count": 1,
+                "matched_contacts": [
+                    {
+                        "dwid": "1001",
+                        "state": "CA",
+                        "first_initial": "J",
+                        "last_initial": "D",
+                        "last_name": "Doe",
+                        "dob": "1990-01-15",
+                        "email": "jane@example.com",
+                        "phones": [{"type": "cell", "number": "5551234567"}],
+                    }
+                ],
+                "matched_contacts_status": "ok",
+                "assignment": {"target_role": "legal"},
+                "assigned_to": "someone@example.com",
+            },
+            vertical=vertical,
+            role=role,
+            system=system,
+        )
+
+    monkeypatch.setattr(request_journey, "principal_has_vertical", fake_has_vertical)
+    monkeypatch.setattr(
+        "admin_api.drop_pipeline.get_owner_vertical_matching_review",
+        fake_review,
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/ops/requests/{request_id}/verticals/data/matching-results?system=cassandra",
+            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    contact = body["matched_contacts"][0]
+    assert body["vertical"] == "data"
+    assert body["system"] == "cassandra"
+    assert body["system_label"] == "CA DROP"
+    assert contact["dwid"] == "1001"
+    assert contact["last_name"] == "Doe"
+    assert contact["email"] == "jane@example.com"
+    assert contact["phones"][0]["number"] == "5551234567"
+    assert body["assignment"] is None
+    assert "assigned_to" not in body
+    assert body["result_kind"] == "ca_drop"
+
+
+def test_owner_vertical_matching_results_sheet_system_strips_drop_pii(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Alumni URL must not inherit request-wide CA DROP people."""
+    roles.settings.require_iap_identity = True
+    roles.settings.admin_api_data_owners = "owner@example.com"
+    request_id = "00000000-0000-0000-0000-000000000099"
+    _owner_matching_review_pool(monkeypatch)
+
+    async def fake_has_vertical(
+        conn: Any, *, email: str, vertical_id: str, role: str
+    ) -> bool:
+        del conn, role
+        assert email == "owner@example.com"
+        return vertical_id == "people_hr"
+
+    async def fake_review(
+        conn: Any, *, request_id: str, vertical: str, role: str, system: str | None = None
+    ) -> dict[str, Any]:
+        del conn
+        from admin_api.drop_pipeline import serialize_owner_vertical_matching_review
+
+        return serialize_owner_vertical_matching_review(
+            {
+                "request_id": request_id,
+                "matched": True,
+                "match_count": 1,
+                "matched_contacts": [
+                    {
+                        "dwid": "1001",
+                        "state": "CA",
+                        "first_initial": "J",
+                        "last_initial": "D",
+                        "last_name": "Doe",
+                        "dob": "1990-01-15",
+                        "email": "jane@example.com",
+                        "phones": [{"type": "cell", "number": "5551234567"}],
+                    }
+                ],
+                "matched_contacts_status": "ok",
+                "matched_hashes": [{"kind": "email", "hash": "abc"}],
+            },
+            vertical=vertical,
+            role=role,
+            system=system,
+        )
+
+    monkeypatch.setattr(request_journey, "principal_has_vertical", fake_has_vertical)
+    monkeypatch.setattr(
+        "admin_api.drop_pipeline.get_owner_vertical_matching_review",
+        fake_review,
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/ops/requests/{request_id}/verticals/people_hr/matching-results?system=hr_alumni",
+            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["system"] == "hr_alumni"
+    assert body["system_label"] == "Alumni Google Sheet"
+    assert body["result_kind"] == "sheet_stub"
+    assert body["matched_contacts"] == []
+    assert body["matched_hashes"] == []
+    assert body["matched_contacts_status"] == "not_live"
+    assert "jane@example.com" not in json.dumps(body)
+
+
+def test_owner_vertical_matching_results_forbids_unassigned_vertical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owner of vertical A must not read vertical B match PII."""
+    roles.settings.require_iap_identity = True
+    roles.settings.admin_api_data_owners = "owner@example.com"
+    request_id = "00000000-0000-0000-0000-000000000099"
+    _owner_matching_review_pool(monkeypatch)
+
+    async def fake_has_vertical(
+        conn: Any, *, email: str, vertical_id: str, role: str
+    ) -> bool:
+        del conn, email, role
+        return vertical_id == "data"
+
+    review = AsyncMock(side_effect=AssertionError("must not load unassigned vertical"))
+    monkeypatch.setattr(request_journey, "principal_has_vertical", fake_has_vertical)
+    monkeypatch.setattr(
+        "admin_api.drop_pipeline.get_owner_vertical_matching_review",
+        review,
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/ops/requests/{request_id}/verticals/paylocity/matching-results",
+            headers={IAP_EMAIL_HEADER: "owner@example.com"},
+        )
+
+    assert response.status_code == 403
+    review.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -299,6 +1391,7 @@ async def test_list_needs_attention_offset_second_page_not_empty() -> None:
         for i in range(3)
     ]
     conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
     captured_limits: list[int] = []
 
     async def fake_matching(conn: Any, *, limit: int):
@@ -334,13 +1427,16 @@ async def test_list_needs_attention_offset_second_page_not_empty() -> None:
             conn, limit=2, offset=2, kind="all"
         )
 
-    assert page1.total == 3
-    assert page2.total == 3
+    from habeas_privacy_core.connections.catalog import list_matching_review_systems
+
+    expected_total = 3 * len(list_matching_review_systems())
+    assert page1.total == expected_total
+    assert page2.total == expected_total
     assert len(page1.items) == 2
-    assert len(page2.items) == 1
-    assert page2.items[0].request_id == matching_items[2].request_id
-    # Fetch size grows with offset+limit (capped at 1000) — not stuck at `limit`.
+    assert len(page2.items) == 2
+    # Matching fetch is request-space up to the 1000-row ceiling (not page size).
     assert captured_limits[-1] >= 4
+    assert captured_limits[-1] == 1000
 
 
 def test_legal_can_read_needs_attention(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -355,8 +1451,12 @@ def test_legal_can_read_needs_attention(monkeypatch: pytest.MonkeyPatch) -> None
         offset: int = 0,
         kind: str = "all",
         assignee: str | None = None,
+        owner_verticals: list[str] | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
     ):
-        del conn, assignee
+        del conn, assignee, vertical, system
+        assert owner_verticals is None
         return request_journey.NeedsAttentionResponse(
             items=[], kind=kind, total=0, limit=limit, offset=offset  # type: ignore[arg-type]
         )

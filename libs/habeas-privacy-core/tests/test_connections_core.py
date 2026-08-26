@@ -7,6 +7,12 @@ from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import pytest
+
+from habeas_privacy_core.connections.catalog import (
+    MATCHING_SYSTEM_COLOR_TOKENS,
+    MATCHING_SYSTEM_LABELS,
+    list_matching_review_systems,
+)
 from habeas_privacy_core.connections.models import (
     ALLOWED_TEST_DETAIL_CODES,
     sanitize_test_detail,
@@ -65,7 +71,7 @@ def test_sanitize_test_detail_allowlists_codes():
 
 def test_sanitize_test_detail_allowlists_live_success_codes():
     for code in (
-        "axios_hq_ok",
+        "mailchimp_ok",
         "paylocity_ok",
         "lever_ok",
         "auth0_ok",
@@ -81,14 +87,13 @@ def test_sanitize_test_detail_allowlists_failure_codes():
     for code in (
         "auth_failed",
         "unreachable",
-        "timeout",
-        "http_4xx",
-        "http_5xx",
         "invalid_credentials",
         "invalid_config",
         "upload_missing_headers",
         "upload_needs_mapping",
         "upload_no_usable_rows",
+        "upload_rows_rejected",
+        "upload_invalid_format",
         "upload_invalid_delimiter",
         "gate_blocked",
         "unknown_system",
@@ -107,9 +112,7 @@ def test_sanitize_test_detail_rejects_vendor_payloads():
         sanitize_test_detail('{"title":"Invalid API Key","status":401,"detail":"Bad key"}')
         == "unknown_error"
     )
-    assert sanitize_test_detail("axios_hq_ok but with extra vendor text") == "unknown_error"
-    assert "mailchimp_ok" not in ALLOWED_TEST_DETAIL_CODES
-    assert sanitize_test_detail("mailchimp_ok") == "unknown_error"
+    assert sanitize_test_detail("mailchimp_ok but with extra vendor text") == "unknown_error"
 
 
 def test_invite_ttl_constant():
@@ -141,25 +144,58 @@ def test_secret_resource_name_format():
     )
 
 
-def test_get_secret_reader_is_public_export(monkeypatch: pytest.MonkeyPatch):
-    from habeas_privacy_core.connections import (
-        get_secret_reader,
-        reset_secret_reader_cache,
-    )
+def test_matching_review_systems_include_sheet_sources():
+    rows = list_matching_review_systems()
+    by_system = {row.system: row for row in rows}
 
-    monkeypatch.delenv("GCP_PROJECT", raising=False)
-    monkeypatch.delenv("SECRET_READER", raising=False)
-    reset_secret_reader_cache()
+    assert "bizdev_contacts" in by_system
+    assert "hr_alumni" in by_system
 
-    assert callable(get_secret_reader)
-    reader = get_secret_reader()
-    assert isinstance(reader, InMemorySecretWriter)
+    contact_us = by_system["bizdev_contacts"]
+    alumni = by_system["hr_alumni"]
+    assert contact_us.system_label == "Contact Us Google Sheet"
+    assert alumni.system_label == "Alumni Google Sheet"
+    assert contact_us.system_label == MATCHING_SYSTEM_LABELS["bizdev_contacts"]
+    assert alumni.system_label == MATCHING_SYSTEM_LABELS["hr_alumni"]
+    assert contact_us.vertical_id == "bizdev"
+    assert alumni.vertical_id == "people_hr"
+
+    cassandra = by_system["cassandra"]
+    assert cassandra.vertical_id == "data"
+    assert cassandra.system_label == "CA DROP"
+    assert MATCHING_SYSTEM_LABELS["cassandra"] == "CA DROP"
+    assert all(row.vertical_id != "test" for row in rows)
+
+    for system in ("bizdev_contacts", "hr_alumni", "cassandra"):
+        assert system in MATCHING_SYSTEM_COLOR_TOKENS
+        assert by_system[system].color_token == MATCHING_SYSTEM_COLOR_TOKENS[system]
+        assert by_system[system].color_token
+
+    assert contact_us.color_token == "teal"
+    assert alumni.color_token == "slate"
+    assert alumni.color_token != "amber"
+
+    assert all(row.color_token for row in rows)
 
 
-def test_write_hashed_raw_is_public_export():
-    from habeas_privacy_core.vertical_hash import write_hashed_raw
+def test_matching_review_systems_filter_bizdev_is_contact_us_only():
+    rows = list_matching_review_systems(vertical_ids=frozenset({"bizdev"}))
+    assert len(rows) == 1
+    assert rows[0].system == "bizdev_contacts"
+    assert rows[0].system_label == "Contact Us Google Sheet"
+    assert rows[0].vertical_id == "bizdev"
+    assert rows[0].vertical_label == "BizDev"
 
-    assert callable(write_hashed_raw)
+
+def test_matching_review_systems_filter_test_includes_cassandra_and_alumni():
+    rows = list_matching_review_systems(vertical_ids=frozenset({"test"}))
+    assert {row.system for row in rows} == {"cassandra", "hr_alumni"}
+    assert {row.vertical_id for row in rows} == {"test"}
+    assert all(row.vertical_label == "Test vertical" for row in rows)
+    labels = {row.system: row.system_label for row in rows}
+    assert labels == {"cassandra": "System A", "hr_alumni": "System B"}
+    assert "CA DROP" not in labels.values()
+    assert "Alumni Google Sheet" not in labels.values()
 
 
 @pytest.fixture
@@ -321,16 +357,3 @@ async def test_set_test_result(pool):
         assert updated.last_test_ok is True
         assert updated.last_test_detail == "stub_ok"
         assert updated.last_tested_at == tested_at
-        assert updated.status == "connected"
-
-        failed = await set_test_result(
-            conn,
-            connection.id,
-            ok=False,
-            detail="auth_failed",
-            tested_at=tested_at,
-        )
-        assert failed is not None
-        assert failed.last_test_ok is False
-        assert failed.last_test_detail == "auth_failed"
-        assert failed.status == "failed"

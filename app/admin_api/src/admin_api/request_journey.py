@@ -14,9 +14,18 @@ from habeas_privacy_core.auth import (
     ROLE_LEGAL,
     ROLE_SUPER_ADMIN,
     is_authenticated_actor,
+    is_vertical_operator_role,
     resolve_actor,
 )
 from habeas_privacy_core.config import CoreSettings
+from habeas_privacy_core.connections.catalog import (
+    MatchingReviewSystem,
+    get_vertical,
+    list_matching_review_systems,
+    list_verticals,
+    matching_system_color_token,
+    matching_system_label,
+)
 from habeas_privacy_core.db.pool import get_pool
 from habeas_privacy_core.queue.constants import (
     DATA_FULFILLMENT_STEP_REPRODUCTION,
@@ -41,15 +50,23 @@ from pydantic_settings import SettingsConfigDict
 
 from admin_api.approvals import (
     match_type_for_count,
+    matching_system_decision_key,
+    parse_decided_matching_systems,
+    parse_declined_matching_verticals,
     recommended_response_status_for_match_count,
 )
 from admin_api.roles import RolePrincipal, require_roles
+from admin_api.vertical_assignments import (
+    fetch_principal_verticals,
+    principal_has_vertical,
+)
 from admin_api.vertical_dispositions import (
     LIVE_VERTICALS,
     VERTICAL_LABELS,
     access_packs_ready_for_notice,
     all_live_verticals_disposed,
     list_vertical_dispositions,
+    normalize_vertical,
 )
 
 AUTH0_VERTICAL = "auth0"
@@ -211,6 +228,20 @@ class NeedsAttentionAssignment(BaseModel):
     assignee_identity: str | None = None
 
 
+class NeedsAttentionConnection(BaseModel):
+    """One catalog system on a request — never a second inbox identity."""
+
+    system: str
+    system_id: str | None = None
+    system_label: str | None = None
+    color_token: str | None = None
+    vertical: str | None = None
+    current_stage: str | None = None
+    match_type: str | None = None
+    kind: str | None = None
+    matched_via: str | None = None
+
+
 class NeedsAttentionItem(BaseModel):
     request_id: str
     reason: str
@@ -228,6 +259,14 @@ class NeedsAttentionItem(BaseModel):
     requestor_state: str | None = None
     review_status: str | None = None
     assignment: NeedsAttentionAssignment | None = None
+    # Matching-review identity is (request, vertical, system). CA DROP is source.
+    vertical: str | None = None
+    vertical_label: str | None = None
+    system: str | None = None
+    system_id: str | None = None
+    system_label: str | None = None
+    color_token: str | None = None
+    connections: list[NeedsAttentionConnection] = Field(default_factory=list)
     # drop_connector download attempt id (batch key) — for inbox thread grouping
     bulk_process_id: int | None = None
     # ZIP member name — fallback batch key when download ledger is missing (seed/broker)
@@ -236,12 +275,23 @@ class NeedsAttentionItem(BaseModel):
     response_status: int | None = None
 
 
+class MatchingInboxFilterOption(BaseModel):
+    """Vertical or system choice for inbox dropdowns (ops sees all; owners scoped)."""
+
+    id: str
+    label: str
+    vertical: str | None = None
+    color_token: str | None = None
+
+
 class NeedsAttentionResponse(BaseModel):
     items: list[NeedsAttentionItem] = Field(default_factory=list)
     kind: NeedsAttentionKind = "all"
     total: int = 0
     limit: int = 0
     offset: int = 0
+    filter_verticals: list[MatchingInboxFilterOption] = Field(default_factory=list)
+    filter_systems: list[MatchingInboxFilterOption] = Field(default_factory=list)
 
 
 class RequestCommentBody(BaseModel):
@@ -931,7 +981,7 @@ class WorkbenchVerticalDispositionSummary(BaseModel):
 
 
 class WorkbenchVerticalRow(BaseModel):
-    """One vertical's posture inside the Matching or Fulfillment cluster (R2)."""
+    """One vertical/system posture inside the Matching or Fulfillment cluster (R2)."""
 
     vertical: str
     label: str
@@ -946,6 +996,9 @@ class WorkbenchVerticalRow(BaseModel):
     fulfillment_status: StageStatus | None = None
     fulfillment_steps: list[WorkbenchStepAttempts] = Field(default_factory=list)
     blocker: str | None = None
+    system: str | None = None
+    system_label: str | None = None
+    color_token: str | None = None
     matching: WorkbenchVerticalMatchingSummary | None = None
     disposition: WorkbenchVerticalDispositionSummary | None = None
 
@@ -1232,7 +1285,7 @@ async def _build_vertical_rows(
                     matching_status = "not_started"
                     matching_blocker = None
         elif disposition is not None:
-            matching_status = "complete"
+            matching_status: StageStatus = "complete"
             matching_blocker = None
         else:
             review = ops_by_stage.get("review")
@@ -1262,6 +1315,10 @@ async def _build_vertical_rows(
                 matching_status = "not_started"
                 matching_blocker = None
 
+        live_systems = list_matching_review_systems(
+            vertical_ids=frozenset({vertical})
+        )
+        live_system = live_systems[0] if live_systems else None
         matching_summary = None
         disposition_summary = None
         if vertical == AUTH0_VERTICAL:
@@ -1277,7 +1334,6 @@ async def _build_vertical_rows(
                 decided=disposition is not None,
                 selected_vendor_record_ids=auth0_vendor_ids,
             )
-
         matching_cluster.append(
             WorkbenchVerticalRow(
                 vertical=vertical,
@@ -1292,6 +1348,9 @@ async def _build_vertical_rows(
                     disposition.selected_dwid_count if disposition else None
                 ),
                 blocker=matching_blocker,
+                system=live_system.system if live_system else None,
+                system_label=live_system.system_label if live_system else None,
+                color_token=live_system.color_token if live_system else None,
                 matching=matching_summary,
                 disposition=disposition_summary,
             )
@@ -1385,8 +1444,6 @@ async def _build_vertical_rows(
         )
 
     for entry in dispositions.coming_soon:
-        if entry.vertical == AUTH0_VERTICAL:
-            continue
         matching_cluster.append(
             WorkbenchVerticalRow(
                 vertical=entry.vertical,
@@ -1394,7 +1451,10 @@ async def _build_vertical_rows(
                 live=False,
                 actionable=False,
                 matching_status="not_started",
-                blocker="Catalog-only — matching is not live",
+                blocker="Coming soon",
+                system=entry.vertical,
+                system_label=matching_system_label(entry.vertical),
+                color_token=matching_system_color_token(entry.vertical),
             )
         )
 
@@ -1531,7 +1591,6 @@ async def build_request_journey_workbench(
             row_.fulfillment_status
             for row_ in fulfillment_cluster
             if row_.fulfillment_status is not None
-            and _vertical_affects_stage_rollup(row_)
         ]
     )
 
@@ -1962,6 +2021,250 @@ async def list_matching_needs_attention(
     return items
 
 
+def _vertical_display_labels() -> dict[str, str]:
+    labels = dict(VERTICAL_LABELS)
+    for entry in list_verticals():
+        labels.setdefault(entry.vertical_id, entry.display_label)
+    return labels
+
+
+def _catalog_verticals_for_scope(vertical_ids: list[str]) -> list[str]:
+    """Normalize assigned ids to catalog verticals (skip unknown slugs)."""
+    known = {entry.vertical_id for entry in list_verticals()}
+    out: list[str] = []
+    for vertical in vertical_ids:
+        normalized = normalize_vertical(vertical)
+        if normalized and normalized in known and normalized not in out:
+            out.append(normalized)
+    return out
+
+
+def _catalog_system_count(vertical: str) -> int:
+    """How many matching-review systems the catalog binds to this vertical."""
+    return len(list_matching_review_systems(vertical_ids=frozenset({vertical})))
+
+
+def _system_row_is_decided(
+    *,
+    vertical: str,
+    system: str,
+    disposed_verticals: set[str],
+    declined_verticals: set[str],
+    decided_systems: set[str],
+) -> bool:
+    """Hide one (vertical, system) row — never a sibling system by accident.
+
+    New data uses ``confirmed_systems`` / ``declined_systems``. Legacy
+    ``declined_verticals`` / dispositions still hide a vertical that has
+    exactly one catalog system (CA DROP, Contact Us).
+    """
+    key = matching_system_decision_key(vertical, system)
+    if key in decided_systems:
+        return True
+    if _catalog_system_count(vertical) != 1:
+        return False
+    return vertical in disposed_verticals or vertical in declined_verticals
+
+
+def _matching_filter_options(
+    systems: list[MatchingReviewSystem],
+) -> tuple[list[MatchingInboxFilterOption], list[MatchingInboxFilterOption]]:
+    verticals: list[MatchingInboxFilterOption] = []
+    seen_verticals: set[str] = set()
+    for row in systems:
+        if row.vertical_id not in seen_verticals:
+            seen_verticals.add(row.vertical_id)
+            verticals.append(
+                MatchingInboxFilterOption(id=row.vertical_id, label=row.vertical_label)
+            )
+        try:
+            get_vertical(row.vertical_id)
+        except ValueError:
+            continue
+    system_options = [
+        MatchingInboxFilterOption(
+            id=row.system,
+            label=row.system_label,
+            vertical=row.vertical_id,
+            color_token=row.color_token,
+        )
+        for row in systems
+    ]
+    return verticals, system_options
+
+
+async def _matching_decision_maps(
+    conn: Any,
+    *,
+    request_ids: list[UUID],
+) -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, set[str]]]:
+    if not request_ids:
+        return {}, {}, {}
+    raw_disposed = await conn.fetch(
+        """
+        SELECT request_id::text AS request_id, vertical
+          FROM request_vertical_dispositions
+         WHERE request_id = ANY($1::uuid[])
+        """,
+        request_ids,
+    )
+    rows = raw_disposed if isinstance(raw_disposed, list) else []
+    disposed_by_request: dict[str, set[str]] = {}
+    for row in rows:
+        disposed_by_request.setdefault(str(row["request_id"]), set()).add(
+            normalize_vertical(str(row["vertical"]))
+        )
+    raw_reviews = await conn.fetch(
+        """
+        SELECT request_id::text AS request_id, context_jsonb
+          FROM approval_requests
+         WHERE request_id = ANY($1::uuid[])
+           AND action_type = $2
+           AND status = 'pending'
+        """,
+        request_ids,
+        MATCHING_REVIEW_ACTION,
+    )
+    review_rows = raw_reviews if isinstance(raw_reviews, list) else []
+    declined_by_request: dict[str, set[str]] = {}
+    decided_systems_by_request: dict[str, set[str]] = {}
+    for row in review_rows:
+        request_id = str(row["request_id"])
+        declined_by_request.setdefault(request_id, set()).update(
+            parse_declined_matching_verticals(row["context_jsonb"])
+        )
+        decided_systems_by_request.setdefault(request_id, set()).update(
+            parse_decided_matching_systems(row["context_jsonb"])
+        )
+    return disposed_by_request, declined_by_request, decided_systems_by_request
+
+
+def group_owner_matching_inbox_items(
+    base_items: list[NeedsAttentionItem],
+    systems: list[MatchingReviewSystem],
+    *,
+    disposed_by_request: dict[str, set[str]],
+    declined_by_request: dict[str, set[str]],
+    decided_systems_by_request: dict[str, set[str]],
+    clear_assignment: bool,
+) -> list[NeedsAttentionItem]:
+    """Owner matching-review rows — one item per (request, vertical, system).
+
+    Data owners confirm each system separately. Do not merge System A and
+    System B (or Paylocity and Alumni) into one inbox identity. CA DROP is
+    the request source (``intake_source``), not a Test system label.
+    """
+    return fan_out_matching_inbox_items(
+        base_items,
+        systems,
+        disposed_by_request=disposed_by_request,
+        declined_by_request=declined_by_request,
+        decided_systems_by_request=decided_systems_by_request,
+        clear_assignment=clear_assignment,
+    )
+
+
+def fan_out_matching_inbox_items(
+    base_items: list[NeedsAttentionItem],
+    systems: list[MatchingReviewSystem],
+    *,
+    disposed_by_request: dict[str, set[str]],
+    declined_by_request: dict[str, set[str]],
+    decided_systems_by_request: dict[str, set[str]],
+    clear_assignment: bool,
+) -> list[NeedsAttentionItem]:
+    """One matching-review row per (request, vertical, system)."""
+    items: list[NeedsAttentionItem] = []
+    for item in base_items:
+        disposed = disposed_by_request.get(item.request_id, set())
+        declined = declined_by_request.get(item.request_id, set())
+        decided_systems = decided_systems_by_request.get(item.request_id, set())
+        for system in systems:
+            if _system_row_is_decided(
+                vertical=system.vertical_id,
+                system=system.system,
+                disposed_verticals=disposed,
+                declined_verticals=declined,
+                decided_systems=decided_systems,
+            ):
+                continue
+            updates: dict[str, Any] = {
+                "vertical": system.vertical_id,
+                "vertical_label": system.vertical_label,
+                "system": system.system,
+                "system_id": system.system,
+                "system_label": system.system_label,
+                "color_token": system.color_token,
+            }
+            if clear_assignment:
+                updates["assignment"] = None
+            items.append(item.model_copy(update=updates))
+    items.sort(key=lambda row: row.requested_at or row.received_at or "")
+    return items
+
+
+async def expand_matching_inbox_items(
+    conn: Any,
+    base_items: list[NeedsAttentionItem],
+    *,
+    systems: list[MatchingReviewSystem],
+    clear_assignment: bool,
+    group_by_vertical: bool = False,
+) -> list[NeedsAttentionItem]:
+    if not base_items or not systems:
+        return []
+    request_ids = [UUID(item.request_id) for item in base_items]
+    disposed, declined, decided_systems = await _matching_decision_maps(
+        conn, request_ids=request_ids
+    )
+    builder = (
+        group_owner_matching_inbox_items
+        if group_by_vertical
+        else fan_out_matching_inbox_items
+    )
+    return builder(
+        base_items,
+        systems,
+        disposed_by_request=disposed,
+        declined_by_request=declined,
+        decided_systems_by_request=decided_systems,
+        clear_assignment=clear_assignment,
+    )
+
+
+async def list_owner_matching_needs_attention(
+    conn: Any,
+    *,
+    owner_verticals: list[str],
+    limit: int,
+) -> list[NeedsAttentionItem]:
+    """Matching.review inbox — one item per (request, vertical, system).
+
+    Data owners confirm each catalog system separately. Test vertical labels
+    are System A / System B — never CA DROP or Alumni. CA DROP stays on
+    ``intake_source``. The caller pages; do not slice to ``limit`` here or
+    ``total`` collapses to the page size.
+
+    Assignment is implicit via ``user_vertical_assignments``; this path never
+    reads or writes ``workflow.assignment`` (legal reviewer / take-it).
+    """
+    actionable = _catalog_verticals_for_scope(owner_verticals)
+    systems = list_matching_review_systems(vertical_ids=frozenset(actionable))
+    if not systems:
+        return []
+
+    # Request-space ceiling (same 1000-row safety cap as the HTTP ``limit``).
+    fetch_cap = min(1000, max(limit, 1000))
+    base_items = await list_matching_needs_attention(conn, limit=fetch_cap)
+    return await expand_matching_inbox_items(
+        conn,
+        base_items,
+        systems=systems,
+        clear_assignment=True,
+        group_by_vertical=True,
+    )
+
+
 async def list_assignment_needs_attention(
     conn: Any,
     *,
@@ -2187,6 +2490,39 @@ async def list_delivery_needs_attention(
     return items
 
 
+class OwnerVerticalForbidden(Exception):
+    """Owner asked to filter a vertical they do not own."""
+
+
+def _apply_matching_inbox_filters(
+    items: list[NeedsAttentionItem],
+    *,
+    vertical: str | None,
+    system: str | None,
+) -> list[NeedsAttentionItem]:
+    """Apply ``vertical`` / ``system`` query filters to matching rows only."""
+    vertical_norm = normalize_vertical(vertical) if vertical and vertical.strip() else None
+    system_norm = system.strip().lower() if system and system.strip() else None
+    if not vertical_norm and not system_norm:
+        return items
+    filtered: list[NeedsAttentionItem] = []
+    for item in items:
+        if item.kind != "matching":
+            filtered.append(item)
+            continue
+        if vertical_norm and (item.vertical or "").strip().lower() != vertical_norm:
+            continue
+        if system_norm:
+            item_system = (item.system or item.system_id or "").strip().lower()
+            connection_systems = {
+                (row.system or "").strip().lower() for row in item.connections
+            }
+            if item_system != system_norm and system_norm not in connection_systems:
+                continue
+        filtered.append(item)
+    return filtered
+
+
 async def list_needs_attention(
     conn: Any,
     *,
@@ -2194,41 +2530,97 @@ async def list_needs_attention(
     offset: int = 0,
     kind: NeedsAttentionKind = "all",
     assignee: str | None = None,
+    owner_verticals: list[str] | None = None,
+    vertical: str | None = None,
+    system: str | None = None,
 ) -> NeedsAttentionResponse:
     """Inbox queue by kind (matching · triage · escalations · notice · delivery · all).
 
     Optional ``assignee`` (email) keeps only rows whose current assignment
     ``assignee_identity`` matches (case-insensitive) — My work · Tasks.
 
+    Matching rows fan out one item per ``(request, vertical, system)`` for
+    both ops and owners — one privacy request, N system matching attempts.
+    ``vertical`` / ``system`` query filters apply after that expansion.
+    Owners may not filter a vertical they do not own.
+
+    When ``owner_verticals`` is set (data-owner inbox), only matching rows
+    for those catalog verticals are returned. ``kind=all`` (the HTTP default)
+    does **not** union Legal triage / escalations / notice / delivery — those
+    queues are unscoped and include ``assignee_identity``. Explicit Legal
+    kinds are a no-op for owners.
+
     Candidates are collected then sliced by ``offset``/``limit`` in Python
-    (single kind or a union of kinds) — each sub-query fetches enough rows to
-    cover the requested page (at least ``offset + limit``, capped at 1000, the
-    existing per-kind safety ceiling) so page 2+ is never silently empty from
-    an earlier per-kind hard cap. ``total`` is exact up to that 1000-row
-    fetch ceiling per kind; queues deeper than that report a floor, not the
-    true count (matches the existing ``le=1000`` safety cap elsewhere).
+    (single kind or a union of kinds). Non-matching kinds fetch at least
+    ``offset + limit`` rows (capped at 1000) so page 2+ is never silently
+    empty from an earlier per-kind hard cap.
+
+    Matching SQL is still one row per **request**. That fetch always uses the
+    1000-row ceiling, then expands to ``(request, vertical, system)``, then
+    applies ``vertical`` / ``system`` filters, then pages. ``total`` is the
+    filtered fan-out length (a floor when more than 1000 matching requests
+    exist — the existing ``le=1000`` safety cap). Fetching only
+    ``offset + limit`` requests would collapse a ``system=`` / ``vertical=``
+    ``total`` to the page size and hide the rest of the queue.
     """
     if kind not in NEEDS_ATTENTION_KINDS:
         raise ValueError(f"invalid needs-attention kind: {kind!r}")
 
+    scoped_verticals = (
+        _catalog_verticals_for_scope(owner_verticals)
+        if owner_verticals is not None
+        else None
+    )
+    vertical_norm = normalize_vertical(vertical) if vertical and vertical.strip() else None
+    if scoped_verticals is not None and vertical_norm and vertical_norm not in scoped_verticals:
+        raise OwnerVerticalForbidden(vertical_norm)
+
+    matching_systems = list_matching_review_systems(
+        vertical_ids=frozenset(scoped_verticals) if scoped_verticals is not None else None
+    )
+    filter_verticals, filter_systems = _matching_filter_options(matching_systems)
+
     fetch_limit = min(1000, max(limit, offset + limit))
+    # Matching is request-space until fan-out; always pull the 1000-row
+    # ceiling so a later ``system=`` / ``vertical=`` filter does not clamp
+    # ``total`` to the page size.
+    matching_fetch_limit = 1000
 
     items: list[NeedsAttentionItem] = []
     if kind in {"matching", "all"}:
-        items.extend(await list_matching_needs_attention(conn, limit=fetch_limit))
-    if kind in {"triage", "all"}:
+        if owner_verticals is not None:
+            items.extend(
+                await list_owner_matching_needs_attention(
+                    conn,
+                    owner_verticals=owner_verticals,
+                    limit=matching_fetch_limit,
+                )
+            )
+        else:
+            base = await list_matching_needs_attention(conn, limit=matching_fetch_limit)
+            items.extend(
+                await expand_matching_inbox_items(
+                    conn,
+                    base,
+                    systems=matching_systems,
+                    clear_assignment=False,
+                )
+            )
+    # Data owners never see unscoped Legal queues (assignee emails, other
+    # verticals' request ids). ``kind=all`` is matching-only for this path.
+    if owner_verticals is None and kind in {"triage", "all"}:
         items.extend(
             await list_assignment_needs_attention(conn, kind="triage", limit=fetch_limit)
         )
-    if kind in {"escalations", "all"}:
+    if owner_verticals is None and kind in {"escalations", "all"}:
         items.extend(
             await list_assignment_needs_attention(
                 conn, kind="escalations", limit=fetch_limit
             )
         )
-    if kind in {"notice", "all"}:
+    if owner_verticals is None and kind in {"notice", "all"}:
         items.extend(await list_notice_needs_attention(conn, limit=fetch_limit))
-    if kind in {"delivery", "all"}:
+    if owner_verticals is None and kind in {"delivery", "all"}:
         items.extend(await list_delivery_needs_attention(conn, limit=fetch_limit))
 
     assignee_norm = assignee.strip().lower() if assignee and assignee.strip() else None
@@ -2242,12 +2634,20 @@ async def list_needs_attention(
             == assignee_norm
         ]
 
+    items = _apply_matching_inbox_filters(items, vertical=vertical, system=system)
+
     # Stable sort across unioned kinds, then page.
     items.sort(key=lambda item: item.requested_at or item.received_at or "")
     total = len(items)
     page_items = items[offset : offset + limit]
     return NeedsAttentionResponse(
-        items=page_items, kind=kind, total=total, limit=limit, offset=offset
+        items=page_items,
+        kind=kind,
+        total=total,
+        limit=limit,
+        offset=offset,
+        filter_verticals=filter_verticals,
+        filter_systems=filter_systems,
     )
 
 
@@ -2417,6 +2817,14 @@ async def needs_attention(
         default=None,
         description="Filter by assignment assignee_identity; use 'me' for the caller.",
     ),
+    vertical: str | None = Query(
+        default=None,
+        description="Matching inbox filter — catalog vertical id.",
+    ),
+    system: str | None = Query(
+        default=None,
+        description="Matching inbox filter — catalog system slug (e.g. hr_alumni).",
+    ),
 ) -> NeedsAttentionResponse:
     _require_database()
     assignee_filter = assignee
@@ -2424,6 +2832,13 @@ async def needs_attention(
         assignee_filter = viewer.email
     pool = get_pool()
     async with pool.acquire() as conn:
+        owner_verticals: list[str] | None = None
+        if is_vertical_operator_role(viewer.role):
+            owner_verticals = await fetch_principal_verticals(
+                conn, email=viewer.email
+            )
+            # ``assignee`` filters legal ``workflow.assignment`` — not DO vertical scope.
+            assignee_filter = None
         try:
             response = await list_needs_attention(
                 conn,
@@ -2431,11 +2846,74 @@ async def needs_attention(
                 offset=offset,
                 kind=kind,
                 assignee=assignee_filter,
+                owner_verticals=owner_verticals,
+                vertical=vertical,
+                system=system,
             )
+        except OwnerVerticalForbidden as exc:
+            raise HTTPException(status_code=403, detail="vertical access denied") from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     assert_no_pii_keys(response.model_dump())
     return response
+
+
+@router.get("/{request_id}/verticals/{vertical}/matching-results")
+async def owner_vertical_matching_results(
+    request_id: str,
+    vertical: str,
+    viewer: RequestOpsViewer,
+    system: str | None = Query(
+        default=None,
+        description="Matching-review system slug for this inbox row.",
+    ),
+) -> dict[str, Any]:
+    """Owner vertical-item match review — same DWID + PII as individual review.
+
+    Authorized via ``user_vertical_assignments`` for that vertical, not
+    request-level ``assigned_to``. Inbox lists stay PII-free; this read is
+    the detail payload for one ``(request_id, vertical, system)`` item.
+    """
+    _require_database()
+    try:
+        UUID(request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid request_id") from exc
+
+    vertical_norm = normalize_vertical(vertical)
+    if not vertical_norm:
+        raise HTTPException(status_code=400, detail="invalid vertical")
+
+    from admin_api.drop_pipeline import get_owner_vertical_matching_review
+
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        allowed = await principal_has_vertical(
+            conn,
+            email=viewer.email,
+            vertical_id=vertical_norm,
+            role=viewer.role,
+        )
+        if not allowed:
+            raise HTTPException(status_code=403, detail="vertical access denied")
+        payload = await get_owner_vertical_matching_review(
+            conn,
+            request_id=request_id,
+            vertical=vertical_norm,
+            role=viewer.role,
+            system=system,
+        )
+    if payload is None:
+        raise HTTPException(status_code=404, detail="matching result not found")
+    system_norm = system.strip().lower() if system and system.strip() else None
+    if system_norm:
+        payload["system"] = system_norm
+        payload["system_id"] = system_norm
+        payload["system_label"] = matching_system_label(
+            system_norm, vertical_id=vertical_norm
+        )
+        payload["color_token"] = matching_system_color_token(system_norm)
+    return payload
 
 
 @router.get("/{request_id}/comments", response_model=list[RequestComment])

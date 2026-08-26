@@ -2,6 +2,15 @@
 
 > Gate: code touching request, approval, attempt, or audit tables.
 
+## Vocabulary
+
+- **request** — one privacy request row; mutations go through admin-api only.
+- **source** — intake origin. **CA DROP** is a source, not a catalog system or connection.
+- **system** (connection) — a data system in a **vertical**. Matching review is **per system** (one owner verification per connection).
+- **batch** — intake grouping (date + source), not a system.
+- **data owner** configures connections; **data user** reviews and fulfills.
+- **Test vertical** systems display as **System A** / **System B**. Other verticals use the real connection name.
+
 ## Rules
 
 - No personally identifiable information in application logs, structured log fields, or audit `arguments` / `error_payload`.

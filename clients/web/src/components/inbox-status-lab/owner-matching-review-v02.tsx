@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 
 import {
-  formatMatchedContactLabel,
   matchedChannelsFromDetail,
   matchingDetailIsNotLive,
 } from '@/components/requests/RequestTriageDialog'
@@ -50,6 +49,9 @@ import { cn } from '@/lib/utils'
 
 import {
   ResultApplyBar,
+  ResultContactPii,
+  ResultPeopleSearch,
+  ResultSystemLabel,
   applyNeedsPeople,
   resultViewEmpty,
   statusSelectClass,
@@ -257,6 +259,7 @@ function KpiStrip({ items }: { items: Kpi[] }) {
   )
 }
 
+
 function requestTypeEmphasis(requestType: string | null | undefined): {
   delete: boolean
   optIn: boolean
@@ -396,8 +399,6 @@ export function OwnerMatchingReviewV02({
   pending,
   onApply,
   onSearchPeople,
-  peopleSearchBlocked,
-  peopleSearchPending,
 }: MatchingResultsViewProps) {
   const { me } = useMe()
   const requestUuid = item ? matchingLabRequestId(item.request_id) : null
@@ -408,12 +409,6 @@ export function OwnerMatchingReviewV02({
   const [addedPeople, setAddedPeople] = useState<MatchedPersonContact[]>([])
   const [removedDwids, setRemovedDwids] = useState<string[]>([])
   const [personActions, setPersonActions] = useState<Record<string, PersonAction>>({})
-  const [searchQuery, setSearchQuery] = useState('')
-  const [searchHits, setSearchHits] = useState<MatchedPersonContact[]>([])
-  const [searchBusy, setSearchBusy] = useState(false)
-  const [searchFailed, setSearchFailed] = useState(false)
-  const searchFnRef = useRef(onSearchPeople)
-  searchFnRef.current = onSearchPeople
 
   const requestQuery = useQuery({
     queryKey: ['admin-api', 'requests', requestUuid, 'matching-review-v02'],
@@ -431,8 +426,6 @@ export function OwnerMatchingReviewV02({
     retry: false,
   })
 
-  const trimmedSearch = searchQuery.trim()
-
   const empty = resultViewEmpty(loading, Boolean(item))
   const matchType = detail?.match_type ?? item?.match_type
   const matchCount = detail?.match_count ?? item?.match_count ?? contacts.length
@@ -444,10 +437,7 @@ export function OwnerMatchingReviewV02({
   useEffect(() => {
     setAddedPeople([])
     setRemovedDwids([])
-    setSearchQuery('')
     setPersonActions({})
-    setSearchHits([])
-    setSearchFailed(false)
   }, [item?.request_id, systemId, contactKey])
 
   useEffect(() => {
@@ -502,18 +492,13 @@ export function OwnerMatchingReviewV02({
     [detail?.attempts],
   )
 
-  const localGate = gateMatchesSystem(attemptGate ?? connectorGate ?? reminderGate, systemId)
-  const gate = peopleSearchBlocked ?? localGate
+  const gate = gateMatchesSystem(attemptGate ?? connectorGate ?? reminderGate, systemId)
   const needsConnection =
     !gate &&
     !catalogVertical &&
     matchingDetailIsNotLive(detail) &&
     !isHiddenSystemId(systemId)
   const matchingBlocked = Boolean(gate || needsConnection)
-  const searchGated = matchingBlocked
-  const searchPendingSetup = !searchGated && (Boolean(peopleSearchPending) || !onSearchPeople)
-  const directorySearchOpen =
-    Boolean(onSearchPeople) && !searchGated && !searchPendingSetup && !disabled && !pending
   const showConnectorsButton = matchingBlocked && !catalogVertical
 
   const peopleDirectory = useMemo(() => {
@@ -528,38 +513,6 @@ export function OwnerMatchingReviewV02({
     () => peopleDirectory.filter((contact) => contact.dwid && !removedDwids.includes(contact.dwid)),
     [peopleDirectory, removedDwids],
   )
-
-  useEffect(() => {
-    const needle = trimmedSearch
-    if (!directorySearchOpen || needle.length < 2) {
-      setSearchHits([])
-      setSearchBusy(false)
-      setSearchFailed(false)
-      return
-    }
-    let cancelled = false
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        setSearchBusy(true)
-        setSearchFailed(false)
-        try {
-          const result = (await searchFnRef.current?.(needle)) ?? []
-          if (cancelled) return
-          setSearchHits(result)
-        } catch {
-          if (cancelled) return
-          setSearchHits([])
-          setSearchFailed(true)
-        } finally {
-          if (!cancelled) setSearchBusy(false)
-        }
-      })()
-    }, 200)
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-  }, [directorySearchOpen, trimmedSearch])
 
   if (empty) return empty
   if (!item) return null
@@ -599,14 +552,6 @@ export function OwnerMatchingReviewV02({
     .filter((action): action is PersonAction => action === '3' || action === '4')
   const mixedActions = new Set(selectedActions).size > 1
   const blockedCopy = matchingBlocked ? blockedMatchingCopy(gate, needsConnection) : null
-  const visibleIds = new Set(rows.map((contact) => contact.dwid))
-  const addableHits = searchHits.filter(
-    (contact) => Boolean(contact.dwid) && !visibleIds.has(contact.dwid),
-  )
-  const pendingSearchCopy = peopleSearchPending ?? {
-    title: 'Needs connection',
-    support: 'This system is not connected for people search yet.',
-  }
 
   const kpis: Kpi[] = [
     {
@@ -699,7 +644,6 @@ export function OwnerMatchingReviewV02({
       )
     }
     setPersonDisposition({ ...contact, dwid: contact.dwid }, action)
-    setSearchQuery('')
   }
 
   return (
@@ -716,6 +660,7 @@ export function OwnerMatchingReviewV02({
         >
           {due.label}
         </Badge>
+        <ResultSystemLabel item={item} detail={detail} />
       </div>
 
       {blockedCopy ? (
@@ -786,8 +731,8 @@ export function OwnerMatchingReviewV02({
                       onClick={() => setPersonDisposition(contact, '4')}
                     />
                   </TableCell>
-                  <TableCell className="max-w-[11rem] truncate text-xs text-ink">
-                    {formatMatchedContactLabel(contact)}
+                  <TableCell className="max-w-[14rem] text-xs text-ink">
+                    <ResultContactPii contact={contact} compact />
                   </TableCell>
                   <TableCell>
                     <SurfaceMarks surfaces={personSurfaces(contact, surfaces)} />
@@ -812,58 +757,16 @@ export function OwnerMatchingReviewV02({
         </TableBody>
       </Table>
 
-      <div className="space-y-1.5 border border-line bg-paper px-2.5 py-2">
-        <label className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
-          Add from this system
-        </label>
-        <input
-          type="search"
-          value={searchQuery}
-          disabled={locked || searchGated || searchPendingSetup}
-          placeholder="Search this system…"
-          aria-label="Search people in this system"
-          className={cn(statusSelectClass(), 'w-full max-w-md')}
-          onChange={(event) => setSearchQuery(event.target.value)}
+      <div className="border border-line bg-paper px-2.5 py-2">
+        <ResultPeopleSearch
+          onSearchPeople={onSearchPeople}
+          localContacts={peopleDirectory}
+          excludeDwids={rows.map((contact) => contact.dwid).filter(Boolean)}
+          onAddPerson={addPerson}
+          disabled={locked}
+          item={item}
+          detail={detail}
         />
-        {searchGated ? null : searchPendingSetup ? (
-          <p className="text-[0.65rem] text-mute">
-            {pendingSearchCopy.title}
-            {pendingSearchCopy.support ? ` · ${pendingSearchCopy.support}` : ''}
-          </p>
-        ) : trimmedSearch.length >= 2 ? (
-          <div className="space-y-1">
-            {addableHits.map((contact) => (
-              <div
-                key={contact.dwid}
-                className="flex flex-wrap items-center justify-between gap-2 text-xs"
-              >
-                <span className="truncate text-ink">{formatMatchedContactLabel(contact)}</span>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={locked}
-                  onClick={() => addPerson(contact)}
-                >
-                  Add
-                </Button>
-              </div>
-            ))}
-            {searchBusy ? (
-              <p className="text-[0.65rem] text-mute">Searching this system…</p>
-            ) : null}
-            {searchFailed ? (
-              <p className="text-[0.65rem] text-mute">Could not search this system.</p>
-            ) : null}
-            {!searchBusy && !searchFailed && addableHits.length === 0 ? (
-              <p className="text-[0.65rem] text-mute">
-                No people from this system match that search.
-              </p>
-            ) : null}
-          </div>
-        ) : (
-          <p className="text-[0.65rem] text-mute">Type two or more characters to search this system.</p>
-        )}
       </div>
 
       <div className="space-y-2">

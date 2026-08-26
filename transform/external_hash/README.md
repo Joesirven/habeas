@@ -2,7 +2,8 @@
 
 BigQuery [dbt](https://docs.getdbt.com/) project for **Tier-C / non–data-warehouse**
 hash indexes. Materializes serving marts from **already-hashed** raw extracts written
-by per-system hash-refresh workers (Mailchimp, Paylocity, Lever, Auth0, Google Sheets).
+by per-system hash-refresh workers for Auth0 (and other hashed-raw systems). Axios HQ
+(`axios_headquarters`) is upload-every-batch, not a hashed-raw worker on this tree.
 
 **GCP project:** `example-gcp-project` · **Dataset (default):** `external_hash_index` · **Region:** `us-east4`
 
@@ -30,10 +31,10 @@ hash-refresh worker (in-memory hash) → BQ hashed raw → dbt staging → dbt m
 
 | Layer | Example | Notes |
 |-------|---------|-------|
-| Hashed raw | `external_hash_index.mailchimp_hashed_raw`, `external_hash_index.auth0_hashed_raw` | Worker-written; hash-only |
-| Staging | `stg_mailchimp_hashed`, `stg_auth0_hashed` | Thin select from source |
-| Serving build | `mailchimp_email_hash__build`, `auth0_email_hash__build` | `(hash_value, vendor_record_id, system, built_at)` |
-| Serving | `mailchimp_email_hash`, `auth0_email_hash` | Shared lookup table after build+swap |
+| Hashed raw | `external_hash_index.auth0_hashed_raw` | Worker-written; hash-only |
+| Staging | `stg_auth0_hashed` | Thin select from source |
+| Serving build | `auth0_email_hash__build` | `(hash_value, vendor_record_id, system, built_at)` |
+| Serving | `auth0_email_hash` | Shared lookup table after build+swap |
 
 Build+swap macros are documented in [macros/README.md](macros/README.md) (mirrors
 `transform/drop_hash`); swap implementation is deferred to a follow-up unit.
@@ -42,8 +43,7 @@ Build+swap macros are documented in [macros/README.md](macros/README.md) (mirror
 
 | Table | Columns | Clustering |
 |-------|---------|------------|
-| `mailchimp_email_hash` | `hash_value`, `vendor_record_id`, `system`, `built_at` | `(system, hash_value)` |
-| `auth0_email_hash` | `hash_value`, `vendor_record_id`, `system`, `built_at` | `(system, hash_value)` |
+| `{system}_email_hash` | `hash_value`, `vendor_record_id`, `system`, `built_at` | `(system, hash_value)` |
 
 `hash_value` is Base64(SHA-256) of the DROP-standardized identifier. Matching workers
 join DROP request hashes to these marts; suppression uses `vendor_record_id` only.
@@ -71,110 +71,64 @@ cp ../drop_hash/profiles.yml.example profiles.yml
 # Edit profile name to external_hash and dataset to external_hash_index
 ```
 
+### Hashed-raw table contract (Jose / OQ1 only)
+
+Workers write `{system}_hashed_raw` with hash columns only. Do not create these
+tables in prod without approval. Same shape for every system in scope:
+
+```sql
+-- Jose / OQ1 only — do not run in prod without approval:
+-- CREATE TABLE `example-gcp-project.external_hash_index.auth0_hashed_raw` (
+--   email_hash STRING NOT NULL,
+--   vendor_record_id STRING NOT NULL,
+--   system STRING NOT NULL,
+--   extracted_at TIMESTAMP NOT NULL
+-- );
+```
+
+Repeat with `paylocity_hashed_raw`, `lever_hashed_raw`,
+`hr_alumni_hashed_raw`, and `bizdev_contacts_hashed_raw`. Do **not** create
+`axios_headquarters_hashed_raw` or invent `axios_hashed_raw` this slice.
+No plaintext email.
+
 ## Build (manual refresh)
 
-The Auth0 hash-refresh worker invokes this select after writing hashed raw.
-Worker env, enqueue, and `POST /hash-refresh/process`:
-[app/auth0/README.md](../../app/auth0/README.md). Mailchimp and other vertical
-workers are still scaffold. Operators may also run the Auth0 select manually
-when `auth0_hashed_raw` is present (requires live BigQuery + profiles):
+Hash-refresh workers will invoke dbt from this directory after writing hashed raw.
+Until workers land, operators can run manually (requires live BigQuery + profiles):
 
 ```bash
 cd transform/external_hash
-DBT_PROFILES_DIR=. dbt parse
 DBT_PROFILES_DIR=. dbt build
-# Auth0 subset (after auth0_hashed_raw is loaded):
-DBT_PROFILES_DIR=. dbt build --select stg_auth0_hashed mart_auth0_email_hash
 ```
 
 Disable serving swap when macros exist: `--vars '{perform_serving_swap: false}'`.
+
+Auth0 worker selects only its pair:
+
+```bash
+dbt build --select stg_auth0_hashed mart_auth0_email_hash
+```
 
 ## Systems in scope
 
 | System | Hashed raw | Mart | Hash refresh |
 |--------|------------|------|--------------|
-| Mailchimp | `mailchimp_hashed_raw` | `mart_mailchimp_email_hash` | Yes |
-| Paylocity | (future) | (future) | Yes |
-| Lever | (future) | (future) | Yes |
-| Auth0 | `auth0_hashed_raw` | `mart_auth0_email_hash` | Yes |
-| Google Sheets | (future) | (future) | Yes |
+| Auth0 | `auth0_hashed_raw` | `mart_auth0_email_hash` (`auth0_email_hash__build`) | Yes |
+| Axios HQ (`axios_headquarters`) | — (upload-every-batch; do not invent `axios_hashed_raw`) | — (no empty Axios HQ mart SQL this slice) | No |
+| Paylocity | `paylocity_hashed_raw` | `mart_paylocity_email_hash` (`paylocity_email_hash__build`) | Yes |
+| Lever | `lever_hashed_raw` | `mart_lever_email_hash` (`lever_email_hash__build`) | Yes |
+| Alumni Google Sheet | `hr_alumni_hashed_raw` | `mart_hr_alumni_email_hash` (`hr_alumni_email_hash__build`) | Yes |
+| Contact Us Google Sheet | `bizdev_contacts_hashed_raw` | `mart_bizdev_contacts_email_hash` (`bizdev_contacts_email_hash__build`) | Yes |
+| Mailchimp | — | — | Retired (no dbt models) |
 | Cassandra | — | — | No (suppress-only pipe) |
-
-## Auth0
-
-Email hash index only (no phone or NDZ). The auth0 hash-refresh worker runs
-the Management API users-export job (`POST /api/v2/jobs/users-exports`),
-hashes emails in memory (DROP v1.2.0 / CPPA), and writes **hash-only** rows
-to BigQuery. dbt never sees plaintext email. Extract path:
-[app/auth0/README.md](../../app/auth0/README.md).
-
-Same layering as Mailchimp: hashed raw → staging view → serving-build mart.
-
-| Layer | Name | Role |
-|-------|------|------|
-| Hashed raw (source) | `external_hash_index.auth0_hashed_raw` | Worker-written; declared in `models/sources.yml` |
-| Staging | `stg_auth0_hashed` | Thin view; drops null `email_hash` |
-| Serving build | `mart_auth0_email_hash` → alias `auth0_email_hash__build` | Distinct `(hash_value, vendor_record_id, system, built_at)`; clustered `(system, hash_value)` |
-| Serving | `auth0_email_hash` | Planned swap target (`macros/README.md`; deferred) |
-
-`vendor_record_id` is the opaque Auth0 `user_id` (vendor vocabulary stays in
-`app/auth0/adapters/`). `system` is always `auth0`. Users without a hashable
-email are skipped by the worker and must not appear as null-`email_hash` rows.
-
-### Hashed-raw table contract
-
-Mirror Mailchimp `mailchimp_hashed_raw`. Allowed columns only — no plaintext
-email, name, phone, or other profile fields.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `email_hash` | STRING | Base64(SHA-256) of DROP-standardized email |
-| `vendor_record_id` | STRING | Opaque Auth0 `user_id` |
-| `system` | STRING | Always `auth0` |
-| `extracted_at` | TIMESTAMP | Worker write time |
-
-There is no standalone DDL file in this project; apply the following in BigQuery
-only after OQ1 (dataset name confirmed) and Jose approval for production.
-
-```sql
--- Hashed identifiers only. Do not add plaintext email or profile columns.
-CREATE TABLE `example-gcp-project.external_hash_index.auth0_hashed_raw` (
-  email_hash STRING NOT NULL,
-  vendor_record_id STRING NOT NULL,
-  system STRING NOT NULL,
-  extracted_at TIMESTAMP NOT NULL
-)
-OPTIONS (
-  description = "Auth0 Management hashed extract (email_hash + opaque user_id). Populated by the auth0 hash-refresh worker."
-);
-```
-
-Dataset creation remains deferred until OQ1 (see commented `bq mk` under
-One-time setup). Do not create the production dataset or table without Jose
-approval.
-
-### Build Auth0 marts
-
-Requires live BigQuery, `profiles.yml` (gitignored), and a loaded
-`auth0_hashed_raw` table. Hash-refresh workers invoke the same select after
-writing hashed raw.
-
-```bash
-cd transform/external_hash
-DBT_PROFILES_DIR=. dbt parse
-DBT_PROFILES_DIR=. dbt build --select stg_auth0_hashed mart_auth0_email_hash
-```
-
-Matching reads `auth0_email_hash__build` until serving swap lands.
 
 ## Worker contract
 
-Auth0 is live (extract → hash in memory → BQ hashed raw → dbt). Other systems remain scaffold:
+Per-system hash-refresh worker flow (stub/live extract → hash in memory → BQ hashed raw → dbt):
 
 ```bash
 cd transform/external_hash
 dbt build
-# Auth0: dbt build --select stg_auth0_hashed mart_auth0_email_hash
 ```
 
 Matching workers query serving marts by `(hash_value, system)`; vendor vocabulary stays

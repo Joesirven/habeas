@@ -4,9 +4,9 @@ User matching and block/revoke suppression via Auth0 Management API.
 
 Hash in worker → BigQuery hashed raw → [`transform/external_hash`](../../transform/external_hash/) dbt marts. Queue: `auth0_attempts` (`step` = `matching` | `suppression`).
 
-Cloud Run FastAPI app — health + step routes (`adapters/stub.py` for matching/suppression). Hash refresh runs the Auth0 **users-export job**, hashes emails in memory, writes hashed raw, then runs dbt. Depends on [`habeas-privacy-core`](../../libs/habeas-privacy-core/).
+Cloud Run FastAPI app — health + step routes. Matching (`POST /matching/submit`) looks up the Auth0 mart; suppression still uses `adapters/stub.py`. Hash refresh runs the Auth0 **users-export job**, hashes emails in memory, writes hashed raw, then runs dbt. Depends on [`habeas-privacy-core`](../../libs/habeas-privacy-core/).
 
-**Cloud Run `auth0-dev` is not deployed.** There is no Cloud Build YAML, no Scheduler job, and no `*.run.app` Auth0 worker. Hash refresh **process** is **local uvicorn** + `POST /hash-refresh/process`. Admin-api can enqueue (and, when also local, proxy process) — see [Auth0 matching on dev](#auth0-matching-on-dev). Do not invent a Cloud Run URL.
+**Cloud Run `auth0-dev` is not deployed.** First deploy is Jose-gated (`infra/cloudbuild/auth0-dev.yaml`, S08). There is no Scheduler job and no live `*.run.app` Auth0 worker. Hash-refresh **process** (`POST /hash-refresh/process`) and matching **submit** (`POST /matching/submit`) are **local uvicorn**. Admin-api can enqueue (and, when also local, proxy process) — see [Auth0 matching on dev](#auth0-matching-on-dev). Do not invent a Cloud Run URL. Do not claim the service is live.
 
 **Agent rules:** [`AGENTS.md`](AGENTS.md) · **Parent:** [`app/AGENTS.md`](../AGENTS.md)
 
@@ -59,7 +59,7 @@ GSM secret for that row must already exist from connections onboarding (`dpra-co
 
 ### Local extract + dbt
 
-`auth0-dev` Cloud Run does **not** exist. Use local uvicorn. Needs ADC, live `DATABASE_URL`, GSM accessor on `dpra-connections-auth0-{connection_id}`, and a dataset that already exists. Local extract is GSM + ADC — `SECRET_READER=memory` is not an operator path.
+`auth0-dev` Cloud Run is **not deployed** (Jose + `infra/cloudbuild/auth0-dev.yaml`, S08). Use local uvicorn. Needs ADC, live `DATABASE_URL`, GSM accessor on `dpra-connections-auth0-{connection_id}`, and a dataset that already exists. Local extract is GSM + ADC — `SECRET_READER=memory` is not an operator path.
 
 Numbered blockers **before** enqueue / uvicorn / curl:
 
@@ -160,22 +160,24 @@ To mark timeout locally, run the existing reaper (`POST /reap` — see [`app/rea
 
 ### IAM (not automated)
 
-Cloud Build and Terraform do **not** bind `auth0-dev` (the service is not deployed). When a runtime identity exists, grants are an ops follow-up — see [`infra/README.md`](../../infra/README.md).
+Cloud Build YAML for `auth0-dev` is S08; the service is **not deployed** until Jose approves the first submit. Do not treat the YAML as a live URL. When a runtime identity exists, grants are an ops follow-up — see [`infra/README.md`](../../infra/README.md).
 
 Do **not** treat dataset-wide `dataEditor` on `external_hash_index` as acceptable: that dataset also holds Mailchimp hashed raw / marts. Bind table-level editor on `auth0_hashed_raw` and `auth0_email_hash__build` only, plus project `jobUser` and GSM `secretAccessor` on `dpra-connections-auth0-{connection_id}`.
 
 ## Auth0 matching on dev
 
-Email-hash matching on **dev** runs in **`matching-dev`**, not this worker’s stub `/matching/submit` routes. Leave those stubs unused for this path. The serving mart `example-gcp-project.external_hash_index.auth0_email_hash__build` must exist before matching-dev looks it up.
+Email-hash matching on **dev** runs in **this worker** (`POST /matching/submit`), not `matching-dev`. **matching-dev is DROP-only** — it does not look up the Auth0 mart, does not write `request_vertical_matching`, and must **not** be granted `auth0_hashed_raw` (or dataset-wide `external_hash_index`).
+
+Admin-api is the control plane: super_admin enqueue/process matching (S05). Users never invoke workers. The serving mart `example-gcp-project.external_hash_index.auth0_email_hash__build` must exist before this worker looks it up.
 
 **Cadence is UNSET and out of scope.** Matching does **not** read owner freshness, `evaluate_connection_gate`, or a 12h Sheets-style gate. An UNSET cadence does **not** block the wave. Hash refresh stays **manual**.
 
-**`auth0-dev` is not deployed.** Do not curl a fabricated `*.run.app` Auth0 worker. Process is local uvicorn (port **8080**).
+**`auth0-dev` Cloud Run is not deployed.** First deploy is Jose-gated and needs `infra/cloudbuild/auth0-dev.yaml` (S08). Do not curl a fabricated `*.run.app` Auth0 worker. Hash-refresh **process** and matching **submit** are **local uvicorn** (port **8080**) until that deploy exists. Do not claim the service is live.
 
 Numbered path:
 
 1. Hash refresh enqueue / process (mart prerequisite)
-2. DROP matching wave on `matching-dev`
+2. Admin-api Auth0 matching enqueue / process (this worker `/matching/submit`)
 3. Verify `request_vertical_matching`
 4. Owner GET candidates + PUT disposition
 
@@ -190,7 +192,7 @@ curl -sS -X POST http://127.0.0.1:8000/ops/verticals/auth0/hash-refresh/enqueue
 curl -sS -X POST http://127.0.0.1:8000/ops/verticals/auth0/hash-refresh/process
 ```
 
-Against **admin-api-dev**, enqueue still writes `vertical_hash_refresh_attempts`. Process **cannot** reach this laptop and there is no Cloud Run Auth0 service — after enqueue, process locally:
+Against **admin-api-dev**, enqueue still writes `vertical_hash_refresh_attempts`. Process **cannot** reach this laptop and there is no live Cloud Run Auth0 service — after enqueue, process locally:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/hash-refresh/process
@@ -200,19 +202,27 @@ Empty mart → matching records `match_count=0`. Confirm dbt built `auth0_email_
 
 Env for this worker: [Environment](#environment). Admin-api process proxy: `AUTH0_WORKER_URL` (default `http://127.0.0.1:8080`) — [`app/admin_api/README.md`](../admin_api/README.md) § Auth0 vertical.
 
-### 2. DROP matching wave (`matching-dev`)
+### 2. Admin-api Auth0 matching enqueue / process
 
-Promote then dispatch. Admin-api chains `matching-dev` `/ensure-drain` after `/ops/drop/dispatch`. One-row fallback: `habeas-cli drop match --execute`.
+Enqueue writes `auth0_attempts` (`step=matching`) for the request. Process proxies to `AUTH0_WORKER_URL` `/matching/submit` (default `http://127.0.0.1:8080`). Super_admin only. matching-dev `/ensure-drain` is the DROP wave — do not use it for Auth0 matching.
 
 ```bash
-uv run --package habeas-cli habeas-cli drop dispatch --execute
-# Catch-up drain (no CLI wrapper):
-# POST /ops/drop/ensure-drain
+# Local admin-api. Enqueue is per request (auth0_attempts unique on request_id + step).
+curl -sS -X POST "http://127.0.0.1:8000/ops/verticals/auth0/matching/enqueue" \
+  -H 'Content-Type: application/json' \
+  -d "{\"request_id\":\"${REQUEST_ID}\"}"
+curl -sS -X POST http://127.0.0.1:8000/ops/verticals/auth0/matching/process
 ```
 
-Auth0 lookup runs **after** a successful DROP **email** match in the same cycle. Details: [`app/matching/README.md`](../matching/README.md) § Auth0 vertical.
+Against **admin-api-dev**, enqueue still writes `auth0_attempts`. Process **cannot** reach this laptop and `auth0-dev` is not deployed — after enqueue, process locally:
 
-matching-dev runtime SA needs project `roles/bigquery.jobUser` and **table-level** `roles/bigquery.dataViewer` on `external_hash_index.auth0_email_hash__build` (Jose-gated). Do **not** grant dataset-wide write — Mailchimp shares that dataset. See [`infra/README.md`](../../infra/README.md) (matching-dev + Auth0 mart).
+```bash
+curl -sS -X POST http://127.0.0.1:8080/matching/submit
+```
+
+This worker claims the pending `auth0_attempts` row, looks up `auth0_email_hash__build` by the request’s DROP **email** hash, and upserts `request_vertical_matching`. No email hash → zero-hit snapshot (not an error). Empty mart → `match_count=0`.
+
+Do **not** grant `auth0_hashed_raw` (or dataset-wide `external_hash_index`) to matching-dev. Mart read for this path is this worker (local ADC until Jose deploys `auth0-dev`). Table-level IAM for a future Cloud Run identity is S08 / [`infra/README.md`](../../infra/README.md) — do not treat that as live.
 
 ### 3. Verify `request_vertical_matching`
 

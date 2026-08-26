@@ -22,6 +22,7 @@ DEFAULT_REAPED_TABLES: list[ReapedTableConfig] = [
     ReapedTableConfig(table="auth0_attempts"),
     ReapedTableConfig(table="google_sheets_attempts"),
     ReapedTableConfig(table="cassandra_attempts"),
+    ReapedTableConfig(table="axios_headquarters_attempts"),
     ReapedTableConfig(
         table="vertical_hash_refresh_attempts",
         supports_attempt_retry=False,

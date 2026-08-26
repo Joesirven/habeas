@@ -369,29 +369,38 @@ def test_vertical_scoped_connectors_migration_exists():
     assert "migrate:down" in content
 
 
-def test_communications_axios_hq_migration_exists():
+def test_test_vertical_and_member_invites_migration_exists():
     migration = (
-        migrations_dir() / "20260824160000_core_communications_axios_hq.sql"
+        migrations_dir() / "20260821120001_core_test_vertical_and_member_invites.sql"
     )
     assert migration.exists()
     content = migration.read_text()
-
-    for constraint in (
-        "vertical_system_bindings_system_valid",
-        "integration_connections_system_valid",
-        "vertical_hash_refresh_attempts_system_valid",
-    ):
-        section = content.split(constraint, 1)[1].split(")", 1)[0]
-        assert "'axios_hq'" in section
-
-    integration_check = content.split("integration_connections_system_valid", 1)[1].split(
-        ")", 1
-    )[0]
-    assert "'mailchimp'" in integration_check
-
-    assert "UPDATE vertical_system_bindings" in content
-    assert "system = 'mailchimp'" in content
-    assert "active = false" in content
-    assert "('communications', 'axios_hq', ARRAY['upload']" in content
+    assert "test" in content
+    assert "vertical_member_invites" in content
+    assert "settings_json" in content
     assert "migrate:up" in content
     assert "migrate:down" in content
+
+
+def test_matching_auth0_vertical_matching_migration_exists():
+    migration = (
+        migrations_dir() / "20260824200001_matching_auth0_vertical_matching.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+    assert "CREATE TABLE request_vertical_matching" in content
+    assert "request_id" in content
+    assert "vertical" in content
+    assert "match_count" in content
+    assert "vendor_record_ids" in content
+    assert "source_matching_attempt_id" in content
+    assert "recorded_at" in content
+    assert "request_vertical_matching_request_vertical_unique" in content
+    assert "UNIQUE (request_id, vertical)" in content
+    assert "ALTER TABLE request_vertical_dispositions" in content
+    assert "selected_vendor_record_ids" in content
+    assert "JSONB NOT NULL DEFAULT '[]'" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+    assert "CREATE TABLE drop_" not in content
+    assert "selected_dwids" not in content

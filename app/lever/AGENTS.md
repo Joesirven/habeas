@@ -15,6 +15,10 @@ Candidate matching and archive/opt-out suppression via Lever API.
   hashed values and opaque vendor ids only.
 - Routes: `POST /matching/submit`, `POST /matching/collect`, `POST /suppression/submit`,
   `POST /suppression/collect`, `POST /hash-refresh/process`.
+- Matching looks up `lever_email_hash__build` (Auth0 snapshot pattern). Empty mart or
+  missing email hash → `match_count=0` snapshot, not stub success.
+- Hash refresh is live-extract-not-wired: typed `extract_not_configured` failure, never
+  silent stub success. Do not call the Lever tester from this worker (admin-api only).
 - Suppression remains approval-gated via `suppress.lever` — worker leaves pending until
   approved; do not bypass (fail closed if rule missing).
 - Vendor adapter code in `adapters/` inside this app only.

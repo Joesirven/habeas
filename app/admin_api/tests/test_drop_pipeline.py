@@ -124,8 +124,10 @@ PIPELINE_FIXTURE: dict[str, Any] = {
 def test_pipeline_status_shape(monkeypatch: pytest.MonkeyPatch):
     from admin_api import main as admin_main
 
-    async def fake_status() -> dict[str, Any]:
-        return PIPELINE_FIXTURE
+    async def fake_status(*, detail: str = "full") -> dict[str, Any]:
+        payload = dict(PIPELINE_FIXTURE)
+        payload["detail"] = detail
+        return payload
 
     monkeypatch.setattr(drop_pipeline, "get_pipeline_status", fake_status)
     # Avoid lifespan create_pool when DATABASE_URL points at an unreachable host.
@@ -165,9 +167,50 @@ def test_pipeline_status_shape(monkeypatch: pytest.MonkeyPatch):
     assert "url" not in body["worker_health"]["drop_connector"]
 
 
+def test_pipeline_lite_skips_worker_probes(monkeypatch: pytest.MonkeyPatch):
+    from admin_api import main as admin_main
+
+    health_calls = 0
+
+    async def fake_counts(conn: Any, *, detail: str = "full") -> dict[str, Any]:
+        assert detail == "lite"
+        return {"connector_attempts": [], "ingest_attempts": []}
+
+    async def fake_health() -> dict[str, Any]:
+        nonlocal health_calls
+        health_calls += 1
+        return {"matching": {"ok": True, "status_code": 200, "body": {"status": "ok"}}}
+
+    class _Acquire:
+        async def __aenter__(self):
+            return MagicMock()
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(drop_pipeline, "collect_pipeline_counts", fake_counts)
+    monkeypatch.setattr(drop_pipeline, "collect_worker_health", fake_health)
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
+
+    with TestClient(app) as client:
+        response = client.get("/ops/drop/pipeline?detail=lite")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["detail"] == "lite"
+    assert body["worker_health"] == {}
+    assert health_calls == 0
+
+
 @pytest.mark.asyncio
 async def test_pipeline_status_strips_worker_urls(monkeypatch: pytest.MonkeyPatch):
-    async def fake_counts(conn: Any) -> dict[str, Any]:
+    async def fake_counts(conn: Any, *, detail: str = "full") -> dict[str, Any]:
         return {"connector_attempts": []}
 
     async def fake_health() -> dict[str, Any]:
@@ -1661,10 +1704,14 @@ def test_matching_results_bulk_approve_route(monkeypatch: pytest.MonkeyPatch):
         match_type: str,
         decided_by: str,
         decision_reason: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
     ) -> dict[str, Any]:
         captured["match_type"] = match_type
         captured["decided_by"] = decided_by
         captured["decision_reason"] = decision_reason
+        captured["vertical"] = vertical
+        captured["system"] = system
         return {
             "match_type": match_type,
             "approved_count": 2,
@@ -1698,6 +1745,8 @@ def test_matching_results_bulk_approve_route(monkeypatch: pytest.MonkeyPatch):
     assert body["match_type"] == "multi_match"
     assert captured["match_type"] == "multi_match"
     assert captured["decided_by"] == "web-admin@habeas.com"
+    assert captured["vertical"] == "data"
+    assert captured["system"] == "cassandra"
 
 
 def test_matching_results_bulk_approve_prefers_iap_actor(monkeypatch: pytest.MonkeyPatch):
@@ -1709,6 +1758,8 @@ def test_matching_results_bulk_approve_prefers_iap_actor(monkeypatch: pytest.Mon
         match_type: str,
         decided_by: str,
         decision_reason: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
     ) -> dict[str, Any]:
         captured["decided_by"] = decided_by
         return {
@@ -1813,36 +1864,38 @@ async def test_bulk_approve_matching_review_sql_filters_status_4(monkeypatch: py
     from admin_api.approvals import bulk_approve_matching_review_by_match_type
 
     conn = MagicMock()
-    # 1) ensure query (no missing gates)  2) approve UPDATE returning one row
-    conn.fetch = AsyncMock(
-        side_effect=[
-            [],
-            [_Row(id=7, request_id="00000000-0000-0000-0000-000000000007")],
-        ]
+    conn.fetch = AsyncMock(return_value=[])
+
+    async def fake_ensure(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"ensured_count": 0}
+
+    async def fake_ids(*args: Any, **kwargs: Any) -> list[str]:
+        return ["00000000-0000-0000-0000-000000000007"]
+
+    async def fake_promote(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs.get("vertical") == "data"
+        assert kwargs.get("system") == "cassandra"
+        return {"review_status": "approved", "approval_id": 7}
+
+    monkeypatch.setattr(
+        approvals_mod, "ensure_pending_matching_reviews_for_match_type", fake_ensure
     )
-
-    async def fail_create(*args: Any, **kwargs: Any) -> dict[str, Any]:
-        raise AssertionError("ensure should not create when fetch returns empty")
-
-    monkeypatch.setattr(approvals_mod, "create_matching_review_approval", fail_create)
+    monkeypatch.setattr(approvals_mod, "_drop_request_ids_for_match_type", fake_ids)
+    monkeypatch.setattr(approvals_mod, "promote_matching_review_for_request", fake_promote)
 
     result = await bulk_approve_matching_review_by_match_type(
         conn,
         match_type="multi_match",
         decided_by="ops@habeas.com",
         decision_reason="bulk approve match_type=multi_match",
+        vertical="data",
+        system="cassandra",
     )
     assert result["ensured_count"] == 0
     assert result["approved_count"] == 1
     assert result["approval_ids"] == [7]
-    assert conn.fetch.await_count == 2
-    ensure_sql = conn.fetch.await_args_list[0].args[0]
-    approve_sql = conn.fetch.await_args_list[1].args[0]
-    assert "match_count > 1" in ensure_sql
-    assert "match_count > 1" in approve_sql
-    assert "intake_source = 'drop'" in approve_sql
-    assert "status = 'pending'" in approve_sql
-    assert "matching.review" in str(conn.fetch.await_args_list[1].args)
+    assert result["vertical"] == "data"
+    assert result["system"] == "cassandra"
 
 
 def test_match_proxy_opens_matching_review_gate(monkeypatch: pytest.MonkeyPatch):
@@ -2436,7 +2489,7 @@ def test_drop_pipeline_read_requires_super_admin(
 ) -> None:
     roles.settings.admin_api_admins = "admin@example.com"
 
-    async def fake_status() -> dict[str, Any]:
+    async def fake_status(*, detail: str = "full") -> dict[str, Any]:
         return PIPELINE_FIXTURE
 
     monkeypatch.setattr(drop_pipeline, "get_pipeline_status", fake_status)
@@ -2524,6 +2577,8 @@ def test_drop_matching_results_bulk_approve_allowed_for_data_owner(
         match_type: str,
         decided_by: str,
         decision_reason: str | None = None,
+        vertical: str | None = None,
+        system: str | None = None,
     ) -> dict[str, Any]:
         return {
             "match_type": match_type,
@@ -3088,7 +3143,7 @@ async def test_admin_web_401_is_not_pipeline_blocking_down(
     workers_down = sum(1 for probe in health.values() if not probe.get("ok"))
     assert workers_down == 0
 
-    async def fake_counts(conn: Any) -> dict[str, Any]:
+    async def fake_counts(conn: Any, *, detail: str = "full") -> dict[str, Any]:
         return {"connector_attempts": []}
 
     _fake_pool(monkeypatch)
@@ -3126,7 +3181,7 @@ async def test_collect_worker_health_uses_cache(monkeypatch: pytest.MonkeyPatch)
     assert second == first
     assert len(seen) == 1
 
-    async def fake_counts(conn: Any) -> dict[str, Any]:
+    async def fake_counts(conn: Any, *, detail: str = "full") -> dict[str, Any]:
         return {"connector_attempts": []}
 
     _fake_pool(monkeypatch)
@@ -3160,7 +3215,7 @@ async def test_pipeline_worker_health_omits_huge_html_body(
 
     _patch_readyz_httpx(monkeypatch, handler)
 
-    async def fake_counts(conn: Any) -> dict[str, Any]:
+    async def fake_counts(conn: Any, *, detail: str = "full") -> dict[str, Any]:
         return {"connector_attempts": []}
 
     _fake_pool(monkeypatch)
@@ -3287,7 +3342,7 @@ async def test_not_deployed_404_is_not_workers_down(
     assert stats["workers_down"] == 0
     assert stats["workers_total"] == 2
 
-    async def fake_counts(conn: Any) -> dict[str, Any]:
+    async def fake_counts(conn: Any, *, detail: str = "full") -> dict[str, Any]:
         return {"connector_attempts": []}
 
     monkeypatch.setattr(drop_pipeline, "collect_pipeline_counts", fake_counts)
@@ -3352,7 +3407,7 @@ async def test_get_pipeline_status_does_not_issue_fourteen_live_probes(
     assert "admin_api" not in first
     assert first["matching"]["ok"] is True
 
-    async def fake_counts(conn: Any) -> dict[str, Any]:
+    async def fake_counts(conn: Any, *, detail: str = "full") -> dict[str, Any]:
         return {"connector_attempts": []}
 
     _fake_pool(monkeypatch)

@@ -22,8 +22,6 @@ import {
 } from '@/components/ui/table'
 import { isVerticalOperatorRole, useMe } from '@/lib/auth'
 import {
-  fetchOwnerVerticalMatchingDetailOptional,
-  getDropMatchingResultDetail,
   listConnections,
   listOwnerConnectors,
   suggestedDropResponseStatus,
@@ -52,19 +50,18 @@ import {
   inboxReviewItemVerticalLabel,
 } from '@/lib/inbox-status-lab'
 import { matchingSystemColorClass } from '@/lib/legalJourneyLabels'
-import { cn, isRequestUuid } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 
 import {
   applyNeedsPeople,
   ResultApplyBar,
+  ResultContactPii,
+  ResultPeopleSearch,
+  ResultSystemLabel,
   resultViewEmpty,
   statusSelectClass,
 } from '../matching-results-lab/ResultViewChrome'
-import {
-  matchingLabRequestId,
-  type MatchingResultsViewProps,
-  type SearchPeopleFn,
-} from '../matching-results-lab/matching-results-lab-types'
+import type { MatchingResultsViewProps } from '../matching-results-lab/matching-results-lab-types'
 
 export const OWNER_MATCHING_REVIEW_V10_PHILOSOPHY =
   'Hybrid two-tier: matching-only, per-system sections, thin request facts. Default lab view.'
@@ -247,43 +244,6 @@ function personSurfaces(
   return hits
 }
 
-/** Search chrome: Needs refresh / Needs connection — never Connected. */
-function peopleSearchNotice(
-  blocked?: MatchingConnectorGate | null,
-  pending?: { title: string; support: string } | null,
-): { title: string; support: string } | null {
-  if (blocked?.blocked) {
-    const refresh =
-      blocked.displayStatus === 'needs_refresh' || blocked.gateCode === 'upload_stale'
-    return {
-      title: refresh ? 'Needs refresh' : 'Needs connection',
-      support: pending?.support ?? '',
-    }
-  }
-  if (!pending) return null
-  const title = pending.title.trim() === 'Connected' ? 'Needs connection' : pending.title
-  return { title, support: pending.support }
-}
-
-function contactSearchHaystack(contact: MatchedPersonContact): string {
-  const phones = (contact.phones ?? [])
-    .map((phone) => phone?.number?.trim() ?? '')
-    .filter(Boolean)
-    .join(' ')
-  return [
-    formatMatchedContactLabel(contact),
-    contact.email,
-    contact.state,
-    contact.last_name,
-    contact.first_initial,
-    contact.last_initial,
-    phones,
-  ]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase()
-}
-
 function mergeContactsByDwid(
   ...lists: Array<MatchedPersonContact[] | null | undefined>
 ): MatchedPersonContact[] {
@@ -378,9 +338,8 @@ function PeopleList({
   onPersonActionChange,
   onRemovePerson,
   onAddPerson,
-  searchableContacts,
   onSearchPeople,
-  searchNotice,
+  searchableContacts,
   systemStatus,
   selectable,
   disabled,
@@ -393,21 +352,12 @@ function PeopleList({
   onPersonActionChange: (dwid: string, action: PersonActionId) => void
   onRemovePerson: (dwid: string) => void
   onAddPerson: (contact: MatchedPersonContact) => void
+  onSearchPeople?: MatchingResultsViewProps['onSearchPeople']
   searchableContacts: MatchedPersonContact[]
-  onSearchPeople?: SearchPeopleFn
-  searchNotice: { title: string; support: string } | null
   systemStatus: string | null
   selectable: boolean
   disabled: boolean
 }) {
-  const [query, setQuery] = useState('')
-  const [searchOpen, setSearchOpen] = useState(false)
-  const [directoryHits, setDirectoryHits] = useState<MatchedPersonContact[]>([])
-  const [searchBusy, setSearchBusy] = useState(false)
-  const [searchFailed, setSearchFailed] = useState(false)
-  const searchRef = useRef(onSearchPeople)
-  searchRef.current = onSearchPeople
-  const searchLocked = Boolean(disabled || searchNotice)
   const people = useMemo(() => {
     const byDwid = new Map(
       safeMatchedContacts(contacts).map((contact) => [contact.dwid, contact] as const),
@@ -422,48 +372,6 @@ function PeopleList({
   const matchType = detail?.match_type ?? item.match_type
   const matchCount =
     typeof detail?.match_count === 'number' ? detail.match_count : people.length
-  const visibleSet = new Set(visibleDwids)
-  const needle = query.trim().toLowerCase()
-
-  useEffect(() => {
-    const text = query.trim()
-    if (searchLocked || !onSearchPeople || text.length < 2) {
-      setDirectoryHits([])
-      setSearchBusy(false)
-      setSearchFailed(false)
-      return
-    }
-    let cancelled = false
-    const timer = window.setTimeout(() => {
-      void (async () => {
-        setSearchBusy(true)
-        setSearchFailed(false)
-        try {
-          const result = await searchRef.current?.(text)
-          if (!cancelled) setDirectoryHits(result ?? [])
-        } catch {
-          if (!cancelled) {
-            setDirectoryHits([])
-            setSearchFailed(true)
-          }
-        } finally {
-          if (!cancelled) setSearchBusy(false)
-        }
-      })()
-    }, 200)
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-  }, [onSearchPeople, query, searchLocked])
-
-  const addable = mergeContactsByDwid(directoryHits, searchableContacts).filter((contact) => {
-    const dwid = contact.dwid?.trim()
-    if (!dwid || visibleSet.has(dwid)) return false
-    if (directoryHits.some((row) => row.dwid === dwid)) return true
-    if (!needle) return true
-    return contactSearchHaystack(contact).includes(needle)
-  })
 
   if (status === 'unavailable' && people.length === 0 && visibleDwids.length === 0) {
     return <MatchedContactsUnavailableCallout matching={detail ?? undefined} />
@@ -524,11 +432,11 @@ function PeopleList({
                 <TableRow key={dwid || `person-${index}`}>
                   <TableCell
                     className={cn(
-                      'max-w-[12rem] truncate text-xs',
+                      'max-w-[12rem] text-xs',
                       applies || !selectable ? 'text-ink' : 'text-mute',
                     )}
                   >
-                    {formatMatchedContactLabel(contact)}
+                    <ResultContactPii contact={contact} compact />
                   </TableCell>
                   <SurfaceMarks hits={personSurfaces(contact, attemptHits)} />
                   <TableCell>
@@ -578,70 +486,15 @@ function PeopleList({
         </Table>
       )}
 
-      <div className="space-y-1">
-        <label className="text-[0.65rem] font-medium uppercase tracking-wide text-mute">
-          Add from this system
-        </label>
-        <input
-          type="search"
-          className={statusSelectClass()}
-          value={query}
-          disabled={searchLocked}
-          placeholder={searchNotice ? searchNotice.title : 'Search this system…'}
-          aria-label="Search people in this system"
-          onFocus={() => setSearchOpen(true)}
-          onChange={(event) => {
-            setSearchOpen(true)
-            setQuery(event.target.value)
-          }}
-        />
-        {searchNotice ? (
-          <p className="text-[0.65rem] text-ink-soft" role="status">
-            {searchNotice.title}
-            {searchNotice.support ? ` — ${searchNotice.support}` : ''}
-          </p>
-        ) : null}
-        {searchOpen && !searchLocked ? (
-          <div className="space-y-1" role="listbox" aria-label="People to add">
-            {searchBusy ? (
-              <p className="text-[0.65rem] text-mute">Searching this system…</p>
-            ) : null}
-            {searchFailed ? (
-              <p className="text-[0.65rem] text-red-800">
-                Could not search this system. Try again.
-              </p>
-            ) : null}
-            {addable.length === 0 && !searchBusy ? (
-              <p className="text-[0.65rem] text-mute">
-                {needle
-                  ? onSearchPeople && needle.length < 2
-                    ? 'Type at least 2 characters to search this system.'
-                    : 'No people in this system match that search.'
-                  : 'No additional people to add. Removed matches appear here.'}
-              </p>
-            ) : (
-              addable.map((contact) => {
-                const dwid = contact.dwid
-                return (
-                  <button
-                    key={dwid}
-                    type="button"
-                    role="option"
-                    className="flex w-full items-center justify-between rounded-md border border-line bg-paper px-2 py-1 text-left text-xs text-ink hover:bg-canvas"
-                    onClick={() => {
-                      onAddPerson(contact)
-                      setQuery('')
-                    }}
-                  >
-                    <span className="truncate">{formatMatchedContactLabel(contact)}</span>
-                    <span className="shrink-0 text-[0.65rem] text-habeas-navy">Add</span>
-                  </button>
-                )
-              })
-            )}
-          </div>
-        ) : null}
-      </div>
+      <ResultPeopleSearch
+        onSearchPeople={onSearchPeople}
+        localContacts={searchableContacts}
+        excludeDwids={visibleDwids}
+        onAddPerson={onAddPerson}
+        disabled={disabled}
+        item={item}
+        detail={detail}
+      />
     </div>
   )
 }
@@ -720,8 +573,6 @@ export function OwnerMatchingReviewV10({
   activeSystem,
   onSelectSystem,
   onSearchPeople,
-  peopleSearchBlocked,
-  peopleSearchPending,
 }: OwnerMatchingReviewV10Props) {
   const empty = resultViewEmpty(loading, Boolean(item))
   const checkboxId = useId()
@@ -757,7 +608,7 @@ export function OwnerMatchingReviewV10({
   const verticalId =
     detail?.vertical?.trim() || item?.vertical?.trim() || null
   const connections = item ? inboxDisplayConnections(item) : []
-  const sections = (
+  const sections =
     connections.length > 0
       ? connections
       : [
@@ -769,60 +620,15 @@ export function OwnerMatchingReviewV10({
             match_type: item?.match_type,
           },
         ]
-  ).filter((connection) => {
-    const systemId = connection.system?.trim() || ''
-    if (!systemIdIsCassandra(systemId)) return true
-    return (connection.vertical ?? item?.vertical ?? '').trim().toLowerCase() === 'test'
-  })
 
   const { gateFor } = useSystemConnectorGates({
     verticalId,
     activeSystemId: resolvedSystem,
   })
 
-  const { role } = useMe()
-  const ownerPersona = isVerticalOperatorRole(role)
-  const requestId = item ? matchingLabRequestId(item.request_id) : null
-  const searchSystem = resolvedSystem && !systemIdIsCassandra(resolvedSystem) ? resolvedSystem : null
-  const peopleSearchQuery = useQuery({
-    queryKey: ownerPersona
-      ? [
-          'admin-api',
-          'ops',
-          'requests',
-          requestId,
-          'verticals',
-          verticalId,
-          'matching-results',
-          searchSystem,
-          'v10-people',
-        ]
-      : ['admin-api', 'ops', 'drop', 'matching-results', requestId, 'v10-people'],
-    queryFn: () => {
-      if (!requestId || !isRequestUuid(requestId)) return null
-      if (ownerPersona) {
-        if (!verticalId) return null
-        return fetchOwnerVerticalMatchingDetailOptional(
-          requestId,
-          verticalId,
-          searchSystem ?? undefined,
-        )
-      }
-      return getDropMatchingResultDetail(requestId)
-    },
-    enabled: Boolean(requestId && searchSystem && (!ownerPersona || verticalId)),
-    staleTime: 30_000,
-    retry: false,
-  })
-
   const matchedPool = useMemo(
-    () =>
-      mergeContactsByDwid(
-        contacts,
-        extraContacts,
-        peopleSearchQuery.data?.matched_contacts,
-      ),
-    [contacts, extraContacts, peopleSearchQuery.data?.matched_contacts],
+    () => mergeContactsByDwid(contacts, extraContacts),
+    [contacts, extraContacts],
   )
 
   useEffect(() => {
@@ -1027,6 +833,7 @@ export function OwnerMatchingReviewV10({
                       />
                     ) : null}
                     <h3 className="text-xs font-semibold text-ink">{label}</h3>
+                    {isActive ? <ResultSystemLabel item={item} detail={detail} /> : null}
                     <Badge variant="default" className="normal-case tracking-normal">
                       {matchTypeLabel(sectionMatch, ownerLanguage)}
                     </Badge>
@@ -1152,9 +959,8 @@ export function OwnerMatchingReviewV10({
                     onPersonActionChange={handlePersonActionChange}
                     onRemovePerson={handleRemovePerson}
                     onAddPerson={handleAddPerson}
-                    searchableContacts={matchedPool}
                     onSearchPeople={onSearchPeople}
-                    searchNotice={peopleSearchNotice(peopleSearchBlocked, peopleSearchPending)}
+                    searchableContacts={matchedPool}
                     systemStatus={effectiveStatus}
                     selectable={!peopleCleared}
                     disabled={sectionLocked || peopleCleared}

@@ -12,11 +12,11 @@ from pydantic import BaseModel, Field
 from pydantic_settings import SettingsConfigDict
 
 from habeas_privacy_core.auth import (
+    ALL_ROLES,
     is_authenticated_actor,
     resolve_actor,
 )
 from habeas_privacy_core.auth.roles import (
-    ALL_ROLES,
     ROLE_DATA_OWNER,
     ROLE_SUPER_ADMIN,
     Role,
@@ -63,6 +63,17 @@ class AssignedVerticalLabelOut(BaseModel):
     display_label: str
 
 
+PENDING_SETTING_INVITE_USERS = "invite_data_users"
+
+
+class PendingSettingOut(BaseModel):
+    """Reusable first-run / changed-settings prompt hook for /me."""
+
+    id: str
+    title: str
+    status: Literal["pending", "skipped", "done"]
+
+
 class MeResponse(BaseModel):
     email: str
     role: Role
@@ -72,6 +83,55 @@ class MeResponse(BaseModel):
     assigned_vertical_labels: list[AssignedVerticalLabelOut] = Field(default_factory=list)
     needs_connector_setup: bool = False
     connector_reminders: list[ConnectorReminderOut] = Field(default_factory=list)
+    pending_settings: list[PendingSettingOut] = Field(default_factory=list)
+
+
+class MeHomeStageCounts(BaseModel):
+    ingest: int = 0
+    matching: int = 0
+    fulfillment: int = 0
+    notice: int = 0
+
+
+class MeHomeCaDrop(BaseModel):
+    next_run_at: str | None = None
+    cadence: str | None = None
+    schedule_utc: str | None = None
+
+
+class MeHomeDataRefresh(BaseModel):
+    system: str
+    label: str
+    next_at: str | None = None
+
+
+class MeHomeComment(BaseModel):
+    request_id: str
+    actor: str
+    occurred_at: str
+    body: str
+
+
+class MeHomeNotification(BaseModel):
+    id: str
+    kind: Literal["comment", "batch"]
+    title: str
+    occurred_at: str
+    request_id: str | None = None
+
+
+class MeHomeResponse(BaseModel):
+    """GET /me/home — owner chrome + empty/zero fields for other roles."""
+
+    given_name: str
+    pending_attention_count: int = 0
+    urgent_deadline_days: int | None = None
+    stage_counts_year: MeHomeStageCounts = Field(default_factory=MeHomeStageCounts)
+    next_ca_drop: MeHomeCaDrop = Field(default_factory=MeHomeCaDrop)
+    next_data_refresh: MeHomeDataRefresh | None = None
+    comments: list[MeHomeComment] = Field(default_factory=list)
+    notifications: list[MeHomeNotification] = Field(default_factory=list)
+
 
 @dataclass(frozen=True, slots=True)
 class RolePrincipal:

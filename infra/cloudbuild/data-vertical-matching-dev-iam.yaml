@@ -1,0 +1,6 @@
+# Do not apply this file.
+#
+# Data Vertical Matching (data-vertical-matching-dev): DROP hash + future MDR
+# plaintext; not Auth0/Axios. It must not get Auth0 mart access
+# (dataViewer or similar on auth0_email_hash__build / external_hash_index).
+# Auth0 mart dataViewer belongs on the auth0-dev service account — see infra/README.

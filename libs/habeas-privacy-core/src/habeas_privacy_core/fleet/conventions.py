@@ -41,6 +41,7 @@ CONTROL_PLANE_SERVICE_EXCLUDES: Final[frozenset[str]] = frozenset(
 # Minimal stable naming quirks (not a full worker list).
 SERVICE_ALIAS_TO_WORKER_KEY: Final[Mapping[str, str]] = {
     "data-fulfillment-dispatcher": "data_fulfillment",
+    "data-vertical-matching": "matching",
 }
 
 ATTEMPT_TABLE_EXCEPTIONS: Final[Mapping[str, str]] = {

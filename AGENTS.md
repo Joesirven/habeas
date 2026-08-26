@@ -22,9 +22,9 @@ Code repo for **Habeas Data Privacy Request Automation**. Design authority (arch
 |------|------|
 | [`libs/habeas-privacy-core/`](libs/habeas-privacy-core/) | Shared library — models, queue, audit, adapter bases (not deployed alone) |
 | [`transform/drop_hash/`](transform/drop_hash/) | dbt + UDF DROP hash index — prod home; serving marts `email_hash` / `phone_hash` / `ndz_hash` in `example-gcp-project.drop_hash_index` (not `analytics/`) |
-| [`transform/external_hash/`](transform/external_hash/) | dbt marts for external vertical hash indexes (Mailchimp, Auth0, …) — hashed raw only |
+| [`transform/external_hash/`](transform/external_hash/) | dbt marts for external vertical hash indexes (Auth0, Paylocity, Lever, Sheets, …) — hashed raw only; Axios HQ (`axios_headquarters`) is upload-every-batch (no `axios_hashed_raw` invented this slice) |
 | [`app/`](app/) | All Cloud Run FastAPI apps — control plane + automation |
-| [`app/matching/`](app/matching/) | Matching worker + chunk drain; Job `matching-drain-*` (5 tasks) started via `/ensure-drain` |
+| [`app/matching/`](app/matching/) | Matching worker + chunk drain; Python package stays `matching`; Job target `data-vertical-matching-drain-*` (5 tasks) via `/ensure-drain`. Live Cloud Run/Job rename is Jose-gated; historical `matching-dev` / `matching-drain-dev` may still be running. |
 | [`app/admin_api/`](app/admin_api/) | Main control-plane app — mutations, dashboard, live events |
 | [`app/auth0/`](app/auth0/) | Auth0 worker — matching/suppression + hash refresh into [`transform/external_hash`](transform/external_hash/) |
 | [`clients/web/`](clients/web/) | Admin web app — Vite, React, TypeScript, Bun; Ops Dashboard (Pipeline / Errors / Logs / Health) + connections onboarding |
@@ -62,6 +62,21 @@ If pre-merge → read [`.agent/modules/review-personas.md`](.agent/modules/revie
 | Touching request or audit tables | [`privacy-invariants.md`](.agent/modules/privacy-invariants.md) |
 
 ---
+
+## Vocabulary
+
+| Term | Meaning |
+|------|---------|
+| **request** | One privacy request (a person asked Habeas to act). |
+| **source** | Where the request arrived — **CA DROP**, access portal, authorized agent, manual. Not a connection. |
+| **system** (connection) | A data system in a vertical (Alumni Google Sheet, Axios HQ). Owner verifies matching **per system**. |
+| **vertical** | Org slice that owns systems (People/HR, Communications, **Test vertical**). |
+| **batch** | Intake grouping, typically date + source (e.g. `Aug 21 · CA DROP`). |
+| **matching-review item** | One review row for a request **in one system**. |
+| **data owner** | Configures the vertical and its connections. |
+| **data user** | Reviews, fulfills, and refreshes matching in assigned verticals. |
+
+**CA DROP is a source**, never a system or connection chip. **Test vertical** systems display as **System A** / **System B** (placeholders). Other verticals show the real connection name.
 
 ## Invariants
 

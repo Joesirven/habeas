@@ -1,10 +1,21 @@
-# Matching
+# Data Vertical Matching
 
-Consumer record matching for privacy requests, across all intake sources. A `MatchingPipeline`
-interface with one adapter per source — `DropHashPipeline` (DROP: SHA-256 compare against the
-BigQuery hash-index marts) and `PlaintextMatchPipeline` (webform / CSV: plaintext lookup, data
-source TBD — MDR vs M Tool) — dispatched by a router keyed on `IntakeSource`. A future
-state-specific matching requirement is a new adapter class, not a new app.
+This app matches **all intake sources** against the **Data vertical** only.
+Auth0, Axios Headquarters, and other vendor verticals are separate workers — not
+this process. Webform / CSV / manual stay in this same app (MDR plaintext) — do
+not add a second Cloud Run for those intakes. Target Cloud Run names:
+`data-vertical-matching-dev` / `data-vertical-matching-prod` and drain jobs
+`data-vertical-matching-drain-dev` / `data-vertical-matching-drain-prod`. Live
+rename is Jose-gated; historical `matching-dev` may still be the running service
+until cutover.
+
+A `MatchingPipeline` interface with one adapter per source — `DropHashPipeline`
+(DROP: SHA-256 compare against the BigQuery hash-index marts) and
+`PlaintextMatchPipeline` (webform / CSV / manual: plaintext lookup against
+**MDR**; mechanics not wired yet) — dispatched by a router keyed on
+`IntakeSource`. Runtime today is DROP-only (`DropHashPipeline` +
+`drop_hash_index` + chunk drain). A future state-specific matching requirement
+is a new adapter class, not a new app.
 
 ## DROP hash lookup
 
@@ -20,7 +31,7 @@ state-specific matching requirement is a new adapter class, not a new app.
 
 - Queue remains **one `matching_attempts` row per request**.
 - Hot path: `POST /ensure-drain` acquires a single-flight `matching_drain_lease`, then
-  starts Cloud Run Job **`matching-drain-dev`** (5 parallel tasks). Each task runs
+  starts Cloud Run Job **`data-vertical-matching-drain-dev`** (5 parallel tasks). Each task runs
   `python -m matching.chunk_drain` and drains **≤10K** homogeneous chunks via set-based
   BigQuery (`lookup_dwids_by_hashes`). Tasks compete with `SKIP LOCKED`.
 - Job task HTTP unit (optional/ops): `POST /drain-chunk` (one chunk).
@@ -35,14 +46,15 @@ state-specific matching requirement is a new adapter class, not a new app.
 ### Compat-first cutover
 
 1. Deploy matching + migration `matching_create_matching_drain_lease`.
-2. Deploy Job via `matching-dev.yaml` (embeds Job deploy) or `matching-drain-job-dev.yaml`.
+2. Deploy Job via `data-vertical-matching-dev.yaml` (embeds Job deploy) or `data-vertical-matching-drain-job-dev.yaml`.
 3. Confirm pending declines faster than ~12/hour (Job executions visible in Cloud Run).
 4. Flip matching Scheduler to ensure-drain only.
 5. Mid-flight rows: complete or reaper timeout → new pending → chunk drain.
-6. **Prod:** Jose-approved (2026-07-22). Use `infra/cloudbuild/matching-prod.yaml` once
+6. **Prod:** Jose-approved (2026-07-22). Use `infra/cloudbuild/data-vertical-matching-prod.yaml` once
    prod Cloud SQL exists; create/flip `dpra-prod-matching` → `/ensure-drain` after smoke.
-   Today `example-gcp-project` has no prod SQL / matching-prod runtime — operational cutover is
-   on `matching-dev` + `matching-drain-dev`.
+   Today `example-gcp-project` has no prod SQL / `data-vertical-matching-prod` runtime — live
+   rename is Jose-gated; historical `matching-dev` + `matching-drain-dev` may still be
+   the running services until cutover.
 
 ## Auth0 vertical
 

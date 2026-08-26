@@ -54,6 +54,10 @@ export type SheetsOauthLabSearch = {
   error?: string
 }
 
+function searchWithoutOauthCallback(search: SheetsOauthLabSearch): SheetsOauthLabSearch {
+  return search.error ? { error: search.error } : {}
+}
+
 /** Owner-style Sheets OAuth lab — not production connections wiring. */
 export function SheetsOauthLabPage() {
   const me = useMe()
@@ -124,6 +128,11 @@ export function SheetsOauthLabPage() {
         title: 'Redeem failed',
         description: actionToast.safeErrorMessage(error),
       })
+      void navigate({
+        to: '/dev/sheets-oauth',
+        search: searchWithoutOauthCallback(search),
+        replace: true,
+      })
     },
   })
 
@@ -162,10 +171,20 @@ export function SheetsOauthLabPage() {
     const stored = readStoredSession()
     if (!stored) {
       setStepNote('OAuth returned a code but no lab session was found in this browser.')
+      void navigate({
+        to: '/dev/sheets-oauth',
+        search: searchWithoutOauthCallback(search),
+        replace: true,
+      })
       return
     }
     if (stored.state !== search.state) {
       setStepNote('OAuth state mismatch — start Connect again.')
+      void navigate({
+        to: '/dev/sheets-oauth',
+        search: searchWithoutOauthCallback(search),
+        replace: true,
+      })
       return
     }
     if (redeemMutation.isPending || redeemMutation.isSuccess) return
@@ -244,8 +263,9 @@ export function SheetsOauthLabPage() {
         <li className="rounded-md border border-slate-200 bg-white p-4 space-y-3">
           <p className="text-sm font-medium text-slate-900">2 · Connect Google</p>
           <p className="text-xs text-slate-600">
-            Offline access + spreadsheets.readonly. Consent as the owner account. Refresh
-            token is redeemed by admin-api (client secret never in the browser).
+            Offline access + spreadsheets.readonly + drive.readonly + openid + email.
+            Consent as the owner account. Refresh token is redeemed by admin-api (client
+            secret never in the browser).
           </p>
           <Button
             type="button"

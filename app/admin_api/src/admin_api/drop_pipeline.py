@@ -756,8 +756,17 @@ async def collect_matching_progress(conn: Any) -> dict[str, Any]:
     }
 
 
-async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
-    """Cheap SQL snapshot — ids, counts, and statuses only (no PII)."""
+async def collect_pipeline_counts(
+    conn: Any,
+    *,
+    detail: str = "full",
+) -> dict[str, Any]:
+    """SQL snapshot — ids, counts, and statuses only (no PII).
+
+    ``detail=lite`` skips the 1.8M-row raw spine GROUP BY and other heavy
+    walks so the console can paint before background refresh.
+    """
+    lite = detail == "lite"
     connector_rows = await conn.fetch(
         """
         SELECT step, status, COUNT(*)::int AS count
@@ -777,66 +786,82 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
     # One GROUP BY on drop_raw_requests — never a second full scan for
     # response_status, and never a correlated fulfillment.ready walk of the
     # 1.8M-row spine (approval ⋈ requests ⋈ raws ⋈ matching_results MAX).
-    raw_grouped = await conn.fetch(
-        """
-        SELECT list_type,
-               response_status,
-               COUNT(*)::int AS count
-          FROM drop_raw_requests
-         GROUP BY list_type, response_status
-         ORDER BY list_type, response_status NULLS FIRST
-        """
-    )
-    raw_rows, response_status_rows = _rollup_raw_request_groups(raw_grouped)
-    if response_status_rows is None:
-        response_status_rows = []
-    fulfillment_ready = 0
-    recent_drop_requests = await conn.fetch(
-        """
-        SELECT id::text AS id, received_at, raw_record_id
-          FROM requests
-         WHERE intake_source = 'drop'
-         ORDER BY received_at DESC
-         LIMIT 20
-        """
-    )
-    # Request cardinality (not raw-spine sum). Index-only COUNT — no
-    # COUNT(*) OVER window, no second drop_raw_requests scan.
-    drop_request_count = await conn.fetchval(
-        """
-        SELECT COUNT(*)::bigint
-          FROM requests
-         WHERE intake_source = 'drop'
-        """
-    )
-    matching_progress = await collect_matching_progress(conn)
-    matching_pending = int(matching_progress["pending"])
-    matching_claimed = int(matching_progress["claimed"])
-    matching_success = int(matching_progress["success"])
-    matching_by_status = matching_progress["by_status"]
-    matching_drain = matching_progress["drain"]
-    matching_failed_terminal = 0
-    last_fail_status: str | None = None
-    for item in matching_by_status:
-        if item["status"] in _TERMINAL_FAIL_STATUSES:
-            matching_failed_terminal += int(item["count"])
-            if last_fail_status is None:
-                last_fail_status = str(item["status"])
+    if lite:
+        raw_rows: list[dict[str, Any]] = []
+        response_status_rows: list[dict[str, Any]] = []
+        recent_drop_requests = []
+        drop_request_count = None
+        matching_pending = 0
+        matching_claimed = 0
+        matching_success = 0
+        matching_by_status: list[dict[str, Any]] = []
+        matching_drain = {
+            "active": False,
+            "holder": None,
+            "expires_at": None,
+        }
+        matching_failed_terminal = 0
+        last_fail_status = None
+        matching_result_rows = []
+    else:
+        raw_grouped = await conn.fetch(
+            """
+            SELECT list_type,
+                   response_status,
+                   COUNT(*)::int AS count
+              FROM drop_raw_requests
+             GROUP BY list_type, response_status
+             ORDER BY list_type, response_status NULLS FIRST
+            """
+        )
+        raw_rows, response_status_rows = _rollup_raw_request_groups(raw_grouped)
+        if response_status_rows is None:
+            response_status_rows = []
+        recent_drop_requests = await conn.fetch(
+            """
+            SELECT id::text AS id, received_at, raw_record_id
+              FROM requests
+             WHERE intake_source = 'drop'
+             ORDER BY received_at DESC
+             LIMIT 20
+            """
+        )
+        drop_request_count = await conn.fetchval(
+            """
+            SELECT COUNT(*)::bigint
+              FROM requests
+             WHERE intake_source = 'drop'
+            """
+        )
+        matching_progress = await collect_matching_progress(conn)
+        matching_pending = int(matching_progress["pending"])
+        matching_claimed = int(matching_progress["claimed"])
+        matching_success = int(matching_progress["success"])
+        matching_by_status = matching_progress["by_status"]
+        matching_drain = matching_progress["drain"]
+        matching_failed_terminal = 0
+        last_fail_status = None
+        for item in matching_by_status:
+            if item["status"] in _TERMINAL_FAIL_STATUSES:
+                matching_failed_terminal += int(item["count"])
+                if last_fail_status is None:
+                    last_fail_status = str(item["status"])
 
-    matching_result_rows = await conn.fetch(
-        """
-        SELECT mr.request_id::text AS request_id,
-               mr.matched,
-               mr.match_count,
-               mr.matched_via,
-               mr.recorded_at
-          FROM matching_results mr
-          JOIN requests r ON r.id = mr.request_id
-         WHERE r.intake_source = 'drop'
-         ORDER BY mr.recorded_at DESC
-         LIMIT 20
-        """
-    )
+        matching_result_rows = await conn.fetch(
+            """
+            SELECT mr.request_id::text AS request_id,
+                   mr.matched,
+                   mr.match_count,
+                   mr.matched_via,
+                   mr.recorded_at
+              FROM matching_results mr
+              JOIN requests r ON r.id = mr.request_id
+             WHERE r.intake_source = 'drop'
+             ORDER BY mr.recorded_at DESC
+             LIMIT 20
+            """
+        )
+    fulfillment_ready = 0
     approval_rows = await conn.fetch(
         """
         SELECT status, COUNT(*)::int AS count
@@ -928,19 +953,22 @@ async def collect_pipeline_counts(conn: Any) -> dict[str, Any]:
         open_statuses,
         str(APPROACHING_SLA_THRESHOLD_HOURS["ingest"]),
     )
-    approaching_matching = await conn.fetchval(
-        """
-        -- approaching_sla:matching
-        SELECT COUNT(*)::int
-          FROM matching_attempts ma
-          JOIN requests r ON r.id = ma.request_id
-         WHERE r.intake_source = 'drop'
-           AND ma.status = ANY($1::text[])
-           AND ma.attempted_at < NOW() - ($2 || ' hours')::interval
-        """,
-        open_statuses,
-        str(APPROACHING_SLA_THRESHOLD_HOURS["matching"]),
-    )
+    if lite:
+        approaching_matching = 0
+    else:
+        approaching_matching = await conn.fetchval(
+            """
+            -- approaching_sla:matching
+            SELECT COUNT(*)::int
+              FROM matching_attempts ma
+              JOIN requests r ON r.id = ma.request_id
+             WHERE r.intake_source = 'drop'
+               AND ma.status = ANY($1::text[])
+               AND ma.attempted_at < NOW() - ($2 || ' hours')::interval
+            """,
+            open_statuses,
+            str(APPROACHING_SLA_THRESHOLD_HOURS["matching"]),
+        )
     approaching_matching_review = await conn.fetchval(
         """
         -- approaching_sla:matching_review
@@ -1843,14 +1871,18 @@ async def collect_bulk_process_progress(
     }
 
 
-async def get_pipeline_status() -> dict[str, Any]:
+async def get_pipeline_status(*, detail: str = "full") -> dict[str, Any]:
     """Full pipeline snapshot including best-effort worker health."""
     _require_database()
     pool = get_pool()
 
     async def _counts() -> dict[str, Any]:
         async with pool.acquire() as conn:
-            return await collect_pipeline_counts(conn)
+            return await collect_pipeline_counts(conn, detail=detail)
+
+    if detail == "lite":
+        counts = await _counts()
+        return {**counts, "worker_health": {}, "detail": "lite"}
 
     counts, worker_health = await asyncio.gather(
         _counts(),
@@ -1859,7 +1891,7 @@ async def get_pipeline_status() -> dict[str, Any]:
     public_health = {
         name: _public_worker_health(probe) for name, probe in worker_health.items()
     }
-    return {**counts, "worker_health": public_health}
+    return {**counts, "worker_health": public_health, "detail": "full"}
 
 
 async def proxy_post_payload(
@@ -1910,8 +1942,15 @@ def _model_dump_nonzero(model: BaseModel) -> dict[str, Any]:
 
 
 @router.get("/pipeline")
-async def drop_pipeline_status(_principal: SuperAdminPrincipal):
-    return await get_pipeline_status()
+async def drop_pipeline_status(
+    _principal: SuperAdminPrincipal,
+    detail: str = Query(
+        default="full",
+        pattern="^(full|lite)$",
+        description="lite skips raw-spine scan and worker probes for fast console paint",
+    ),
+):
+    return await get_pipeline_status(detail=detail)
 
 
 @router.get("/matching-progress")
@@ -3225,6 +3264,8 @@ async def drop_matching_results_bulk_approve(
             match_type=body.match_type,
             decided_by=decided_by,
             decision_reason=body.decision_reason,
+            vertical="data",
+            system="cassandra",
         )
     return {"status": "ok", **result}
 

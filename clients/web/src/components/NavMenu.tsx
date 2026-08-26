@@ -359,7 +359,7 @@ function NavDropdown({ group }: { group: NavGroup }) {
         <div
           id={menuId}
           role="menu"
-          className="absolute right-0 top-full z-50 mt-1 min-w-[14rem] max-w-[min(20rem,calc(100vw-1.5rem))]"
+          className="absolute right-0 top-full z-50 min-w-[14rem] max-w-[min(20rem,calc(100vw-1.5rem))] pt-1"
         >
           <div className="overflow-hidden rounded-md border border-line bg-white py-1 shadow-md">
             {group.children.map((child) => {
@@ -377,7 +377,10 @@ function NavDropdown({ group }: { group: NavGroup }) {
                   className={`flex items-center justify-between gap-3 px-3 py-2 text-[0.8125rem] transition-colors hover:bg-panel hover:text-ink ${
                     childActive ? 'bg-panel text-ink' : 'text-ink-soft'
                   }`}
-                  onClick={() => close()}
+                  onClick={() => {
+                    close()
+                  }}
+                  onMouseEnter={() => clearCloseTimer()}
                 >
                   <span className="flex min-w-0 items-baseline gap-1.5">
                     <span className="truncate">{child.label}</span>

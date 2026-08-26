@@ -72,6 +72,16 @@ class TestServiceAliasesAndExcludes:
             == "data_fulfillment"
         )
 
+    def test_data_vertical_matching_alias(self) -> None:
+        assert SERVICE_ALIAS_TO_WORKER_KEY["data-vertical-matching"] == "matching"
+        assert worker_key_from_service_slug("data-vertical-matching") == "matching"
+        assert (
+            service_slug_from_name("data-vertical-matching-dev", "-dev")
+            == "data-vertical-matching"
+        )
+        assert service_slug_from_name("matching-dev", "-dev") == "matching"
+        assert worker_key_from_service_slug("matching") == "matching"
+
     def test_default_hyphen_to_underscore(self) -> None:
         assert worker_key_from_service_slug("hash-index-refresh") == "hash_index_refresh"
 

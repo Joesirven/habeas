@@ -1,11 +1,10 @@
-# matching-prod — same Method E drain as matching-dev.
+# data-vertical-matching-prod — same Method E drain as matching-dev.
 # Requires a production Cloud SQL instance + _DATABASE_URL substitution.
-# Jose-approved cutover (2026-07-22): deploy when prod SQL exists; flip
-# Scheduler dpra-prod-matching → /ensure-drain after smoke.
+# Jose-gated first prod cutover; Data Vertical Matching.
 substitutions:
   _REGION: us-east4
   _PROJECT: example-gcp-project
-  _SERVICE: matching-prod
+  _SERVICE: data-vertical-matching-prod
   _TAG: latest
   # Override at submit time when prod SQL is provisioned.
   _CLOUDSQL_INSTANCE: example-gcp-project:us-east4:dpra-prod
@@ -45,7 +44,21 @@ steps:
       - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
       - --timeout=3600
       - --service-account=${_RUNTIME_SA}
-      - --set-env-vars=SERVICE_NAME=matching,WORKER_ID=matching-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},MATCHING_DRAIN_MAX_CHUNKS=50,MATCHING_DRAIN_TASK_COUNT=20,MATCHING_DRAIN_JOB_NAME=matching-drain-prod,MATCHING_DRAIN_JOB_REGION=${_REGION},MATCHING_DRAIN_LEASE_HOLDER=matching-drain-job
+      - --set-env-vars=SERVICE_NAME=matching,WORKER_ID=data-vertical-matching-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},MATCHING_DRAIN_MAX_CHUNKS=50,MATCHING_DRAIN_TASK_COUNT=20,MATCHING_DRAIN_JOB_NAME=data-vertical-matching-drain-prod,MATCHING_DRAIN_JOB_REGION=${_REGION},MATCHING_DRAIN_LEASE_HOLDER=matching-drain-job
+
+  # admin-api runtime SA only — never user/IAP run.invoker on workers. Never allUsers.
+  - id: grant-admin-api-invoker
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - add-iam-policy-binding
+      - ${_SERVICE}
+      - --region=${_REGION}
+      - --member=serviceAccount:${_RUNTIME_SA}
+      - --role=roles/run.invoker
+      - --quiet
 
   - id: deploy-drain-job
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
@@ -55,7 +68,7 @@ steps:
       - |
         set -euo pipefail
         IMAGE="us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}"
-        gcloud run jobs deploy matching-drain-prod \
+        gcloud run jobs deploy data-vertical-matching-drain-prod \
           --project="${_PROJECT}" \
           --region="${_REGION}" \
           --image="$${IMAGE}" \
@@ -67,9 +80,9 @@ steps:
           --set-cloudsql-instances="${_CLOUDSQL_INSTANCE}" \
           --command=python \
           --args=-m,matching.chunk_drain \
-          --set-env-vars="SERVICE_NAME=matching-drain,WORKER_ID=matching-drain-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},MATCHING_DRAIN_MAX_CHUNKS=50,MATCHING_DRAIN_TASK_COUNT=20,MATCHING_DRAIN_LEASE_HOLDER=matching-drain-job,PYTHONPATH=/app/app/matching/src" \
+          --set-env-vars="SERVICE_NAME=matching-drain,WORKER_ID=data-vertical-matching-drain-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},MATCHING_DRAIN_MAX_CHUNKS=50,MATCHING_DRAIN_TASK_COUNT=20,MATCHING_DRAIN_LEASE_HOLDER=matching-drain-job,PYTHONPATH=/app/app/matching/src" \
           --quiet
-        gcloud run jobs add-iam-policy-binding matching-drain-prod \
+        gcloud run jobs add-iam-policy-binding data-vertical-matching-drain-prod \
           --project="${_PROJECT}" \
           --region="${_REGION}" \
           --member="serviceAccount:${_RUNTIME_SA}" \

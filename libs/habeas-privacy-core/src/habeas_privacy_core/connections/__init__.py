@@ -1,5 +1,9 @@
 """Integration connections onboarding helpers."""
 
+from habeas_privacy_core.connections.gcp_secret_reader import (
+    GcpSecretReader,
+    gsm_secret_id,
+)
 from habeas_privacy_core.connections.catalog import (
     CATALOG_BINDINGS,
     CATALOG_VERTICALS,

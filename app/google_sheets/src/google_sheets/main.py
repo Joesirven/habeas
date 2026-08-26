@@ -1,45 +1,29 @@
-"""Google Sheets Cloud Run worker — matching + suppression."""
+"""Google Sheets Cloud Run worker — catalog-system scaffold (not a sheet).
+
+This app is not the matcher. Real workers are google_sheets_alumni and
+google_sheets_contact_us — they own ``google_sheets_attempts`` claims.
+Process routes return 503 and must not claim. Library modules
+(``hash_extract``, ``vertical_match``, ``dbt_runner``) stay on disk for a
+later port into those workers.
+"""
 
 from __future__ import annotations
 
 import logging
-import json
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import Any, AsyncIterator
-
-from fastapi import FastAPI, HTTPException
-from pydantic_settings import SettingsConfigDict
 
 from habeas_privacy_core.config import CoreSettings
-from habeas_privacy_core.connections.catalog import SHEET_SYSTEMS, get_bindings_for_vertical
-from habeas_privacy_core.connections.freshness import GateResult
-from habeas_privacy_core.connections.matching_gate import (
-    evaluate_vertical_matching_gate,
-    gate_block_audit,
-    vertical_id_from_attempt_row,
-)
-from habeas_privacy_core.db.connections import stamp_successful_extract_for_system
-from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
-from habeas_privacy_core.db.vertical_hash_refresh import (
-    claim_vertical_hash_refresh,
-    mark_vertical_hash_refresh_in_flight,
-    record_vertical_hash_refresh_run,
-)
+from habeas_privacy_core.db.pool import close_pool, create_pool, ping
 from habeas_privacy_core.health import health_payload, ready_payload
 from habeas_privacy_core.observability.logging import configure_logging
 from habeas_privacy_core.observability.tracing import setup_tracing
-from habeas_privacy_core.queue.claim import claim_next
-from habeas_privacy_core.queue.constants import (
-    GOOGLE_SHEETS_ATTEMPTS_TABLE,
-    VERTICAL_HASH_REFRESH_ATTEMPTS_TABLE,
-)
-from habeas_privacy_core.vertical_hash.audit import build_vertical_audit_payload
+from fastapi import FastAPI, HTTPException
+from pydantic_settings import SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
-TABLE = GOOGLE_SHEETS_ATTEMPTS_TABLE
-SYSTEM = "google_sheets"
+SCAFFOLD_DOES_NOT_CLAIM = "google_sheets scaffold does not claim work"
 
 
 class Settings(CoreSettings):
@@ -89,175 +73,30 @@ async def readyz():
     return payload
 
 
-async def _claim(step: str) -> dict[str, Any] | None:
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        return await claim_next(
-            conn, TABLE, step, worker_id=settings.worker_id, lease_minutes=10
-        )
-
-
-async def _complete_stub(attempt_id: int, step: str, *, success: bool = True) -> dict[str, Any]:
-    """Stub terminal transition — real adapters land later."""
-    import json
-
-    pool = get_pool()
-    status = "success" if success else "submit_error"
-    audit = json.dumps(
-        build_vertical_audit_payload(adapter="stub", step=step, system=SYSTEM)
-    )
-    async with pool.acquire() as conn:
-        await conn.execute(
-            f"""
-            UPDATE {TABLE}
-               SET status = $2,
-                   completed_at = NOW(),
-                   audit_payload = COALESCE(audit_payload, '{{}}'::jsonb) || $3::jsonb
-             WHERE id = $1 AND status = 'claimed'
-            """,
-            attempt_id,
-            status,
-            audit,
-        )
-    return {"attempt_id": attempt_id, "step": step, "status": status}
-
-
-async def _complete_gate_blocked(
-    attempt_id: int,
-    gate: GateResult,
-    *,
-    system: str,
-) -> dict[str, Any]:
-    pool = get_pool()
-    step = "matching"
-    audit = json.dumps(
-        {
-            **build_vertical_audit_payload(
-                adapter="stub",
-                step=step,
-                system=system,
-                error_code="gate_blocked",
-            ),
-            **gate_block_audit(system=system, gate=gate),
-        }
-    )
-    async with pool.acquire() as conn:
-        await conn.execute(
-            f"""
-            UPDATE {TABLE}
-               SET status = $2,
-                   completed_at = NOW(),
-                   error_code = 'gate_blocked',
-                   audit_payload = COALESCE(audit_payload, '{{}}'::jsonb) || $3::jsonb
-             WHERE id = $1 AND status = 'claimed'
-            """,
-            attempt_id,
-            "submit_error",
-            audit,
-        )
-    return {"attempt_id": attempt_id, "step": step, "status": "gate_blocked"}
-
-
-def _gate_system_for_attempt(row: dict[str, Any]) -> str:
-    vertical_id = vertical_id_from_attempt_row(row)
-    if vertical_id:
-        try:
-            for binding in get_bindings_for_vertical(vertical_id):
-                if binding.system in SHEET_SYSTEMS:
-                    return binding.system
-        except ValueError:
-            pass
-    return SYSTEM
+def _refuse_scaffold_claim() -> None:
+    raise HTTPException(status_code=503, detail=SCAFFOLD_DOES_NOT_CLAIM)
 
 
 @app.post("/matching/submit")
 async def matching_submit():
-    if not settings.database_url:
-        raise HTTPException(status_code=503, detail="database not configured")
-    row = await _claim("matching")
-    if row is None:
-        return {"claimed": False}
-    gate_system = _gate_system_for_attempt(row)
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        gate = await evaluate_vertical_matching_gate(
-            conn,
-            system=gate_system,
-            vertical_id=vertical_id_from_attempt_row(row),
-        )
-    if not gate.allowed:
-        result = await _complete_gate_blocked(int(row["id"]), gate, system=gate_system)
-        return {"claimed": True, **result}
-    result = await _complete_stub(int(row["id"]), "matching")
-    return {"claimed": True, **result}
+    _refuse_scaffold_claim()
 
 
 @app.post("/matching/collect")
 async def matching_collect():
-    return {"collected": 0}
+    _refuse_scaffold_claim()
 
 
 @app.post("/suppression/submit")
 async def suppression_submit():
-    if not settings.database_url:
-        raise HTTPException(status_code=503, detail="database not configured")
-    row = await _claim("suppression")
-    if row is None:
-        return {"claimed": False}
-    result = await _complete_stub(int(row["id"]), "suppression")
-    return {"claimed": True, **result}
+    _refuse_scaffold_claim()
 
 
 @app.post("/suppression/collect")
 async def suppression_collect():
-    return {"collected": 0}
+    _refuse_scaffold_claim()
 
 
 @app.post("/hash-refresh/process")
 async def hash_refresh_process():
-    """Claim vertical_hash_refresh for Google Sheets; stub extract (no plaintext persist)."""
-    if not settings.database_url:
-        raise HTTPException(status_code=503, detail="database not configured")
-
-    pool = get_pool()
-    async with pool.acquire() as conn:
-        claim = await claim_vertical_hash_refresh(
-            conn,
-            system=SYSTEM,
-            worker_id=settings.worker_id,
-        )
-        if claim is None:
-            return {"processed": False, "reason": "idle", "system": SYSTEM}
-
-        attempt_id = int(claim["id"])
-        started_at = datetime.now(timezone.utc)
-        await mark_vertical_hash_refresh_in_flight(conn, attempt_id)
-
-        # Stub extract: hash in memory only; never land plaintext in BQ.
-        finished_at = datetime.now(timezone.utc)
-        await record_vertical_hash_refresh_run(
-            conn,
-            attempt_id=attempt_id,
-            status="success",
-            started_at=started_at,
-            finished_at=finished_at,
-            rows_written=0,
-        )
-        await stamp_successful_extract_for_system(conn, SYSTEM, at=finished_at)
-        await conn.execute(
-            f"""
-            UPDATE {VERTICAL_HASH_REFRESH_ATTEMPTS_TABLE}
-               SET status = 'success',
-                   completed_at = NOW()
-             WHERE id = $1
-               AND status = 'in_flight'
-            """,
-            attempt_id,
-        )
-
-    return {
-        "processed": True,
-        "attempt_id": attempt_id,
-        "status": "success",
-        "system": SYSTEM,
-    }
+    _refuse_scaffold_claim()

@@ -3216,7 +3216,12 @@ function DropPipelinePageInner() {
   const actionResultRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    setFatPipelineEnabled(true)
+    if (typeof requestIdleCallback === 'function') {
+      const id = requestIdleCallback(() => setFatPipelineEnabled(true), { timeout: 400 })
+      return () => cancelIdleCallback(id)
+    }
+    const id = window.setTimeout(() => setFatPipelineEnabled(true), 0)
+    return () => clearTimeout(id)
   }, [])
 
   function focusActionResultPanel(targetTab: PipelineTab = 'pipeline') {
@@ -3264,16 +3269,27 @@ function DropPipelinePageInner() {
   const matchingProgressQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-matching-progress'],
     queryFn: getDropMatchingProgress,
-    refetchInterval: 2_000,
+    refetchInterval: (query) => {
+      const drainActive = query.state.data?.drain?.active ?? false
+      const pending = matchingProgressCount(query.state.data, 'pending') ?? 0
+      const claimed = matchingProgressCount(query.state.data, 'claimed') ?? 0
+      return drainActive || pending > 0 || claimed > 0 ? 750 : 5_000
+    },
+    placeholderData: (previous) => previous,
+  })
+
+  const pipelineLiteQuery = useQuery({
+    queryKey: ['admin-api', 'ops', 'drop-pipeline', 'lite'],
+    queryFn: () => getDropPipeline({ detail: 'lite' }),
+    refetchInterval: 15_000,
     placeholderData: (previous) => previous,
   })
 
   const pipelineQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'drop-pipeline'],
-    queryFn: getDropPipeline,
-    refetchInterval: 5_000,
+    queryKey: ['admin-api', 'ops', 'drop-pipeline', 'full'],
+    queryFn: () => getDropPipeline({ detail: 'full' }),
+    refetchInterval: 30_000,
     placeholderData: (previous) => previous,
-    // First paint must not wait on fat GET /ops/drop/pipeline.
     enabled: fatPipelineEnabled,
   })
 
@@ -3310,7 +3326,7 @@ function DropPipelinePageInner() {
   const trendsQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-workers', 'trends', '3m'],
     queryFn: () => getDropWorkerTrends('3m'),
-    enabled: pipelineQuery.isFetched && processesQuery.isFetched,
+    enabled: (pipelineLiteQuery.isFetched || pipelineQuery.isFetched) && processesQuery.isFetched,
     refetchInterval: 60_000,
     placeholderData: (previous) => previous,
   })
@@ -3412,14 +3428,15 @@ function DropPipelinePageInner() {
     })
   }
 
-  const data: DropPipelineStatus | undefined = pipelineQuery.data
+  const data: DropPipelineStatus | undefined = pipelineQuery.data ?? pipelineLiteQuery.data
   const matchingProgress = matchingProgressQuery.data
-  const showSkeleton = pipelineQuery.isPending && !data
+  const showSkeleton = pipelineLiteQuery.isPending && !pipelineLiteQuery.data
   const hashPending = (data?.hash_index_refresh?.pending ?? 0) > 0
-  const hashWorkerTone = data
-    ? data.worker_health.hash_index_refresh == null
+  const workerHealth = pipelineQuery.data?.worker_health ?? data?.worker_health
+  const hashWorkerTone = workerHealth
+    ? workerHealth.hash_index_refresh == null
       ? 'not_deployed'
-      : workerProbeTone(data.worker_health.hash_index_refresh)
+      : workerProbeTone(workerHealth.hash_index_refresh)
     : 'unknown'
   const lastRun = data?.hash_index_refresh?.last_run
   const caSchedule = data?.ca_drop_schedule
@@ -3463,6 +3480,7 @@ function DropPipelinePageInner() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {(matchingProgressQuery.isFetching && !matchingProgressQuery.isPending) ||
+          (pipelineLiteQuery.isFetching && !pipelineLiteQuery.isPending) ||
           (pipelineQuery.isFetching && !pipelineQuery.isPending) ? (
             <span className="rounded-md border border-line px-2 py-0.5 text-[0.65rem] text-mute">
               Refreshing

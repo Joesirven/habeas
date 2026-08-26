@@ -159,6 +159,8 @@ async def test_upload_connection(
     content: bytes,
     multi_pii_delimiter: str | None,
     column_mapping: dict[str, str] | None = None,
+    email_format: str | None = None,
+    phone_format: str | None = None,
 ) -> tuple[bool, str]:
     """Run an upload CSV connection test without Live credential validation."""
     logger.info("connection_test_started system=%s mode=upload", system)
@@ -176,6 +178,8 @@ async def test_upload_connection(
             content=content,
             multi_pii_delimiter=multi_pii_delimiter,
             column_mapping=column_mapping,
+            email_format=email_format,
+            phone_format=phone_format,
         )
     except Exception:
         logger.info(

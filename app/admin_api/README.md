@@ -75,6 +75,12 @@ Disposition body may include `vendor_record_ids`. Status 3/4 require ≥1 vendor
 
 Numbered dev path: (1) hash-refresh enqueue / process, (2) DROP dispatch / ensure-drain on matching-dev, (3) verify `request_vertical_matching`, (4) GET candidates + PUT disposition. See [`app/matching/README.md`](../matching/README.md) § Auth0 vertical.
 
+Remaining-ops routes `/ops/verticals/axios_headquarters/*` (and paylocity / lever /
+sheets) exist on this tree. First Cloud Run for those workers is Jose-gated. Do not
+create `app/axios_headquarters` here — that worker lives in another checkout. Worker
+URLs are settings-only; do not invent `*.run.app` hosts.
+
+
 ## Local
 
 ```bash
