@@ -15,6 +15,7 @@ import {
   getOwnerConnectorCredentialPreview,
   listOwnerConnectorReminders,
   listOwnerConnectors,
+  listOwnerVisibleVerticals,
   listVerticalMembers,
   mintVerticalMemberInvite,
   ownerSheetsOauthExtract,
@@ -43,11 +44,17 @@ import {
   CADENCE_OPTION_WEEKLY,
   CADENCE_OPTION_WITH_NEW_BATCHES,
   MULTI_PII_DELIMITER_OPTIONS,
-  SYSTEM_COPY,
+  findOwnerConnector,
+  isAxiosHqOwnerSystem,
+  systemWizardCopy,
   activeModeFromMetadata,
   allowsLive,
   allowsOauth,
   allowsUpload,
+  buildModeStepCards,
+  connectionMethodLabel,
+  DIRECT_CONNECTION_LABEL,
+  MANUAL_UPLOAD_LABEL,
   buildReminderBannerItems,
   buildVerticalWizardSteps,
   parseVerticalWizardStepId,
@@ -59,12 +66,15 @@ import {
   filterRemindersForOwnerConnectorsPage,
   isOwnerConnectorsHiddenSystem,
   isOwnerConnectorsHiddenVertical,
+  ownerConnectorsVerticalIds,
   isSheetsOwnerSystem,
   ownerConnectorDisplayName,
+  ownerUploadAllowed,
   liveConnectFailureActions,
   liveConnectReady,
   liveConnectSuccessFollowOn,
   LIVE_CONNECT_FAILURE_HINT,
+  LIVE_CONNECT_FAILURE_RETRY_ONLY_HINT,
   LIVE_CONNECT_RETRY_LABEL,
   LIVE_CONNECT_SETUP_UPLOAD_LABEL,
   LIVE_PING_NOT_EXTRACT_HINT,
@@ -93,6 +103,7 @@ import {
   type SheetsConnectMethod,
   type VerticalWizardStep,
 } from '@/lib/owner-connector-ui'
+import { verticalLabel } from '@/lib/legalJourneyLabels'
 import { cn } from '@/lib/utils'
 
 const FIELD_CLASS =
@@ -143,11 +154,23 @@ function connectorTitle(
   return ownerConnectorDisplayName(verticalId, connector.system, connector.display_name)
 }
 
+/** Prefer API `connection_method_label`, then `connection_method`. Never "Live". */
+function ownerMethodLabel(
+  connector: Pick<
+    OwnerConnectorSystem,
+    'system' | 'connection_method' | 'connection_method_label'
+  >,
+): string {
+  const preferred =
+    connector.connection_method_label?.trim() || connector.connection_method
+  return connectionMethodLabel(connector.system, preferred) ?? DIRECT_CONNECTION_LABEL
+}
+
 function systemsNeedingCadence(connectors: readonly OwnerConnectorSystem[]) {
   return connectors.filter(
     (connector) =>
       isSheetsOwnerSystem(connector.system) ||
-      allowsUpload(connector.allowed_approaches) ||
+      ownerUploadAllowed(connector.system, connector.upload_allowed) ||
       livePingIsNotMatchingExtract(connector.system) ||
       connector.system === 'google_sheets' ||
       connector.system === 'alumni_google_sheet' ||
@@ -165,13 +188,15 @@ function wizardableConnectors(connectors: readonly OwnerConnectorSystem[]) {
   )
 }
 
-/** Catalog may omit Upload (Lever until M10). Still expose mapping + CSV in the wizard. */
+/** Catalog may omit Upload (Lever until M10). Still expose mapping + CSV when advertised. */
 function liveUploadOptInFallback(
-  connector: Pick<OwnerConnectorSystem, 'system' | 'allowed_approaches'>,
+  connector: Pick<OwnerConnectorSystem, 'system' | 'allowed_approaches' | 'upload_allowed'>,
 ): LiveConnectUploadFallback | null {
+  if (!ownerUploadAllowed(connector.system, connector.upload_allowed)) return null
   const fromCatalog = liveConnectFailureActions({
     system: connector.system,
     allowedApproaches: connector.allowed_approaches,
+    uploadAllowed: connector.upload_allowed,
   }).setupManualUpload
   const pingOnly = livePingIsNotMatchingExtract(connector.system)
   if (!fromCatalog && !pingOnly) return null
@@ -498,7 +523,7 @@ function UploadHowToPanel({
   onContinue: () => void
 }) {
   const copy =
-    SYSTEM_COPY[connector.system]?.uploadHowto ??
+    systemWizardCopy(connector.system)?.uploadHowto ??
     modeStepSystemHint(connector.system, 'upload')
 
   return (
@@ -542,9 +567,9 @@ function SheetsHowToPanel({
   onContinue: () => void
 }) {
   const copy =
-    SYSTEM_COPY[connector.system]?.howto ??
-    SYSTEM_COPY[connector.system]?.oauthHowto ??
-    SYSTEM_COPY[connector.system]?.uploadHowto
+    systemWizardCopy(connector.system)?.howto ??
+    systemWizardCopy(connector.system)?.oauthHowto ??
+    systemWizardCopy(connector.system)?.uploadHowto
 
   return (
     <div className="space-y-3">
@@ -1011,7 +1036,7 @@ function SheetsConnectPanel({
               : 'border-line hover:border-slate-300',
           )}
         >
-          <p className="text-sm font-medium text-ink">Upload CSV</p>
+          <p className="text-sm font-medium text-ink">{MANUAL_UPLOAD_LABEL}</p>
           <p className="mt-1 text-xs text-ink-soft">
             Use an existing export if you cannot grant sheet access.
           </p>
@@ -1409,13 +1434,34 @@ function LiveHowToPanel({
   verticalId,
   connector,
   onContinue,
+  onUseUpload,
 }: {
   verticalId: string
   connector: OwnerConnectorSystem
-  onContinue: () => void
+  onContinue: (mode: 'live' | 'upload') => void
+  onUseUpload?: () => void
 }) {
+  const [selectedMode, setSelectedMode] = useState<'live' | 'upload'>('live')
+  const methodLabel = ownerMethodLabel(connector)
   const copy =
-    SYSTEM_COPY[connector.system]?.liveHowto ?? modeStepSystemHint(connector.system, 'live')
+    systemWizardCopy(connector.system)?.liveHowto ?? modeStepSystemHint(connector.system, 'live')
+
+  const modeCards = buildModeStepCards({
+    systemId: connector.system,
+    displayName: connectorTitle(verticalId, connector),
+    allowedApproaches: connector.allowed_approaches,
+    connectionMethod: connector.connection_method_label ?? connector.connection_method,
+    uploadAllowed: connector.upload_allowed,
+  })
+  const liveCard = modeCards.find((card) => card.mode === 'live' && card.allowed)
+  const uploadCard = modeCards.find((card) => card.mode === 'upload' && card.allowed)
+  const showModeCards = Boolean(
+    liveCard &&
+      uploadCard &&
+      onUseUpload &&
+      ownerUploadAllowed(connector.system, connector.upload_allowed),
+  )
+  const pickerCards = showModeCards && liveCard && uploadCard ? [liveCard, uploadCard] : []
 
   const previewQuery = useQuery({
     queryKey: [
@@ -1430,20 +1476,51 @@ function LiveHowToPanel({
     staleTime: 60_000,
   })
 
+  function selectMode(mode: 'live' | 'upload') {
+    setSelectedMode(mode)
+  }
+
   return (
     <div className="space-y-3">
       <div>
         <h4 className="text-sm font-medium text-ink">
-          {connectorTitle(verticalId, connector)} · Live how-to
+          {connectorTitle(verticalId, connector)} · {methodLabel} how-to
         </h4>
         {copy ? <p className="mt-1 text-xs leading-relaxed text-ink-soft">{copy}</p> : null}
       </div>
+
+      {pickerCards.length ? (
+        <div className="grid gap-2 sm:grid-cols-2">
+          {pickerCards.map((card) => {
+            const selected = selectedMode === card.mode
+            const title = card.mode === 'upload' ? MANUAL_UPLOAD_LABEL : methodLabel
+            return (
+              <button
+                key={card.mode}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => selectMode(card.mode)}
+                className={cn(
+                  'rounded-md border p-3 text-left transition-colors',
+                  selected
+                    ? 'border-habeas-navy bg-canvas ring-1 ring-habeas-navy'
+                    : 'border-line hover:border-slate-300',
+                )}
+              >
+                <p className="text-sm font-medium text-ink">{title}</p>
+                <p className="mt-1 text-xs text-ink-soft">{card.hint ?? card.definition}</p>
+              </button>
+            )
+          })}
+        </div>
+      ) : null}
 
       {previewQuery.isPending ? <SkeletonLines lines={3} /> : null}
 
       {previewQuery.isError ? (
         <p className="text-xs text-red-800">
-          Could not load Live credential instructions for {connectorTitle(verticalId, connector)}.
+          Could not load {methodLabel} credential instructions for{' '}
+          {connectorTitle(verticalId, connector)}.
         </p>
       ) : null}
 
@@ -1465,7 +1542,7 @@ function LiveHowToPanel({
       ) : null}
 
       <div className="flex justify-end">
-        <Button type="button" size="sm" onClick={onContinue}>
+        <Button type="button" size="sm" onClick={() => onContinue(selectedMode)}>
           Continue
         </Button>
       </div>
@@ -1502,20 +1579,25 @@ function LiveConnectPanel({
 
   const preview = previewQuery.data
   const systemLabel = connectorTitle(verticalId, connector)
+  const methodLabel = ownerMethodLabel(connector)
   const failureActions = liveConnectFailureActions({
     system: connector.system,
     allowedApproaches: connector.allowed_approaches,
+    uploadAllowed: connector.upload_allowed,
   })
   const successFollowOn = liveConnectSuccessFollowOn({
     system: connector.system,
     allowedApproaches: connector.allowed_approaches,
+    uploadAllowed: connector.upload_allowed,
   })
   const setupManualUpload = liveUploadOptInFallback(connector)
   const pingIsNotExtract = livePingIsNotMatchingExtract(connector.system)
   const showUploadFallback = Boolean(onUseUpload && setupManualUpload)
   const failHint = showUploadFallback
     ? LIVE_CONNECT_FAILURE_HINT
-    : failureActions.hint
+    : ownerUploadAllowed(connector.system, connector.upload_allowed)
+      ? failureActions.hint
+      : LIVE_CONNECT_FAILURE_RETRY_ONLY_HINT
 
   const [credentials, setCredentials] = useState<Record<string, string>>({})
   const [clientError, setClientError] = useState<string | null>(null)
@@ -1712,14 +1794,14 @@ function LiveConnectPanel({
     <div className="relative space-y-3">
       {testing ? <LiveTestOverlay systemLabel={systemLabel} /> : null}
 
-      <h4 className="text-sm font-medium text-ink">{systemLabel} · Live credentials</h4>
+      <h4 className="text-sm font-medium text-ink">{systemLabel} · {methodLabel} credentials</h4>
       <p className="text-xs text-mute">
-        Paste Live credentials below, then test the connection before continuing.
+        Paste {methodLabel} credentials below, then test the connection before continuing.
       </p>
 
       {preview.fields.length === 0 ? (
         <p className="text-xs text-mute">
-          No Live credentials are collected for this system in the wizard. Contact Habeas if you
+          No {methodLabel} credentials are collected for this system in the wizard. Contact Habeas if you
           expected a form.
         </p>
       ) : (
@@ -2040,7 +2122,7 @@ function UploadConnectPanel({
         {connectorTitle(verticalId, connector)} · Upload CSV
       </h4>
       <p className="text-xs text-mute">
-        {SYSTEM_COPY[connector.system]?.uploadHowto ??
+        {systemWizardCopy(connector.system)?.uploadHowto ??
           'Upload your export as-is. Email alone or phone alone is enough. After upload, map columns if the headers do not match. Rows that fail the selected email or phone format stay in this step so you can clean them and resubmit.'}
       </p>
       <div className="flex flex-wrap gap-1.5">
@@ -2321,7 +2403,7 @@ function CadenceStepPanel({
     return (
       <div className="space-y-3">
         <p className="text-xs text-mute">
-          This vertical only has Live systems. Refresh cadence applies to file, upload, and sheet
+          This vertical only has direct-connection systems. Refresh cadence applies to file, upload, and sheet
           sources — continue to confirm.
         </p>
         <div className="flex justify-between gap-2">
@@ -2344,7 +2426,7 @@ function CadenceStepPanel({
           Applies to upload and sheet sources in this vertical:{' '}
           {cadenceSystems.map((connector) => connectorTitle(verticalId, connector)).join(', ')}.
         </p>
-        {cadenceSystems.some((connector) => connector.system === 'axios_hq') ? (
+        {cadenceSystems.some((connector) => isAxiosHqOwnerSystem(connector.system)) ? (
           <p className="mt-1 text-xs text-mute">
             Axios HQ is upload-every-batch. After each upload, map identifier columns if the
             headers differ. Email or phone is enough.
@@ -2457,6 +2539,13 @@ function ConfirmStepPanel({
 }) {
   const cadenceSystems = systemsNeedingCadence(connectors)
   const liveSystems = connectors.filter((connector) => allowsLive(connector.allowed_approaches))
+  const rotationMethods = [
+    ...new Set(liveSystems.map((connector) => ownerMethodLabel(connector))),
+  ]
+  const rotationLead =
+    rotationMethods.length === 1
+      ? `${rotationMethods[0]} credentials`
+      : 'Direct-connection credentials'
   const pingOnlySystems = connectors.filter((connector) =>
     livePingIsNotMatchingExtract(connector.system),
   )
@@ -2477,7 +2566,7 @@ function ConfirmStepPanel({
             className="rounded-md border border-line bg-white px-3 py-2 text-ink-soft"
           >
             <span className="font-medium text-ink">{connectorTitle(verticalId, connector)}</span>
-            {allowsUpload(connector.allowed_approaches) ? (
+            {ownerUploadAllowed(connector.system, connector.upload_allowed) ? (
               <span>
                 {' '}
                 · Upload delimiter:{' '}
@@ -2501,9 +2590,9 @@ function ConfirmStepPanel({
 
       {liveSystems.length ? (
         <p className="rounded-md border border-line bg-white px-3 py-2 text-xs text-ink-soft">
-          Live credentials must be rotated at least every <strong>180 days</strong> for:{' '}
-          {liveSystems.map((connector) => connectorTitle(verticalId, connector)).join(', ')}. Matching may gate
-          when rotation is overdue.
+          {rotationLead} must be rotated at least every <strong>180 days</strong> for:{' '}
+          {liveSystems.map((connector) => connectorTitle(verticalId, connector)).join(', ')}. Matching may
+          gate when rotation is overdue.
         </p>
       ) : null}
 
@@ -2552,6 +2641,7 @@ function VerticalWizard({
             system: connector.system,
             allowedApproaches: connector.allowed_approaches,
             displayLabel: connectorTitle(verticalId, connector),
+            uploadAllowed: connector.upload_allowed,
           })),
           viewOnly: list.view_only,
         }),
@@ -2788,6 +2878,7 @@ function VerticalWizard({
     const followOn = liveConnectSuccessFollowOn({
       system: connector.system,
       allowedApproaches: connector.allowed_approaches,
+      uploadAllowed: connector.upload_allowed,
     })
     const mappingId = liveMappingFollowOnStepId(connector.system)
     if (
@@ -2847,7 +2938,10 @@ function VerticalWizard({
   }
 
   const connector =
-    'system' in parsedStep ? connectorBySystem[parsedStep.system] : undefined
+    'system' in parsedStep
+      ? findOwnerConnector(connectors, parsedStep.system) ??
+        connectorBySystem[parsedStep.system]
+      : undefined
   const isSheetsConnector = Boolean(
     connector && isSheetsOwnerSystem(connector.system),
   )
@@ -2887,7 +2981,18 @@ function VerticalWizard({
         <LiveHowToPanel
           verticalId={verticalId}
           connector={connector}
-          onContinue={() => void handleContinueFromHowTo(parsedStep.system, 'live')}
+          onContinue={(mode) => void handleContinueFromHowTo(parsedStep.system, mode)}
+          onUseUpload={
+            ownerUploadAllowed(connector.system, connector.upload_allowed)
+              ? () => {
+                  const fallback = liveUploadOptInFallback(connector)
+                  void handleUseUpload(
+                    connector.system,
+                    fallback?.stepId ?? liveUploadFallbackStepId(connector.system),
+                  )
+                }
+              : undefined
+          }
         />
       ) : null}
 
@@ -2991,13 +3096,17 @@ function VerticalWizard({
           invalidate={invalidate}
           onBack={goBack}
           onContinue={() => handleLiveContinue(connector)}
-          onUseUpload={() => {
-            const fallback = liveUploadOptInFallback(connector)
-            void handleUseUpload(
-              connector.system,
-              fallback?.stepId ?? liveUploadFallbackStepId(connector.system),
-            )
-          }}
+          onUseUpload={
+            ownerUploadAllowed(connector.system, connector.upload_allowed)
+              ? () => {
+                  const fallback = liveUploadOptInFallback(connector)
+                  void handleUseUpload(
+                    connector.system,
+                    fallback?.stepId ?? liveUploadFallbackStepId(connector.system),
+                  )
+                }
+              : undefined
+          }
         />
       ) : null}
 
@@ -3067,7 +3176,7 @@ function ReminderBanners({
             <p className="text-xs opacity-90">{item.description}</p>
             <p className="text-[11px] opacity-70">
               {ownerConnectorDisplayName(item.verticalId, item.system)} ·{' '}
-              {item.verticalId.replaceAll('_', '/')}
+              {verticalLabel(item.verticalId)}
             </p>
           </div>
           <Button
@@ -3125,6 +3234,12 @@ function ConnectorStatusRow({
   connector: OwnerConnectorSystem
 }) {
   const metaMode = activeModeFromMetadata(connector.metadata)
+  const modeLabel =
+    metaMode === 'live'
+      ? ownerMethodLabel(connector)
+      : metaMode === 'upload'
+        ? MANUAL_UPLOAD_LABEL
+        : null
 
   return (
     <div className="rounded-md border border-line bg-white px-3 py-2.5">
@@ -3132,11 +3247,10 @@ function ConnectorStatusRow({
         <div className="min-w-0 space-y-1">
           <h4 className="text-sm font-medium text-ink">{connectorTitle(verticalId, connector)}</h4>
           <p className="text-[11px] text-mute">
-            {connector.system.replaceAll('_', ' ')}
-            {metaMode ? ` · ${metaMode}` : ''}
+            {modeLabel ? `${modeLabel} · ` : ''}
             {connector.connection_id
-              ? ` · ${connector.connection_id.slice(0, 8)}…`
-              : ' · not linked'}
+              ? `${connector.connection_id.slice(0, 8)}…`
+              : 'not linked'}
           </p>
         </div>
         <DisplayStatusBadge
@@ -3366,7 +3480,7 @@ function TeamMembersSection({
 }
 
 function OwnerConnectorsBody({ search }: { search?: OwnerConnectorsSearch }) {
-  const { me, role } = useAuth()
+  const { me, role, realRole } = useAuth()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const verticalFilter = search?.vertical
@@ -3479,11 +3593,31 @@ function OwnerConnectorsBody({ search }: { search?: OwnerConnectorsSearch }) {
     document.getElementById('team')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [role])
 
-  const verticals = me?.verticals ?? []
+  const catalogQuery = useQuery({
+    queryKey: ['admin-api', 'owner', 'verticals'],
+    queryFn: listOwnerVisibleVerticals,
+    staleTime: 30_000,
+    enabled:
+      role === 'data_owner' ||
+      role === 'data_user' ||
+      role === 'super_admin' ||
+      role === 'admin',
+  })
+  const verticals = useMemo(
+    () =>
+      ownerConnectorsVerticalIds({
+        role,
+        realRole,
+        meVerticals: me?.verticals,
+        catalogVerticalIds: catalogQuery.isSuccess
+          ? catalogQuery.data.map((row) => row.id)
+          : undefined,
+      }),
+    [role, realRole, me?.verticals, catalogQuery.isSuccess, catalogQuery.data],
+  )
   const visibleVerticals = useMemo(() => {
-    const assigned = verticals.filter((id) => !isOwnerConnectorsHiddenVertical(id))
-    if (!verticalFilter) return assigned
-    return assigned.filter((id) => id === verticalFilter)
+    if (!verticalFilter) return verticals
+    return verticals.filter((id) => id === verticalFilter)
   }, [verticals, verticalFilter])
 
   const remindersFromMe = me?.connector_reminders
@@ -3599,7 +3733,7 @@ function OwnerConnectorsBody({ search }: { search?: OwnerConnectorsSearch }) {
               })
             }
           >
-            {id.replaceAll('_', '/')}
+            {verticalLabel(id)}
           </Button>
         ))}
       </div>

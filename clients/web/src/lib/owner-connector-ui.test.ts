@@ -32,7 +32,10 @@ import {
   displayStatusChip,
   filterRemindersForOwnerConnectorsPage,
   isModeAllowed,
+  ownerUploadAllowed,
   liveConnectReady,
+  MANUAL_UPLOAD_LABEL,
+  connectionMethodLabel,
   MODE_DEFINITION_CARDS,
   MODE_STEP_CONNECTING_NOT_MATCHING_FOOTNOTE,
   MODE_UPLOAD_DEFINITION_CARD,
@@ -53,8 +56,15 @@ import {
   isOwnerConnectorsHiddenSystem,
   isOwnerConnectorsHiddenVertical,
   isOwnerWizardHiddenSystem,
+  ownerConnectorsVerticalIds,
+  ownerSeesAllCatalogVerticals,
   filterOwnerWizardConnectors,
   ownerConnectorDisplayName,
+  catalogOwnerSystemId,
+  isAxiosHqOwnerSystem,
+  systemWizardCopy,
+  findOwnerConnector,
+  sameOwnerConnectorSystem,
   LIVE_CONNECT_FAILURE_HINT,
   LIVE_CONNECT_FAILURE_RETRY_ONLY_HINT,
   LIVE_CONNECT_RETRY_LABEL,
@@ -237,6 +247,31 @@ describe('reminder banners (R10 soft)', () => {
   })
 })
 
+describe('ownerUploadAllowed', () => {
+  test('Auth0 local fallback is false; API boolean wins', () => {
+    expect(ownerUploadAllowed('auth0')).toBe(false)
+    expect(ownerUploadAllowed('auth0', false)).toBe(false)
+    expect(ownerUploadAllowed('auth0', true)).toBe(true)
+  })
+
+  test('advertised systems stay true without an API value', () => {
+    expect(ownerUploadAllowed('paylocity')).toBe(true)
+    expect(ownerUploadAllowed('lever')).toBe(true)
+    expect(ownerUploadAllowed('axios_hq')).toBe(true)
+    expect(ownerUploadAllowed('axios_headquarters')).toBe(true)
+    expect(ownerUploadAllowed('hr_alumni')).toBe(true)
+    expect(ownerUploadAllowed('bizdev_contacts')).toBe(true)
+  })
+
+  test('unadvertised catalog slugs stay false without an API value', () => {
+    expect(ownerUploadAllowed('cassandra')).toBe(false)
+    expect(ownerUploadAllowed('google_sheets')).toBe(false)
+    expect(ownerUploadAllowed('alumni_google_sheet')).toBe(false)
+    expect(ownerUploadAllowed('contact_us_google_sheet')).toBe(false)
+    expect(ownerUploadAllowed('mailchimp')).toBe(false)
+  })
+})
+
 describe('mode and cadence helpers', () => {
   test('allowsUpload / allowsLive / allowsOauth', () => {
     expect(allowsUpload(['live', 'upload'])).toBe(true)
@@ -293,6 +328,18 @@ describe('vertical wizard steps', () => {
     expect(steps.map((step) => step.id)).toEqual([
       'axios_hq-howto-upload',
       'axios_hq-upload',
+      'cadence',
+      'confirm',
+    ])
+  })
+
+  test('communications worker slug axios_headquarters still builds upload steps', () => {
+    const steps = buildVerticalWizardSteps({
+      systems: [{ system: 'axios_headquarters', allowedApproaches: ['upload'] }],
+    })
+    expect(steps.map((step) => step.id)).toEqual([
+      'axios_headquarters-howto-upload',
+      'axios_headquarters-upload',
       'cadence',
       'confirm',
     ])
@@ -496,18 +543,18 @@ describe('vertical wizard steps', () => {
     })
   })
 
-  test('auth0 live extract does not add a mapping step after live-creds', () => {
+  test('auth0 live extract has no mapping or upload steps after live-creds', () => {
     const steps = buildVerticalWizardSteps({
       systems: [{ system: 'auth0', allowedApproaches: ['live', 'upload'] }],
     })
     expect(steps.map((step) => step.id)).toEqual([
       'auth0-howto-live',
       'auth0-live-creds',
-      'auth0-howto-upload',
-      'auth0-upload',
       'cadence',
       'confirm',
     ])
+    expect(steps.map((step) => step.id)).not.toContain('auth0-howto-upload')
+    expect(steps.map((step) => step.id)).not.toContain('auth0-upload')
   })
 
   test('omits live mapping follow-on when the caller says mapping is complete', () => {
@@ -629,6 +676,20 @@ describe('live connect mapping follow-on (Wave M)', () => {
     expect(liveConnectOffersUploadFallback(['upload'], 'cassandra')).toBe(false)
   })
 
+  test('Auth0 live fail is retry-only even when approaches include upload', () => {
+    const auth0 = liveConnectFailureActions({
+      system: 'auth0',
+      allowedApproaches: ['live', 'upload'],
+    })
+    expect(auth0.retryLabel).toBe(LIVE_CONNECT_RETRY_LABEL)
+    expect(auth0.setupManualUpload).toBeNull()
+    expect(auth0.hint).toBe(LIVE_CONNECT_FAILURE_RETRY_ONLY_HINT)
+    expect(auth0.hint.toLowerCase()).toContain('retry')
+    expect(auth0.hint.toLowerCase()).not.toContain('manual upload')
+    expect(auth0.hint.toLowerCase()).not.toContain('csv')
+    expect(liveConnectOffersUploadFallback(['live', 'upload'], 'auth0')).toBe(false)
+  })
+
   test('live success next step is mapping when upload is allowed', () => {
     const paylocity = liveConnectSuccessFollowOn({
       system: 'paylocity',
@@ -670,18 +731,18 @@ describe('live connect mapping follow-on (Wave M)', () => {
     expect(leverPingOnly.setupManualUpload).toBeNull()
   })
 
-  test('Auth0 Live success skips upload how-to and lands on cadence', () => {
+  test('Auth0 live success lands on cadence with no upload steps in the list', () => {
     const steps = buildVerticalWizardSteps({
       systems: [{ system: 'auth0', allowedApproaches: ['live', 'upload'] }],
     })
     expect(steps.map((step) => step.id)).toEqual([
       'auth0-howto-live',
       'auth0-live-creds',
-      'auth0-howto-upload',
-      'auth0-upload',
       'cadence',
       'confirm',
     ])
+    expect(steps.map((step) => step.id)).not.toContain('auth0-howto-upload')
+    expect(steps.map((step) => step.id)).not.toContain('auth0-upload')
     expect(nextWizardStepAfterSuccessfulLive(steps, 'auth0')).toBe('cadence')
     expect(nextWizardStepAfterSuccessfulLive(steps, 'Auth0')).toBe('cadence')
     expect(nextWizardStepAfterSuccessfulLive(steps, 'lever')).toBeNull()
@@ -812,6 +873,40 @@ describe('SYSTEM_COPY', () => {
       'coming soon',
     )
     expect(SYSTEM_COPY.axios_hq.uploadHowto?.toLowerCase()).not.toContain('api')
+    expect(systemWizardCopy('axios_headquarters')?.uploadHowto).toBe(
+      SYSTEM_COPY.axios_hq.uploadHowto,
+    )
+    expect(modeStepSystemHint('axios_headquarters', 'upload')?.toLowerCase()).toContain(
+      'every batch',
+    )
+  })
+
+  test('catalog owner system id aliases Axios HQ worker slug', () => {
+    expect(catalogOwnerSystemId('axios_headquarters')).toBe('axios_hq')
+    expect(catalogOwnerSystemId('Axios_HQ')).toBe('axios_hq')
+    expect(isAxiosHqOwnerSystem('axios_headquarters')).toBe(true)
+    expect(isAxiosHqOwnerSystem('axios_hq')).toBe(true)
+    expect(isAxiosHqOwnerSystem('lever')).toBe(false)
+    expect(sameOwnerConnectorSystem('axios_hq', 'axios_headquarters')).toBe(true)
+    expect(
+      findOwnerConnector(
+        [
+          {
+            system: 'axios_headquarters',
+            display_name: 'Axios HQ',
+            allowed_approaches: ['upload'],
+            connection_id: null,
+            status: null,
+            last_test_ok: null,
+            metadata: {},
+            display_status: 'needs_setup',
+            gate_code: '',
+            gate_allowed: false,
+          },
+        ],
+        'axios_hq',
+      )?.system,
+    ).toBe('axios_headquarters')
   })
 
   test('lever upload how-to maps identifiers without requiring first last email', () => {
@@ -876,6 +971,7 @@ function alwaysVisibleIdentifierCopy(): Array<{ label: string; text: string }> {
     'hr_alumni',
     'bizdev_contacts',
     'lever',
+    'axios_hq',
   ]) {
     const hint = modeStepSystemHint(system, 'upload')
     if (hint) {
@@ -928,6 +1024,12 @@ describe('identifier mapping copy (no required trio)', () => {
     expect(
       modeStepSystemHint('bizdev_contacts', 'upload')?.toLowerCase(),
     ).toContain('email or phone')
+    expect(modeStepSystemHint('axios_hq', 'upload')?.toLowerCase()).toContain(
+      'email or phone',
+    )
+    expect(modeStepSystemHint('axios_headquarters', 'upload')?.toLowerCase()).toContain(
+      'email or phone',
+    )
     expect(
       disallowedModeReason('paylocity', 'live', {
         allowedApproaches: ['upload'],
@@ -939,8 +1041,9 @@ describe('identifier mapping copy (no required trio)', () => {
 describe('mode step explainer (KD25)', () => {
   test('definition cards use plain language and Habeas Platform name', () => {
     expect(MODE_DEFINITION_CARDS).toHaveLength(2)
-    expect(MODE_DEFINITION_CARDS[0].title).toBe('Upload')
-    expect(MODE_DEFINITION_CARDS[1].title).toBe('Live')
+    expect(MODE_DEFINITION_CARDS[0].title).toBe('Manual upload')
+    expect(MODE_DEFINITION_CARDS[0].title).toBe(MANUAL_UPLOAD_LABEL)
+    expect(MODE_DEFINITION_CARDS[1].title).not.toBe('Live')
     expect(MODE_DEFINITION_CARDS[0].definition).toContain(
       HABEAS_PLATFORM_DISPLAY_NAME,
     )
@@ -958,13 +1061,30 @@ describe('mode step explainer (KD25)', () => {
     )
   })
 
-  test('isModeAllowed mirrors allowsUpload / allowsLive', () => {
+  test('isModeAllowed follows approaches except Auth0 upload is not advertised', () => {
     expect(isModeAllowed('upload', ['live', 'upload'])).toBe(true)
     expect(isModeAllowed('live', ['upload'])).toBe(false)
     expect(isModeAllowed('live', ['live'])).toBe(true)
     expect(isModeAllowed('live', ['oauth'])).toBe(true)
     expect(isModeAllowed('live', ['upload'], 'hr_alumni')).toBe(true)
     expect(isModeAllowed('upload', ['oauth'], 'bizdev_contacts')).toBe(true)
+    expect(isModeAllowed('upload', ['live', 'upload'], 'auth0')).toBe(false)
+    expect(isModeAllowed('live', ['live', 'upload'], 'auth0')).toBe(true)
+  })
+
+  test('Auth0 Mode step is Management API only — no Manual upload card', () => {
+    const cards = buildModeStepCards({
+      systemId: 'auth0',
+      displayName: 'Auth0',
+      allowedApproaches: ['live', 'upload'],
+    })
+    expect(cards).toHaveLength(1)
+    expect(cards[0].mode).toBe('live')
+    expect(cards[0].title).toBe('Management API')
+    expect(cards[0].title).not.toBe('Live')
+    expect(cards.find((card) => card.mode === 'upload')).toBeUndefined()
+    expect(cards.every((card) => card.title !== 'Manual upload')).toBe(true)
+    expect(cards.every((card) => card.title !== 'Live')).toBe(true)
   })
 
   test('paylocity cards include per-system hints when both modes allowed', () => {
@@ -975,27 +1095,46 @@ describe('mode step explainer (KD25)', () => {
     })
     expect(cards).toHaveLength(2)
     expect(cards.every((card) => card.allowed)).toBe(true)
+    expect(cards.find((card) => card.mode === 'upload')?.title).toBe('Manual upload')
+    expect(cards.find((card) => card.mode === 'live')?.title).toBe('SFTP')
     expect(cards.find((card) => card.mode === 'upload')?.hint).toContain('map')
     expect(cards.find((card) => card.mode === 'live')?.hint?.toLowerCase()).toContain('sftp')
     expect(cards.every((card) => card.disabledReason === null)).toBe(true)
+    expect(cards.every((card) => card.title !== 'Live')).toBe(true)
   })
 
-  test('upload-only system greys Live with curated reason', () => {
+  test('upload-only Axios HQ omits the live method card', () => {
     const cards = buildModeStepCards({
       systemId: 'axios_hq',
       displayName: 'Axios HQ',
       allowedApproaches: ['upload'],
     })
-    const live = cards.find((card) => card.mode === 'live')
-    expect(live?.allowed).toBe(false)
-    expect(live?.hint).toBeNull()
-    expect(live?.disabledReason?.toLowerCase()).toContain('live is not available')
-    expect(live?.definition.toLowerCase()).not.toContain('coming soon')
-    expect(live?.disabledReason?.toLowerCase()).not.toContain('coming soon')
-    expect(cards.find((card) => card.mode === 'upload')?.allowed).toBe(true)
+    expect(cards).toHaveLength(1)
+    expect(cards[0].mode).toBe('upload')
+    expect(cards[0].title).toBe('Manual upload')
+    expect(cards[0].allowed).toBe(true)
+    expect(cards.find((card) => card.mode === 'live')).toBeUndefined()
+    expect(cards[0].definition.toLowerCase()).not.toContain('coming soon')
+    const headquarters = buildModeStepCards({
+      systemId: 'axios_headquarters',
+      displayName: 'Axios HQ',
+      allowedApproaches: ['upload'],
+    })
+    expect(headquarters).toHaveLength(1)
+    expect(headquarters[0].mode).toBe('upload')
+    expect(headquarters[0].title).toBe('Manual upload')
     expect(
-      cards.find((card) => card.mode === 'upload')?.definition.toLowerCase(),
-    ).not.toContain('coming soon')
+      disallowedModeReason('axios_hq', 'live', {
+        displayName: 'Axios HQ',
+        allowedApproaches: ['upload'],
+      }),
+    ).toBe('Direct connection is not available for Axios HQ.')
+    expect(
+      disallowedModeReason('axios_hq', 'live', {
+        displayName: 'Axios HQ',
+        allowedApproaches: ['upload'],
+      }).toLowerCase(),
+    ).not.toContain('live is not available')
   })
 
   test('sheets systems allow oauth (live) or upload', () => {
@@ -1006,6 +1145,8 @@ describe('mode step explainer (KD25)', () => {
     })
     expect(cards.every((card) => card.allowed)).toBe(true)
     expect(cards.every((card) => card.disabledReason === null)).toBe(true)
+    expect(cards.find((card) => card.mode === 'live')?.title).toBe('Google OAuth')
+    expect(cards.find((card) => card.mode === 'upload')?.title).toBe('Manual upload')
     expect(cards.find((card) => card.mode === 'live')?.hint?.toLowerCase()).toContain(
       'oauth',
     )
@@ -1019,6 +1160,8 @@ describe('mode step explainer (KD25)', () => {
       allowedApproaches: ['live', 'upload'],
     })
     expect(cards.find((card) => card.mode === 'upload')?.allowed).toBe(true)
+    expect(cards.find((card) => card.mode === 'upload')?.title).toBe('Manual upload')
+    expect(cards.find((card) => card.mode === 'live')?.title).toBe('Lever API')
     expect(cards.find((card) => card.mode === 'upload')?.disabledReason).toBeNull()
     expect(cards.find((card) => card.mode === 'upload')?.hint?.toLowerCase()).toContain(
       'map',
@@ -1031,24 +1174,112 @@ describe('mode step explainer (KD25)', () => {
       displayName: 'Lever',
       allowedApproaches: ['live'],
     })
+    expect(reason).toBe('Manual upload is not available for Lever.')
     expect(reason.toLowerCase()).toContain('not available')
     expect(reason.toLowerCase()).not.toContain('only supports live')
+    expect(reason.toLowerCase()).not.toContain('live is not available')
     const cards = buildModeStepCards({
       systemId: 'lever',
       displayName: 'Lever',
       allowedApproaches: ['live'],
     })
     expect(cards.find((card) => card.mode === 'upload')?.disabledReason).toBe(reason)
+    expect(cards.find((card) => card.mode === 'upload')?.title).toBe('Manual upload')
+    expect(cards.find((card) => card.mode === 'live')?.title).toBe('Lever API')
     expect(modeStepSystemHint('lever', 'live')).toContain('Users read/list')
   })
 
-  test('paylocity Live copy promises SFTP, not API', () => {
+  test('live card titles use the real method; upload is always Manual upload', () => {
+    const cases: Array<{
+      systemId: string
+      displayName: string
+      allowedApproaches: readonly string[]
+      liveTitle: string
+    }> = [
+      {
+        systemId: 'paylocity',
+        displayName: 'Paylocity',
+        allowedApproaches: ['live', 'upload'],
+        liveTitle: 'SFTP',
+      },
+      {
+        systemId: 'auth0',
+        displayName: 'Auth0',
+        allowedApproaches: ['live', 'upload'],
+        liveTitle: 'Management API',
+      },
+      {
+        systemId: 'lever',
+        displayName: 'Lever',
+        allowedApproaches: ['live', 'upload'],
+        liveTitle: 'Lever API',
+      },
+      {
+        systemId: 'hr_alumni',
+        displayName: 'HR Alumni',
+        allowedApproaches: ['oauth', 'upload'],
+        liveTitle: 'Google OAuth',
+      },
+      {
+        systemId: 'bizdev_contacts',
+        displayName: 'BizDev Contacts',
+        allowedApproaches: ['oauth', 'upload'],
+        liveTitle: 'Google OAuth',
+      },
+      {
+        systemId: 'google_sheets',
+        displayName: 'Google Sheets',
+        allowedApproaches: ['oauth', 'upload'],
+        liveTitle: 'Google Sheets',
+      },
+      {
+        systemId: 'alumni_google_sheet',
+        displayName: 'Alumni Google Sheet',
+        allowedApproaches: ['live', 'upload'],
+        liveTitle: 'Google Sheets',
+      },
+      {
+        systemId: 'contact_us_google_sheet',
+        displayName: 'Contact Us Google Sheet',
+        allowedApproaches: ['live', 'upload'],
+        liveTitle: 'Google Sheets',
+      },
+    ]
+    for (const { systemId, displayName, allowedApproaches, liveTitle } of cases) {
+      const cards = buildModeStepCards({
+        systemId,
+        displayName,
+        allowedApproaches,
+      })
+      if (ownerUploadAllowed(systemId)) {
+        expect(cards.find((card) => card.mode === 'upload')?.title, systemId).toBe(
+          'Manual upload',
+        )
+      } else {
+        expect(cards.find((card) => card.mode === 'upload'), systemId).toBeUndefined()
+      }
+      expect(cards.find((card) => card.mode === 'live')?.title, systemId).toBe(liveTitle)
+      expect(cards.every((card) => card.title !== 'Live'), systemId).toBe(true)
+    }
+    expect(connectionMethodLabel('paylocity')).toBe('SFTP')
+    expect(connectionMethodLabel('auth0')).toBe('Management API')
+    expect(connectionMethodLabel('lever')).toBe('Lever API')
+    expect(connectionMethodLabel('hr_alumni')).toBe('Google OAuth')
+    expect(connectionMethodLabel('bizdev_contacts')).toBe('Google OAuth')
+    expect(connectionMethodLabel('google_sheets')).toBe('Google Sheets')
+    expect(connectionMethodLabel('axios_hq')).toBeNull()
+    expect(connectionMethodLabel('axios_headquarters')).toBeNull()
+  })
+
+  test('paylocity SFTP copy promises SFTP, not API', () => {
     const cards = buildModeStepCards({
       systemId: 'paylocity',
       displayName: 'Paylocity',
       allowedApproaches: ['upload'],
     })
     const live = cards.find((card) => card.mode === 'live')
+    expect(live?.title).toBe('SFTP')
+    expect(live?.title).not.toBe('Live')
     expect(live?.definition.toLowerCase()).toContain('sftp')
     expect(live?.definition.toLowerCase()).toContain('not an api connection')
     expect(live?.definition.toLowerCase()).toContain('upload today')
@@ -1063,6 +1294,7 @@ describe('mode step explainer (KD25)', () => {
       displayName: 'Paylocity',
       allowedApproaches: ['live', 'upload'],
     }).find((card) => card.mode === 'live')
+    expect(liveAllowed?.title).toBe('SFTP')
     expect(liveAllowed?.definition.toLowerCase()).toContain('sftp')
     expect(liveAllowed?.definition.toLowerCase()).toContain('manual upload')
     expect(liveAllowed?.definition.toLowerCase()).not.toContain('use upload today')
@@ -1072,6 +1304,41 @@ describe('mode step explainer (KD25)', () => {
     expect(liveAllowed?.hint?.toLowerCase()).toContain('not an api')
     expect(liveAllowed?.hint?.toLowerCase()).toContain('manual upload')
     expect(liveAllowed?.hint?.toLowerCase()).not.toContain('coming soon')
+  })
+})
+
+describe('owner connectors super_admin verticals', () => {
+  test('View-as super_admin sees every catalog chip, not only tech', () => {
+    expect(ownerSeesAllCatalogVerticals('super_admin', 'super_admin')).toBe(true)
+    expect(ownerSeesAllCatalogVerticals('data_owner', 'super_admin')).toBe(true)
+    expect(ownerSeesAllCatalogVerticals('data_owner', 'data_owner')).toBe(false)
+    expect(
+      ownerConnectorsVerticalIds({
+        role: 'super_admin',
+        realRole: 'super_admin',
+        meVerticals: ['tech'],
+        catalogVerticalIds: ['communications', 'people_hr', 'tech', 'data', 'test'],
+      }),
+    ).toEqual(['communications', 'people_hr', 'tech', 'test'])
+  })
+
+  test('00023 fallback uses /me catalog when owner index is missing', () => {
+    expect(
+      ownerConnectorsVerticalIds({
+        role: 'super_admin',
+        meVerticals: ['communications', 'people_hr', 'tech', 'test'],
+      }),
+    ).toEqual(['communications', 'people_hr', 'tech', 'test'])
+  })
+
+  test('data_owner stays on assigned verticals', () => {
+    expect(
+      ownerConnectorsVerticalIds({
+        role: 'data_owner',
+        meVerticals: ['tech'],
+        catalogVerticalIds: ['tech'],
+      }),
+    ).toEqual(['tech'])
   })
 })
 
@@ -1127,6 +1394,15 @@ describe('owner connectors hide cassandra', () => {
     expect(ownerConnectorDisplayName('communications', 'axios_hq', 'Axios HQ')).toBe(
       'Axios HQ',
     )
+    expect(ownerConnectorDisplayName('communications', 'axios_headquarters')).toBe(
+      'Axios HQ',
+    )
+    expect(
+      ownerConnectorDisplayName('communications', 'axios_headquarters', 'Axios HQ'),
+    ).toBe('Axios HQ')
+    expect(
+      ownerConnectorDisplayName('communications', 'axios_headquarters', 'axios headquarters'),
+    ).toBe('Axios HQ')
     expect(ownerConnectorDisplayName('data', 'cassandra', 'Cassandra')).not.toMatch(
       /cassandra/i,
     )

@@ -1081,7 +1081,7 @@ export function listDropBulkProcesses(params?: {
   const query = search.toString()
   return fetchAdminApi<BulkProcessesPayload>(
     `/ops/drop/processes${query ? `?${query}` : ''}`,
-    { timeoutMs: OPS_QUERY_TIMEOUT_MS },
+    { timeoutMs: OPS_FAST_QUERY_TIMEOUT_MS },
   )
 }
 
@@ -3185,6 +3185,9 @@ export type OwnerConnectorSystem = {
   display_name: string
   allowed_approaches: string[]
   connection_id: string | null
+  connection_method?: string | null
+  connection_method_label?: string | null
+  upload_allowed?: boolean
   status: string | null
   last_test_ok: boolean | null
   metadata: Record<string, unknown>
@@ -3286,6 +3289,8 @@ export type OwnerCredentialPreview = {
     help: string | null
   }>
   trust_copy: string
+  connection_method_label?: string | null
+  upload_allowed?: boolean
 }
 
 /** Credential fields + how-to copy for in-wizard Live connect (KD21). */

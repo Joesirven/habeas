@@ -103,11 +103,11 @@ const REMINDER_CODE_COPY: Record<string, { title: string; description: string }>
   },
   rotation_approaching: {
     title: 'Credential rotation coming due',
-    description: 'Live credentials are approaching the rotation window. Rotate soon so matching stays unblocked.',
+    description: 'Credentials are approaching the rotation window. Rotate soon so matching stays unblocked.',
   },
   rotation_overdue: {
     title: 'Credential rotation overdue',
-    description: 'Live credentials are past the rotation window. Matching stays gated until you rotate.',
+    description: 'Credentials are past the rotation window. Matching stays gated until you rotate.',
   },
   sheets_refresh_stale: {
     title: 'Google Sheet refresh needed',
@@ -198,10 +198,12 @@ export type VerticalWizardSystemInput = {
   displayLabel?: string
   /**
    * Include mapping after connect (sheets `mapping-clean`) or after live-creds
-   * (Lever / Paylocity `{system}-mapping` when upload is allowed).
+   * (Lever / Paylocity `{system}-mapping` when upload is advertised).
    * Defaults to true. Pass false when columns already map and no rows need cleaning.
    */
   needsMappingClean?: boolean
+  /** API `upload_allowed`. Omit to use the local catalog map (00095-mof safe). */
+  uploadAllowed?: boolean
 }
 
 export type BuildVerticalWizardStepsArgs = {
@@ -268,8 +270,8 @@ export function liveUploadFallbackStepId(system: string): string {
 }
 
 /**
- * After live-creds, include `{system}-mapping` when upload is allowed and the
- * Live ping is not a matching extract (reuse sheets mapping completeness).
+ * After live-creds, include `{system}-mapping` when upload is advertised and the
+ * live ping is not a matching extract (reuse sheets mapping completeness).
  */
 export function shouldIncludeLiveMappingFollowOn(input: {
   system: string
@@ -278,11 +280,13 @@ export function shouldIncludeLiveMappingFollowOn(input: {
   mapping?: Record<string, string> | null
   mappingComplete?: boolean
   rejectedRowCount?: number
+  uploadAllowed?: boolean
 }): boolean {
   const normalized = normalizeSystemId(input.system)
   if (isSheetsOwnerSystem(normalized)) return false
   if (isOwnerWizardHiddenSystem(normalized)) return false
   if (!livePingIsNotMatchingExtract(normalized)) return false
+  if (!ownerUploadAllowed(normalized, input.uploadAllowed)) return false
   if (!allowsUpload(input.allowedApproaches)) return false
   if (!(allowsLive(input.allowedApproaches) || allowsOauth(input.allowedApproaches))) {
     return false
@@ -300,11 +304,11 @@ export const LIVE_CONNECT_RETRY_LABEL = 'Retry connection'
 export const LIVE_CONNECT_SETUP_UPLOAD_LABEL = 'Set up manual upload'
 
 export const LIVE_CONNECT_SUCCESS_MAPPING_HINT =
-  'Connection confirmed. Next, map identifier columns if the headers differ. Email or phone is enough. A Live test does not start matching by itself.'
+  'Connection confirmed. Next, map identifier columns if the headers differ. Email or phone is enough. A connection test does not start matching by itself.'
 
 /** Auth0 Live extract — after a passing test, go to cadence / Complete, not Upload. */
 export const LIVE_CONNECT_SUCCESS_CONTINUE_HINT =
-  'Connection confirmed. Continue to choose a refresh cadence, then complete the wizard. A Live test does not start matching by itself.'
+  'Connection confirmed. Continue to choose a refresh cadence, then complete the wizard. A connection test does not start matching by itself.'
 
 export const LIVE_CONNECT_FAILURE_HINT =
   'Connection test failed. Retry the connection, or set up a manual upload and map identifier columns if the headers differ. Email or phone is enough.'
@@ -313,7 +317,7 @@ export const LIVE_CONNECT_FAILURE_RETRY_ONLY_HINT =
   'Connection test failed. Retry the connection.'
 
 export const LIVE_PING_NOT_EXTRACT_HINT =
-  'A successful Live test only checks connectivity. Matching still needs a mapped upload. Map identifier columns if the headers differ — email or phone is enough.'
+  'A successful connection test only checks connectivity. Matching still needs a mapped upload. Map identifier columns if the headers differ — email or phone is enough.'
 
 export type LiveConnectUploadFallback = {
   label: string
@@ -336,26 +340,30 @@ export type LiveConnectSuccessFollowOn = {
 }
 
 /**
- * Show Retry / Set up manual upload when Live fails and upload is allowed.
- * Cassandra never offers upload.
+ * Show Retry / Set up manual upload when live fails and upload is advertised.
+ * Cassandra never offers upload. Auth0 binds upload but is not advertised.
  */
 export function liveConnectOffersUploadFallback(
   allowedApproaches: readonly string[] | null | undefined,
   system?: string | null,
+  uploadAllowed?: boolean | null,
 ): boolean {
   if (system && isOwnerWizardHiddenSystem(system)) return false
+  if (!ownerUploadAllowed(system, uploadAllowed)) return false
   return allowsUpload(allowedApproaches)
 }
 
-/** Live-fail CTAs: always Retry; Set up manual upload only when upload is allowed. */
+/** Live-fail CTAs: always Retry; Set up manual upload only when upload is advertised. */
 export function liveConnectFailureActions(input: {
   system: string
   allowedApproaches: readonly string[] | null | undefined
+  uploadAllowed?: boolean
 }): LiveConnectFailureActions {
   const normalized = normalizeSystemId(input.system)
   const canUpload = liveConnectOffersUploadFallback(
     input.allowedApproaches,
     normalized,
+    input.uploadAllowed,
   )
   return {
     retryLabel: LIVE_CONNECT_RETRY_LABEL,
@@ -372,7 +380,7 @@ export function liveConnectFailureActions(input: {
 }
 
 /**
- * After a passing Live test: continue to mapping when that follow-on is in
+ * After a passing live test: continue to mapping when that follow-on is in
  * the wizard; otherwise the next linear step. Lever/Paylocity still expose
  * Set up manual upload because the ping is not a hashed extract.
  */
@@ -383,6 +391,7 @@ export function liveConnectSuccessFollowOn(input: {
   mapping?: Record<string, string> | null
   mappingComplete?: boolean
   rejectedRowCount?: number
+  uploadAllowed?: boolean
 }): LiveConnectSuccessFollowOn {
   const normalized = normalizeSystemId(input.system)
   const includeMapping = shouldIncludeLiveMappingFollowOn({
@@ -392,10 +401,12 @@ export function liveConnectSuccessFollowOn(input: {
     mapping: input.mapping,
     mappingComplete: input.mappingComplete,
     rejectedRowCount: input.rejectedRowCount,
+    uploadAllowed: input.uploadAllowed,
   })
   const canUpload = liveConnectOffersUploadFallback(
     input.allowedApproaches,
     normalized,
+    input.uploadAllowed,
   )
   const pingOnly = livePingIsNotMatchingExtract(normalized)
   const setupManualUpload =
@@ -474,7 +485,7 @@ export function mappingFollowOnCopy(displayName: string): {
   const label = (displayName ?? '').trim() || 'this system'
   return {
     title: `Map columns for ${label}`,
-    intro: `Map identifier columns if the headers differ. Email or phone is enough. A Live connection does not skip this step.`,
+    intro: `Map identifier columns if the headers differ. Email or phone is enough. A connection test does not skip this step.`,
   }
 }
 
@@ -531,7 +542,7 @@ function sheetsWizardSystemSteps(
 function wizardSystemStepsForBinding(
   system: string,
   allowedApproaches: readonly string[],
-  options?: { needsMappingClean?: boolean },
+  options?: { needsMappingClean?: boolean; uploadAllowed?: boolean },
 ): VerticalWizardStep[] {
   const normalized = normalizeSystemId(system)
   if (isSheetsOwnerSystem(normalized)) {
@@ -549,12 +560,16 @@ function wizardSystemStepsForBinding(
         system: normalized,
         allowedApproaches,
         needsMappingClean: options?.needsMappingClean,
+        uploadAllowed: options?.uploadAllowed,
       })
     ) {
       steps.push({ id: liveMappingFollowOnStepId(normalized) })
     }
   }
-  if (allowsUpload(allowedApproaches)) {
+  if (
+    ownerUploadAllowed(normalized, options?.uploadAllowed) &&
+    allowsUpload(allowedApproaches)
+  ) {
     steps.push({ id: `${normalized}-howto-upload` })
     steps.push({ id: `${normalized}-upload` })
   }
@@ -586,6 +601,7 @@ export function buildVerticalWizardSteps(
     steps.push(
       ...wizardSystemStepsForBinding(entry.system, entry.allowedApproaches, {
         needsMappingClean: entry.needsMappingClean,
+        uploadAllowed: entry.uploadAllowed,
       }),
     )
   }
@@ -740,13 +756,13 @@ export const SYSTEM_COPY: Record<string, SystemWizardCopy> = {
   },
   paylocity: {
     liveHowto:
-      'Follow the numbered steps under each field to create Paylocity SFTP credentials, paste them, then run a connection test. Live is SFTP, not an API. If the test fails, retry the connection or set up a manual upload.',
+      'Follow the numbered steps under each field to create Paylocity SFTP credentials, paste them, then run a connection test. This is SFTP, not an API. If the SFTP test fails, retry the connection or set up a manual upload.',
     uploadHowto:
-      'If Live credentials fail, upload a Paylocity CSV and map identifier columns if the headers differ. Email or phone is enough.',
+      'If the SFTP test fails, upload a Paylocity CSV and map identifier columns if the headers differ. Email or phone is enough.',
   },
   lever: {
     liveHowto:
-      'Follow the numbered steps to create a Lever API key, paste it, then run a connection test. A passing test only checks Users read/list — it does not extract candidates. If Live fails, retry the connection or set up a manual upload.',
+      'Follow the numbered steps to create a Lever API key, paste it, then run a connection test. A passing test only checks Users read/list — it does not extract candidates. If the Lever API test fails, retry the connection or set up a manual upload.',
     uploadHowto:
       'Export a CSV, then map identifier columns if the headers differ. Email or phone is enough.',
   },
@@ -754,7 +770,7 @@ export const SYSTEM_COPY: Record<string, SystemWizardCopy> = {
     liveHowto:
       'Follow the numbered steps to create an Auth0 Machine-to-Machine app, paste Domain, Client ID, and Client Secret, then run a connection test.',
     uploadHowto:
-      'If Live credentials fail, export Auth0 users as CSV, upload, then map identifier columns if the headers differ. Email or phone is enough.',
+      'If Management API credentials fail, export Auth0 users as CSV, upload, then map identifier columns if the headers differ. Email or phone is enough.',
   },
 }
 
@@ -778,6 +794,12 @@ export { PLATFORM_NAME as HABEAS_PLATFORM_DISPLAY_NAME } from './brand'
 
 export type ConnectorApproachMode = 'upload' | 'live'
 
+/** Owner-facing upload method name — never "Upload" alone on cards. */
+export const MANUAL_UPLOAD_LABEL = 'Manual upload'
+
+/** Fallback when a live method is disallowed and has no mapped name. */
+export const DIRECT_CONNECTION_LABEL = 'Direct connection'
+
 export type ModeDefinitionCardCopy = {
   mode: ConnectorApproachMode
   title: string
@@ -787,17 +809,17 @@ export type ModeDefinitionCardCopy = {
 
 export const MODE_UPLOAD_DEFINITION_CARD: ModeDefinitionCardCopy = {
   mode: 'upload',
-  title: 'Upload',
+  title: MANUAL_UPLOAD_LABEL,
   definition: `You upload your existing export to ${PLATFORM_NAME}, then map identifier columns if the headers differ. Email or phone is enough.`,
 }
 
 export const MODE_LIVE_DEFINITION_CARD: ModeDefinitionCardCopy = {
   mode: 'live',
-  title: 'Live',
+  title: '',
   definition: `${PLATFORM_NAME} connects directly to the service with credentials you provide and pulls updated data automatically.`,
 }
 
-/** KD25 — always-visible Upload vs Live definition cards (default copy). */
+/** KD25 — always-visible Manual upload vs method definition cards (default copy). */
 export const MODE_DEFINITION_CARDS: readonly ModeDefinitionCardCopy[] = [
   MODE_UPLOAD_DEFINITION_CARD,
   MODE_LIVE_DEFINITION_CARD,
@@ -805,7 +827,7 @@ export const MODE_DEFINITION_CARDS: readonly ModeDefinitionCardCopy[] = [
 
 /** KD25 / R17 — shared Mode-step footnote: connecting ≠ enabling matching. */
 export const MODE_STEP_CONNECTING_NOT_MATCHING_FOOTNOTE =
-  'Connecting a system does not start matching by itself. Matching runs only after you finish this wizard, keep data fresh on your cadence, and rotate Live credentials when due.'
+  'Connecting a system does not start matching by itself. Matching runs only after you finish this wizard, keep data fresh on your cadence, and rotate credentials when due.'
 
 export type ModeStepCardState = {
   mode: ConnectorApproachMode
@@ -826,7 +848,7 @@ const MODE_SYSTEM_HINTS: Record<
     upload:
       'Upload a Paylocity export and map identifier columns if the headers differ. Email or phone is enough — no Developer Portal credentials needed.',
     live:
-      'Paylocity will deliver employee files through SFTP — not an API connection. If Live fails, set up a manual upload.',
+      'Paylocity will deliver employee files through SFTP — not an API connection. If the SFTP test fails, set up a manual upload.',
   },
   lever: {
     upload:
@@ -838,6 +860,10 @@ const MODE_SYSTEM_HINTS: Record<
     upload:
       'Export Auth0 users as CSV, upload the file, then map identifier columns if the headers differ. Email or phone is enough.',
     live: 'Habeas pulls user records from Auth0 using Machine-to-Machine API credentials.',
+  },
+  axios_hq: {
+    upload:
+      'Export a contact or subscriber list from Axios HQ as CSV. Upload a fresh file every batch, then map identifier columns if the headers differ. Email or phone is enough.',
   },
   bizdev_contacts: {
     upload:
@@ -859,12 +885,106 @@ const DISALLOWED_MODE_REASONS: Record<
 > = {
   paylocity: {
     live:
-      'Paylocity Live uses SFTP. When Live is not configured, use Upload and map identifier columns if the headers differ. Email or phone is enough.',
+      'Paylocity uses SFTP. When SFTP is not configured, use Manual upload and map identifier columns if the headers differ. Email or phone is enough.',
   },
 }
 
 function normalizeSystemId(systemId: string): string {
   return systemId.trim().toLowerCase()
+}
+
+/** Catalog display id — worker slug `axios_headquarters` aliases to `axios_hq`. */
+export function catalogOwnerSystemId(systemId: string | null | undefined): string {
+  const id = normalizeSystemId(systemId ?? '')
+  return id === 'axios_headquarters' ? 'axios_hq' : id
+}
+
+export function isAxiosHqOwnerSystem(system: string | null | undefined): boolean {
+  return catalogOwnerSystemId(system) === 'axios_hq'
+}
+
+/**
+ * Advertise-Upload for owner wizard cards.
+ * Prefers an API boolean; otherwise the local catalog map (00095-mof safe).
+ * Never infer from `allowed_approaches` — Auth0 may bind upload while this is false.
+ * `axios_headquarters` aliases to `axios_hq` via `catalogOwnerSystemId`.
+ */
+const OWNER_UPLOAD_ALLOWED: Readonly<Record<string, boolean>> = {
+  paylocity: true,
+  lever: true,
+  axios_hq: true,
+  axios_headquarters: true,
+  hr_alumni: true,
+  bizdev_contacts: true,
+  auth0: false,
+  cassandra: false,
+  google_sheets: false,
+  alumni_google_sheet: false,
+  contact_us_google_sheet: false,
+  mailchimp: false,
+}
+
+export function ownerUploadAllowed(
+  system: string | null | undefined,
+  apiValue?: boolean | null,
+): boolean {
+  if (typeof apiValue === 'boolean') return apiValue
+  return OWNER_UPLOAD_ALLOWED[catalogOwnerSystemId(system)] === true
+}
+
+/**
+ * Confirmed owner-facing method names. Axios HQ / Cassandra are omitted (no live method).
+ * Do not add Mailchimp.
+ */
+export const CONNECTION_METHOD_LABELS: Readonly<Record<string, string>> = {
+  paylocity: 'SFTP',
+  lever: 'Lever API',
+  auth0: 'Management API',
+  hr_alumni: 'Google OAuth',
+  bizdev_contacts: 'Google OAuth',
+  google_sheets: 'Google Sheets',
+  alumni_google_sheet: 'Google Sheets',
+  contact_us_google_sheet: 'Google Sheets',
+}
+
+/**
+ * Owner-facing connection method for cards and copy.
+ * Prefers a non-empty API value (except the banned word Live); else the local map.
+ * Axios HQ aliases and Cassandra have no live method.
+ */
+export function connectionMethodLabel(
+  system: string | null | undefined,
+  apiValue?: string | null,
+): string | null {
+  const catalogId = catalogOwnerSystemId(system)
+  if (catalogId === 'axios_hq' || catalogId === 'cassandra') return null
+  const trimmed = (apiValue ?? '').trim()
+  if (trimmed && trimmed.toLowerCase() !== 'live') return trimmed
+  return CONNECTION_METHOD_LABELS[catalogId] ?? null
+}
+
+/** How-to copy for a binding — accepts catalog `axios_hq` or worker `axios_headquarters`. */
+export function systemWizardCopy(system: string | null | undefined): SystemWizardCopy | undefined {
+  return SYSTEM_COPY[catalogOwnerSystemId(system)]
+}
+
+export function sameOwnerConnectorSystem(
+  left: string | null | undefined,
+  right: string | null | undefined,
+): boolean {
+  const a = normalizeSystemId(left ?? '')
+  const b = normalizeSystemId(right ?? '')
+  if (!a || !b) return false
+  return a === b || catalogOwnerSystemId(a) === catalogOwnerSystemId(b)
+}
+
+/** Find a connector by catalog or worker slug so Axios HQ lookup cannot miss. */
+export function findOwnerConnector(
+  connectors: readonly OwnerConnectorSystem[] | null | undefined,
+  system: string | null | undefined,
+): OwnerConnectorSystem | undefined {
+  if (!connectors?.length || !system) return undefined
+  return connectors.find((connector) => sameOwnerConnectorSystem(connector.system, system))
 }
 
 function displayLabel(displayName: string | undefined, systemId: string): string {
@@ -878,7 +998,11 @@ export function isModeAllowed(
   mode: ConnectorApproachMode,
   allowedApproaches: readonly string[] | null | undefined,
   systemId?: string | null,
+  uploadAllowed?: boolean | null,
 ): boolean {
+  if (mode === 'upload' && systemId && !ownerUploadAllowed(systemId, uploadAllowed)) {
+    return false
+  }
   if (systemId && isSheetsOwnerSystem(systemId)) return true
   if (mode === 'upload') return allowsUpload(allowedApproaches)
   return allowsLive(allowedApproaches) || allowsOauth(allowedApproaches)
@@ -900,9 +1024,9 @@ function modeDefinitionForSystem(
       ? isModeAllowed('live', allowedApproaches, normalized)
       : false
     if (liveAllowed) {
-      return `${PLATFORM_NAME} will receive Paylocity employee files through SFTP. This is not an API connection. If Live fails, retry the connection or set up a manual upload.`
+      return `${PLATFORM_NAME} will receive Paylocity employee files through SFTP. This is not an API connection. If the SFTP test fails, retry the connection or set up a manual upload.`
     }
-    return `${PLATFORM_NAME} will receive Paylocity employee files through SFTP. This is not an API connection — use Upload today.`
+    return `${PLATFORM_NAME} will receive Paylocity employee files through SFTP. This is not an API connection — use Manual upload today.`
   }
   const card = MODE_DEFINITION_CARDS.find((entry) => entry.mode === mode)
   return card?.definition ?? ''
@@ -913,7 +1037,7 @@ export function modeStepSystemHint(
   systemId: string,
   mode: ConnectorApproachMode,
 ): string | null {
-  const hints = MODE_SYSTEM_HINTS[normalizeSystemId(systemId)]
+  const hints = MODE_SYSTEM_HINTS[catalogOwnerSystemId(systemId)]
   return hints?.[mode] ?? null
 }
 
@@ -921,7 +1045,11 @@ export function modeStepSystemHint(
 export function disallowedModeReason(
   systemId: string,
   mode: ConnectorApproachMode,
-  options?: { displayName?: string; allowedApproaches?: readonly string[] },
+  options?: {
+    displayName?: string
+    allowedApproaches?: readonly string[]
+    uploadAllowed?: boolean
+  },
 ): string {
   const normalized = normalizeSystemId(systemId)
   const label = displayLabel(options?.displayName, normalized)
@@ -930,42 +1058,63 @@ export function disallowedModeReason(
   if (known) return known
   if (
     options?.allowedApproaches &&
-    isModeAllowed(mode, options.allowedApproaches, normalized)
+    isModeAllowed(mode, options.allowedApproaches, normalized, options.uploadAllowed)
   ) {
     return ''
   }
   if (mode === 'upload') {
-    return `Upload is not available for ${label}.`
+    return `${MANUAL_UPLOAD_LABEL} is not available for ${label}.`
   }
-  return `Live is not available for ${label}.`
+  const method = connectionMethodLabel(normalized) ?? DIRECT_CONNECTION_LABEL
+  return `${method} is not available for ${label}.`
 }
 
-/** KD25 — build Upload vs Live cards for the Mode wizard step. */
+/** KD25 — build Manual upload vs method cards for the Mode wizard step. */
 export function buildModeStepCards(input: {
   systemId: string
   displayName: string
   allowedApproaches: readonly string[]
+  /** Optional API method name — forwarded to `connectionMethodLabel`. */
+  connectionMethod?: string | null
+  /** API `upload_allowed`. Omit to use the local catalog map (00095-mof safe). */
+  uploadAllowed?: boolean
 }): ModeStepCardState[] {
   const normalized = normalizeSystemId(input.systemId)
-  return MODE_DEFINITION_CARDS.map((card) => {
-    const allowed = isModeAllowed(card.mode, input.allowedApproaches, normalized)
-    return {
-      mode: card.mode,
-      title: card.title,
-      definition: modeDefinitionForSystem(
-        normalized,
-        card.mode,
-        input.allowedApproaches,
-      ),
-      hint: allowed ? modeStepSystemHint(normalized, card.mode) : null,
-      allowed,
-      disabledReason: allowed
-        ? null
-        : disallowedModeReason(normalized, card.mode, {
-            displayName: input.displayName,
-            allowedApproaches: input.allowedApproaches,
-          }),
+  const methodLabel = connectionMethodLabel(normalized, input.connectionMethod)
+  const advertiseUpload = ownerUploadAllowed(normalized, input.uploadAllowed)
+  return MODE_DEFINITION_CARDS.flatMap((card) => {
+    if (card.mode === 'live' && methodLabel === null) {
+      return []
     }
+    if (card.mode === 'upload' && !advertiseUpload) {
+      return []
+    }
+    const allowed = isModeAllowed(
+      card.mode,
+      input.allowedApproaches,
+      normalized,
+      input.uploadAllowed,
+    )
+    return [
+      {
+        mode: card.mode,
+        title: card.mode === 'live' ? (methodLabel ?? DIRECT_CONNECTION_LABEL) : MANUAL_UPLOAD_LABEL,
+        definition: modeDefinitionForSystem(
+          normalized,
+          card.mode,
+          input.allowedApproaches,
+        ),
+        hint: allowed ? modeStepSystemHint(normalized, card.mode) : null,
+        allowed,
+        disabledReason: allowed
+          ? null
+          : disallowedModeReason(normalized, card.mode, {
+              displayName: input.displayName,
+              allowedApproaches: input.allowedApproaches,
+              uploadAllowed: input.uploadAllowed,
+            }),
+      },
+    ]
   })
 }
 
@@ -1038,6 +1187,44 @@ export function isOwnerConnectorsHiddenVertical(verticalId: string): boolean {
   return verticalId.trim().toLowerCase() === 'data'
 }
 
+/** Effective or real super_admin — 00023 chips must not stay on a tech-only assignment. */
+export function ownerSeesAllCatalogVerticals(
+  role?: string | null,
+  realRole?: string | null,
+): boolean {
+  return role === 'super_admin' || realRole === 'super_admin'
+}
+
+/**
+ * Vertical ids for /owner/connectors chips.
+ * Prefer GET /owner/verticals when present; otherwise /me.verticals.
+ */
+export function ownerConnectorsVerticalIds(input: {
+  role?: string | null
+  realRole?: string | null
+  meVerticals?: readonly string[] | null
+  catalogVerticalIds?: readonly string[] | null
+}): string[] {
+  const seesAll = ownerSeesAllCatalogVerticals(input.role, input.realRole)
+  const catalog = input.catalogVerticalIds
+  const assigned = input.meVerticals
+  const raw =
+    catalog && catalog.length > 0
+      ? catalog
+      : seesAll && assigned?.length
+        ? assigned
+        : (assigned ?? catalog ?? [])
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const id of raw) {
+    const key = id.trim()
+    if (!key || isOwnerConnectorsHiddenVertical(key) || seen.has(key)) continue
+    seen.add(key)
+    out.push(key)
+  }
+  return out
+}
+
 /** Drop leftover demo / infra systems that must not appear as wizard cards. */
 export function filterOwnerWizardConnectors(
   connectors: readonly OwnerConnectorSystem[] | null | undefined,
@@ -1052,11 +1239,19 @@ export function ownerConnectorDisplayName(
   system: string,
   displayName?: string | null,
 ): string {
-  const labeled = catalogSystemDisplayLabel(system, {
+  const catalogId = catalogOwnerSystemId(system)
+  if (isAxiosHqOwnerSystem(catalogId) && (verticalId ?? '').trim().toLowerCase() !== 'test') {
+    const apiLabel = (displayName ?? '').trim()
+    if (!apiLabel || apiLabel.toLowerCase() === 'axios headquarters') return 'Axios HQ'
+  }
+  const labeled = catalogSystemDisplayLabel(catalogId, {
     vertical: verticalId,
     systemLabel: displayName,
   })
-  if (labeled && labeled.toLowerCase() !== OWNER_WIZARD_HIDDEN_SYSTEM_ID) return labeled
+  if (labeled && labeled.toLowerCase() !== OWNER_WIZARD_HIDDEN_SYSTEM_ID) {
+    if (labeled.toLowerCase() === 'axios headquarters') return 'Axios HQ'
+    return labeled
+  }
   const trimmed = (displayName ?? '').trim()
   if (trimmed && trimmed.toLowerCase() !== OWNER_WIZARD_HIDDEN_SYSTEM_ID) return trimmed
   return 'System'
