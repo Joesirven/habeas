@@ -678,6 +678,65 @@ async def test_get_unknown_request_is_404(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
+async def test_get_strips_auth0_vendor_ids_when_owner_not_assigned_tech(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """People/HR owner may list dispositions but must not see Auth0 vendor ids."""
+    auth0_email_shaped_id = "jane.doe@example.com"
+    conn = FakeConn(
+        rows=[
+            {
+                "request_id": REQUEST_ID,
+                "vertical": "auth0",
+                "status": 4,
+                "selected_dwids": json.dumps([]),
+                "selected_vendor_record_ids": json.dumps([auth0_email_shaped_id]),
+                "decided_by": "owner@example.com",
+                "actor_role": ROLE_DATA_OWNER,
+                "decided_at": datetime.now(UTC),
+                "updated_at": datetime.now(UTC),
+            }
+        ]
+    )
+    fake_pool(monkeypatch, conn)
+    _stub_has_vertical(monkeypatch, {"people_hr"})
+
+    response = await vd.get_vertical_dispositions(REQUEST_ID, DATA_OWNER)
+    assert [item.vertical for item in response.dispositions] == ["auth0"]
+    assert response.dispositions[0].selected_vendor_record_ids == []
+    assert response.dispositions[0].selected_vendor_record_id_count == 1
+    dumped = str(response.model_dump())
+    assert auth0_email_shaped_id not in dumped
+
+
+@pytest.mark.asyncio
+async def test_get_keeps_auth0_vendor_ids_when_owner_assigned_tech(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    auth0_vendor = "auth0|opaque-assigned"
+    conn = FakeConn(
+        rows=[
+            {
+                "request_id": REQUEST_ID,
+                "vertical": "auth0",
+                "status": 4,
+                "selected_dwids": json.dumps([]),
+                "selected_vendor_record_ids": json.dumps([auth0_vendor]),
+                "decided_by": "owner@example.com",
+                "actor_role": ROLE_DATA_OWNER,
+                "decided_at": datetime.now(UTC),
+                "updated_at": datetime.now(UTC),
+            }
+        ]
+    )
+    fake_pool(monkeypatch, conn)
+    _stub_has_vertical(monkeypatch, {"tech"})
+
+    response = await vd.get_vertical_dispositions(REQUEST_ID, DATA_OWNER)
+    assert response.dispositions[0].selected_vendor_record_ids == [auth0_vendor]
+
+
+@pytest.mark.asyncio
 async def test_promote_upserts_data_vertical_disposition(monkeypatch: pytest.MonkeyPatch):
     """Promote writes the Data disposition and mirrors DROP response_status."""
     _stub_matching_catalog(monkeypatch, systems=_one_data_system())

@@ -22,12 +22,13 @@ from admin_api.request_journey import (
     build_request_journey,
     build_request_journey_workbench,
 )
+from admin_api.roles import RolePrincipal
 from admin_api.vertical_dispositions import (
     VerticalCatalogEntry,
     VerticalDisposition,
     VerticalDispositionsResponse,
 )
-from habeas_privacy_core.auth import IAP_EMAIL_HEADER
+from habeas_privacy_core.auth import IAP_EMAIL_HEADER, ROLE_DATA_OWNER
 
 from habeas_privacy_core.db.migrations import run_migrations
 from habeas_privacy_core.workflow.approval import (
@@ -3027,6 +3028,86 @@ async def test_workbench_auth0_matching_count_and_confirmed_vendor_id(
     assert _AUTH0_VENDOR_ID in serialized
     for forbidden in ("email", "phone", "first_name", "last_name", "hash_value"):
         assert forbidden not in serialized
+
+
+@pytest.mark.asyncio
+async def test_workbench_strips_auth0_vendor_ids_when_owner_not_assigned_tech(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """People/HR owner may open the workbench but must not see Auth0 vendor ids."""
+    ops = _ops_journey(
+        [
+            JourneyStage(stage="received", label="Received", status="complete"),
+            JourneyStage(stage="download", label="Download", status="skipped"),
+            JourneyStage(stage="land", label="Land", status="skipped"),
+            JourneyStage(stage="promote", label="Promote", status="skipped"),
+            JourneyStage(stage="match", label="Match", status="complete"),
+            JourneyStage(stage="review", label="Review", status="complete"),
+            JourneyStage(stage="fulfill", label="Fulfill", status="not_started"),
+        ]
+    )
+    monkeypatch.setattr(request_journey, "build_request_journey", AsyncMock(return_value=ops))
+    auth0_disposition = VerticalDisposition(
+        request_id=_WORKBENCH_REQUEST_ID,
+        vertical="auth0",
+        label="Auth0",
+        live=True,
+        status=4,
+        selected_dwids=[],
+        selected_dwid_count=0,
+        decided_by="owner@example.com",
+        actor_role="data_owner",
+        decided_at="2026-08-24T18:00:00+00:00",
+    )
+    monkeypatch.setattr(
+        request_journey,
+        "list_vertical_dispositions",
+        AsyncMock(
+            return_value=VerticalDispositionsResponse(
+                request_id=_WORKBENCH_REQUEST_ID,
+                dispositions=[auth0_disposition],
+                live_verticals=["data", "auth0"],
+                coming_soon=[],
+                matching_complete=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        request_journey, "is_vertical_kickoff_approved", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(
+        request_journey,
+        "fetch_vertical_matching_snapshot",
+        _snapshot_for_vertical(
+            "auth0",
+            {"match_count": 1, "vendor_record_ids": [_AUTH0_VENDOR_ID]},
+        ),
+    )
+    monkeypatch.setattr(
+        request_journey,
+        "fetch_selected_vendor_record_ids",
+        _vendor_ids_for_vertical("auth0", [_AUTH0_VENDOR_ID]),
+    )
+    monkeypatch.setattr(
+        request_journey,
+        "viewer_may_read_auth0_vendor_ids",
+        AsyncMock(return_value=False),
+    )
+
+    people_hr_owner = RolePrincipal(
+        email="hr-owner@example.com",
+        role=ROLE_DATA_OWNER,
+        real_role=ROLE_DATA_OWNER,
+    )
+    conn = _MetaConn(intake_source="manual", request_type="delete")
+    result = await build_request_journey_workbench(
+        conn, request_id=_WORKBENCH_REQUEST_ID, viewer=people_hr_owner
+    )
+
+    auth0 = next(row for row in result.matching_cluster if row.vertical == "auth0")
+    assert auth0.disposition is not None
+    assert auth0.disposition.selected_vendor_record_ids == []
+    assert _AUTH0_VENDOR_ID not in json.dumps(result.model_dump())
 
 
 @pytest.mark.asyncio

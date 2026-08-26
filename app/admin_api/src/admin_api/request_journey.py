@@ -69,6 +69,7 @@ from admin_api.vertical_dispositions import (
     matching_snapshot_lookup_keys,
     normalize_vertical,
     resolve_disposition_vertical,
+    viewer_may_read_auth0_vendor_ids,
 )
 
 AUTH0_VERTICAL = "auth0"
@@ -1299,6 +1300,7 @@ async def _build_vertical_rows(
     request_type: str,
     ops_by_stage: dict[str, JourneyStage],
     response_status: int | None = None,
+    viewer: RolePrincipal | None = None,
 ) -> tuple[list[WorkbenchVerticalRow], list[WorkbenchVerticalRow]]:
     """Matching cluster (live + coming-soon) and Fulfillment cluster (live only)."""
     dispositions = await list_vertical_dispositions(conn, request_id=request_id)
@@ -1320,6 +1322,10 @@ async def _build_vertical_rows(
     auth0_vendor_ids = await fetch_selected_vendor_record_ids(
         conn, request_id=request_id, vertical=AUTH0_VERTICAL
     )
+    if viewer is not None and not await viewer_may_read_auth0_vendor_ids(
+        conn, viewer
+    ):
+        auth0_vendor_ids = []
 
     for vertical in _journey_live_verticals():
         disposition = disposed_by_vertical.get(vertical)
@@ -1662,7 +1668,7 @@ async def _build_notice_summary(
 
 
 async def build_request_journey_workbench(
-    conn: Any, *, request_id: str
+    conn: Any, *, request_id: str, viewer: RolePrincipal | None = None
 ) -> RequestJourneyWorkbenchResponse:
     """Four-stage detail chrome DTO — Matching/Fulfillment per-vertical clusters.
 
@@ -1712,6 +1718,7 @@ async def build_request_journey_workbench(
         request_type=request_type,
         ops_by_stage=ops_by_stage,
         response_status=int(response_status) if response_status is not None else None,
+        viewer=viewer,
     )
 
     matching_status = _rollup_status(
@@ -1943,7 +1950,7 @@ async def build_batch_journey_workbench(
 )
 async def request_journey_workbench(
     request_id: str,
-    _viewer: RequestOpsViewer,
+    viewer: RequestOpsViewer,
 ) -> RequestJourneyWorkbenchResponse:
     """Four-stage legal/admin detail chrome DTO (U4). Ops `/journey` is unchanged."""
     _require_database()
@@ -1954,7 +1961,9 @@ async def request_journey_workbench(
 
     pool = get_pool()
     async with pool.acquire() as conn:
-        response = await build_request_journey_workbench(conn, request_id=request_id)
+        response = await build_request_journey_workbench(
+            conn, request_id=request_id, viewer=viewer
+        )
     assert_no_pii_keys(response.model_dump())
     return response
 

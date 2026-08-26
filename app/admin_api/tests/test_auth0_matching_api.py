@@ -128,6 +128,11 @@ def _install_pool(monkeypatch: pytest.MonkeyPatch, conn: Any | None = None) -> A
     monkeypatch.setattr(auth0_matching, "get_pool", lambda: pool)
     monkeypatch.setattr(auth0_matching.settings, "database_url", "postgres://local")
     monkeypatch.setattr(auth0_matching, "write_audit", AsyncMock())
+    monkeypatch.setattr(
+        auth0_matching,
+        "fetch_principal_verticals",
+        AsyncMock(return_value=["tech"]),
+    )
     _install_matching_gate(monkeypatch)
     return fake_conn
 
@@ -233,6 +238,78 @@ def test_unknown_email_forbidden(monkeypatch: pytest.MonkeyPatch) -> None:
             headers=signed_headers("stranger@example.com"),
         )
     assert response.status_code == 403
+
+
+def test_match_candidates_people_hr_owner_forbidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """People/HR owner must not read Auth0 vendor_record_id candidates (email-shaped PII)."""
+    _install_pool(monkeypatch)
+    monkeypatch.setattr(
+        auth0_matching,
+        "fetch_principal_verticals",
+        AsyncMock(return_value=["people_hr"]),
+    )
+    monkeypatch.setattr(
+        auth0_matching,
+        "get_request",
+        AsyncMock(return_value=_drop_record()),
+    )
+    monkeypatch.setattr(
+        auth0_matching,
+        "fetch_auth0_snapshot",
+        AsyncMock(
+            return_value={
+                "match_count": 2,
+                "vendor_record_ids": [VENDOR_A, VENDOR_B],
+            }
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/requests/{REQUEST_ID}/verticals/auth0/match-candidates",
+            headers=_owner_headers(),
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "vertical access denied"
+    _assert_no_vendor_record_id_list(response.json())
+
+
+def test_match_candidates_legal_skips_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_pool(monkeypatch)
+    monkeypatch.setattr(
+        auth0_matching,
+        "fetch_principal_verticals",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        auth0_matching,
+        "get_request",
+        AsyncMock(return_value=_drop_record()),
+    )
+    monkeypatch.setattr(
+        auth0_matching,
+        "fetch_auth0_snapshot",
+        AsyncMock(
+            return_value={
+                "match_count": 1,
+                "vendor_record_ids": [VENDOR_A],
+            }
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/requests/{REQUEST_ID}/verticals/auth0/match-candidates",
+            headers=_legal_headers(),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["candidates"] == [{"vendor_record_id": VENDOR_A}]
 
 
 def test_snapshot_returns_opaque_ids_only(monkeypatch: pytest.MonkeyPatch) -> None:
