@@ -587,7 +587,7 @@ export function MatchingResultsLabPage() {
           })
           return []
         }
-        return contactsFromMdrSearch(await searchMdrPeople(needle))
+        return contactsFromMdrSearch(await searchMdrPeople(needle, { state: 'CA' }))
       }
       if (peopleSource === 'auth0') {
         if (!searchRequestId) return []

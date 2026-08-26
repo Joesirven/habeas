@@ -161,6 +161,21 @@ def test_drop_dispatch_execute():
     assert mock_req.call_args.kwargs["json_body"] == {"limit": 100}
 
 
+def test_drop_dispatch_execute_drain_all():
+    with patch(
+        "habeas_cli.commands.drop.admin_api_request",
+        return_value={"status": "ok"},
+    ) as mock_req:
+        result = runner.invoke(
+            app,
+            ["drop", "dispatch", "--execute", "--drain-all", "--limit", "100"],
+        )
+    assert result.exit_code == 0
+    mock_req.assert_called_once()
+    assert mock_req.call_args.args[1] == "/ops/drop/dispatch"
+    assert mock_req.call_args.kwargs["json_body"] == {"limit": 100, "drain_all": True}
+
+
 def test_drop_fulfill_dry_run():
     result = runner.invoke(app, ["drop", "fulfill", "--request-id", "req-1"])
     assert result.exit_code == 0

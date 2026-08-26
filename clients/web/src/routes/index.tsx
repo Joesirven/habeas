@@ -19,11 +19,12 @@ import { LegalChromeActions } from '@/components/UploadMenu'
 import { useMe, isLegalAdminPersona } from '@/lib/auth'
 import {
   getDropGlobalStats,
-  getDropPipeline,
+  getDropPipelineLite,
   getHealth,
   getLegalPortfolio,
   getNeedsAttention,
   getOwnerFulfillmentNeedsAttention,
+  type DropPipelineStatus,
 } from '@/lib/api'
 import {
   ownerAssignedVerticalSummary,
@@ -65,11 +66,11 @@ function OperatorDashboardHome() {
 
   const pipelineQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-pipeline', 'home-viz'],
-    queryFn: getDropPipeline,
+    queryFn: () => getDropPipelineLite(),
     refetchInterval: 15_000,
     enabled: isAdmin,
     retry: 2,
-    placeholderData: (previous) => previous,
+    placeholderData: (previous: DropPipelineStatus | undefined) => previous,
   })
 
   const attentionCount = attentionQuery.data?.items.length ?? 0

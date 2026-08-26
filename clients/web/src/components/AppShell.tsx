@@ -1,6 +1,13 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
 
 import { CommandPalette, useCommandPaletteShortcut } from '@/components/CommandPalette'
 import { InboxEntryPill, NavMenu } from '@/components/NavMenu'
@@ -410,7 +417,9 @@ function AppShellFrame({ children }: AppShellProps) {
         <RoleStatusBanner />
       </header>
 
-      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-3 sm:px-6">{children}</main>
+      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-3 sm:px-6">
+        <Suspense fallback={<SkeletonLines lines={4} className="py-4" />}>{children}</Suspense>
+      </main>
 
       {showPalette ? (
         <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />

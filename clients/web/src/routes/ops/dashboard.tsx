@@ -4,9 +4,10 @@ import { useMemo, useState, type ReactNode } from 'react'
 
 import { SkeletonLines } from '@/components/AppShell'
 import {
-  getDropPipeline,
+  getDropPipelineLite,
   getFleetWorkers,
   listRuns,
+  type DropPipelineStatus,
   type OpsTimeWindow,
   type RunSummary,
 } from '@/lib/api'
@@ -271,10 +272,10 @@ function DashboardContent() {
   })
 
   const pipelineQuery = useQuery({
-    queryKey: ['admin-api', 'ops', 'drop-pipeline'],
-    queryFn: getDropPipeline,
-    refetchInterval: 10_000,
-    placeholderData: (previous) => previous,
+    queryKey: ['admin-api', 'ops', 'drop-pipeline', 'lite'],
+    queryFn: () => getDropPipelineLite(),
+    refetchInterval: 15_000,
+    placeholderData: (previous: DropPipelineStatus | undefined) => previous,
   })
 
   const fleetQuery = useQuery({

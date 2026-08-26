@@ -14,7 +14,7 @@ import {
 import { inboxPendingWorkUnitCount } from '@/lib/inbox-batch-status'
 
 import { useQuery } from '@tanstack/react-query'
-import { Link, useRouterState } from '@tanstack/react-router'
+import { Link, useRouter, useRouterState } from '@tanstack/react-router'
 import {
   useCallback,
   useEffect,
@@ -246,6 +246,7 @@ function NavLink({
 }
 
 function NavDropdown({ group }: { group: NavGroup }) {
+  const router = useRouter()
   const menuId = useId()
   const rootRef = useRef<HTMLDivElement>(null)
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -380,7 +381,13 @@ function NavDropdown({ group }: { group: NavGroup }) {
                   onClick={() => {
                     close()
                   }}
-                  onMouseEnter={() => clearCloseTimer()}
+                  onMouseEnter={() => {
+                    clearCloseTimer()
+                    void router.preloadRoute({
+                      to: child.to,
+                      search: child.search,
+                    })
+                  }}
                 >
                   <span className="flex min-w-0 items-baseline gap-1.5">
                     <span className="truncate">{child.label}</span>

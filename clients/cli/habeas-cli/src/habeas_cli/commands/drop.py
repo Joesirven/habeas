@@ -197,11 +197,14 @@ def promote(
 @app.command("dispatch")
 def dispatch(
     limit: int | None = typer.Option(None, "--limit", min=1, max=5000),
+    drain_all: bool = typer.Option(False, "--drain-all"),
     execute: bool = typer.Option(False, "--execute"),
     human: bool = typer.Option(False, "--human"),
 ):
     """Proxy request dispatcher via admin-api (optional DispatchProxyBody fields)."""
     body = _optional_body(limit=limit)
+    if drain_all:
+        body["drain_all"] = True
     _post_spine("/ops/drop/dispatch", execute=execute, human=human, body=body)
 
 

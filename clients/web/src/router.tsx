@@ -1,5 +1,6 @@
 import { createRootRoute, createRoute, createRouter, Outlet, redirect } from '@tanstack/react-router'
 import { TanStackRouterDevtools } from '@tanstack/router-devtools'
+import { lazy } from 'react'
 
 import { AppShell } from '@/components/AppShell'
 import { isInboxIdentifierSurface } from '@/lib/inbox-status-lab'
@@ -8,13 +9,10 @@ import { DashboardPage } from '@/routes/index'
 import { DeMonitorPage } from '@/routes/ops/de-monitor'
 import { OpsIncidentsPage } from '@/routes/ops/incidents'
 import { OpsJobsPage } from '@/routes/ops/jobs'
-import { OpsRunsPage } from '@/routes/ops/runs'
 import { RunDetailPage } from '@/routes/ops/run-detail'
-import { WorkersPage, WorkersTrendsPage } from '@/routes/ops/workers'
 import { AttemptTablesIndexPage } from '@/routes/ops/workers/AttemptTablesIndexPage'
 import { WorkerQueuePage } from '@/routes/ops/workers/WorkerQueuePage'
 import { WorkersSettingsPage } from '@/routes/ops/workers/settings'
-import { ConnectionsPage } from '@/routes/ops/connections'
 import { ConnectTokenPage } from '@/routes/connect.$token'
 import {
   OwnerConnectorsPage,
@@ -23,7 +21,6 @@ import {
 import { HealthEscalationsPage } from '@/routes/ops/health/escalations'
 import { RequestDetailPage } from '@/routes/requests/$requestId'
 import { NeedsAttentionPage } from '@/routes/requests/needs-attention'
-import { MatchingResultsLabPage } from '@/routes/requests/matching-results-lab'
 import { PendingSettingsLabPage } from '@/routes/dev/pending-settings-lab'
 import { DevLabsIndexPage } from '@/routes/dev/index'
 import {
@@ -37,6 +34,24 @@ import { RequestsPage } from '@/routes/requests/index'
 import { RequestsSlasPage } from '@/routes/requests/slas'
 import { DocsPage } from '@/routes/docs'
 import { HOME_WINDOWS, type HomeWindow } from '@/components/legal/home/DateToolbar'
+
+const WorkersPage = lazy(() =>
+  import('@/routes/ops/workers').then((m) => ({ default: m.WorkersPage })),
+)
+const WorkersTrendsPage = lazy(() =>
+  import('@/routes/ops/workers').then((m) => ({ default: m.WorkersTrendsPage })),
+)
+const OpsRunsPage = lazy(() =>
+  import('@/routes/ops/runs').then((m) => ({ default: m.OpsRunsPage })),
+)
+const ConnectionsPage = lazy(() =>
+  import('@/routes/ops/connections').then((m) => ({ default: m.ConnectionsPage })),
+)
+const MatchingResultsLabPage = lazy(() =>
+  import('@/routes/requests/matching-results-lab').then((m) => ({
+    default: m.MatchingResultsLabPage,
+  })),
+)
 
 export const PIPELINE_TABS = [
   'pipeline',

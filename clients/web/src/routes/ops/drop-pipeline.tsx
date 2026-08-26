@@ -36,6 +36,7 @@ import {
   fetchAdminApi,
   getDropBulkProcess,
   getDropPipeline,
+  getDropPipelineLite,
   getDropWorkerTrends,
   listDropBulkProcesses,
   listDropBulkProcessRuns,
@@ -3280,14 +3281,14 @@ function DropPipelinePageInner() {
 
   const pipelineLiteQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-pipeline', 'lite'],
-    queryFn: () => getDropPipeline({ detail: 'lite' }),
+    queryFn: () => getDropPipelineLite(),
     refetchInterval: 15_000,
     placeholderData: (previous) => previous,
   })
 
   const pipelineQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'drop-pipeline', 'full'],
-    queryFn: () => getDropPipeline({ detail: 'full' }),
+    queryFn: () => getDropPipeline(),
     refetchInterval: 30_000,
     placeholderData: (previous) => previous,
     enabled: fatPipelineEnabled,

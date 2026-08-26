@@ -247,7 +247,7 @@ export function DropProdCutoverLabPage() {
 
   const pipelineQuery = useQuery({
     queryKey: PIPELINE_QUERY_KEY,
-    queryFn: getDropPipeline,
+    queryFn: () => getDropPipeline(),
     enabled:
       opsOk &&
       (monitorArmed ||

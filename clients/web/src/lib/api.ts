@@ -700,10 +700,12 @@ export type DropGlobalStats = {
   workers_total: number
 }
 
-export function getDropPipeline(opts?: { detail?: 'full' | 'lite' }) {
-  const detail = opts?.detail ?? 'full'
-  const qs = detail === 'lite' ? '?detail=lite' : ''
-  return fetchAdminApi<DropPipelineStatus>(`/ops/drop/pipeline${qs}`)
+export function getDropPipeline() {
+  return fetchAdminApi<DropPipelineStatus>('/ops/drop/pipeline')
+}
+
+export function getDropPipelineLite() {
+  return fetchAdminApi<DropPipelineStatus>('/ops/drop/pipeline?detail=lite')
 }
 
 export type BulkProcessSummary = {

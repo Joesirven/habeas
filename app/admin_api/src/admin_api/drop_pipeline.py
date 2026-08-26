@@ -241,6 +241,7 @@ class PromoteProxyBody(BaseModel):
 
 class DispatchProxyBody(BaseModel):
     limit: int | None = Field(default=None, ge=1, le=5000)
+    drain_all: bool = False
 
 
 class FulfillProxyBody(BaseModel):

@@ -450,6 +450,40 @@ def test_fulfill_proxy_forwards_request_id(monkeypatch: pytest.MonkeyPatch):
     assert captured["json"]["request_id"] == "00000000-0000-0000-0000-000000000099"
 
 
+def test_dispatch_proxy_forwards_drain_all(monkeypatch: pytest.MonkeyPatch):
+    captured: list[tuple[str, Any]] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, Any]:
+            return {"status": "ok", "queued": 0}
+
+    class FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        async def post(self, url: str, json: Any = None, headers: Any = None) -> FakeResponse:
+            captured.append((url, json))
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    with TestClient(app) as client:
+        response = client.post("/ops/drop/dispatch", json={"drain_all": True})
+
+    assert response.status_code == 200
+    dispatch_calls = [(url, body) for url, body in captured if str(url).endswith("/dispatch")]
+    assert len(dispatch_calls) == 1
+    assert dispatch_calls[0][1] == {"drain_all": True}
+
+
 def _is_drop_request_cardinality_sql(sql: str) -> bool:
     """True for index-only COUNT of DROP requests — not raw GROUP BY or recent LIMIT."""
     return (
