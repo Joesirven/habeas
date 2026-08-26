@@ -23,6 +23,7 @@ from habeas_privacy_core.connections.catalog import (
     VERTICAL_COMMUNICATIONS,
     VERTICAL_DATA,
     VERTICAL_PEOPLE_HR,
+    VERTICAL_TECH,
     get_bindings_for_vertical,
 )
 from habeas_privacy_core.connections.freshness import evaluate_connection_gate
@@ -1238,6 +1239,70 @@ def test_wizard_complete_accepts_refresh_cadence_body(
     assert "cadence_days" not in meta
     assert meta.get("wizard_completed_at")
     helpers["enqueue"].assert_not_awaited()
+
+
+def test_auth0_complete_allows_live_when_spa_overwrote_upload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """00023 Continue POSTs mode=upload after a green Live test; no CSV exists.
+
+    Complete must succeed for Auth0 Live and restore active_mode so matching
+    is not left gated as upload-without-file.
+    """
+    meta: dict = {
+        "vertical_id": VERTICAL_TECH,
+        "active_mode": "upload",
+        "refresh_cadence": "rarely",
+        "credentials_rotated_at": NOW.isoformat(),
+    }
+    current = _connection(
+        system="auth0",
+        metadata=meta,
+        status="connected",
+        last_test_ok=True,
+    )
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_TECH}/systems/auth0/wizard/complete",
+            headers=_owner_headers(),
+        )
+    assert response.status_code == 200
+    assert meta.get("wizard_completed_at")
+    assert meta["active_mode"] == "live"
+    assert "last_successful_upload_at" not in meta
+    helpers["enqueue"].assert_not_awaited()
+
+
+def test_auth0_complete_still_requires_upload_without_live_test(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auth0 upload-without-CSV stays blocked when Live was never green."""
+    meta: dict = {
+        "vertical_id": VERTICAL_TECH,
+        "active_mode": "upload",
+        "refresh_cadence": "rarely",
+    }
+    current = _connection(system="auth0", metadata=meta, status="pending", last_test_ok=None)
+    helpers = _patch_owner_access(monkeypatch, connection=current, merge_result=current)
+    helpers["merge"].return_value = current
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_TECH}/systems/auth0/wizard/complete",
+            headers=_owner_headers(),
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "successful upload required"
+    assert "wizard_completed_at" not in meta
 
 
 @pytest.mark.parametrize(

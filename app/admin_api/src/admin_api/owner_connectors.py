@@ -960,7 +960,27 @@ async def _apply_live_test_outcome(
     return refreshed
 
 
-def _wizard_ready(connection: Connection) -> None:
+def _live_credentials_ready(connection: Connection) -> bool:
+    """True when Live credentials have been stored and tested successfully."""
+    meta = connection.metadata or {}
+    rotated = meta.get("credentials_rotated_at")
+    return bool(rotated) or bool(connection.last_test_ok) or connection.status == "connected"
+
+
+def _auth0_live_overrides_upload(connection: Connection, *, system: str) -> bool:
+    """00023 SPA after green Live test POSTs mode=upload with no CSV.
+
+    Auth0 Live must still be allowed to finish the wizard without a file.
+    """
+    if system != "auth0":
+        return False
+    meta = connection.metadata or {}
+    if meta.get("last_successful_upload_at"):
+        return False
+    return _live_credentials_ready(connection)
+
+
+def _wizard_ready(connection: Connection, *, system: str) -> None:
     meta = connection.metadata or {}
     active_mode = parse_stored_active_mode(dict(meta))
     if active_mode not in {APPROACH_LIVE, APPROACH_UPLOAD}:
@@ -968,12 +988,13 @@ def _wizard_ready(connection: Connection) -> None:
     if parse_refresh_cadence(dict(meta)) is None and meta.get("cadence_days") is None:
         raise HTTPException(status_code=422, detail="refresh_cadence required")
     if active_mode == APPROACH_UPLOAD:
-        if not meta.get("last_successful_upload_at"):
-            raise HTTPException(status_code=422, detail="successful upload required")
+        if meta.get("last_successful_upload_at"):
+            return
+        if _auth0_live_overrides_upload(connection, system=system):
+            return
+        raise HTTPException(status_code=422, detail="successful upload required")
     elif active_mode == APPROACH_LIVE:
-        rotated = meta.get("credentials_rotated_at")
-        live_ok = bool(rotated) or connection.last_test_ok or connection.status == "connected"
-        if not live_ok:
+        if not _live_credentials_ready(connection):
             raise HTTPException(status_code=422, detail="live credentials required")
 
 
@@ -1493,9 +1514,13 @@ async def complete_system_wizard(
             )
             if connection is None:
                 raise HTTPException(status_code=404, detail="connection not found")
-        _wizard_ready(connection)
+        _wizard_ready(connection, system=system)
         completed_at = datetime.now(timezone.utc).isoformat()
         patch = {"wizard_completed_at": completed_at, "vertical_id": vertical_id}
+        # Restore Live when the shipped SPA overwrote Auth0 to upload after a
+        # green test so matching is not left gated as upload-without-CSV.
+        if _auth0_live_overrides_upload(connection, system=system):
+            patch["active_mode"] = APPROACH_LIVE
         updated = await _merge_metadata(
             conn,
             UUID(str(connection.id)),
