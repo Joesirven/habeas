@@ -23,6 +23,7 @@ _CACHE_TTL_SECONDS = 300
 
 __all__ = [
     "GcpSecretReader",
+    "GcpSecretWriter",
     "gsm_secret_id",
 ]
 
@@ -38,6 +39,14 @@ def _secret_version_name(*, project_id: str, secret_id: str) -> str:
 
 def _is_not_found(exc: BaseException) -> bool:
     return type(exc).__name__ == "NotFound"
+
+
+def _is_already_exists(exc: BaseException) -> bool:
+    return type(exc).__name__ == "AlreadyExists"
+
+
+def _secret_resource_name(*, project_id: str, secret_id: str) -> str:
+    return f"projects/{project_id}/secrets/{gsm_secret_id(secret_id)}"
 
 
 class GcpSecretReader:
@@ -105,6 +114,86 @@ class GcpSecretReader:
         except ImportError as exc:
             raise RuntimeError(
                 "google-cloud-secret-manager is required for GcpSecretReader"
+            ) from exc
+        self._client = secretmanager.SecretManagerServiceClient()
+        return self._client
+
+
+class GcpSecretWriter:
+    """Synchronous GSM writer. Inject ``client`` in tests; never log payloads."""
+
+    def __init__(self, *, project_id: str, client: Any | None = None) -> None:
+        resolved = project_id.strip()
+        if not resolved:
+            raise ValueError("GCP_PROJECT is required for GcpSecretWriter")
+        self._project_id = resolved
+        self._client = client
+
+    def put_secret(self, secret_id: str, value: str) -> None:
+        """Create the GSM secret if needed and add a new version. Never log value."""
+        client = self._client_or_create()
+        parent = f"projects/{self._project_id}"
+        gsm_id = gsm_secret_id(secret_id)
+        try:
+            client.create_secret(
+                request={
+                    "parent": parent,
+                    "secret_id": gsm_id,
+                    "secret": {"replication": {"automatic": {}}},
+                }
+            )
+        except Exception as exc:
+            if not _is_already_exists(exc):
+                logger.warning(
+                    "secret_create_failed",
+                    extra={
+                        "event": "secret_create_failed",
+                        "error_type": type(exc).__name__,
+                        "secret_id": secret_id,
+                    },
+                )
+                raise RuntimeError(
+                    f"secret_write_failed error_type={type(exc).__name__}"
+                ) from None
+        try:
+            client.add_secret_version(
+                request={
+                    "parent": _secret_resource_name(
+                        project_id=self._project_id, secret_id=secret_id
+                    ),
+                    "payload": {"data": value.encode("utf-8")},
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "secret_version_failed",
+                extra={
+                    "event": "secret_version_failed",
+                    "error_type": type(exc).__name__,
+                    "secret_id": secret_id,
+                },
+            )
+            raise RuntimeError(
+                f"secret_write_failed error_type={type(exc).__name__}"
+            ) from None
+
+    def get_secret(self, secret_id: str) -> str | None:
+        """Read back the latest version (wizard re-test). Does not cache."""
+        reader = GcpSecretReader(
+            project_id=self._project_id,
+            client=self._client_or_create(),
+            cache_ttl_seconds=0,
+        )
+        return reader.get_secret(secret_id)
+
+    def _client_or_create(self) -> Any:
+        if self._client is not None:
+            return self._client
+        try:
+            from google.cloud import secretmanager  # type: ignore[import-untyped]
+        except ImportError as exc:
+            raise RuntimeError(
+                "google-cloud-secret-manager is required for GcpSecretWriter"
             ) from exc
         self._client = secretmanager.SecretManagerServiceClient()
         return self._client

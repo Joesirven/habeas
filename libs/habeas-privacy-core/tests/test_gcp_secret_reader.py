@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from habeas_privacy_core.connections.gcp_secret_reader import (
     GcpSecretReader,
+    GcpSecretWriter,
     gsm_secret_id,
 )
 from habeas_privacy_core.connections.secrets import (
@@ -21,6 +22,41 @@ AUTH0_SECRET_ID = f"dpra/connections/auth0/{AUTH0_CONNECTION_ID}"
 AUTH0_JSON = (
     '{"domain":"example.auth0.com","client_id":"cid","client_secret":"super-secret-value"}'
 )
+
+
+class _FakeGsmWriteClient:
+    def __init__(
+        self,
+        *,
+        create_error: Exception | None = None,
+        version_error: Exception | None = None,
+        payload: bytes | None = None,
+    ) -> None:
+        self.create_error = create_error
+        self.version_error = version_error
+        self.payload = payload
+        self.created: list[dict[str, object]] = []
+        self.versions: list[str] = []
+
+    def create_secret(self, request: dict[str, object]) -> None:
+        if self.create_error is not None:
+            raise self.create_error
+        self.created.append(request)
+
+    def add_secret_version(self, request: dict[str, object]) -> None:
+        if self.version_error is not None:
+            raise self.version_error
+        self.versions.append(str(request.get("parent", "")))
+        payload = request.get("payload")
+        if isinstance(payload, dict):
+            self.payload = payload.get("data")  # type: ignore[assignment]
+
+    def access_secret_version(self, request: dict[str, str]) -> SimpleNamespace:
+        return SimpleNamespace(payload=SimpleNamespace(data=self.payload))
+
+
+class AlreadyExists(Exception):
+    """Name matches google.api_core.exceptions.AlreadyExists."""
 
 
 class _FakeGsmClient:
@@ -173,3 +209,75 @@ def test_gcp_secret_reader_error_message_omits_secret_value():
 def test_gcp_secret_reader_requires_project():
     with pytest.raises(ValueError, match="GCP_PROJECT"):
         GcpSecretReader(project_id="  ")
+
+
+def test_get_secret_writer_uses_gcp_when_project_set(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("GCP_PROJECT", "example-gcp-project")
+    monkeypatch.delenv("SECRET_READER", raising=False)
+    monkeypatch.delenv("SECRET_WRITER", raising=False)
+
+    created: list[str] = []
+
+    class _StubWriter:
+        def __init__(self, *, project_id: str) -> None:
+            created.append(project_id)
+
+        def put_secret(self, secret_id: str, value: str) -> None:
+            _ = (secret_id, value)
+
+    monkeypatch.setattr(
+        "habeas_privacy_core.connections.gcp_secret_reader.GcpSecretWriter",
+        _StubWriter,
+    )
+    writer = get_secret_writer()
+    assert created == ["example-gcp-project"]
+    assert isinstance(writer, _StubWriter)
+
+
+def test_get_secret_writer_memory_flag_wins_over_project(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("GCP_PROJECT", "example-gcp-project")
+    monkeypatch.setenv("SECRET_WRITER", "memory")
+    writer = get_secret_writer()
+    assert isinstance(writer, InMemorySecretWriter)
+
+
+def test_gcp_secret_writer_creates_and_adds_version():
+    client = _FakeGsmWriteClient()
+    writer = GcpSecretWriter(project_id="example-gcp-project", client=client)
+    writer.put_secret(AUTH0_SECRET_ID, AUTH0_JSON)
+    assert len(client.created) == 1
+    created = client.created[0]
+    assert created["parent"] == "projects/example-gcp-project"
+    assert created["secret_id"] == f"dpra-connections-auth0-{AUTH0_CONNECTION_ID}"
+    assert client.versions == [
+        f"projects/example-gcp-project/secrets/dpra-connections-auth0-{AUTH0_CONNECTION_ID}"
+    ]
+    assert client.payload == AUTH0_JSON.encode("utf-8")
+
+
+def test_gcp_secret_writer_treats_already_exists_as_success():
+    client = _FakeGsmWriteClient(create_error=AlreadyExists("exists"))
+    writer = GcpSecretWriter(project_id="example-gcp-project", client=client)
+    writer.put_secret(AUTH0_SECRET_ID, AUTH0_JSON)
+    assert client.versions == [
+        f"projects/example-gcp-project/secrets/dpra-connections-auth0-{AUTH0_CONNECTION_ID}"
+    ]
+
+
+def test_gcp_secret_writer_does_not_log_secret_value(caplog: pytest.LogCaptureFixture):
+    client = _FakeGsmWriteClient(version_error=RuntimeError("denied: super-secret-value"))
+    writer = GcpSecretWriter(project_id="example-gcp-project", client=client)
+    with caplog.at_level("WARNING"), pytest.raises(RuntimeError, match="secret_write_failed"):
+        writer.put_secret(AUTH0_SECRET_ID, AUTH0_JSON)
+    combined = " ".join(record.getMessage() for record in caplog.records)
+    assert "super-secret-value" not in combined
+    assert AUTH0_JSON not in combined
+    for record in caplog.records:
+        extras = getattr(record, "__dict__", {})
+        assert "super-secret-value" not in str(extras.get("secret_id", ""))
+        assert extras.get("error_type") == "RuntimeError"
+
+
+def test_gcp_secret_writer_requires_project():
+    with pytest.raises(ValueError, match="GCP_PROJECT"):
+        GcpSecretWriter(project_id="  ")

@@ -132,7 +132,10 @@ def test_in_memory_secret_writer_overwrites():
     assert writer.get_secret("secret-id") == "second"
 
 
-def test_get_secret_writer_defaults_to_in_memory():
+def test_get_secret_writer_defaults_to_in_memory(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("GCP_PROJECT", raising=False)
+    monkeypatch.delenv("SECRET_READER", raising=False)
+    monkeypatch.delenv("SECRET_WRITER", raising=False)
     writer = get_secret_writer()
     assert isinstance(writer, InMemorySecretWriter)
 
