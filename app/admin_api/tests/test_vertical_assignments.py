@@ -22,8 +22,10 @@ from habeas_privacy_core.connections.catalog import (
     VERTICAL_COMMUNICATIONS,
     VERTICAL_DATA,
     VERTICAL_PEOPLE_HR,
+    VERTICAL_TECH,
     VERTICAL_TEST,
     get_vertical,
+    list_verticals,
 )
 from habeas_privacy_core.connections.token import hash_token
 
@@ -515,3 +517,98 @@ def test_post_data_vertical_member_invite_via_test_client(
     assert payload["vertical_id"] == VERTICAL_DATA
     assert payload["invite_id"] == str(invite_id)
     assert payload["raw_token"] == fixture_token
+
+
+def test_owner_verticals_super_admin_lists_full_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tech-only assignment must not hide People/HR / Communications / Test."""
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "dev-owner-2@example.com")
+    monkeypatch.setattr(
+        vertical_assignments,
+        "fetch_principal_verticals",
+        AsyncMock(return_value=[VERTICAL_TECH]),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/owner/verticals",
+            headers=signed_headers("dev-owner-2@example.com"),
+        )
+
+    assert response.status_code == 200
+    ids = [row["id"] for row in response.json()]
+    assert ids == [entry.vertical_id for entry in list_verticals()]
+    assert VERTICAL_TECH in ids
+    assert VERTICAL_PEOPLE_HR in ids
+    assert VERTICAL_COMMUNICATIONS in ids
+    assert VERTICAL_TEST in ids
+
+
+def test_owner_verticals_data_owner_stays_assignment_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[{"vertical_id": VERTICAL_TECH}])
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "owner@example.com")
+    monkeypatch.setattr(vertical_assignments, "_require_database", lambda: None)
+    monkeypatch.setattr(vertical_assignments, "get_pool", lambda: FakePool())
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/owner/verticals",
+            headers=signed_headers("owner@example.com"),
+        )
+
+    assert response.status_code == 200
+    assert [row["id"] for row in response.json()] == [VERTICAL_TECH]
+
+
+@pytest.mark.asyncio
+async def test_me_super_admin_lists_catalog_not_tech_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(admin_main.settings, "database_url", "postgresql://test")
+    monkeypatch.setattr(
+        admin_main,
+        "fetch_principal_verticals",
+        AsyncMock(return_value=[VERTICAL_TECH]),
+    )
+    principal = RolePrincipal(
+        email="dev-owner-2@example.com",
+        role=ROLE_SUPER_ADMIN,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    result = await admin_main.me(principal)
+    assert VERTICAL_TECH in result.verticals
+    assert VERTICAL_PEOPLE_HR in result.verticals
+    assert VERTICAL_COMMUNICATIONS in result.verticals
+    assert VERTICAL_TEST in result.verticals
+    assert result.verticals == [entry.vertical_id for entry in list_verticals()]
+
+
+@pytest.mark.asyncio
+async def test_me_view_as_data_owner_stays_assignment_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[{"vertical_id": VERTICAL_TECH}])
+
+    class FakePool:
+        def acquire(self):
+            return _fake_pool(conn)
+
+    monkeypatch.setattr(admin_main.settings, "database_url", "postgresql://test")
+    monkeypatch.setattr(admin_main, "get_pool", lambda: FakePool())
+    principal = RolePrincipal(
+        email="dev-owner-2@example.com",
+        role=ROLE_DATA_OWNER,
+        real_role=ROLE_SUPER_ADMIN,
+    )
+    result = await admin_main.me(principal)
+    assert result.verticals == [VERTICAL_TECH]

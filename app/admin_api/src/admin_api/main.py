@@ -69,9 +69,11 @@ from admin_api.owner_connectors import (
     collect_connector_reminders,
 )
 from admin_api.vertical_assignments import (
+    catalog_vertical_ids,
     fetch_principal_verticals,
     owner_has_data_users,
     owner_router as vertical_owner_router,
+    principal_lists_all_catalog_verticals,
 )
 from admin_api.vertical_assignments import router as vertical_assignments_router
 from admin_api.vertical_hash_ops import router as vertical_hash_ops_router
@@ -260,8 +262,14 @@ def _approval_record(row: dict[str, Any]) -> ApprovalRecord:
     )
 
 
-async def _load_me_verticals(email: str) -> list[str]:
-    """Active vertical assignments for *email*; empty when DB unavailable or on error."""
+async def _load_me_verticals(email: str, role: str = "") -> list[str]:
+    """Vertical ids for /me — full catalog for super_admin so 00023 chips are not assignment-filtered.
+
+    Owners/users stay on ``user_vertical_assignments``. Super_admin (effective
+    role, including View-as super_admin) skips the assignment query.
+    """
+    if principal_lists_all_catalog_verticals(role):
+        return catalog_vertical_ids()
     if not settings.database_url:
         return []
     try:
@@ -388,7 +396,7 @@ async def _build_me_response(
     principal: CurrentRolePrincipal,
     request: Request | None = None,
 ) -> MeResponse:
-    verticals = await _load_me_verticals(principal.email)
+    verticals = await _load_me_verticals(principal.email, principal.role)
     reminders = await _load_me_reminders(
         principal.email,
         principal.role,
@@ -860,7 +868,7 @@ async def _build_me_home_response(
     principal: CurrentRolePrincipal,
     request: Request | None = None,
 ) -> MeHomeResponse:
-    verticals = await _load_me_verticals(principal.email)
+    verticals = await _load_me_verticals(principal.email, principal.role)
     reminders = await _load_me_reminders(
         principal.email,
         principal.role,

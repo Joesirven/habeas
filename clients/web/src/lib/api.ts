@@ -122,7 +122,7 @@ export type MePayload = {
   role: UserRole
   /** Allowlist role before simulate override. */
   real_role: UserRole
-  /** Assigned KD20 vertical ids (empty when none). */
+  /** Assigned KD20 vertical ids. Super_admin receives the full catalog. */
   verticals?: string[]
   /** Catalog display labels for assigned verticals (welcome copy). */
   assigned_vertical_labels?: AssignedVerticalLabel[]
@@ -3217,6 +3217,10 @@ export type OwnerUploadResult = {
   accepted_row_count?: number | null
   rejected_row_count?: number | null
   rejected_rows?: OwnerRejectedUploadRow[] | null
+}
+
+export function listOwnerVisibleVerticals() {
+  return fetchAdminApi<VerticalCatalogEntry[]>('/owner/verticals')
 }
 
 export function listOwnerConnectors(verticalId: string) {
