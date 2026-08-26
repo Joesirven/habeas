@@ -797,31 +797,15 @@ async def _with_header_statement_timeout(
 
 
 async def collect_matching_progress(conn: Any) -> dict[str, Any]:
-    """One GROUP BY status on matching_attempts plus drain lease. No PII.
+    """Drain lease only — do not scan matching_attempts (~1.84M GROUP BY hung 00078).
 
-    Do not JOIN ``requests`` — that scan over ~1.84M rows hung prod 00078.
+    Pending/claimed/success paint as zero on this ticker. Full counts stay on
+    ``GET /ops/drop/pipeline`` (not the header/snapshot path). No PII.
     """
-    matching_attempt_rows = await conn.fetch(
-        """
-        SELECT status, COUNT(*)::int AS count
-          FROM matching_attempts
-         GROUP BY status
-         ORDER BY status
-        """
-    )
     matching_pending = 0
     matching_success = 0
     matching_claimed = 0
     matching_by_status: list[dict[str, Any]] = []
-    for row in matching_attempt_rows:
-        item = {"status": row["status"], "count": int(row["count"])}
-        matching_by_status.append(item)
-        if row["status"] == "pending":
-            matching_pending = item["count"]
-        elif row["status"] == "success":
-            matching_success = item["count"]
-        elif row["status"] == "claimed":
-            matching_claimed = item["count"]
 
     drain_lease_row = await conn.fetchrow(
         """

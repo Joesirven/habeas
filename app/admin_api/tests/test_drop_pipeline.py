@@ -3979,26 +3979,17 @@ def _capturing_matching_progress_conn() -> tuple[MagicMock, list[str]]:
 def _assert_matching_progress_sql(issued: list[str]) -> None:
     assert issued, "matching-progress issued no SQL"
     assert all("drop_raw_requests" not in sql for sql in issued)
-    group_bys = [sql for sql in issued if _is_matching_progress_attempts_group_by(sql)]
-    assert len(group_bys) == 1
-    compact = " ".join(group_bys[0].split())
-    compact_l = compact.lower()
-    assert "FROM matching_attempts" in compact
-    assert "GROUP BY ma.status" in compact or "GROUP BY status" in compact
-    assert " join " not in f" {compact_l} "
-    assert "from requests" not in compact_l
-    assert "join requests" not in compact_l
-    attempt_sqls = [sql for sql in issued if "matching_attempts" in sql]
-    assert len(attempt_sqls) == 1
+    assert all("matching_attempts" not in sql for sql in issued)
+    assert any("matching_drain_lease" in sql for sql in issued)
     assert all("drop_connector_attempts" not in sql for sql in issued)
     assert all("drop_ingest_attempts" not in sql for sql in issued)
 
 
 def _assert_matching_progress_body(body: dict[str, Any]) -> None:
-    assert body["pending"] == 10
-    assert body["claimed"] == 3
-    assert body["success"] == 100
-    assert any(row["status"] == "pending" and row["count"] == 10 for row in body["by_status"])
+    assert body["pending"] == 0
+    assert body["claimed"] == 0
+    assert body["success"] == 0
+    assert body["by_status"] == []
     assert body["drain"]["active"] is True
     assert body["drain"]["holder"] == "matching-drain-1"
     blob = json.dumps(body).lower()
@@ -4022,7 +4013,7 @@ async def test_collect_matching_progress_sql_is_attempts_group_by_only() -> None
     result = await drop_pipeline.collect_matching_progress(conn)
     _assert_matching_progress_sql(issued)
     _assert_matching_progress_body(result)
-    assert conn.fetch.await_count == 1
+    assert conn.fetch.await_count == 0
     assert conn.fetchrow.await_count == 1
 
 
