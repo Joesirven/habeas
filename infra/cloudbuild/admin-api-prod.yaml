@@ -13,7 +13,7 @@ substitutions:
   _DROP_CONNECTOR_URL: https://drop-connector-prod-hsa55rg7ja-uk.a.run.app
   _DROP_INGESTOR_URL: https://drop-ingestor-prod-hsa55rg7ja-uk.a.run.app
   _REQUEST_DISPATCHER_URL: https://request-dispatcher-prod-hsa55rg7ja-uk.a.run.app
-  _MATCHING_URL: https://matching-prod-hsa55rg7ja-uk.a.run.app
+  _MATCHING_URL: https://data-vertical-matching-prod-hsa55rg7ja-uk.a.run.app
   _DATA_FULFILLMENT_URL: https://data-fulfillment-dispatcher-prod-hsa55rg7ja-uk.a.run.app
   _HASH_INDEX_REFRESH_URL: https://hash-index-refresh-prod-hsa55rg7ja-uk.a.run.app
   _REAPER_URL: https://reaper-prod-hsa55rg7ja-uk.a.run.app
