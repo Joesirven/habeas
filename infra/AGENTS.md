@@ -12,11 +12,12 @@ Cloud Build pipelines, Terraform, Docker build contexts. Path-filtered triggers:
 - Matching drain Job: `infra/cloudbuild/data-vertical-matching-dev.yaml` deploys
   service `data-vertical-matching-dev` + Job `data-vertical-matching-drain-dev`
   (tasks=5). App slug stays `matching`. Scheduler `dpra-dev-matching` → matching
-  `POST /ensure-drain`. Prod templates: `data-vertical-matching-prod.yaml` (not
-  live until prod Cloud SQL exists). Job invoker = matching runtime SA
-  (`roles/run.developer` on Job).
-- **Jose-gated cutover:** live Cloud Run is still `matching-dev`. Admin-api-dev
-  `_MATCHING_URL` may keep the current `matching-dev` `*.run.app` until Jose
-  flips it — do not invent a new URL.
+  `POST /ensure-drain`. **Prod** is live via `data-vertical-matching-prod.yaml` +
+  Job `data-vertical-matching-drain-prod`; `admin-api-prod` `_MATCHING_URL` points
+  at `data-vertical-matching-prod` (not legacy `matching-prod`). Job invoker =
+  matching runtime SA (`roles/run.developer` on Job).
+- **Dev cutover (Jose-gated):** admin-api-dev `_MATCHING_URL` may still target legacy
+  `matching-dev` until Jose flips it to `data-vertical-matching-dev` — do not invent
+  a new URL.
 
 Prod deploy → [`.agent/modules/prod-write-gate.md`](../.agent/modules/prod-write-gate.md).

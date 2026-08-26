@@ -24,7 +24,7 @@ Code repo for **Habeas Data Privacy Request Automation**. Design authority (arch
 | [`transform/drop_hash/`](transform/drop_hash/) | dbt + UDF DROP hash index — prod home; serving marts `email_hash` / `phone_hash` / `ndz_hash` in `example-gcp-project.drop_hash_index` (not `analytics/`) |
 | [`transform/external_hash/`](transform/external_hash/) | dbt marts for external vertical hash indexes (Auth0, Paylocity, Lever, Sheets, …) — hashed raw only; Axios HQ (`axios_headquarters`) is upload-every-batch (no `axios_hashed_raw` invented this slice) |
 | [`app/`](app/) | All Cloud Run FastAPI apps — control plane + automation |
-| [`app/matching/`](app/matching/) | Matching worker + chunk drain; Python package stays `matching`; Job target `data-vertical-matching-drain-*` (5 tasks) via `/ensure-drain`. Live Cloud Run/Job rename is Jose-gated; historical `matching-dev` / `matching-drain-dev` may still be running. |
+| [`app/matching/`](app/matching/) | Matching worker + chunk drain; Python package stays `matching`; Job target `data-vertical-matching-drain-*` via `/ensure-drain`. **Prod** uses `data-vertical-matching-prod` (`admin-api-prod` `_MATCHING_URL`). **Dev** cutover from legacy `matching-dev` is still Jose-gated. |
 | [`app/admin_api/`](app/admin_api/) | Main control-plane app — mutations, dashboard, live events |
 | [`app/auth0/`](app/auth0/) | Auth0 worker — matching/suppression + hash refresh into [`transform/external_hash`](transform/external_hash/) |
 | [`clients/web/`](clients/web/) | Admin web app — Vite, React, TypeScript, Bun; Ops Dashboard (Pipeline / Errors / Logs / Health) + connections onboarding |
@@ -91,13 +91,15 @@ If pre-merge → read [`.agent/modules/review-personas.md`](.agent/modules/revie
 
 ---
 
-## Prod scaffolding (2026-08-25)
+## Prod status (2026-08-25)
 
-On `example-gcp-project`: Cloud SQL `dpra-prod`, Secret Manager `database-url-prod`, and Cloud Run `admin-api-prod`, `drop-ingestor-prod`, `request-dispatcher-prod`, and `matching-prod` are live. `drop-connector-prod` and Confirm (first DROP pull) are **not** ready. Cassandra stays off. No production writes without Jose.
+On `example-gcp-project`: Cloud SQL `dpra-prod`, Secret Manager `database-url-prod`, and the DROP spine plus vertical workers are live — `admin-api-prod` (`_MATCHING_URL` → `data-vertical-matching-prod`, not legacy `matching-prod`; `max-instances=3`), `drop-connector-prod`, `drop-ingestor-prod`, `request-dispatcher-prod`, `data-vertical-matching-prod`, `hash-index-refresh-prod`, `data-fulfillment-dispatcher-prod`, `drop-notice-dispatcher-prod`, `reaper-prod`, and vertical workers `auth0-prod`, `google-sheets-prod`, `lever-prod`, `paylocity-prod`.
 
-Integration branch is `master`; owner / Sheets cadence UI from the other worktree is on `origin/master` as of 2026-08-25 (`d2d9525` and later). This agent branch may still carry Auth0/prod scaffolding WIP.
+**DROP intake (complete):** first production CA DROP pull finished (~1.84M requests); Data-vertical matching is complete. Ops orchestration used `POST /ops/drop/prod/confirm-run` (admin-api spine: connector download → ingestor land/promote → dispatch → ensure-drain) — that is the cutover runbook endpoint, not an open blocker. Ongoing pulls use scheduled `drop-connector-prod` `/download`.
 
-Runbook: [`infra/README.md`](infra/README.md) § Prod Cloud SQL + first DROP pull. Worker attach: [`app/AGENTS.md`](app/AGENTS.md).
+**Still off in prod:** Cassandra (`cassandra-prod` stays stub / do-not-write). Mailchimp is retired (Communications vertical is Axios HQ). No ad-hoc production writes without Jose.
+
+Runbook: [`infra/README.md`](infra/README.md) § Prod Cloud SQL + DROP cutover. Worker attach: [`app/AGENTS.md`](app/AGENTS.md).
 
 ---
 

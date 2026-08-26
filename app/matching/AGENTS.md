@@ -11,8 +11,9 @@ Headquarters, and other vendor verticals are not this process. Webform / CSV /
 manual stay in this same app (MDR plaintext) — do not add a second Cloud Run for
 those intakes. Target Cloud Run names: `data-vertical-matching-dev` /
 `data-vertical-matching-prod` and drain jobs `data-vertical-matching-drain-dev` /
-`data-vertical-matching-drain-prod`. Live rename is Jose-gated; historical
-`matching-dev` may still be the running service until cutover.
+`data-vertical-matching-drain-prod`. **Prod** cutover is complete (`admin-api-prod`
+`_MATCHING_URL` → `data-vertical-matching-prod`). **Dev** may still run legacy
+`matching-dev` until Jose flips admin-api-dev to `data-vertical-matching-dev`.
 
 - One `MatchingPipeline` interface (`pipeline.py`); one adapter class per intake source in
   `adapters/` (`drop_hash.py`, `plaintext.py`); `router.py` dispatches by `IntakeSource`

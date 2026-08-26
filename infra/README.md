@@ -493,25 +493,44 @@ Do **not** treat Cloud Run **Jobs** (`data-vertical-matching-drain-dev`) as flee
 | `hash_index_refresh` | `hash-index-refresh-dev` | not auto-scheduled |
 | `reaper` | `reaper-dev` | |
 | `intake_drop_poller` | `intake-drop-poller-dev` | discover-only until scheduled |
-| `drop_notice_dispatcher` | `drop-notice-dispatcher-dev` | not live yet |
+| `drop_notice_dispatcher` | `drop-notice-dispatcher-dev` | prod: `drop-notice-dispatcher-prod` |
 
-**Jose-gated cutover:** live traffic is still `matching-dev` (`https://matching-dev-hsa55rg7ja-uk.a.run.app`). `data-vertical-matching-dev` is deployed and Ready (`https://data-vertical-matching-dev-hsa55rg7ja-uk.a.run.app`, invoker = admin-api runtime SA only; drain Job `data-vertical-matching-drain-dev` Ready). Keep admin-api-dev `_MATCHING_URL` on `matching-dev` until Jose flips it to the described `data-vertical-matching-dev` URL. Do **not** submit `data-vertical-matching-prod.yaml` until Jose approves prod cutover.
+**Dev cutover (Jose-gated):** live dev traffic may still be `matching-dev` (`https://matching-dev-hsa55rg7ja-uk.a.run.app`). `data-vertical-matching-dev` is deployed and Ready (`https://data-vertical-matching-dev-hsa55rg7ja-uk.a.run.app`, invoker = admin-api runtime SA only; drain Job `data-vertical-matching-drain-dev` Ready). Keep admin-api-dev `_MATCHING_URL` on `matching-dev` until Jose flips it to the described `data-vertical-matching-dev` URL.
 
-**Connection / vertical workers (lock before first Cloud Run create):**
+**Prod (live):** `data-vertical-matching-prod` is deployed; `admin-api-prod` `_MATCHING_URL` points at `https://data-vertical-matching-prod-hsa55rg7ja-uk.a.run.app` (not legacy `matching-prod`). Drain Job `data-vertical-matching-drain-prod` uses 20 tasks. DROP intake complete (~1.84M requests; matching finished).
 
-| worker_key | service_name (dev) |
-|------------|-------------------|
-| `paylocity` | `paylocity-dev` |
-| `lever` | `lever-dev` |
-| `auth0` | `auth0-dev` |
-| `google_sheets` | `google-sheets-dev` |
-| `cassandra` | `cassandra-dev` |
+**Connection / vertical workers:**
 
-Axios HQ Cloud Build yaml and worker live on the other checkout (`agent/connection-error-triage`) — do not first-create `axios-headquarters-dev` or `mailchimp-dev` from this tree.
+| worker_key | service_name (dev) | service_name (prod) |
+|------------|-------------------|---------------------|
+| `paylocity` | `paylocity-dev` | `paylocity-prod` |
+| `lever` | `lever-dev` | `lever-prod` |
+| `auth0` | `auth0-dev` | `auth0-prod` |
+| `google_sheets` | `google-sheets-dev` | `google-sheets-prod` |
+| `drop_notice_dispatcher` | `drop-notice-dispatcher-dev` | `drop-notice-dispatcher-prod` |
+| `cassandra` | `cassandra-dev` | *(not deployed — stays stub)* |
+
+Mailchimp is **retired** — do not deploy `mailchimp-prod`. Communications vertical is **Axios HQ** (`axios_headquarters`); its Cloud Build yaml and worker live on the other checkout (`agent/connection-error-triage`) — do not first-create `axios-headquarters-dev` from this tree.
 
 Rules: service name = kebab-case + `-dev`; `google_sheets` → `google-sheets-dev` (hyphen), worker_key stays underscore. Health probe path is always `GET {service_url}/readyz`.
 
 **Discover-only this wave:** do **not** expand `upsert_worker_scheduler_jobs.sh` for undeployed connection workers. Discovery must work for scheduled DROP workers, unscheduled deployed workers (`hash-index-refresh`, `intake-drop-poller`), and future `*-dev` services as soon as they appear.
+
+## Prod Cloud SQL + DROP cutover
+
+| Resource | ID |
+|----------|-----|
+| Cloud SQL | `example-gcp-project:us-east4:dpra-prod` |
+| Secret Manager | `database-url-prod` |
+| Scheduler prefix | `dpra-prod` |
+
+**admin-api-prod:** `_MATCHING_URL` → `data-vertical-matching-prod` (not legacy `matching-prod`). Cloud Run scaling: `max-instances=3`, `min-instances=1` (see [`cloudbuild/admin-api-prod.yaml`](cloudbuild/admin-api-prod.yaml)).
+
+**DROP intake (complete):** first production CA DROP pull finished (~1.84M requests ingested). Data-vertical matching is complete. Cutover ops used `POST /ops/drop/prod/confirm-run` on admin-api — that endpoint chains connector `/download` → ingestor land/promote → request dispatch → matching `/ensure-drain`. It is the orchestrated spine runbook, not an open “first pull never run” blocker. Ongoing intake uses scheduled `drop-connector-prod` `/download` (`dpra-prod-drop-connector-download`).
+
+**Prod workers (live):** `admin-api-prod`, `drop-connector-prod`, `drop-ingestor-prod`, `request-dispatcher-prod`, `data-vertical-matching-prod`, `hash-index-refresh-prod`, `data-fulfillment-dispatcher-prod`, `drop-notice-dispatcher-prod`, `reaper-prod`, and vertical workers `auth0-prod`, `google-sheets-prod`, `lever-prod`, `paylocity-prod`.
+
+**Not live in prod:** `cassandra-prod` (stub / do-not-write until explicit cutover). `mailchimp-prod` is retired. Legacy `matching-prod` may still exist in the project; do not point admin-api at it.
 
 ## Manual deploy (dev)
 

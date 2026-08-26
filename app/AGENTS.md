@@ -16,7 +16,11 @@ All Cloud Run FastAPI deployables. **Each app subdirectory has its own AGENTS.md
 [`admin_api/`](admin_api/) · [`matching/`](matching/) · [`request_dispatcher/`](request_dispatcher/) · [`drop_connector/`](drop_connector/) · [`drop_ingestor/`](drop_ingestor/) · [`hash_index_refresh/`](hash_index_refresh/) · [`data_fulfillment_dispatcher/`](data_fulfillment_dispatcher/) · [`reaper/`](reaper/) · [`sla_monitor/`](sla_monitor/) · [`cassandra/`](cassandra/) · [`paylocity/`](paylocity/) · [`lever/`](lever/) · [`auth0/`](auth0/) · [`google_sheets/`](google_sheets/)
 
 
-Do not create `app/axios_headquarters/` here. The Axios HQ worker lives on the other checkout (`agent/connection-error-triage`); this tree must not create a second copy. Catalog slug `axios_headquarters`, display Axios HQ.
+Do not create `app/axios_headquarters/` here. The Axios HQ worker lives on the other checkout (`agent/connection-error-triage`); this tree must not create a second copy. Catalog slug `axios_headquarters`, display Axios HQ. Mailchimp is retired — do not treat `app/mailchimp/` or `mailchimp-prod` as a live Communications worker.
+
+## Prod vertical workers (2026-08-25)
+
+Deployed on `example-gcp-project`: `auth0-prod`, `google-sheets-prod`, `lever-prod`, `paylocity-prod`, `drop-notice-dispatcher-prod`. Cassandra stays off prod. Axios HQ worker yaml is on the other checkout.
 
 ## Rules
 
