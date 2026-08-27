@@ -39,6 +39,7 @@ from admin_api.connections_admin import router as connections_admin_router
 from admin_api.connections_redeem import router as connections_redeem_router
 from admin_api.auth0_matching import router as auth0_matching_router
 from admin_api.owner_connectors import router as owner_connectors_router
+from admin_api.vertical_settings import router as vertical_settings_router
 from admin_api.legal_team import router as legal_team_router
 from admin_api.vertical_hash_ops import router as vertical_hash_ops_router
 from admin_api.request_correspondence import router as request_correspondence_router
@@ -355,6 +356,7 @@ app.include_router(attempt_tables_router)
 app.include_router(connections_admin_router)
 app.include_router(connections_redeem_router)
 app.include_router(owner_connectors_router)
+app.include_router(vertical_settings_router)
 app.include_router(vertical_assignments_router)
 app.include_router(vertical_owner_router)
 

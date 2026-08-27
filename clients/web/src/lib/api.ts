@@ -3499,6 +3499,10 @@ export type OwnerConnectorSystem = {
   display_status: string
   gate_code: string
   gate_allowed: boolean
+  // Surfaced by admin-api inside `metadata.wizard_completed_at`; top-level only
+  // if ConnectorSystemOut grows the field. Prefer wizardCompletedAt(metadata)
+  // from @/lib/quick-start-tour.
+  wizard_completed_at?: string | null
 }
 
 export type OwnerConnectorList = {
@@ -3537,6 +3541,30 @@ export function listOwnerConnectors(verticalId: string) {
   return fetchAdminApi<OwnerConnectorList>(
     `/owner/verticals/${encodeURIComponent(verticalId)}/connectors`,
     { timeoutMs: OPS_FAST_QUERY_TIMEOUT_MS },
+  )
+}
+
+export type OwnerVerticalSettings = {
+  notify_email: boolean
+  notify_slack: boolean
+}
+
+export function getOwnerVerticalSettings(
+  verticalId: string,
+): Promise<OwnerVerticalSettings> {
+  return fetchAdminApi<OwnerVerticalSettings>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/settings`,
+    { timeoutMs: OPS_FAST_QUERY_TIMEOUT_MS },
+  )
+}
+
+export function patchOwnerVerticalSettings(
+  verticalId: string,
+  body: Partial<OwnerVerticalSettings>,
+): Promise<OwnerVerticalSettings> {
+  return fetchAdminApi<OwnerVerticalSettings>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/settings`,
+    { method: 'PATCH', body: JSON.stringify(body) },
   )
 }
 
@@ -3637,7 +3665,11 @@ export async function uploadOwnerConnectorCsv(
   file: File,
   multiPiiDelimiter: string | null,
   columnMapping?: Record<string, string> | null,
-  formats?: { emailFormat?: string; phoneFormat?: string },
+  formats?: {
+    emailFormat?: string
+    phoneFormat?: string
+    nameFormat?: 'first_last' | 'last_first'
+  },
 ): Promise<OwnerUploadResult> {
   await refreshAdminApiUserTokenIfNeeded()
   const headers = adminApiAuthHeaders({ Accept: 'application/json' })
@@ -3654,6 +3686,9 @@ export async function uploadOwnerConnectorCsv(
   }
   if (formats?.phoneFormat) {
     form.append('phone_format', formats.phoneFormat)
+  }
+  if (formats?.nameFormat) {
+    form.append('name_format', formats.nameFormat)
   }
   const response = await fetch(
     adminApiRequestUrl(

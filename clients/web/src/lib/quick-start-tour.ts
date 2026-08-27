@@ -35,8 +35,8 @@ export type OwnerQuickStartTourStep = {
 
 const CONNECTORS_STEP: OwnerQuickStartTourStep = {
   id: 'connectors',
-  navLabel: 'Connectors',
-  title: 'Connectors',
+  navLabel: 'Data vertical settings',
+  title: 'Data vertical settings',
   body: 'Manage your vertical systems — mode, upload refresh, credential rotation, and cadence.',
   path: '/owner/connectors',
   exact: true,
@@ -86,7 +86,7 @@ const DOCS_STEP: OwnerQuickStartTourStep = {
   exact: true,
 }
 
-/** OQ18 — super_admin cheap variant: Connectors + Pipeline Connections (vertical catalog). */
+/** OQ18 — super_admin cheap variant: Data vertical settings + Pipeline Connections (vertical catalog). */
 const OPS_CONNECTIONS_STEP: OwnerQuickStartTourStep = {
   id: 'ops-connections',
   navLabel: 'Connections',
@@ -95,7 +95,7 @@ const OPS_CONNECTIONS_STEP: OwnerQuickStartTourStep = {
   path: '/ops/connections',
 }
 
-/** F9 v1 owner chain (default): Connectors → Home → Requests → Inbox → Docs. */
+/** F9 v1 owner chain (default): Data vertical settings → Home → Requests → Inbox → Docs. */
 export const OWNER_QUICK_START_TOUR_STEPS: readonly OwnerQuickStartTourStep[] = [
   CONNECTORS_STEP,
   HOME_STEP,
@@ -106,7 +106,7 @@ export const OWNER_QUICK_START_TOUR_STEPS: readonly OwnerQuickStartTourStep[] = 
 
 /**
  * Role-filtered tour chain — skips nav items not rendered for the principal (F9, OQ18).
- * `data_owner`: full owner chain; `super_admin`: Connectors + ops Connections only.
+ * `data_owner`: full owner chain; `super_admin`: Data vertical settings + ops Connections only.
  */
 export function ownerQuickStartTourStepsForRole(
   role: UserRole | undefined,

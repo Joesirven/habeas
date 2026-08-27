@@ -615,7 +615,7 @@ function DataOwnerHome() {
               <OwnerPulseChip
                 to="/owner/connectors"
                 value={connectorCount == null ? '—' : String(connectorCount)}
-                label="Connectors"
+                label="Data vertical settings"
                 tone={connectorCount != null && connectorCount > 0 ? 'danger' : undefined}
               />
             </div>
@@ -655,14 +655,14 @@ function DataOwnerHome() {
           <section className="px-4 py-2.5">
             <HomeModuleHeader
               compact
-              title="Connectors"
+              title="Data vertical settings"
               hint="Reminders for your assigned verticals only."
             />
             {reminderBanners.length === 0 ? (
               <p className="text-xs text-mute">
                 {connectorCount === 0
                   ? 'No connector reminders for your verticals.'
-                  : 'Open Connectors to finish setup or refresh.'}
+                  : 'Open Data vertical settings to finish setup or refresh.'}
               </p>
             ) : (
               <ul className="space-y-2">
@@ -696,7 +696,7 @@ function DataOwnerHome() {
           </Link>
         </Button>
         <Button asChild size="sm" variant="outline">
-          <Link to="/owner/connectors">Connectors</Link>
+          <Link to="/owner/connectors">Data vertical settings</Link>
         </Button>
       </div>
     </section>

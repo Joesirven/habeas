@@ -858,6 +858,7 @@ async def _ingest_owner_csv(
     email_format: str | None,
     phone_format: str | None,
     allow_live_mode: bool,
+    name_format: str | None = None,
     extra_metadata: dict[str, Any] | None = None,
     log_event: str = "owner_upload",
 ) -> UploadResultOut:
@@ -924,6 +925,7 @@ async def _ingest_owner_csv(
         )
         uploaded_at = datetime.now(timezone.utc).isoformat()
         row_count = int(stats.get("row_count") or 0)
+        persisted_mapping = _persistable_column_mapping(column_mapping)
         patch: dict[str, Any] = {
             "vertical_id": vertical_id,
             "gcs_uri": gcs_uri,
@@ -931,8 +933,10 @@ async def _ingest_owner_csv(
             "last_successful_upload_at": uploaded_at,
             "last_successful_refresh_at": uploaded_at,
             "upload_row_count": row_count,
-            "column_mapping": _persistable_column_mapping(column_mapping),
+            "column_mapping": persisted_mapping,
         }
+        if name_format is not None and persisted_mapping and "full_name" in persisted_mapping:
+            patch["name_format"] = name_format
         if extra_metadata:
             patch.update(extra_metadata)
         if (
@@ -1347,6 +1351,7 @@ async def upload_system_csv(
     column_mapping: str | None = Form(default=None),
     email_format: str | None = Form(default=None),
     phone_format: str | None = Form(default=None),
+    name_format: str | None = Form(default=None),
 ) -> UploadResultOut:
     """Multipart CSV upload → U5 tester → stub/GCS writer → freshness metadata."""
     _validate_vertical(vertical_id)
@@ -1364,6 +1369,15 @@ async def upload_system_csv(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid multi_pii_delimiter") from exc
 
+    from admin_api.upload_templates import NAME_FORMAT_FIRST_LAST, NAME_FORMATS
+
+    raw_name_format = name_format
+    if isinstance(raw_name_format, str) and raw_name_format.strip() == "":
+        raw_name_format = None
+    resolved_name_format = (raw_name_format or NAME_FORMAT_FIRST_LAST).strip().lower()
+    if resolved_name_format not in NAME_FORMATS:
+        raise HTTPException(status_code=422, detail="invalid name_format")
+
     content = await file.read()
     if not content:
         raise HTTPException(status_code=422, detail="empty upload")
@@ -1380,6 +1394,7 @@ async def upload_system_csv(
         column_mapping=parsed_mapping,
         email_format=email_format,
         phone_format=phone_format,
+        name_format=resolved_name_format,
         allow_live_mode=False,
         log_event="owner_upload",
     )

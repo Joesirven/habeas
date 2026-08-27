@@ -171,7 +171,7 @@ export function staticActions(
       {
         id: 'action-connectors',
         group: 'actions',
-        label: 'Go to Connectors',
+        label: 'Go to Data vertical settings',
         onSelect: finish(() => navigate({ to: '/owner/connectors' })),
       },
     )

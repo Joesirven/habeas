@@ -2410,3 +2410,181 @@ def test_sheets_oauth_does_not_log_email(
     joined = " ".join(record.getMessage() for record in caplog.records)
     assert "refresh-owner-1" not in joined
     assert "hr-owner@example.com" not in joined
+
+
+FULL_NAME_PAYLOCITY_CSV = (
+    b"Name,Email\n"
+    b"Ada Lovelace,ada@example.com\n"
+)
+
+
+FULL_NAME_MAPPED_CSV = (
+    b"Name,Work Mail\n"
+    b"Ada Lovelace,ada@example.com\n"
+)
+
+
+FULL_NAME_ONLY_CSV = (
+    b"Name\n"
+    b"Ada Lovelace\n"
+)
+
+
+def test_upload_full_name_header_auto_binds_without_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Name header auto-binds full_name via alias — upload ok without a map.
+
+    Auto-bind persists no column_mapping (same as canonical-header uploads);
+    the explicit-mapping test below covers persistence.
+    """
+    from admin_api.upload_templates import IDENTIFIER_FIELDS, suggest_column_mapping
+
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "upload"}
+    current = _connection(metadata=meta)
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        current.status = "connected"
+        current.last_test_ok = True
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    _patch_ingest_writes(monkeypatch, current)
+
+    with TestClient(app) as client:
+        upload = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/upload",
+            headers=_owner_headers(),
+            data={"multi_pii_delimiter": ""},
+            files={"file": ("names.csv", FULL_NAME_PAYLOCITY_CSV, "text/csv")},
+        )
+    assert upload.status_code == 200
+    assert upload.json()["ok"] is True
+    assert meta.get("column_mapping") is None
+    helpers["enqueue"].assert_awaited_once()
+
+    suggested = suggest_column_mapping(["Name", "Email"], IDENTIFIER_FIELDS)
+    assert suggested["full_name"] == "Name"
+    assert suggested["email"] == "Email"
+
+
+def test_upload_full_name_explicit_mapping_persists_name_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit full_name mapping + name_format=last_first persist on metadata."""
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "upload"}
+    current = _connection(metadata=meta)
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        current.status = "connected"
+        current.last_test_ok = True
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    _patch_ingest_writes(monkeypatch, current)
+
+    mapping = {"full_name": "Name", "email": "Work Mail"}
+    with TestClient(app) as client:
+        upload = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/upload",
+            headers=_owner_headers(),
+            data={
+                "multi_pii_delimiter": "",
+                "column_mapping": json.dumps(mapping),
+                "name_format": "last_first",
+            },
+            files={"file": ("mapped-names.csv", FULL_NAME_MAPPED_CSV, "text/csv")},
+        )
+    assert upload.status_code == 200
+    assert upload.json()["ok"] is True
+    assert meta["column_mapping"] == mapping
+    assert meta["name_format"] == "last_first"
+    helpers["enqueue"].assert_awaited_once()
+
+
+def test_upload_name_format_not_persisted_without_full_name_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """name_format is accepted but NOT persisted when the mapping has no full_name."""
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "upload"}
+    current = _connection(metadata=meta)
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        current.status = "connected"
+        current.last_test_ok = True
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    _patch_ingest_writes(monkeypatch, current)
+
+    with TestClient(app) as client:
+        upload = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/upload",
+            headers=_owner_headers(),
+            data={"multi_pii_delimiter": "", "name_format": "last_first"},
+            files={"file": ("paylocity.csv", PAYLOCITY_CSV, "text/csv")},
+        )
+    assert upload.status_code == 200
+    assert upload.json()["ok"] is True
+    assert "name_format" not in meta
+
+
+def test_upload_rejects_invalid_name_format(monkeypatch: pytest.MonkeyPatch) -> None:
+    current = _connection(
+        metadata={"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "upload"}
+    )
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+
+    with TestClient(app) as client:
+        upload = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/upload",
+            headers=_owner_headers(),
+            data={"multi_pii_delimiter": "", "name_format": "bogus_value"},
+            files={"file": ("paylocity.csv", PAYLOCITY_CSV, "text/csv")},
+        )
+    assert upload.status_code == 422
+    assert upload.json()["detail"] == "invalid name_format"
+    helpers["merge"].assert_not_awaited()
+    helpers["enqueue"].assert_not_awaited()
+
+
+def test_upload_full_name_only_column_is_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full name alone satisfies the usable-identifier rule (no email/phone)."""
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "upload"}
+    current = _connection(metadata=meta)
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        current.status = "connected"
+        current.last_test_ok = True
+        return current
+
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    _patch_ingest_writes(monkeypatch, current)
+
+    with TestClient(app) as client:
+        upload = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/upload",
+            headers=_owner_headers(),
+            data={"multi_pii_delimiter": ""},
+            files={"file": ("names-only.csv", FULL_NAME_ONLY_CSV, "text/csv")},
+        )
+    assert upload.status_code == 200
+    body = upload.json()
+    assert body["ok"] is True
+    assert body["detail"] == "upload_ok"
+    assert meta.get("last_successful_upload_at")
+    helpers["enqueue"].assert_awaited_once()
