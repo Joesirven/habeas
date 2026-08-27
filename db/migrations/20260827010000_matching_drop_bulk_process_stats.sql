@@ -408,11 +408,12 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION core_backfill_drop_bulk_process_stats(BIGINT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION core_backfill_drop_bulk_process_stats(BIGINT) TO app_user;
 
 DO $$
 BEGIN
     IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_user') THEN
+        GRANT EXECUTE ON FUNCTION core_backfill_drop_bulk_process_stats(BIGINT)
+            TO app_user;
         GRANT SELECT, INSERT, UPDATE ON drop_bulk_process_stats TO app_user;
         REVOKE DELETE ON drop_bulk_process_stats FROM app_user;
     END IF;
