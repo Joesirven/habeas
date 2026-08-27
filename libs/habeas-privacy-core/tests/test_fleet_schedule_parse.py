@@ -7,11 +7,14 @@ from datetime import datetime, timezone
 from habeas_privacy_core.fleet.schedule_parse import (
     cadence_label,
     cron_from_interval_minutes,
+    cron_from_month_days,
     cron_from_time_utc,
     infer_schedule_kind,
     next_daily_fire_utc,
+    next_month_days_fire_utc,
     parse_cron,
     parse_interval_days_from_body,
+    parse_month_days_from_cron,
 )
 
 
@@ -27,12 +30,17 @@ class TestInferScheduleKind:
 
     def test_interval_days_from_body(self) -> None:
         assert (
-            infer_schedule_kind("0 0 1 * *", body='{"interval_days": 15}')
+            infer_schedule_kind("0 14 * * *", body='{"interval_days": 15}')
             == "interval_days"
         )
         assert (
             infer_schedule_kind(None, body='{"interval_days": 7}') == "interval_days"
         )
+
+    def test_month_days_from_cron_and_body(self) -> None:
+        assert infer_schedule_kind("0 14 1,15 * *") == "month_days"
+        assert infer_schedule_kind("0 0 1 * *") == "month_days"
+        assert infer_schedule_kind(cron="0 14 1,15 * *", body_text=None) == "month_days"
 
     def test_unknown_cron_falls_back_to_minutes(self) -> None:
         assert infer_schedule_kind("0 0 * * 1") == "interval_minutes"
@@ -67,9 +75,19 @@ class TestParseCronAndBody:
     def test_cron_builders(self) -> None:
         assert cron_from_interval_minutes(10) == "*/10 * * * *"
         assert cron_from_time_utc("14:00") == "0 14 * * *"
+        assert cron_from_month_days("14:00", [1, 15]) == "0 14 1,15 * *"
+        assert parse_month_days_from_cron("0 14 1,15 * *") == [1, 15]
 
     def test_next_daily_fire_and_cadence(self) -> None:
         now = datetime(2026, 8, 3, 15, 0, tzinfo=timezone.utc)
         nxt = next_daily_fire_utc(time_utc="14:00", now=now)
         assert nxt.day == 4
         assert cadence_label(15) == "every_15_days"
+
+    def test_next_month_days_fire_and_cadence(self) -> None:
+        now = datetime(2026, 8, 26, 18, 0, tzinfo=timezone.utc)
+        nxt = next_month_days_fire_utc(
+            month_days=[1, 15], time_utc="14:00", now=now
+        )
+        assert nxt == datetime(2026, 9, 1, 14, 0, tzinfo=timezone.utc)
+        assert cadence_label(month_days=[1, 15]) == "on_1st_and_15th"

@@ -285,6 +285,10 @@ class FulfillProxyBody(BaseModel):
     limit: int | None = Field(default=None, ge=1, le=5000)
 
 
+class NoticeUploadProxyBody(BaseModel):
+    limit: int | None = Field(default=None, ge=1, le=5000)
+
+
 class HashIndexRefreshEnqueueBody(BaseModel):
     """Single-state enqueue — ``state`` is required (no CA default on empty POST)."""
 
@@ -2716,6 +2720,30 @@ async def drop_fulfill(
     body: FulfillProxyBody | None = None,
 ):
     url = f"{settings.data_fulfillment_url.rstrip('/')}/fulfill"
+    payload = _model_dump_nonzero(body) if body is not None else {}
+    return await proxy_post(url, json_body=payload)
+
+
+@router.post("/upload-weekly")
+async def drop_upload_weekly(
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
+    body: NoticeUploadProxyBody | None = None,
+):
+    """Proxy drop-notice-dispatcher weekly CPPA response CSV upload."""
+    url = f"{settings.drop_notice_url.rstrip('/')}/upload-weekly"
+    payload = _model_dump_nonzero(body) if body is not None else {}
+    return await proxy_post(url, json_body=payload)
+
+
+@router.post("/amend-weekly")
+async def drop_amend_weekly(
+    _principal: SuperAdminPrincipal,
+    _actor: DropMutationActor,
+    body: NoticeUploadProxyBody | None = None,
+):
+    """Proxy drop-notice-dispatcher weekly CPPA response CSV amend."""
+    url = f"{settings.drop_notice_url.rstrip('/')}/amend-weekly"
     payload = _model_dump_nonzero(body) if body is not None else {}
     return await proxy_post(url, json_body=payload)
 

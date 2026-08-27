@@ -656,7 +656,7 @@ async def test_collect_pipeline_counts_shape():
         "matching_review": 0,
         "thresholds_hours": dict(drop_pipeline.APPROACHING_SLA_THRESHOLD_HOURS),
     }
-    assert result["ca_drop_schedule"]["cadence"] == "every_15_days"
+    assert result["ca_drop_schedule"]["cadence"] == "on_1st_and_15th"
     assert result["ca_drop_schedule"]["schedule_utc"]
     assert result["ca_drop_schedule"]["next_run_at"]
     assert result["ca_drop_schedule"]["last_success_at"] is None

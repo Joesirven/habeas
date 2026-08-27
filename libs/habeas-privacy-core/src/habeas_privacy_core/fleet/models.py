@@ -59,9 +59,10 @@ class ScheduleRow(BaseModel):
     job_name: str
     label: str
     enabled: bool = True
-    schedule_kind: Literal["interval_minutes", "interval_days"]
+    schedule_kind: Literal["interval_minutes", "interval_days", "month_days"]
     interval_days: int | None = None
     interval_minutes: int | None = None
+    month_days: list[int] | None = None
     time_utc: str | None = None
     cron: str = ""
     timezone: str = "UTC"

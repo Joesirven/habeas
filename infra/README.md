@@ -428,13 +428,15 @@ Workers are HTTP + queue-claim. Cloud Scheduler OIDC-invokes worker endpoints on
 
 | Job id pattern | Target | Default |
 |----------------|--------|---------|
-| `dpra-{env}-drop-connector-download` | `POST /download` | Daily `0 14 * * *` UTC + body `interval_days=15` (eligibility gate) |
+| `dpra-{env}-drop-connector-download` | `POST /download` | 1st and 15th `0 14 1,15 * *` UTC (editable in Workers → Settings) |
 | `dpra-{env}-reaper` | `POST /reap` | every 1 min |
 | `dpra-{env}-drop-ingestor-land` | `POST /ingest/land` | every 5 min |
 | `dpra-{env}-drop-ingestor-promote` | `POST /ingest/promote` | every 5 min |
 | `dpra-{env}-request-dispatcher` | `POST /dispatch` | every 5 min |
 | `dpra-{env}-matching` | `POST /process` | every 5 min |
 | `dpra-{env}-data-fulfillment` | `POST /fulfill` | every 5 min |
+| `dpra-{env}-drop-notice-upload-weekly` | `POST /upload-weekly` on drop-notice-dispatcher | Wed 00:00 `America/Los_Angeles` |
+| `dpra-{env}-drop-notice-amend-weekly` | `POST /amend-weekly` on drop-notice-dispatcher | Wed 04:00 `America/Los_Angeles` |
 
 **Scheduler SA:** `dpra-scheduler@example-gcp-project.iam.gserviceaccount.com` — grant `roles/run.invoker` on workers (infra exception; still never grant users worker invoker). OIDC audience must be the Cloud Run **service root** URL (no path). Grant Cloud Scheduler’s agent `roles/iam.serviceAccountUser` on the scheduler SA so it can mint tokens.
 

@@ -32,6 +32,7 @@ import {
   ownerHomeQueueRows,
 } from '@/lib/connection-display'
 import { buildReminderBannerItems } from '@/lib/owner-connector-ui'
+import { formatScheduleCadence } from '@/lib/worker-fleet'
 import { cn, firstNameFromEmail } from '@/lib/utils'
 import { ownerVisibleInboxItems } from '@/routes/requests/needs-attention'
 
@@ -184,7 +185,7 @@ function OperatorDashboardHome() {
                 {new Date(pipelineQuery.data.ca_drop_schedule.next_run_at).toLocaleString()}
               </p>
               <p className="mt-1 text-xs text-ink-soft">
-                {pipelineQuery.data.ca_drop_schedule.cadence} ·{' '}
+                {formatScheduleCadence(pipelineQuery.data.ca_drop_schedule.cadence)} ·{' '}
                 {pipelineQuery.data.ca_drop_schedule.schedule_utc} UTC
               </p>
             </div>

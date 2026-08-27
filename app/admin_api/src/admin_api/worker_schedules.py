@@ -26,6 +26,14 @@ from admin_api.roles import RolePrincipal, require_roles
 from habeas_privacy_core.auth import ROLE_SUPER_ADMIN
 from habeas_privacy_core.config import CoreSettings
 from habeas_privacy_core.db.pool import get_pool
+from habeas_privacy_core.fleet.schedule_parse import (
+    cron_from_month_days,
+    infer_schedule_kind as _core_infer_schedule_kind,
+    next_month_days_fire_utc,
+    normalize_month_days,
+    parse_month_days_from_body,
+    parse_month_days_from_cron,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +58,8 @@ _LABEL_OVERRIDES: dict[str, str] = {
     "request_dispatcher": "Request dispatcher",
     "matching": "Matching",
     "data_fulfillment": "Data fulfillment",
+    "drop_notice_upload_weekly": "DROP notice upload",
+    "drop_notice_amend_weekly": "DROP notice amend",
 }
 
 
@@ -61,6 +71,7 @@ class ScheduleSettings(CoreSettings):
     cloud_scheduler_location: str = "us-east4"
     cloud_scheduler_job_prefix: str = "dpra-prod"
     drop_connector_interval_days: int = 15
+    drop_connector_month_days: str = "1,15"
     drop_connector_schedule_utc: str = "14:00"
     drop_connector_schedule_label: str = "CA DROP retrieval"
 
@@ -180,15 +191,20 @@ except ImportError:
         return "interval_minutes"
 
 
+def infer_schedule_kind(*, cron: str, body_text: str | None = None) -> str:
+    return _core_infer_schedule_kind(cron, body=body_text)
+
+
 @dataclass(frozen=True, slots=True)
 class LocalScheduleConvention:
     """Local-mode row seed — not the GCP inventory allowlist."""
 
     job_key: str
     label: str
-    schedule_kind: str  # interval_days | interval_minutes
+    schedule_kind: str  # interval_days | interval_minutes | month_days
     default_interval_days: int | None = None
     default_interval_minutes: int | None = None
+    default_month_days: tuple[int, ...] | None = None
     default_time_utc: str | None = None
     default_cron: str = ""
 
@@ -198,10 +214,10 @@ LOCAL_SCHEDULE_CONVENTIONS: tuple[LocalScheduleConvention, ...] = (
     LocalScheduleConvention(
         job_key="drop_connector_download",
         label="CA DROP download",
-        schedule_kind="interval_days",
-        default_interval_days=15,
+        schedule_kind="month_days",
+        default_month_days=(1, 15),
         default_time_utc="14:00",
-        default_cron="0 14 * * *",
+        default_cron="0 14 1,15 * *",
     ),
     LocalScheduleConvention(
         job_key="reaper",
@@ -245,6 +261,20 @@ LOCAL_SCHEDULE_CONVENTIONS: tuple[LocalScheduleConvention, ...] = (
         default_interval_minutes=5,
         default_cron="*/5 * * * *",
     ),
+    LocalScheduleConvention(
+        job_key="drop_notice_upload_weekly",
+        label="DROP notice upload",
+        schedule_kind="interval_days",
+        default_time_utc="07:00",
+        default_cron="0 0 * * 3",
+    ),
+    LocalScheduleConvention(
+        job_key="drop_notice_amend_weekly",
+        label="DROP notice amend",
+        schedule_kind="interval_days",
+        default_time_utc="11:00",
+        default_cron="0 4 * * 3",
+    ),
 )
 
 _LOCAL_BY_KEY = {spec.job_key: spec for spec in LOCAL_SCHEDULE_CONVENTIONS}
@@ -278,8 +308,16 @@ def next_daily_fire_utc(*, time_utc: str, now: datetime | None = None) -> dateti
     return candidate
 
 
-def cadence_label(interval_days: int) -> str:
-    return f"every_{interval_days}_days"
+def _default_month_days() -> list[int]:
+    return normalize_month_days(settings.drop_connector_month_days) or [1, 15]
+
+
+def cadence_label(
+    interval_days: int | None = None, *, month_days: list[int] | None = None
+) -> str:
+    from habeas_privacy_core.fleet.schedule_parse import cadence_label as _cadence
+
+    return _cadence(interval_days, month_days=month_days)
 
 
 def _decode_http_body(body_b64: Any) -> str | None:
@@ -438,17 +476,27 @@ def _make_client() -> SchedulerClient:
 def _default_schedule_row(spec: LocalScheduleConvention) -> dict[str, Any]:
     interval_days = spec.default_interval_days
     interval_minutes = spec.default_interval_minutes
+    month_days = list(spec.default_month_days) if spec.default_month_days else None
     time_utc = spec.default_time_utc
     if spec.job_key == "drop_connector_download":
-        interval_days = settings.drop_connector_interval_days
+        month_days = _default_month_days()
+        interval_days = None
         time_utc = settings.drop_connector_schedule_utc
     next_run = None
-    if spec.schedule_kind == "interval_days" and time_utc:
+    cron = spec.default_cron
+    if spec.schedule_kind == "month_days" and time_utc:
+        next_run = next_month_days_fire_utc(
+            month_days=month_days, time_utc=time_utc
+        ).isoformat()
+        cron = cron_from_month_days(time_utc, month_days)
+    elif spec.schedule_kind == "interval_days" and time_utc:
         next_run = next_daily_fire_utc(time_utc=time_utc).isoformat()
+        cron = cron_from_time_utc(time_utc)
     elif interval_minutes:
         next_run = (
             datetime.now(timezone.utc) + timedelta(minutes=interval_minutes)
         ).isoformat()
+        cron = cron_from_interval_minutes(interval_minutes)
     return {
         "job_key": spec.job_key,
         "job_name": job_name_for(spec.job_key),
@@ -457,12 +505,9 @@ def _default_schedule_row(spec: LocalScheduleConvention) -> dict[str, Any]:
         "schedule_kind": spec.schedule_kind,
         "interval_days": interval_days,
         "interval_minutes": interval_minutes,
+        "month_days": month_days,
         "time_utc": time_utc,
-        "cron": (
-            cron_from_time_utc(time_utc)
-            if spec.schedule_kind == "interval_days" and time_utc
-            else cron_from_interval_minutes(interval_minutes or 5)
-        ),
+        "cron": cron,
         "timezone": "UTC",
         "next_run_at": next_run,
         "last_success_at": None,
@@ -479,8 +524,29 @@ def _row_from_gcp_job(job: dict[str, Any], *, job_key: str) -> dict[str, Any]:
     schedule_kind = infer_schedule_kind(cron=cron, body_text=body_text)
     interval_minutes, _, time_utc = parse_cron(cron, schedule_kind=schedule_kind)
     interval_days = parse_interval_days_from_body(body_text)
+    month_days = parse_month_days_from_cron(cron) or parse_month_days_from_body(
+        body_text
+    )
 
-    if schedule_kind == "interval_days":
+    if schedule_kind == "month_days":
+        month_days = (
+            month_days
+            or (
+                list(local.default_month_days)
+                if local and local.default_month_days
+                else None
+            )
+            or _default_month_days()
+        )
+        time_utc = (
+            time_utc
+            or (local.default_time_utc if local else None)
+            or settings.drop_connector_schedule_utc
+            or "14:00"
+        )
+        interval_days = None
+        interval_minutes = None
+    elif schedule_kind == "interval_days":
         interval_days = (
             interval_days
             or (local.default_interval_days if local else None)
@@ -494,6 +560,7 @@ def _row_from_gcp_job(job: dict[str, Any], *, job_key: str) -> dict[str, Any]:
             or "14:00"
         )
         interval_minutes = None
+        month_days = None
     else:
         interval_minutes = (
             interval_minutes
@@ -501,6 +568,7 @@ def _row_from_gcp_job(job: dict[str, Any], *, job_key: str) -> dict[str, Any]:
             or 5
         )
         interval_days = None
+        month_days = None
         time_utc = None
 
     state = str(job.get("state") or "ENABLED")
@@ -508,7 +576,12 @@ def _row_from_gcp_job(job: dict[str, Any], *, job_key: str) -> dict[str, Any]:
     schedule_time = job.get("scheduleTime")
     next_run_at = schedule_time if isinstance(schedule_time, str) else None
     if next_run_at is None and time_utc:
-        next_run_at = next_daily_fire_utc(time_utc=time_utc).isoformat()
+        if schedule_kind == "month_days":
+            next_run_at = next_month_days_fire_utc(
+                month_days=month_days, time_utc=time_utc
+            ).isoformat()
+        else:
+            next_run_at = next_daily_fire_utc(time_utc=time_utc).isoformat()
 
     return {
         "job_key": job_key,
@@ -518,6 +591,7 @@ def _row_from_gcp_job(job: dict[str, Any], *, job_key: str) -> dict[str, Any]:
         "schedule_kind": schedule_kind,
         "interval_days": interval_days,
         "interval_minutes": interval_minutes,
+        "month_days": month_days,
         "time_utc": time_utc,
         "cron": cron,
         "timezone": str(job.get("timeZone") or "UTC"),
@@ -616,9 +690,12 @@ async def ca_drop_schedule_payload(
     else:
         last_iso = last_success_at
 
-    interval_days = settings.drop_connector_interval_days
+    month_days = _default_month_days()
+    interval_days: int | None = None
     time_utc = settings.drop_connector_schedule_utc
-    next_run = next_daily_fire_utc(time_utc=time_utc).isoformat()
+    next_run = next_month_days_fire_utc(
+        month_days=month_days, time_utc=time_utc
+    ).isoformat()
     label = settings.drop_connector_schedule_label
 
     if settings.cloud_scheduler_enabled:
@@ -628,9 +705,23 @@ async def ca_drop_schedule_payload(
                 (r for r in rows if r["job_key"] == "drop_connector_download"), None
             )
             if connector:
-                interval_days = int(connector.get("interval_days") or interval_days)
+                month_days = normalize_month_days(connector.get("month_days"))
+                raw_interval = connector.get("interval_days")
                 time_utc = str(connector.get("time_utc") or time_utc)
-                next_run = connector.get("next_run_at") or next_run
+                if connector.get("schedule_kind") == "interval_days":
+                    interval_days = int(
+                        raw_interval or settings.drop_connector_interval_days
+                    )
+                    month_days = []
+                    next_run = connector.get("next_run_at") or next_daily_fire_utc(
+                        time_utc=time_utc
+                    ).isoformat()
+                else:
+                    month_days = month_days or _default_month_days()
+                    interval_days = None
+                    next_run = connector.get("next_run_at") or next_month_days_fire_utc(
+                        month_days=month_days, time_utc=time_utc
+                    ).isoformat()
                 last_iso = connector.get("last_success_at") or last_iso
                 label = str(connector.get("label") or label)
         except HTTPException:
@@ -639,10 +730,11 @@ async def ca_drop_schedule_payload(
     return {
         "label": label,
         "schedule_utc": time_utc,
-        "cadence": cadence_label(interval_days),
+        "cadence": cadence_label(interval_days, month_days=month_days or None),
         "next_run_at": next_run,
         "last_success_at": last_iso,
         "interval_days": interval_days,
+        "month_days": month_days or None,
     }
 
 
@@ -651,14 +743,33 @@ class SchedulePatchBody(BaseModel):
     enabled: bool | None = None
     interval_minutes: int | None = Field(default=None, ge=1, le=59)
     interval_days: int | None = Field(default=None, ge=1, le=90)
+    month_days: list[int] | None = Field(default=None, min_length=1, max_length=16)
     time_utc: str | None = Field(default=None, max_length=5)
 
 
+def _validate_month_days(days: list[int]) -> list[int]:
+    normalized = normalize_month_days(days)
+    if not normalized or any(day < 1 or day > 31 for day in days):
+        raise HTTPException(
+            status_code=422, detail="month_days must be unique calendar days 1-31"
+        )
+    return normalized
+
+
 def _validate_patch_fields(*, schedule_kind: str, body: SchedulePatchBody) -> None:
+    if body.month_days is not None and body.interval_days is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="month_days and interval_days cannot both be set",
+        )
     if schedule_kind == "interval_minutes":
         if body.interval_days is not None:
             raise HTTPException(
                 status_code=422, detail="interval_days not valid for this job"
+            )
+        if body.month_days is not None:
+            raise HTTPException(
+                status_code=422, detail="month_days not valid for this job"
             )
         if body.time_utc is not None:
             raise HTTPException(
@@ -671,6 +782,8 @@ def _validate_patch_fields(*, schedule_kind: str, body: SchedulePatchBody) -> No
             )
         if body.time_utc is not None:
             _parse_hhmm(body.time_utc)
+        if body.month_days is not None:
+            _validate_month_days(body.month_days)
 
 
 @router.get("/schedules")
@@ -696,11 +809,41 @@ async def patch_worker_schedule(body: SchedulePatchBody, actor: SuperAdminActor)
         if body.interval_minutes is not None:
             row["interval_minutes"] = body.interval_minutes
             row["cron"] = cron_from_interval_minutes(body.interval_minutes)
-        if body.interval_days is not None:
+        if body.month_days is not None:
+            days = _validate_month_days(body.month_days)
+            row["month_days"] = days
+            row["schedule_kind"] = "month_days"
+            row["interval_days"] = None
+            if body.time_utc is not None:
+                row["time_utc"] = body.time_utc
+            row["cron"] = cron_from_month_days(str(row["time_utc"] or "14:00"), days)
+            row["next_run_at"] = next_month_days_fire_utc(
+                month_days=days, time_utc=str(row["time_utc"] or "14:00")
+            ).isoformat()
+        elif body.interval_days is not None:
             row["interval_days"] = body.interval_days
-        if body.time_utc is not None:
+            row["month_days"] = None
+            row["schedule_kind"] = "interval_days"
+            if body.time_utc is not None:
+                row["time_utc"] = body.time_utc
+            row["cron"] = cron_from_time_utc(str(row["time_utc"] or "14:00"))
+            row["next_run_at"] = next_daily_fire_utc(
+                time_utc=str(row["time_utc"] or "14:00")
+            ).isoformat()
+        elif body.time_utc is not None:
             row["time_utc"] = body.time_utc
-            row["cron"] = cron_from_time_utc(body.time_utc)
+            if row.get("schedule_kind") == "month_days":
+                row["cron"] = cron_from_month_days(
+                    body.time_utc, row.get("month_days")
+                )
+                row["next_run_at"] = next_month_days_fire_utc(
+                    month_days=row.get("month_days"), time_utc=body.time_utc
+                ).isoformat()
+            else:
+                row["cron"] = cron_from_time_utc(body.time_utc)
+                row["next_run_at"] = next_daily_fire_utc(
+                    time_utc=body.time_utc
+                ).isoformat()
         logger.info(
             "worker_schedule_patched_local",
             extra={
@@ -745,12 +888,46 @@ async def patch_worker_schedule(body: SchedulePatchBody, actor: SuperAdminActor)
         schedule_kind = infer_schedule_kind(cron=cron, body_text=body_text)
         _validate_patch_fields(schedule_kind=schedule_kind, body=body)
 
+        effective_kind = schedule_kind
+        if body.month_days is not None:
+            effective_kind = "month_days"
+        elif body.interval_days is not None:
+            effective_kind = "interval_days"
+
         update_paths: list[str] = []
 
         if schedule_kind == "interval_minutes" and body.interval_minutes is not None:
             cron = cron_from_interval_minutes(body.interval_minutes)
             update_paths.append("schedule")
-        if schedule_kind == "interval_days":
+        if effective_kind == "month_days":
+            time_utc = body.time_utc
+            if time_utc is None:
+                _, _, parsed = parse_cron(cron, schedule_kind="month_days")
+                local = _LOCAL_BY_KEY.get(body.job_key)
+                time_utc = (
+                    parsed
+                    or (local.default_time_utc if local else None)
+                    or settings.drop_connector_schedule_utc
+                    or "14:00"
+                )
+            days = (
+                _validate_month_days(body.month_days)
+                if body.month_days is not None
+                else (
+                    parse_month_days_from_cron(cron)
+                    or parse_month_days_from_body(body_text)
+                    or _default_month_days()
+                )
+            )
+            if body.month_days is not None or body.time_utc is not None:
+                cron = cron_from_month_days(time_utc, days)
+                update_paths.append("schedule")
+                payload = json.dumps(
+                    {"source": "cloud_scheduler", "month_days": days}
+                ).encode("utf-8")
+                http_target["body"] = base64.b64encode(payload).decode("ascii")
+                update_paths.append("httpTarget.body")
+        elif effective_kind == "interval_days":
             time_utc = body.time_utc
             if time_utc is None:
                 _, _, parsed = parse_cron(cron, schedule_kind="interval_days")

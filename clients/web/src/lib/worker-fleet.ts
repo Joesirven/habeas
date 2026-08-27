@@ -97,6 +97,30 @@ export function workersSupportingUnifiedRuns(
   return orderedWorkers(payload).filter(supportsUnifiedRuns)
 }
 
+export function formatScheduleCadence(cadence: string | null | undefined): string {
+  if (!cadence) return '—'
+  if (cadence.startsWith('every_') && cadence.endsWith('_days')) {
+    const n = cadence.slice('every_'.length, -'_days'.length)
+    return `Every ${n} days`
+  }
+  if (cadence.startsWith('on_')) {
+    return `${cadence.slice(3).replaceAll('_and_', ' and ').replaceAll('_', ' ')} of the month`
+  }
+  return cadence.replaceAll('_', ' ')
+}
+
+export function parseMonthDaysInput(raw: string): number[] {
+  const days = raw
+    .split(/[,;\s]+/)
+    .map((part) => Number(part.trim()))
+    .filter((value) => Number.isInteger(value) && value >= 1 && value <= 31)
+  return [...new Set(days)].sort((a, b) => a - b)
+}
+
+export function formatMonthDaysInput(days: number[] | null | undefined): string {
+  return (days ?? []).join(', ')
+}
+
 /** Allowlisted columns from catalog entry or rows payload — never invent. */
 export function resolveAttemptColumns(input: {
   columns?: string[]

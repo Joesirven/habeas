@@ -8,9 +8,34 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import UUID
 
-from habeas_privacy_core.workflow import NOTICE_REVIEW_ACTION
+from habeas_privacy_core.workflow import FULFILLMENT_KICKOFF_ACTION, NOTICE_REVIEW_ACTION
 
-# Re-export for tests that import NOTICE_REVIEW_ACTION from this module.
+OWNER_FULFILLMENT_STEP = "interim_upload"
+
+# SaaS verticals (communications, people_hr, auth0, …) complete via owner-status
+# on step=interim_upload after Legal kickoff — block CPPA upload until each kicked-off
+# non-data vertical has a successful owner completion row.
+def _saas_kickoff_fulfillment_gate(*, kickoff_param: str) -> str:
+    return f"""
+           AND NOT EXISTS (
+                 SELECT 1
+                   FROM approval_requests ar_k
+                  WHERE ar_k.request_id = r.id
+                    AND ar_k.action_type = {kickoff_param}
+                    AND ar_k.status = 'approved'
+                    AND COALESCE(ar_k.context_jsonb->>'vertical', '') <> ''
+                    AND ar_k.context_jsonb->>'vertical' <> 'data'
+                    AND NOT EXISTS (
+                          SELECT 1
+                            FROM data_fulfillment_attempts dfa_saas
+                           WHERE dfa_saas.request_id = r.id
+                             AND dfa_saas.step = 'interim_upload'
+                             AND dfa_saas.status = 'success'
+                             AND dfa_saas.audit_payload->>'vertical'
+                                 = ar_k.context_jsonb->>'vertical'
+                        )
+               )
+"""
 __all__ = [
     "NOTICE_REVIEW_ACTION",
     "ReadyRow",
@@ -112,6 +137,7 @@ async def find_ready_rows(
                           OR dfa.gcs_uri IS NOT NULL
                         )
                )
+""" + _saas_kickoff_fulfillment_gate(kickoff_param="$3") + """
            AND NOT EXISTS (
                  SELECT 1
                    FROM drop_response_submission_ids dri
@@ -123,6 +149,7 @@ async def find_ready_rows(
         """,
         limit,
         NOTICE_REVIEW_ACTION,
+        FULFILLMENT_KICKOFF_ACTION,
     )
     return [
         ReadyRow(
@@ -183,10 +210,12 @@ async def find_amend_rows(
                           OR dfa.gcs_uri IS NOT NULL
                         )
                )
+""" + _saas_kickoff_fulfillment_gate(kickoff_param="$2") + """
          ORDER BY drr.source_csv_filename, r.received_at ASC
          LIMIT $1
         """,
         limit,
+        FULFILLMENT_KICKOFF_ACTION,
     )
     return [
         ReadyRow(

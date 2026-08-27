@@ -135,11 +135,13 @@ def test_get_schedules_defaults_when_scheduler_disabled():
     connector = next(
         r for r in body["schedules"] if r["job_key"] == "drop_connector_download"
     )
-    assert connector["interval_days"] == 15
-    assert connector["schedule_kind"] == "interval_days"
+    assert connector["month_days"] == [1, 15]
+    assert connector["schedule_kind"] == "month_days"
+    assert connector["interval_days"] is None
     assert connector["scheduler_reachable"] is False
     assert connector["scheduler_state"] == "LOCAL"
     assert connector["time_utc"] == "14:00"
+    assert connector["cron"] == "0 14 1,15 * *"
 
 
 def test_get_schedules_requires_super_admin():
@@ -176,13 +178,14 @@ def test_patch_schedules_local_mode_and_clamps():
             headers=_headers(),
             json={
                 "job_key": "drop_connector_download",
-                "interval_days": 15,
+                "month_days": [1, 15],
                 "time_utc": "15:30",
             },
         )
         assert connector.status_code == 200
         assert connector.json()["schedule"]["time_utc"] == "15:30"
-        assert connector.json()["schedule"]["cron"] == "30 15 * * *"
+        assert connector.json()["schedule"]["cron"] == "30 15 1,15 * *"
+        assert connector.json()["schedule"]["schedule_kind"] == "month_days"
 
 
 def test_patch_rejects_wrong_fields_for_job_kind():
@@ -219,6 +222,7 @@ def test_cron_helpers():
         '{"interval_days":15,"source":"cloud_scheduler"}'
     ) == 15
     assert worker_schedules.cadence_label(15) == "every_15_days"
+    assert worker_schedules.cadence_label(month_days=[1, 15]) == "on_1st_and_15th"
 
 
 def test_infer_schedule_kind_and_noise_helpers():
@@ -236,6 +240,10 @@ def test_infer_schedule_kind_and_noise_helpers():
     assert (
         worker_schedules.infer_schedule_kind(cron="0 14 * * *", body_text=None)
         == "interval_days"
+    )
+    assert (
+        worker_schedules.infer_schedule_kind(cron="0 14 1,15 * *", body_text=None)
+        == "month_days"
     )
     assert worker_schedules.is_noise_scheduler_job("test-probe-job") is True
     assert worker_schedules.is_noise_scheduler_job("dpra-dev-test-probe-job") is True
@@ -256,8 +264,9 @@ def test_infer_schedule_kind_and_noise_helpers():
 @pytest.mark.asyncio
 async def test_ca_drop_schedule_payload_cadence():
     payload = await worker_schedules.ca_drop_schedule_payload(last_success_at=None)
-    assert payload["cadence"] == "every_15_days"
-    assert payload["interval_days"] == 15
+    assert payload["cadence"] == "on_1st_and_15th"
+    assert payload["month_days"] == [1, 15]
+    assert payload["interval_days"] is None
     assert payload["schedule_utc"] == "14:00"
 
 
@@ -378,7 +387,7 @@ def test_patch_discovered_job_gcp_mode(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_local_mode_uses_drop_connector_env(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(worker_schedules.settings, "drop_connector_interval_days", 21)
+    monkeypatch.setattr(worker_schedules.settings, "drop_connector_month_days", "1,15")
     monkeypatch.setattr(worker_schedules.settings, "drop_connector_schedule_utc", "09:15")
     monkeypatch.setattr(
         worker_schedules.settings, "drop_connector_schedule_label", "Custom DROP"
@@ -390,7 +399,55 @@ def test_local_mode_uses_drop_connector_env(monkeypatch: pytest.MonkeyPatch):
         for r in response.json()["schedules"]
         if r["job_key"] == "drop_connector_download"
     )
-    assert connector["interval_days"] == 21
+    assert connector["month_days"] == [1, 15]
     assert connector["time_utc"] == "09:15"
     assert connector["label"] == "Custom DROP"
-    assert connector["cron"] == "15 9 * * *"
+    assert connector["cron"] == "15 9 1,15 * *"
+
+
+def test_patch_month_days_on_live_interval_job(monkeypatch: pytest.MonkeyPatch):
+    connector_body = base64.b64encode(
+        json.dumps({"interval_days": 15, "source": "cloud_scheduler"}).encode("utf-8")
+    ).decode("ascii")
+    jobs = [
+        _job_resource(
+            "dpra-dev-drop-connector-download",
+            schedule="0 14 * * *",
+            httpTarget={
+                "uri": "https://example.run.app/download",
+                "body": connector_body,
+            },
+        ),
+    ]
+    held: list[FakeSchedulerClient] = []
+
+    def factory(**kwargs: Any) -> FakeSchedulerClient:
+        client = FakeSchedulerClient(jobs=jobs, **kwargs)
+        held.append(client)
+        return client
+
+    monkeypatch.setattr(worker_schedules.settings, "cloud_scheduler_enabled", True)
+    worker_schedules.set_scheduler_client_factory(factory)
+
+    with TestClient(app) as client:
+        ok = client.patch(
+            "/ops/workers/schedules",
+            headers=_headers(),
+            json={
+                "job_key": "drop_connector_download",
+                "month_days": [1, 15],
+                "time_utc": "14:00",
+            },
+        )
+    assert ok.status_code == 200
+    payload = ok.json()
+    assert payload["schedule"]["cron"] == "0 14 1,15 * *"
+    assert payload["schedule"]["schedule_kind"] == "month_days"
+    assert payload["schedule"]["month_days"] == [1, 15]
+    assert payload["schedule"]["interval_days"] is None
+    assert held[-1].patch_calls
+    patched = held[-1].patch_calls[-1][1]
+    assert patched["schedule"] == "0 14 1,15 * *"
+    body = json.loads(base64.b64decode(patched["httpTarget"]["body"]).decode("utf-8"))
+    assert body["month_days"] == [1, 15]
+    assert "interval_days" not in body

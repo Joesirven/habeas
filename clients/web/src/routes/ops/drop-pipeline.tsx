@@ -63,6 +63,7 @@ import {
   type OpsTimeWindow,
   type WorkerHealthProbe,
 } from '@/lib/api'
+import { formatScheduleCadence } from '@/lib/worker-fleet'
 import {
   runsSearchForBulkStage,
   runsSearchForWorker,
@@ -2581,6 +2582,7 @@ function CompactOpsMetrics({
   reviewPending,
   lastCaDrop,
   nextCaDrop,
+  caDropCadence,
   errorRateMonth,
   matchRate,
   matchPending,
@@ -2592,6 +2594,7 @@ function CompactOpsMetrics({
   reviewPending: number | null
   lastCaDrop: string | null
   nextCaDrop: string | null
+  caDropCadence: string | null
   errorRateMonth: number | null
   matchRate: number | null
   matchPending: number | null
@@ -2663,6 +2666,10 @@ function CompactOpsMetrics({
           <div className="flex justify-between gap-3">
             <dt className="text-mute">Next run</dt>
             <dd className="tabular-nums text-ink">{formatMetricTs(nextCaDrop)}</dd>
+          </div>
+          <div className="flex justify-between gap-3">
+            <dt className="text-mute">Cadence</dt>
+            <dd className="text-ink">{formatScheduleCadence(caDropCadence)}</dd>
           </div>
         </dl>
       ),
@@ -3537,6 +3544,7 @@ export function DropPipelinePageInner() {
         reviewPending={summaryData?.matching_review?.pending ?? null}
         lastCaDrop={caSchedule?.last_success_at ?? null}
         nextCaDrop={caSchedule?.next_run_at ?? null}
+        caDropCadence={caSchedule?.cadence ?? null}
         errorRateMonth={monthErrorRate}
         matchRate={matchRate}
         matchPending={matchPending}

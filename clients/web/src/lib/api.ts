@@ -815,17 +815,21 @@ export type CaDropSchedule = {
   cadence: string
   next_run_at: string
   last_success_at: string | null
-  interval_days?: number
+  interval_days?: number | null
+  month_days?: number[] | null
 }
+
+export type WorkerScheduleKind = 'interval_days' | 'interval_minutes' | 'month_days'
 
 export type WorkerSchedule = {
   job_key: string
   job_name: string
   label: string
   enabled: boolean
-  schedule_kind: 'interval_days' | 'interval_minutes'
+  schedule_kind: WorkerScheduleKind
   interval_days: number | null
   interval_minutes: number | null
+  month_days: number[] | null
   time_utc: string | null
   cron: string
   timezone: string
@@ -844,6 +848,7 @@ export type WorkerSchedulePatch = {
   enabled?: boolean
   interval_minutes?: number
   interval_days?: number
+  month_days?: number[]
   time_utc?: string
 }
 

@@ -5,7 +5,10 @@ import type { FleetWorkersPayload } from './api'
 import {
   attemptTableForWorker,
   buildJobFilterOptions,
+  formatMonthDaysInput,
+  formatScheduleCadence,
   orderedWorkerKeys,
+  parseMonthDaysInput,
   resolveAttemptColumns,
   supportsUnifiedRuns,
   workerByKey,
@@ -86,5 +89,13 @@ describe('worker-fleet helpers', () => {
     expect(src).not.toMatch(/drop_connector_download/)
     expect(src).not.toMatch(/\['matching',\s*'fulfillment'/)
     expect(src).not.toMatch(/hash_index_refresh'/)
+  })
+
+  test('formatScheduleCadence and month-day input helpers', () => {
+    expect(formatScheduleCadence('every_15_days')).toBe('Every 15 days')
+    expect(formatScheduleCadence('on_1st_and_15th')).toBe('1st and 15th of the month')
+    expect(parseMonthDaysInput('1, 15')).toEqual([1, 15])
+    expect(parseMonthDaysInput('15 1 15')).toEqual([1, 15])
+    expect(formatMonthDaysInput([1, 15])).toBe('1, 15')
   })
 })

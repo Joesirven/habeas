@@ -83,6 +83,20 @@ async def test_find_ready_rows_requires_successful_fulfillment():
 
 
 @pytest.mark.asyncio
+async def test_find_ready_rows_requires_saas_kickoff_fulfillment():
+    """Wave M: kicked-off SaaS verticals must complete owner fulfillment before upload."""
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+
+    await find_ready_rows(conn, limit=10)
+
+    sql = conn.fetch.await_args.args[0]
+    assert "fulfillment.kickoff" in conn.fetch.await_args.args
+    assert "interim_upload" in sql
+    assert "audit_payload->>'vertical'" in sql
+
+
+@pytest.mark.asyncio
 async def test_find_amend_rows_requires_successful_fulfillment():
     """U2 · KTD7: amend path must not re-open the fulfillment gate hole.
 
@@ -101,6 +115,7 @@ async def test_find_amend_rows_requires_successful_fulfillment():
     assert "dfa.status = 'success'" in sql
     assert "drr.response_status = 5" in sql
     assert "dfa.gcs_uri IS NOT NULL" in sql
+    assert "interim_upload" in sql
 
 
 @pytest.mark.asyncio

@@ -54,11 +54,16 @@ from habeas_privacy_core.fleet.models import (
 from habeas_privacy_core.fleet.schedule_parse import (
     cadence_label,
     cron_from_interval_minutes,
+    cron_from_month_days,
     cron_from_time_utc,
     infer_schedule_kind,
     next_daily_fire_utc,
+    next_month_days_fire_utc,
+    normalize_month_days,
     parse_cron,
     parse_interval_days_from_body,
+    parse_month_days_from_body,
+    parse_month_days_from_cron,
 )
 
 __all__ = [
@@ -89,6 +94,7 @@ __all__ = [
     "build_safe_select",
     "cadence_label",
     "cron_from_interval_minutes",
+    "cron_from_month_days",
     "cron_from_time_utc",
     "infer_schedule_kind",
     "is_denied_attempt_table",
@@ -98,8 +104,12 @@ __all__ = [
     "label_from_worker_key",
     "merge_fleet_inventory",
     "next_daily_fire_utc",
+    "next_month_days_fire_utc",
+    "normalize_month_days",
     "parse_cron",
     "parse_interval_days_from_body",
+    "parse_month_days_from_body",
+    "parse_month_days_from_cron",
     "parse_worker_fleet_urls",
     "project_columns",
     "project_row",

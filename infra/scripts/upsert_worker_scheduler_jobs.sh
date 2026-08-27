@@ -26,6 +26,8 @@ PREFIX="dpra-${ENV}"
 SUFFIX=""
 if [[ "${ENV}" == "dev" ]]; then
   SUFFIX="-dev"
+elif [[ "${ENV}" == "prod" ]]; then
+  SUFFIX="-prod"
 fi
 
 run() {
@@ -51,6 +53,7 @@ upsert_http_job() {
   local uri="$2"
   local cron="$3"
   local body="${4:-}"
+  local tz="${5:-UTC}"
   # Cloud Run expects OIDC audience = service root URL (no path).
   local audience
   audience="$(printf '%s\n' "${uri}" | sed -E 's#(https://[^/]+).*#\1#')"
@@ -64,7 +67,7 @@ upsert_http_job() {
     --project="${PROJECT}"
     --location="${REGION}"
     --schedule="${cron}"
-    --time-zone="UTC"
+    --time-zone="${tz}"
     --uri="${uri}"
     --http-method=POST
     --headers="Content-Type=application/json"
@@ -93,6 +96,7 @@ DROP_CONNECTOR_URL="$(service_url "drop-connector${SUFFIX}")"
 DROP_INGESTOR_URL="$(service_url "drop-ingestor${SUFFIX}")"
 REQUEST_DISPATCHER_URL="$(service_url "request-dispatcher${SUFFIX}")"
 DATA_FULFILLMENT_URL="$(service_url "data-fulfillment-dispatcher${SUFFIX}")"
+DROP_NOTICE_URL="$(service_url "drop-notice-dispatcher${SUFFIX}")"
 REAPER_URL="$(service_url "reaper${SUFFIX}")"
 
 # Jose-gated dual-run: prefer data-vertical-matching, fall back to matching while
@@ -131,10 +135,10 @@ else
   echo "MATCHING_URL=${MATCHING_URL}"
 fi
 
-CONNECTOR_BODY='{"interval_days":15,"source":"cloud_scheduler"}'
+CONNECTOR_BODY='{"source":"cloud_scheduler","month_days":[1,15]}'
 
 upsert_http_job "${PREFIX}-drop-connector-download" \
-  "${DROP_CONNECTOR_URL}/download" "0 14 * * *" "${CONNECTOR_BODY}"
+  "${DROP_CONNECTOR_URL}/download" "0 14 1,15 * *" "${CONNECTOR_BODY}"
 upsert_http_job "${PREFIX}-reaper" \
   "${REAPER_URL}/reap" "*/1 * * * *"
 upsert_http_job "${PREFIX}-drop-ingestor-land" \
@@ -148,6 +152,17 @@ upsert_http_job "${PREFIX}-matching" \
 upsert_http_job "${PREFIX}-data-fulfillment" \
   "${DATA_FULFILLMENT_URL}/fulfill" "*/5 * * * *"
 
+if [[ -n "${DROP_NOTICE_URL}" ]]; then
+  echo "DROP_NOTICE_URL=${DROP_NOTICE_URL}"
+  # Wednesday 00:00 / 04:00 America/Los_Angeles — CPPA response upload + amend.
+  upsert_http_job "${PREFIX}-drop-notice-upload-weekly" \
+    "${DROP_NOTICE_URL}/upload-weekly" "0 0 * * 3" "" "America/Los_Angeles"
+  upsert_http_job "${PREFIX}-drop-notice-amend-weekly" \
+    "${DROP_NOTICE_URL}/amend-weekly" "0 4 * * 3" "" "America/Los_Angeles"
+else
+  echo "WARN: DROP_NOTICE_URL unresolved — skipping notice upload/amend schedulers." >&2
+fi
+
 echo
 echo "Invoker (infra SA — not users). Dry-run prints commands:"
 for svc in \
@@ -156,6 +171,7 @@ for svc in \
   "request-dispatcher${SUFFIX}" \
   "${MATCHING_SERVICE}" \
   "data-fulfillment-dispatcher${SUFFIX}" \
+  "drop-notice-dispatcher${SUFFIX}" \
   "reaper${SUFFIX}"
 do
   if [[ -z "${svc}" ]]; then
