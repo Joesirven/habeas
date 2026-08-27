@@ -2888,6 +2888,32 @@ async def test_list_bulk_processes_skips_gcs_uri_trim():
     assert "LIMIT" in sql
 
 
+def test_matching_stage_from_rollup_maps_cards() -> None:
+    """Rollup counters become stageRunIndicators queued / in-flight / abandoned."""
+    stage = drop_pipeline._matching_stage_from_rollup(
+        {
+            "request_rows": 100,
+            "matching_pending": 10,
+            "matching_claimed": 2,
+            "matching_in_flight": 3,
+            "matching_success": 80,
+            "matching_failed": 4,
+            "matching_abandoned": 1,
+            "matching_none": 0,
+        }
+    )
+    assert stage["total"] == 100
+    assert stage["open"] == 15
+    assert stage["success"] == 80
+    assert stage["failed"] == 5
+    by_status = {row["status"]: row["count"] for row in stage["by_list_type"]}
+    assert by_status["pending"] == 10
+    assert by_status["claimed"] == 2
+    assert by_status["in_flight"] == 3
+    assert by_status["abandoned"] == 1
+    assert "email" not in json.dumps(stage).lower()
+
+
 def test_ops_fast_statement_timeout_skips_mocks():
     conn = MagicMock()
     assert drop_pipeline._supports_local_statement_timeout(conn) is False
@@ -2950,7 +2976,7 @@ async def test_collect_bulk_process_progress_shape():
 
 @pytest.mark.asyncio
 async def test_collect_bulk_process_progress_lite_skips_spine() -> None:
-    """detail=lite uses connector + ingest ledgers — never batch_raw CTE."""
+    """detail=lite uses connector + ingest + rollup — never batch_raw CTE."""
     attempted = datetime(2026, 8, 25, 18, 0, tzinfo=timezone.utc)
     issued: list[str] = []
 
@@ -2965,6 +2991,19 @@ async def test_collect_bulk_process_progress_lite_skips_spine() -> None:
                 attempted_at=attempted,
                 completed_at=attempted,
                 gcs_uri="gs://bucket/aug25.zip",
+            )
+        if "FROM drop_bulk_process_stats" in sql:
+            return _Row(
+                request_rows=1_840_000,
+                matching_pending=100,
+                matching_claimed=20,
+                matching_in_flight=30,
+                matching_success=1_830_000,
+                matching_failed=9_800,
+                matching_abandoned=50,
+                matching_none=0,
+                matching_started_at=attempted,
+                matching_completed_at=None,
             )
         return None
 
@@ -2990,10 +3029,20 @@ async def test_collect_bulk_process_progress_lite_skips_spine() -> None:
     assert detail["process_id"] == 25
     assert detail["stages"]["download"]["success"] == 1
     assert detail["stages"]["land"]["success"] == 1
-    assert detail["stages"]["matching"]["total"] == 0
-    assert detail["request_rows"] == 0
+    matching = detail["stages"]["matching"]
+    assert matching["success"] == 1_830_000
+    assert matching["open"] == 150
+    assert matching["failed"] == 9_850
+    assert matching["total"] == 1_840_000
+    assert detail["request_rows"] == 1_840_000
+    by_status = {row["status"]: row["count"] for row in matching["by_list_type"]}
+    assert by_status["pending"] == 100
+    assert by_status["claimed"] == 20
+    assert by_status["in_flight"] == 30
+    assert by_status["abandoned"] == 50
     assert all("drop_raw_requests" not in sql for sql in issued)
     assert all("batch_raw" not in sql for sql in issued)
+    assert any("drop_bulk_process_stats" in sql for sql in issued)
 
 
 @pytest.mark.asyncio
@@ -3043,6 +3092,19 @@ async def test_collect_process_run_groups_lite_skips_matching_spine(
                 gcs_uri="gs://bucket/aug25.zip",
                 attempt_number=1,
             )
+        if "FROM drop_bulk_process_stats" in sql:
+            return _Row(
+                request_rows=1_840_000,
+                matching_pending=0,
+                matching_claimed=0,
+                matching_in_flight=0,
+                matching_success=1_840_000,
+                matching_failed=0,
+                matching_abandoned=0,
+                matching_none=0,
+                matching_started_at=attempted,
+                matching_completed_at=attempted,
+            )
         return None
 
     monkeypatch.setattr(drop_pipeline, "list_bulk_processes", fake_list)
@@ -3059,9 +3121,16 @@ async def test_collect_process_run_groups_lite_skips_matching_spine(
     )
     assert len(groups) == 1
     assert groups[0]["process_id"] == 25
-    assert groups[0]["runs"] == []
+    assert len(groups[0]["runs"]) == 1
+    synthetic = groups[0]["runs"][0]
+    assert synthetic["job"] == "matching"
+    assert synthetic["status"] == "success"
+    assert synthetic["started_at"] == attempted.isoformat()
+    assert synthetic["completed_at"] == attempted.isoformat()
+    assert synthetic["request_id"] is None
     assert all("matching_attempts" not in sql for sql in issued)
     assert all("drop_raw_requests" not in sql for sql in issued)
+    assert any("drop_bulk_process_stats" in sql for sql in issued)
 
 
 @pytest.mark.asyncio
@@ -4882,6 +4951,72 @@ def test_process_detail_defaults_to_lite_not_spine(
     assert progress_calls == ["lite", "lite"]
     assert defaulted.json()["detail"] == "lite"
     assert defaulted.json()["process_id"] == 25
+
+
+def test_backfill_matching_stats_calls_sql_function(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST backfill is a mutation — function call + audit, no PII arguments."""
+    from admin_api import main as admin_main
+
+    executed: list[str] = []
+
+    class Conn:
+        async def fetchrow(self, sql: str, *args: Any) -> _Row | None:
+            executed.append(sql)
+            if "drop_connector_attempts" in sql:
+                return _Row(id=25)
+            return None
+
+        async def fetchval(self, sql: str, *args: Any) -> dict[str, Any]:
+            executed.append(sql)
+            assert "core_backfill_drop_bulk_process_stats" in sql
+            assert args == (25,)
+            return {
+                "download_id": 25,
+                "membership_updated": 10,
+                "request_rows": 10,
+                "matching_success": 10,
+            }
+
+    class _Acquire:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class FakePool:
+        def acquire(self):
+            return _Acquire()
+
+    async def fake_audit(**kwargs: Any) -> int:
+        assert kwargs["command"] == "drop.backfill_matching_stats"
+        assert kwargs["arguments"] == {"process_id": 25}
+        return 1
+
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
+    monkeypatch.setattr(drop_pipeline, "_require_database", lambda: None)
+    monkeypatch.setattr(drop_pipeline, "get_pool", lambda: FakePool())
+    monkeypatch.setattr(drop_pipeline, "write_audit", fake_audit)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/ops/drop/processes/25/backfill-matching-stats",
+            headers=signed_headers("ops@example.com"),
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["download_id"] == 25
+    assert body["request_rows"] == 10
+    assert any("core_backfill_drop_bulk_process_stats" in sql for sql in executed)
+    assert all("email" not in sql.lower() for sql in executed)
 
 
 def test_process_runs_defaults_to_lite_not_matching_spine(

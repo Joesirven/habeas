@@ -52,6 +52,7 @@ async def complete_attempt_success(
         )
         result_id_int = int(result_id)
         payload = {**(audit_payload or {}), "result_id": result_id_int}
+        # matching_attempts_bulk_stats moves the latest-attempt bucket.
         await conn.execute(
             f"""
             UPDATE {MATCHING_ATTEMPTS_TABLE}

@@ -127,7 +127,11 @@ async def promote_manual_request(
 
 
 async def enqueue_matching(conn: asyncpg.Connection, request_id: str) -> None:
-    """Enqueue the first matching attempt for a request."""
+    """Enqueue the first matching attempt for a request.
+
+    Matching rollup pending++ is applied by ``matching_attempts_bulk_stats``
+    when the request has ``bulk_process_download_id`` (latest attempt only).
+    """
     await conn.execute(
         f"""
         INSERT INTO {MATCHING_ATTEMPTS_TABLE} (request_id, step, attempt_number, status)

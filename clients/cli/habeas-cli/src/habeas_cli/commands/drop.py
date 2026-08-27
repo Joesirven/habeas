@@ -217,6 +217,25 @@ def match(
     _post_spine("/ops/drop/match", execute=execute, human=human)
 
 
+@app.command("backfill-matching-stats")
+def backfill_matching_stats(
+    process_id: int = typer.Option(..., "--process-id", min=1),
+    execute: bool = typer.Option(False, "--execute"),
+    human: bool = typer.Option(False, "--human"),
+):
+    """One-shot matching rollup backfill for one download process_id (minutes)."""
+    path = f"/ops/drop/processes/{process_id}/backfill-matching-stats"
+    if not execute:
+        emit({"dry_run": True, "would_post": path}, human=human)
+        return
+    try:
+        payload = admin_api_request("POST", path, timeout=3300.0)
+    except AdminApiError as exc:
+        emit({"status": "error", "detail": str(exc)}, human=human)
+        raise typer.Exit(code=1) from exc
+    emit(payload, human=human)
+
+
 @app.command("fulfill")
 def fulfill(
     request_id: str | None = typer.Option(None, "--request-id"),

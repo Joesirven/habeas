@@ -151,6 +151,21 @@ def test_cassandra_attempts_migration_exists():
     assert "migrate:down" in content
 
 
+def test_drop_bulk_process_stats_migration_exists():
+    migration = (
+        migrations_dir() / "20260827010000_matching_drop_bulk_process_stats.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+    assert "CREATE TABLE drop_bulk_process_stats" in content
+    assert "bulk_process_download_id" in content
+    assert "core_backfill_drop_bulk_process_stats" in content
+    assert "matching_attempts_bulk_stats" in content
+    assert "PII" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+
+
 def test_request_closures_and_due_overrides_migration_exists():
     migration = (
         migrations_dir() / "20260730140001_core_request_closures_and_due_overrides.sql"

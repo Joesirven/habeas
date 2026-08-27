@@ -6,14 +6,15 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
-from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 import httpx
 from habeas_privacy_core.audit.redaction import redact_error_text
+from habeas_privacy_core.audit.writer import write_audit
 from habeas_privacy_core.auth import (
     ROLE_ADMIN,
     ROLE_DATA_OWNER,
@@ -1534,6 +1535,76 @@ def _empty_stage_counts() -> dict[str, int]:
     return {"total": 0, "open": 0, "success": 0, "failed": 0, "other": 0}
 
 
+def _record_get(row: Any, key: str, default: Any = None) -> Any:
+    """Read a column from asyncpg Record or dict mock — never raise on miss."""
+    if row is None:
+        return default
+    try:
+        value = row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+    return default if value is None else value
+
+
+def _matching_stage_from_rollup(row: Any) -> dict[str, Any]:
+    """Map drop_bulk_process_stats counters to stages.matching for expand cards.
+
+    ``by_list_type`` is a status breakdown (list_type unused) so
+    ``stageRunIndicators`` can split queued / in flight / abandoned.
+    Counts only — no PII.
+    """
+    pending = int(_record_get(row, "matching_pending", 0) or 0)
+    claimed = int(_record_get(row, "matching_claimed", 0) or 0)
+    in_flight = int(_record_get(row, "matching_in_flight", 0) or 0)
+    success = int(_record_get(row, "matching_success", 0) or 0)
+    failed = int(_record_get(row, "matching_failed", 0) or 0)
+    abandoned = int(_record_get(row, "matching_abandoned", 0) or 0)
+    stored_none = _record_get(row, "matching_none")
+    request_rows = int(_record_get(row, "request_rows", 0) or 0)
+    bucketed = pending + claimed + in_flight + success + failed + abandoned
+    if stored_none is None:
+        none = max(0, request_rows - bucketed)
+    else:
+        none = int(stored_none or 0)
+    open_n = pending + claimed + in_flight + none
+    failed_n = failed + abandoned
+    total = open_n + success + failed_n
+    if total == 0 and request_rows > 0:
+        total = request_rows
+        open_n = request_rows
+        none = request_rows
+    by_list = [
+        {"list_type": None, "status": "pending", "count": pending + none},
+        {"list_type": None, "status": "claimed", "count": claimed},
+        {"list_type": None, "status": "in_flight", "count": in_flight},
+        {"list_type": None, "status": "success", "count": success},
+        {"list_type": None, "status": "abandoned", "count": abandoned},
+        {"list_type": None, "status": "submit_error", "count": failed},
+    ]
+    return {
+        "total": total,
+        "open": open_n,
+        "success": success,
+        "failed": failed_n,
+        "other": 0,
+        "by_list_type": [item for item in by_list if int(item["count"]) > 0],
+    }
+
+
+_BULK_STATS_SELECT = """
+        SELECT request_rows, matching_pending, matching_claimed, matching_in_flight,
+               matching_success, matching_failed, matching_abandoned, matching_none,
+               matching_started_at, matching_completed_at
+          FROM drop_bulk_process_stats
+         WHERE download_id = $1
+"""
+
+
+async def _fetch_bulk_process_stats(conn: Any, process_id: int) -> Any:
+    """O(1) rollup row — never walks drop_raw_requests."""
+    return await conn.fetchrow(_BULK_STATS_SELECT, process_id)
+
+
 def _accumulate_status(counts: dict[str, int], status: str, n: int) -> None:
     bucket = _status_bucket(status)
     counts[bucket] = int(counts.get(bucket, 0)) + n
@@ -1816,8 +1887,9 @@ async def collect_process_run_groups(
 ) -> list[dict[str, Any]]:
     """Attempt history for pipeline stages, grouped by bulk process label.
 
-    ``detail=lite`` (default) uses connector + ingest ledgers only. The matching
-    raw-spine JOIN stays on ``detail=full`` — it scans ~1.8M drop_raw_requests.
+    ``detail=lite`` (default) uses connector + ingest ledgers plus the
+    per-download matching rollup timestamps (synthetic matching run for
+    Stage dur). The matching raw-spine JOIN stays on ``detail=full``.
     """
     allowed = {"download", "land", "promote", "matching"}
     stage_set = [s for s in stages if s in allowed]
@@ -1891,7 +1963,34 @@ async def collect_process_run_groups(
                     )
                 )
 
-        if gcs_uri and "matching" in stage_set and not lite:
+        if "matching" in stage_set and lite:
+            stats = await _fetch_bulk_process_stats(conn, pid)
+            started_at = _record_get(stats, "matching_started_at")
+            completed_at = _record_get(stats, "matching_completed_at")
+            if started_at is not None:
+                pending = int(_record_get(stats, "matching_pending", 0) or 0)
+                claimed = int(_record_get(stats, "matching_claimed", 0) or 0)
+                in_flight = int(_record_get(stats, "matching_in_flight", 0) or 0)
+                none = int(_record_get(stats, "matching_none", 0) or 0)
+                open_n = pending + claimed + in_flight + none
+                if completed_at is not None and open_n == 0:
+                    match_status = "success"
+                elif claimed > 0 or in_flight > 0:
+                    match_status = "in_flight"
+                else:
+                    match_status = "pending"
+                runs.append(
+                    _run_row(
+                        job="matching",
+                        attempt_id=pid,
+                        step="matching",
+                        status=match_status,
+                        started_at=started_at,
+                        completed_at=completed_at,
+                        attempt_number=1,
+                    )
+                )
+        elif gcs_uri and "matching" in stage_set and not lite:
             match_rows = await conn.fetch(
                 """
                 SELECT ma.id, ma.step, ma.status, ma.attempted_at, ma.completed_at,
@@ -2249,8 +2348,8 @@ async def collect_bulk_process_progress(
 ) -> dict[str, Any] | None:
     """Stage progress for one DROP download-keyed bulk process (counts only).
 
-    ``detail=lite`` uses connector + ingest ledgers only; the spine CTE runs on
-    ``detail=full`` (detail endpoint).
+    ``detail=lite`` uses connector + ingest ledgers plus ``drop_bulk_process_stats``
+    for exact matching cards. The spine CTE stays on ``detail=full``.
     """
     lite = detail == "lite"
     head = await conn.fetchrow(
@@ -2288,6 +2387,11 @@ async def collect_bulk_process_progress(
     request_rows = 0
     land_csv_count = 0
     request_stats = None
+    if lite:
+        stats = await _fetch_bulk_process_stats(conn, process_id)
+        if stats is not None:
+            matching = _matching_stage_from_rollup(stats)
+            request_rows = int(_record_get(stats, "request_rows", 0) or 0)
     if not lite and gcs_uri:
         # drop_raw_requests has source_csv_filename (ZIP-internal Email/
         # Phone/NDZ names) and no download id. Joining that name to *any*
@@ -2747,6 +2851,65 @@ async def drop_bulk_process_detail(
     if payload is None:
         raise HTTPException(status_code=404, detail="process not found")
     return {**payload, "detail": detail}
+
+
+@router.post("/processes/{process_id}/backfill-matching-stats")
+async def drop_backfill_matching_stats(
+    process_id: int,
+    _principal: SuperAdminPrincipal,
+    actor: DropMutationActor,
+):
+    """One-shot membership walk + matching rollup for one download id.
+
+    Walks ``drop_raw_requests`` once to set ``bulk_process_download_id`` and
+    rewrite ``drop_bulk_process_stats``. May take minutes on the Aug 25 batch.
+    Expand / lite progress must not call this. Counts only — no PII.
+    """
+    _require_database()
+    if process_id < 1:
+        raise HTTPException(status_code=400, detail="invalid process_id")
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        head = await conn.fetchrow(
+            """
+            SELECT id
+              FROM drop_connector_attempts
+             WHERE id = $1 AND step = 'download'
+            """,
+            process_id,
+        )
+        if head is None:
+            raise HTTPException(status_code=404, detail="process not found")
+        try:
+            payload = await conn.fetchval(
+                "SELECT core_backfill_drop_bulk_process_stats($1)",
+                process_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "drop_backfill_matching_stats_failed",
+                extra={
+                    "event": "drop_backfill_matching_stats_failed",
+                    "process_id": process_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            raise HTTPException(
+                status_code=500, detail="backfill failed"
+            ) from exc
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        result = payload if isinstance(payload, dict) else {"download_id": process_id}
+        await write_audit(
+            actor=actor,
+            interface="admin-api",
+            command="drop.backfill_matching_stats",
+            arguments={"process_id": process_id},
+            result_status=200,
+            result_summary="matching rollup backfill",
+            conn=conn,
+        )
+    return result
 
 
 @router.get("/workers/trends")

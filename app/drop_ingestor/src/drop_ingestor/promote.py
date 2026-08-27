@@ -129,12 +129,44 @@ async def fetch_unpromoted_raw_rows(
 
 
 _THIN_INSERT_SQL = """
-        INSERT INTO requests (intake_source, raw_record_id, requestor_state, request_type)
-        SELECT 'drop', x.raw_record_id, x.requestor_state, 'delete'
+        INSERT INTO requests (
+            intake_source, raw_record_id, requestor_state, request_type,
+            bulk_process_download_id
+        )
+        SELECT 'drop', x.raw_record_id, x.requestor_state, 'delete', $3
           FROM UNNEST($1::bigint[], $2::varchar[])
             AS x(raw_record_id, requestor_state)
 """
 _THIN_INSERT_RETURNING_SQL = _THIN_INSERT_SQL + "        RETURNING id, raw_record_id\n"
+
+
+async def resolve_bulk_process_download_id(
+    conn: DbConnection, *, gcs_uri: str | None
+) -> int | None:
+    """Lookup download attempt id from ZIP ``gcs_uri`` (once per promote)."""
+    if not gcs_uri or not str(gcs_uri).strip():
+        return None
+    try:
+        value = await conn.fetchval(
+            """
+            SELECT id
+              FROM drop_connector_attempts
+             WHERE step = 'download'
+               AND gcs_uri = $1
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            str(gcs_uri).strip(),
+        )
+    except Exception:
+        return None
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 async def insert_thin_drop_requests(
@@ -143,18 +175,28 @@ async def insert_thin_drop_requests(
     raw_record_ids: list[int],
     requestor_states: list[str],
     return_ids: bool = True,
+    bulk_process_download_id: int | None = None,
 ) -> list[str]:
-    """Set-based thin-spine insert. Always DROP delete — no matching enqueue."""
+    """Set-based thin-spine insert. Always DROP delete — no matching enqueue.
+
+    ``bulk_process_download_id`` is the immutable download attempt id, set only
+    at INSERT. Request-row counters increment via ``requests_bulk_stats_insert``.
+    """
     _reject_drop_access(IntakeSource.DROP, "delete")
     if not raw_record_ids:
         return []
     if len(raw_record_ids) != len(requestor_states):
         raise ValueError("raw_record_ids and requestor_states length mismatch")
     states = [normalize_state_acronym(state) for state in requestor_states]
+    download_id = (
+        int(bulk_process_download_id) if bulk_process_download_id is not None else None
+    )
     if not return_ids:
-        await conn.execute(_THIN_INSERT_SQL, raw_record_ids, states)
+        await conn.execute(_THIN_INSERT_SQL, raw_record_ids, states, download_id)
         return []
-    inserted = await conn.fetch(_THIN_INSERT_RETURNING_SQL, raw_record_ids, states)
+    inserted = await conn.fetch(
+        _THIN_INSERT_RETURNING_SQL, raw_record_ids, states, download_id
+    )
     return [str(row["id"]) for row in inserted]
 
 
@@ -427,6 +469,7 @@ async def run_promote(
     caller_scoped = filter_filename is not None or filter_list_type is not None
     batch_size = max(1, limit)
     drain_cap = max(1, max_rows)
+    gcs_uri: str | None = None
 
     if attempt_id is None and not caller_scoped:
         claim = await claim_next(
@@ -442,6 +485,29 @@ async def run_promote(
             attempt_id = int(claim["id"])
             filter_filename = claim.get("source_csv_filename") or filter_filename
             filter_list_type = claim.get("list_type") or filter_list_type
+            raw_uri = claim.get("gcs_uri")
+            if isinstance(raw_uri, str) and raw_uri.strip():
+                gcs_uri = raw_uri.strip()
+
+    if promote_attempt_id is not None and gcs_uri is None:
+        try:
+            bound = await conn.fetchrow(
+                f"""
+                SELECT gcs_uri
+                  FROM {DROP_INGEST_ATTEMPTS_TABLE}
+                 WHERE id = $1 AND step = $2
+                """,
+                promote_attempt_id,
+                PROMOTE_STEP,
+            )
+        except Exception:
+            bound = None
+        if bound is not None:
+            raw_uri = bound["gcs_uri"] if "gcs_uri" in bound else None
+            if isinstance(raw_uri, str) and raw_uri.strip():
+                gcs_uri = raw_uri.strip()
+
+    download_id = await resolve_bulk_process_download_id(conn, gcs_uri=gcs_uri)
 
     # Claimed per-CSV filters drain first; then this call unscope-continues.
     scoped_from_claim = (not caller_scoped) and (
@@ -496,12 +562,14 @@ async def run_promote(
             raw_ids, states, default_state_count = _prepare_promote_batch(raw_rows)
             default_state_total += default_state_count
             need_sample = len(result.request_ids) < PROMOTE_ID_SAMPLE_CAP
-            request_ids = await insert_thin_drop_requests(
-                conn,
-                raw_record_ids=raw_ids,
-                requestor_states=states,
-                return_ids=need_sample,
-            )
+            insert_kwargs: dict[str, Any] = {
+                "raw_record_ids": raw_ids,
+                "requestor_states": states,
+                "return_ids": need_sample,
+            }
+            if download_id is not None:
+                insert_kwargs["bulk_process_download_id"] = download_id
+            request_ids = await insert_thin_drop_requests(conn, **insert_kwargs)
             result.promoted += len(raw_ids)
             if need_sample:
                 _append_id_sample(result, request_ids, raw_ids)

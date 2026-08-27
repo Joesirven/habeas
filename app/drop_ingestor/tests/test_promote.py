@@ -438,6 +438,76 @@ async def test_insert_thin_drop_requests_is_set_based_delete_only():
     assert "matching_attempts" not in sql
     assert conn.fetch.await_args.args[1] == [1, 2]
     assert conn.fetch.await_args.args[2] == ["CA", "NY"]
+    assert conn.fetch.await_args.args[3] is None
+    assert "bulk_process_download_id" in sql
+
+
+@pytest.mark.asyncio
+async def test_insert_thin_drop_requests_sets_download_id():
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(
+        return_value=[{"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "raw_record_id": 1}]
+    )
+
+    ids = await insert_thin_drop_requests(
+        conn,
+        raw_record_ids=[1],
+        requestor_states=["CA"],
+        bulk_process_download_id=25,
+    )
+
+    assert ids == ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]
+    assert conn.fetch.await_args.args[3] == 25
+
+
+@pytest.mark.asyncio
+async def test_promote_resolves_download_id_from_claim_gcs_uri(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("DROP_ALLOW_DEFAULT_REQUESTOR_STATE", "CA")
+    seen: list[int | None] = []
+
+    async def fake_insert(
+        conn: Any,
+        *,
+        raw_record_ids: list[int],
+        requestor_states: list[str],
+        return_ids: bool = True,
+        bulk_process_download_id: int | None = None,
+    ) -> list[str]:
+        seen.append(bulk_process_download_id)
+        if not return_ids:
+            return []
+        return ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]
+
+    conn = AsyncMock()
+    conn.fetch = _unpromoted_then_idle([_raw(1, payload={"state": "CA"})])
+    conn.fetchval = AsyncMock(return_value=25)
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    claim = {
+        "id": 99,
+        "source_csv_filename": "20260716_1_EMAIL.csv",
+        "list_type": "Email",
+        "gcs_uri": "gs://bucket/aug25.zip",
+    }
+    with patch("drop_ingestor.promote.insert_thin_drop_requests", side_effect=fake_insert):
+        with patch("drop_ingestor.promote.claim_next", AsyncMock(return_value=claim)):
+            with patch("drop_ingestor.promote.mark_attempt_in_flight", AsyncMock()):
+                with patch("drop_ingestor.promote.mark_attempt_success", AsyncMock()):
+                    with patch(
+                        "drop_ingestor.promote.close_leftover_pending_promote_attempts",
+                        AsyncMock(return_value=0),
+                    ):
+                        result = await run_promote(
+                            conn=conn, worker_id="drop-ingestor-test"
+                        )
+
+    assert result.promoted == 1
+    assert seen == [25]
+    lookup_sql = str(conn.fetchval.await_args.args[0])
+    assert "drop_connector_attempts" in lookup_sql
+    assert conn.fetchval.await_args.args[1] == "gs://bucket/aug25.zip"
 
 
 @pytest.mark.asyncio

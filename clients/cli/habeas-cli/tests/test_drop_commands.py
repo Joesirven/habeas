@@ -176,6 +176,33 @@ def test_drop_dispatch_execute_drain_all():
     assert mock_req.call_args.kwargs["json_body"] == {"limit": 100, "drain_all": True}
 
 
+def test_drop_backfill_matching_stats_dry_run():
+    result = runner.invoke(
+        app, ["drop", "backfill-matching-stats", "--process-id", "25"]
+    )
+    assert result.exit_code == 0
+    assert "dry_run" in result.stdout
+    assert "/ops/drop/processes/25/backfill-matching-stats" in result.stdout
+
+
+def test_drop_backfill_matching_stats_execute():
+    with patch(
+        "habeas_cli.commands.drop.admin_api_request",
+        return_value={"download_id": 25, "request_rows": 10},
+    ) as mock_req:
+        result = runner.invoke(
+            app,
+            ["drop", "backfill-matching-stats", "--process-id", "25", "--execute"],
+        )
+    assert result.exit_code == 0
+    mock_req.assert_called_once()
+    assert mock_req.call_args.args[0] == "POST"
+    assert mock_req.call_args.args[1] == (
+        "/ops/drop/processes/25/backfill-matching-stats"
+    )
+    assert mock_req.call_args.kwargs["timeout"] == 3300.0
+
+
 def test_drop_fulfill_dry_run():
     result = runner.invoke(app, ["drop", "fulfill", "--request-id", "req-1"])
     assert result.exit_code == 0
