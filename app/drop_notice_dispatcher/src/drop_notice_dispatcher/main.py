@@ -77,7 +77,7 @@ async def readyz():
 async def upload_weekly(body: UploadWeeklyRequest | None = None):
     """Batch Id,Status CSVs by source_csv_filename; POST drop_connector /upload.
 
-  Sandbox only: CPPA host guard lives in drop_connector (DROP_ENV=sandbox).
+  CPPA host guard lives in drop_connector (DROP_ENV=sandbox|production).
     """
     if not settings.database_url:
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured")

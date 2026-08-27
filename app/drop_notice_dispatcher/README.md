@@ -2,7 +2,7 @@
 
 Weekly DROP notice batch uploader (U10). Groups notice-approved DROP requests by
 `source_csv_filename`, builds Id,Status CSVs, and POSTs to `drop_connector` `/upload`.
-Does **not** call CPPA directly — sandbox guard lives in the connector.
+Does **not** call CPPA directly — host guard lives in the connector (`DROP_ENV=sandbox` on dev, `production` on `drop-connector-prod`).
 
 ```bash
 uv run --package drop-notice-dispatcher uvicorn drop_notice_dispatcher.main:app \
