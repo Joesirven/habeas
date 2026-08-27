@@ -6,6 +6,11 @@ from habeas_privacy_core.db.hash_index_refresh import (
     enqueue_hash_index_refresh_all_states,
     record_hash_index_refresh_run,
 )
+from habeas_privacy_core.db.match_stats import (
+    fetch_drop_match_totals,
+    fetch_latest_match_page,
+    fetch_parameter_stats,
+)
 from habeas_privacy_core.db.migrations import migration_status, migrations_dir, run_migrations
 from habeas_privacy_core.db.pool import (
     close_pool,
@@ -34,6 +39,9 @@ __all__ = [
     "enqueue_hash_index_refresh_all_states",
     "enqueue_matching",
     "enqueue_rematch_for_refresh",
+    "fetch_drop_match_totals",
+    "fetch_latest_match_page",
+    "fetch_parameter_stats",
     "get_pool",
     "get_request",
     "insert_request",

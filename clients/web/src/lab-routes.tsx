@@ -20,6 +20,10 @@ import {
   OwnerMapAlternativesPage,
   parseOwnerMapLabSearch,
 } from '@/routes/dev/owner-map-alternatives'
+import {
+  MatchQualityLabPage,
+  parseMatchQualityLabSearch,
+} from '@/routes/dev/match-quality'
 
 const MatchingResultsLabPage = lazy(() =>
   import('@/routes/requests/matching-results-lab').then((m) => ({
@@ -103,6 +107,17 @@ export function createLabRoutes(
     },
   })
 
+  const matchQualityLabRoute = createRoute({
+    getParentRoute: () => parent,
+    path: '/dev/match-quality',
+    validateSearch: (search: Record<string, unknown>) =>
+      parseMatchQualityLabSearch(search),
+    component: function MatchQualityLabRoute() {
+      const search = matchQualityLabRoute.useSearch()
+      return <MatchQualityLabPage search={search} />
+    },
+  })
+
   return [
     matchingResultsLabRoute,
     devLabsIndexRoute,
@@ -113,5 +128,6 @@ export function createLabRoutes(
     tokenResourceServerLabRoute,
     ownerMapFallbackLabRoute,
     ownerMapAlternativesLabRoute,
+    matchQualityLabRoute,
   ]
 }

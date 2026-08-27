@@ -18,6 +18,10 @@ const LABS = [
     to: '/dev/owner-map-alternatives',
     label: 'Owner map alternatives (8 variants)',
   },
+  {
+    to: '/dev/match-quality',
+    label: 'Match quality (8 variants)',
+  },
 ] as const
 
 const OWNER_WIZARD_LINKS = [

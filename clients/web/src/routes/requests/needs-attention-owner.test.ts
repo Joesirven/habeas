@@ -1085,6 +1085,7 @@ describe('production owner walkthrough — no design-lab chrome', () => {
     expect(router).not.toContain('@/routes/dev/')
     expect(router).not.toContain('matching-results-lab')
     expect(labs).toContain("path: '/dev/owner-map-alternatives'")
+    expect(labs).toContain("path: '/dev/match-quality'")
     expect(labs).toContain("path: '/dev/sheets-oauth'")
     expect(labs).toContain("path: '/dev/drop-prod-cutover'")
     expect(labs).toContain("path: '/requests/matching-results-lab'")

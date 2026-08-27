@@ -1009,11 +1009,30 @@ def test_retry_config_get_and_patch_floor(monkeypatch: pytest.MonkeyPatch):
         assert ok.json()["max_attempts"] == 6
 
 
+def _is_open_drop_raw_unresponded_count(sql: str) -> bool:
+    """True for COUNT on drop_raw_requests WHERE response_status IS NULL — no requests join."""
+    compact = " ".join(sql.split())
+    return (
+        "COUNT(*)" in compact
+        and "FROM drop_raw_requests" in compact
+        and "response_status IS NULL" in compact
+        and "JOIN requests" not in compact
+        and "FROM requests" not in compact
+    )
+
+
 def test_drop_stats_global(monkeypatch: pytest.MonkeyPatch):
+    issued: list[str] = []
+
     class _Acquire:
         async def __aenter__(self):
             conn = MagicMock()
-            conn.fetchval = AsyncMock(side_effect=[10, 3, 1, 2])
+
+            async def fetchval(sql: str, *args: Any) -> int:
+                issued.append(sql)
+                return [10, 3, 1, 2][len(issued) - 1]
+
+            conn.fetchval = AsyncMock(side_effect=fetchval)
             return conn
 
         async def __aexit__(self, *args: Any) -> None:
@@ -1042,6 +1061,11 @@ def test_drop_stats_global(monkeypatch: pytest.MonkeyPatch):
     assert body["matching_review_pending"] == 3
     assert body["workers_down"] == 1
     assert "email" not in body
+    assert issued, "stats/global issued no SQL"
+    assert _is_open_drop_raw_unresponded_count(issued[0])
+    assert not any(
+        "JOIN drop_raw_requests" in sql and "FROM requests" in sql for sql in issued
+    )
 
 
 def test_drop_workers_and_health_queues(monkeypatch: pytest.MonkeyPatch):
@@ -1197,13 +1221,10 @@ def test_recommended_response_status_for_match_count():
     assert recommended_response_status_for_match_count(9) == 4
 
 
-@pytest.mark.asyncio
-async def test_collect_matching_results_stats_and_filter():
-    from datetime import datetime, timezone
-
+def _matching_results_list_fixture_rows() -> list[_Row]:
     recorded = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
     recorded_old = datetime(2026, 7, 10, 8, 0, tzinfo=timezone.utc)
-    rows = [
+    return [
         _Row(
             request_id="00000000-0000-0000-0000-000000000001",
             matched=True,
@@ -1242,13 +1263,71 @@ async def test_collect_matching_results_stats_and_filter():
         ),
     ]
 
+
+def _matching_results_global_stats_row() -> _Row:
+    return _Row(
+        total=3,
+        single_match=1,
+        multi_match=1,
+        not_found=1,
+        review_pending=2,
+        review_approved=0,
+        review_none=1,
+    )
+
+
+def _is_matching_results_latest_stats_aggregate(sql: str) -> bool:
+    """Global stats: COUNT/FILTER on matching_results_latest — not a full row dump."""
+    compact = " ".join(sql.split())
+    return (
+        "FROM matching_results_latest" in compact
+        and "COUNT(*)" in compact
+        and "FILTER" in compact
+        and "assignment_context" not in compact
+        and "ORDER BY l.recorded_at" not in compact
+    )
+
+
+def _is_matching_results_latest_list_limit(sql: str) -> bool:
+    """List: limited latest rows + laterals — never DISTINCT ON the history table."""
+    compact = " ".join(sql.split())
+    return (
+        "FROM matching_results_latest" in compact
+        and "LIMIT" in compact
+        and "ORDER BY l.recorded_at DESC" in compact
+        and "LEFT JOIN LATERAL" in compact
+        and "DISTINCT ON" not in compact
+        and "COUNT(*)" not in compact
+    )
+
+
+def _capturing_matching_results_conn() -> tuple[MagicMock, list[str], list[str]]:
+    stats_sqls: list[str] = []
+    list_sqls: list[str] = []
+
+    async def fetchrow(sql: str, *args: Any) -> _Row:
+        stats_sqls.append(sql)
+        return _matching_results_global_stats_row()
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        list_sqls.append(sql)
+        return _matching_results_list_fixture_rows()
+
     conn = MagicMock()
-    conn.fetch = AsyncMock(return_value=rows)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    conn.fetch = AsyncMock(side_effect=fetch)
+    return conn, stats_sqls, list_sqls
+
+
+@pytest.mark.asyncio
+async def test_collect_matching_results_stats_and_filter():
+    conn, stats_sqls, list_sqls = _capturing_matching_results_conn()
 
     all_results = await drop_pipeline.collect_matching_results(conn, limit=100)
-    issued_sql = conn.fetch.await_args.args[0]
-    assert "LIMIT" in issued_sql
-    assert "DISTINCT ON" not in issued_sql
+    assert stats_sqls and _is_matching_results_latest_stats_aggregate(stats_sqls[0])
+    assert list_sqls and _is_matching_results_latest_list_limit(list_sqls[0])
+    assert "LIMIT" in list_sqls[0]
+    assert "DISTINCT ON" not in list_sqls[0]
     assert all_results["stats"]["total"] == 3
     assert all_results["stats"]["single_match"] == 1
     assert all_results["stats"]["multi_match"] == 1
@@ -1270,6 +1349,7 @@ async def test_collect_matching_results_stats_and_filter():
     assert multi["match_type_filter"] == "multi_match"
     # Stats remain global even when list is filtered.
     assert multi["stats"]["total"] == 3
+    assert multi["filters"]["stats_scope"] == "global"
 
     by_q = await drop_pipeline.collect_matching_results(
         conn, q="000000000002", limit=100
@@ -1277,6 +1357,7 @@ async def test_collect_matching_results_stats_and_filter():
     assert len(by_q["results"]) == 1
     assert by_q["results"][0]["request_id"].endswith("0002")
     assert by_q["filters"]["q"] == "000000000002"
+    assert by_q["stats"]["total"] == 3
 
     by_state = await drop_pipeline.collect_matching_results(conn, state="tx", limit=100)
     assert len(by_state["results"]) == 1
@@ -1291,6 +1372,24 @@ async def test_collect_matching_results_stats_and_filter():
     assert all(
         r["request_id"] != "00000000-0000-0000-0000-000000000003" for r in by_date["results"]
     )
+
+
+@pytest.mark.asyncio
+async def test_collect_matching_results_stats_sql_is_latest_aggregate() -> None:
+    """Stats must aggregate matching_results_latest — never SELECT all latest rows."""
+    conn, stats_sqls, list_sqls = _capturing_matching_results_conn()
+    result = await drop_pipeline.collect_matching_results(conn, limit=100)
+    assert len(stats_sqls) == 1
+    assert len(list_sqls) == 1
+    assert _is_matching_results_latest_stats_aggregate(stats_sqls[0])
+    assert _is_matching_results_latest_list_limit(list_sqls[0])
+    compact_stats = " ".join(stats_sqls[0].split())
+    assert "l.request_id::text" not in compact_stats
+    assert compact_stats.count("FROM matching_results_latest") == 1
+    compact_list = " ".join(list_sqls[0].split())
+    assert compact_list.count("LIMIT") >= 1
+    assert result["filters"]["stats_scope"] == "global"
+    assert result["stats"]["review_none"] == 1
 
 
 @pytest.mark.asyncio

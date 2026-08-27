@@ -29,6 +29,7 @@ from admin_api.drop_pipeline import iter_live_pipeline_events
 from admin_api.drop_pipeline import router as drop_pipeline_router
 from admin_api.drop_pipeline import SuperAdminPrincipal
 from admin_api.drop_prod_cutover import router as drop_prod_cutover_router
+from admin_api.match_quality import router as match_quality_router
 from admin_api.fulfillment_kickoff import router as fulfillment_kickoff_router
 from admin_api.fulfillment_ops import router as fulfillment_ops_router
 from admin_api.legal_portfolio import router as legal_portfolio_router
@@ -306,6 +307,7 @@ app.add_middleware(AuditMiddleware)
 app.add_middleware(RequestTimingMiddleware)
 app.include_router(drop_pipeline_router)
 app.include_router(drop_prod_cutover_router)
+app.include_router(match_quality_router)
 app.include_router(ops_health_router)
 app.include_router(fulfillment_ops_router)
 app.include_router(fulfillment_kickoff_router)

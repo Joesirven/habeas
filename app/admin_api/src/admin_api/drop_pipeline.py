@@ -3636,6 +3636,29 @@ def _parse_recorded_bound(value: str, *, end_of_day: bool) -> datetime:
         ) from exc
 
 
+def _matching_results_global_stats_from_row(row: Any) -> dict[str, int]:
+    """Normalize one aggregate row — zeros when the rollup is empty."""
+    if row is None:
+        return {
+            "total": 0,
+            "single_match": 0,
+            "multi_match": 0,
+            "not_found": 0,
+            "review_pending": 0,
+            "review_approved": 0,
+            "review_none": 0,
+        }
+    return {
+        "total": int(row["total"] or 0),
+        "single_match": int(row["single_match"] or 0),
+        "multi_match": int(row["multi_match"] or 0),
+        "not_found": int(row["not_found"] or 0),
+        "review_pending": int(row["review_pending"] or 0),
+        "review_approved": int(row["review_approved"] or 0),
+        "review_none": int(row["review_none"] or 0),
+    }
+
+
 async def collect_matching_results(
     conn: Any,
     *,
@@ -3649,33 +3672,74 @@ async def collect_matching_results(
 ) -> dict[str, Any]:
     """Latest DROP matching_results + global stats + pending review counts.
 
-    ``stats`` are always unfiltered (global DROP totals). List filters only
-    narrow ``results``; echoed under ``filters`` with ``stats_scope=global``.
+    ``stats`` are always unfiltered (global DROP totals) via SQL aggregate on
+    ``matching_results_latest`` — never a full latest dump into Python. List
+    filters only narrow ``results``; echoed under ``filters`` with
+    ``stats_scope=global``.
     """
     from habeas_privacy_core.workflow.approval import WORKFLOW_ASSIGNMENT_ACTION
 
-    # LIMIT in SQL — DISTINCT ON the full matching_results table 20s-timeouts prod.
+    capped_limit = max(1, min(int(limit), 500))
+    id_query = (request_id or q or "").strip() or None
+    state_norm = state.strip().upper() if state else None
+
     async with ops_fast_statement_scope(conn):
+        stats_row = await conn.fetchrow(
+            """
+            SELECT COUNT(*)::int AS total,
+                   COUNT(*) FILTER (
+                       WHERE COALESCE(l.match_count, 0) = 1
+                   )::int AS single_match,
+                   COUNT(*) FILTER (
+                       WHERE COALESCE(l.match_count, 0) > 1
+                   )::int AS multi_match,
+                   COUNT(*) FILTER (
+                       WHERE COALESCE(l.match_count, 0) = 0
+                   )::int AS not_found,
+                   COUNT(*) FILTER (
+                       WHERE COALESCE(ar.status, 'none') = 'pending'
+                   )::int AS review_pending,
+                   COUNT(*) FILTER (
+                       WHERE COALESCE(ar.status, 'none') = 'approved'
+                   )::int AS review_approved,
+                   COUNT(*) FILTER (
+                       WHERE COALESCE(ar.status, 'none') = 'none'
+                   )::int AS review_none
+              FROM matching_results_latest l
+              JOIN requests r
+                ON r.id = l.request_id
+               AND r.intake_source = 'drop'
+              LEFT JOIN LATERAL (
+                    SELECT a.status
+                      FROM approval_requests a
+                     WHERE a.request_id = l.request_id
+                       AND a.action_type = $1
+                     ORDER BY a.requested_at DESC
+                     LIMIT 1
+              ) ar ON TRUE
+            """,
+            MATCHING_REVIEW_ACTION,
+        )
         latest_rows = await conn.fetch(
             """
-            SELECT mr.request_id::text AS request_id,
-                   mr.matched,
-                   mr.match_count,
-                   mr.matched_via,
-                   mr.recorded_at,
+            SELECT l.request_id::text AS request_id,
+                   l.matched,
+                   l.match_count,
+                   l.matched_via,
+                   l.recorded_at,
                    UPPER(TRIM(r.requestor_state)) AS requestor_state,
                    ar.id AS approval_id,
                    COALESCE(ar.status, 'none') AS review_status,
                    wa.approver_role AS assignment_target,
                    wa.context_jsonb AS assignment_context
-              FROM matching_results mr
+              FROM matching_results_latest l
               JOIN requests r
-                ON r.id = mr.request_id
+                ON r.id = l.request_id
                AND r.intake_source = 'drop'
               LEFT JOIN LATERAL (
                     SELECT a.id, a.status
                       FROM approval_requests a
-                     WHERE a.request_id = mr.request_id
+                     WHERE a.request_id = l.request_id
                        AND a.action_type = $1
                      ORDER BY a.requested_at DESC
                      LIMIT 1
@@ -3683,32 +3747,21 @@ async def collect_matching_results(
               LEFT JOIN LATERAL (
                     SELECT a.approver_role, a.context_jsonb
                       FROM approval_requests a
-                     WHERE a.request_id = mr.request_id
+                     WHERE a.request_id = l.request_id
                        AND a.action_type = $2
                        AND a.status = 'pending'
                      ORDER BY a.requested_at DESC
                      LIMIT 1
               ) wa ON TRUE
-             ORDER BY mr.recorded_at DESC NULLS LAST
+             ORDER BY l.recorded_at DESC NULLS LAST
              LIMIT $3
             """,
             MATCHING_REVIEW_ACTION,
             WORKFLOW_ASSIGNMENT_ACTION,
-            max(1, min(int(limit), 500)),
+            capped_limit,
         )
 
-    id_query = (request_id or q or "").strip() or None
-    state_norm = state.strip().upper() if state else None
-
-    stats = {
-        "total": 0,
-        "single_match": 0,
-        "multi_match": 0,
-        "not_found": 0,
-        "review_pending": 0,
-        "review_approved": 0,
-        "review_none": 0,
-    }
+    stats = _matching_results_global_stats_from_row(stats_row)
     results: list[dict[str, Any]] = []
     for row in latest_rows:
         item = _serialize_matching_result_row(row)
@@ -3725,16 +3778,6 @@ async def collect_matching_results(
             if row["assignment_target"] is not None
             else None
         )
-        stats["total"] += 1
-        stats[item["match_type"]] += 1
-        review = item["review_status"]
-        if review == "pending":
-            stats["review_pending"] += 1
-        elif review == "approved":
-            stats["review_approved"] += 1
-        elif review == "none":
-            stats["review_none"] += 1
-
         if match_type is not None and item["match_type"] != match_type:
             continue
         if id_query is not None and id_query.lower() not in str(item["request_id"]).lower():
@@ -5036,10 +5079,8 @@ async def drop_stats_global(_principal: SuperAdminPrincipal):
         open_drop = await conn.fetchval(
             """
             SELECT COUNT(*)::int
-              FROM requests r
-              JOIN drop_raw_requests d ON d.id = r.raw_record_id
-             WHERE r.intake_source = 'drop'
-               AND d.response_status IS NULL
+              FROM drop_raw_requests
+             WHERE response_status IS NULL
             """
         )
         review_pending = await conn.fetchval(

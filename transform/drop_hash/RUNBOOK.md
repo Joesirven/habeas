@@ -166,6 +166,40 @@ Dataset `drop_hash_index` lists serving + intermediate tables; experiment datase
 `drop_hash_experiment` still present (sandbox only). Email serving still reflects
 MDR-only fill until a Jose-approved refresh runs the digital union.
 
+### CA DROP Email zero matches (2026-08-26)
+
+Production CA DROP **Email** matching returned **0 / 607239** hits. Likely
+cause: `email_hash` is empty for `state=CA`. The July probe (above) had
+`email_hash` in **9** states (NY/IN/IL/WI/RI/SD/FL/AZ/MT) — **CA absent**.
+Phone/NDZ already cover USPS 50+DC.
+
+**Operator probe (counts only — never `hash_value` or `dwid`).**
+Read-only helper: `matching.hash_index_coverage.probe_hash_index_coverage`
+(pass a BQ client; optional `state="CA"`). Equivalent SQL:
+
+```sql
+SELECT "email_hash" AS mart, COUNT(*) AS row_count, COUNT(DISTINCT state) AS distinct_states
+  FROM `example-gcp-project.drop_hash_index.email_hash`
+ WHERE state = @state
+UNION ALL
+SELECT "phone_hash", COUNT(*), COUNT(DISTINCT state)
+  FROM `example-gcp-project.drop_hash_index.phone_hash`
+ WHERE state = @state
+UNION ALL
+SELECT "ndz_hash", COUNT(*), COUNT(DISTINCT state)
+  FROM `example-gcp-project.drop_hash_index.ndz_hash`
+ WHERE state = @state
+```
+
+Bind `@state = 'CA'` to confirm the empty CA email slice. Omit the `WHERE`
+clause for national `COUNT(*)` / `COUNT(DISTINCT state)`.
+
+**Next step is Jose-gated.** Do not run prod dbt or enqueue a CA hash-index
+refresh without Jose. After approval only: per-state `dbt build --vars
+'{state: CA}'` from `transform/drop_hash/` **or** admin-api
+`POST /ops/drop/hash-index-refresh/enqueue` (`state=CA`). See “Per-state
+refresh” above — not a default operator action.
+
 ### Blockers / notes for prod enqueue-all
 
 1. **Prod-write gate** — no prod dbt build and no prod `enqueue-all` without Jose
