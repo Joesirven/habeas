@@ -1,11 +1,9 @@
 # admin-api-prod — twin of admin-api-dev. Architecture B resource server.
-# Browser SSO front door is admin-web-prod (IAP). This service stays
-# IAM-locked (no allUsers) and WITHOUT Cloud Run IAP so the web nginx
-# proxy can invoke it with a service-account identity token.
-# Keep IAM locked; do not re-grant allUsers in this pipeline. GIS
-# cutover is a separate pin, not this yaml. nginx ADMIN_API_UPSTREAM
-# on admin-web-prod remains for same-origin /api (SSE + rollback).
-# ops-ia-web is retired; do not re-add its CORS origin.
+# allUsers invoker is required so browser GIS user JWT can reach the app
+# (aud = OAuth client; Cloud Run IAM would otherwise reject). App-level
+# REQUIRE_IAP_IDENTITY still verifies the token. nginx compute SA remains
+# invoker for same-origin /api (SSE + rollback). WITHOUT Cloud Run IAP
+# (--no-iap). ops-ia-web is retired; do not re-add its CORS origin.
 # DATABASE_URL from GSM database-url-prod via --set-secrets (not a Cloud Build
 # substitution). Comma-delimited --set-env-vars truncates passwords that
 # contain commas.
@@ -125,17 +123,11 @@ steps:
         gcloud run services add-iam-policy-binding ${_SERVICE} \
           --region=${_REGION} --project=${_PROJECT} \
           --member="user:dev-owner-1@example.com" --role=roles/run.invoker --quiet || true
-        # Strip leftover public invoker. Binding already gone is success;
-        # any other error fails the build (do not || true).
-        strip_out=$$(gcloud run services remove-iam-policy-binding ${_SERVICE} \
+        # allUsers is required: GIS user JWT (aud = OAuth client) cannot
+        # pass Cloud Run IAM without it. Fail closed (do not || true).
+        gcloud run services add-iam-policy-binding ${_SERVICE} \
           --region=${_REGION} --project=${_PROJECT} \
-          --member=allUsers --role=roles/run.invoker --quiet 2>&1) && strip_rc=0 || strip_rc=$$?
-        if [[ $${strip_rc} -ne 0 ]]; then
-          if [[ "$${strip_out}" != *"Policy binding"* || "$${strip_out}" != *"not found"* ]]; then
-            echo "$${strip_out}" >&2
-            exit $${strip_rc}
-          fi
-        fi
+          --member=allUsers --role=roles/run.invoker --quiet
         # Stale IAP-SA invoker is unused once --no-iap; ignore failures.
         gcloud run services remove-iam-policy-binding ${_SERVICE} \
           --region=${_REGION} --project=${_PROJECT} \

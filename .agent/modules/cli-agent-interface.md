@@ -10,21 +10,24 @@
 | Analysis reads (SELECT, joins, state inspection) | Postgres **read-only role** via Cloud SQL Auth Proxy |
 | Forbidden | insert, update, delete, truncate, data definition language; direct user→worker Cloud Run calls; `DATABASE_URL` as a mutation path |
 
-## Auth to deployed admin-api (CLI path current; browser GIS intended / not prod 00023)
+## Auth to deployed admin-api (CLI path ADC / IAP; browser GIS live on prod web)
 
 admin-api is the **resource server**. Cloud Run Identity-Aware Proxy (IAP) is
 **off** (`--no-iap`). App-level `REQUIRE_IAP_IDENTITY=true` requires a verified
 Google ID token Bearer. Header-alone (`X-Goog-Authenticated-User-Email` without
 a verified Bearer) is **401**. Legal sources: `user_jwt` (GIS — browser only),
 `bearer_jwt` (ADC / Cloud Run `aud`), `iap_header` (verified Bearer **plus**
-IAP email). `allUsers` invoker is **stripped** on `admin-api-prod` and
-`admin-api-dev` (remaining: compute SA + `jsirven@`).
+IAP email). `admin-api-prod` invoker matches live `admin-api-dev` (`allUsers`
++ compute SA + `jsirven@`) so browser GIS Bearer passes Cloud Run IAM; the app
+still verifies the JWT. CLI still uses Cloud Run audience tokens (`aud` =
+admin-api origin). ADC callers who already have `run.invoker` are not
+allUsers-dependent.
 
 CLI Application Default Credentials (ADC) and IAP login are **unchanged**. Do
 **not** invent a Google Identity Services command, a browser-token login, or an
 audience flag. Browser Google Identity Services is a **third client** (user
-Bearer, `aud` = `IAP_OAUTH_CLIENT_ID`) — not a CLI path, and **not live on
-prod web** (100% is `admin-web-prod-00023-fnz` nginx `/api`; 00024 at 0%).
+Bearer, `aud` = `IAP_OAUTH_CLIENT_ID`) — not a CLI path. GIS is **live on
+prod web**.
 
 | Who | How |
 |-----|-----|

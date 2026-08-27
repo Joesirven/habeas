@@ -49,18 +49,19 @@ cd clients/web && bun test
 | reaper | `test_reaper_health.py`, `test_reaper_config.py` | testers did not **run** the suite; matching reap or review reconcile regresses; fulfill is invoked |
 | `clients/web` | `bun test` | web tests fail when `clients/web` changed |
 | `clients/web` first-paint | `cd clients/web && bun test src/lib/admin-api-auth.test.ts` | first-paint GETs (`/me`, connectors list, snapshot or processes, pipeline header) lack the 8s `OPS_FAST_QUERY_TIMEOUT_MS`; prod probe budgets (`OPS_PROD_PROBE_MAX_MS` 5s, `OPS_ME_PROD_MAX_MS` 2s) regress; collapsed pipeline batch rows blank status/date/counts the API returned |
-| admin-api live page-load | `DATABASE_URL="" uv run --package admin-api pytest app/admin_api/tests/test_drop_pipeline.py -k prod_page_load -q` (skips without `ADMIN_API_PROBE_URL` + token) | serving `GET /me` > 2s; `GET /owner/verticals/tech/connectors`, `GET /ops/drop/pipeline/summary`, or `GET /ops/drop/processes?days=7&intake_source=drop&limit=50` > 5s (or 8s SPA abort); `snapshot.processes` is `[]` while processes API has rows; GIS web (`admin-web-prod-00024`) at 100% |
+| admin-api live page-load | `DATABASE_URL="" uv run --package admin-api pytest app/admin_api/tests/test_drop_pipeline.py -k prod_page_load -q` (skips without `ADMIN_API_PROBE_URL` + token) | serving `GET /me` > 2s; `GET /owner/verticals/tech/connectors`, `GET /ops/drop/pipeline/summary`, or `GET /ops/drop/processes?days=7&intake_source=drop&limit=50` > 5s (or 8s SPA abort); `snapshot.processes` is `[]` while processes API has rows |
 | QCQA | every required suite | testers did not **run** pytest / `bun test` — listing commands is not enough |
 
 ## Page-load ship gate
 
-Fail the QCQA round and **HOLD ship** when any of these are true (do not flip GIS; do not grant `allUsers`):
+Fail the QCQA round and **HOLD ship** when any of these are true:
 
 1. First paint / critical GET exceeds **5s** on the prod probe, or the SPA 8s abort fires. Named serving probes that **must** stay under 5s: `GET /owner/verticals/tech/connectors`, `GET /ops/drop/pipeline/summary`, `GET /ops/drop/processes?days=7&intake_source=drop&limit=50`.
 2. Serving API `GET /me` exceeds **2s**.
 3. Collapsed pipeline batch rows render with no status / date / counts when the API returned those fields (`collapsedBulkRowDisplay` + `admin-api-auth.test.ts`).
 4. `GET /ops/drop/console/snapshot` returns empty `processes` while `GET /ops/drop/processes` has rows (blank collapsed pipeline batches).
 5. `listOwnerConnectors` lacks the 8s `OPS_FAST_QUERY_TIMEOUT_MS` abort.
-6. GIS web is at **100%** (`admin-web-prod-00024` or `ADMIN_WEB_GIS_TRAFFIC_PERCENT=100`).
 
-Live probe env (skip the live tests when unset): `ADMIN_API_PROBE_URL`, `ADMIN_API_PROBE_TOKEN` (or `ADMIN_API_ID_TOKEN` / `CLOUD_RUN_ID_TOKEN`), optional `ADMIN_API_PROBE_EMAIL` / `IAP_USER_EMAIL`, optional `ADMIN_WEB_GIS_TRAFFIC_PERCENT`.
+Architecture B at 100% (GIS bake, yaml `VITE_ADMIN_API_URL` set) is the required prod web end state; `admin-api-prod` invoker may include `allUsers` to match live `admin-api-dev` so GIS JWT can pass Cloud Run IAM.
+
+Live probe env (skip the live tests when unset): `ADMIN_API_PROBE_URL`, `ADMIN_API_PROBE_TOKEN` (or `ADMIN_API_ID_TOKEN` / `CLOUD_RUN_ID_TOKEN`), optional `ADMIN_API_PROBE_EMAIL` / `IAP_USER_EMAIL`, optional `ADMIN_WEB_GIS_TRAFFIC_PERCENT` (probe input only; 100% does not fail the round).

@@ -9,7 +9,7 @@ Deploy targets:
 - **Dev (browser):** Cloud Run `admin-web-dev` — IAP front door for **Habeas Platform** chrome
   ([`https://admin-web-dev-hsa55rg7ja-uk.a.run.app`](https://admin-web-dev-hsa55rg7ja-uk.a.run.app)).
   `/dev` labs (including `/dev/owner-map-alternatives`) ship on `admin-web-dev` only (`VITE_ENABLE_LABS=true`); `admin-web-prod` stays clean — the product wizard `/owner/connectors` may ship on prod.
-- **Prod (browser):** Cloud Run `admin-web-prod`. Live 100% is revision **00023-fnz** (nginx same-origin `/api`). Revision **00024** (GIS bake) is at **0%** and must not be flipped until GIS `/me` is proven on DEV. Do not claim prod uses Google Identity Services. There is no Firebase Hosting front door.
+- **Prod (browser):** Cloud Run `admin-web-prod` Architecture B — baked `VITE_ADMIN_API_URL` → admin-api-prod, GIS user JWT for JSON. IAP is the human SSO front door. nginx `/api` remains for Server-Sent Events and rollback. There is no Firebase Hosting front door.
 
 All browser mutations go through **admin-api** only — the SPA never calls worker URLs directly.
 

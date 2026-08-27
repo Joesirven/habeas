@@ -5,8 +5,8 @@ Dashboard, approvals, Server-Sent Events live stream, mutation routes.
 
 Cloud Run IAP is **off** (`--no-iap`). Deployed identity is app-level `REQUIRE_IAP_IDENTITY=true`:
 a verified Bearer is required; IAP email header alone is **401**. Do **not** re-enable Cloud Run
-IAP on this service. **Current prod web is not on GIS:** live 100% is `admin-web-prod-00023-fnz`
-(nginx `/api`); **00024** is the unused B bake at 0% — do not flip until GIS `/me` is proven on DEV.
+IAP on this service. **Prod web is on Architecture B (GIS):** browser JSON sends a GIS user
+Bearer (`aud` = OAuth client). nginx `/api` remains for Server-Sent Events and empty-VITE rollback.
 
 ## DROP ops (Wave B)
 
@@ -41,9 +41,9 @@ owners via `/ops/verticals/assignments`; owners complete setup in the `/owner/co
 
 Secrets write to Secret Manager only (`dpra/connections/{system}/{connection_id}`). Connection
 tests return allowlisted `detail` codes — never echo credentials. All mutations require a
-verified Bearer on deployed admin-api (`REQUIRE_IAP_IDENTITY`). Browser 00023 reaches admin-api
-through admin-web nginx `/api` (SA Bearer + IAP headers). Intended B is a GIS user Bearer after
-a DEV-proven 00024 cutover — not live on prod web. CLI: `habeas-cli auth login --adc` or
+verified Bearer on deployed admin-api (`REQUIRE_IAP_IDENTITY`). Browser Architecture B reaches
+admin-api with a GIS user Bearer. nginx `/api` remains for Server-Sent Events and rollback
+(SA Bearer + IAP headers). CLI: `habeas-cli auth login --adc` or
 `auth login` (`ADMIN_API_ID_TOKEN_AUDIENCE` + `IAP_OAUTH_CLIENT_ID`).
 
 Plan: [`docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md`](../../docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md).

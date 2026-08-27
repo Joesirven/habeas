@@ -59,9 +59,10 @@ A verified Bearer is required before any source other than `None`:
 Header alone is never an identity. Without a verified Bearer (missing token, or
 token that failed verify), `resolve_actor` returns `unknown` / `source=None`
 (401 when identity is required). `X-Goog-Authenticated-User-Email` is never
-trusted by itself. Public invoke (`allUsers` `run.invoker`) stays stripped on
-`admin-api-prod` and `admin-api-dev`. Do not re-open until Jose-gated DEV GIS
-`/me` proof plus an explicit cutover.
+trusted by itself. `allUsers` on `admin-api-dev` is live and is copied to
+`admin-api-prod` so browser GIS JWT can pass Cloud Run IAM (`aud` is the OAuth
+client, not the Cloud Run URL). App-level `verify_oauth2_token` still
+fail-closed. Workers never get `allUsers`.
 
 ## Role allowlists (v1)
 

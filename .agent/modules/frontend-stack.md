@@ -22,11 +22,11 @@ Visual design: load [`design-taste.md`](design-taste.md). For DROP Ops IA (Runs 
 2. admin-api `LISTEN privacy_events` → forwards to Server-Sent Events clients.
 3. Web `EventSource` on same-origin `/api/live/events` (EventSource cannot set Authorization) → TanStack Query `invalidateQueries` for affected resources. JSON APIs may go cross-origin; the event hop stays on `/api`.
 
-## Admin-api access (Architecture B — intended)
+## Admin-api access (Architecture B)
 
-admin-api is the **resource server**. Intended: humans reach the SPA through **admin-web Identity-Aware Proxy**. Browser JSON uses an in-memory Google Identity Services user ID token (`Authorization: Bearer`) when `VITE_ADMIN_API_URL` is set. Cookie IAP (`credentials: 'include'`) is not the B API session. The token is not persisted. Client id from `VITE_GOOGLE_CLIENT_ID` or `VITE_GIS_CLIENT_ID` only — never hardcode.
+admin-api is the **resource server**. Humans reach the SPA through **admin-web Identity-Aware Proxy**. Browser JSON uses an in-memory Google Identity Services user ID token (`Authorization: Bearer`) when `VITE_ADMIN_API_URL` is set. Cookie IAP (`credentials: 'include'`) is not the B API session. The token is not persisted. Client id from `VITE_GOOGLE_CLIENT_ID` or `VITE_GIS_CLIENT_ID` only — never hardcode.
 
-**Current prod web is not on B.** Live 100% is `admin-web-prod-00023-fnz` (empty-VITE / nginx `/api`). Revision **00024** is the unused B bake at **0% traffic**. Do not claim prod already uses Google Identity Services. Do not flip 00024 until GIS `/me` is proven on DEV. `allUsers` invoker is **stripped** on `admin-api-prod` / `admin-api-dev` (compute SA + `jsirven@` only). GIS JWT `aud` is the OAuth client, not the Cloud Run URL — a 00024 flip today would **403** at Cloud Run IAM.
+**Prod web is on B.** `admin-web-prod.yaml` bakes `VITE_ADMIN_API_URL=https://admin-api-prod-hsa55rg7ja-uk.a.run.app`. OAuth client id is baked from GSM `iap-oauth-client-id` at deploy (not in git). Browser GIS user JWT → `admin-api-prod` (app verifies `aud` = OAuth client). `admin-api-prod` invoker matches live `admin-api-dev` (`allUsers` + compute SA + `jsirven@`) so GIS Bearer passes Cloud Run IAM; app-level `REQUIRE_IAP_IDENTITY` still verifies the JWT.
 
 **Server-Sent Events** always use same-origin `GET /api/live/events`. nginx or Vite `/api` proxies that hop.
 
@@ -36,7 +36,7 @@ admin-api is the **resource server**. Intended: humans reach the SPA through **a
   (`google-auth-library`, same audience as `habeas-cli auth login --adc`). Optional
   `IAP_USER_EMAIL` only for SA impersonation fallback. Do not paste an IAP OAuth-client
   audience token into `IAP_ID_TOKEN`.
-- Cloud Build yamls bake `VITE_ADMIN_API_URL` + `VITE_GOOGLE_CLIENT_ID` into **00024** (same project brand as `IAP_OAUTH_CLIENT_ID` — not a secret). Bake ≠ cutover: `admin-web-prod.yaml` has no `--no-traffic`; 00024-at-0% is a **manual pin** to 00023. Empty `VITE_ADMIN_API_URL` is local / current-prod-00023 / rollback (all REST via `/api`).
+- Cloud Build yamls bake `VITE_ADMIN_API_URL` (prod → admin-api-prod) + `VITE_GOOGLE_CLIENT_ID` from GSM `iap-oauth-client-id` (same project brand as `IAP_OAUTH_CLIENT_ID` — not a secret). Empty `VITE_ADMIN_API_URL` is local / rollback (all REST via `/api`).
 - CLI: `habeas-cli auth login --adc` (super_admin) and `habeas-cli auth login` (IAP) — unchanged. Pin `ADMIN_API_ID_TOKEN_AUDIENCE` and `IAP_OAUTH_CLIENT_ID`.
 - Do **not** re-run `infra/cloudbuild/admin-api-dev-iam.yaml` (re-enables Cloud Run IAP).
 - Never call worker Cloud Run URLs from the browser.
@@ -63,7 +63,7 @@ Privacy: toast copy must not include personally identifiable information, hashes
 
 - Thin client — no business rules in browser; all authorization on admin-api.
 - `/dev` labs (including `/dev/owner-map-alternatives`) ship on `admin-web-dev` only (`VITE_ENABLE_LABS=true`); `admin-web-prod` stays clean — the product wizard `/owner/connectors` may ship on prod.
-- Not Next.js — single-page app on Cloud Run (`admin-web-*`) behind Identity-Aware Proxy (human SSO). Intended B API session is a Google Identity Services user Bearer. Current prod 00023 session is nginx `/api`.
+- Not Next.js — single-page app on Cloud Run (`admin-web-*`) behind Identity-Aware Proxy (human SSO). B API session is a Google Identity Services user Bearer. Empty `VITE_ADMIN_API_URL` is local / rollback (REST via `/api`).
 - Mutations never bypass admin-api.
 - After a user-triggered mutation settles, give feedback with an **action toast** (see above) — not silent success and not a one-off alert pattern.
 
