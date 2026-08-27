@@ -289,7 +289,33 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     )
     if settings.database_url:
         await create_pool(settings.database_url)
+    broadcaster = None
+    try:
+        from admin_api.live_rollup_notify import get_bulk_rollup_broadcaster
+
+        broadcaster = get_bulk_rollup_broadcaster()
+    except ImportError:
+        logger.warning(
+            "live_events_bulk_bridge_unavailable",
+            extra={"event": "live_events_bulk_bridge_unavailable"},
+        )
+    if broadcaster is not None:
+        try:
+            await broadcaster.start()
+        except Exception:
+            logger.exception(
+                "live_events_bulk_bridge_start_failed",
+                extra={"event": "live_events_bulk_bridge_start_failed"},
+            )
     yield
+    if broadcaster is not None:
+        try:
+            await broadcaster.stop()
+        except Exception:
+            logger.exception(
+                "live_events_bulk_bridge_stop_failed",
+                extra={"event": "live_events_bulk_bridge_stop_failed"},
+            )
     await close_pool()
 
 

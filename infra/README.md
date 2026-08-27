@@ -155,6 +155,16 @@ gcloud builds submit --config=infra/cloudbuild/admin-web-prod.yaml --project=exa
 
 `admin-api-dev` / `admin-api-prod` `_CORS_ORIGINS` already include both `admin-web-*` origins. After a new web origin, append it there and redeploy admin-api.
 
+### Live events push plane (DROP bulk rollup → SSE)
+
+`GET /live/events` `bulk_process` snapshots are commit-triggered, not polled per connection. Migration [`20260827230000_drop_bulk_stats_notify.sql`](../db/migrations/20260827230000_drop_bulk_stats_notify.sql) installs trigger `drop_bulk_process_stats_notify` (`AFTER INSERT OR UPDATE` on `drop_bulk_process_stats`) → `pg_notify('drop_bulk_stats_changed', download_id::text)` — payload is the id only, never PII, and NOTIFY delivers only after COMMIT. admin-api bridges LISTEN → SSE via `admin_api.live_rollup_notify.BulkRollupBroadcaster` (dedicated asyncpg connection, started/stopped with the app lifespan): reconnect with backoff plus catch-up refresh, coalesce window `LIVE_BULK_NOTIFY_COALESCE_MS` (default `200`), immediate flush when a batch's matching completes, per-id dedupe; each flush re-reads the rollup so payloads stay exact. Backstop: one shared 5s poll of the latest process per admin-api process (replaces the old per-connection bulk polls) keeps clients exact if LISTEN drops. The per-connection `matching_progress` 1.5s poll and all event shapes are unchanged — web clients need no changes.
+
+Post-deploy verification (after `dbmate -d db/migrations up` and the admin-api deploy):
+
+1. Revision logs show listener startup (LISTEN attached to `drop_bulk_stats_changed`; no reconnect-loop spam).
+2. `GET /live/events` returns `ready` and heartbeats as before.
+3. `bulk_process` events arrive on counter change — cards move within the coalesce window, well under the old 5s poll cadence.
+
 ### Sheets owner OAuth (Connect Google Sheets)
 
 Owner wizard `/owner/connectors` → **Connect Google Sheets** (systems `hr_alumni`, `bizdev_contacts`) runs a Google OAuth **web** client flow in admin-api (`owner_connectors.py` / `lab_sheets_oauth.py`). Both admin-api yamls pass `SHEETS_LAB_OAUTH_CLIENT_ID` / `SHEETS_LAB_OAUTH_CLIENT_SECRET` via `--set-secrets` and set `SHEETS_LAB_ALLOWED_REDIRECT_URIS` to the environment admin-web origin + `/owner/connectors` (dev also lists the local Vite origins).
