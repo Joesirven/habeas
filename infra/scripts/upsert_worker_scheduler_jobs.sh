@@ -70,9 +70,11 @@ upsert_http_job() {
     --time-zone="${tz}"
     --uri="${uri}"
     --http-method=POST
-    --headers="Content-Type=application/json"
     "${oidc_flags[@]}"
   )
+
+  local create_headers=(--headers="Content-Type=application/json")
+  local update_headers=(--update-headers="Content-Type=application/json")
 
   if [[ -n "${body}" ]]; then
     common+=(--message-body="${body}")
@@ -80,9 +82,9 @@ upsert_http_job() {
 
   if gcloud scheduler jobs describe "${job_id}" \
       --project="${PROJECT}" --location="${REGION}" >/dev/null 2>&1; then
-    run gcloud scheduler jobs update http "${job_id}" "${common[@]}"
+    run gcloud scheduler jobs update http "${job_id}" "${common[@]}" "${update_headers[@]}"
   else
-    run gcloud scheduler jobs create http "${job_id}" "${common[@]}"
+    run gcloud scheduler jobs create http "${job_id}" "${common[@]}" "${create_headers[@]}"
   fi
 }
 
