@@ -1,22 +1,23 @@
-# Admin web IAP front door — Architecture B (GIS user JWT → admin-api-prod).
-# IAP on admin-web-prod is the human SSO front door only; browser JSON uses an
-# in-memory GIS user ID token (aud = IAP OAuth client). nginx /api remains for
-# SSE (/api/live/events) and rollback (empty VITE_ADMIN_API_URL rebuild).
+# Admin web IAP front door — same pattern as admin-web-dev.
+# Browser Google login via IAP; same-origin /api/*; nginx mints Cloud Run
+# invoker token and forwards X-Goog-Authenticated-User-* to admin-api.
+# Architecture B (GIS direct to admin-api) is dev-only until GIS /me is proven.
 #
-# Deploy (client id from GSM — never commit the value):
-#   CLIENT_ID="$(gcloud secrets versions access latest --secret=iap-oauth-client-id --project=example-gcp-project)"
-#   gcloud builds submit --config=infra/cloudbuild/admin-web-prod.yaml --project=example-gcp-project . \
-#     --substitutions=_VITE_GOOGLE_CLIENT_ID="$CLIENT_ID"
-#
-# Post-deploy: GET /me < 2s via GIS Bearer; SSE still same-origin /api/live/events.
+# Post-deploy curl checklist (IAP session or super_admin ADC via /api):
+#   curl -sS -o /dev/null -w '%{http_code} %{time_total}s\n' \
+#     https://admin-web-prod-hsa55rg7ja-uk.a.run.app/
+#   time curl -sS -H "Authorization: Bearer $TOKEN" \
+#     https://admin-web-prod-hsa55rg7ja-uk.a.run.app/api/ops/drop/matching-progress | head -c 200
 substitutions:
   _REGION: us-east4
   _PROJECT: example-gcp-project
   _SERVICE: admin-web-prod
   _TAG: latest
-  # Architecture B — browser calls admin-api-prod directly (CORS allows admin-web-prod).
-  _VITE_ADMIN_API_URL: "https://admin-api-prod-hsa55rg7ja-uk.a.run.app"
-  # Pass at deploy via --substitutions (GSM iap-oauth-client-id). Empty fails GIS at runtime.
+  # Same-origin /api — do not bake a cross-origin admin-api URL.
+  # Absolute VITE_ADMIN_API_URL makes the browser call admin-api-prod directly;
+  # GIS One Tap often fails behind IAP (skipped/not displayed) → "Could not sign in with Google".
+  # Prove GIS on admin-web-dev before flipping prod to Architecture B.
+  _VITE_ADMIN_API_URL: ""
   _VITE_GOOGLE_CLIENT_ID: ""
   # Labs are DEV-only — never enable on admin-web-prod.
   _VITE_ENABLE_LABS: "false"

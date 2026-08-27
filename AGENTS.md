@@ -97,7 +97,7 @@ On `example-gcp-project`: Cloud SQL `dpra-prod`, Secret Manager `database-url-pr
 
 **DROP intake (complete):** first production CA DROP pull finished (~1.84M requests); Data-vertical matching is complete. Ops orchestration used `POST /ops/drop/prod/confirm-run` (admin-api spine: connector download → ingestor land/promote → dispatch → ensure-drain) — that is the cutover runbook endpoint, not an open blocker. Ongoing pulls use scheduled `drop-connector-prod` `/download`.
 
-**Still off in prod:** Cassandra (`cassandra-prod` stays stub / do-not-write). Mailchimp is retired (Communications vertical is Axios HQ). **Prod web is on Architecture B (GIS)** — live 100% is `admin-web-prod-00037-wvl` (GIS user JWT → `admin-api-prod`; nginx `/api` remains for SSE). OAuth client id is baked from GSM `iap-oauth-client-id` at deploy (not in git). `admin-api-prod` invoker includes `allUsers` so GIS Bearer passes Cloud Run IAM. No ad-hoc production writes without Jose.
+**Still off in prod:** Cassandra (`cassandra-prod` stays stub / do-not-write). Mailchimp is retired (Communications vertical is Axios HQ). **Prod web is not on GIS** — live 100% is `admin-web-prod-00023-fnz` (nginx `/api`); `admin-web-prod-00024` exists at 0% and must not be flipped until GIS `/me` is proven on DEV. `allUsers` invoker is stripped on `admin-api-prod` and `admin-api-dev` (remaining: compute SA + `jsirven@`). No ad-hoc production writes without Jose.
 
 Runbook: [`infra/README.md`](infra/README.md) § Prod Cloud SQL + DROP cutover. Worker attach: [`app/AGENTS.md`](app/AGENTS.md).
 
