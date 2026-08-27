@@ -11,6 +11,7 @@ from uuid import UUID
 from habeas_privacy_core.db.requests import enqueue_matching
 from habeas_privacy_core.models.intake import DropListType
 from habeas_privacy_core.queue.constants import (
+    AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
     AUTH0_ATTEMPTS_TABLE,
     GOOGLE_SHEETS_ATTEMPTS_TABLE,
     MATCHING_ATTEMPTS_TABLE,
@@ -67,6 +68,7 @@ class DispatchResult:
     auth0_enqueued: int = 0
     mailchimp_enqueued: int = 0
     google_sheets_enqueued: int = 0
+    axios_headquarters_enqueued: int = 0
     held_for_triage: int = 0
     skipped_open_triage: int = 0
 
@@ -309,6 +311,7 @@ def _email_vertical_insert_sql(table: str) -> str:
 
 
 _GOOGLE_SHEETS_INSERT_SQL = _email_vertical_insert_sql(GOOGLE_SHEETS_ATTEMPTS_TABLE)
+_AXIOS_HEADQUARTERS_INSERT_SQL = _email_vertical_insert_sql(AXIOS_HEADQUARTERS_ATTEMPTS_TABLE)
 
 
 async def find_requests_needing_matching(
@@ -467,6 +470,19 @@ async def enqueue_google_sheets_matching(conn: DbConnection, request_id: str) ->
     )
 
 
+async def enqueue_axios_headquarters_matching(conn: DbConnection, request_id: str) -> None:
+    """Enqueue pending Axios HQ matching (step=matching, attempt 1) if none exists."""
+    await conn.execute(
+        f"""
+        INSERT INTO {AXIOS_HEADQUARTERS_ATTEMPTS_TABLE} (request_id, step, attempt_number, status)
+        VALUES ($1::uuid, $2::varchar, 1, 'pending')
+        ON CONFLICT (request_id, step, attempt_number) DO NOTHING
+        """,
+        UUID(request_id),
+        MATCHING_STEP,
+    )
+
+
 async def _hold_legal_triage_candidates(
     conn: DbConnection,
     *,
@@ -510,6 +526,8 @@ async def _hold_legal_triage_candidates(
             result.auth0_enqueued += 1
             await enqueue_google_sheets_matching(conn, request_id)
             result.google_sheets_enqueued += 1
+            await enqueue_axios_headquarters_matching(conn, request_id)
+            result.axios_headquarters_enqueued += 1
     return enqueued_here
 
 
@@ -586,12 +604,19 @@ async def run_dispatch(
         matching_room = _MAX_ENQUEUE_PER_CALL - result.enqueued
         auth0_room = _MAX_ENQUEUE_PER_CALL - result.auth0_enqueued
         sheets_room = _MAX_ENQUEUE_PER_CALL - result.google_sheets_enqueued
-        if matching_room <= 0 and auth0_room <= 0 and sheets_room <= 0:
+        axios_room = _MAX_ENQUEUE_PER_CALL - result.axios_headquarters_enqueued
+        if (
+            matching_room <= 0
+            and auth0_room <= 0
+            and sheets_room <= 0
+            and axios_room <= 0
+        ):
             break
 
         enqueued_before = result.enqueued
         auth0_before = result.auth0_enqueued
         sheets_before = result.google_sheets_enqueued
+        axios_before = result.axios_headquarters_enqueued
 
         if scan_legal_holds:
             await _hold_legal_triage_candidates(
@@ -634,13 +659,26 @@ async def run_dispatch(
         else:
             n_sheets = 0
 
+        if axios_room > 0:
+            n_axios, axios_ids = await _insert_email_vertical_attempts(
+                conn,
+                sql=_AXIOS_HEADQUARTERS_INSERT_SQL,
+                limit=min(batch, axios_room),
+            )
+            result.axios_headquarters_enqueued += n_axios
+            _extend_request_ids(result, axios_ids)
+        else:
+            n_axios = 0
+
         if (
             result.enqueued == enqueued_before
             and result.auth0_enqueued == auth0_before
             and result.google_sheets_enqueued == sheets_before
+            and result.axios_headquarters_enqueued == axios_before
             and n_match == 0
             and n_auth0 == 0
             and n_sheets == 0
+            and n_axios == 0
         ):
             break
 
@@ -652,6 +690,7 @@ async def run_dispatch(
             "auth0_enqueued": result.auth0_enqueued,
             "mailchimp_enqueued": result.mailchimp_enqueued,
             "google_sheets_enqueued": result.google_sheets_enqueued,
+            "axios_headquarters_enqueued": result.axios_headquarters_enqueued,
             "held_for_triage": result.held_for_triage,
             "skipped_open_triage": result.skipped_open_triage,
         },

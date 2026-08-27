@@ -197,16 +197,11 @@ export function matchingLabSystemKind(
   return 'other'
 }
 
-const CATALOG_ONLY_VERTICAL_IDS = new Set([
-  'axios_hq',
-  'lever',
-  'paylocity',
-  'cassandra',
-])
+const CATALOG_ONLY_VERTICAL_IDS = new Set(['cassandra'])
 
 /**
  * Directory search source — vertical first.
- * data → MDR; auth0 → Auth0; catalog-only (axios_hq / lever / paylocity / cassandra) → none.
+ * data → MDR; auth0 → Auth0; catalog-only (cassandra) → none.
  * Cassandra system id is not MDR unless vertical is data.
  */
 export function matchingLabPeopleSource(

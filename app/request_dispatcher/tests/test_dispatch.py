@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from request_dispatcher.dispatch import (
     DispatchCandidate,
     enqueue_auth0_matching,
+    enqueue_axios_headquarters_matching,
     enqueue_google_sheets_matching,
     enqueue_mailchimp_matching,
     find_requests_needing_auth0_matching,
@@ -29,6 +30,7 @@ def _dispatch_conn(
     matching_inserts: list[dict[str, Any]] | None = None,
     auth0_inserts: list[dict[str, Any]] | None = None,
     google_sheets_inserts: list[dict[str, Any]] | None = None,
+    axios_headquarters_inserts: list[dict[str, Any]] | None = None,
 ) -> AsyncMock:
     """Mock conn: fetch = triage scan; fetchrow = set-based INSERT results."""
     conn = AsyncMock()
@@ -36,6 +38,7 @@ def _dispatch_conn(
     matching = list(matching_inserts or [_insert_row(0)])
     auth0 = list(auth0_inserts or [_insert_row(0)])
     sheets = list(google_sheets_inserts or [_insert_row(0)])
+    axios = list(axios_headquarters_inserts or [_insert_row(0)])
 
     async def fake_fetch(_query: str, *_args: Any) -> list[dict[str, Any]]:
         if triage:
@@ -54,6 +57,10 @@ def _dispatch_conn(
         if "INSERT INTO google_sheets_attempts" in query:
             if sheets:
                 return sheets.pop(0)
+            return _insert_row(0)
+        if "INSERT INTO axios_headquarters_attempts" in query:
+            if axios:
+                return axios.pop(0)
             return _insert_row(0)
         return _insert_row(0)
 
@@ -860,6 +867,7 @@ async def test_dispatch_enqueues_google_sheets_for_drop_email_not_mailchimp():
         matching_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
         auth0_inserts=[_insert_row(0), _insert_row(0)],
         google_sheets_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
+        axios_headquarters_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
     )
 
     with (
@@ -891,12 +899,15 @@ async def test_dispatch_enqueues_google_sheets_for_drop_email_not_mailchimp():
     assert result.enqueued == 1
     assert result.mailchimp_enqueued == 0
     assert result.google_sheets_enqueued == 1
+    assert result.axios_headquarters_enqueued == 1
     matching_mock.assert_not_awaited()
     mailchimp_row_mock.assert_not_awaited()
     sheets_row_mock.assert_not_awaited()
 
     sheets_sql = _insert_sql(conn, "google_sheets_attempts")
     _assert_email_vertical_sql(sheets_sql, "google_sheets_attempts")
+    axios_sql = _insert_sql(conn, "axios_headquarters_attempts")
+    _assert_email_vertical_sql(axios_sql, "axios_headquarters_attempts")
     all_sql = " ".join(call.args[0] for call in conn.fetchrow.await_args_list)
     assert "mailchimp_attempts" not in all_sql
     for people_table in _PEOPLE_ATTEMPT_TABLES:
@@ -942,10 +953,13 @@ async def test_dispatch_does_not_enqueue_sheets_for_non_email(list_type: str):
     assert result.enqueued == 1
     assert result.mailchimp_enqueued == 0
     assert result.google_sheets_enqueued == 0
+    assert result.axios_headquarters_enqueued == 0
     mailchimp_row_mock.assert_not_awaited()
     sheets_row_mock.assert_not_awaited()
     sheets_sql = _insert_sql(conn, "google_sheets_attempts")
     _assert_email_vertical_sql(sheets_sql, "google_sheets_attempts")
+    axios_sql = _insert_sql(conn, "axios_headquarters_attempts")
+    _assert_email_vertical_sql(axios_sql, "axios_headquarters_attempts")
     all_sql = " ".join(call.args[0] for call in conn.fetchrow.await_args_list)
     assert "mailchimp_attempts" not in all_sql
 
@@ -1020,5 +1034,18 @@ async def test_enqueue_google_sheets_matching_inserts_pending_row():
 
     sql = conn.execute.await_args.args[0]
     assert "INSERT INTO google_sheets_attempts" in sql
+    assert "ON CONFLICT (request_id, step, attempt_number) DO NOTHING" in sql
+    assert conn.execute.await_args.args[2] == "matching"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_axios_headquarters_matching_inserts_pending_row():
+    request_id = "55555555-5555-5555-5555-555555555559"
+    conn = AsyncMock()
+
+    await enqueue_axios_headquarters_matching(conn, request_id)
+
+    sql = conn.execute.await_args.args[0]
+    assert "INSERT INTO axios_headquarters_attempts" in sql
     assert "ON CONFLICT (request_id, step, attempt_number) DO NOTHING" in sql
     assert conn.execute.await_args.args[2] == "matching"
