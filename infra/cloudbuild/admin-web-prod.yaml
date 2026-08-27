@@ -1,7 +1,7 @@
 # Admin web IAP front door — same pattern as admin-web-dev.
-# Architecture B: SPA calls admin-api-prod cross-origin with a GIS user ID token.
-# Keep IAP on this service (human SSO). Labs stay off — /dev is not the prod page.
-# nginx ADMIN_API_UPSTREAM remains for same-origin /api (SSE + rollback).
+# Browser Google login via IAP; same-origin /api/*; nginx mints Cloud Run
+# invoker token and forwards X-Goog-Authenticated-User-* to admin-api.
+# Architecture B (GIS direct to admin-api) is dev-only until GIS /me is proven.
 #
 # Post-deploy curl checklist (IAP session or super_admin ADC via /api):
 #   curl -sS -o /dev/null -w '%{http_code} %{time_total}s\n' \
@@ -13,10 +13,12 @@ substitutions:
   _PROJECT: example-gcp-project
   _SERVICE: admin-web-prod
   _TAG: latest
-  # Architecture B — browser JSON goes to admin-api-prod (CORS already allows this origin).
-  _VITE_ADMIN_API_URL: "https://admin-api-prod-hsa55rg7ja-uk.a.run.app"
-  # Public GIS / IAP OAuth client (same project brand as IAP_OAUTH_CLIENT_ID). Safe to bake.
-  _VITE_GOOGLE_CLIENT_ID: "95660886550-cpdl76minmdshvi7vcchcqivkjdna3f7.apps.googleusercontent.com"
+  # Same-origin /api — do not bake a cross-origin admin-api URL.
+  # Absolute VITE_ADMIN_API_URL makes the browser call admin-api-prod directly;
+  # GIS One Tap often fails behind IAP (skipped/not displayed) → "Could not sign in with Google".
+  # Prove GIS on admin-web-dev before flipping prod to Architecture B.
+  _VITE_ADMIN_API_URL: ""
+  _VITE_GOOGLE_CLIENT_ID: ""
   # Labs are DEV-only — never enable on admin-web-prod.
   _VITE_ENABLE_LABS: "false"
   _ADMIN_API_UPSTREAM: https://admin-api-prod-hsa55rg7ja-uk.a.run.app
