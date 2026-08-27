@@ -565,6 +565,7 @@ export function listRequests(options?: {
   limit?: number
   offset?: number
   q?: string
+  timeoutMs?: number
 }) {
   const search = new URLSearchParams()
   if (options?.intakeSource) search.set('intake_source', options.intakeSource)
@@ -579,7 +580,9 @@ export function listRequests(options?: {
   if (options?.offset != null) search.set('offset', String(options.offset))
   if (options?.q?.trim()) search.set('q', options.q.trim())
   const query = search.toString()
-  return fetchAdminApi<RequestListPage>(`/requests${query ? `?${query}` : ''}`)
+  return fetchAdminApi<RequestListPage>(`/requests${query ? `?${query}` : ''}`, {
+    timeoutMs: options?.timeoutMs,
+  })
 }
 
 export function createManualRequest(body: ManualRequestInput) {
@@ -1133,6 +1136,8 @@ export type BulkProcessSummary = {
     land?: BulkProcessStageCounts
     promote?: BulkProcessStageCounts
   }
+  /** Counts-only per-vertical posture — present once the batch rollup fills it. */
+  verticals?: BulkProcessVerticalStats[]
 }
 
 export type CollapsedPipelineCardFields = {
@@ -1227,6 +1232,26 @@ export type BulkProcessStageCounts = {
   by_list_type?: { list_type: string | null; status: string; count: number }[]
 }
 
+/** Stage counters at (download_id, vertical, stage) grain — counts only, never PII. */
+export type BulkProcessVerticalStageCounts = {
+  total: number
+  open: number
+  success: number
+  failed: number
+  in_flight: number
+}
+
+/** One vertical's posture on a bulk batch; stage counters optional until live. */
+export type BulkProcessVerticalStats = {
+  vertical: string
+  label: string
+  live: boolean
+  catalog_only: boolean
+  matching?: BulkProcessVerticalStageCounts
+  review?: BulkProcessVerticalStageCounts
+  fulfillment?: BulkProcessVerticalStageCounts
+}
+
 export type BulkProcessDetail = {
   process_id: number
   intake_source: string
@@ -1251,6 +1276,8 @@ export type BulkProcessDetail = {
     current_stage: string
     status: string
   }
+  /** Counts-only per-vertical × stage rollup (drop_bulk_vertical_stats). */
+  verticals?: BulkProcessVerticalStats[]
 }
 
 export type BulkProcessesPayload = {
@@ -2466,7 +2493,9 @@ async function listApprovedFulfillmentKickoffs(limit: number): Promise<ApprovalR
     status: 'approved',
     limit: String(Math.min(200, Math.max(1, limit))),
   })
-  return fetchAdminApi<ApprovalRecord[]>(`/approvals?${search}`)
+  return fetchAdminApi<ApprovalRecord[]>(`/approvals?${search}`, {
+    timeoutMs: OPS_QUERY_TIMEOUT_MS,
+  })
 }
 
 /**
@@ -2479,7 +2508,12 @@ export async function getOwnerFulfillmentNeedsAttention(params?: {
 }): Promise<NeedsAttentionResponse> {
   const limit = params?.limit ?? 200
   const [page, approvals] = await Promise.all([
-    listRequests({ stage: 'fulfillment', limit, offset: 0 }),
+    listRequests({
+      stage: 'fulfillment',
+      limit,
+      offset: 0,
+      timeoutMs: OPS_QUERY_TIMEOUT_MS,
+    }),
     listApprovedFulfillmentKickoffs(limit).catch((error: unknown) => {
       if (error instanceof Error && /Admin API 403/.test(error.message)) {
         return [] as ApprovalRecord[]
@@ -2530,6 +2564,7 @@ export function getNeedsAttention(
   const query = search.toString()
   return fetchAdminApi<NeedsAttentionResponse>(
     `/ops/requests/needs-attention${query ? `?${query}` : ''}`,
+    { timeoutMs: OPS_QUERY_TIMEOUT_MS },
   )
 }
 

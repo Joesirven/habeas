@@ -24,6 +24,10 @@ import {
   MatchQualityLabPage,
   parseMatchQualityLabSearch,
 } from '@/routes/dev/match-quality'
+import {
+  PipelineLiveLabPage,
+  parsePipelineLiveLabSearch,
+} from '@/routes/dev/pipeline-live'
 
 const MatchingResultsLabPage = lazy(() =>
   import('@/routes/requests/matching-results-lab').then((m) => ({
@@ -118,6 +122,17 @@ export function createLabRoutes(
     },
   })
 
+  const pipelineLiveLabRoute = createRoute({
+    getParentRoute: () => parent,
+    path: '/dev/pipeline-live',
+    validateSearch: (search: Record<string, unknown>) =>
+      parsePipelineLiveLabSearch(search),
+    component: function PipelineLiveLabRoute() {
+      const search = pipelineLiveLabRoute.useSearch()
+      return <PipelineLiveLabPage search={search} />
+    },
+  })
+
   return [
     matchingResultsLabRoute,
     devLabsIndexRoute,
@@ -129,5 +144,6 @@ export function createLabRoutes(
     ownerMapFallbackLabRoute,
     ownerMapAlternativesLabRoute,
     matchQualityLabRoute,
+    pipelineLiveLabRoute,
   ]
 }

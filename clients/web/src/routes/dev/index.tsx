@@ -22,6 +22,10 @@ const LABS = [
     to: '/dev/match-quality',
     label: 'Match quality (8 variants)',
   },
+  {
+    to: '/dev/pipeline-live',
+    label: 'Pipeline live progress (8 variants)',
+  },
 ] as const
 
 const OWNER_WIZARD_LINKS = [

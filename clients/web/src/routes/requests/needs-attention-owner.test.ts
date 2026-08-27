@@ -1,7 +1,24 @@
 // @ts-nocheck — exercised via `bun test`; not part of app tsc graph
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, mock, test } from 'bun:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+
+// The /dev/pipeline-live page calls Vite-only `import.meta.glob` at module scope,
+// which crashes hermetic `bun test` loads through router.tsx → lab-routes.tsx.
+// Mock the page module so the router import graph stays loadable; the lab path
+// assert below reads lab-routes.tsx as text and is unaffected by this mock.
+// The router import must stay dynamic so this mock registers before router.tsx
+// evaluates its top-level `await import('@/lab-routes')`.
+mock.module('../dev/pipeline-live', () => ({
+  PipelineLiveLabPage: () => null,
+  parsePipelineLiveLabSearch: (search: Record<string, unknown>) => {
+    const raw = typeof search?.v === 'string' ? search.v.trim().toLowerCase() : ''
+    const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
+    return { v: ids.includes(raw) ? raw : 'a' }
+  },
+}))
+
+const { mergeNeedsAttentionSearch, parseNeedsAttentionSearch } = await import('../../router')
 
 import {
   isOwnerVerticalTask,
@@ -27,10 +44,6 @@ import {
 } from '../../components/matching-results-lab/matching-results-lab-types'
 import { matchingDetailIsNotLive } from '../../components/requests/RequestTriageDialog'
 import { isAuth0MatchingScope } from '../../components/requests/RequestDetailOverlay'
-import {
-  mergeNeedsAttentionSearch,
-  parseNeedsAttentionSearch,
-} from '../../router'
 import {
   DATA_OWNER_INBOX_KIND_TABS,
   buildGroupedInboxRows,
@@ -1086,6 +1099,7 @@ describe('production owner walkthrough — no design-lab chrome', () => {
     expect(router).not.toContain('matching-results-lab')
     expect(labs).toContain("path: '/dev/owner-map-alternatives'")
     expect(labs).toContain("path: '/dev/match-quality'")
+    expect(labs).toContain("path: '/dev/pipeline-live'")
     expect(labs).toContain("path: '/dev/sheets-oauth'")
     expect(labs).toContain("path: '/dev/drop-prod-cutover'")
     expect(labs).toContain("path: '/requests/matching-results-lab'")

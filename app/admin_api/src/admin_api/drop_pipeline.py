@@ -86,6 +86,8 @@ from admin_api.roles import RolePrincipal, require_roles
 from admin_api.roles import settings as role_settings
 from admin_api.sheets_intake_refresh import stamp_volatile_sheets_after_intake
 from admin_api.vertical_dispositions import (
+    COMING_SOON_VERTICALS,
+    LIVE_VERTICALS,
     VERTICAL_DATA,
     VERTICAL_LABELS,
     fetch_vertical_disposition,
@@ -1591,10 +1593,67 @@ def _matching_stage_from_rollup(row: Any) -> dict[str, Any]:
     }
 
 
+def _review_stage_from_rollup(row: Any) -> dict[str, Any]:
+    """Map drop_bulk_process_stats review counters to stages.review.
+
+    Counts only — no PII. Mirrors the spine-based review math so lite cards
+    show the same shape as detail=full without scanning drop_raw_requests.
+    """
+    pending = int(_record_get(row, "review_pending", 0) or 0)
+    approved = int(_record_get(row, "review_approved", 0) or 0)
+    request_rows = int(_record_get(row, "request_rows", 0) or 0)
+    if request_rows > 0:
+        success = min(approved, request_rows)
+        open_n = max(0, request_rows - success)
+        if pending > 0:
+            open_n = max(open_n, pending)
+        total = request_rows
+    else:
+        success = approved
+        open_n = pending
+        total = open_n + success
+    by_list = [
+        {"list_type": None, "status": "pending", "count": pending},
+        {"list_type": None, "status": "approved", "count": approved},
+    ]
+    return {
+        "total": total,
+        "open": open_n,
+        "success": success,
+        "failed": 0,
+        "other": 0,
+        "by_list_type": [item for item in by_list if int(item["count"]) > 0],
+    }
+
+
+def _fulfill_stage_from_rollup(row: Any) -> dict[str, Any]:
+    """Map drop_bulk_process_stats fulfillment counters to stages.fulfillment.
+
+    Counts only — no PII. Mirrors the spine-based unset/done split.
+    """
+    unset = int(_record_get(row, "fulfill_unset", 0) or 0)
+    done = int(_record_get(row, "fulfill_done", 0) or 0)
+    request_rows = int(_record_get(row, "request_rows", 0) or 0)
+    total = max(request_rows, unset + done)
+    by_list = [
+        {"list_type": None, "status": "unset", "count": unset},
+        {"list_type": None, "status": "done", "count": done},
+    ]
+    return {
+        "total": total,
+        "open": unset,
+        "success": done,
+        "failed": 0,
+        "other": max(0, total - unset - done),
+        "by_list_type": [item for item in by_list if int(item["count"]) > 0],
+    }
+
+
 _BULK_STATS_SELECT = """
         SELECT request_rows, matching_pending, matching_claimed, matching_in_flight,
                matching_success, matching_failed, matching_abandoned, matching_none,
-               matching_started_at, matching_completed_at
+               matching_started_at, matching_completed_at,
+               review_pending, review_approved, fulfill_unset, fulfill_done
           FROM drop_bulk_process_stats
          WHERE download_id = $1
 """
@@ -1603,6 +1662,76 @@ _BULK_STATS_SELECT = """
 async def _fetch_bulk_process_stats(conn: Any, process_id: int) -> Any:
     """O(1) rollup row — never walks drop_raw_requests."""
     return await conn.fetchrow(_BULK_STATS_SELECT, process_id)
+
+
+_BULK_VERTICAL_STATS_SELECT = """
+        SELECT vertical, stage, total, open, success, failed, in_flight
+          FROM drop_bulk_vertical_stats
+         WHERE download_id = $1
+"""
+
+
+async def _fetch_bulk_vertical_stats(conn: Any, process_id: int) -> list[Any]:
+    """O(N) vertical rollup rows — one row per vertical/stage, no PII."""
+    return await conn.fetch(_BULK_VERTICAL_STATS_SELECT, process_id)
+
+
+def _vertical_stage_from_stats(row: Any) -> dict[str, Any]:
+    """Pivot one drop_bulk_vertical_stats row into a stage shape."""
+    total = int(_record_get(row, "total", 0) or 0)
+    open_n = int(_record_get(row, "open", 0) or 0)
+    success = int(_record_get(row, "success", 0) or 0)
+    failed = int(_record_get(row, "failed", 0) or 0)
+    in_flight = int(_record_get(row, "in_flight", 0) or 0)
+    other = max(0, total - open_n - success - failed - in_flight)
+    return {
+        "total": total,
+        "open": open_n,
+        "success": success,
+        "failed": failed,
+        "in_flight": in_flight,
+        "other": other,
+        "by_list_type": [],
+    }
+
+
+def _empty_vertical_stage_counts() -> dict[str, Any]:
+    return {
+        "total": 0,
+        "open": 0,
+        "success": 0,
+        "failed": 0,
+        "in_flight": 0,
+        "other": 0,
+        "by_list_type": [],
+    }
+
+
+def _build_verticals_block(rows: list[Any]) -> list[dict[str, Any]]:
+    """Group drop_bulk_vertical_stats rows into per-vertical stage blocks."""
+    by_vertical: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in rows:
+        vertical = str(row["vertical"])
+        stage = str(row["stage"])
+        by_vertical.setdefault(vertical, {})[stage] = _vertical_stage_from_stats(row)
+    result: list[dict[str, Any]] = []
+    for vertical in sorted(by_vertical):
+        stages = by_vertical[vertical]
+        live = vertical in LIVE_VERTICALS
+        catalog_only = vertical in COMING_SOON_VERTICALS
+        label = VERTICAL_LABELS.get(vertical, vertical.replace("_", " ").title())
+        result.append(
+            {
+                "vertical": vertical,
+                "label": label,
+                "live": live,
+                "catalog_only": catalog_only,
+                "matching": stages.get("matching", _empty_vertical_stage_counts()),
+                "review": stages.get("review", _empty_vertical_stage_counts()),
+                "fulfillment": stages.get("fulfillment", _empty_vertical_stage_counts()),
+            }
+        )
+    return result
 
 
 def _accumulate_status(counts: dict[str, int], status: str, n: int) -> None:
@@ -2225,6 +2354,7 @@ def _assemble_bulk_process_payload(
     fulfillment: dict[str, int],
     raw_rows: int,
     request_rows: int,
+    verticals: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     stages = {
         "download": download,
@@ -2264,6 +2394,7 @@ def _assemble_bulk_process_payload(
         ),
         "stages": stages,
         "overall": overall,
+        "verticals": verticals if verticals is not None else [],
     }
 
 
@@ -2272,7 +2403,7 @@ async def collect_bulk_process_summaries_lite(
     *,
     process_ids: list[int],
 ) -> dict[int, dict[str, Any]]:
-    """Ledger-only bulk summaries for list paint — no drop_raw_requests spine."""
+    """Ledger + rollup bulk summaries for list/expand paint — no drop_raw_requests spine."""
     if not process_ids:
         return {}
     ids = list(dict.fromkeys(int(pid) for pid in process_ids))
@@ -2305,6 +2436,36 @@ async def collect_bulk_process_summaries_lite(
             uri = str(row["gcs_uri"])
             ingest_by_uri.setdefault(uri, []).append(row)
 
+    head_ids = [int(head["id"]) for head in heads]
+    stats_by_id: dict[int, Any] = {}
+    verticals_by_id: dict[int, list[dict[str, Any]]] = {}
+    if head_ids:
+        stats_rows = await conn.fetch(
+            """
+            SELECT download_id, request_rows,
+                   matching_pending, matching_claimed, matching_in_flight,
+                   matching_success, matching_failed, matching_abandoned, matching_none,
+                   matching_started_at, matching_completed_at,
+                   review_pending, review_approved, fulfill_unset, fulfill_done
+              FROM drop_bulk_process_stats
+             WHERE download_id = ANY($1::bigint[])
+            """,
+            head_ids,
+        )
+        for row in stats_rows:
+            stats_by_id[int(row["download_id"])] = row
+        vertical_rows = await conn.fetch(
+            """
+            SELECT download_id, vertical, stage, total, open, success, failed, in_flight
+              FROM drop_bulk_vertical_stats
+             WHERE download_id = ANY($1::bigint[])
+            """,
+            head_ids,
+        )
+        for row in vertical_rows:
+            pid = int(row["download_id"])
+            verticals_by_id.setdefault(pid, []).append(row)
+
     summaries: dict[int, dict[str, Any]] = {}
     for head in heads:
         pid = int(head["id"])
@@ -2313,6 +2474,17 @@ async def collect_bulk_process_summaries_lite(
         download, land, promote, land_by_list, promote_by_list = _bulk_process_ledger_stages(
             head, ledger_rows
         )
+        stats = stats_by_id.get(pid)
+        if stats is not None:
+            matching = _matching_stage_from_rollup(stats)
+            review = _review_stage_from_rollup(stats)
+            fulfillment = _fulfill_stage_from_rollup(stats)
+            request_rows = int(_record_get(stats, "request_rows", 0) or 0)
+        else:
+            matching = _empty_stage_counts()
+            review = _empty_stage_counts()
+            fulfillment = _empty_stage_counts()
+            request_rows = 0
         payload = _assemble_bulk_process_payload(
             head,
             download=download,
@@ -2320,22 +2492,20 @@ async def collect_bulk_process_summaries_lite(
             promote=promote,
             land_by_list=land_by_list,
             promote_by_list=promote_by_list,
-            matching=_empty_stage_counts(),
-            review=_empty_stage_counts(),
-            fulfillment=_empty_stage_counts(),
+            matching=matching,
+            review=review,
+            fulfillment=fulfillment,
             raw_rows=0,
-            request_rows=0,
+            request_rows=request_rows,
+            verticals=_build_verticals_block(verticals_by_id.get(pid, [])),
         )
         summaries[pid] = {
             "process_id": pid,
             "overall": payload["overall"],
             "raw_rows": payload["raw_rows"],
             "request_rows": payload["request_rows"],
-            "stages": {
-                "download": payload["stages"]["download"],
-                "land": payload["stages"]["land"],
-                "promote": payload["stages"]["promote"],
-            },
+            "stages": payload["stages"],
+            "verticals": payload["verticals"],
         }
     return summaries
 
@@ -2391,6 +2561,8 @@ async def collect_bulk_process_progress(
         stats = await _fetch_bulk_process_stats(conn, process_id)
         if stats is not None:
             matching = _matching_stage_from_rollup(stats)
+            review = _review_stage_from_rollup(stats)
+            fulfillment = _fulfill_stage_from_rollup(stats)
             request_rows = int(_record_get(stats, "request_rows", 0) or 0)
     if not lite and gcs_uri:
         # drop_raw_requests has source_csv_filename (ZIP-internal Email/
@@ -2532,6 +2704,8 @@ async def collect_bulk_process_progress(
         review = _empty_stage_counts()
         fulfillment = _empty_stage_counts()
 
+    verticals = _build_verticals_block(await _fetch_bulk_vertical_stats(conn, process_id))
+
     return _assemble_bulk_process_payload(
         head,
         download=download,
@@ -2544,6 +2718,7 @@ async def collect_bulk_process_progress(
         fulfillment=fulfillment,
         raw_rows=raw_rows,
         request_rows=request_rows,
+        verticals=verticals,
     )
 
 

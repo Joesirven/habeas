@@ -6,6 +6,11 @@ from habeas_privacy_core.db.hash_index_refresh import (
     enqueue_hash_index_refresh_all_states,
     record_hash_index_refresh_run,
 )
+from habeas_privacy_core.db.bulk_stage_stats import (
+    bulk_stage_from_rollup,
+    fetch_bulk_process_stats,
+    fetch_bulk_vertical_stats,
+)
 from habeas_privacy_core.db.match_stats import (
     fetch_drop_match_totals,
     fetch_latest_match_page,
@@ -32,6 +37,7 @@ from habeas_privacy_core.db.requests import (
 )
 
 __all__ = [
+    "bulk_stage_from_rollup",
     "claim_hash_index_refresh",
     "close_pool",
     "create_pool",
@@ -39,6 +45,8 @@ __all__ = [
     "enqueue_hash_index_refresh_all_states",
     "enqueue_matching",
     "enqueue_rematch_for_refresh",
+    "fetch_bulk_process_stats",
+    "fetch_bulk_vertical_stats",
     "fetch_drop_match_totals",
     "fetch_latest_match_page",
     "fetch_parameter_stats",

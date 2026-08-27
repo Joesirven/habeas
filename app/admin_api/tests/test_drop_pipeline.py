@@ -4899,7 +4899,7 @@ async def test_collect_bulk_process_summaries_lite_no_spine_cte() -> None:
     assert all("drop_raw_requests" not in sql for sql in issued)
     assert all("batch_raw" not in sql for sql in issued)
     assert len([sql for sql in issued if "drop_connector_attempts" in sql]) == 1
-    assert conn.fetch.await_count == 2
+    assert conn.fetch.await_count == 4
 
 
 def test_processes_include_summary_uses_lite_bulk_not_spine_per_row(

@@ -363,6 +363,83 @@ describe('Architecture B admin-api client', () => {
     expect(getMe()).rejects.toThrow(/timed out after 8000ms: \/me/)
   })
 
+  test('getNeedsAttention uses the 30s ops-query timeout, not 8s', async () => {
+    const originalTimeout = AbortSignal.timeout
+    const timeoutMs: number[] = []
+    AbortSignal.timeout = ((ms: number) => {
+      timeoutMs.push(ms)
+      return originalTimeout.call(AbortSignal, ms)
+    }) as typeof AbortSignal.timeout
+    try {
+      const { getNeedsAttention, OPS_QUERY_TIMEOUT_MS, OPS_FAST_QUERY_TIMEOUT_MS } =
+        await importApi(undefined)
+      expect(OPS_QUERY_TIMEOUT_MS).toBe(30_000)
+      await getNeedsAttention({ kind: 'matching', limit: 100 })
+      expect(timeoutMs).toContain(30_000)
+      expect(timeoutMs).not.toContain(OPS_FAST_QUERY_TIMEOUT_MS)
+      expect(fetchCall(fetchMock).url).toContain('/ops/requests/needs-attention')
+      expect(fetchCall(fetchMock).url).toContain('kind=matching')
+    } finally {
+      AbortSignal.timeout = originalTimeout
+    }
+  })
+
+  test('getOwnerMatchingNeedsAttention inherits the 30s timeout', async () => {
+    const originalTimeout = AbortSignal.timeout
+    const timeoutMs: number[] = []
+    AbortSignal.timeout = ((ms: number) => {
+      timeoutMs.push(ms)
+      return originalTimeout.call(AbortSignal, ms)
+    }) as typeof AbortSignal.timeout
+    try {
+      const { getOwnerMatchingNeedsAttention } = await importApi(undefined)
+      await getOwnerMatchingNeedsAttention({ limit: 100 })
+      expect(timeoutMs).toContain(30_000)
+      expect(fetchCall(fetchMock).url).toContain('/ops/requests/needs-attention')
+      expect(fetchCall(fetchMock).url).toContain('kind=matching')
+    } finally {
+      AbortSignal.timeout = originalTimeout
+    }
+  })
+
+  test('getOwnerFulfillmentNeedsAttention bounds both legs at 30s', async () => {
+    const originalTimeout = AbortSignal.timeout
+    const timeoutMs: number[] = []
+    AbortSignal.timeout = ((ms: number) => {
+      timeoutMs.push(ms)
+      return originalTimeout.call(AbortSignal, ms)
+    }) as typeof AbortSignal.timeout
+    fetchMock = mock(async (input: unknown) => {
+      const url = String(input)
+      if (url.includes('/approvals')) return jsonResponse([])
+      return jsonResponse({ items: [], total: 0, limit: 200, offset: 0 })
+    })
+    globalThis.fetch = fetchMock
+    try {
+      const { getOwnerFulfillmentNeedsAttention } = await importApi(undefined)
+      const page = await getOwnerFulfillmentNeedsAttention({ limit: 50 })
+      expect(page.items).toEqual([])
+      const urls = fetchMock.mock.calls.map((call) => String(call[0]))
+      expect(urls.some((url) => url.includes('/requests?'))).toBe(true)
+      expect(urls.some((url) => url.includes('stage=fulfillment'))).toBe(true)
+      expect(urls.some((url) => url.includes('/approvals?'))).toBe(true)
+      expect(timeoutMs.filter((ms) => ms === 30_000)).toHaveLength(2)
+    } finally {
+      AbortSignal.timeout = originalTimeout
+    }
+  })
+
+  test('getNeedsAttention timeout error names the path and 30s budget', async () => {
+    fetchMock = mock(async () => {
+      throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+    })
+    globalThis.fetch = fetchMock
+    const { getNeedsAttention } = await importApi(undefined)
+    await expect(getNeedsAttention({ kind: 'matching' })).rejects.toThrow(
+      /timed out after 30000ms: \/ops\/requests\/needs-attention/,
+    )
+  })
+
   test('getMe fills real_role from role when the API omits it', async () => {
     fetchMock = mock(async () => jsonResponse(ME_OK))
     globalThis.fetch = fetchMock

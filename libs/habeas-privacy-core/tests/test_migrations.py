@@ -166,6 +166,22 @@ def test_drop_bulk_process_stats_migration_exists():
     assert "migrate:down" in content
 
 
+def test_drop_bulk_stage_vertical_stats_migration_exists():
+    migration = (
+        migrations_dir() / "20260827180000_drop_bulk_stage_vertical_stats.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+    assert "CREATE TABLE drop_bulk_vertical_stats" in content
+    assert "drop_bulk_process_stats" in content
+    assert "core_matching_attempts_vertical_data_stats" in content
+    assert "matching.review" in content
+    assert "fulfill_unset" in content
+    assert "PII" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+
+
 def test_request_closures_and_due_overrides_migration_exists():
     migration = (
         migrations_dir() / "20260730140001_core_request_closures_and_due_overrides.sql"

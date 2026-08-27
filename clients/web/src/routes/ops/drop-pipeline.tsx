@@ -4,6 +4,12 @@ import { Fragment, useEffect, useId, useRef, useState, type ReactNode } from 're
 import { createPortal } from 'react-dom'
 
 import { Skeleton, SkeletonLines } from '@/components/AppShell'
+import {
+  ChipMicroBar,
+  SegmentedStageBar,
+  formatStageEstLabel,
+  stageWorkerDone,
+} from '@/components/ops/pipeline-live'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -53,6 +59,8 @@ import {
   type BulkProcessRunGroup,
   type BulkProcessStageCounts,
   type BulkProcessSummary,
+  type BulkProcessVerticalStageCounts,
+  type BulkProcessVerticalStats,
   type BulkProcessesPayload,
   type DropConsoleSnapshot,
   type DropMatchingProgress,
@@ -257,9 +265,15 @@ function stageVisualState(
 ): StageVisual {
   if (!counts || counts.total === 0) return isCurrent ? 'active' : 'idle'
   if (counts.failed > 0) return 'failed'
-  const done =
-    counts.open === 0 && counts.success >= counts.total && counts.total > 0
-  if (done) return 'complete'
+  // A4 worker-done: nothing open and nothing claimed by a worker.
+  if (
+    stageWorkerDone({
+      open: counts.open,
+      in_flight: stageRunIndicators(counts).inFlight,
+    })
+  ) {
+    return 'complete'
+  }
   if (counts.open > 0 || counts.success < counts.total) {
     return isCurrent ? 'active' : 'pending'
   }
@@ -1636,7 +1650,10 @@ function BulkStageStrip({
         const tone = stageStripTone(visual)
         const currentRunning =
           isCurrent && Boolean(running) && visual !== 'complete'
-        const currentCompact = expanded && isCurrent && !selected
+        // A5 handoff: a worker-done stage retires to complete chrome; the
+        // left border + pulse move with overall.current_stage.
+        const currentCompact =
+          expanded && isCurrent && !selected && visual !== 'complete'
 
         if (!emphasize) {
           return (
@@ -1684,18 +1701,36 @@ function BulkStageStrip({
                         : undefined
                 }
               />
-              <span
-                className={cn(
-                  'truncate text-[0.55rem] font-medium leading-none tracking-wide',
-                  visual === 'complete' ||
-                    currentRunning ||
-                    currentCompact ||
-                    visual === 'failed'
-                    ? tone.text
-                    : 'text-mute',
-                )}
-              >
-                {tab.label}
+              <span className="flex min-w-0 flex-col gap-0.5">
+                <span
+                  className={cn(
+                    'truncate text-[0.55rem] font-medium leading-none tracking-wide',
+                    visual === 'complete' ||
+                      currentRunning ||
+                      currentCompact ||
+                      visual === 'failed'
+                      ? tone.text
+                      : 'text-mute',
+                  )}
+                >
+                  {tab.label}
+                </span>
+                {counts && counts.total > 0 ? (
+                  <ChipMicroBar
+                    percent={indicators.percent}
+                    tone={
+                      visual === 'complete'
+                        ? 'emerald'
+                        : visual === 'failed'
+                          ? 'red'
+                          : visual === 'active'
+                            ? 'emerald'
+                            : visual === 'pending'
+                              ? 'navy'
+                              : 'mute'
+                    }
+                  />
+                ) : null}
               </span>
             </button>
           )
@@ -1761,18 +1796,14 @@ function BulkStageStrip({
                 {counts && counts.total > 0 ? `${indicators.percent}%` : '—'}
               </span>
             </div>
-            <div className="relative mt-1.5 h-1.5 overflow-hidden rounded-full bg-line/60">
-              <div
-                className={cn(
-                  'h-full rounded-full transition-[width]',
-                  visual === 'failed' ? 'bg-red-600' : tone.bar,
-                )}
-                style={{ width: `${indicators.percent}%` }}
-              />
-              {currentRunning ? (
-                <div className="pointer-events-none absolute inset-0 animate-pulse bg-gradient-to-r from-transparent via-white/50 to-transparent" />
-              ) : null}
-            </div>
+            <SegmentedStageBar
+              className="mt-1.5"
+              finished={indicators.finished}
+              inFlight={indicators.inFlight}
+              queued={indicators.queued}
+              failed={indicators.failed}
+              total={counts?.total}
+            />
           </button>
         )
       })}
@@ -1981,6 +2012,185 @@ function stageTabFromOverall(
   return 'download'
 }
 
+type BulkVerticalStageKey = 'matching' | 'review' | 'fulfillment'
+
+const BULK_VERTICAL_POSTURE_STAGES: {
+  key: BulkVerticalStageKey
+  label: string
+}[] = [
+  { key: 'matching', label: 'Matching' },
+  { key: 'review', label: 'Review' },
+  { key: 'fulfillment', label: 'Fulfillment' },
+]
+
+function verticalStagePercent(
+  counts: BulkProcessVerticalStageCounts | undefined,
+): number | null {
+  if (!counts || counts.total <= 0) return null
+  return Math.round((counts.success / counts.total) * 100)
+}
+
+function verticalStageDone(
+  counts: BulkProcessVerticalStageCounts | undefined,
+): boolean {
+  if (!counts || counts.total <= 0) return false
+  return stageWorkerDone({ open: counts.open, in_flight: counts.in_flight })
+}
+
+/**
+ * Plan H — collapsed per-stage posture (worst vertical + k of n done) that
+ * drills in place to per-vertical rows. Verticals differ by label and
+ * position only; catalog-only verticals stay grey. Counts only, never PII.
+ */
+function BulkVerticalPostureStrip({
+  verticals,
+}: {
+  verticals: BulkProcessVerticalStats[]
+}) {
+  const [drillStage, setDrillStage] = useState<BulkVerticalStageKey | null>(
+    null,
+  )
+  const live = verticals.filter((entry) => entry.live && !entry.catalog_only)
+  const catalogOnly = verticals.filter((entry) => entry.catalog_only)
+  return (
+    <div className="rounded-md border border-line/70 bg-paper px-2 py-1.5">
+      <p className="text-[0.6rem] font-medium uppercase tracking-wide text-mute">
+        Vertical posture
+      </p>
+      <div className="mt-1 space-y-0.5">
+        {BULK_VERTICAL_POSTURE_STAGES.map((stage) => {
+          const drilled = drillStage === stage.key
+          const doneCount = live.filter((entry) =>
+            verticalStageDone(entry[stage.key]),
+          ).length
+          let worst: { label: string; percent: number } | null = null
+          for (const entry of live) {
+            const percent = verticalStagePercent(entry[stage.key]) ?? 0
+            if (!worst || percent < worst.percent) {
+              worst = { label: entry.label, percent }
+            }
+          }
+          const allDone = live.length > 0 && doneCount === live.length
+          return (
+            <div key={stage.key}>
+              <button
+                type="button"
+                aria-expanded={drilled}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  setDrillStage(drilled ? null : stage.key)
+                }}
+                className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left transition-colors hover:bg-panel/50"
+              >
+                <span
+                  className="inline-flex h-3 w-3 shrink-0 items-center justify-center text-[0.55rem] text-mute"
+                  aria-hidden="true"
+                >
+                  {drilled ? '▼' : '▶'}
+                </span>
+                <span className="shrink-0 text-[0.65rem] font-medium text-ink">
+                  {stage.label}
+                </span>
+                <span className="truncate text-[0.65rem] tabular-nums text-mute">
+                  {live.length === 0
+                    ? 'no live verticals'
+                    : allDone
+                      ? `${doneCount} of ${live.length} done`
+                      : worst
+                        ? `${worst.percent}% · ${worst.label} lagging · ${doneCount} of ${live.length} done`
+                        : '—'}
+                </span>
+              </button>
+              {drilled ? (
+                <div className="space-y-0.5 py-0.5 pl-5">
+                  {live.map((entry) => {
+                    const counts = entry[stage.key]
+                    const percent = verticalStagePercent(counts)
+                    const done = verticalStageDone(counts)
+                    const failed = counts?.failed ?? 0
+                    const inFlight = counts?.in_flight ?? 0
+                    const queued = counts
+                      ? Math.max(0, counts.open - counts.in_flight)
+                      : 0
+                    return (
+                      <div
+                        key={entry.vertical}
+                        className="flex items-center gap-2"
+                        title={
+                          counts
+                            ? `${entry.label}: ${counts.success}/${counts.total} ok · ${counts.open} open · ${counts.failed} failed`
+                            : `${entry.label}: not started`
+                        }
+                      >
+                        <StatusLight
+                          tone={
+                            done
+                              ? 'emerald'
+                              : failed > 0
+                                ? 'red'
+                                : inFlight > 0
+                                  ? 'emerald'
+                                  : 'mute'
+                          }
+                          pulse={!done && inFlight > 0}
+                          title={
+                            done
+                              ? 'Done'
+                              : failed > 0
+                                ? 'Failed'
+                                : inFlight > 0
+                                  ? 'Running'
+                                  : undefined
+                          }
+                        />
+                        <span className="w-28 shrink-0 truncate text-[0.65rem] text-ink">
+                          {entry.label}
+                        </span>
+                        <ChipMicroBar
+                          className="min-w-8 flex-1"
+                          percent={percent}
+                          tone={
+                            done
+                              ? 'emerald'
+                              : failed > 0
+                                ? 'red'
+                                : percent != null
+                                  ? 'navy'
+                                  : 'mute'
+                          }
+                        />
+                        <span className="shrink-0 text-[0.65rem] tabular-nums text-ink">
+                          {percent != null ? `${percent}%` : '—'}
+                        </span>
+                        <span className="shrink-0 text-[0.6rem] tabular-nums text-mute">
+                          {counts
+                            ? `${counts.success} fin · ${inFlight} in flight · ${queued} queued · ${failed} failed`
+                            : 'not started'}
+                        </span>
+                      </div>
+                    )
+                  })}
+                  {live.length === 0 ? (
+                    <p className="text-[0.6rem] text-mute">
+                      No live verticals on this batch.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          )
+        })}
+      </div>
+      {catalogOnly.length > 0 ? (
+        <p className="px-1 pt-1 text-[0.6rem] text-mute">
+          Catalog-only — matching is not live:{' '}
+          {catalogOnly.map((entry) => entry.label).join(', ')}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
 function BatchProcessExpandRow({
   row,
   expanded,
@@ -2077,15 +2287,16 @@ function BatchProcessExpandRow({
   const reviewCount = derived.reviewOpen > 0 ? derived.reviewOpen : null
   const activeTabCounts = countsForStageTab(detail, activeStage)
   const activeIndicators = stageRunIndicators(activeTabCounts)
-  const estCompletion = activeIndicators.percent
+  const activeTotal = activeTabCounts?.total ?? 0
+  const estCompletion = activeTotal > 0 ? activeIndicators.percent : null
   const errorRate =
-    activeTabCounts && activeTabCounts.total > 0
+    activeTotal > 0
       ? Math.round(
           ((activeIndicators.failed + activeIndicators.abandoned) /
-            activeTabCounts.total) *
+            activeTotal) *
             100,
         )
-      : 0
+      : null
 
   useEffect(() => {
     if (!expanded) {
@@ -2181,7 +2392,11 @@ function BatchProcessExpandRow({
                 </span>
                 {expanded ? (
                   <span>
-                    Est {estCompletion}% · err {errorRate}%
+                    {formatStageEstLabel(
+                      activeStage.label,
+                      estCompletion,
+                      errorRate,
+                    )}
                   </span>
                 ) : (
                   <span>
@@ -2267,6 +2482,9 @@ function BatchProcessExpandRow({
               Fulfillment is tracked per request response status; cards link to
               matching-job runs as the closest Runs filter.
             </p>
+          ) : null}
+          {detail?.verticals?.length ? (
+            <BulkVerticalPostureStrip verticals={detail.verticals} />
           ) : null}
         </div>
       ) : null}
