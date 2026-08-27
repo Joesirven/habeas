@@ -3748,7 +3748,7 @@ function batchClusterAsPipelineRows(rows: WorkbenchVerticalBatchRow[]) {
   })
 }
 
-/** API blocker on catalog-only / not-live workbench rows (`request_journey`). */
+/** Fallback when a cluster row is `live: false` (Cassandra / bizdev — not Axios HQ). */
 export const CATALOG_ONLY_NOT_LIVE_LABEL = 'Catalog-only — matching is not live'
 
 /** Vertical cluster rows as countable substeps — never per-request match rows. */
@@ -3771,6 +3771,7 @@ export function batchClusterAsSubsteps(
       blocker: null,
       statusLabel:
         countLabel ||
+        // Axios HQ / Communications stay live when the API row is live:true.
         (row.live ? workbenchStatusLabel(status) : CATALOG_ONLY_NOT_LIVE_LABEL),
     }
   })

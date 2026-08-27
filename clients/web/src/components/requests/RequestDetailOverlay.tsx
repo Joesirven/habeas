@@ -133,10 +133,10 @@ type JourneySubstepItem = {
   statusLabel?: string
 }
 
-/** Workbench API copy for `live: false` cluster rows — not a launch teaser. */
+/** Workbench API copy for `live: false` cluster rows (Cassandra / bizdev) — not a launch teaser. */
 export const CATALOG_ONLY_NOT_LIVE_LABEL = 'Catalog-only — matching is not live'
 
-/** Visible cluster-row status. Catalog-only rows use API not-live copy, never Soon. */
+/** Visible cluster-row status. `live: true` (including Axios HQ) never greys to catalog-only. */
 export function clusterRowStatusLabel(
   row: Pick<PipelineClusterRow, 'live' | 'blocker'>,
   liveStatus: JourneyStageStatus,

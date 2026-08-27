@@ -31,10 +31,10 @@ describe('clusterRowStatusLabel', () => {
     ).toBe('Catalog-only — matching is not live')
     expect(
       clusterRowStatusLabel(
-        { live: false, blocker: 'Axios HQ matching is not live.' },
+        { live: false, blocker: 'Cassandra matching is not live.' },
         'not_started',
       ),
-    ).toBe('Axios HQ matching is not live.')
+    ).toBe('Cassandra matching is not live.')
     expect(clusterRowStatusLabel({ live: false, blocker: null }, 'not_started')).toBe(
       CATALOG_ONLY_NOT_LIVE_LABEL,
     )
@@ -73,8 +73,8 @@ describe('JourneyStageSubsteps catalog-only cluster rows', () => {
             blocker: null,
           },
           {
-            vertical: 'axios_hq',
-            label: 'Axios HQ',
+            vertical: 'cassandra',
+            label: 'Cassandra',
             live: false,
             matching_status: 'not_started',
             fulfillment_status: null,
@@ -85,9 +85,42 @@ describe('JourneyStageSubsteps catalog-only cluster rows', () => {
     )
     expect(html).toContain('In progress')
     expect(html).toContain('Catalog-only — matching is not live')
-    expect(html).toContain('Axios HQ: Catalog-only — matching is not live')
+    expect(html).toContain('Cassandra: Catalog-only — matching is not live')
     expect(html).not.toContain('Soon')
     expect(html).not.toContain('Due soon')
+  })
+
+  test('Axios HQ live:true stays on the matching rail — not greyed or catalog-only', () => {
+    const html = renderToStaticMarkup(
+      createElement(JourneyStageSubsteps, {
+        stages,
+        stageKey: 'matching',
+        matchingCluster: [
+          {
+            vertical: 'axios_hq',
+            label: 'Axios HQ',
+            live: true,
+            matching_status: 'in_progress',
+            fulfillment_status: null,
+            blocker: null,
+          },
+          {
+            vertical: 'bizdev',
+            label: 'Bizdev',
+            live: false,
+            matching_status: 'not_started',
+            fulfillment_status: null,
+            blocker: 'Catalog-only — matching is not live',
+          },
+        ],
+      }),
+    )
+    expect(html).toContain('Axios HQ')
+    expect(html).toContain('In progress')
+    expect(html).not.toContain('Axios HQ: Catalog-only')
+    expect(html).not.toMatch(/Axios HQ[^<]*matching is not live/)
+    expect(html).toContain('Bizdev: Catalog-only — matching is not live')
+    expect(html).not.toContain('Soon')
   })
 
   test('fulfillment rail uses the same catalog-only copy when not live', () => {

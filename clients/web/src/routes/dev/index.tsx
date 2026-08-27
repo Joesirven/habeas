@@ -55,9 +55,10 @@ export function DevLabsIndexPage() {
       </ul>
       <p className="text-xs text-slate-500">
         <span className="font-mono">/dev/token-resource-server</span> is URL-only (not in
-        primary nav). It describes the intended B path (GIS + direct admin-api + IAP on
-        admin-web only). Current prod web is not on B — revision 00023 is nginx /api,
-        not GIS. The comms meeting used snapshot API + web 00023, not B.
+        primary nav). Architecture B is the intended authorized identity: GIS user JWT
+        → admin-api as resource server, IAP on admin-web only. Master yaml was reverted
+        in 2094211; ARCH-B is re-shipping the bake. Bake is not live traffic until that
+        cutover — do not treat nginx /api as the standing prod JSON path.
       </p>
       <p className="text-xs text-slate-500">
         <span className="font-mono">/dev/owner-map-fallback</span> still redirects to the

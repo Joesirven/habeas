@@ -26,7 +26,7 @@ Visual design: load [`design-taste.md`](design-taste.md). For DROP Ops IA (Runs 
 
 admin-api is the **resource server**. Humans reach the SPA through **admin-web Identity-Aware Proxy**. Browser JSON uses an in-memory Google Identity Services user ID token (`Authorization: Bearer`) when `VITE_ADMIN_API_URL` is set. Cookie IAP (`credentials: 'include'`) is not the B API session. The token is not persisted. Client id from `VITE_GOOGLE_CLIENT_ID` or `VITE_GIS_CLIENT_ID` only — never hardcode.
 
-**Prod web is on B.** `admin-web-prod.yaml` bakes `VITE_ADMIN_API_URL=https://admin-api-prod-hsa55rg7ja-uk.a.run.app`. OAuth client id is baked from GSM `iap-oauth-client-id` at deploy (not in git). Browser GIS user JWT → `admin-api-prod` (app verifies `aud` = OAuth client). `admin-api-prod` invoker matches live `admin-api-dev` (`allUsers` + compute SA + `jsirven@`) so GIS Bearer passes Cloud Run IAM; app-level `REQUIRE_IAP_IDENTITY` still verifies the JWT.
+**Architecture B is the intended authorized identity.** GIS user JWT → admin-api as resource server; IAP on admin-web only; Cloud Run IAP **off** on admin-api (`--no-iap`). `admin-web-prod.yaml` bakes `VITE_ADMIN_API_URL=https://admin-api-prod-hsa55rg7ja-uk.a.run.app`. OAuth client id is baked from GSM `iap-oauth-client-id` at deploy (not in git). Browser GIS user JWT → `admin-api-prod` (app verifies `aud` = OAuth client). `admin-api-prod` invoker matches live `admin-api-dev` (`allUsers` + compute SA + `jsirven@`) so GIS Bearer passes Cloud Run IAM; app-level `REQUIRE_IAP_IDENTITY` still verifies the JWT. Master yaml was reverted in `2094211`; ARCH-B is re-shipping the bake. **Bake ≠ live traffic** until that cutover — do not invent a traffic percent, and do not treat nginx `/api` as the standing prod JSON path.
 
 **Server-Sent Events** always use same-origin `GET /api/live/events`. nginx or Vite `/api` proxies that hop.
 
@@ -36,7 +36,7 @@ admin-api is the **resource server**. Humans reach the SPA through **admin-web I
   (`google-auth-library`, same audience as `habeas-cli auth login --adc`). Optional
   `IAP_USER_EMAIL` only for SA impersonation fallback. Do not paste an IAP OAuth-client
   audience token into `IAP_ID_TOKEN`.
-- Cloud Build yamls bake `VITE_ADMIN_API_URL` (prod → admin-api-prod) + `VITE_GOOGLE_CLIENT_ID` from GSM `iap-oauth-client-id` (same project brand as `IAP_OAUTH_CLIENT_ID` — not a secret). Empty `VITE_ADMIN_API_URL` is local / rollback (all REST via `/api`).
+- Cloud Build yamls bake `VITE_ADMIN_API_URL` (prod → admin-api-prod) + `VITE_GOOGLE_CLIENT_ID` from GSM `iap-oauth-client-id` (same project brand as `IAP_OAUTH_CLIENT_ID` — not a secret). Empty `VITE_ADMIN_API_URL` is local Vite and emergency rollback only — not a standing prod JSON path.
 - CLI: `habeas-cli auth login --adc` (super_admin) and `habeas-cli auth login` (IAP) — unchanged. Pin `ADMIN_API_ID_TOKEN_AUDIENCE` and `IAP_OAUTH_CLIENT_ID`.
 - Do **not** re-run `infra/cloudbuild/admin-api-dev-iam.yaml` (re-enables Cloud Run IAP).
 - Never call worker Cloud Run URLs from the browser.
@@ -63,7 +63,7 @@ Privacy: toast copy must not include personally identifiable information, hashes
 
 - Thin client — no business rules in browser; all authorization on admin-api.
 - `/dev` labs (including `/dev/owner-map-alternatives`) ship on `admin-web-dev` only (`VITE_ENABLE_LABS=true`); `admin-web-prod` stays clean — the product wizard `/owner/connectors` may ship on prod.
-- Not Next.js — single-page app on Cloud Run (`admin-web-*`) behind Identity-Aware Proxy (human SSO). B API session is a Google Identity Services user Bearer. Empty `VITE_ADMIN_API_URL` is local / rollback (REST via `/api`).
+- Not Next.js — single-page app on Cloud Run (`admin-web-*`) behind Identity-Aware Proxy (human SSO). B API session is a Google Identity Services user Bearer. Empty `VITE_ADMIN_API_URL` is local Vite and emergency rollback only (REST via `/api`) — not a standing prod JSON path.
 - Mutations never bypass admin-api.
 - After a user-triggered mutation settles, give feedback with an **action toast** (see above) — not silent success and not a one-off alert pattern.
 

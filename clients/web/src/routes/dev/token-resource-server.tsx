@@ -1,7 +1,7 @@
 // @ts-nocheck — /dev paths are omitted from the product router Register.
 /**
  * Temporary lab — Architecture B as intended (GIS + direct API + IAP on web only).
- * Prod web is not on B: admin-web-prod 00023 (100%) is nginx /api, not GIS.
+ * Architecture B is the intended prod path. Bake versus traffic is ARCH-B.
  * Not in primary nav. Tear down after the post-meeting pick.
  */
 import { Link } from '@tanstack/react-router'
@@ -27,8 +27,8 @@ const B_HOPS = [
 const MEETING_HOPS = [
   'The comms meeting needed a loading pipeline console, not a new token path.',
   'admin-api grew GET /ops/drop/console/snapshot so first paint is one payload (ids/counts).',
-  'admin-web-prod revision 00023 (100% traffic) is current prod: nginx /api, IAP cookie — not GIS.',
-  'Revision 00024 is the B bake at 0% traffic. Do not treat 00023 as GIS or a B bake.',
+  'Architecture B is the intended prod path (GIS user JWT → admin-api). nginx /api is SSE + rollback.',
+  'Bake versus live traffic is ARCH-B cutover — do not pin Architecture A or a 00023/00024 percent.',
 ] as const
 
 const HOP_ROWS = [
@@ -74,10 +74,10 @@ export function TokenResourceServerLabPage() {
         </p>
         <h1 className="text-xl font-semibold text-ink">Token resource server</h1>
         <p className="max-w-3xl text-sm text-ink-soft">
-          Architecture B as intended in this tree: Google Identity Services, direct
-          admin-api, Identity-Aware Proxy on admin-web only. Current prod web is not
-          on B — revision 00023 (100% traffic) is nginx /api, not GIS. The 26 Aug 2026
-          comms meeting used the snapshot API on that 00023 path.{' '}
+          Architecture B is the intended prod path: Google Identity Services, direct
+          admin-api, Identity-Aware Proxy on admin-web only. nginx /api stays for
+          Server-Sent Events and rollback. Bake versus live traffic is ARCH-B cutover
+          — do not pin Architecture A or invent a revision percent.{' '}
           <Link className="text-habeas-navy underline-offset-2 hover:underline" to="/dev">
             All labs
           </Link>
@@ -88,7 +88,7 @@ export function TokenResourceServerLabPage() {
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant="default">Intended B · GIS + direct API</Badge>
         <Badge variant="wait">IAP · admin-web only</Badge>
-        <Badge variant="wait">Prod 00023 · not GIS</Badge>
+        <Badge variant="wait">Bake ≠ traffic · ARCH-B</Badge>
       </div>
 
       <div className="grid gap-3 lg:grid-cols-2">
@@ -113,7 +113,7 @@ export function TokenResourceServerLabPage() {
             <p className="text-[0.65rem] font-medium uppercase tracking-[0.14em] text-mute">
               Meeting
             </p>
-            <h2 className="mt-1 text-sm font-semibold text-ink">Snapshot API + 00023</h2>
+            <h2 className="mt-1 text-sm font-semibold text-ink">Snapshot API (comms cutover)</h2>
           </header>
           <ol className="space-y-2 px-4 py-3 text-xs leading-relaxed text-ink-soft">
             {MEETING_HOPS.map((hop, index) => (
@@ -138,7 +138,7 @@ export function TokenResourceServerLabPage() {
             <TableRow>
               <TableHead>Hop</TableHead>
               <TableHead>Intended B</TableHead>
-              <TableHead>Empty VITE (prod 00023)</TableHead>
+              <TableHead>Empty VITE (nginx /api rollback)</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -184,11 +184,10 @@ export function TokenResourceServerLabPage() {
           Meeting vs B
         </p>
         <p className="mt-2 text-xs leading-relaxed text-ink-soft">
-          26 Aug 2026 — Communications onboarding needed a loading console. That cutover was{' '}
-          <span className="font-mono">GET /ops/drop/console/snapshot</span> plus web revision
-          00023 (still 100% of prod; nginx /api, not GIS). Architecture B is intended in
-          this tree and is not what prod serves. Do not claim prod already uses Google
-          Identity Services. This lab is URL-only — not in primary nav.
+          26 Aug 2026 — Communications onboarding used{' '}
+          <span className="font-mono">GET /ops/drop/console/snapshot</span>. Architecture B
+          is the intended prod path (GIS user JWT → admin-api). nginx /api stays for
+          Server-Sent Events and rollback. This lab is URL-only — not in primary nav.
         </p>
       </article>
     </section>

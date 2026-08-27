@@ -5,9 +5,10 @@ Auth0, Axios Headquarters, and other vendor verticals are separate workers — n
 this process. Webform / CSV / manual stay in this same app (MDR plaintext) — do
 not add a second Cloud Run for those intakes. Target Cloud Run names:
 `data-vertical-matching-dev` / `data-vertical-matching-prod` and drain jobs
-`data-vertical-matching-drain-dev` / `data-vertical-matching-drain-prod`. Live
-rename is Jose-gated; historical `matching-dev` may still be the running service
-until cutover.
+`data-vertical-matching-drain-dev` / `data-vertical-matching-drain-prod`. **Prod**
+is live: `data-vertical-matching-prod`; `admin-api-prod` `_MATCHING_URL` points
+there (not legacy `matching-prod`). **Dev** may still run historical
+`matching-dev` until Jose flips admin-api-dev to `data-vertical-matching-dev`.
 
 A `MatchingPipeline` interface with one adapter per source — `DropHashPipeline`
 (DROP: SHA-256 compare against the BigQuery hash-index marts) and
@@ -50,11 +51,12 @@ is a new adapter class, not a new app.
 3. Confirm pending declines faster than ~12/hour (Job executions visible in Cloud Run).
 4. Flip matching Scheduler to ensure-drain only.
 5. Mid-flight rows: complete or reaper timeout → new pending → chunk drain.
-6. **Prod:** Jose-approved (2026-07-22). Use `infra/cloudbuild/data-vertical-matching-prod.yaml` once
-   prod Cloud SQL exists; create/flip `dpra-prod-matching` → `/ensure-drain` after smoke.
-   Today `example-gcp-project` has no prod SQL / `data-vertical-matching-prod` runtime — live
-   rename is Jose-gated; historical `matching-dev` + `matching-drain-dev` may still be
-   the running services until cutover.
+6. **Prod:** live. Cloud SQL `dpra-prod` exists. `data-vertical-matching-prod` + Job
+   `data-vertical-matching-drain-prod` are deployed; `admin-api-prod` `_MATCHING_URL`
+   points at `https://data-vertical-matching-prod-hsa55rg7ja-uk.a.run.app` (not
+   legacy `matching-prod`). Scheduler `dpra-prod-matching` → `/ensure-drain`.
+   **Dev** may still run historical `matching-dev` + `matching-drain-dev` until
+   Jose flips admin-api-dev to `data-vertical-matching-dev`.
 
 ## Auth0 vertical
 

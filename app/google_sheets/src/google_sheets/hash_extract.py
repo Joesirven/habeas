@@ -1,7 +1,10 @@
 """Hash upload CSV emails in memory and write hashed-raw rows.
 
-Source is ``integration_connections.metadata.gcs_uri`` (owner Upload). Emails
-are hashed before any BigQuery write. Raw emails never persist or log.
+Source is ``integration_connections.metadata.gcs_uri`` (owner Upload). Apply
+persisted ``metadata.column_mapping`` (canonical → source header) the same way
+Paylocity does; existing header aliases are the fallback when mapping is
+absent. Emails are hashed before any BigQuery write. Raw emails never persist
+or log. Do not invent CSV columns.
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ import inspect
 import io
 import json
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -100,23 +103,69 @@ async def load_connection_gcs_uri(conn: Any, system: str) -> str:
     return uri
 
 
-def _pick_column(fieldnames: Iterable[str] | None, aliases: frozenset[str]) -> str | None:
-    for name in fieldnames or ():
-        if name and _normalize_header(name) in aliases:
-            return name
+def _column_mapping(metadata: dict[str, Any] | None) -> dict[str, str] | None:
+    if not metadata:
+        return None
+    raw = metadata.get("column_mapping")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        if value is None:
+            continue
+        canonical = _normalize_header(str(key))
+        source = str(value).strip()
+        if canonical and source:
+            out[canonical] = source
+    return out or None
+
+
+def _pick_column(
+    fieldnames: list[str],
+    aliases: frozenset[str],
+    *,
+    mapping: dict[str, str] | None,
+    canonical: str,
+) -> str | None:
+    if mapping:
+        source = mapping.get(canonical)
+        if source:
+            if source in fieldnames:
+                return source
+            by_norm = {_normalize_header(name): name for name in fieldnames if name}
+            return by_norm.get(_normalize_header(str(source)))
+    by_norm = {_normalize_header(name): name for name in fieldnames if name}
+    for alias in aliases:
+        if alias in by_norm:
+            return by_norm[alias]
     return None
 
 
-def _iter_csv_rows(content: bytes) -> list[tuple[str, str | None]]:
+def _iter_csv_rows(
+    content: bytes,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> list[tuple[str, str | None]]:
     try:
         text = content.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise HashExtractError("csv_decode_failed") from exc
     reader = csv.DictReader(io.StringIO(text))
-    email_col = _pick_column(reader.fieldnames, _EMAIL_HEADERS)
+    fieldnames = [name for name in (reader.fieldnames or []) if name]
+    mapping = _column_mapping(metadata)
+    email_col = _pick_column(
+        fieldnames, _EMAIL_HEADERS, mapping=mapping, canonical="email"
+    )
     if email_col is None:
         raise HashExtractError("csv_email_column_missing")
-    vendor_col = _pick_column(reader.fieldnames, _VENDOR_ID_HEADERS)
+    vendor_col = _pick_column(
+        fieldnames, _VENDOR_ID_HEADERS, mapping=mapping, canonical="employee_id"
+    )
 
     rows: list[tuple[str, str | None]] = []
     for index, row in enumerate(reader, start=1):
@@ -159,12 +208,16 @@ async def run_hash_extract(
     *,
     system: str,
     gcs_uri: str,
+    metadata: dict[str, Any] | None = None,
     bq_table: str | None = None,
     read_object_fn: ReadObjectFn | None = None,
     write_hashed_raw_fn: WriteHashedRawFn | None = None,
     email_hash_fn: EmailHashFn | None = None,
 ) -> int:
     """Hash CSV emails from ``gcs_uri`` and write hashed-raw rows.
+
+    ``column_mapping`` (on *metadata*) selects email / employee_id headers;
+    aliases fill gaps only when mapping omits that canonical key.
 
     Returns the number of hashed rows passed to the BigQuery writer. Rows
     without a hashable email are skipped. The writer is never called with an
@@ -186,7 +239,7 @@ async def run_hash_extract(
 
     try:
         content = await _read_csv_bytes(gcs_uri, read_object_fn)
-        csv_rows = _iter_csv_rows(content)
+        csv_rows = _iter_csv_rows(content, metadata=metadata)
     except HashExtractError:
         raise
     except Exception:

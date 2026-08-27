@@ -5,8 +5,11 @@ Dashboard, approvals, Server-Sent Events live stream, mutation routes.
 
 Cloud Run IAP is **off** (`--no-iap`). Deployed identity is app-level `REQUIRE_IAP_IDENTITY=true`:
 a verified Bearer is required; IAP email header alone is **401**. Do **not** re-enable Cloud Run
-IAP on this service. **Prod web is on Architecture B (GIS):** browser JSON sends a GIS user
-Bearer (`aud` = OAuth client). nginx `/api` remains for Server-Sent Events and empty-VITE rollback.
+IAP on this service. **Architecture B is the intended authorized identity:** browser JSON
+sends a GIS user Bearer (`aud` = OAuth client) to admin-api as the resource server. Master yaml
+was reverted in `2094211`; ARCH-B is re-shipping the bake. **Bake ≠ live traffic** until that
+cutover — do not invent a traffic percent. nginx `/api` remains for Server-Sent Events and
+empty-VITE local/emergency rollback — not a standing prod JSON path.
 
 ## DROP ops (Wave B)
 
@@ -42,9 +45,9 @@ owners via `/ops/verticals/assignments`; owners complete setup in the `/owner/co
 Secrets write to Secret Manager only (`dpra/connections/{system}/{connection_id}`). Connection
 tests return allowlisted `detail` codes — never echo credentials. All mutations require a
 verified Bearer on deployed admin-api (`REQUIRE_IAP_IDENTITY`). Browser Architecture B reaches
-admin-api with a GIS user Bearer. nginx `/api` remains for Server-Sent Events and rollback
-(SA Bearer + IAP headers). CLI: `habeas-cli auth login --adc` or
-`auth login` (`ADMIN_API_ID_TOKEN_AUDIENCE` + `IAP_OAUTH_CLIENT_ID`).
+admin-api with a GIS user Bearer. nginx `/api` remains for Server-Sent Events and
+local/emergency rollback (SA Bearer + IAP headers) — not a standing prod JSON path. CLI:
+`habeas-cli auth login --adc` or `auth login` (`ADMIN_API_ID_TOKEN_AUDIENCE` + `IAP_OAUTH_CLIENT_ID`).
 
 Plan: [`docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md`](../../docs/plans/2026-08-11-001-feat-vertical-scoped-connectors-plan.md).
 

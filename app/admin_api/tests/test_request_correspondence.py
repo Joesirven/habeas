@@ -474,6 +474,16 @@ def test_legal_cannot_put_email_template() -> None:
     assert response.status_code == 403
 
 
+def test_fulfillment_gcs_bucket_defaults_to_prod(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FULFILLMENT_GCS_BUCKET", raising=False)
+    assert request_correspondence._fulfillment_gcs_bucket() == "privacy-fulfillment-prod"
+
+
+def test_fulfillment_gcs_bucket_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FULFILLMENT_GCS_BUCKET", "privacy-fulfillment-dev")
+    assert request_correspondence._fulfillment_gcs_bucket() == "privacy-fulfillment-dev"
+
+
 # --- U7: document role expansion + download (R20/KD12/KTD9) -----------------
 
 
@@ -544,7 +554,10 @@ async def test_download_request_document_returns_bytes(monkeypatch: pytest.Monke
         return_value={
             "filename": "notice.pdf",
             "content_type": "application/pdf",
-            "gcs_uri": "gs://privacy-fulfillment-dev/requests/x/documents/y/notice.pdf",
+            "gcs_uri": (
+                f"gs://{request_correspondence._fulfillment_gcs_bucket()}"
+                "/requests/x/documents/y/notice.pdf"
+            ),
         }
     )
     _patch_pool(monkeypatch, conn)  # type: ignore[arg-type]
@@ -584,7 +597,10 @@ async def test_download_request_document_404_when_object_missing(
         return_value={
             "filename": "notice.pdf",
             "content_type": "application/pdf",
-            "gcs_uri": "gs://privacy-fulfillment-dev/requests/x/documents/y/notice.pdf",
+            "gcs_uri": (
+                f"gs://{request_correspondence._fulfillment_gcs_bucket()}"
+                "/requests/x/documents/y/notice.pdf"
+            ),
         }
     )
     _patch_pool(monkeypatch, conn)  # type: ignore[arg-type]

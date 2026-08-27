@@ -98,12 +98,12 @@ describe('matching not-live callout (owner language)', () => {
   test('saas stub keeps confirm/decline without invented matching claims', () => {
     const copy = matchingNotLiveCalloutCopy({
       result_kind: 'saas_stub',
-      system: 'mailchimp',
-      system_label: 'Mailchimp',
+      system: 'cassandra',
+      system_label: 'Cassandra',
     })
     expect(copy.title).toBe('System matching not live')
     expect(copy.reason).toBe(
-      'Mailchimp has no match result. Confirm or decline this inbox item.',
+      'Cassandra has no match result. Confirm or decline this inbox item.',
     )
     expect(copy.reason).toMatch(/Confirm or decline/)
     expect(copy.reason).not.toMatch(/catalog-only/i)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -44,7 +45,12 @@ DataOwnerFulfillmentMutator = Annotated[
 
 DeliveryStatus = Literal["pending", "delivered", "failed", "recalled"]
 _ALLOWED_DELIVERY = frozenset({"pending", "delivered", "failed", "recalled"})
-_FULFILLMENT_BUCKET = "privacy-fulfillment-dev"
+_DEFAULT_FULFILLMENT_BUCKET = "privacy-fulfillment-prod"
+
+
+def _fulfillment_gcs_bucket() -> str:
+    """GCS bucket for fulfillment artifacts. Env override; prod default when unset."""
+    return os.environ.get("FULFILLMENT_GCS_BUCKET", "").strip() or _DEFAULT_FULFILLMENT_BUCKET
 
 
 class FulfillmentArtifactResponse(BaseModel):
@@ -298,7 +304,7 @@ async def initiate_interim_access(
             rid,
         )
         gcs_uri = await provision_interim_prefix(
-            bucket=_FULFILLMENT_BUCKET,
+            bucket=_fulfillment_gcs_bucket(),
             process_id=str(process_id),
             request_id=request_id,
         )
@@ -391,7 +397,8 @@ async def upload_interim_access_files(
         if row is None or not row["gcs_uri"]:
             raise HTTPException(status_code=409, detail="interim access not initiated")
         base_uri = str(row["gcs_uri"])
-        prefix = base_uri.replace(f"gs://{_FULFILLMENT_BUCKET}/", "").rsplit("/", 1)[0] + "/"
+        bucket = _fulfillment_gcs_bucket()
+        prefix = base_uri.replace(f"gs://{bucket}/", "").rsplit("/", 1)[0] + "/"
 
         for upload in files:
             raw = await upload.read()
@@ -399,7 +406,7 @@ async def upload_interim_access_files(
                 continue
             name = (upload.filename or "upload.bin").strip()[:200]
             uri = await write_object(
-                _FULFILLMENT_BUCKET,
+                bucket,
                 f"{prefix}{name}",
                 raw,
                 content_type=upload.content_type or "application/octet-stream",

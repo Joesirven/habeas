@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
@@ -72,6 +73,13 @@ TEMPLATE_VARIABLES: dict[str, list[str]] = {
     "general": list(_COMMON_TEMPLATE_VARIABLES),
 }
 _ALL_TEMPLATE_VARIABLES = sorted({v for values in TEMPLATE_VARIABLES.values() for v in values})
+
+_DEFAULT_FULFILLMENT_BUCKET = "privacy-fulfillment-prod"
+
+
+def _fulfillment_gcs_bucket() -> str:
+    """GCS bucket for request documents. Env override; prod default when unset."""
+    return os.environ.get("FULFILLMENT_GCS_BUCKET", "").strip() or _DEFAULT_FULFILLMENT_BUCKET
 
 
 def _allowed_variables_for_slug(slug: str) -> list[str]:
@@ -566,7 +574,7 @@ async def upload_request_document(
 
     doc_id = uuid4()
     gcs_path = f"requests/{request_id}/documents/{doc_id}/{filename}"
-    bucket = "privacy-fulfillment-dev"
+    bucket = _fulfillment_gcs_bucket()
     gcs_uri = await write_object(bucket, gcs_path, raw, content_type=content_type)
     actor = (principal.email or "legal")[:200]
 
