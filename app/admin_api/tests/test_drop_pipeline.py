@@ -1246,6 +1246,9 @@ async def test_collect_matching_results_stats_and_filter():
     conn.fetch = AsyncMock(return_value=rows)
 
     all_results = await drop_pipeline.collect_matching_results(conn, limit=100)
+    issued_sql = conn.fetch.await_args.args[0]
+    assert "LIMIT" in issued_sql
+    assert "DISTINCT ON" not in issued_sql
     assert all_results["stats"]["total"] == 3
     assert all_results["stats"]["single_match"] == 1
     assert all_results["stats"]["multi_match"] == 1
@@ -3871,6 +3874,9 @@ async def test_collect_bulk_process_progress_missing_gcs_uri_skips_global_matchi
 def _reset_matching_progress_cache() -> None:
     """Drop in-process matching TTL so hermetic tests hit SQL, not a prior result."""
     drop_pipeline._matching_progress_cache = None
+    drop_pipeline._matching_progress_refreshing = False
+    drop_pipeline._pipeline_summary_cache = None
+    drop_pipeline._pipeline_summary_refreshing = False
 
 
 @pytest.fixture(autouse=True)
@@ -3940,7 +3946,11 @@ def _assert_matching_progress_sql(issued: list[str]) -> None:
     compact = " ".join(group_bys[0].split())
     assert "FROM matching_attempts" in compact
     assert "GROUP BY ma.status" in compact or "GROUP BY status" in compact
-    attempt_sqls = [sql for sql in issued if "matching_attempts" in sql]
+    attempt_sqls = [
+        sql
+        for sql in issued
+        if "matching_attempts" in sql and "GROUP BY" in sql and "pg_class" not in sql
+    ]
     assert len(attempt_sqls) == 1
     assert all("drop_connector_attempts" not in sql for sql in issued)
     assert all("drop_ingest_attempts" not in sql for sql in issued)
@@ -4036,6 +4046,27 @@ async def test_collect_matching_progress_ttl_skips_immediate_second_sql() -> Non
     assert "consumer_id" not in blob
 
 
+@pytest.mark.asyncio
+async def test_collect_matching_progress_serves_stale_without_sql() -> None:
+    """Expired matching cache is served immediately — no second GROUP BY."""
+    _reset_matching_progress_cache()
+    conn, issued = _capturing_matching_progress_conn()
+    first = await drop_pipeline.collect_matching_progress(conn)
+    first_sql = list(issued)
+    _assert_matching_progress_sql(first_sql)
+    assert conn.fetch.await_count == 1
+
+    cached_at, cached_result = drop_pipeline._matching_progress_cache
+    drop_pipeline._matching_progress_cache = (
+        cached_at - drop_pipeline._MATCHING_PROGRESS_TTL_SECONDS - 1.0,
+        cached_result,
+    )
+    second = await drop_pipeline.collect_matching_progress(conn)
+    assert second == first
+    assert issued == first_sql
+    assert conn.fetch.await_count == 1
+
+
 def _capturing_pipeline_summary_conn() -> tuple[MagicMock, list[str]]:
     """Conn that records summary SQL — must stay off the drop_raw_requests spine."""
     issued: list[str] = []
@@ -4044,6 +4075,8 @@ def _capturing_pipeline_summary_conn() -> tuple[MagicMock, list[str]]:
         issued.append(sql)
         if "drop_raw_requests" in sql:
             raise AssertionError("pipeline summary must not scan drop_raw_requests")
+        if "pg_class" in sql:
+            return 1_843_251
         if "FROM requests" in sql and "intake_source = 'drop'" in sql:
             return 1_843_251
         if "approval_requests" in sql and "status = 'pending'" in sql:
@@ -4088,11 +4121,14 @@ async def _fake_ca_drop_schedule_payload(
 def _assert_pipeline_summary_sql(issued: list[str]) -> None:
     assert len(issued) == 3
     assert all("drop_raw_requests" not in sql for sql in issued)
-    open_sql = next(sql for sql in issued if "FROM requests" in sql)
+    open_sql = next(
+        sql
+        for sql in issued
+        if "pg_class" in sql or ("FROM requests" in sql and "intake_source" in sql)
+    )
     review_sql = next(sql for sql in issued if "approval_requests" in sql)
     connector_sql = next(sql for sql in issued if "drop_connector_attempts" in sql)
-    assert "intake_source = 'drop'" in open_sql
-    assert "COUNT(*)" in open_sql
+    assert "reltuples" in open_sql or "COUNT(*)" in open_sql
     assert "status = 'pending'" in review_sql
     assert "status = 'success'" in connector_sql
     assert "GROUP BY" not in " ".join(issued)
@@ -4156,6 +4192,8 @@ async def test_collect_pipeline_summary_fetchvals_are_sequential(
             await asyncio.sleep(0)
             if "drop_raw_requests" in sql:
                 raise AssertionError("pipeline summary must not scan drop_raw_requests")
+            if "pg_class" in sql:
+                return 1_843_251
             if "FROM requests" in sql and "intake_source = 'drop'" in sql:
                 return 1_843_251
             if "approval_requests" in sql and "status = 'pending'" in sql:
@@ -4297,6 +4335,8 @@ def _capturing_console_snapshot_conn(
                 raise AssertionError(
                     "console snapshot open count must not GROUP BY / JOIN drop_raw_requests"
                 )
+            if "pg_class" in sql:
+                return 1_843_251
             if "FROM requests" in sql and "intake_source = 'drop'" in sql:
                 return 1_843_251
             if "approval_requests" in sql and "status = 'pending'" in sql:
@@ -4391,7 +4431,7 @@ def _assert_console_snapshot_body(body: dict[str, Any]) -> None:
     assert "label" in processes["processes"][0]
     recent = body["recent_processes"]
     assert isinstance(recent, dict)
-    assert recent["days"] == 30
+    assert recent["days"] in (7, 30)
     assert isinstance(recent["processes"], list)
     assert recent["processes"][0]["process_id"] == 12
     blob = json.dumps(body).lower()
@@ -4426,6 +4466,35 @@ async def test_collect_console_snapshot_sequential_no_raw_spine(
     _assert_console_snapshot_sql(issued)
     _assert_console_snapshot_body(body)
     assert conn.fetchval.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_collect_console_snapshot_reuses_process_list_for_recent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default recent window ⊆ process window — one list_bulk_processes only."""
+    monkeypatch.setattr(
+        "admin_api.worker_schedules.ca_drop_schedule_payload",
+        _fake_ca_drop_schedule_payload,
+    )
+    calls: list[dict[str, Any]] = []
+
+    async def _counting_list(_conn: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        calls.append(kwargs)
+        return [_snapshot_process_row(12)]
+
+    monkeypatch.setattr(drop_pipeline, "list_bulk_processes", _counting_list)
+    monkeypatch.setattr(
+        drop_pipeline,
+        "collect_bulk_process_summaries_lite",
+        _fake_snapshot_lite_summaries,
+    )
+    conn, issued = _capturing_console_snapshot_conn()
+    body = await drop_pipeline.collect_console_snapshot(conn)
+    assert len(calls) == 1
+    assert body["recent_processes"]["days"] == 7
+    assert body["recent_processes"]["processes"][0]["process_id"] == 12
+    assert all("drop_raw_requests" not in sql for sql in issued)
 
 
 def test_console_snapshot_route_registered() -> None:

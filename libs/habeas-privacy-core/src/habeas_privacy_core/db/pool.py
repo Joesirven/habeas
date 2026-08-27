@@ -7,8 +7,12 @@ import asyncpg
 _pool: asyncpg.Pool | None = None
 
 
-async def create_pool(database_url: str, *, min_size: int = 1, max_size: int = 5) -> asyncpg.Pool:
-    """Create and register the process-wide connection pool."""
+async def create_pool(database_url: str, *, min_size: int = 1, max_size: int = 12) -> asyncpg.Pool:
+    """Create and register the process-wide connection pool.
+
+    Default max_size is 12 (min_size stays 1). admin-api Cloud Run concurrency is 40;
+    a 5-conn pool lets fat DROP collectors starve first-paint GETs.
+    """
     global _pool
     if _pool is not None:
         await close_pool()

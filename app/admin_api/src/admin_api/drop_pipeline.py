@@ -761,10 +761,16 @@ def _rollup_raw_request_groups(
     return list_rows, status_rows
 
 
-_MATCHING_PROGRESS_TTL_SECONDS = 2.0
-_MATCHING_PROGRESS_DRAIN_TTL_SECONDS = 4.0
+_MATCHING_PROGRESS_TTL_SECONDS = 30.0
+_MATCHING_PROGRESS_DRAIN_TTL_SECONDS = 45.0
 _matching_progress_cache: tuple[float, dict[str, Any]] | None = None
 _matching_progress_refresh_lock: asyncio.Lock | None = None
+_matching_progress_refreshing = False
+
+_PIPELINE_SUMMARY_TTL_SECONDS = 30.0
+_pipeline_summary_cache: tuple[float, dict[str, Any]] | None = None
+_pipeline_summary_refresh_lock: asyncio.Lock | None = None
+_pipeline_summary_refreshing = False
 
 
 def _matching_progress_lock() -> asyncio.Lock:
@@ -772,6 +778,13 @@ def _matching_progress_lock() -> asyncio.Lock:
     if _matching_progress_refresh_lock is None:
         _matching_progress_refresh_lock = asyncio.Lock()
     return _matching_progress_refresh_lock
+
+
+def _pipeline_summary_lock() -> asyncio.Lock:
+    global _pipeline_summary_refresh_lock
+    if _pipeline_summary_refresh_lock is None:
+        _pipeline_summary_refresh_lock = asyncio.Lock()
+    return _pipeline_summary_refresh_lock
 
 
 def _matching_progress_ttl_seconds(result: dict[str, Any]) -> float:
@@ -793,14 +806,91 @@ def _matching_progress_cache_hit(
     return cached_result
 
 
+def _matching_progress_stale() -> dict[str, Any] | None:
+    if _matching_progress_cache is None:
+        return None
+    return _matching_progress_cache[1]
+
+
+def _pipeline_summary_cache_hit(
+    *,
+    now: float | None = None,
+) -> dict[str, Any] | None:
+    if _pipeline_summary_cache is None:
+        return None
+    cached_at, cached_result = _pipeline_summary_cache
+    stamp = now if now is not None else monotonic()
+    if stamp - cached_at >= _PIPELINE_SUMMARY_TTL_SECONDS:
+        return None
+    return cached_result
+
+
+def _pipeline_summary_stale() -> dict[str, Any] | None:
+    if _pipeline_summary_cache is None:
+        return None
+    return _pipeline_summary_cache[1]
+
+
+def _schedule_background(coro_factory: Any) -> None:
+    """Fire-and-forget refresh. No-op when no running loop or pool."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(coro_factory())
+
+
+async def _refresh_matching_progress_background() -> None:
+    global _matching_progress_refreshing, _matching_progress_cache
+    if _matching_progress_refreshing:
+        return
+    _matching_progress_refreshing = True
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            async with ops_fast_statement_scope(conn):
+                result = await _fetch_matching_progress(conn)
+            _matching_progress_cache = (monotonic(), result)
+    except Exception:
+        logger.exception(
+            "matching_progress_refresh_failed",
+            extra={"event": "matching_progress_refresh_failed"},
+        )
+    finally:
+        _matching_progress_refreshing = False
+
+
+async def _refresh_pipeline_summary_background() -> None:
+    global _pipeline_summary_refreshing, _pipeline_summary_cache
+    if _pipeline_summary_refreshing:
+        return
+    _pipeline_summary_refreshing = True
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            async with ops_fast_statement_scope(conn):
+                result = await _collect_pipeline_summary_body(conn)
+            _pipeline_summary_cache = (monotonic(), result)
+    except Exception:
+        logger.exception(
+            "pipeline_summary_refresh_failed",
+            extra={"event": "pipeline_summary_refresh_failed"},
+        )
+    finally:
+        _pipeline_summary_refreshing = False
+
+
 async def _fetch_matching_progress(conn: Any) -> dict[str, Any]:
-    """One GROUP BY on matching_attempts (DROP intake) plus drain lease. No PII."""
+    """One GROUP BY on open matching_attempts plus drain lease. No PII.
+
+    Pending/claimed/in_flight are a small indexed set. A full-status GROUP BY
+    (or JOIN requests) is ~8s p95 on prod and must stay off the request path.
+    """
     matching_attempt_rows = await conn.fetch(
         """
         SELECT ma.status, COUNT(*)::int AS count
           FROM matching_attempts ma
-          JOIN requests r ON r.id = ma.request_id
-         WHERE r.intake_source = 'drop'
+         WHERE ma.status IN ('pending', 'claimed', 'in_flight')
          GROUP BY ma.status
          ORDER BY ma.status
         """
@@ -809,15 +899,33 @@ async def _fetch_matching_progress(conn: Any) -> dict[str, Any]:
     matching_success = 0
     matching_claimed = 0
     matching_by_status: list[dict[str, Any]] = []
+    open_n = 0
     for row in matching_attempt_rows:
         item = {"status": row["status"], "count": int(row["count"])}
         matching_by_status.append(item)
+        if row["status"] in _OPEN_ATTEMPT_STATUSES:
+            open_n += item["count"]
         if row["status"] == "pending":
             matching_pending = item["count"]
         elif row["status"] == "success":
             matching_success = item["count"]
         elif row["status"] == "claimed":
             matching_claimed = item["count"]
+
+    if matching_success == 0:
+        stale = _matching_progress_stale()
+        if stale is not None and int(stale.get("success") or 0) > 0:
+            matching_success = int(stale["success"])
+        else:
+            estimate = await conn.fetchval(
+                """
+                SELECT reltuples::bigint
+                  FROM pg_class
+                 WHERE oid = 'matching_attempts'::regclass
+                """
+            )
+            matching_success = max(0, int(estimate or 0) - open_n)
+        matching_by_status.append({"status": "success", "count": matching_success})
 
     drain_lease_row = await conn.fetchrow(
         """
@@ -852,19 +960,28 @@ async def _fetch_matching_progress(conn: Any) -> dict[str, Any]:
 
 
 async def collect_matching_progress(conn: Any) -> dict[str, Any]:
-    """Return cached matching progress; refresh at most once per ~2s (~4s during drain).
+    """Return cached matching progress; serve stale immediately when TTL expires.
 
-    Pipeline / matching-progress polls (~750ms during drain) must not each pay the
-    full matching_attempts GROUP BY cost (~8s p95 on prod).
+    Cold miss runs the cheap open-status GROUP BY (8s statement cap). Spaced
+    polls must not re-pay a full matching_attempts scan.
     """
     hit = _matching_progress_cache_hit()
     if hit is not None:
         return hit
+    stale = _matching_progress_stale()
+    if stale is not None:
+        _schedule_background(_refresh_matching_progress_background)
+        return stale
     async with _matching_progress_lock():
         hit = _matching_progress_cache_hit()
         if hit is not None:
             return hit
-        result = await _fetch_matching_progress(conn)
+        stale = _matching_progress_stale()
+        if stale is not None:
+            _schedule_background(_refresh_matching_progress_background)
+            return stale
+        async with ops_fast_statement_scope(conn):
+            result = await _fetch_matching_progress(conn)
         global _matching_progress_cache
         _matching_progress_cache = (monotonic(), result)
         return result
@@ -873,30 +990,40 @@ async def collect_matching_progress(conn: Any) -> dict[str, Any]:
 async def collect_pipeline_summary(conn: Any) -> dict[str, Any]:
     """Header counts for Pipeline console — no drop_raw_requests spine scan.
 
-    ``open_requests`` is DROP intake volume on ``requests`` only. ``review_pending``
-    is approval_requests.pending for matching.review. Worker-down uses the cached
-    probe snapshot only (never fans out on this path). ``ca_drop_schedule`` reuses
-    the lite connector last-success query (no raw spine).
+    ``open_requests`` uses ``pg_class.reltuples`` (instant) instead of COUNT on
+    1.8M ``requests`` rows. ``review_pending`` is approval_requests.pending for
+    matching.review. Worker-down uses the cached probe snapshot only.
     """
-    # asyncpg connections are not concurrent — never asyncio.gather on one conn.
-    async with ops_fast_statement_scope(conn):
-        return await _collect_pipeline_summary_body(conn)
+    hit = _pipeline_summary_cache_hit()
+    if hit is not None:
+        return hit
+    stale = _pipeline_summary_stale()
+    if stale is not None:
+        _schedule_background(_refresh_pipeline_summary_background)
+        return stale
+    async with _pipeline_summary_lock():
+        hit = _pipeline_summary_cache_hit()
+        if hit is not None:
+            return hit
+        stale = _pipeline_summary_stale()
+        if stale is not None:
+            _schedule_background(_refresh_pipeline_summary_background)
+            return stale
+        async with ops_fast_statement_scope(conn):
+            result = await _collect_pipeline_summary_body(conn)
+        global _pipeline_summary_cache
+        _pipeline_summary_cache = (monotonic(), result)
+        return result
 
 
 async def _collect_pipeline_summary_body(conn: Any) -> dict[str, Any]:
-    if _supports_local_statement_timeout(conn):
-        # Prefer ix_requests_intake_source_received / ix_requests_drop_id over a
-        # 1.8M-row heap scan (prod p95 ~15s without the index-only path).
-        await conn.execute("SET LOCAL enable_seqscan = off")
     open_requests = await conn.fetchval(
         """
-        SELECT COUNT(*)::bigint
-          FROM requests
-         WHERE intake_source = 'drop'
+        SELECT reltuples::bigint
+          FROM pg_class
+         WHERE oid = 'requests'::regclass
         """
     )
-    if _supports_local_statement_timeout(conn):
-        await conn.execute("SET LOCAL enable_seqscan = on")
     review_pending = await conn.fetchval(
         """
         SELECT COUNT(*)::int
@@ -1597,13 +1724,15 @@ async def collect_console_snapshot(
     *,
     process_days: int = 7,
     process_limit: int = 50,
-    recent_days: int = 30,
-    recent_limit: int = 100,
+    recent_days: int = 7,
+    recent_limit: int = 50,
 ) -> dict[str, Any]:
     """Unified Pipeline console paint — summary + matching + process heads.
 
     Collectors run sequentially on one connection; asyncpg forbids concurrent
     operations on a single connection (``asyncio.gather`` on one ``conn`` 500s).
+    When the recent window fits inside the process window, reuse those heads
+    instead of a second ``list_bulk_processes`` scan.
     """
     summary = await collect_pipeline_summary(conn)
     summary.pop("as_of", None)
@@ -1613,18 +1742,38 @@ async def collect_console_snapshot(
         days=process_days,
         limit=process_limit,
     )
-    recent_processes = await list_bulk_processes(
-        conn,
-        days=max(1, min(recent_days, 30)),
-        limit=max(1, min(recent_limit, 100)),
+    bounded_recent_days = max(1, min(recent_days, 30))
+    bounded_recent_limit = max(1, min(recent_limit, 100))
+    reuse_recent = (
+        bounded_recent_days <= max(1, min(process_days, 30))
+        and bounded_recent_limit <= max(1, min(process_limit, 100))
     )
+    if reuse_recent:
+        recent_processes = [
+            {
+                "process_id": item["process_id"],
+                "intake_source": item["intake_source"],
+                "process_at": item.get("process_at"),
+                "completed_at": item.get("completed_at"),
+                "download_status": item.get("download_status"),
+                "label": item.get("label"),
+                "linkable": item.get("linkable"),
+            }
+            for item in processes.get("processes", [])
+        ][:bounded_recent_limit]
+    else:
+        recent_processes = await list_bulk_processes(
+            conn,
+            days=bounded_recent_days,
+            limit=bounded_recent_limit,
+        )
     return {
         "as_of": datetime.now(timezone.utc).isoformat(),
         "summary": summary,
         "matching_progress": matching_progress,
         "processes": processes,
         "recent_processes": {
-            "days": max(1, min(recent_days, 30)),
+            "days": bounded_recent_days,
             "processes": recent_processes,
         },
     }
@@ -3301,54 +3450,48 @@ async def collect_matching_results(
     """
     from habeas_privacy_core.workflow.approval import WORKFLOW_ASSIGNMENT_ACTION
 
-    latest_rows = await conn.fetch(
-        """
-        WITH latest AS (
-            SELECT DISTINCT ON (mr.request_id)
-                   mr.request_id::text AS request_id,
+    # LIMIT in SQL — DISTINCT ON the full matching_results table 20s-timeouts prod.
+    async with ops_fast_statement_scope(conn):
+        latest_rows = await conn.fetch(
+            """
+            SELECT mr.request_id::text AS request_id,
                    mr.matched,
                    mr.match_count,
                    mr.matched_via,
                    mr.recorded_at,
-                   UPPER(TRIM(r.requestor_state)) AS requestor_state
+                   UPPER(TRIM(r.requestor_state)) AS requestor_state,
+                   ar.id AS approval_id,
+                   COALESCE(ar.status, 'none') AS review_status,
+                   wa.approver_role AS assignment_target,
+                   wa.context_jsonb AS assignment_context
               FROM matching_results mr
-              JOIN requests r ON r.id = mr.request_id
-             WHERE r.intake_source = 'drop'
-             ORDER BY mr.request_id, mr.recorded_at DESC
+              JOIN requests r
+                ON r.id = mr.request_id
+               AND r.intake_source = 'drop'
+              LEFT JOIN LATERAL (
+                    SELECT a.id, a.status
+                      FROM approval_requests a
+                     WHERE a.request_id = mr.request_id
+                       AND a.action_type = $1
+                     ORDER BY a.requested_at DESC
+                     LIMIT 1
+              ) ar ON TRUE
+              LEFT JOIN LATERAL (
+                    SELECT a.approver_role, a.context_jsonb
+                      FROM approval_requests a
+                     WHERE a.request_id = mr.request_id
+                       AND a.action_type = $2
+                       AND a.status = 'pending'
+                     ORDER BY a.requested_at DESC
+                     LIMIT 1
+              ) wa ON TRUE
+             ORDER BY mr.recorded_at DESC NULLS LAST
+             LIMIT $3
+            """,
+            MATCHING_REVIEW_ACTION,
+            WORKFLOW_ASSIGNMENT_ACTION,
+            max(1, min(int(limit), 500)),
         )
-        SELECT lr.request_id,
-               lr.matched,
-               lr.match_count,
-               lr.matched_via,
-               lr.recorded_at,
-               lr.requestor_state,
-               ar.id AS approval_id,
-               COALESCE(ar.status, 'none') AS review_status,
-               wa.approver_role AS assignment_target,
-               wa.context_jsonb AS assignment_context
-          FROM latest lr
-          LEFT JOIN LATERAL (
-                SELECT a.id, a.status
-                  FROM approval_requests a
-                 WHERE a.request_id = lr.request_id::uuid
-                   AND a.action_type = $1
-                 ORDER BY a.requested_at DESC
-                 LIMIT 1
-          ) ar ON TRUE
-          LEFT JOIN LATERAL (
-                SELECT a.approver_role, a.context_jsonb
-                  FROM approval_requests a
-                 WHERE a.request_id = lr.request_id::uuid
-                   AND a.action_type = $2
-                   AND a.status = 'pending'
-                 ORDER BY a.requested_at DESC
-                 LIMIT 1
-          ) wa ON TRUE
-         ORDER BY lr.recorded_at DESC
-        """,
-        MATCHING_REVIEW_ACTION,
-        WORKFLOW_ASSIGNMENT_ACTION,
-    )
 
     id_query = (request_id or q or "").strip() or None
     state_norm = state.strip().upper() if state else None

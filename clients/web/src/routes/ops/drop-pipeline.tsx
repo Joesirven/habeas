@@ -1216,8 +1216,8 @@ const ACTIVE_BULK_MAX_AGE_MS = 48 * 60 * 60 * 1000
 const CONSOLE_SNAPSHOT_PARAMS = {
   process_days: 7,
   process_limit: 50,
-  recent_days: 30,
-  recent_limit: 100,
+  recent_days: 7,
+  recent_limit: 50,
 } as const
 
 const CONSOLE_SNAPSHOT_QUERY_KEY = [
