@@ -39,7 +39,7 @@ steps:
       - --no-allow-unauthenticated
       - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
       - --timeout=3600
-      - --set-env-vars=SERVICE_NAME=google-sheets,WORKER_ID=google-sheets-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL}
+      - --set-env-vars=SERVICE_NAME=google-sheets,WORKER_ID=google-sheets-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,GCS_TRANSPORT=google,DATABASE_URL=${_DATABASE_URL}
 
   # admin-api runtime SA only — never user/IAP run.invoker on workers. Never allUsers.
   - id: grant-admin-api-invoker

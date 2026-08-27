@@ -536,6 +536,8 @@ Rules: service name = kebab-case + `-dev`; `google_sheets` → `google-sheets-de
 
 **Prod workers (live):** `admin-api-prod`, `drop-connector-prod`, `drop-ingestor-prod`, `request-dispatcher-prod`, `data-vertical-matching-prod`, `hash-index-refresh-prod`, `data-fulfillment-dispatcher-prod`, `drop-notice-dispatcher-prod`, `reaper-prod`, and vertical workers `auth0-prod`, `axios-headquarters-prod`, `google-sheets-prod`, `lever-prod`, `paylocity-prod`. Redeploy DROP hash worker via [`cloudbuild/hash-index-refresh-prod.yaml`](cloudbuild/hash-index-refresh-prod.yaml) (pass `_DATABASE_URL` from `database-url-prod` at submit).
 
+**Owner mapped upload (prod):** `admin-api-prod` sets `CONNECTIONS_UPLOAD_BUCKET=gs://example-gcp-project-dpra-uploads` (objects at `connections/{system}/{connection_id}/upload.csv`). Vertical workers need `GCS_TRANSPORT=google` to read those objects during `POST /hash-refresh/process`. Hash-refresh **enqueue** runs in-process on owner upload; **process** is super_admin via `POST /ops/verticals/{system}/hash-refresh/process` (Auth0 uses `/ops/verticals/auth0/...`). No per-vertical Scheduler in v1 — ops or a follow-up job must call process after enqueue.
+
 **Not live in prod:** `cassandra-prod` (stub / do-not-write until explicit cutover). `mailchimp-prod` is retired. Legacy `matching-prod` may still exist in the project; do not point admin-api at it.
 
 ## Manual deploy (dev)
