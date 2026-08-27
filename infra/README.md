@@ -155,6 +155,17 @@ gcloud builds submit --config=infra/cloudbuild/admin-web-prod.yaml --project=exa
 
 `admin-api-dev` / `admin-api-prod` `_CORS_ORIGINS` already include both `admin-web-*` origins. After a new web origin, append it there and redeploy admin-api.
 
+### Sheets owner OAuth (Connect Google Sheets)
+
+Owner wizard `/owner/connectors` → **Connect Google Sheets** (systems `hr_alumni`, `bizdev_contacts`) runs a Google OAuth **web** client flow in admin-api (`owner_connectors.py` / `lab_sheets_oauth.py`). Both admin-api yamls pass `SHEETS_LAB_OAUTH_CLIENT_ID` / `SHEETS_LAB_OAUTH_CLIENT_SECRET` via `--set-secrets` and set `SHEETS_LAB_ALLOWED_REDIRECT_URIS` to the environment admin-web origin + `/owner/connectors` (dev also lists the local Vite origins).
+
+One-time setup:
+
+1. **GSM secrets:** create `sheets-lab-oauth-client-id` and `sheets-lab-oauth-client-secret` (values from the Sheets OAuth web client; local-dev copies live in repo-root `.env`). Grant the admin-api runtime SA `roles/secretmanager.secretAccessor` on both.
+2. **Cloud Console (not scriptable):** on that OAuth client, register authorized redirect URIs `https://admin-web-prod-hsa55rg7ja-uk.a.run.app/owner/connectors` (prod) and `https://admin-web-dev-hsa55rg7ja-uk.a.run.app/owner/connectors` (dev). Without this, Google shows `redirect_uri_mismatch` **after** our start endpoint succeeds.
+
+Failure modes: origin missing from `SHEETS_LAB_ALLOWED_REDIRECT_URIS` → start returns 400 `redirect_uri_not_allowed`; secrets missing → 503 `sheets_oauth_not_configured`. `--session-affinity` is on both deploys because OAuth sessions are in-process memory (prod `max-instances=3`) — the callback must land on the instance that started the flow. Local dev unchanged: repo-root `.env` values + default localhost allowlist.
+
 ### Post-deploy revision verify (admin-api-prod / admin-web-prod)
 
 After Jose-gated `gcloud builds submit` for [`admin-api-prod.yaml`](cloudbuild/admin-api-prod.yaml) or [`admin-web-prod.yaml`](cloudbuild/admin-web-prod.yaml), confirm the live Cloud Run revision is serving the image you just built — `_TAG: latest` alone does not record which git SHA is live.

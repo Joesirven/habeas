@@ -88,7 +88,6 @@ import {
   suggestUploadColumnMapping,
   uploadMappingComplete,
   UPLOAD_IDENTIFIER_FIELDS,
-  UPLOAD_SAMPLE_CSV,
   EMAIL_FORMAT_OPTIONS,
   PHONE_FORMAT_OPTIONS,
   parseCsvDocument,
@@ -575,15 +574,15 @@ function SheetsHowToPanel({
     <div className="space-y-3">
       <div>
         <h4 className="text-sm font-medium text-ink">
-          {connectorTitle(verticalId, connector)} · Connect Google or upload
+          {connectorTitle(verticalId, connector)} · Sign in with Google or upload
         </h4>
         {copy ? <p className="mt-1 text-xs leading-relaxed text-ink-soft">{copy}</p> : null}
       </div>
       <div className="rounded-md border border-line bg-white px-3 py-2.5 text-xs text-ink-soft">
-        <p className="font-medium text-ink">Connect Google</p>
+        <p className="font-medium text-ink">Sign in with Google</p>
         <p className="mt-1">
           Sign in with your Habeas Google account. After Google returns, pick one
-          spreadsheet and a tab, then extract. No service-account share.
+          spreadsheet and a tab — that’s all. No other access or IT setup is needed.
         </p>
         <p className="mt-2 font-medium text-ink">Or upload a CSV</p>
         <p className="mt-1">
@@ -927,7 +926,7 @@ function SheetsConnectPanel({
     },
     onError: (error) => {
       actionToast.error({
-        title: 'Could not start Google connect',
+        title: 'Could not start Google sign-in',
         description: actionToast.safeErrorMessage(error),
         action: {
           label: 'Retry',
@@ -1004,7 +1003,7 @@ function SheetsConnectPanel({
     <div className="space-y-3">
       <h4 className="text-sm font-medium text-ink">{systemLabel} · Connect</h4>
       <p className="text-xs text-mute">
-        Connect Google to pick a sheet, or upload a CSV. Mapping and rejected-row clean-up are
+        Sign in with Google to pick a sheet, or upload a CSV. Mapping and rejected-row clean-up are
         the same either way.
       </p>
 
@@ -1020,10 +1019,8 @@ function SheetsConnectPanel({
               : 'border-line hover:border-slate-300',
           )}
         >
-          <p className="text-sm font-medium text-ink">Connect Google</p>
-          <p className="mt-1 text-xs text-ink-soft">
-            Sign in, then choose one spreadsheet and a tab to extract.
-          </p>
+          <p className="text-sm font-medium text-ink">Sign in with Google</p>
+          <p className="mt-1 text-xs text-ink-soft">Choose one spreadsheet and a tab to use.</p>
         </button>
         <button
           type="button"
@@ -1048,11 +1045,8 @@ function SheetsConnectPanel({
           {!oauthReady ? (
             <div className="space-y-2">
               <p className="text-xs text-ink-soft">
-                Offline access, spreadsheets.readonly. Habeas stores a refresh token — values
-                never appear in this app.
-              </p>
-              <p className="font-mono text-[11px] text-mute break-all">
-                redirect_uri={ownerSheetsOauthRedirectUri()}
+                Sign in with Google and choose the spreadsheet and tab. Habeas can only read
+                that sheet — its contents never appear in this app.
               </p>
               <Button
                 type="button"
@@ -1060,7 +1054,7 @@ function SheetsConnectPanel({
                 disabled={startMutation.isPending}
                 onClick={() => startMutation.mutate()}
               >
-                {startMutation.isPending ? 'Starting…' : 'Connect Google Sheets'}
+                {startMutation.isPending ? 'Starting…' : 'Sign in with Google'}
               </Button>
             </div>
           ) : (
@@ -1542,7 +1536,17 @@ function LiveHowToPanel({
       ) : null}
 
       <div className="flex justify-end">
-        <Button type="button" size="sm" onClick={() => onContinue(selectedMode)}>
+        <Button
+          type="button"
+          size="sm"
+          onClick={() => {
+            if (selectedMode === 'upload' && onUseUpload) {
+              onUseUpload()
+              return
+            }
+            onContinue(selectedMode)
+          }}
+        >
           Continue
         </Button>
       </div>
@@ -1959,17 +1963,6 @@ function LiveConnectPanel({
   )
 }
 
-function downloadUploadSample(kind: keyof typeof UPLOAD_SAMPLE_CSV) {
-  const sample = UPLOAD_SAMPLE_CSV[kind]
-  const blob = new Blob([sample.body], { type: 'text/csv;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = sample.filename
-  anchor.click()
-  URL.revokeObjectURL(url)
-}
-
 function UploadConnectPanel({
   verticalId,
   connector,
@@ -2135,23 +2128,6 @@ function UploadConnectPanel({
         >
           {templateMutation.isPending ? 'Downloading…' : 'Download template'}
         </Button>
-        {(Object.keys(UPLOAD_SAMPLE_CSV) as Array<keyof typeof UPLOAD_SAMPLE_CSV>).map((kind) => (
-          <Button
-            key={kind}
-            type="button"
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              downloadUploadSample(kind)
-              actionToast.success({
-                title: 'Sample downloaded',
-                description: `${UPLOAD_SAMPLE_CSV[kind].filename} is ready to upload.`,
-              })
-            }}
-          >
-            {UPLOAD_SAMPLE_CSV[kind].label}
-          </Button>
-        ))}
       </div>
 
       <label className="block space-y-1 text-xs">
@@ -3516,7 +3492,7 @@ function OwnerConnectorsBody({ search }: { search?: OwnerConnectorsSearch }) {
       })
       actionToast.success({
         title: 'Google connected',
-        description: 'Choose a spreadsheet and tab to extract.',
+        description: 'Choose a spreadsheet and tab to use.',
       })
       void navigate({
         to: '/owner/connectors',
@@ -3526,8 +3502,8 @@ function OwnerConnectorsBody({ search }: { search?: OwnerConnectorsSearch }) {
     },
     onError: (error, input) => {
       actionToast.error({
-        title: 'Google connect failed',
-        description: actionToast.safeErrorMessage(error, 'Start Connect Google again.'),
+        title: 'Google sign-in failed',
+        description: actionToast.safeErrorMessage(error, 'Start Google sign-in again.'),
         action: {
           label: 'Dismiss',
           onClick: () => undefined,
@@ -3545,8 +3521,8 @@ function OwnerConnectorsBody({ search }: { search?: OwnerConnectorsSearch }) {
     const returned = oauthReturn
     if (returned.error) {
       actionToast.error({
-        title: 'Google connect cancelled',
-        description: 'Start Connect Google again if you still want to link a sheet.',
+        title: 'Google sign-in cancelled',
+        description: 'Start Google sign-in again if you still want to link a sheet.',
       })
       void navigate({
         to: '/owner/connectors',
@@ -3559,8 +3535,8 @@ function OwnerConnectorsBody({ search }: { search?: OwnerConnectorsSearch }) {
     const stored = readOwnerSheetsOauthSession()
     if (!stored) {
       actionToast.error({
-        title: 'Google connect expired',
-        description: 'Start Connect Google again from the wizard.',
+        title: 'Google sign-in expired',
+        description: 'Start Google sign-in again from the wizard.',
       })
       void navigate({
         to: '/owner/connectors',
@@ -3571,8 +3547,8 @@ function OwnerConnectorsBody({ search }: { search?: OwnerConnectorsSearch }) {
     }
     if (stored.state !== returned.state) {
       actionToast.error({
-        title: 'Google connect mismatch',
-        description: 'Start Connect Google again from the wizard.',
+        title: 'Google sign-in check failed',
+        description: 'Start Google sign-in again from the wizard.',
       })
       void navigate({
         to: '/owner/connectors',

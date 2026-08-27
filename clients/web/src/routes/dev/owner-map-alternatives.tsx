@@ -35,7 +35,6 @@ import {
   MODE_STEP_CONNECTING_NOT_MATCHING_FOOTNOTE,
   SYSTEM_COPY,
   UPLOAD_IDENTIFIER_FIELDS,
-  UPLOAD_SAMPLE_CSV,
   allowsLive,
   allowsUpload,
   buildVerticalWizardSteps,
@@ -83,7 +82,11 @@ export function parseOwnerMapLabSearch(
 const FIELD_CLASS =
   'w-full rounded-md border border-line bg-white px-3 py-2 text-sm text-ink outline-none transition focus:border-habeas-mid focus:ring-2 focus:ring-habeas-mid/20'
 
-const SAMPLE_CSV = UPLOAD_SAMPLE_CSV.remap
+const SAMPLE_CSV = {
+  filename: 'remap.csv',
+  label: 'Remap',
+  body: 'Given,Family,Work Email,Department\nAlan,Turing,alan@example.com,Research\n',
+}
 
 type FixtureKind = 'upload' | 'live_ping' | 'infra'
 type LiveOutcome = 'idle' | 'pass' | 'fail'

@@ -52,10 +52,10 @@ import {
   wizardProgressPercent,
   suggestUploadColumnMapping,
   uploadMappingComplete,
-  UPLOAD_SAMPLE_CSV,
   parseCsvHeaderRow,
   parseCsvDocument,
   serializeCsvDocument,
+  rejectedRowCodeLabel,
   isOwnerConnectorsHiddenSystem,
   isOwnerConnectorsHiddenVertical,
   isOwnerWizardHiddenSystem,
@@ -89,6 +89,7 @@ import {
   mappingFollowOnCopy,
   shouldIncludeLiveMappingFollowOn,
 } from './owner-connector-ui'
+import * as ownerConnectorUi from './owner-connector-ui'
 
 describe('MULTI_PII_DELIMITER_OPTIONS (AE10 UI)', () => {
   test('presents None / ; / | / ,', () => {
@@ -937,12 +938,13 @@ describe('SYSTEM_COPY', () => {
     expect(SYSTEM_COPY.paylocity.uploadHowto?.toLowerCase()).toContain('map')
   })
 
-  test('sheets howto covers oauth or upload and does not mention service-account share', () => {
+  test('sheets howto covers sign-in or upload and does not mention service-account share', () => {
     for (const system of SHEETS_OWNER_SYSTEM_IDS) {
       const copy = SYSTEM_COPY[system]
       expect(copy.howto?.toLowerCase()).toContain('google')
       expect(copy.howto?.toLowerCase()).toContain('upload')
-      expect(copy.oauthHowto?.toLowerCase()).toContain('oauth')
+      expect(copy.oauthHowto?.toLowerCase()).not.toContain('oauth')
+      expect(copy.oauthHowto?.toLowerCase()).toContain('sign in with google')
       expect(copy.oauthHowto?.toLowerCase()).not.toContain('service account')
       expect(copy.uploadHowto?.toLowerCase()).toContain('csv')
     }
@@ -1151,10 +1153,13 @@ describe('mode step explainer (KD25)', () => {
     })
     expect(cards.every((card) => card.allowed)).toBe(true)
     expect(cards.every((card) => card.disabledReason === null)).toBe(true)
-    expect(cards.find((card) => card.mode === 'live')?.title).toBe('Google OAuth')
+    expect(cards.find((card) => card.mode === 'live')?.title).toBe('Google sign-in')
     expect(cards.find((card) => card.mode === 'upload')?.title).toBe('Manual upload')
+    expect(
+      cards.find((card) => card.mode === 'live')?.hint?.toLowerCase(),
+    ).not.toContain('oauth')
     expect(cards.find((card) => card.mode === 'live')?.hint?.toLowerCase()).toContain(
-      'oauth',
+      'sign in with google',
     )
     expect(disallowedModeReason('hr_alumni', 'live')).toBe('')
   })
@@ -1224,13 +1229,13 @@ describe('mode step explainer (KD25)', () => {
         systemId: 'hr_alumni',
         displayName: 'HR Alumni',
         allowedApproaches: ['oauth', 'upload'],
-        liveTitle: 'Google OAuth',
+        liveTitle: 'Google sign-in',
       },
       {
         systemId: 'bizdev_contacts',
         displayName: 'BizDev Contacts',
         allowedApproaches: ['oauth', 'upload'],
-        liveTitle: 'Google OAuth',
+        liveTitle: 'Google sign-in',
       },
       {
         systemId: 'google_sheets',
@@ -1270,8 +1275,8 @@ describe('mode step explainer (KD25)', () => {
     expect(connectionMethodLabel('paylocity')).toBe('SFTP')
     expect(connectionMethodLabel('auth0')).toBe('Management API')
     expect(connectionMethodLabel('lever')).toBe('Lever API')
-    expect(connectionMethodLabel('hr_alumni')).toBe('Google OAuth')
-    expect(connectionMethodLabel('bizdev_contacts')).toBe('Google OAuth')
+    expect(connectionMethodLabel('hr_alumni')).toBe('Google sign-in')
+    expect(connectionMethodLabel('bizdev_contacts')).toBe('Google sign-in')
     expect(connectionMethodLabel('google_sheets')).toBe('Google Sheets')
     expect(connectionMethodLabel('axios_hq')).toBeNull()
     expect(connectionMethodLabel('axios_headquarters')).toBeNull()
@@ -1492,28 +1497,67 @@ describe('owner connectors hide cassandra', () => {
   })
 })
 
-describe('upload column mapping', () => {
-  test('success and autobind samples suggest a complete map', () => {
-    const successHeaders = parseCsvHeaderRow(UPLOAD_SAMPLE_CSV.success.body)
-    expect(suggestUploadColumnMapping(successHeaders)).toEqual({
-      first_name: 'first_name',
-      last_name: 'last_name',
-      email: 'email',
-    })
-    const autoHeaders = parseCsvHeaderRow(UPLOAD_SAMPLE_CSV.autobind.body)
-    expect(suggestUploadColumnMapping(autoHeaders)).toEqual({
-      first_name: 'First Name',
-      last_name: 'Last Name',
-      email: 'Email Address',
-    })
-    expect(uploadMappingComplete(suggestUploadColumnMapping(autoHeaders))).toBe(true)
+describe('upload csv helpers', () => {
+  test('parseCsvHeaderRow trims headers, drops blanks, strips BOM, and reads quotes', () => {
+    expect(
+      parseCsvHeaderRow('first_name, last_name ,email\nAda,Lovelace,ada@example.org\n'),
+    ).toEqual(['first_name', 'last_name', 'email'])
+    expect(parseCsvHeaderRow('email,,phone\n')).toEqual(['email', 'phone'])
+    const bom = String.fromCharCode(0xfeff)
+    expect(parseCsvHeaderRow(`${bom}email,phone\n`)).toEqual(['email', 'phone'])
+    expect(parseCsvHeaderRow('"Work, Email",Department\n')).toEqual([
+      'Work, Email',
+      'Department',
+    ])
   })
 
-  test('remap sample is incomplete until the owner binds columns', () => {
-    const headers = parseCsvHeaderRow(UPLOAD_SAMPLE_CSV.remap.body)
+  test('parseCsvDocument parses a clean name+email sheet and pads short rows', () => {
+    const doc = parseCsvDocument(
+      'first_name,last_name,email\nAda,Lovelace,ada@example.org\nGrace,Hopper,grace@example.org\n',
+    )
+    expect(doc.headers).toEqual(['first_name', 'last_name', 'email'])
+    expect(doc.rows).toEqual([
+      ['Ada', 'Lovelace', 'ada@example.org'],
+      ['Grace', 'Hopper', 'grace@example.org'],
+    ])
+    const short = parseCsvDocument('first_name,last_name,email\nAda,ada@example.org\n')
+    expect(short.rows).toEqual([['Ada', 'ada@example.org', '']])
+  })
+
+  test('email-only and phone-only sheets auto-bind a complete identifier mapping', () => {
+    const emailMap = suggestUploadColumnMapping(
+      parseCsvHeaderRow('email,department\nada@example.org,Eng\n'),
+    )
+    expect(emailMap).toEqual({ email: 'email' })
+    expect(uploadMappingComplete(emailMap)).toBe(true)
+
+    const phoneMap = suggestUploadColumnMapping(
+      parseCsvHeaderRow('phone,department\n4155550100,Eng\n'),
+    )
+    expect(phoneMap).toEqual({ phone: 'phone' })
+    expect(uploadMappingComplete(phoneMap)).toBe(true)
+  })
+
+  test('friendly headers suggest the email column without an owner remap', () => {
+    const headers = parseCsvHeaderRow(
+      'First Name,Last Name,Email Address\nAda,Lovelace,ada@example.org\n',
+    )
+    expect(suggestUploadColumnMapping(headers)).toEqual({
+      email: 'Email Address',
+      first_name: 'First Name',
+      last_name: 'Last Name',
+    })
+  })
+
+  test('unmapped headers stay incomplete until the owner binds an identifier column', () => {
+    const headers = parseCsvHeaderRow(
+      'Given,Family,Work Email,Department\nAda,Lovelace,ada@example.org,Eng\n',
+    )
     expect(headers).toEqual(['Given', 'Family', 'Work Email', 'Department'])
     const suggested = suggestUploadColumnMapping(headers)
+    expect(suggested).toEqual({})
     expect(uploadMappingComplete(suggested)).toBe(false)
+    expect(uploadMappingComplete({ ...suggested, email: 'Work Email' })).toBe(true)
     expect(
       uploadMappingComplete({
         first_name: 'Given',
@@ -1523,30 +1567,25 @@ describe('upload column mapping', () => {
     ).toBe(true)
   })
 
-  test('email-only or phone-only samples auto-bind a complete identifier map', () => {
-    expect(
-      uploadMappingComplete(
-        suggestUploadColumnMapping(parseCsvHeaderRow(UPLOAD_SAMPLE_CSV.success_email_only.body)),
-      ),
-    ).toBe(true)
-    expect(
-      uploadMappingComplete(
-        suggestUploadColumnMapping(parseCsvHeaderRow(UPLOAD_SAMPLE_CSV.success_phone_only.body)),
-      ),
-    ).toBe(true)
+  test('parser keeps corrupt email/phone rows the server rejects with reason codes', () => {
+    const doc = parseCsvDocument('email,phone\nada@example.org,4155550100\nnot-an-email,123\n')
+    expect(doc.rows).toHaveLength(2)
+    expect(doc.rows[1]).toEqual(['not-an-email', '123'])
+    expect(rejectedRowCodeLabel('email_invalid')).toBe('Email format')
+    expect(rejectedRowCodeLabel('phone_invalid')).toBe('Phone format')
+    expect(rejectedRowCodeLabel('no_identifier')).toBe('No identifier')
   })
 
-  test('failure with no identifier columns cannot auto-bind', () => {
-    const headers = parseCsvHeaderRow(UPLOAD_SAMPLE_CSV.failure_no_identifier.body)
-    expect(uploadMappingComplete(suggestUploadColumnMapping(headers))).toBe(false)
-  })
-
-  test('parse and serialize round-trip mixed corrupt sample', () => {
-    const doc = parseCsvDocument(UPLOAD_SAMPLE_CSV.mixed_good_and_corrupt.body)
-    expect(doc.headers).toEqual(['email', 'phone', 'first_name'])
-    expect(doc.rows).toHaveLength(3)
-    expect(doc.rows[1][0]).toBe('not-an-email')
-    expect(parseCsvDocument(serializeCsvDocument(doc)).rows).toEqual(doc.rows)
+  test('serialize round-trips quoted commas, quotes, and newlines', () => {
+    const doc = parseCsvDocument(
+      'email,note\nada@example.org,"said ""hi"""\ngrace@example.org,"line1\nline2"\n',
+    )
+    expect(doc.rows[0][1]).toBe('said "hi"')
+    expect(doc.rows[1][1]).toBe('line1\nline2')
+    const text = serializeCsvDocument(doc)
+    expect(text).toContain('"said ""hi"""')
+    expect(text.endsWith('\n')).toBe(true)
+    expect(parseCsvDocument(text)).toEqual(doc)
   })
 })
 
@@ -1564,5 +1603,52 @@ describe('connectors first-paint (QCQA)', () => {
     const source = readFileSync(join(here, '..', 'routes', 'ops', 'connections.tsx'), 'utf8')
     expect(source).toContain('listConnections')
     expect(source).not.toMatch(/fetch\(`?['"]\/ops\/connections/)
+  })
+})
+
+describe('connectors.tsx source smoke (sample removal + sheets copy)', () => {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const connectorsSource = () =>
+    readFileSync(join(here, '..', 'routes', 'owner', 'connectors.tsx'), 'utf8')
+
+  test('sample CSV fixtures and sample downloads are gone', () => {
+    const source = connectorsSource()
+    expect(source).not.toContain('UPLOAD_SAMPLE_CSV')
+    expect(source).not.toContain('downloadUploadSample')
+  })
+
+  test('real template download button is preserved', () => {
+    const source = connectorsSource()
+    expect(source).toContain('downloadOwnerUploadTemplate')
+  })
+
+  test('LiveHowToPanel Continue with upload mode calls onUseUpload', () => {
+    const source = connectorsSource()
+    const start = source.indexOf('function LiveHowToPanel')
+    expect(start).toBeGreaterThan(-1)
+    const end = source.indexOf('\nfunction ', start + 1)
+    const panel = source.slice(start, end === -1 ? undefined : end)
+    expect(panel).toMatch(/selectedMode === 'upload'[\s\S]{0,160}onUseUpload\(\)/)
+  })
+
+  test('sheets connect copy drops oauth jargon and keeps the plain-language promise', () => {
+    const source = connectorsSource()
+    expect(source).not.toContain('Offline access')
+    expect(source).not.toContain('refresh token')
+    expect(source).not.toContain('redirect_uri=')
+    expect(source).not.toContain('spreadsheets.readonly')
+    expect(source).toContain('never appear in this app')
+  })
+
+  test('owner-connector-ui no longer exports UPLOAD_SAMPLE_CSV', () => {
+    expect('UPLOAD_SAMPLE_CSV' in ownerConnectorUi).toBe(false)
+  })
+
+  test('action-toast maps sheets oauth failures to friendly copy', () => {
+    const source = readFileSync(join(here, 'action-toast.ts'), 'utf8')
+    expect(source).toContain('sheets_oauth_not_configured')
+    expect(source).toContain('redirect_uri_not_allowed')
+    expect(source).toContain("Google sign-in isn't set up yet")
+    expect(source).toContain("Google sign-in can't start from this address yet")
   })
 })

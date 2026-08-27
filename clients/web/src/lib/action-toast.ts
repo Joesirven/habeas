@@ -49,6 +49,13 @@ export const SAFE_API_ERROR_DETAILS: Record<string, string> = {
   invalid_config: 'The connection settings look incorrect. Check the fields and try again.',
   unknown_error: 'Connection test failed. Check the values and try again.',
   failed: 'Connection test failed. Check the values and try again.',
+  sheets_oauth_not_configured:
+    "Google sign-in isn't set up yet. Contact Habeas support and we'll finish the setup.",
+  redirect_uri_not_allowed:
+    "Google sign-in can't start from this address yet. Contact Habeas support.",
+  oauth_session_not_found: 'Your sign-in session expired. Start the Google sign-in again.',
+  oauth_session_expired: 'Your sign-in session expired. Start the Google sign-in again.',
+  state_mismatch: "The sign-in response didn't match this browser. Start the Google sign-in again.",
 }
 
 function isCredentialFieldNoise(detail: string): boolean {

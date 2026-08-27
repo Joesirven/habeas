@@ -188,8 +188,8 @@ _CONNECTION_METHOD_BY_SYSTEM = {
     "paylocity": "SFTP",
     "lever": "Lever API",
     "auth0": "Management API",
-    "hr_alumni": "Google OAuth",
-    "bizdev_contacts": "Google OAuth",
+    "hr_alumni": "Google sign-in",
+    "bizdev_contacts": "Google sign-in",
 }
 
 

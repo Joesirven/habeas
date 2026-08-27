@@ -728,31 +728,31 @@ export const SYSTEM_COPY: Record<string, SystemWizardCopy> = {
   },
   hr_alumni: {
     howto:
-      'Connect the Alumni Google Sheet with Google OAuth, or upload a CSV if you cannot grant sheet access. Map identifier columns if the headers differ — email or phone is enough — then choose how often this list should stay current.',
+      'Sign in with Google to connect the Alumni sheet, or upload a CSV file if you cannot sign in. Map identifier columns if the headers differ — email or phone is enough — then choose how often this list should stay current.',
     oauthHowto:
-      'Sign in with Google (OAuth) to grant Habeas access to the Alumni sheet, then paste the spreadsheet URL. Habeas tests metadata access before you continue.',
+      'Sign in with Google, choose the spreadsheet and tab, and Habeas reads only that sheet. The sheet’s contents never appear in this app.',
     uploadHowto:
-      'If Google OAuth is not available, upload the alumni list as CSV and map identifier columns if the headers differ. Email or phone is enough.',
+      'If you cannot sign in with Google, upload the alumni list as a CSV file and map identifier columns if the headers differ. Email or phone is enough.',
   },
   bizdev_contacts: {
     howto:
-      'Connect the Contact Us Google Sheet with Google OAuth, or upload a CSV if you cannot grant sheet access. Map identifier columns if the headers differ — email or phone is enough — then choose how often this list should stay current.',
+      'Sign in with Google to connect the Contact Us sheet, or upload a CSV file if you cannot sign in. Map identifier columns if the headers differ — email or phone is enough — then choose how often this list should stay current.',
     oauthHowto:
-      'Sign in with Google (OAuth) to grant Habeas access to the Contact Us sheet, then paste the spreadsheet URL. Habeas tests metadata access before you continue.',
+      'Sign in with Google, choose the spreadsheet and tab, and Habeas reads only that sheet. The sheet’s contents never appear in this app.',
     uploadHowto:
-      'If Google OAuth is not available, upload Contact Us rows as CSV and map identifier columns if the headers differ. Email or phone is enough.',
+      'If you cannot sign in with Google, upload Contact Us rows as a CSV file and map identifier columns if the headers differ. Email or phone is enough.',
   },
   alumni_google_sheet: {
     liveHowto:
-      'Sign in with Google to grant Habeas access to the Alumni sheet, then paste the spreadsheet URL. Sharing with a service account is not required.',
+      'Sign in with Google, choose the Alumni spreadsheet and tab, and Habeas reads only that sheet. The sheet’s contents never appear in this app.',
     uploadHowto:
-      'If Google OAuth is not available, upload the alumni list as CSV and map identifier columns if the headers differ. Email or phone is enough.',
+      'If you cannot sign in with Google, upload the alumni list as a CSV file and map identifier columns if the headers differ. Email or phone is enough.',
   },
   contact_us_google_sheet: {
     liveHowto:
-      'Sign in with Google to grant Habeas access to the Contact Us sheet, then paste the spreadsheet URL. Sharing with a service account is not required.',
+      'Sign in with Google, choose the Contact Us spreadsheet and tab, and Habeas reads only that sheet. The sheet’s contents never appear in this app.',
     uploadHowto:
-      'If Google OAuth is not available, upload Contact Us rows as CSV and map identifier columns if the headers differ. Email or phone is enough.',
+      'If you cannot sign in with Google, upload Contact Us rows as a CSV file and map identifier columns if the headers differ. Email or phone is enough.',
   },
   paylocity: {
     liveHowto:
@@ -869,13 +869,13 @@ const MODE_SYSTEM_HINTS: Record<
     upload:
       'Upload Contact Us contacts as CSV, then map identifier columns if the headers differ. Email or phone is enough.',
     live:
-      'Connect the Contact Us Google Sheet with Google OAuth. Habeas does not use a service-account share.',
+      'Sign in with Google to connect the Contact Us sheet. Habeas reads only the sheet you choose.',
   },
   hr_alumni: {
     upload:
       'Upload your alumni list as CSV, then map identifier columns if the headers differ. Email or phone is enough.',
     live:
-      'Connect the Alumni Google Sheet with Google OAuth. Habeas does not use a service-account share.',
+      'Sign in with Google to connect the Alumni sheet. Habeas reads only the sheet you choose.',
   },
 }
 
@@ -940,8 +940,8 @@ export const CONNECTION_METHOD_LABELS: Readonly<Record<string, string>> = {
   paylocity: 'SFTP',
   lever: 'Lever API',
   auth0: 'Management API',
-  hr_alumni: 'Google OAuth',
-  bizdev_contacts: 'Google OAuth',
+  hr_alumni: 'Google sign-in',
+  bizdev_contacts: 'Google sign-in',
   google_sheets: 'Google Sheets',
   alumni_google_sheet: 'Google Sheets',
   contact_us_google_sheet: 'Google Sheets',
@@ -1445,75 +1445,4 @@ export const REJECTED_ROW_CODE_LABELS: Record<string, string> = {
 
 export function rejectedRowCodeLabel(code: string): string {
   return REJECTED_ROW_CODE_LABELS[code] ?? 'Invalid value'
-}
-
-/** In-app samples matching admin_api tests/fixtures/upload_mapping/. */
-export const UPLOAD_SAMPLE_CSV: Record<
-  | 'success'
-  | 'success_email_only'
-  | 'success_phone_only'
-  | 'autobind'
-  | 'remap'
-  | 'failure_no_identifier'
-  | 'failure_no_usable_rows'
-  | 'corrupted_emails'
-  | 'corrupted_phones'
-  | 'mixed_good_and_corrupt',
-  { filename: string; body: string; label: string }
-> = {
-  success: {
-    filename: 'success.csv',
-    label: 'Success (name + email)',
-    body: 'first_name,last_name,email\nAda,Lovelace,ada@example.com\n',
-  },
-  success_email_only: {
-    filename: 'success_email_only.csv',
-    label: 'Success (email only)',
-    body: 'email\nada@example.com\n',
-  },
-  success_phone_only: {
-    filename: 'success_phone_only.csv',
-    label: 'Success (phone only)',
-    body: 'phone\n2025550100\n',
-  },
-  autobind: {
-    filename: 'autobind.csv',
-    label: 'Auto-bind',
-    body: 'First Name,Last Name,Email Address\nGrace,Hopper,grace@example.com\n',
-  },
-  remap: {
-    filename: 'remap.csv',
-    label: 'Remap',
-    body: 'Given,Family,Work Email,Department\nAlan,Turing,alan@example.com,Research\n',
-  },
-  failure_no_identifier: {
-    filename: 'failure_no_identifier.csv',
-    label: 'Fail (no identifier columns)',
-    body: 'department,notes\nResearch,internal only\n',
-  },
-  failure_no_usable_rows: {
-    filename: 'failure_no_usable_rows.csv',
-    label: 'Fail (bad email/phone)',
-    body: 'email,phone\nnot-an-email,123\n',
-  },
-  corrupted_emails: {
-    filename: 'corrupted_emails.csv',
-    label: 'Corrupt emails',
-    body: 'email\nnot-an-email\nuser@\n@nodomain.com\n',
-  },
-  corrupted_phones: {
-    filename: 'corrupted_phones.csv',
-    label: 'Corrupt phones',
-    body: 'phone\n123\nabc\n555-12\n',
-  },
-  mixed_good_and_corrupt: {
-    filename: 'mixed_good_and_corrupt.csv',
-    label: 'Mixed good + corrupt',
-    body: 'email,phone,first_name\nada@example.com,2025550100,Ada\nnot-an-email,2025550100,Bad\ngrace@example.com,123,Grace\n',
-  },
-}
-
-export function uploadSampleFile(kind: keyof typeof UPLOAD_SAMPLE_CSV): File {
-  const sample = UPLOAD_SAMPLE_CSV[kind]
-  return new File([sample.body], sample.filename, { type: 'text/csv' })
 }
