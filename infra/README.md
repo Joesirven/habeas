@@ -161,7 +161,7 @@ gcloud builds submit --config=infra/cloudbuild/admin-web-prod.yaml --project=exa
 
 Post-deploy verification (after `dbmate -d db/migrations up` and the admin-api deploy):
 
-1. Revision logs show listener startup (LISTEN attached to `drop_bulk_stats_changed`; no reconnect-loop spam).
+1. Revision logs show listener startup — `live_rollup_started` then `live_rollup_listen_ready` (reconnects log `live_rollup_listen_reconnect`; no reconnect-loop spam).
 2. `GET /live/events` returns `ready` and heartbeats as before.
 3. `bulk_process` events arrive on counter change — cards move within the coalesce window, well under the old 5s poll cadence.
 
