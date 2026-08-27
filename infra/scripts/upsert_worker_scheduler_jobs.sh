@@ -70,7 +70,7 @@ upsert_http_job() {
     --time-zone="${tz}"
     --uri="${uri}"
     --http-method=POST
-    --headers="Content-Type=application/json"
+    --update-headers="Content-Type=application/json"
     "${oidc_flags[@]}"
   )
 
