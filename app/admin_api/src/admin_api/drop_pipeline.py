@@ -1812,12 +1812,18 @@ async def collect_process_run_groups(
     process_id: int | None = None,
     status: str | None = None,
     limit_per_group: int = 40,
+    detail: str = "lite",
 ) -> list[dict[str, Any]]:
-    """Attempt history for pipeline stages, grouped by bulk process label."""
+    """Attempt history for pipeline stages, grouped by bulk process label.
+
+    ``detail=lite`` (default) uses connector + ingest ledgers only. The matching
+    raw-spine JOIN stays on ``detail=full`` — it scans ~1.8M drop_raw_requests.
+    """
     allowed = {"download", "land", "promote", "matching"}
     stage_set = [s for s in stages if s in allowed]
     if not stage_set:
         return []
+    lite = detail != "full"
 
     processes = await list_bulk_processes(
         conn,
@@ -1885,7 +1891,7 @@ async def collect_process_run_groups(
                     )
                 )
 
-        if gcs_uri and "matching" in stage_set:
+        if gcs_uri and "matching" in stage_set and not lite:
             match_rows = await conn.fetch(
                 """
                 SELECT ma.id, ma.step, ma.status, ma.attempted_at, ma.completed_at,
@@ -2674,38 +2680,73 @@ async def drop_bulk_process_runs(
     days: int = Query(default=1, ge=1, le=30),
     process_id: int | None = Query(default=None, ge=1),
     status: str | None = Query(default=None),
+    detail: str = Query(
+        default="lite",
+        pattern="^(full|lite)$",
+        description="lite skips matching raw-spine JOIN; full is opt-in inspect",
+    ),
 ):
     """Attempt history for pipeline stages, grouped by bulk process."""
     _require_database()
     stages = [part.strip() for part in stage.split(",") if part.strip()]
     pool = get_pool()
     async with pool.acquire() as conn:
-        groups = await collect_process_run_groups(
-            conn,
-            stages=stages,
-            day=day,
-            days=days,
-            process_id=process_id,
-            status=status,
-        )
-    return {"stages": stages, "groups": groups}
+        if detail == "lite":
+            async with ops_fast_statement_scope(conn):
+                groups = await collect_process_run_groups(
+                    conn,
+                    stages=stages,
+                    day=day,
+                    days=days,
+                    process_id=process_id,
+                    status=status,
+                    detail=detail,
+                )
+        else:
+            groups = await collect_process_run_groups(
+                conn,
+                stages=stages,
+                day=day,
+                days=days,
+                process_id=process_id,
+                status=status,
+                detail=detail,
+            )
+    return {"stages": stages, "groups": groups, "detail": detail}
 
 
 @router.get("/processes/{process_id}")
 async def drop_bulk_process_detail(
     process_id: int,
     _principal: SuperAdminPrincipal,
+    detail: str = Query(
+        default="lite",
+        pattern="^(full|lite)$",
+        description="lite is ledger-only (expand path); full walks the raw spine",
+    ),
 ):
-    """Stage progress for one DROP bulk process (connector download id)."""
+    """Stage progress for one DROP bulk process (connector download id).
+
+    Expand / batch-click uses ``detail=lite`` (default). ``detail=full`` is the
+    opt-in spine walk — do not call it from the pipeline expand row.
+    """
     _require_database()
     if process_id < 1:
         raise HTTPException(status_code=400, detail="invalid process_id")
     pool = get_pool()
     async with pool.acquire() as conn:
-        detail = await collect_bulk_process_progress(conn, process_id=process_id)
-    if detail is None:
+        if detail == "lite":
+            async with ops_fast_statement_scope(conn):
+                payload = await collect_bulk_process_progress(
+                    conn, process_id=process_id, detail=detail
+                )
+        else:
+            payload = await collect_bulk_process_progress(
+                conn, process_id=process_id, detail=detail
+            )
+    if payload is None:
         raise HTTPException(status_code=404, detail="process not found")
-    return detail
+    return {**payload, "detail": detail}
 
 
 @router.get("/workers/trends")

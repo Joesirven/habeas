@@ -2949,6 +2949,122 @@ async def test_collect_bulk_process_progress_shape():
 
 
 @pytest.mark.asyncio
+async def test_collect_bulk_process_progress_lite_skips_spine() -> None:
+    """detail=lite uses connector + ingest ledgers — never batch_raw CTE."""
+    attempted = datetime(2026, 8, 25, 18, 0, tzinfo=timezone.utc)
+    issued: list[str] = []
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        issued.append(sql)
+        if "drop_raw_requests" in sql or "batch_raw" in sql:
+            raise AssertionError("lite progress must not use drop_raw_requests spine")
+        if "FROM drop_connector_attempts" in sql and "step = 'download'" in sql:
+            return _Row(
+                id=25,
+                status="success",
+                attempted_at=attempted,
+                completed_at=attempted,
+                gcs_uri="gs://bucket/aug25.zip",
+            )
+        return None
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        issued.append(sql)
+        if "drop_raw_requests" in sql or "batch_raw" in sql:
+            raise AssertionError("lite progress must not use drop_raw_requests spine")
+        if "drop_ingest_attempts" in sql:
+            return [
+                _Row(step="land", status="success", list_type="Email", count=1),
+                _Row(step="promote", status="success", list_type="Email", count=1),
+            ]
+        return []
+
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+    conn.fetch = AsyncMock(side_effect=fetch)
+
+    detail = await drop_pipeline.collect_bulk_process_progress(
+        conn, process_id=25, detail="lite"
+    )
+    assert detail is not None
+    assert detail["process_id"] == 25
+    assert detail["stages"]["download"]["success"] == 1
+    assert detail["stages"]["land"]["success"] == 1
+    assert detail["stages"]["matching"]["total"] == 0
+    assert detail["request_rows"] == 0
+    assert all("drop_raw_requests" not in sql for sql in issued)
+    assert all("batch_raw" not in sql for sql in issued)
+
+
+@pytest.mark.asyncio
+async def test_collect_process_run_groups_lite_skips_matching_spine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """lite matching runs must not JOIN drop_raw_requests / matching_attempts spine."""
+    attempted = datetime(2026, 8, 25, 18, 0, tzinfo=timezone.utc)
+    issued: list[str] = []
+
+    async def fake_list(
+        conn: Any,
+        *,
+        day: Any = None,
+        days: int = 1,
+        intake_source: str | None = None,
+        download_status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "process_id": 25,
+                "intake_source": "drop",
+                "process_at": attempted.isoformat(),
+                "completed_at": attempted.isoformat(),
+                "download_status": "success",
+                "label": "Aug 25 · CA DROP",
+            }
+        ]
+
+    async def fetch(sql: str, *args: Any) -> list[_Row]:
+        issued.append(sql)
+        if "matching_attempts" in sql or "drop_raw_requests" in sql:
+            raise AssertionError("lite runs must not scan matching spine")
+        return []
+
+    async def fetchrow(sql: str, *args: Any) -> _Row | None:
+        issued.append(sql)
+        if "matching_attempts" in sql or "drop_raw_requests" in sql:
+            raise AssertionError("lite runs must not scan matching spine")
+        if "FROM drop_connector_attempts" in sql:
+            return _Row(
+                id=25,
+                status="success",
+                attempted_at=attempted,
+                completed_at=attempted,
+                gcs_uri="gs://bucket/aug25.zip",
+                attempt_number=1,
+            )
+        return None
+
+    monkeypatch.setattr(drop_pipeline, "list_bulk_processes", fake_list)
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=fetch)
+    conn.fetchrow = AsyncMock(side_effect=fetchrow)
+
+    groups = await drop_pipeline.collect_process_run_groups(
+        conn,
+        stages=["matching"],
+        days=7,
+        process_id=25,
+        detail="lite",
+    )
+    assert len(groups) == 1
+    assert groups[0]["process_id"] == 25
+    assert groups[0]["runs"] == []
+    assert all("matching_attempts" not in sql for sql in issued)
+    assert all("drop_raw_requests" not in sql for sql in issued)
+
+
+@pytest.mark.asyncio
 async def test_collect_bulk_process_progress_reconciles_stale_land():
     """Land attempts stuck pending still count success when raw CSVs exist."""
     attempted = datetime(2026, 7, 17, 16, 50, tzinfo=timezone.utc)
@@ -3186,7 +3302,7 @@ async def test_collect_process_run_groups_matching_requires_land_success() -> No
     conn.fetch = AsyncMock(side_effect=fetch)
     conn.fetchrow = AsyncMock(side_effect=fetchrow)
     groups = await drop_pipeline.collect_process_run_groups(
-        conn, stages=["matching"], days=1
+        conn, stages=["matching"], days=1, detail="full"
     )
     by_id = {int(g["process_id"]): g for g in groups}
     assert matching_uris == [ok_uri, fail_uri]
@@ -4705,6 +4821,111 @@ def test_processes_include_summary_uses_lite_bulk_not_spine_per_row(
     assert len(body["processes"]) == 3
     assert all(item["overall"]["status"] == "running" for item in body["processes"])
     assert all(item["request_rows"] == 0 for item in body["processes"])
+
+
+def test_process_detail_defaults_to_lite_not_spine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GET /ops/drop/processes/{id} defaults to detail=lite — no full spine."""
+    from admin_api import main as admin_main
+
+    progress_calls: list[str] = []
+    attempted = datetime(2026, 8, 25, 18, 0, tzinfo=timezone.utc)
+
+    async def tracking_progress(
+        conn: Any, *, process_id: int, detail: str = "full"
+    ) -> dict[str, Any] | None:
+        progress_calls.append(detail)
+        if detail == "full":
+            raise AssertionError("default process detail must not request full spine")
+        return {
+            "process_id": process_id,
+            "intake_source": "drop",
+            "process_at": attempted.isoformat(),
+            "completed_at": None,
+            "label": "Aug 25 · CA DROP",
+            "download_status": "success",
+            "raw_rows": 0,
+            "request_rows": 0,
+            "stages": {
+                "download": {"success": 1, "failed": 0, "open": 0, "total": 1},
+                "land": {"success": 1, "failed": 0, "open": 0, "total": 1},
+                "promote": {"success": 1, "failed": 0, "open": 0, "total": 1},
+                "matching": {"success": 0, "failed": 0, "open": 0, "total": 0},
+                "review": {"success": 0, "failed": 0, "open": 0, "total": 0},
+                "fulfillment": {"success": 0, "failed": 0, "open": 0, "total": 0},
+            },
+            "overall": {"status": "complete", "current_stage": "matching", "percent": 50},
+        }
+
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "collect_bulk_process_progress", tracking_progress)
+
+    with TestClient(app) as client:
+        defaulted = client.get(
+            "/ops/drop/processes/25",
+            headers=signed_headers("ops@example.com"),
+        )
+        explicit = client.get(
+            "/ops/drop/processes/25?detail=lite",
+            headers=signed_headers("ops@example.com"),
+        )
+
+    assert defaulted.status_code == 200
+    assert explicit.status_code == 200
+    assert progress_calls == ["lite", "lite"]
+    assert defaulted.json()["detail"] == "lite"
+    assert defaulted.json()["process_id"] == 25
+
+
+def test_process_runs_defaults_to_lite_not_matching_spine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GET /ops/drop/processes/runs defaults to detail=lite."""
+    from admin_api import main as admin_main
+
+    run_details: list[str] = []
+
+    async def tracking_groups(
+        conn: Any,
+        *,
+        stages: list[str],
+        day: Any = None,
+        days: int = 1,
+        process_id: int | None = None,
+        status: str | None = None,
+        limit_per_group: int = 40,
+        detail: str = "lite",
+    ) -> list[dict[str, Any]]:
+        run_details.append(detail)
+        if detail == "full":
+            raise AssertionError("default process runs must not request full matching spine")
+        return []
+
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
+    monkeypatch.setattr(roles.settings, "require_iap_identity", True)
+    monkeypatch.setattr(roles.settings, "admin_api_super_admins", "ops@example.com")
+    monkeypatch.setattr(roles.settings, "admin_api_admins", "")
+    monkeypatch.setattr(roles.settings, "admin_api_legals", "")
+    monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
+    _fake_pool(monkeypatch)
+    monkeypatch.setattr(drop_pipeline, "collect_process_run_groups", tracking_groups)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/ops/drop/processes/runs?stage=matching&days=7",
+            headers=signed_headers("ops@example.com"),
+        )
+
+    assert response.status_code == 200
+    assert run_details == ["lite"]
+    assert response.json()["detail"] == "lite"
 
 
 @pytest.mark.asyncio

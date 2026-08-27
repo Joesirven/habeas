@@ -211,6 +211,46 @@ describe('Architecture B admin-api client', () => {
     expect(fetchCall(fetchMock).url).not.toContain('include_summary=')
   })
 
+  test('getDropBulkProcess defaults to lite detail and 8s timeout', async () => {
+    const originalTimeout = AbortSignal.timeout
+    const timeoutMs: number[] = []
+    AbortSignal.timeout = ((ms: number) => {
+      timeoutMs.push(ms)
+      return originalTimeout.call(AbortSignal, ms)
+    }) as typeof AbortSignal.timeout
+    try {
+      const { getDropBulkProcess, OPS_FAST_QUERY_TIMEOUT_MS, OPS_EXPAND_DETAIL_TIMEOUT_MS } =
+        await importApi(undefined)
+      expect(OPS_FAST_QUERY_TIMEOUT_MS).toBe(8_000)
+      await getDropBulkProcess(25)
+      expect(timeoutMs).toContain(8_000)
+      expect(timeoutMs).not.toContain(OPS_EXPAND_DETAIL_TIMEOUT_MS)
+      expect(fetchCall(fetchMock).url).toContain('/ops/drop/processes/25')
+      expect(fetchCall(fetchMock).url).toContain('detail=lite')
+    } finally {
+      AbortSignal.timeout = originalTimeout
+    }
+  })
+
+  test('listDropBulkProcessRuns defaults to lite detail and 8s timeout', async () => {
+    const originalTimeout = AbortSignal.timeout
+    const timeoutMs: number[] = []
+    AbortSignal.timeout = ((ms: number) => {
+      timeoutMs.push(ms)
+      return originalTimeout.call(AbortSignal, ms)
+    }) as typeof AbortSignal.timeout
+    try {
+      const { listDropBulkProcessRuns, OPS_FAST_QUERY_TIMEOUT_MS } = await importApi(undefined)
+      await listDropBulkProcessRuns({ stage: 'matching', days: 7 })
+      expect(timeoutMs).toContain(OPS_FAST_QUERY_TIMEOUT_MS)
+      expect(fetchCall(fetchMock).url).toContain('/ops/drop/processes/runs')
+      expect(fetchCall(fetchMock).url).toContain('detail=lite')
+      expect(fetchCall(fetchMock).url).toContain('stage=matching')
+    } finally {
+      AbortSignal.timeout = originalTimeout
+    }
+  })
+
   test.each([
     [
       'listOwnerVisibleVerticals',

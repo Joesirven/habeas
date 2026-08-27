@@ -217,7 +217,7 @@ export const OPS_PROD_PROBE_MAX_MS = 5_000
 /** Prod serving GET /me — QCQA HOLD if slower. */
 export const OPS_ME_PROD_MAX_MS = 2_000
 
-/** Bulk process row expand — spine walk may take tens of seconds. */
+/** Opt-in full spine walk — batch expand uses lite + OPS_FAST_QUERY_TIMEOUT_MS. */
 export const OPS_EXPAND_DETAIL_TIMEOUT_MS = 45_000
 
 /** Default abort for slow ops reads (full pipeline, worker trends, …). */
@@ -1236,6 +1236,8 @@ export type BulkProcessDetail = {
   download_status: string
   raw_rows: number
   request_rows: number
+  /** lite = ledger only (expand default). full = raw-spine walk. */
+  detail?: 'lite' | 'full'
   stages: {
     download: BulkProcessStageCounts
     land: BulkProcessStageCounts
@@ -1333,10 +1335,17 @@ export function listDropBulkProcesses(params?: {
   )
 }
 
-export function getDropBulkProcess(processId: number) {
-  return fetchAdminApi<BulkProcessDetail>(`/ops/drop/processes/${processId}`, {
-    timeoutMs: OPS_EXPAND_DETAIL_TIMEOUT_MS,
-  })
+export function getDropBulkProcess(
+  processId: number,
+  opts?: { detail?: 'lite' | 'full' },
+) {
+  const detail = opts?.detail ?? 'lite'
+  const timeoutMs =
+    detail === 'full' ? OPS_EXPAND_DETAIL_TIMEOUT_MS : OPS_FAST_QUERY_TIMEOUT_MS
+  return fetchAdminApi<BulkProcessDetail>(
+    `/ops/drop/processes/${processId}?detail=${encodeURIComponent(detail)}`,
+    { timeoutMs },
+  )
 }
 
 export function listDropBulkProcessRuns(params: {
@@ -1345,15 +1354,22 @@ export function listDropBulkProcessRuns(params: {
   days?: number
   process_id?: number
   status?: string
+  detail?: 'lite' | 'full'
 }) {
   const search = new URLSearchParams()
   search.set('stage', params.stage)
+  search.set('detail', params.detail ?? 'lite')
   if (params.day) search.set('day', params.day)
   if (params.days != null) search.set('days', String(params.days))
   if (params.process_id != null) search.set('process_id', String(params.process_id))
   if (params.status) search.set('status', params.status)
+  const timeoutMs =
+    (params.detail ?? 'lite') === 'full'
+      ? OPS_EXPAND_DETAIL_TIMEOUT_MS
+      : OPS_FAST_QUERY_TIMEOUT_MS
   return fetchAdminApi<BulkProcessRunsPayload>(
     `/ops/drop/processes/runs?${search.toString()}`,
+    { timeoutMs },
   )
 }
 
