@@ -14,7 +14,7 @@
 - **matching-review item** — one review row for a request in one system.
 - **data owner** / **data user** — owner configures connections; user reviews and fulfills.
 
-Source filter = DROP vs other intake. System filter = catalog connections (Alumni, Mailchimp, …). Do not put CA DROP next to Alumni as a system chip.
+Source filter = DROP vs other intake. System filter = catalog connections (Alumni, Axios HQ, …). Do not put CA DROP next to Alumni as a system chip.
 
 ## Composition recipes
 
