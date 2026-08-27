@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -89,14 +90,23 @@ def test_gsm_secret_id_replaces_slashes():
     )
 
 
-def test_get_secret_reader_defaults_to_in_memory(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("GCP_PROJECT", raising=False)
+def _clear_prod_like_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("REQUIRE_IAP_IDENTITY", raising=False)
+    monkeypatch.delenv("WORKER_ID", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
     monkeypatch.delenv("SECRET_READER", raising=False)
+    monkeypatch.delenv("SECRET_WRITER", raising=False)
+
+
+def test_get_secret_reader_defaults_to_in_memory(monkeypatch: pytest.MonkeyPatch):
+    _clear_prod_like_secret_env(monkeypatch)
+    monkeypatch.delenv("GCP_PROJECT", raising=False)
     reader = get_secret_reader()
     assert isinstance(reader, InMemorySecretWriter)
 
 
 def test_get_secret_reader_memory_flag_wins_over_project(monkeypatch: pytest.MonkeyPatch):
+    _clear_prod_like_secret_env(monkeypatch)
     monkeypatch.setenv("GCP_PROJECT", "example-gcp-project")
     monkeypatch.setenv("SECRET_READER", "memory")
     reader = get_secret_reader()
@@ -104,6 +114,7 @@ def test_get_secret_reader_memory_flag_wins_over_project(monkeypatch: pytest.Mon
 
 
 def test_get_secret_reader_shares_store_with_writer(monkeypatch: pytest.MonkeyPatch):
+    _clear_prod_like_secret_env(monkeypatch)
     monkeypatch.delenv("GCP_PROJECT", raising=False)
     writer = get_secret_writer()
     assert isinstance(writer, InMemorySecretWriter)
@@ -212,9 +223,8 @@ def test_gcp_secret_reader_requires_project():
 
 
 def test_get_secret_writer_uses_gcp_when_project_set(monkeypatch: pytest.MonkeyPatch):
+    _clear_prod_like_secret_env(monkeypatch)
     monkeypatch.setenv("GCP_PROJECT", "example-gcp-project")
-    monkeypatch.delenv("SECRET_READER", raising=False)
-    monkeypatch.delenv("SECRET_WRITER", raising=False)
 
     created: list[str] = []
 
@@ -239,12 +249,101 @@ def test_get_secret_writer_memory_flag_wins_over_project(
     monkeypatch: pytest.MonkeyPatch,
     memory_flag: str,
 ):
+    _clear_prod_like_secret_env(monkeypatch)
     monkeypatch.setenv("GCP_PROJECT", "example-gcp-project")
     other_flag = "SECRET_READER" if memory_flag == "SECRET_WRITER" else "SECRET_WRITER"
     monkeypatch.delenv(other_flag, raising=False)
     monkeypatch.setenv(memory_flag, "memory")
     writer = get_secret_writer()
     assert isinstance(writer, InMemorySecretWriter)
+
+
+def _stub_gcp_writer(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    created: list[str] = []
+
+    class _StubWriter:
+        def __init__(self, *, project_id: str) -> None:
+            created.append(project_id)
+
+        def put_secret(self, secret_id: str, value: str) -> None:
+            _ = (secret_id, value)
+
+    monkeypatch.setattr(
+        "habeas_privacy_core.connections.gcp_secret_reader.GcpSecretWriter",
+        _StubWriter,
+    )
+    return created
+
+
+@pytest.mark.parametrize(
+    "prod_env",
+    [
+        {"REQUIRE_IAP_IDENTITY": "true"},
+        {"WORKER_ID": "admin-api-prod"},
+        {"WORKER_ID": "admin-api-dev"},
+        {"K_SERVICE": "admin-api-dev"},
+        {"K_SERVICE": "admin-api-prod"},
+    ],
+)
+def test_get_secret_writer_prod_like_uses_gcp(
+    monkeypatch: pytest.MonkeyPatch,
+    prod_env: dict[str, str],
+):
+    _clear_prod_like_secret_env(monkeypatch)
+    monkeypatch.setenv("GCP_PROJECT", "example-gcp-project")
+    for key, value in prod_env.items():
+        monkeypatch.setenv(key, value)
+    created = _stub_gcp_writer(monkeypatch)
+    writer = get_secret_writer()
+    assert created == ["example-gcp-project"]
+    assert type(writer).__name__ == "_StubWriter"
+
+
+@pytest.mark.parametrize(
+    "prod_env",
+    [
+        {"REQUIRE_IAP_IDENTITY": "true"},
+        {"WORKER_ID": "admin-api-prod"},
+        {"WORKER_ID": "admin-api-dev"},
+        {"K_SERVICE": "admin-api-dev"},
+        {"K_SERVICE": "admin-api-prod"},
+    ],
+)
+def test_get_secret_writer_prod_like_missing_project_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    prod_env: dict[str, str],
+):
+    _clear_prod_like_secret_env(monkeypatch)
+    monkeypatch.delenv("GCP_PROJECT", raising=False)
+    for key, value in prod_env.items():
+        monkeypatch.setenv(key, value)
+    with pytest.raises(RuntimeError, match="GCP_PROJECT is required"):
+        get_secret_writer()
+
+
+@pytest.mark.parametrize("memory_flag", ["SECRET_WRITER", "SECRET_READER"])
+@pytest.mark.parametrize(
+    "prod_env",
+    [
+        {"REQUIRE_IAP_IDENTITY": "true"},
+        {"WORKER_ID": "admin-api-prod"},
+        {"WORKER_ID": "admin-api-dev"},
+        {"K_SERVICE": "admin-api-dev"},
+        {"K_SERVICE": "admin-api-prod"},
+    ],
+)
+def test_get_secret_writer_prod_like_rejects_memory_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    memory_flag: str,
+    prod_env: dict[str, str],
+):
+    _clear_prod_like_secret_env(monkeypatch)
+    monkeypatch.setenv("GCP_PROJECT", "example-gcp-project")
+    monkeypatch.setenv(memory_flag, "memory")
+    for key, value in prod_env.items():
+        monkeypatch.setenv(key, value)
+    with pytest.raises(RuntimeError, match="in-memory secret backend is not allowed"):
+        get_secret_writer()
 
 
 def test_gcp_secret_writer_creates_and_adds_version():
@@ -299,3 +398,15 @@ def test_gcp_secret_writer_does_not_log_secret_value(
 def test_gcp_secret_writer_requires_project():
     with pytest.raises(ValueError, match="GCP_PROJECT"):
         GcpSecretWriter(project_id="  ")
+
+
+def test_admin_api_cloudbuild_pins_gcp_secret_writer() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    for relative in (
+        "infra/cloudbuild/admin-api-dev.yaml",
+        "infra/cloudbuild/admin-api-prod.yaml",
+    ):
+        text = (repo_root / relative).read_text()
+        assert "SECRET_WRITER=gcp" in text
+        assert "SECRET_WRITER=memory," not in text
+        assert ",SECRET_WRITER=memory" not in text

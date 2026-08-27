@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
 
@@ -23,6 +25,11 @@ def signed_headers(email: str, **extra: str) -> dict[str, str]:
 @pytest.fixture(autouse=True)
 def _force_memory_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep wizard tests off live GSM even when the shell has GCP_PROJECT."""
+    monkeypatch.delenv("REQUIRE_IAP_IDENTITY", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    worker_id = os.environ.get("WORKER_ID", "").strip().lower()
+    if worker_id.endswith(("-dev", "-prod")):
+        monkeypatch.delenv("WORKER_ID", raising=False)
     monkeypatch.setenv("SECRET_READER", "memory")
     monkeypatch.setenv("SECRET_WRITER", "memory")
 

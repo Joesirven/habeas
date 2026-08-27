@@ -1310,6 +1310,70 @@ def test_live_credentials_gsm_write_failure_returns_502(
     helpers["merge"].assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "deployed_env",
+    [
+        {"K_SERVICE": "admin-api-dev"},
+        {"K_SERVICE": "admin-api-prod"},
+        {"REQUIRE_IAP_IDENTITY": "true"},
+        {"WORKER_ID": "admin-api-dev"},
+        {"WORKER_ID": "admin-api-prod"},
+    ],
+)
+def test_live_credentials_missing_gcp_project_on_deployed_returns_502(
+    monkeypatch: pytest.MonkeyPatch,
+    deployed_env: dict[str, str],
+) -> None:
+    """Owner Live save must 502 when deployed admin-api cannot open GSM."""
+    current = _connection(
+        system="lever",
+        metadata={"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "live"},
+        status="pending",
+    )
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    monkeypatch.delenv("SECRET_READER", raising=False)
+    monkeypatch.delenv("SECRET_WRITER", raising=False)
+    monkeypatch.delenv("GCP_PROJECT", raising=False)
+    for key, value in deployed_env.items():
+        monkeypatch.setenv(key, value)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/credentials",
+            headers=_owner_headers(),
+            json={"credentials": {"api_key": "lever-test-key"}},
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "secret_write_failed"
+    helpers["merge"].assert_not_awaited()
+
+
+@pytest.mark.parametrize("memory_flag", ["SECRET_WRITER", "SECRET_READER"])
+def test_live_credentials_memory_flag_on_cloud_run_returns_502(
+    monkeypatch: pytest.MonkeyPatch,
+    memory_flag: str,
+) -> None:
+    current = _connection(
+        system="lever",
+        metadata={"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "live"},
+        status="pending",
+    )
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    monkeypatch.setenv("GCP_PROJECT", "example-gcp-project")
+    monkeypatch.setenv("K_SERVICE", "admin-api-dev")
+    monkeypatch.setenv(memory_flag, "memory")
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/lever/credentials",
+            headers=_owner_headers(),
+            json={"credentials": {"api_key": "lever-test-key"}},
+        )
+    assert response.status_code == 502
+    assert response.json()["detail"] == "secret_write_failed"
+    helpers["merge"].assert_not_awaited()
+
+
 def test_live_credentials_failed_test_allows_retry_without_wizard_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

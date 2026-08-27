@@ -136,6 +136,9 @@ def test_get_secret_writer_defaults_to_in_memory(monkeypatch: pytest.MonkeyPatch
     monkeypatch.delenv("GCP_PROJECT", raising=False)
     monkeypatch.delenv("SECRET_READER", raising=False)
     monkeypatch.delenv("SECRET_WRITER", raising=False)
+    monkeypatch.delenv("REQUIRE_IAP_IDENTITY", raising=False)
+    monkeypatch.delenv("WORKER_ID", raising=False)
+    monkeypatch.delenv("K_SERVICE", raising=False)
     writer = get_secret_writer()
     assert isinstance(writer, InMemorySecretWriter)
 

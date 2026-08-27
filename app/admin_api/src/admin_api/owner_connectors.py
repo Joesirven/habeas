@@ -1474,8 +1474,8 @@ async def save_live_credentials(
         _reject_live_while_upload_mode(connection)
         connection_id = UUID(str(connection.id))
         secret_name = connections_db.secret_resource_name(system, str(connection_id))
-        writer = get_secret_writer()
         try:
+            writer = get_secret_writer()
             writer.put_secret(secret_name, json.dumps(cleaned, sort_keys=True))
         except Exception:
             logger.warning(
@@ -1839,8 +1839,8 @@ async def redeem_owner_sheets_oauth(
         )
         connection_id = UUID(str(connection.id))
         secret_name = connections_db.secret_resource_name(system, str(connection_id))
-        writer = get_secret_writer()
         try:
+            writer = get_secret_writer()
             writer.put_secret(
                 secret_name,
                 json.dumps(

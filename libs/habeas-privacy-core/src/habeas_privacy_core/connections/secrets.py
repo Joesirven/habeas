@@ -60,8 +60,10 @@ def get_secret_writer() -> SecretWriter:
     """Return the default secret writer.
 
     Uses the production GSM writer when ``GCP_PROJECT`` is set and
-    ``SECRET_READER`` / ``SECRET_WRITER`` is not ``memory``. Otherwise
-    returns the process-local in-memory store.
+    ``SECRET_READER`` / ``SECRET_WRITER`` is not ``memory``. Deployed
+    processes (Cloud Run ``K_SERVICE``, ``REQUIRE_IAP_IDENTITY``, or
+    ``WORKER_ID`` ending in ``-dev`` / ``-prod``) fail closed — they
+    never fall back to the in-memory store.
     """
     if not _use_gcp_secret_writer():
         global _default_writer
@@ -89,28 +91,68 @@ def reset_secret_reader_cache() -> None:
     _default_gcp_writer_project = None
 
 
+_TRUTHY_ENV = frozenset({"1", "true", "yes"})
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in _TRUTHY_ENV
+
+
 def _memory_secret_backend() -> bool:
     reader_mode = os.environ.get("SECRET_READER", "").strip().lower()
     writer_mode = os.environ.get("SECRET_WRITER", "").strip().lower()
     return reader_mode == "memory" or writer_mode == "memory"
 
 
-def _use_gcp_secret_reader() -> bool:
-    if _memory_secret_backend():
+def _require_gsm_secret_backend() -> bool:
+    """True for Cloud Run and deployed *-dev/*-prod processes that must use GSM."""
+    if os.environ.get("K_SERVICE", "").strip():
+        return True
+    if _env_truthy("REQUIRE_IAP_IDENTITY"):
+        return True
+    worker_id = os.environ.get("WORKER_ID", "").strip().lower()
+    return worker_id.endswith(("-dev", "-prod"))
+
+
+def _use_gcp_secret_backend() -> bool:
+    """Choose GSM, in-memory, or fail closed. Never log secret values."""
+    require = _require_gsm_secret_backend()
+    memory = _memory_secret_backend()
+    project = os.environ.get("GCP_PROJECT", "").strip()
+    if require:
+        if memory:
+            raise RuntimeError(
+                "in-memory secret backend is not allowed when K_SERVICE is set, "
+                "REQUIRE_IAP_IDENTITY is true, or WORKER_ID ends with -dev or -prod"
+            )
+        if not project:
+            raise RuntimeError(
+                "GCP_PROJECT is required for the secret writer when K_SERVICE is set, "
+                "REQUIRE_IAP_IDENTITY is true, or WORKER_ID ends with -dev or -prod"
+            )
+        return True
+    if memory:
         return False
-    return bool(os.environ.get("GCP_PROJECT", "").strip())
+    return bool(project)
+
+
+def _use_gcp_secret_reader() -> bool:
+    return _use_gcp_secret_backend()
 
 
 def _use_gcp_secret_writer() -> bool:
-    return _use_gcp_secret_reader()
+    return _use_gcp_secret_backend()
 
 
 def get_secret_reader() -> SecretReader:
     """Return the default secret reader.
 
     Uses the production GSM reader when ``GCP_PROJECT`` is set and
-    ``SECRET_READER`` is not ``memory``. Otherwise returns the shared
-    in-memory writer (read side) so tests can ``put_secret`` / ``get_secret``.
+    ``SECRET_READER`` is not ``memory``. Deployed processes (Cloud Run
+    ``K_SERVICE``, ``REQUIRE_IAP_IDENTITY``, or ``WORKER_ID`` ending in
+    ``-dev`` / ``-prod``) fail closed — they never fall back to the
+    in-memory store. Otherwise returns the shared in-memory writer
+    (read side) so tests can ``put_secret`` / ``get_secret``.
     """
     if not _use_gcp_secret_reader():
         writer = get_secret_writer()
