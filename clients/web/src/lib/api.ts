@@ -9,6 +9,19 @@ export function usesDirectAdminApi(): boolean {
   return API_BASE.startsWith('http://') || API_BASE.startsWith('https://')
 }
 
+/**
+ * JSON URL. Architecture B uses the baked admin-api origin only when a GIS
+ * user token is in memory. One Tap often misses behind admin-web IAP — then
+ * same-origin `/api` (nginx + IAP headers) keeps the session off the Retry
+ * screen. Server-Sent Events stay on `/api/live/events` either way.
+ */
+export function adminApiRequestUrl(path: string): string {
+  if (usesDirectAdminApi() && !getAdminApiUserToken()) {
+    return `/api${path}`
+  }
+  return `${API_BASE}${path}`
+}
+
 /** GIS web client id from VITE_ only — never invent or hardcode a client id. */
 const GIS_CLIENT_ID = (
   (import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined) ||
@@ -38,16 +51,31 @@ function decodeJwtExpiryMs(token: string): number | null {
 let adminApiUserToken: string | null = null
 let adminApiUserTokenExpiresAt: number | null = null
 let adminApiUserTokenRefresher: (() => Promise<void>) | null = null
+const adminApiUserTokenListeners = new Set<() => void>()
+
+function notifyAdminApiUserTokenListeners(): void {
+  for (const listener of adminApiUserTokenListeners) listener()
+}
+
+/** Fired after the in-memory GIS token is set or cleared. */
+export function subscribeAdminApiUserToken(listener: () => void): () => void {
+  adminApiUserTokenListeners.add(listener)
+  return () => {
+    adminApiUserTokenListeners.delete(listener)
+  }
+}
 
 export function setAdminApiUserToken(token: string | null): void {
   const trimmed = token?.trim() ?? ''
   if (trimmed.length === 0) {
     adminApiUserToken = null
     adminApiUserTokenExpiresAt = null
+    notifyAdminApiUserTokenListeners()
     return
   }
   adminApiUserToken = trimmed
   adminApiUserTokenExpiresAt = decodeJwtExpiryMs(trimmed)
+  notifyAdminApiUserTokenListeners()
 }
 
 export function getAdminApiUserToken(): string | null {
@@ -346,7 +374,7 @@ export async function fetchAdminApi<T>(path: string, init?: AdminApiFetchInit): 
   try {
     let response: Response
     try {
-      response = await fetch(`${API_BASE}${path}`, {
+      response = await fetch(adminApiRequestUrl(path), {
         ...rest,
         signal: adminApiAbortSignal(timeoutMs, callerSignal),
         headers: {
@@ -577,7 +605,7 @@ export async function postAgentBatchUpload(file: File) {
   const headers = adminApiAuthHeaders({ Accept: 'application/json' })
   const form = new FormData()
   form.append('file', file)
-  const response = await fetch(`${API_BASE}/requests/agent-batch`, {
+  const response = await fetch(adminApiRequestUrl('/requests/agent-batch'), {
     method: 'POST',
     headers,
     body: form,
@@ -2919,7 +2947,7 @@ export async function uploadRequestDocument(requestId: string, file: File) {
   const form = new FormData()
   form.append('file', file)
   const response = await fetch(
-    `${API_BASE}/requests/${encodeURIComponent(requestId)}/documents`,
+    adminApiRequestUrl(`/requests/${encodeURIComponent(requestId)}/documents`),
     { method: 'POST', headers, body: form },
   )
   if (!response.ok) {
@@ -2937,7 +2965,9 @@ export async function downloadRequestDocument(
   await refreshAdminApiUserTokenIfNeeded()
   const headers = adminApiAuthHeaders()
   const response = await fetch(
-    `${API_BASE}/requests/${encodeURIComponent(requestId)}/documents/${encodeURIComponent(documentId)}/download`,
+    adminApiRequestUrl(
+      `/requests/${encodeURIComponent(requestId)}/documents/${encodeURIComponent(documentId)}/download`,
+    ),
     { headers },
   )
   if (!response.ok) {
@@ -2955,7 +2985,9 @@ export async function deleteRequestDocument(
   await refreshAdminApiUserTokenIfNeeded()
   const headers = adminApiAuthHeaders({ Accept: 'application/json' })
   const response = await fetch(
-    `${API_BASE}/requests/${encodeURIComponent(requestId)}/documents/${encodeURIComponent(documentId)}`,
+    adminApiRequestUrl(
+      `/requests/${encodeURIComponent(requestId)}/documents/${encodeURIComponent(documentId)}`,
+    ),
     { method: 'DELETE', headers },
   )
   if (!response.ok) {
@@ -3573,7 +3605,9 @@ export async function uploadOwnerConnectorCsv(
     form.append('phone_format', formats.phoneFormat)
   }
   const response = await fetch(
-    `${API_BASE}/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/upload`,
+    adminApiRequestUrl(
+      `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/upload`,
+    ),
     { method: 'POST', headers, body: form },
   )
   if (!response.ok) {
@@ -3590,7 +3624,9 @@ export async function downloadOwnerUploadTemplate(
   await refreshAdminApiUserTokenIfNeeded()
   const headers = adminApiAuthHeaders()
   const response = await fetch(
-    `${API_BASE}/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/upload-template`,
+    adminApiRequestUrl(
+      `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/upload-template`,
+    ),
     { headers },
   )
   if (!response.ok) {

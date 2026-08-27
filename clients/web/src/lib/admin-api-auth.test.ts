@@ -159,10 +159,13 @@ describe('Architecture B admin-api client', () => {
     expect(headerValue(init.headers, 'Authorization')).toBe(`Bearer ${token}`)
   })
 
-  test('set VITE_ADMIN_API_URL without a user token omits Authorization', async () => {
-    const { fetchAdminApi } = await importApi('https://admin-api-dev.example')
+  test('set VITE_ADMIN_API_URL without a user token uses same-origin /api IAP fallback', async () => {
+    const { fetchAdminApi, adminApiRequestUrl } = await importApi(
+      'https://admin-api-dev.example',
+    )
+    expect(adminApiRequestUrl('/me')).toBe('/api/me')
     await fetchAdminApi('/me')
-    expect(fetchCall(fetchMock).url).toBe('https://admin-api-dev.example/me')
+    expect(fetchCall(fetchMock).url).toBe('/api/me')
     expect(headerValue(fetchCall(fetchMock).init.headers, 'Authorization')).toBeNull()
   })
 
@@ -679,6 +682,7 @@ describe('GIS script load (P1 hang)', () => {
         id: {
           initialize: () => {},
           prompt: () => {},
+          renderButton: () => {},
         },
       },
     }
@@ -692,6 +696,62 @@ describe('GIS script load (P1 hang)', () => {
     const { ensureDirectAdminApiUserToken } = await import('./auth.tsx')
     await ensureDirectAdminApiUserToken()
     expect(created).toEqual([])
+  })
+
+  test('One Tap skip resolves immediately as a miss (not a hang)', async () => {
+    const { promptGoogleOneTap } = await import('./auth.tsx')
+    if (!globalThis.window) globalThis.window = globalThis
+    globalThis.window.google = {
+      accounts: {
+        id: {
+          initialize: () => {},
+          prompt: (listener) => {
+            listener?.({
+              isNotDisplayed: () => true,
+              isSkippedMoment: () => false,
+              isDismissedMoment: () => false,
+            })
+          },
+          renderButton: () => {},
+        },
+      },
+    }
+    const started = Date.now()
+    await expect(promptGoogleOneTap()).resolves.toBeNull()
+    expect(Date.now() - started).toBeLessThan(500)
+  })
+
+  test('renderGoogleSignInButton mounts the official GIS button', async () => {
+    const { renderGoogleSignInButton } = await import('./auth.tsx')
+    if (!globalThis.window) globalThis.window = globalThis
+    const rendered: Array<{ width?: number; text?: string }> = []
+    globalThis.window.google = {
+      accounts: {
+        id: {
+          initialize: () => {},
+          prompt: () => {},
+          renderButton: (_parent, options) => {
+            rendered.push(options)
+          },
+        },
+      },
+    }
+    const parent = { replaceChildren: () => {} }
+    const ok = await renderGoogleSignInButton(
+      parent as HTMLElement,
+      'test-client.apps.googleusercontent.com',
+    )
+    expect(ok).toBe(true)
+    expect(rendered).toEqual([
+      {
+        type: 'standard',
+        theme: 'outline',
+        size: 'large',
+        text: 'signin_with',
+        shape: 'rectangular',
+        width: 280,
+      },
+    ])
   })
 })
 

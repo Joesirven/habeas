@@ -1,5 +1,13 @@
 import { useQuery } from '@tanstack/react-query'
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -9,6 +17,7 @@ import {
   googleIdentityServicesClientId,
   registerAdminApiUserTokenRefresher,
   setAdminApiUserToken,
+  subscribeAdminApiUserToken,
   usesDirectAdminApi,
   type MePayload,
   type UserRole,
@@ -50,8 +59,21 @@ type GoogleAccountsId = {
     client_id: string
     callback: (response: { credential?: string }) => void
     auto_select?: boolean
+    cancel_on_tap_outside?: boolean
   }) => void
   prompt: (momentListener?: (notification: GoogleIdPromptNotification) => void) => void
+  renderButton: (
+    parent: HTMLElement,
+    options: {
+      type?: 'standard' | 'icon'
+      theme?: 'outline' | 'filled_blue' | 'filled_black'
+      size?: 'large' | 'medium' | 'small'
+      text?: 'signin_with' | 'signup_with' | 'continue_with' | 'signin'
+      shape?: 'rectangular' | 'pill' | 'circle' | 'square'
+      width?: number
+    },
+  ) => void
+  cancel?: () => void
 }
 
 type GisScriptElement = HTMLScriptElement & {
@@ -119,8 +141,28 @@ export function loadGoogleIdentityScript(
   })
 }
 
-/** Request a user Google ID token via GIS. Client id comes from VITE_ only. */
-function requestGoogleIdToken(clientId: string): Promise<string | null> {
+/**
+ * Initialize GIS once per client id. One Tap (`prompt`) is best-effort —
+ * IAP / FedCM often skip it. The Sign in with Google button stays available.
+ */
+export async function initializeGoogleIdentity(clientId: string): Promise<boolean> {
+  await loadGoogleIdentityScript()
+  const api = window.google?.accounts?.id
+  if (!api) return false
+  api.initialize({
+    client_id: clientId,
+    auto_select: true,
+    cancel_on_tap_outside: false,
+    callback: (response) => {
+      const token = response.credential?.trim()
+      if (token) setAdminApiUserToken(token)
+    },
+  })
+  return true
+}
+
+/** One Tap only. Skip / not-displayed / dismiss is a miss, not a fatal error. */
+export function promptGoogleOneTap(): Promise<string | null> {
   return new Promise((resolve) => {
     const api = window.google?.accounts?.id
     if (!api) {
@@ -133,15 +175,20 @@ function requestGoogleIdToken(clientId: string): Promise<string | null> {
       settled = true
       resolve(token)
     }
-    const timer = window.setTimeout(() => finish(null), GIS_PROMPT_TIMEOUT_MS)
-    api.initialize({
-      client_id: clientId,
-      auto_select: true,
-      callback: (response) => {
+    const onToken = () => {
+      const token = getAdminApiUserToken()
+      if (token) {
+        unsubscribe()
         window.clearTimeout(timer)
-        finish(response.credential?.trim() || null)
-      },
-    })
+        finish(token)
+      }
+    }
+    const unsubscribe = subscribeAdminApiUserToken(onToken)
+    const timer = window.setTimeout(() => {
+      unsubscribe()
+      finish(getAdminApiUserToken())
+    }, GIS_PROMPT_TIMEOUT_MS)
+    onToken()
     api.prompt((notification) => {
       if (
         notification.isNotDisplayed() ||
@@ -149,10 +196,32 @@ function requestGoogleIdToken(clientId: string): Promise<string | null> {
         notification.isDismissedMoment()
       ) {
         window.clearTimeout(timer)
-        finish(null)
+        unsubscribe()
+        finish(getAdminApiUserToken())
       }
     })
   })
+}
+
+/** Official GIS button — works when One Tap is suppressed behind IAP. */
+export async function renderGoogleSignInButton(
+  parent: HTMLElement,
+  clientId = googleIdentityServicesClientId(),
+): Promise<boolean> {
+  if (!clientId) return false
+  const ready = await initializeGoogleIdentity(clientId)
+  const api = window.google?.accounts?.id
+  if (!ready || !api) return false
+  parent.replaceChildren()
+  api.renderButton(parent, {
+    type: 'standard',
+    theme: 'outline',
+    size: 'large',
+    text: 'signin_with',
+    shape: 'rectangular',
+    width: 280,
+  })
+  return true
 }
 
 let mintInflight: Promise<void> | null = null
@@ -170,12 +239,13 @@ export async function ensureDirectAdminApiUserToken(): Promise<void> {
   if (!clientId) return
   mintInflight = (async () => {
     try {
-      await loadGoogleIdentityScript()
-      const token = await requestGoogleIdToken(clientId)
+      const ready = await initializeGoogleIdentity(clientId)
+      if (!ready) return
+      const token = await promptGoogleOneTap()
       if (token) setAdminApiUserToken(token)
     } catch {
-      // Leave token unset. AuthProvider treats a B session without a token as
-      // a Google sign-in miss (not a GET /me / role-API failure).
+      // Leave token unset. GET /me still runs via nginx /api (IAP) so the
+      // session is not stuck on Retry when One Tap is skipped behind IAP.
     }
   })().finally(() => {
     mintInflight = null
@@ -190,7 +260,9 @@ type AuthContextValue = {
   isLoading: boolean
   isError: boolean
   error: Error | null
-  /** Architecture B: GIS/direct-API mint settled with no in-memory token. */
+  /** Architecture B: GIS user JWT is in memory. */
+  hasUserToken: boolean
+  /** Architecture B: GET /me failed and One Tap did not mint a token. */
   googleSignInFailed: boolean
   /** Remint GIS (Architecture B) then retry GET /me. */
   retryIdentity: () => void
@@ -205,20 +277,23 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const needsUserToken = usesDirectAdminApi()
   const [tokenReady, setTokenReady] = useState(!needsUserToken)
+  const [hasUserToken, setHasUserToken] = useState(() => Boolean(getAdminApiUserToken()))
   const [googleSignInFailed, setGoogleSignInFailed] = useState(false)
 
   const settleDirectToken = useCallback((cancelled?: () => boolean) => {
     if (cancelled?.()) return
-    if (
-      classifyIdentityMiss({
-        directAdminApi: needsUserToken,
-        hasUserToken: Boolean(getAdminApiUserToken()),
-      }) === 'google_sign_in'
-    ) {
-      setGoogleSignInFailed(true)
-    }
+    setHasUserToken(Boolean(getAdminApiUserToken()))
+    // One Tap miss is not fatal: GET /me still runs (nginx /api IAP fallback).
+    setGoogleSignInFailed(false)
     setTokenReady(true)
-  }, [needsUserToken])
+  }, [])
+
+  useEffect(() => {
+    return subscribeAdminApiUserToken(() => {
+      setHasUserToken(Boolean(getAdminApiUserToken()))
+      setGoogleSignInFailed(false)
+    })
+  }, [])
 
   useEffect(() => {
     if (!needsUserToken) {
@@ -234,7 +309,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [needsUserToken, settleDirectToken])
 
-  const queryEnabled = tokenReady && !googleSignInFailed
+  const queryEnabled = tokenReady
   const query = useQuery({
     queryKey: ['admin-api', 'me'],
     queryFn: getMe,
@@ -242,6 +317,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     retry: false,
     enabled: queryEnabled,
   })
+
+  const hadUserToken = useRef(hasUserToken)
+  useEffect(() => {
+    if (hasUserToken && !hadUserToken.current) {
+      void query.refetch()
+    }
+    hadUserToken.current = hasUserToken
+  }, [hasUserToken, query])
 
   const retryIdentity = useCallback(() => {
     setGoogleSignInFailed(false)
@@ -260,7 +343,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isLoading: !tokenReady || (queryEnabled && query.isLoading),
     isError: query.isError,
     error: query.error instanceof Error ? query.error : null,
-    googleSignInFailed,
+    hasUserToken,
+    googleSignInFailed:
+      googleSignInFailed ||
+      (needsUserToken && !hasUserToken && tokenReady && query.isError),
     retryIdentity,
     role: query.data?.role,
     realRole: query.data?.real_role ?? query.data?.role,
@@ -410,6 +496,15 @@ function RoleApiErrorState({ error }: { error: Error | null }) {
 }
 
 function GoogleSignInErrorState({ onRetry }: { onRetry: () => void }) {
+  const buttonHostRef = useRef<HTMLDivElement>(null)
+  const [buttonKey, setButtonKey] = useState(0)
+
+  useEffect(() => {
+    const host = buttonHostRef.current
+    if (!host) return
+    void renderGoogleSignInButton(host)
+  }, [buttonKey])
+
   return (
     <section className="space-y-4">
       <p className="taste-micro">Access</p>
@@ -419,7 +514,14 @@ function GoogleSignInErrorState({ onRetry }: { onRetry: () => void }) {
       <p className="max-w-lg text-sm leading-relaxed text-ink-soft">
         {GOOGLE_SIGN_IN_ERROR.description}
       </p>
-      <Button type="button" onClick={onRetry}>
+      <div ref={buttonHostRef} className="min-h-10" data-testid="gis-sign-in-button" />
+      <Button
+        type="button"
+        onClick={() => {
+          setButtonKey((key) => key + 1)
+          onRetry()
+        }}
+      >
         {GOOGLE_SIGN_IN_ERROR.retryLabel}
       </Button>
     </section>
@@ -427,9 +529,23 @@ function GoogleSignInErrorState({ onRetry }: { onRetry: () => void }) {
 }
 
 export function RoleGate({ allow, children }: RoleGateProps) {
-  const { role, isLoading, me, isError, error, googleSignInFailed, retryIdentity } = useAuth()
+  const {
+    role,
+    isLoading,
+    me,
+    isError,
+    error,
+    hasUserToken,
+    googleSignInFailed,
+    retryIdentity,
+  } = useAuth()
   const [loadingTimedOut, setLoadingTimedOut] = useState(false)
   const waitingForMe = isLoading && !me
+  const showGoogleSignIn =
+    usesDirectAdminApi() &&
+    !hasUserToken &&
+    !me &&
+    (googleSignInFailed || isError || loadingTimedOut)
 
   useEffect(() => {
     if (!waitingForMe) {
@@ -460,7 +576,7 @@ export function RoleGate({ allow, children }: RoleGateProps) {
     )
   }
 
-  if (googleSignInFailed) {
+  if (showGoogleSignIn) {
     return <GoogleSignInErrorState onRetry={retryIdentity} />
   }
 
