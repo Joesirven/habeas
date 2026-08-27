@@ -162,10 +162,15 @@ async def test_initial_snapshot_sent_once(live_env: Any) -> None:
     assert live_env.calls["list"] == 1
     assert live_env.calls["lite"] == 1
 
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(gen.__anext__(), timeout=0.3)
+    pending = asyncio.create_task(gen.__anext__())
+    deadline = monotonic() + 2.0
+    while live_env.calls["matching"] < 3 and monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    assert live_env.calls["matching"] >= 3
     assert live_env.calls["list"] == 1
-    assert live_env.calls["matching"] >= 2
+    assert not pending.done()
+    pending.cancel()
+    await asyncio.wait([pending])
     await gen.aclose()
     await asyncio.sleep(0)
 
@@ -267,9 +272,14 @@ async def test_import_error_falls_back_to_legacy_bulk_poll(
         assert bulk["event"] == "bulk_process"
         assert json.loads(bulk["data"]) == _bulk_summary(12)
 
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(gen.__anext__(), timeout=0.35)
+        pending = asyncio.create_task(gen.__anext__())
+        deadline = monotonic() + 2.0
+        while live_env.calls["list"] < 2 and monotonic() < deadline:
+            await asyncio.sleep(0.01)
         assert live_env.calls["list"] >= 2
+        assert not pending.done()  # unchanged payload → no duplicate bulk
+        pending.cancel()
+        await asyncio.wait([pending])
         await gen.aclose()
         assert len(fallback_warnings()) == 1
 
