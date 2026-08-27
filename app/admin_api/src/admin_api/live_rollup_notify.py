@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import OrderedDict
+from time import monotonic
 from typing import Any
 
 import asyncpg
@@ -35,6 +37,9 @@ _RECONNECT_MIN_SECONDS = 1.0
 _RECONNECT_MAX_SECONDS = 30.0
 _LISTEN_HEALTH_SECONDS = 1.0
 _SUBSCRIBER_QUEUE_MAX = 100
+_NOTIFY_INBOX_MAX = 10_000
+_LAST_EMITTED_MAX = 128
+_DROP_LOG_MIN_INTERVAL_SECONDS = 60.0
 
 _COMPLETION_CHECK_SQL = """
         SELECT matching_completed_at, matching_pending, matching_claimed,
@@ -49,14 +54,18 @@ class BulkRollupBroadcaster:
 
     def __init__(self) -> None:
         self._subscribers: set[asyncio.Queue[dict[str, str]]] = set()
-        self._last_emitted: dict[int, str] = {}
+        self._last_emitted: OrderedDict[int, str] = OrderedDict()
         self._latest_pid: int | None = None
         self._dropped_events = 0
+        self._dropped_notifications = 0
+        self._last_drop_log_at = float("-inf")
 
         self._dirty: set[int] = set()
         self._dirty_available = asyncio.Event()
         self._flush_now = asyncio.Event()
-        self._notify_inbox: asyncio.Queue[int] = asyncio.Queue()
+        self._notify_inbox: asyncio.Queue[int] = asyncio.Queue(
+            maxsize=_NOTIFY_INBOX_MAX
+        )
 
         self._listen_conn: Any = None
         self._listen_task: asyncio.Task[None] | None = None
@@ -152,7 +161,22 @@ class BulkRollupBroadcaster:
                 extra={"event": "live_rollup_notify_bad_payload", "channel": channel},
             )
             return
-        self._notify_inbox.put_nowait(process_id)
+        try:
+            self._notify_inbox.put_nowait(process_id)
+        except asyncio.QueueFull:
+            # Notifications repeat constantly during active matching and the
+            # 5s backstop covers idle tails, so a drop loses nothing.
+            self._dropped_notifications += 1
+            now = monotonic()
+            if now - self._last_drop_log_at >= _DROP_LOG_MIN_INTERVAL_SECONDS:
+                self._last_drop_log_at = now
+                logger.debug(
+                    "live_rollup_notify_inbox_full",
+                    extra={
+                        "event": "live_rollup_notify_inbox_full",
+                        "dropped": self._dropped_notifications,
+                    },
+                )
 
     async def _listen_loop(self) -> None:
         backoff = _RECONNECT_MIN_SECONDS
@@ -214,6 +238,9 @@ class BulkRollupBroadcaster:
     async def _notify_consumer_loop(self) -> None:
         while True:
             process_id = await self._notify_inbox.get()
+            if process_id in self._dirty:
+                # Already scheduled for flush — skip the redundant point read.
+                continue
             if not self._dirty:
                 self._dirty_available.set()
             self._dirty.add(process_id)
@@ -345,26 +372,37 @@ class BulkRollupBroadcaster:
     # -- fan-out --------------------------------------------------------------
 
     def _emit(self, process_id: int, payload: dict[str, Any]) -> bool:
-        data = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-        if self._last_emitted.get(process_id) == data:
+        try:
+            data = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+            if self._last_emitted.get(process_id) == data:
+                return False
+            self._last_emitted[process_id] = data
+            self._last_emitted.move_to_end(process_id)
+            while len(self._last_emitted) > _LAST_EMITTED_MAX:
+                self._last_emitted.popitem(last=False)
+            event = {"event": "bulk_process", "data": data}
+            for queue in tuple(self._subscribers):
+                try:
+                    queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    # A stuck client must never block the bridge.
+                    self._dropped_events += 1
+                    logger.debug(
+                        "live_rollup_subscriber_queue_full",
+                        extra={
+                            "event": "live_rollup_subscriber_queue_full",
+                            "process_id": process_id,
+                            "dropped": self._dropped_events,
+                        },
+                    )
+            return True
+        except Exception:
+            # A bad payload must never kill the flush/backstop tasks.
+            logger.exception(
+                "live_rollup_emit_error",
+                extra={"event": "live_rollup_emit_error", "process_id": process_id},
+            )
             return False
-        self._last_emitted[process_id] = data
-        event = {"event": "bulk_process", "data": data}
-        for queue in tuple(self._subscribers):
-            try:
-                queue.put_nowait(event)
-            except asyncio.QueueFull:
-                # A stuck client must never block the bridge.
-                self._dropped_events += 1
-                logger.debug(
-                    "live_rollup_subscriber_queue_full",
-                    extra={
-                        "event": "live_rollup_subscriber_queue_full",
-                        "process_id": process_id,
-                        "dropped": self._dropped_events,
-                    },
-                )
-        return True
 
 
 _BROADCASTER: BulkRollupBroadcaster | None = None

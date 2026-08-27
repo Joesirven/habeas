@@ -295,10 +295,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
         broadcaster = get_bulk_rollup_broadcaster()
     except ImportError:
-        logger.warning(
-            "live_events_bulk_bridge_unavailable",
-            extra={"event": "live_events_bulk_bridge_unavailable"},
-        )
+        # The emitter logs live_events_bulk_bridge_unavailable once per
+        # process on first connection; a lifespan warning would duplicate it.
+        pass
     if broadcaster is not None:
         try:
             await broadcaster.start()

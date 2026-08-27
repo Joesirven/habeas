@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from time import monotonic
 from types import SimpleNamespace
 from typing import Any
@@ -238,6 +239,22 @@ async def test_completion_requires_zero_open_buckets(bridge: Any) -> None:
     await bridge.broadcaster.stop()
 
 
+async def test_already_dirty_notify_skips_completion_read(bridge: Any) -> None:
+    live_rollup_notify.settings.live_bulk_notify_coalesce_ms = 60_000
+    bridge.read_conn.stats_rows[61] = _stats_row(completed=False, pending=1)
+    bridge.summaries[61] = _summary(61)
+    await bridge.broadcaster.start()
+    await _wait_for(lambda: LIVE_BULK_NOTIFY_CHANNEL in bridge.listen_conn.listeners)
+    bridge.listen_conn.deliver(61)
+    await _wait_for(lambda: bridge.read_conn.fetchrow_calls.count(61) == 1)
+    bridge.listen_conn.deliver(61)
+    bridge.listen_conn.deliver(61)
+    await asyncio.sleep(0.2)
+    assert bridge.read_conn.fetchrow_calls.count(61) == 1
+    assert bridge.broadcaster._dirty == {61}
+    await bridge.broadcaster.stop()
+
+
 async def test_dedupe_skips_unchanged_payload(bridge: Any) -> None:
     bridge.summaries[31] = _summary(31)
     await bridge.broadcaster.start()
@@ -310,6 +327,56 @@ async def test_full_subscriber_queue_drops_without_blocking() -> None:
     drained = {json.loads(queue.get_nowait()["data"])["process_id"] for _ in range(100)}
     assert 9999 not in drained
     assert 1000 in drained
+
+
+def test_notify_inbox_is_bounded_and_drops_are_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    broadcaster = BulkRollupBroadcaster()
+    inbox_max = live_rollup_notify._NOTIFY_INBOX_MAX
+    assert broadcaster._notify_inbox.maxsize == inbox_max
+    with caplog.at_level(logging.DEBUG, logger="admin_api.live_rollup_notify"):
+        for offset in range(inbox_max + 3):
+            broadcaster._on_notify(None, 0, LIVE_BULK_NOTIFY_CHANNEL, str(offset))
+    assert broadcaster._notify_inbox.qsize() == inbox_max
+    assert broadcaster._dropped_notifications == 3
+    full_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "live_rollup_notify_inbox_full"
+    ]
+    assert len(full_logs) == 1
+
+
+async def test_emit_failure_is_contained_and_flush_survives(bridge: Any) -> None:
+    bridge.summaries[91] = _summary(91)
+    poisoned = _summary(92)
+    poisoned["stages"]["download"]["bad"] = object()
+    bridge.summaries[92] = poisoned
+    await bridge.broadcaster.start()
+    await _wait_for(lambda: LIVE_BULK_NOTIFY_CHANNEL in bridge.listen_conn.listeners)
+    queue = bridge.broadcaster.subscribe()
+    bridge.listen_conn.deliver(91)
+    bridge.listen_conn.deliver(92)
+    event = await asyncio.wait_for(queue.get(), timeout=2.0)
+    assert json.loads(event["data"])["process_id"] == 91
+    await asyncio.sleep(0.1)
+    assert queue.empty()
+    flush_task = bridge.broadcaster._flush_task
+    assert flush_task is not None and not flush_task.done()
+    await bridge.broadcaster.stop()
+
+
+def test_last_emitted_map_is_capped() -> None:
+    broadcaster = BulkRollupBroadcaster()
+    cap = live_rollup_notify._LAST_EMITTED_MAX
+    for offset in range(cap + 50):
+        assert broadcaster._emit(4000 + offset, _summary(4000 + offset)) is True
+    assert len(broadcaster._last_emitted) == cap
+    assert 4000 not in broadcaster._last_emitted
+    newest = 4000 + cap + 49
+    assert newest in broadcaster._last_emitted
+    assert broadcaster._emit(newest, _summary(newest)) is False
 
 
 async def test_start_noop_without_database_url(bridge: Any) -> None:
