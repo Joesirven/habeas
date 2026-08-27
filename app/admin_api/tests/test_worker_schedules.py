@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from admin_api import roles, worker_schedules
 from admin_api.main import app
+from admin_api import main as admin_main
 from habeas_privacy_core.auth import ROLE_ADMIN, ROLE_SUPER_ADMIN
 
 
@@ -110,6 +111,7 @@ def _reset_scheduler(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(roles.settings, "admin_api_admins", "admin@example.com")
     monkeypatch.setattr(roles.settings, "admin_api_legals", "")
     monkeypatch.setattr(roles.settings, "admin_api_data_owners", "")
+    monkeypatch.setattr(admin_main.settings, "database_url", "")
     worker_schedules.reset_scheduler_client_factory()
     yield
     worker_schedules.reset_scheduler_client_factory()
