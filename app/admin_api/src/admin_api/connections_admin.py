@@ -698,6 +698,9 @@ async def _run_connection_test(
     )
     if inspect.isawaitable(result):
         result = await result
+    if isinstance(result, tuple) and len(result) == 3:
+        ok, detail, _triage = result
+        return bool(ok), str(detail)
     if isinstance(result, tuple) and len(result) == 2:
         ok, detail = result
         return bool(ok), str(detail)

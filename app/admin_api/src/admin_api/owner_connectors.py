@@ -1493,7 +1493,7 @@ async def save_live_credentials(
         )
 
         share_sa = _service_account_from_metadata(dict(connection.metadata or {}))
-        test_ok, detail = await test_connection(
+        test_ok, detail, _triage = await test_connection(
             system,
             cleaned,
             impersonate_service_account=share_sa,
@@ -1555,7 +1555,7 @@ async def test_live_connection(
             raise HTTPException(status_code=400, detail="secret not stored")
 
         share_sa = _service_account_from_metadata(dict(connection.metadata or {}))
-        test_ok, detail = await test_connection(
+        test_ok, detail, _triage = await test_connection(
             system,
             credentials,
             impersonate_service_account=share_sa,

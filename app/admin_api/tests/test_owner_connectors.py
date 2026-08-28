@@ -943,7 +943,7 @@ def test_live_credentials_fail_does_not_stamp_active_mode_live(
     monkeypatch.setattr(
         owner_connectors,
         "test_connection",
-        AsyncMock(return_value=(False, "auth_failed")),
+        AsyncMock(return_value=(False, "auth_failed", {})),
     )
     monkeypatch.setattr(
         owner_connectors.connections_db,
@@ -1255,7 +1255,7 @@ def test_lever_live_credentials_success_stamps_rotation(
     monkeypatch.setattr(
         owner_connectors,
         "test_connection",
-        AsyncMock(return_value=(True, "lever_ok")),
+        AsyncMock(return_value=(True, "lever_ok", {})),
     )
     set_test = AsyncMock(return_value=current)
     update_status = AsyncMock(return_value=current)
@@ -1399,7 +1399,7 @@ def test_live_credentials_failed_test_allows_retry_without_wizard_complete(
     monkeypatch.setattr(
         owner_connectors,
         "test_connection",
-        AsyncMock(return_value=(False, "auth_failed")),
+        AsyncMock(return_value=(False, "auth_failed", {})),
     )
     get_conn = AsyncMock(return_value=current)
     monkeypatch.setattr(owner_connectors.connections_db, "get_connection", get_conn)
@@ -1509,7 +1509,7 @@ def test_live_retest_uses_stored_secret(
 
     helpers = _patch_owner_access(monkeypatch, connection=current)
     helpers["merge"].side_effect = _apply_merge
-    test_mock = AsyncMock(return_value=(True, "lever_ok"))
+    test_mock = AsyncMock(return_value=(True, "lever_ok", {}))
     monkeypatch.setattr(owner_connectors, "test_connection", test_mock)
     monkeypatch.setattr(
         owner_connectors.connections_db,
