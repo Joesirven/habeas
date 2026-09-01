@@ -205,6 +205,29 @@ def test_vertical_stage_from_stats_pivots_row() -> None:
     assert stage["by_list_type"] == []
 
 
+def test_auth0_matching_percent_not_complete_when_success_below_total() -> None:
+    """Auth0 rollup must not report 100% when only a slice of Email rows finished."""
+    rows = [
+        _Row(
+            download_id=1,
+            vertical="auth0",
+            stage="matching",
+            total=1_843_251,
+            open=1_618_031,
+            success=225_220,
+            failed=0,
+            in_flight=0,
+        ),
+    ]
+    block = drop_pipeline._build_verticals_block(rows)
+    auth0 = next(entry for entry in block if entry["vertical"] == "auth0")
+    matching = auth0["matching"]
+    percent = round((matching["success"] / matching["total"]) * 100)
+    assert percent == 12
+    assert percent < 100
+    assert matching["open"] > 0
+
+
 def test_build_verticals_block_groups_by_vertical_and_stage() -> None:
     """Rows are grouped by vertical, pivoted by stage, and sorted."""
     rows = [
