@@ -39,6 +39,7 @@ from admin_api.connections_admin import router as connections_admin_router
 from admin_api.connections_redeem import router as connections_redeem_router
 from admin_api.auth0_matching import router as auth0_matching_router
 from admin_api.owner_connectors import router as owner_connectors_router
+from admin_api.vertical_settings import router as vertical_settings_router
 from admin_api.legal_team import router as legal_team_router
 from admin_api.vertical_hash_ops import router as vertical_hash_ops_router
 from admin_api.request_correspondence import router as request_correspondence_router
@@ -289,7 +290,32 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     )
     if settings.database_url:
         await create_pool(settings.database_url)
+    broadcaster = None
+    try:
+        from admin_api.live_rollup_notify import get_bulk_rollup_broadcaster
+
+        broadcaster = get_bulk_rollup_broadcaster()
+    except ImportError:
+        # The emitter logs live_events_bulk_bridge_unavailable once per
+        # process on first connection; a lifespan warning would duplicate it.
+        pass
+    if broadcaster is not None:
+        try:
+            await broadcaster.start()
+        except Exception:
+            logger.exception(
+                "live_events_bulk_bridge_start_failed",
+                extra={"event": "live_events_bulk_bridge_start_failed"},
+            )
     yield
+    if broadcaster is not None:
+        try:
+            await broadcaster.stop()
+        except Exception:
+            logger.exception(
+                "live_events_bulk_bridge_stop_failed",
+                extra={"event": "live_events_bulk_bridge_stop_failed"},
+            )
     await close_pool()
 
 
@@ -330,6 +356,7 @@ app.include_router(attempt_tables_router)
 app.include_router(connections_admin_router)
 app.include_router(connections_redeem_router)
 app.include_router(owner_connectors_router)
+app.include_router(vertical_settings_router)
 app.include_router(vertical_assignments_router)
 app.include_router(vertical_owner_router)
 

@@ -358,6 +358,36 @@ def test_integration_connections_migration_exists():
     assert "migrate:down" in content
 
 
+def test_external_vertical_matching_stats_migration_exists():
+    migration = (
+        migrations_dir() / "20260831220000_core_external_vertical_matching_stats.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+    assert "core_drop_bulk_vertical_matching_delta" in content
+    assert "axios_headquarters_attempts_vertical_stats" in content
+    assert "core_people_hr_matching_bucket" in content
+    assert "communications" in content
+    assert "people_hr" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+
+
+def test_auth0_vertical_matching_stats_migration_exists():
+    migration = (
+        migrations_dir() / "20260831210000_core_auth0_vertical_matching_stats.sql"
+    )
+    assert migration.exists()
+    content = migration.read_text()
+    assert "core_auth0_attempts_vertical_stats" in content
+    assert "core_drop_bulk_vertical_auth0_matching_delta" in content
+    assert "auth0_attempts_vertical_stats" in content
+    assert "drr.list_type = 'Email'" in content
+    assert "request_vertical_matching" in content
+    assert "migrate:up" in content
+    assert "migrate:down" in content
+
+
 def test_matching_auth0_vertical_matching_migration_exists():
     migration = (
         migrations_dir() / "20260824200001_matching_auth0_vertical_matching.sql"

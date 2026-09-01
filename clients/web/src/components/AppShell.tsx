@@ -134,7 +134,7 @@ export function shouldShowPendingSettings(_me?: MePayload): boolean {
   return false
 }
 
-/** Soft Settings → Connectors (#team) hint. Not a login modal. */
+/** Soft Settings → Data vertical settings (#team) hint. Not a login modal. */
 export function shouldHintSettingsInvite(me: MePayload | undefined): boolean {
   if (!me || me.role !== 'data_owner') return false
   if (isConnectInvitePath()) return false
@@ -148,7 +148,7 @@ export function shouldShowConnectorWelcome(me: MePayload | undefined): boolean {
   return true
 }
 
-/** Connector welcome only — invite lives on Settings/Connectors. */
+/** Connector welcome only — invite lives on Settings → Data vertical settings. */
 export function nextPostAuthPrompt(
   me: MePayload | undefined,
 ): 'connector_welcome' | null {

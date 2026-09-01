@@ -13,8 +13,6 @@ import {
   allowsUpload,
   buildModeStepCards,
   buildReminderBannerItems,
-  buildVerticalWizardSteps,
-  parseVerticalWizardStepId,
   cadenceDaysFromMetadata,
   cadenceOptionFromMetadata,
   cadenceOptionFromRefreshPolicy,
@@ -47,9 +45,7 @@ import {
   refreshCadenceFromCadenceOption,
   refreshPolicyFromCadenceOption,
   SYSTEM_COPY,
-  verticalWizardStepIndex,
   visibleReminderBanners,
-  wizardProgressPercent,
   suggestUploadColumnMapping,
   uploadMappingComplete,
   parseCsvHeaderRow,
@@ -75,21 +71,15 @@ import {
   LIVE_CONNECT_FAILURE_RETRY_ONLY_HINT,
   LIVE_CONNECT_RETRY_LABEL,
   LIVE_CONNECT_SETUP_UPLOAD_LABEL,
-  LIVE_CONNECT_SUCCESS_CONTINUE_HINT,
-  LIVE_CONNECT_SUCCESS_MAPPING_HINT,
   LIVE_PING_NOT_EXTRACT_HINT,
   LIVE_PING_NOT_EXTRACT_SYSTEMS,
   liveConnectFailureActions,
   liveConnectOffersUploadFallback,
-  liveConnectSuccessFollowOn,
-  liveMappingFollowOnStepId,
   livePingIsNotMatchingExtract,
-  liveUploadFallbackStepId,
-  nextWizardStepAfterSuccessfulLive,
-  mappingFollowOnCopy,
-  shouldIncludeLiveMappingFollowOn,
+  UPLOAD_IDENTIFIER_FIELDS,
 } from './owner-connector-ui'
 import * as ownerConnectorUi from './owner-connector-ui'
+import { NAME_FORMAT_OPTIONS, UPLOAD_HEADER_ALIASES } from './owner-connector-ui'
 
 describe('MULTI_PII_DELIMITER_OPTIONS (AE10 UI)', () => {
   test('presents None / ; / | / ,', () => {
@@ -316,179 +306,14 @@ describe('mode and cadence helpers', () => {
     ).toBe(true)
   })
 
-  test('verticalWizardStepIndex finds dynamic step ids', () => {
-    const steps = buildVerticalWizardSteps({
-      systems: [{ system: 'axios_hq', allowedApproaches: ['upload'] }],
-    })
-    expect(verticalWizardStepIndex(steps, 'axios_hq-howto-upload')).toBe(0)
-    expect(verticalWizardStepIndex(steps, 'confirm')).toBe(steps.length - 1)
-    expect(verticalWizardStepIndex(steps, 'missing')).toBe(-1)
-  })
 })
 
-describe('vertical wizard steps', () => {
-  test('axios_hq upload-only vertical ends with cadence and confirm', () => {
-    const steps = buildVerticalWizardSteps({
-      systems: [{ system: 'axios_hq', allowedApproaches: ['upload'] }],
-    })
-    expect(steps.map((step) => step.id)).toEqual([
-      'axios_hq-howto-upload',
-      'axios_hq-upload',
-      'cadence',
-      'confirm',
-    ])
-  })
-
-  test('communications worker slug axios_headquarters still builds upload steps', () => {
-    const steps = buildVerticalWizardSteps({
-      systems: [{ system: 'axios_headquarters', allowedApproaches: ['upload'] }],
-    })
-    expect(steps.map((step) => step.id)).toEqual([
-      'axios_headquarters-howto-upload',
-      'axios_headquarters-upload',
-      'cadence',
-      'confirm',
-    ])
-  })
-
-  test('parses hr_alumni howto-upload as howto-upload, not upload', () => {
-    expect(parseVerticalWizardStepId('hr_alumni-howto-upload')).toEqual({
-      kind: 'howto-upload',
-      system: 'hr_alumni',
-    })
-    expect(parseVerticalWizardStepId('hr_alumni-upload')).toEqual({
-      kind: 'upload',
-      system: 'hr_alumni',
-    })
-  })
-
-  test('parses sheets howto / connect / mapping-clean without colliding suffixes', () => {
-    expect(parseVerticalWizardStepId('hr_alumni-howto')).toEqual({
-      kind: 'howto',
-      system: 'hr_alumni',
-    })
-    expect(parseVerticalWizardStepId('hr_alumni-connect')).toEqual({
-      kind: 'connect',
-      system: 'hr_alumni',
-    })
-    expect(parseVerticalWizardStepId('bizdev_contacts-mapping-clean')).toEqual({
-      kind: 'mapping-clean',
-      system: 'bizdev_contacts',
-    })
-    expect(parseVerticalWizardStepId('hr_alumni-mapping')).toEqual({
-      kind: 'mapping',
-      system: 'hr_alumni',
-    })
-    expect(parseVerticalWizardStepId('hr_alumni-clean')).toEqual({
-      kind: 'clean',
-      system: 'hr_alumni',
-    })
-    expect(parseVerticalWizardStepId('hr_alumni-oauth')).toEqual({
-      kind: 'oauth',
-      system: 'hr_alumni',
-    })
-  })
-
-  test('paylocity live first then mapping then upload fallback', () => {
-    const steps = buildVerticalWizardSteps({
-      systems: [{ system: 'paylocity', allowedApproaches: ['upload', 'live'] }],
-    })
-    expect(steps.map((step) => step.id)).toEqual([
-      'paylocity-howto-live',
-      'paylocity-live-creds',
-      'paylocity-mapping',
-      'paylocity-howto-upload',
-      'paylocity-upload',
-      'cadence',
-      'confirm',
-    ])
-  })
-
-  test('people_hr bindings produce many steps before cadence', () => {
-    const steps = buildVerticalWizardSteps({
-      systems: [
-        { system: 'paylocity', allowedApproaches: ['upload', 'live'] },
-        { system: 'lever', allowedApproaches: ['live'] },
-        { system: 'hr_alumni', allowedApproaches: ['upload'] },
-      ],
-    })
-    expect(steps.map((step) => step.id)).toEqual([
-      'paylocity-howto-live',
-      'paylocity-live-creds',
-      'paylocity-mapping',
-      'paylocity-howto-upload',
-      'paylocity-upload',
-      'lever-howto-live',
-      'lever-live-creds',
-      'hr_alumni-howto',
-      'hr_alumni-connect',
-      'hr_alumni-mapping-clean',
-      'cadence',
-      'confirm',
-    ])
-  })
-
-  test('skips cassandra and empty-approach systems', () => {
-    const steps = buildVerticalWizardSteps({
-      systems: [
-        { system: 'cassandra', allowedApproaches: [] },
-        { system: 'bizdev_contacts', allowedApproaches: ['upload'] },
-      ],
-    })
-    expect(steps.map((step) => step.id)).toEqual([
-      'bizdev_contacts-howto',
-      'bizdev_contacts-connect',
-      'bizdev_contacts-mapping-clean',
-      'cadence',
-      'confirm',
-    ])
-  })
-
-  test('hr_alumni / bizdev_contacts use howto → connect → mapping-clean', () => {
+describe('sheets owner systems', () => {
+  test('hr_alumni / bizdev_contacts are the sheets owner systems (oauth or upload)', () => {
     expect(SHEETS_OWNER_SYSTEM_IDS).toEqual(['hr_alumni', 'bizdev_contacts'])
     expect(SHEETS_CONNECT_METHODS).toEqual(['oauth', 'upload'])
     expect(isSheetsOwnerSystem('HR_Alumni')).toBe(true)
     expect(isSheetsOwnerSystem('axios_hq')).toBe(false)
-
-    const alumni = buildVerticalWizardSteps({
-      systems: [{ system: 'hr_alumni', allowedApproaches: ['upload'] }],
-    })
-    expect(alumni.map((step) => step.id)).toEqual([
-      'hr_alumni-howto',
-      'hr_alumni-connect',
-      'hr_alumni-mapping-clean',
-      'cadence',
-      'confirm',
-    ])
-
-    const contacts = buildVerticalWizardSteps({
-      systems: [{ system: 'bizdev_contacts', allowedApproaches: [] }],
-    })
-    expect(contacts.map((step) => step.id)).toEqual([
-      'bizdev_contacts-howto',
-      'bizdev_contacts-connect',
-      'bizdev_contacts-mapping-clean',
-      'cadence',
-      'confirm',
-    ])
-  })
-
-  test('omits sheets mapping-clean when the caller says it is not needed', () => {
-    const steps = buildVerticalWizardSteps({
-      systems: [
-        {
-          system: 'hr_alumni',
-          allowedApproaches: ['oauth', 'upload'],
-          needsMappingClean: false,
-        },
-      ],
-    })
-    expect(steps.map((step) => step.id)).toEqual([
-      'hr_alumni-howto',
-      'hr_alumni-connect',
-      'cadence',
-      'confirm',
-    ])
   })
 
   test('shouldIncludeSheetsMappingClean is true until map is complete and rows are clean', () => {
@@ -513,94 +338,10 @@ describe('vertical wizard steps', () => {
       }),
     ).toBe(false)
   })
-
-  test('lever live-only has no mapping follow-on until upload is allowed', () => {
-    const steps = buildVerticalWizardSteps({
-      systems: [{ system: 'lever', allowedApproaches: ['live'] }],
-    })
-    expect(steps.map((step) => step.id)).toEqual([
-      'lever-howto-live',
-      'lever-live-creds',
-      'cadence',
-      'confirm',
-    ])
-    expect(shouldIncludeLiveMappingFollowOn({
-      system: 'lever',
-      allowedApproaches: ['live'],
-    })).toBe(false)
-  })
-
-  test('lever live+upload inserts mapping after live-creds', () => {
-    const steps = buildVerticalWizardSteps({
-      systems: [{ system: 'lever', allowedApproaches: ['live', 'upload'] }],
-    })
-    expect(steps.map((step) => step.id)).toEqual([
-      'lever-howto-live',
-      'lever-live-creds',
-      'lever-mapping',
-      'lever-howto-upload',
-      'lever-upload',
-      'cadence',
-      'confirm',
-    ])
-    expect(parseVerticalWizardStepId('lever-mapping')).toEqual({
-      kind: 'mapping',
-      system: 'lever',
-    })
-  })
-
-  test('auth0 live extract has no mapping or upload steps after live-creds', () => {
-    const steps = buildVerticalWizardSteps({
-      systems: [{ system: 'auth0', allowedApproaches: ['live', 'upload'] }],
-    })
-    expect(steps.map((step) => step.id)).toEqual([
-      'auth0-howto-live',
-      'auth0-live-creds',
-      'cadence',
-      'confirm',
-    ])
-    expect(steps.map((step) => step.id)).not.toContain('auth0-howto-upload')
-    expect(steps.map((step) => step.id)).not.toContain('auth0-upload')
-  })
-
-  test('omits live mapping follow-on when the caller says mapping is complete', () => {
-    const steps = buildVerticalWizardSteps({
-      systems: [
-        {
-          system: 'paylocity',
-          allowedApproaches: ['live', 'upload'],
-          needsMappingClean: false,
-        },
-      ],
-    })
-    expect(steps.map((step) => step.id)).toEqual([
-      'paylocity-howto-live',
-      'paylocity-live-creds',
-      'paylocity-howto-upload',
-      'paylocity-upload',
-      'cadence',
-      'confirm',
-    ])
-  })
-
-  test('viewOnly vertical yields no steps', () => {
-    expect(
-      buildVerticalWizardSteps({
-        viewOnly: true,
-        systems: [{ system: 'axios_hq', allowedApproaches: ['upload'] }],
-      }),
-    ).toEqual([])
-  })
-
-  test('wizardProgressPercent is 0–100 across the step range', () => {
-    expect(wizardProgressPercent(0, 4)).toBe(25)
-    expect(wizardProgressPercent(3, 4)).toBe(100)
-    expect(wizardProgressPercent(0, 0)).toBe(0)
-    expect(wizardProgressPercent(-1, 5)).toBe(0)
-  })
 })
 
-describe('live connect mapping follow-on (Wave M)', () => {
+
+describe('live connect fallback copy (Wave M)', () => {
   test('live ping is not extract for Lever and Paylocity only', () => {
     expect(LIVE_PING_NOT_EXTRACT_SYSTEMS).toEqual(['lever', 'paylocity'])
     expect(livePingIsNotMatchingExtract('lever')).toBe(true)
@@ -610,45 +351,7 @@ describe('live connect mapping follow-on (Wave M)', () => {
     expect(livePingIsNotMatchingExtract('cassandra')).toBe(false)
   })
 
-  test('step ids are mapping after live and howto-upload for fallback', () => {
-    expect(liveMappingFollowOnStepId('Paylocity')).toBe('paylocity-mapping')
-    expect(liveUploadFallbackStepId('LEVER')).toBe('lever-howto-upload')
-  })
 
-  test('shouldIncludeLiveMappingFollowOn requires live ping-not-extract plus upload', () => {
-    expect(
-      shouldIncludeLiveMappingFollowOn({
-        system: 'paylocity',
-        allowedApproaches: ['live', 'upload'],
-      }),
-    ).toBe(true)
-    expect(
-      shouldIncludeLiveMappingFollowOn({
-        system: 'lever',
-        allowedApproaches: ['live', 'upload'],
-        mappingComplete: true,
-        rejectedRowCount: 0,
-      }),
-    ).toBe(false)
-    expect(
-      shouldIncludeLiveMappingFollowOn({
-        system: 'auth0',
-        allowedApproaches: ['live', 'upload'],
-      }),
-    ).toBe(false)
-    expect(
-      shouldIncludeLiveMappingFollowOn({
-        system: 'axios_hq',
-        allowedApproaches: ['upload'],
-      }),
-    ).toBe(false)
-    expect(
-      shouldIncludeLiveMappingFollowOn({
-        system: 'cassandra',
-        allowedApproaches: ['live', 'upload'],
-      }),
-    ).toBe(false)
-  })
 
   test('live fail offers Retry connection and Set up manual upload when upload is allowed', () => {
     const paylocity = liveConnectFailureActions({
@@ -656,10 +359,8 @@ describe('live connect mapping follow-on (Wave M)', () => {
       allowedApproaches: ['live', 'upload'],
     })
     expect(paylocity.retryLabel).toBe(LIVE_CONNECT_RETRY_LABEL)
-    expect(paylocity.setupManualUpload).toEqual({
-      label: LIVE_CONNECT_SETUP_UPLOAD_LABEL,
-      stepId: 'paylocity-howto-upload',
-    })
+    expect(paylocity.setupManualUpload?.label).toBe(LIVE_CONNECT_SETUP_UPLOAD_LABEL)
+    expect(paylocity.setupManualUpload?.stepId).toBe('paylocity-howto-upload')
     expect(paylocity.hint).toBe(LIVE_CONNECT_FAILURE_HINT)
     expect(paylocity.hint.toLowerCase()).toContain('retry')
     expect(paylocity.hint.toLowerCase()).toContain('manual upload')
@@ -696,97 +397,15 @@ describe('live connect mapping follow-on (Wave M)', () => {
     expect(liveConnectOffersUploadFallback(['live', 'upload'], 'auth0')).toBe(false)
   })
 
-  test('live success next step is mapping when upload is allowed', () => {
-    const paylocity = liveConnectSuccessFollowOn({
-      system: 'paylocity',
-      allowedApproaches: ['live', 'upload'],
-    })
-    expect(paylocity.nextKind).toBe('mapping')
-    expect(paylocity.nextStepId).toBe('paylocity-mapping')
-    expect(paylocity.hint).toBe(LIVE_PING_NOT_EXTRACT_HINT)
-    expect(paylocity.setupManualUpload?.label).toBe(LIVE_CONNECT_SETUP_UPLOAD_LABEL)
-    expect(paylocity.setupManualUpload?.stepId).toBe('paylocity-howto-upload')
 
-    const leverMapped = liveConnectSuccessFollowOn({
-      system: 'lever',
-      allowedApproaches: ['live', 'upload'],
-      mappingComplete: true,
-      rejectedRowCount: 0,
-    })
-    expect(leverMapped.nextKind).toBe('howto-upload')
-    expect(leverMapped.nextStepId).toBe('lever-howto-upload')
 
-    const auth0 = liveConnectSuccessFollowOn({
-      system: 'auth0',
-      allowedApproaches: ['live', 'upload'],
-    })
-    expect(auth0.nextKind).toBe('continue')
-    expect(auth0.nextStepId).toBeNull()
-    expect(auth0.setupManualUpload).toBeNull()
-    expect(auth0.hint).toBe(LIVE_CONNECT_SUCCESS_CONTINUE_HINT)
-    expect(auth0.hint.toLowerCase()).not.toContain('upload')
-    expect(auth0.hint.toLowerCase()).toContain('cadence')
 
-    const leverPingOnly = liveConnectSuccessFollowOn({
-      system: 'lever',
-      allowedApproaches: ['live'],
-    })
-    expect(leverPingOnly.nextKind).toBe('continue')
-    expect(leverPingOnly.nextStepId).toBeNull()
-    expect(leverPingOnly.hint).toBe(LIVE_PING_NOT_EXTRACT_HINT)
-    expect(leverPingOnly.setupManualUpload).toBeNull()
-  })
 
-  test('Auth0 live success lands on cadence with no upload steps in the list', () => {
-    const steps = buildVerticalWizardSteps({
-      systems: [{ system: 'auth0', allowedApproaches: ['live', 'upload'] }],
-    })
-    expect(steps.map((step) => step.id)).toEqual([
-      'auth0-howto-live',
-      'auth0-live-creds',
-      'cadence',
-      'confirm',
-    ])
-    expect(steps.map((step) => step.id)).not.toContain('auth0-howto-upload')
-    expect(steps.map((step) => step.id)).not.toContain('auth0-upload')
-    expect(nextWizardStepAfterSuccessfulLive(steps, 'auth0')).toBe('cadence')
-    expect(nextWizardStepAfterSuccessfulLive(steps, 'Auth0')).toBe('cadence')
-    expect(nextWizardStepAfterSuccessfulLive(steps, 'lever')).toBeNull()
-  })
-
-  test('Auth0 Live success skips only Auth0 upload when another system follows', () => {
-    const steps = buildVerticalWizardSteps({
-      systems: [
-        { system: 'auth0', allowedApproaches: ['live', 'upload'] },
-        { system: 'axios_hq', allowedApproaches: ['upload'] },
-      ],
-    })
-    expect(nextWizardStepAfterSuccessfulLive(steps, 'auth0')).toBe(
-      'axios_hq-howto-upload',
-    )
-  })
-
-  test('mapping follow-on copy uses identifier fields only', () => {
-    const copy = mappingFollowOnCopy('Paylocity')
-    expect(copy.title).toContain('Paylocity')
-    expect(copy.intro.toLowerCase()).toContain('identifier')
-    expect(copy.intro.toLowerCase()).toContain('headers differ')
-    expect(copy.intro.toLowerCase()).toContain('email or phone')
-    expect(copy.intro.toLowerCase()).not.toContain(
-      'first name, last name, and email',
-    )
-    expect(LIVE_CONNECT_SUCCESS_MAPPING_HINT.toLowerCase()).toContain(
-      'email or phone',
-    )
-    expect(LIVE_CONNECT_SUCCESS_MAPPING_HINT.toLowerCase()).not.toContain(
-      'first name, last name, and email',
-    )
+  test('ping-not-extract hint uses identifier fields only', () => {
     expect(LIVE_PING_NOT_EXTRACT_HINT.toLowerCase()).toContain('email or phone')
     expect(LIVE_PING_NOT_EXTRACT_HINT.toLowerCase()).not.toContain(
       'first name, last name, and email',
     )
-    expect(copy.intro.toLowerCase()).not.toContain('opportunity')
-    expect(copy.intro.toLowerCase()).not.toContain('department')
   })
 })
 
@@ -1588,6 +1207,69 @@ describe('upload csv helpers', () => {
   })
 })
 
+describe('upload identifier fields (full_name)', () => {
+  test('UPLOAD_IDENTIFIER_FIELDS adds full_name right after last_name', () => {
+    const ids = UPLOAD_IDENTIFIER_FIELDS.map((field) => field.id)
+    expect(ids).toContain('full_name')
+    expect(ids.indexOf('full_name')).toBe(ids.indexOf('last_name') + 1)
+    expect(
+      UPLOAD_IDENTIFIER_FIELDS.find((field) => field.id === 'full_name')?.label,
+    ).toBe('Full name (first and last)')
+  })
+
+  test('UPLOAD_HEADER_ALIASES.full_name mirrors the backend name aliases', () => {
+    // Exact mirror of backend HEADER_ALIASES['full_name'] (upload_templates.py).
+    // Normalized forms only — spaces become underscores before alias lookup,
+    // so 'full name' / 'employee name' are covered by the underscore entries.
+    expect([...(UPLOAD_HEADER_ALIASES?.full_name ?? [])].sort()).toEqual(
+      [
+        'employee',
+        'employee_name',
+        'full_name',
+        'fullname',
+        'name',
+        'worker',
+        'worker_name',
+      ].sort(),
+    )
+  })
+
+  test('suggestUploadColumnMapping auto-binds a Name header to full_name', () => {
+    const headers = parseCsvHeaderRow(
+      'Name,Email,Phone\nAda Lovelace,ada@example.org,4155550100\n',
+    )
+    expect(suggestUploadColumnMapping(headers)).toEqual({
+      full_name: 'Name',
+      email: 'Email',
+      phone: 'Phone',
+    })
+    expect(
+      suggestUploadColumnMapping(
+        parseCsvHeaderRow('Full Name,Department\nAda Lovelace,Eng\n'),
+      ).full_name,
+    ).toBe('Full Name')
+  })
+
+  test('uploadMappingComplete treats a full_name-only mapping as complete', () => {
+    // Semantics: complete when ANY identifier target is bound (targets.some).
+    expect(uploadMappingComplete({ full_name: 'Name' })).toBe(true)
+    expect(uploadMappingComplete({ first_name: 'First' })).toBe(true)
+    expect(uploadMappingComplete({})).toBe(false)
+  })
+})
+
+describe('NAME_FORMAT_OPTIONS', () => {
+  test('first_last / last_first with plain-language labels', () => {
+    expect(NAME_FORMAT_OPTIONS).toBeDefined()
+    expect(NAME_FORMAT_OPTIONS?.map((option) => option.id)).toEqual([
+      'first_last',
+      'last_first',
+    ])
+    expect(NAME_FORMAT_OPTIONS?.[0].label).toBe('First Last')
+    expect(NAME_FORMAT_OPTIONS?.[1].label).toBe('Last, First')
+  })
+})
+
 describe('connectors first-paint (QCQA)', () => {
   const here = dirname(fileURLToPath(import.meta.url))
 
@@ -1605,10 +1287,22 @@ describe('connectors first-paint (QCQA)', () => {
   })
 })
 
-describe('connectors.tsx source smoke (sample removal + sheets copy)', () => {
+describe('connectors.tsx source smoke (modal wizard + copy guards)', () => {
   const here = dirname(fileURLToPath(import.meta.url))
   const connectorsSource = () =>
     readFileSync(join(here, '..', 'routes', 'owner', 'connectors.tsx'), 'utf8')
+
+  test('owner connectors page mounts the modal WizardDialog', () => {
+    const source = connectorsSource()
+    expect(source).toContain('WizardDialog')
+    expect(source).toMatch(/from\s+['"][^'"]*components\/owner\/wizard-dialog['"]/)
+  })
+
+  test('old linear wizard builder is gone from the page', () => {
+    const source = connectorsSource()
+    expect(source).not.toContain('buildVerticalWizardSteps')
+    expect(source).not.toContain('ensureLiveUploadOptInSteps')
+  })
 
   test('sample CSV fixtures and sample downloads are gone', () => {
     const source = connectorsSource()
@@ -1616,18 +1310,14 @@ describe('connectors.tsx source smoke (sample removal + sheets copy)', () => {
     expect(source).not.toContain('downloadUploadSample')
   })
 
-  test('real template download button is preserved', () => {
-    const source = connectorsSource()
+  test('real template download survives in the wizard sheets step', () => {
+    // Pre-redesign this lived in UploadConnectPanel; the moved sheets panel
+    // (sheets-step.tsx) is the remaining template-download surface.
+    const source = readFileSync(
+      join(here, '..', 'components', 'owner', 'sheets-step.tsx'),
+      'utf8',
+    )
     expect(source).toContain('downloadOwnerUploadTemplate')
-  })
-
-  test('LiveHowToPanel Continue with upload mode calls onUseUpload', () => {
-    const source = connectorsSource()
-    const start = source.indexOf('function LiveHowToPanel')
-    expect(start).toBeGreaterThan(-1)
-    const end = source.indexOf('\nfunction ', start + 1)
-    const panel = source.slice(start, end === -1 ? undefined : end)
-    expect(panel).toMatch(/selectedMode === 'upload'[\s\S]{0,160}onUseUpload\(\)/)
   })
 
   test('sheets connect copy drops oauth jargon and keeps the plain-language promise', () => {
@@ -1636,7 +1326,27 @@ describe('connectors.tsx source smoke (sample removal + sheets copy)', () => {
     expect(source).not.toContain('refresh token')
     expect(source).not.toContain('redirect_uri=')
     expect(source).not.toContain('spreadsheets.readonly')
-    expect(source).toContain('never appear in this app')
+    const sheetsStep = readFileSync(
+      join(here, '..', 'components', 'owner', 'sheets-step.tsx'),
+      'utf8',
+    )
+    expect(sheetsStep).toContain('never appear in this app')
+    // The wizard now spans every components/owner file — scan them all.
+    const wizardFiles = [
+      'sheets-step.tsx',
+      'wizard-dialog.tsx',
+      'wizard-shared.tsx',
+      'system-hub.tsx',
+      'credential-steps.tsx',
+      'upload-steps.tsx',
+    ]
+    for (const file of wizardFiles) {
+      const text = readFileSync(join(here, '..', 'components', 'owner', file), 'utf8')
+      expect(text).not.toContain('Offline access')
+      expect(text).not.toContain('refresh token')
+      expect(text).not.toContain('redirect_uri=')
+      expect(text).not.toContain('spreadsheets.readonly')
+    }
   })
 
   test('owner-connector-ui no longer exports UPLOAD_SAMPLE_CSV', () => {
@@ -1649,5 +1359,29 @@ describe('connectors.tsx source smoke (sample removal + sheets copy)', () => {
     expect(source).toContain('redirect_uri_not_allowed')
     expect(source).toContain("Google sign-in isn't set up yet")
     expect(source).toContain("Google sign-in can't start from this address yet")
+  })
+})
+
+describe('wizard runner wiring (QCQA source locks)', () => {
+  const here = dirname(fileURLToPath(import.meta.url))
+
+  test('wizard-dialog splices branch steps and drops the abandoned branch tail', () => {
+    const source = readFileSync(
+      join(here, '..', 'components', 'owner', 'wizard-dialog.tsx'),
+      'utf8',
+    )
+    // Choice resolve + seed-choice upload swap both rebuild `planned` from the
+    // flow lib and must NOT keep the previously chosen branch (regression:
+    // re-choosing a mode inflated "step N of M" for the rest of the flow).
+    expect(source).toContain('branchSteps(')
+    expect(source).toContain('formatStepsForMapping(')
+    expect(source).toContain('finalizeUpload')
+    const abandonedTailKept = /\[\.\.\.planned\.slice\(0, insertAt\), \.\.\.branch, \.\.\.planned\.slice\(insertAt\)\]/
+    expect(source).not.toMatch(abandonedTailKept)
+  })
+
+  test('upload client sends name_format so the owner’s name order choice is honored', () => {
+    const source = readFileSync(join(here, 'api.ts'), 'utf8')
+    expect(source).toContain("form.append('name_format', formats.nameFormat)")
   })
 })

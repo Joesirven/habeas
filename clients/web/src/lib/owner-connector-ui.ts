@@ -447,37 +447,6 @@ export function liveConnectSuccessFollowOn(input: {
   }
 }
 
-const LIVE_SUCCESS_SKIP_STEP_KINDS = new Set(['howto-upload', 'upload'])
-
-/**
- * After a passing Auth0 (live-extract) test, skip that system's Upload how-to
- * and Upload steps. Next is cadence, confirm, or the following system.
- * Returns null for ping-only systems (Lever / Paylocity) — those use mapping.
- */
-export function nextWizardStepAfterSuccessfulLive(
-  steps: readonly VerticalWizardStep[],
-  system: string,
-): string | null {
-  const normalized = normalizeSystemId(system)
-  if (livePingIsNotMatchingExtract(normalized)) return null
-  const liveCredsId = `${normalized}-live-creds`
-  const start = verticalWizardStepIndex(steps, liveCredsId)
-  const from = start >= 0 ? start + 1 : 0
-  for (let i = from; i < steps.length; i += 1) {
-    const parsed = parseVerticalWizardStepId(steps[i].id)
-    if (
-      parsed &&
-      'system' in parsed &&
-      parsed.system === normalized &&
-      LIVE_SUCCESS_SKIP_STEP_KINDS.has(parsed.kind)
-    ) {
-      continue
-    }
-    return steps[i].id
-  }
-  return null
-}
-
 export function mappingFollowOnCopy(displayName: string): {
   title: string
   intro: string
@@ -608,13 +577,6 @@ export function buildVerticalWizardSteps(
   steps.push({ id: 'cadence' })
   steps.push({ id: 'confirm' })
   return steps
-}
-
-export function verticalWizardStepIndex(
-  steps: readonly VerticalWizardStep[],
-  stepId: string,
-): number {
-  return steps.findIndex((entry) => entry.id === stepId)
 }
 
 /** Progress bar fill 0–100 for the current step index and total step count. */
@@ -1286,17 +1248,19 @@ export const UPLOAD_IDENTIFIER_FIELDS = [
   { id: 'phone', label: 'Phone' },
   { id: 'first_name', label: 'First name' },
   { id: 'last_name', label: 'Last name' },
+  { id: 'full_name', label: 'Full name (first and last)' },
   { id: 'dob', label: 'Date of birth' },
   { id: 'zip', label: 'ZIP' },
 ] as const
 
 export type UploadIdentifierFieldId = (typeof UPLOAD_IDENTIFIER_FIELDS)[number]['id']
 
-const UPLOAD_HEADER_ALIASES: Record<UploadIdentifierFieldId, readonly string[]> = {
+export const UPLOAD_HEADER_ALIASES: Record<UploadIdentifierFieldId, readonly string[]> = {
   email: ['email', 'email_address', 'e_mail', 'mail'],
   phone: ['phone', 'phone_number', 'mobile', 'cell'],
   first_name: ['first_name', 'first', 'firstname', 'given_name', 'fname'],
   last_name: ['last_name', 'last', 'lastname', 'surname', 'family_name', 'lname'],
+  full_name: ['name', 'full_name', 'fullname', 'employee_name', 'worker_name', 'worker', 'employee'],
   dob: ['dob', 'date_of_birth', 'birth_date'],
   zip: ['zip', 'zip_code', 'postal', 'postal_code'],
 }
@@ -1433,6 +1397,11 @@ export const PHONE_FORMAT_OPTIONS = [
   { id: 'digits_10_plus', label: '10 or more digits' },
   { id: 'us_10', label: 'US 10-digit (or 1 + 10 digits)' },
   { id: 'e164', label: 'E.164 — leading +, 10–15 digits' },
+] as const
+
+export const NAME_FORMAT_OPTIONS = [
+  { id: 'first_last', label: 'First Last' },
+  { id: 'last_first', label: 'Last, First' },
 ] as const
 
 export const REJECTED_ROW_CODE_LABELS: Record<string, string> = {

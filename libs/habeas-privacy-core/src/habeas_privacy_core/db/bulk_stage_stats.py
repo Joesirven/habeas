@@ -172,6 +172,59 @@ def _matching_stage_from_rollup(row: asyncpg.Record | dict[str, Any]) -> dict[st
     }
 
 
+def _matching_by_list_from_vertical_stage(stage: dict[str, Any]) -> list[dict[str, Any]]:
+    open_n = _as_int(stage.get("open"))
+    in_flight = _as_int(stage.get("in_flight"))
+    success = _as_int(stage.get("success"))
+    failed = _as_int(stage.get("failed"))
+    queued = max(0, open_n - in_flight)
+    by_list = [
+        {"list_type": None, "status": "pending", "count": queued},
+        {"list_type": None, "status": "in_flight", "count": in_flight},
+        {"list_type": None, "status": "success", "count": success},
+        {"list_type": None, "status": "submit_error", "count": failed},
+    ]
+    return [item for item in by_list if int(item["count"]) > 0]
+
+
+def _matching_stage_from_live_verticals(
+    verticals: list[dict[str, Any]],
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    """Headline matching stage = lagging live vertical (not DROP-only 100%)."""
+    candidates: list[dict[str, Any]] = []
+    for entry in verticals:
+        if not entry.get("live") or entry.get("catalog_only"):
+            continue
+        stage = entry.get("matching") or {}
+        if _as_int(stage.get("total")) <= 0:
+            continue
+        candidates.append(stage)
+
+    if not candidates:
+        return fallback
+
+    def _ratio(stage: dict[str, Any]) -> float:
+        total = _as_int(stage.get("total"))
+        if total <= 0:
+            return 0.0
+        return _as_int(stage.get("success")) / total
+
+    worst = min(candidates, key=_ratio)
+    by_list = worst.get("by_list_type") or []
+    if not by_list:
+        by_list = _matching_by_list_from_vertical_stage(worst)
+    return {
+        "total": _as_int(worst.get("total")),
+        "open": _as_int(worst.get("open")),
+        "success": _as_int(worst.get("success")),
+        "failed": _as_int(worst.get("failed")),
+        "other": _as_int(worst.get("other")),
+        "in_flight": _as_int(worst.get("in_flight")),
+        "by_list_type": by_list,
+    }
+
+
 def _review_stage_from_rollup(row: asyncpg.Record | dict[str, Any]) -> dict[str, Any]:
     """Map drop_bulk_process_stats review counters to the admin-api stage shape."""
     pending = _as_int(_record_get(row, "review_pending"))

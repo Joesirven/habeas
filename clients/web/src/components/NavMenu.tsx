@@ -177,7 +177,7 @@ export function InboxEntryPill() {
 function settingsGroup(showOwnerConnectors: boolean, showDevLabs: boolean): NavGroup {
   const children: NavChild[] = []
   if (showOwnerConnectors) {
-    children.push({ label: 'Connectors', to: '/owner/connectors' })
+    children.push({ label: 'Data settings', to: '/owner/connectors' })
   }
   children.push({ label: 'Docs', to: '/docs' })
   if (import.meta.env.VITE_ENABLE_LABS === 'true' || !import.meta.env.PROD) {

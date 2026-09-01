@@ -24,12 +24,24 @@ IDENTIFIER_FIELDS: tuple[str, ...] = (
     "last_name",
     "dob",
     "zip",
+    "full_name",
 )
 
 # Normalized header aliases → canonical template field. Auto-bind without a map.
 HEADER_ALIASES: dict[str, frozenset[str]] = {
     "first_name": frozenset({"first_name", "first", "firstname", "given_name", "fname"}),
     "last_name": frozenset({"last_name", "last", "lastname", "surname", "family_name", "lname"}),
+    "full_name": frozenset(
+        {
+            "name",
+            "full_name",
+            "fullname",
+            "employee_name",
+            "worker_name",
+            "worker",
+            "employee",
+        }
+    ),
     "email": frozenset({"email", "email_address", "e_mail", "mail"}),
     "phone": frozenset({"phone", "phone_number", "mobile", "cell"}),
     "address": frozenset({"address", "street", "street_address"}),
@@ -59,6 +71,10 @@ PHONE_FORMAT_E164 = "e164"
 PHONE_FORMATS: frozenset[str] = frozenset(
     {PHONE_FORMAT_DIGITS_10_PLUS, PHONE_FORMAT_US_10, PHONE_FORMAT_E164}
 )
+
+NAME_FORMAT_FIRST_LAST = "first_last"
+NAME_FORMAT_LAST_FIRST = "last_first"
+NAME_FORMATS: frozenset[str] = frozenset({NAME_FORMAT_FIRST_LAST, NAME_FORMAT_LAST_FIRST})
 
 _STRICT_TLD = re.compile(r"^[A-Za-z]{2,}$")
 _MAX_REJECTED_ROWS = 100
@@ -321,7 +337,11 @@ def _usable_identifier_count(
     phones = _split_list(normalized.get("phone", ""), delimiter)
     if any(_phone_ok(item, phone_format) for item in phones):
         count += 1
-    if normalized.get("first_name") or normalized.get("last_name"):
+    if (
+        normalized.get("first_name")
+        or normalized.get("last_name")
+        or normalized.get("full_name")
+    ):
         count += 1
     if normalized.get("dob"):
         count += 1

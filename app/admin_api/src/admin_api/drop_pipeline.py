@@ -1595,6 +1595,61 @@ def _matching_stage_from_rollup(row: Any) -> dict[str, Any]:
     }
 
 
+def _matching_by_list_from_vertical_stage(stage: dict[str, Any]) -> list[dict[str, Any]]:
+    """Synthesize status breakdown for stageRunIndicators from vertical counters."""
+    open_n = int(stage.get("open", 0) or 0)
+    in_flight = int(stage.get("in_flight", 0) or 0)
+    success = int(stage.get("success", 0) or 0)
+    failed = int(stage.get("failed", 0) or 0)
+    queued = max(0, open_n - in_flight)
+    by_list = [
+        {"list_type": None, "status": "pending", "count": queued},
+        {"list_type": None, "status": "in_flight", "count": in_flight},
+        {"list_type": None, "status": "success", "count": success},
+        {"list_type": None, "status": "submit_error", "count": failed},
+    ]
+    return [item for item in by_list if int(item["count"]) > 0]
+
+
+def _matching_stage_from_live_verticals(
+    verticals: list[dict[str, Any]],
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    """Headline matching stage = lagging live vertical (not DROP-only 100%)."""
+    candidates: list[dict[str, Any]] = []
+    for entry in verticals:
+        if not entry.get("live") or entry.get("catalog_only"):
+            continue
+        stage = entry.get("matching") or {}
+        total = int(stage.get("total", 0) or 0)
+        if total <= 0:
+            continue
+        candidates.append(stage)
+
+    if not candidates:
+        return fallback
+
+    def _ratio(stage: dict[str, Any]) -> float:
+        total = int(stage.get("total", 0) or 0)
+        if total <= 0:
+            return 0.0
+        return int(stage.get("success", 0) or 0) / total
+
+    worst = min(candidates, key=_ratio)
+    by_list = worst.get("by_list_type") or []
+    if not by_list:
+        by_list = _matching_by_list_from_vertical_stage(worst)
+    return {
+        "total": int(worst.get("total", 0) or 0),
+        "open": int(worst.get("open", 0) or 0),
+        "success": int(worst.get("success", 0) or 0),
+        "failed": int(worst.get("failed", 0) or 0),
+        "other": int(worst.get("other", 0) or 0),
+        "in_flight": int(worst.get("in_flight", 0) or 0),
+        "by_list_type": by_list,
+    }
+
+
 def _review_stage_from_rollup(row: Any) -> dict[str, Any]:
     """Map drop_bulk_process_stats review counters to stages.review.
 
@@ -2477,8 +2532,12 @@ async def collect_bulk_process_summaries_lite(
             head, ledger_rows
         )
         stats = stats_by_id.get(pid)
+        verticals = _build_verticals_block(verticals_by_id.get(pid, []))
         if stats is not None:
-            matching = _matching_stage_from_rollup(stats)
+            matching = _matching_stage_from_live_verticals(
+                verticals,
+                _matching_stage_from_rollup(stats),
+            )
             review = _review_stage_from_rollup(stats)
             fulfillment = _fulfill_stage_from_rollup(stats)
             request_rows = int(_record_get(stats, "request_rows", 0) or 0)
@@ -2499,7 +2558,7 @@ async def collect_bulk_process_summaries_lite(
             fulfillment=fulfillment,
             raw_rows=0,
             request_rows=request_rows,
-            verticals=_build_verticals_block(verticals_by_id.get(pid, [])),
+            verticals=verticals,
         )
         summaries[pid] = {
             "process_id": pid,
@@ -2559,10 +2618,14 @@ async def collect_bulk_process_progress(
     request_rows = 0
     land_csv_count = 0
     request_stats = None
+    verticals = _build_verticals_block(await _fetch_bulk_vertical_stats(conn, process_id))
     if lite:
         stats = await _fetch_bulk_process_stats(conn, process_id)
         if stats is not None:
-            matching = _matching_stage_from_rollup(stats)
+            matching = _matching_stage_from_live_verticals(
+                verticals,
+                _matching_stage_from_rollup(stats),
+            )
             review = _review_stage_from_rollup(stats)
             fulfillment = _fulfill_stage_from_rollup(stats)
             request_rows = int(_record_get(stats, "request_rows", 0) or 0)
@@ -2706,7 +2769,8 @@ async def collect_bulk_process_progress(
         review = _empty_stage_counts()
         fulfillment = _empty_stage_counts()
 
-    verticals = _build_verticals_block(await _fetch_bulk_vertical_stats(conn, process_id))
+    if not lite:
+        matching = _matching_stage_from_live_verticals(verticals, matching)
 
     return _assemble_bulk_process_payload(
         head,
@@ -2749,10 +2813,12 @@ async def get_pipeline_status(*, detail: str = "full") -> dict[str, Any]:
 
 _LIVE_EVENTS_MATCHING_INTERVAL_SECONDS = 1.5
 _LIVE_EVENTS_BULK_INTERVAL_SECONDS = 5.0
+_LIVE_BULK_BRIDGE_FALLBACK_LOGGED = False
 
 
 async def iter_live_pipeline_events() -> AsyncIterator[dict[str, str]]:
     """SSE resource events — counts-only patches, not full pipeline refresh."""
+    global _LIVE_BULK_BRIDGE_FALLBACK_LOGGED
     yield {"event": "ready", "data": "connected"}
     if not settings.database_url:
         while True:
@@ -2760,40 +2826,117 @@ async def iter_live_pipeline_events() -> AsyncIterator[dict[str, str]]:
             yield {"event": "heartbeat", "data": "no_database"}
     pool = get_pool()
     last_matching: str | None = None
-    last_bulk: str | None = None
-    last_bulk_at = 0.0
-    while True:
-        try:
-            async with pool.acquire() as conn:
-                matching = await collect_matching_progress(conn)
-                matching_json = json.dumps(matching, separators=(",", ":"), sort_keys=True)
-                if matching_json != last_matching:
-                    last_matching = matching_json
-                    yield {"event": "matching_progress", "data": matching_json}
 
-                now = monotonic()
-                if now - last_bulk_at >= _LIVE_EVENTS_BULK_INTERVAL_SECONDS:
-                    last_bulk_at = now
-                    processes = await list_bulk_processes(conn, days=7, limit=1)
-                    if processes:
-                        pid = int(processes[0]["process_id"])
-                        summaries = await collect_bulk_process_summaries_lite(
-                            conn, process_ids=[pid]
-                        )
-                        bulk_payload = summaries.get(pid)
-                        if bulk_payload is not None:
-                            bulk_json = json.dumps(
-                                bulk_payload, separators=(",", ":"), sort_keys=True
-                            )
-                            if bulk_json != last_bulk:
-                                last_bulk = bulk_json
-                                yield {"event": "bulk_process", "data": bulk_json}
-        except Exception:
-            logger.exception(
-                "live_events_poll_failed",
-                extra={"event": "live_events_poll_failed"},
+    broadcaster: Any | None = None
+    try:
+        from admin_api.live_rollup_notify import get_bulk_rollup_broadcaster
+
+        broadcaster = get_bulk_rollup_broadcaster()
+    except ImportError:
+        if not _LIVE_BULK_BRIDGE_FALLBACK_LOGGED:
+            _LIVE_BULK_BRIDGE_FALLBACK_LOGGED = True
+            logger.warning(
+                "live_events_bulk_bridge_unavailable",
+                extra={"event": "live_events_bulk_bridge_unavailable"},
             )
-        await asyncio.sleep(_LIVE_EVENTS_MATCHING_INTERVAL_SECONDS)
+
+    if broadcaster is None:
+        # Bridge module absent: keep the legacy per-connection bulk poll.
+        last_bulk: str | None = None
+        last_bulk_at = 0.0
+        while True:
+            try:
+                async with pool.acquire() as conn:
+                    matching = await collect_matching_progress(conn)
+                    matching_json = json.dumps(matching, separators=(",", ":"), sort_keys=True)
+                    if matching_json != last_matching:
+                        last_matching = matching_json
+                        yield {"event": "matching_progress", "data": matching_json}
+
+                    now = monotonic()
+                    if now - last_bulk_at >= _LIVE_EVENTS_BULK_INTERVAL_SECONDS:
+                        last_bulk_at = now
+                        processes = await list_bulk_processes(conn, days=7, limit=1)
+                        if processes:
+                            pid = int(processes[0]["process_id"])
+                            summaries = await collect_bulk_process_summaries_lite(
+                                conn, process_ids=[pid]
+                            )
+                            bulk_payload = summaries.get(pid)
+                            if bulk_payload is not None:
+                                bulk_json = json.dumps(
+                                    bulk_payload, separators=(",", ":"), sort_keys=True
+                                )
+                                if bulk_json != last_bulk:
+                                    last_bulk = bulk_json
+                                    yield {"event": "bulk_process", "data": bulk_json}
+            except Exception:
+                logger.exception(
+                    "live_events_poll_failed",
+                    extra={"event": "live_events_poll_failed"},
+                )
+            await asyncio.sleep(_LIVE_EVENTS_MATCHING_INTERVAL_SECONDS)
+
+    queue = broadcaster.subscribe()
+    initial_bulk_sent = False
+    next_matching_at = 0.0
+    try:
+        while True:
+            if monotonic() >= next_matching_at:
+                try:
+                    async with pool.acquire() as conn:
+                        matching = await collect_matching_progress(conn)
+                        matching_json = json.dumps(
+                            matching, separators=(",", ":"), sort_keys=True
+                        )
+                        if matching_json != last_matching:
+                            last_matching = matching_json
+                            yield {"event": "matching_progress", "data": matching_json}
+
+                        if not initial_bulk_sent:
+                            initial_bulk_sent = True
+                            processes = await list_bulk_processes(conn, days=7, limit=1)
+                            if processes:
+                                pid = int(processes[0]["process_id"])
+                                summaries = await collect_bulk_process_summaries_lite(
+                                    conn, process_ids=[pid]
+                                )
+                                bulk_payload = summaries.get(pid)
+                                if bulk_payload is not None:
+                                    bulk_json = json.dumps(
+                                        bulk_payload, separators=(",", ":"), sort_keys=True
+                                    )
+                                    yield {"event": "bulk_process", "data": bulk_json}
+                except Exception:
+                    logger.exception(
+                        "live_events_poll_failed",
+                        extra={"event": "live_events_poll_failed"},
+                    )
+                next_matching_at = monotonic() + _LIVE_EVENTS_MATCHING_INTERVAL_SECONDS
+
+            delay = max(0.0, next_matching_at - monotonic())
+            get_task = asyncio.create_task(queue.get())
+            sleep_task = asyncio.create_task(asyncio.sleep(delay))
+            try:
+                done, _pending = await asyncio.wait(
+                    {get_task, sleep_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if get_task in done:
+                    sleep_task.cancel()
+                    event = get_task.result()
+                    if isinstance(event, dict):
+                        yield event
+                else:
+                    get_task.cancel()
+                    # A cancelled sleep task means generator teardown (or a stubbed
+                    # sleep in hermetic tests); result() re-raises its CancelledError.
+                    sleep_task.result()
+            finally:
+                for task in (get_task, sleep_task):
+                    if not task.done():
+                        task.cancel()
+    finally:
+        broadcaster.unsubscribe(queue)
 
 
 async def proxy_post_payload(
