@@ -1593,6 +1593,61 @@ def _matching_stage_from_rollup(row: Any) -> dict[str, Any]:
     }
 
 
+def _matching_by_list_from_vertical_stage(stage: dict[str, Any]) -> list[dict[str, Any]]:
+    """Synthesize status breakdown for stageRunIndicators from vertical counters."""
+    open_n = int(stage.get("open", 0) or 0)
+    in_flight = int(stage.get("in_flight", 0) or 0)
+    success = int(stage.get("success", 0) or 0)
+    failed = int(stage.get("failed", 0) or 0)
+    queued = max(0, open_n - in_flight)
+    by_list = [
+        {"list_type": None, "status": "pending", "count": queued},
+        {"list_type": None, "status": "in_flight", "count": in_flight},
+        {"list_type": None, "status": "success", "count": success},
+        {"list_type": None, "status": "submit_error", "count": failed},
+    ]
+    return [item for item in by_list if int(item["count"]) > 0]
+
+
+def _matching_stage_from_live_verticals(
+    verticals: list[dict[str, Any]],
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    """Headline matching stage = lagging live vertical (not DROP-only 100%)."""
+    candidates: list[dict[str, Any]] = []
+    for entry in verticals:
+        if not entry.get("live") or entry.get("catalog_only"):
+            continue
+        stage = entry.get("matching") or {}
+        total = int(stage.get("total", 0) or 0)
+        if total <= 0:
+            continue
+        candidates.append(stage)
+
+    if not candidates:
+        return fallback
+
+    def _ratio(stage: dict[str, Any]) -> float:
+        total = int(stage.get("total", 0) or 0)
+        if total <= 0:
+            return 0.0
+        return int(stage.get("success", 0) or 0) / total
+
+    worst = min(candidates, key=_ratio)
+    by_list = worst.get("by_list_type") or []
+    if not by_list:
+        by_list = _matching_by_list_from_vertical_stage(worst)
+    return {
+        "total": int(worst.get("total", 0) or 0),
+        "open": int(worst.get("open", 0) or 0),
+        "success": int(worst.get("success", 0) or 0),
+        "failed": int(worst.get("failed", 0) or 0),
+        "other": int(worst.get("other", 0) or 0),
+        "in_flight": int(worst.get("in_flight", 0) or 0),
+        "by_list_type": by_list,
+    }
+
+
 def _review_stage_from_rollup(row: Any) -> dict[str, Any]:
     """Map drop_bulk_process_stats review counters to stages.review.
 
@@ -2475,8 +2530,12 @@ async def collect_bulk_process_summaries_lite(
             head, ledger_rows
         )
         stats = stats_by_id.get(pid)
+        verticals = _build_verticals_block(verticals_by_id.get(pid, []))
         if stats is not None:
-            matching = _matching_stage_from_rollup(stats)
+            matching = _matching_stage_from_live_verticals(
+                verticals,
+                _matching_stage_from_rollup(stats),
+            )
             review = _review_stage_from_rollup(stats)
             fulfillment = _fulfill_stage_from_rollup(stats)
             request_rows = int(_record_get(stats, "request_rows", 0) or 0)
@@ -2497,7 +2556,7 @@ async def collect_bulk_process_summaries_lite(
             fulfillment=fulfillment,
             raw_rows=0,
             request_rows=request_rows,
-            verticals=_build_verticals_block(verticals_by_id.get(pid, [])),
+            verticals=verticals,
         )
         summaries[pid] = {
             "process_id": pid,
@@ -2557,10 +2616,14 @@ async def collect_bulk_process_progress(
     request_rows = 0
     land_csv_count = 0
     request_stats = None
+    verticals = _build_verticals_block(await _fetch_bulk_vertical_stats(conn, process_id))
     if lite:
         stats = await _fetch_bulk_process_stats(conn, process_id)
         if stats is not None:
-            matching = _matching_stage_from_rollup(stats)
+            matching = _matching_stage_from_live_verticals(
+                verticals,
+                _matching_stage_from_rollup(stats),
+            )
             review = _review_stage_from_rollup(stats)
             fulfillment = _fulfill_stage_from_rollup(stats)
             request_rows = int(_record_get(stats, "request_rows", 0) or 0)
@@ -2704,7 +2767,8 @@ async def collect_bulk_process_progress(
         review = _empty_stage_counts()
         fulfillment = _empty_stage_counts()
 
-    verticals = _build_verticals_block(await _fetch_bulk_vertical_stats(conn, process_id))
+    if not lite:
+        matching = _matching_stage_from_live_verticals(verticals, matching)
 
     return _assemble_bulk_process_payload(
         head,
