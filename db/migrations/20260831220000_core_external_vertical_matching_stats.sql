@@ -91,6 +91,10 @@ BEGIN
         RETURN NULL;
     END IF;
 
+    IF to_regclass(format('public.%I', p_attempts_table)) IS NULL THEN
+        RETURN NULL;
+    END IF;
+
     EXECUTE format(
         'SELECT status
            FROM %I
@@ -128,6 +132,10 @@ DECLARE
 BEGIN
     FOREACH v_table IN ARRAY v_tables
     LOOP
+        IF to_regclass(format('public.%I', v_table)) IS NULL THEN
+            CONTINUE;
+        END IF;
+
         IF p_exclude_table IS NOT NULL AND v_table = p_exclude_table THEN
             CONTINUE;
         END IF;
@@ -338,12 +346,19 @@ CREATE TRIGGER axios_headquarters_attempts_vertical_stats
     FOR EACH ROW
     EXECUTE FUNCTION core_single_vertical_attempts_stats();
 
-DROP TRIGGER IF EXISTS bizdev_contacts_attempts_vertical_stats
-    ON bizdev_contacts_attempts;
-CREATE TRIGGER bizdev_contacts_attempts_vertical_stats
-    AFTER INSERT OR UPDATE OF status ON bizdev_contacts_attempts
-    FOR EACH ROW
-    EXECUTE FUNCTION core_single_vertical_attempts_stats();
+DO $$
+BEGIN
+    IF to_regclass('public.bizdev_contacts_attempts') IS NOT NULL THEN
+        EXECUTE $sql$
+            DROP TRIGGER IF EXISTS bizdev_contacts_attempts_vertical_stats
+                ON bizdev_contacts_attempts;
+            CREATE TRIGGER bizdev_contacts_attempts_vertical_stats
+                AFTER INSERT OR UPDATE OF status ON bizdev_contacts_attempts
+                FOR EACH ROW
+                EXECUTE FUNCTION core_single_vertical_attempts_stats()
+        $sql$;
+    END IF;
+END $$;
 
 DROP TRIGGER IF EXISTS paylocity_attempts_vertical_stats ON paylocity_attempts;
 CREATE TRIGGER paylocity_attempts_vertical_stats
@@ -357,11 +372,19 @@ CREATE TRIGGER lever_attempts_vertical_stats
     FOR EACH ROW
     EXECUTE FUNCTION core_people_hr_attempts_vertical_stats();
 
-DROP TRIGGER IF EXISTS hr_alumni_attempts_vertical_stats ON hr_alumni_attempts;
-CREATE TRIGGER hr_alumni_attempts_vertical_stats
-    AFTER INSERT OR UPDATE OF status ON hr_alumni_attempts
-    FOR EACH ROW
-    EXECUTE FUNCTION core_people_hr_attempts_vertical_stats();
+DO $$
+BEGIN
+    IF to_regclass('public.hr_alumni_attempts') IS NOT NULL THEN
+        EXECUTE $sql$
+            DROP TRIGGER IF EXISTS hr_alumni_attempts_vertical_stats
+                ON hr_alumni_attempts;
+            CREATE TRIGGER hr_alumni_attempts_vertical_stats
+                AFTER INSERT OR UPDATE OF status ON hr_alumni_attempts
+                FOR EACH ROW
+                EXECUTE FUNCTION core_people_hr_attempts_vertical_stats()
+        $sql$;
+    END IF;
+END $$;
 
 CREATE OR REPLACE FUNCTION core_seed_email_vertical_matching_open(
     p_download_id BIGINT,
@@ -428,9 +451,11 @@ BEGIN
             PERFORM core_seed_email_vertical_matching_open(
                 NEW.bulk_process_download_id, 'people_hr'
             );
-            PERFORM core_seed_email_vertical_matching_open(
-                NEW.bulk_process_download_id, 'bizdev'
-            );
+            IF to_regclass('public.bizdev_contacts_attempts') IS NOT NULL THEN
+                PERFORM core_seed_email_vertical_matching_open(
+                    NEW.bulk_process_download_id, 'bizdev'
+                );
+            END IF;
         END IF;
     END IF;
 
@@ -535,54 +560,61 @@ ON CONFLICT (download_id, vertical, stage) DO UPDATE
        in_flight = EXCLUDED.in_flight,
        updated_at = NOW();
 
--- Backfill bizdev (Contact Us sheet attempts).
-DELETE FROM drop_bulk_vertical_stats
- WHERE vertical = 'bizdev'
-   AND stage = 'matching';
+-- Backfill bizdev when the split-sheet worker table exists (post-20260831200000).
+DO $$
+BEGIN
+    IF to_regclass('public.bizdev_contacts_attempts') IS NULL THEN
+        RETURN;
+    END IF;
 
-INSERT INTO drop_bulk_vertical_stats (
-    download_id, vertical, stage, total, open, success, failed, in_flight
-)
-SELECT
-    sub.download_id,
-    'bizdev',
-    'matching',
-    COUNT(*)::bigint,
-    COUNT(*) FILTER (WHERE sub.bucket = 'open')::bigint,
-    COUNT(*) FILTER (WHERE sub.bucket = 'success')::bigint,
-    COUNT(*) FILTER (WHERE sub.bucket = 'failed')::bigint,
-    COUNT(*) FILTER (WHERE sub.bucket = 'in_flight')::bigint
-  FROM (
-    SELECT DISTINCT ON (r.id)
-           r.bulk_process_download_id AS download_id,
-           CASE
-               WHEN aa.status IS NULL THEN 'open'
-               WHEN aa.status = 'success' THEN 'success'
-               WHEN aa.status = 'in_flight' THEN 'in_flight'
-               WHEN aa.status IN (
-                   'submit_error', 'outcome_error', 'timeout', 'failed'
-               ) THEN 'failed'
-               ELSE 'open'
-           END AS bucket
-      FROM requests r
-      JOIN drop_raw_requests drr
-        ON r.intake_source = 'drop'
-       AND r.raw_record_id = drr.id
-       AND drr.list_type = 'Email'
-      LEFT JOIN bizdev_contacts_attempts aa
-        ON aa.request_id = r.id
-       AND aa.step = 'matching'
-     WHERE r.bulk_process_download_id IS NOT NULL
-     ORDER BY r.id, aa.attempt_number DESC NULLS LAST, aa.attempted_at DESC NULLS LAST
-  ) sub
- GROUP BY sub.download_id
-ON CONFLICT (download_id, vertical, stage) DO UPDATE
-   SET total = EXCLUDED.total,
-       open = EXCLUDED.open,
-       success = EXCLUDED.success,
-       failed = EXCLUDED.failed,
-       in_flight = EXCLUDED.in_flight,
-       updated_at = NOW();
+    DELETE FROM drop_bulk_vertical_stats
+     WHERE vertical = 'bizdev'
+       AND stage = 'matching';
+
+    INSERT INTO drop_bulk_vertical_stats (
+        download_id, vertical, stage, total, open, success, failed, in_flight
+    )
+    SELECT
+        sub.download_id,
+        'bizdev',
+        'matching',
+        COUNT(*)::bigint,
+        COUNT(*) FILTER (WHERE sub.bucket = 'open')::bigint,
+        COUNT(*) FILTER (WHERE sub.bucket = 'success')::bigint,
+        COUNT(*) FILTER (WHERE sub.bucket = 'failed')::bigint,
+        COUNT(*) FILTER (WHERE sub.bucket = 'in_flight')::bigint
+      FROM (
+        SELECT DISTINCT ON (r.id)
+               r.bulk_process_download_id AS download_id,
+               CASE
+                   WHEN aa.status IS NULL THEN 'open'
+                   WHEN aa.status = 'success' THEN 'success'
+                   WHEN aa.status = 'in_flight' THEN 'in_flight'
+                   WHEN aa.status IN (
+                       'submit_error', 'outcome_error', 'timeout', 'failed'
+                   ) THEN 'failed'
+                   ELSE 'open'
+               END AS bucket
+          FROM requests r
+          JOIN drop_raw_requests drr
+            ON r.intake_source = 'drop'
+           AND r.raw_record_id = drr.id
+           AND drr.list_type = 'Email'
+          LEFT JOIN bizdev_contacts_attempts aa
+            ON aa.request_id = r.id
+           AND aa.step = 'matching'
+         WHERE r.bulk_process_download_id IS NOT NULL
+         ORDER BY r.id, aa.attempt_number DESC NULLS LAST, aa.attempted_at DESC NULLS LAST
+      ) sub
+     GROUP BY sub.download_id
+    ON CONFLICT (download_id, vertical, stage) DO UPDATE
+       SET total = EXCLUDED.total,
+           open = EXCLUDED.open,
+           success = EXCLUDED.success,
+           failed = EXCLUDED.failed,
+           in_flight = EXCLUDED.in_flight,
+           updated_at = NOW();
+END $$;
 
 DO $$
 BEGIN
