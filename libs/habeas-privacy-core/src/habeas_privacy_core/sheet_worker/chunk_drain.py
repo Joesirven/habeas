@@ -124,7 +124,10 @@ def claim_matching_chunk_sql(config: SheetWorkerConfig) -> str:
              WHERE aa.status = 'pending'
                AND aa.step = $1::varchar
                AND (aa.retry_after IS NULL OR aa.retry_after <= NOW())
-               AND COALESCE(aa.audit_payload->>'system', '') = $5::varchar
+               AND (
+                     COALESCE(aa.audit_payload->>'system', '') = $5::varchar
+                     OR COALESCE(aa.audit_payload->>'system', '') = ''
+                   )
              ORDER BY aa.attempted_at
              LIMIT $2::int
              FOR UPDATE OF aa SKIP LOCKED
@@ -178,7 +181,10 @@ async def reap_stale_claims(
                claim_expires_at = NULL
          WHERE status = 'claimed'
            AND step = $1::varchar
-           AND COALESCE(audit_payload->>'system', '') = $3::varchar
+           AND (
+                 COALESCE(audit_payload->>'system', '') = $3::varchar
+                 OR COALESCE(audit_payload->>'system', '') = ''
+               )
            AND (
                 (claim_expires_at IS NOT NULL
                  AND claim_expires_at < NOW())
@@ -220,7 +226,10 @@ async def reap_worker_claims(
          WHERE status = 'claimed'
            AND step = $1::varchar
            AND worker_id = $2::varchar
-           AND COALESCE(audit_payload->>'system', '') = $3::varchar
+           AND (
+                 COALESCE(audit_payload->>'system', '') = $3::varchar
+                 OR COALESCE(audit_payload->>'system', '') = ''
+               )
         """,
         STEP_MATCHING,
         worker_id,
@@ -673,7 +682,10 @@ async def _pending_matching_count(conn: Any, config: SheetWorkerConfig) -> int:
           FROM {config.attempts_table}
          WHERE status = 'pending'
            AND step = $1::varchar
-           AND COALESCE(audit_payload->>'system', '') = $2::varchar
+           AND (
+                 COALESCE(audit_payload->>'system', '') = $2::varchar
+                 OR COALESCE(audit_payload->>'system', '') = ''
+               )
            AND (retry_after IS NULL OR retry_after <= NOW())
         """,
         STEP_MATCHING,
