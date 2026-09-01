@@ -18,7 +18,13 @@ from habeas_privacy_core.connections.secrets import InMemorySecretWriter
 
 SECRET_VALUE = "super-secret-prod-drop-key-do-not-echo"
 FULFILL_MARKERS = ("/fulfill", "fulfillment", "cassandra", "/upload", "/amend")
-OTHER_VERTICAL_MARKERS = ("auth0", "paylocity", "lever", "mailchimp", "google_sheets")
+OTHER_VERTICAL_MARKERS = (
+    "auth0",
+    "paylocity",
+    "lever",
+    "axios_headquarters",
+    "google_sheets",
+)
 # Fixture URI only — same test bucket prefix already used by drop_connector tests.
 LANDABLE_GCS_URI = "gs://test-drop-intake/drop/intake/cutover.zip"
 FILE_GCS_URI = "file:///tmp/drop_connector/cutover.zip"

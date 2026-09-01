@@ -47,7 +47,8 @@ cd transform/drop_hash
 cp profiles.yml.example profiles.yml   # once; gitignored
 DBT_PROFILES_DIR=. dbt build --vars '{state: CA}'
 DBT_PROFILES_DIR=. dbt build --vars '{state: NY}'   # another state into shared marts
-cd drop_normalize && uv run pytest tests -q
+# Hermetic CPPA vectors (also on root `uv run --group dev pytest` via testpaths)
+uv run --group dev pytest transform/drop_hash/drop_normalize/tests -q   # from repo root
 ```
 
 ## Do not

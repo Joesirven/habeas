@@ -188,6 +188,7 @@ def test_patch_schedules_local_mode_and_clamps():
         assert connector.json()["schedule"]["time_utc"] == "15:30"
         assert connector.json()["schedule"]["cron"] == "30 15 1,15 * *"
         assert connector.json()["schedule"]["schedule_kind"] == "month_days"
+        assert connector.json()["schedule"]["month_days"] == [1, 15]
 
 
 def test_patch_rejects_wrong_fields_for_job_kind():
@@ -295,7 +296,7 @@ def test_get_schedules_from_listed_jobs_excludes_noise(monkeypatch: pytest.Monke
             },
         ),
         _job_resource(
-            "dpra-dev-mailchimp-matching-submit",
+            "dpra-dev-axios-headquarters-matching-submit",
             schedule="*/10 * * * *",
         ),
         _job_resource("test-probe-job", schedule="*/1 * * * *"),
@@ -321,7 +322,7 @@ def test_get_schedules_from_listed_jobs_excludes_noise(monkeypatch: pytest.Monke
     assert keys == {
         "matching",
         "drop_connector_download",
-        "mailchimp_matching_submit",
+        "axios_headquarters_matching_submit",
     }
     assert "test_probe_job" not in keys
     assert clients and clients[0].list_calls >= 1
@@ -343,7 +344,7 @@ def test_patch_discovered_job_gcp_mode(monkeypatch: pytest.MonkeyPatch):
     jobs = [
         _job_resource("dpra-dev-matching", schedule="*/5 * * * *"),
         _job_resource(
-            "dpra-dev-mailchimp-matching-submit",
+            "dpra-dev-axios-headquarters-matching-submit",
             schedule="*/10 * * * *",
         ),
     ]
@@ -369,7 +370,7 @@ def test_patch_discovered_job_gcp_mode(monkeypatch: pytest.MonkeyPatch):
             "/ops/workers/schedules",
             headers=_headers(),
             json={
-                "job_key": "mailchimp_matching_submit",
+                "job_key": "axios_headquarters_matching_submit",
                 "interval_minutes": 12,
                 "enabled": True,
             },
@@ -377,14 +378,15 @@ def test_patch_discovered_job_gcp_mode(monkeypatch: pytest.MonkeyPatch):
         assert ok.status_code == 200
         payload = ok.json()
         assert payload["mode"] == "gcp"
-        assert payload["schedule"]["job_key"] == "mailchimp_matching_submit"
+        assert payload["schedule"]["job_key"] == "axios_headquarters_matching_submit"
         assert payload["schedule"]["interval_minutes"] == 12
         assert payload["schedule"]["cron"] == "*/12 * * * *"
         assert payload["schedule"]["schedule_kind"] == "interval_minutes"
 
     assert held
     assert any(
-        call[0] == "dpra-dev-mailchimp-matching-submit" for call in held[-1].patch_calls
+        call[0] == "dpra-dev-axios-headquarters-matching-submit"
+        for call in held[-1].patch_calls
     )
 
 

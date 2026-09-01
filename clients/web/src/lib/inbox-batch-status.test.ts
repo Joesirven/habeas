@@ -226,8 +226,8 @@ describe('groupInboxConnectorNotifications', () => {
   test('groups reminders by code and attaches gate', () => {
     const reminders: ConnectorReminder[] = [
       {
-        vertical_id: 'mailchimp',
-        system: 'mailchimp',
+        vertical_id: 'communications',
+        system: 'axios_hq',
         code: 'upload_stale',
         severity: 'overdue',
       },
@@ -244,7 +244,7 @@ describe('groupInboxConnectorNotifications', () => {
         blocked: true,
         displayStatus: 'needs_refresh',
         gateCode: 'upload_stale',
-        system: 'mailchimp',
+        system: 'axios_hq',
         source: 'reminder',
       },
     })
@@ -382,14 +382,14 @@ describe('groupInboxItemsBySystem', () => {
     const groups = groupInboxItemsBySystem([
       matchingItem({
         request_id: 'a',
-        system: 'mailchimp',
-        system_label: 'Mailchimp',
+        system: 'axios_hq',
+        system_label: 'Axios HQ',
         match_type: 'single_match',
         kind: 'matching',
       }),
       matchingItem({
         request_id: 'b',
-        system_id: 'mailchimp',
+        system_id: 'axios_hq',
         match_type: 'not_found',
         kind: 'notice',
       }),
@@ -402,12 +402,12 @@ describe('groupInboxItemsBySystem', () => {
     expect(inboxItemSystemId({ system: 'lever', system_id: 'ignored' })).toBe('lever')
     expect(inboxItemSystemId({ system_id: 'salesforce' })).toBe('salesforce')
     expect(groups).toHaveLength(2)
-    const mailchimp = groups.find((group) => group.key === 'mailchimp')
+    const axiosHq = groups.find((group) => group.key === 'axios_hq')
     const lever = groups.find((group) => group.key === 'lever')
-    expect(mailchimp?.items).toHaveLength(2)
-    expect(mailchimp?.label).toBe('Mailchimp')
+    expect(axiosHq?.items).toHaveLength(2)
+    expect(axiosHq?.label).toBe('Axios HQ')
     expect(lever?.label).toBe('Lever')
-    expect(mailchimp?.label).not.toBe(inboxIntakeSourceLabel('drop'))
+    expect(axiosHq?.label).not.toBe(inboxIntakeSourceLabel('drop'))
     expect(lever?.label).not.toBe(inboxIntakeSourceLabel('drop'))
   })
 
@@ -465,13 +465,13 @@ describe('buildInboxGroupingStacks', () => {
   test('optional system stacks ignore match type', () => {
     const groups = buildInboxGroupingStacks(
       [
-        matchingItem({ request_id: 'a', system: 'mailchimp', match_type: 'single_match' }),
-        matchingItem({ request_id: 'b', system: 'mailchimp', match_type: 'multi_match' }),
+        matchingItem({ request_id: 'a', system: 'axios_hq', match_type: 'single_match' }),
+        matchingItem({ request_id: 'b', system: 'axios_hq', match_type: 'multi_match' }),
       ],
       { bySystem: true },
     )
     expect(groups).toHaveLength(1)
-    expect(groups[0]?.key).toBe('mailchimp')
+    expect(groups[0]?.key).toBe('axios_hq')
   })
 
   test('optional status stacks stay available without becoming row identity', () => {
@@ -522,15 +522,15 @@ describe('buildInboxGroupingStacks', () => {
         matchingItem({
           request_id: 'a',
           bulk_process_id: 1,
-          system: 'mailchimp',
-          system_label: 'Mailchimp',
+          system: 'axios_hq',
+          system_label: 'Axios HQ',
           match_type: 'single_match',
         }),
         matchingItem({
           request_id: 'b',
           bulk_process_id: 1,
-          system: 'mailchimp',
-          system_label: 'Mailchimp',
+          system: 'axios_hq',
+          system_label: 'Axios HQ',
           match_type: 'not_found',
         }),
         matchingItem({
@@ -552,8 +552,8 @@ describe('buildInboxGroupingStacks', () => {
       [
         matchingItem({
           request_id: 'a',
-          system: 'mailchimp',
-          system_label: 'Mailchimp',
+          system: 'axios_hq',
+          system_label: 'Axios HQ',
           vertical: 'communications',
           match_type: 'single_match',
         }),
@@ -570,7 +570,7 @@ describe('buildInboxGroupingStacks', () => {
         reminders: [
           {
             code: 'wizard_incomplete',
-            system: 'mailchimp',
+            system: 'axios_hq',
             vertical_id: 'communications',
             severity: 'overdue',
           },
@@ -697,8 +697,8 @@ describe('inboxPendingWorkUnitCount', () => {
       request_id: '11111111-1111-4111-8111-111111111111',
       bulk_process_id: 7,
       vertical: 'communications',
-      system: 'mailchimp',
-      system_label: 'Mailchimp',
+      system: 'axios_hq',
+      system_label: 'Axios HQ',
       match_type: 'single_match',
     })
     const blocked = matchingItem({
@@ -742,15 +742,15 @@ describe('inboxItemConnectorBlock', () => {
   test('maps stale upload reminder to Needs refresh', () => {
     const item = matchingItem({
       vertical: 'communications',
-      system: 'mailchimp',
-      system_label: 'Mailchimp',
+      system: 'axios_hq',
+      system_label: 'Axios HQ',
     })
     expect(
       inboxItemConnectorBlock(item, {
         reminders: [
           {
             code: 'upload_stale',
-            system: 'mailchimp',
+            system: 'axios_hq',
             vertical_id: 'communications',
             severity: 'overdue',
           },
@@ -792,8 +792,8 @@ describe('inboxItemConnectorBlock', () => {
   test('work status prefers Needs refresh over match type', () => {
     const item = matchingItem({
       vertical: 'communications',
-      system: 'mailchimp',
-      system_label: 'Mailchimp',
+      system: 'axios_hq',
+      system_label: 'Axios HQ',
       match_type: 'single_match',
     })
     expect(
@@ -801,7 +801,7 @@ describe('inboxItemConnectorBlock', () => {
         reminders: [
           {
             code: 'upload_stale',
-            system: 'mailchimp',
+            system: 'axios_hq',
             vertical_id: 'communications',
             severity: 'overdue',
           },
@@ -927,9 +927,8 @@ describe('collapsed bulk-process row (lite snapshot)', () => {
     expect(bulkProcessSourceLabel('webform')).not.toBe('CA DROP')
     expect(bulkProcessSourceLabel('csv')).not.toBe('CA DROP')
     expect(bulkProcessSourceLabel('manual')).not.toBe('CA DROP')
-    expect(bulkProcessSourceLabel('mailchimp')).not.toBe('CA DROP')
-    expect(bulkProcessSourceLabel('cassandra')).not.toBe('CA DROP')
     expect(bulkProcessSourceLabel('axios_hq')).not.toBe('CA DROP')
+    expect(bulkProcessSourceLabel('cassandra')).not.toBe('CA DROP')
     const titled = bulkProcessCollapsedTitle({
       process_at: AUG_21,
       intake_source: 'drop',

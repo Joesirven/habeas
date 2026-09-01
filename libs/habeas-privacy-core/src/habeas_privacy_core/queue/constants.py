@@ -28,11 +28,13 @@ VERTICAL_HASH_REFRESH_SYSTEMS = frozenset(
     }
 )
 
-MAILCHIMP_ATTEMPTS_TABLE = "mailchimp_attempts"
 AXIOS_HEADQUARTERS_ATTEMPTS_TABLE = "axios_headquarters_attempts"
 PAYLOCITY_ATTEMPTS_TABLE = "paylocity_attempts"
 LEVER_ATTEMPTS_TABLE = "lever_attempts"
 AUTH0_ATTEMPTS_TABLE = "auth0_attempts"
+HR_ALUMNI_ATTEMPTS_TABLE = "hr_alumni_attempts"
+BIZDEV_CONTACTS_ATTEMPTS_TABLE = "bizdev_contacts_attempts"
+# Deprecated alias — split into hr_alumni + bizdev_contacts attempt tables (2026-08-31).
 GOOGLE_SHEETS_ATTEMPTS_TABLE = "google_sheets_attempts"
 STEP_MATCHING = "matching"
 STEP_SUPPRESSION = "suppression"

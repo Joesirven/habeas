@@ -1,0 +1,96 @@
+# hr-alumni-prod — twin of hr-alumni-dev. Cloud SQL dpra-prod + _DATABASE_URL.
+# Run infra/scripts/provision_sheet_worker_service_accounts.sh before first deploy.
+substitutions:
+  _REGION: us-east4
+  _PROJECT: example-gcp-project
+  _SERVICE: hr-alumni-prod
+  _TAG: latest
+  _CLOUDSQL_INSTANCE: example-gcp-project:us-east4:dpra-prod
+  _DRAIN_JOB: hr-alumni-matching-drain-prod
+  _RUNTIME_SA: dpra-hr-alumni-worker@example-gcp-project.iam.gserviceaccount.com
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+      - -f
+      - app/hr_alumni/Dockerfile
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --service-account=${_RUNTIME_SA}
+      - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
+      - --timeout=3600
+      - --set-env-vars=SERVICE_NAME=hr-alumni,WORKER_ID=hr-alumni-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,GCS_TRANSPORT=google,DATABASE_URL=${_DATABASE_URL},EXTERNAL_HASH_DBT_DIR=/app/transform/external_hash,DBT_PROFILES_DIR=/app/transform/external_hash,EXTERNAL_HASH_BQ_DATASET=external_hash_index,EXTERNAL_HASH_DBT_TIMEOUT_SECONDS=3300,HR_ALUMNI_DRAIN_JOB_NAME=${_DRAIN_JOB},HR_ALUMNI_DRAIN_JOB_REGION=${_REGION},HR_ALUMNI_DRAIN_LEASE_HOLDER=hr-alumni-matching-drain,HR_ALUMNI_DRAIN_TASK_COUNT=5
+
+  # admin-api runtime SA only — never user/IAP run.invoker on workers. Never allUsers.
+  - id: grant-admin-api-invoker
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - add-iam-policy-binding
+      - ${_SERVICE}
+      - --region=${_REGION}
+      - --member=serviceAccount:95660886550-compute@developer.gserviceaccount.com
+      - --role=roles/run.invoker
+      - --quiet
+
+  # HR Alumni matching drain Job — chunk drain (5 parallel tasks), same image.
+  # /ensure-drain on the service starts executions when HR_ALUMNI_DRAIN_JOB_NAME is set.
+  - id: deploy-drain-job
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        IMAGE="us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}"
+        gcloud run jobs deploy "${_DRAIN_JOB}" \
+          --project="${_PROJECT}" \
+          --region="${_REGION}" \
+          --image="$${IMAGE}" \
+          --tasks=5 \
+          --parallelism=5 \
+          --task-timeout=3600 \
+          --max-retries=1 \
+          --service-account="${_RUNTIME_SA}" \
+          --set-cloudsql-instances="${_CLOUDSQL_INSTANCE}" \
+          --command=python \
+          --args=-m,hr_alumni.chunk_drain \
+          --set-env-vars="SERVICE_NAME=hr-alumni-matching-drain,WORKER_ID=${_DRAIN_JOB},GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},HR_ALUMNI_DRAIN_TASK_COUNT=5,HR_ALUMNI_DRAIN_LEASE_HOLDER=hr-alumni-matching-drain,PYTHONPATH=/app/app/hr_alumni/src" \
+          --quiet
+
+        # hr-alumni-prod runtime SA must execute this Job from /ensure-drain.
+        gcloud run jobs add-iam-policy-binding "${_DRAIN_JOB}" \
+          --project="${_PROJECT}" \
+          --region="${_REGION}" \
+          --member="serviceAccount:${_RUNTIME_SA}" \
+          --role="roles/run.developer" \
+          --quiet || true
+
+images:
+  - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}

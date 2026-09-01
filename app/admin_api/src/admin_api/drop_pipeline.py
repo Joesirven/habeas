@@ -182,9 +182,10 @@ class DropPipelineSettings(CoreSettings):
     axios_headquarters_url: str = "http://127.0.0.1:8089"
     paylocity_url: str = "http://127.0.0.1:8090"
     lever_url: str = "http://127.0.0.1:8091"
-    google_sheets_url: str = "http://127.0.0.1:8092"
-    cassandra_url: str = "http://127.0.0.1:8093"
-    drop_notice_url: str = "http://127.0.0.1:8094"
+    hr_alumni_url: str = "http://127.0.0.1:8092"
+    bizdev_contacts_url: str = "http://127.0.0.1:8093"
+    cassandra_url: str = "http://127.0.0.1:8094"
+    drop_notice_url: str = "http://127.0.0.1:8095"
     # When true, mutating /ops/drop/* requires X-Goog-Authenticated-User-Email.
     # Local default false; enable with IAP in front of admin-api (see infra/README).
     require_iap_identity: bool = False
@@ -254,7 +255,8 @@ WORKER_KEYS = (
     ("axios_headquarters", "axios_headquarters_url"),
     ("paylocity", "paylocity_url"),
     ("lever", "lever_url"),
-    ("google_sheets", "google_sheets_url"),
+    ("hr_alumni", "hr_alumni_url"),
+    ("bizdev_contacts", "bizdev_contacts_url"),
     ("cassandra", "cassandra_url"),
     ("drop_notice", "drop_notice_url"),
 )

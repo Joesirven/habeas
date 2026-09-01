@@ -632,7 +632,7 @@ async def test_kickoff_lock_reads_the_shared_core_helper():
     )
 
 
-OWNER_COMMENT = "done in Mailchimp for Jane Doe"
+OWNER_COMMENT = "done in Axios HQ for Jane Doe"
 
 
 @pytest.mark.asyncio

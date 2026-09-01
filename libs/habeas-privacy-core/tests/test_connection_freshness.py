@@ -48,7 +48,7 @@ def _upload_conn(
     wizard_completed: bool = True,
     last_test_ok: bool = True,
     status: str = "connected",
-    system: str = "mailchimp",
+    system: str = "axios_headquarters",
 ) -> _Conn:
     metadata: dict[str, Any] = {"active_mode": "upload"}
     if wizard_completed:
@@ -342,7 +342,7 @@ class TestEvaluateConnectionGate:
 
     def test_unset_active_mode_is_not_connected(self) -> None:
         conn = _Conn(
-            system="mailchimp",
+            system="axios_headquarters",
             status="connected",
             last_test_ok=True,
             metadata={
@@ -356,7 +356,7 @@ class TestEvaluateConnectionGate:
 
     def test_mixed_case_active_mode_is_normalized(self) -> None:
         conn = _Conn(
-            system="mailchimp",
+            system="axios_headquarters",
             status="connected",
             last_test_ok=True,
             metadata={
@@ -371,7 +371,7 @@ class TestEvaluateConnectionGate:
 
     def test_garbage_active_mode_is_not_connected(self) -> None:
         conn = _Conn(
-            system="mailchimp",
+            system="axios_headquarters",
             status="connected",
             last_test_ok=True,
             metadata={
@@ -397,7 +397,7 @@ class TestEvaluateConnectionReminder:
         assert reminder is not None
         assert reminder.code == ReminderCode.UPLOAD_STALE
         assert reminder.severity == ReminderSeverity.OVERDUE
-        assert reminder.system == "mailchimp"
+        assert reminder.system == "axios_headquarters"
         assert reminder.vertical_id == "communications"
 
     def test_upload_approaching_last_20_percent(self) -> None:
@@ -459,7 +459,7 @@ class TestEvaluateConnectionReminder:
     def test_unset_mode_after_wizard_is_incomplete_reminder(self) -> None:
         reminder = evaluate_connection_reminder(
             _Conn(
-                system="mailchimp",
+                system="axios_headquarters",
                 status="connected",
                 last_test_ok=True,
                 metadata={

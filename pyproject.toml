@@ -36,7 +36,8 @@ members = [
     "app/axios_headquarters",
     "app/lever",
     "app/auth0",
-    "app/google_sheets",
+    "app/hr_alumni",
+    "app/bizdev_contacts",
     "app/cassandra",
     # cli
     "clients/cli/habeas-cli",
@@ -59,7 +60,8 @@ root_packages = [
     "axios_headquarters",
     "lever",
     "auth0",
-    "google_sheets",
+    "hr_alumni",
+    "bizdev_contacts",
     "cassandra_worker",
     "sla_monitor",
     "habeas_cli",
@@ -83,7 +85,8 @@ source_modules = [
     "axios_headquarters",
     "lever",
     "auth0",
-    "google_sheets",
+    "hr_alumni",
+    "bizdev_contacts",
     "cassandra_worker",
     "sla_monitor",
     "habeas_cli",
@@ -108,4 +111,11 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 # Per-app tests/ dirs share basenames (test_health.py); importlib avoids collisions.
 addopts = "--import-mode=importlib"
-testpaths = ["libs", "app", "clients/cli"]
+# Hermetic CPPA DROP vectors (no BigQuery). Package lives outside workspace members.
+pythonpath = ["transform/drop_hash/drop_normalize/src"]
+testpaths = [
+    "libs",
+    "app",
+    "clients/cli",
+    "transform/drop_hash/drop_normalize/tests",
+]

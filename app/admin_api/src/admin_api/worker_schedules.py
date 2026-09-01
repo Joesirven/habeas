@@ -87,16 +87,24 @@ settings = ScheduleSettings()
 try:
     from habeas_privacy_core.fleet import (  # type: ignore[import-not-found]
         cron_from_interval_minutes,
+        cron_from_month_days,
         cron_from_time_utc,
-        infer_schedule_kind,
+        infer_schedule_kind as _core_infer_schedule_kind,
         is_noise_scheduler_job,
         job_key_from_job_name,
         label_for_job_key,
+        next_month_days_fire_utc,
+        normalize_month_days,
         parse_cron,
         parse_interval_days_from_body,
+        parse_month_days_from_body,
+        parse_month_days_from_cron,
     )
 
     _USING_FLEET_PACKAGE = True
+
+    def infer_schedule_kind(*, cron: str, body_text: str | None = None) -> str:
+        return _core_infer_schedule_kind(cron, body=body_text)
 except ImportError:
     _USING_FLEET_PACKAGE = False
 
@@ -142,6 +150,38 @@ except ImportError:
         hour, minute = _parse_hhmm(time_utc)
         return f"{minute} {hour} * * *"
 
+    def normalize_month_days(raw: list[int] | tuple[int, ...] | str | None) -> list[int]:
+        values: list[int] = []
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            for part in raw.replace(";", ",").split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    values.append(int(part))
+                except ValueError:
+                    continue
+        else:
+            values.extend(int(item) for item in raw)
+        return sorted({day for day in values if 1 <= day <= 31})
+
+    def cron_from_month_days(time_utc: str, month_days: list[int] | str | None) -> str:
+        hour, minute = _parse_hhmm(time_utc)
+        days = normalize_month_days(month_days) or [1, 15]
+        return f"{minute} {hour} {','.join(str(day) for day in days)} * *"
+
+    def parse_month_days_from_cron(cron: str | None) -> list[int] | None:
+        text = (cron or "").strip()
+        match = re.compile(
+            r"^(\d{1,2})\s+(\d{1,2})\s+(\d{1,2}(?:,\d{1,2})*)\s+\*\s+\*$"
+        ).match(text)
+        if not match:
+            return None
+        days = normalize_month_days(match.group(3))
+        return days or None
+
     def parse_cron(
         cron: str, *, schedule_kind: str
     ) -> tuple[int | None, int | None, str | None]:
@@ -150,6 +190,15 @@ except ImportError:
         minute_match = _MINUTE_CRON_RE.match(text)
         if minute_match:
             return int(minute_match.group(1)), None, None
+        month_days = parse_month_days_from_cron(text)
+        if month_days is not None:
+            match = re.compile(
+                r"^(\d{1,2})\s+(\d{1,2})\s+"
+            ).match(text)
+            if match:
+                minute = int(match.group(1))
+                hour = int(match.group(2))
+                return None, None, f"{hour:02d}:{minute:02d}"
         daily_match = _DAILY_CRON_RE.match(text)
         if daily_match:
             minute = int(daily_match.group(1))
@@ -177,6 +226,18 @@ except ImportError:
             return None
         return value if value > 0 else None
 
+    def parse_month_days_from_body(body: str | None) -> list[int] | None:
+        if not body:
+            return None
+        try:
+            payload = json.loads(body)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        days = normalize_month_days(payload.get("month_days"))
+        return days or None
+
     def infer_schedule_kind(
         *, cron: str, body_text: str | None = None
     ) -> str:
@@ -184,11 +245,46 @@ except ImportError:
         text = (cron or "").strip()
         if _MINUTE_CRON_RE.match(text):
             return "interval_minutes"
+        if parse_month_days_from_cron(text) is not None:
+            return "month_days"
+        if parse_month_days_from_body(body_text) is not None:
+            return "month_days"
         if parse_interval_days_from_body(body_text) is not None:
             return "interval_days"
         if _DAILY_CRON_RE.match(text):
             return "interval_days"
         return "interval_minutes"
+
+    def next_month_days_fire_utc(
+        *,
+        month_days: list[int] | str | None,
+        time_utc: str,
+        now: datetime | None = None,
+    ) -> datetime:
+        days = normalize_month_days(month_days) or [1, 15]
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        else:
+            current = current.astimezone(timezone.utc)
+        hour, minute = _parse_hhmm(time_utc)
+        year, month = current.year, current.month
+        for _ in range(14):
+            for day in days:
+                try:
+                    candidate = datetime(
+                        year, month, day, hour, minute, tzinfo=timezone.utc
+                    )
+                except ValueError:
+                    continue
+                if candidate > current:
+                    return candidate
+            if month == 12:
+                year += 1
+                month = 1
+            else:
+                month += 1
+        return next_daily_fire_utc(time_utc=time_utc, now=current)
 
 
 def infer_schedule_kind(*, cron: str, body_text: str | None = None) -> str:
@@ -727,6 +823,11 @@ async def ca_drop_schedule_payload(
         except HTTPException:
             pass
 
+    cadence = (
+        cadence_label(month_days=month_days)
+        if month_days
+        else cadence_label(interval_days)
+    )
     return {
         "label": label,
         "schedule_utc": time_utc,

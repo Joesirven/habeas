@@ -93,11 +93,11 @@ describe('connection-display (AE8 / KD18)', () => {
     expect(connectionInviteAllowed({ system: 'bizdev_contacts' })).toBe(false)
     expect(connectionInviteAllowed({ system: 'hr_alumni' })).toBe(false)
     expect(
-      connectionInviteAllowed({ system: 'mailchimp', credentialFieldCount: 0 }),
+      connectionInviteAllowed({ system: 'auth0', credentialFieldCount: 0 }),
     ).toBe(false)
     expect(
       connectionInviteAllowed({
-        system: 'mailchimp',
+        system: 'auth0',
         inviteAllowed: true,
         credentialFieldCount: 1,
       }),
@@ -158,7 +158,7 @@ describe('connection-display (AE8 / KD18)', () => {
     expect(isUploadOnlySystem('bizdev_contacts')).toBe(true)
     expect(isUploadOnlySystem('axios_hq')).toBe(true)
     expect(isUploadOnlySystem('axios_headquarters')).toBe(true)
-    expect(isUploadOnlySystem('mailchimp')).toBe(false)
+    expect(isUploadOnlySystem('auth0')).toBe(false)
     expect(isUploadOnlySystem('lever')).toBe(false)
     expect(isUploadOnlySystem('paylocity')).toBe(false)
   })
@@ -203,7 +203,7 @@ describe('connection-display (AE8 / KD18)', () => {
         event: 'gate_blocked',
         gate_code: 'upload_stale',
         display_status: 'needs_refresh',
-        system: 'mailchimp',
+        system: 'axios_hq',
       },
       { error_code: 'gate_blocked', status: 'submit_error' },
     )
@@ -274,8 +274,8 @@ describe('connection-display (AE8 / KD18)', () => {
       connections: [
         {
           id: 'c1',
-          system: 'mailchimp',
-          display_name: 'Mailchimp',
+          system: 'axios_hq',
+          display_name: 'Axios HQ',
           status: 'connected',
           display_status: 'action_required',
           gate_allowed: false,
@@ -307,7 +307,7 @@ describe('connection-display (AE8 / KD18)', () => {
   test('reminder hard-gate codes map to KD18 labels', () => {
     const stale = matchingGateFromReminder({
       code: 'upload_stale',
-      system: 'mailchimp',
+      system: 'axios_hq',
       vertical_id: 'communications',
       severity: 'overdue',
     })
@@ -322,7 +322,7 @@ describe('connection-display (AE8 / KD18)', () => {
     expect(
       matchingGateFromReminder({
         code: 'upload_approaching',
-        system: 'mailchimp',
+        system: 'axios_hq',
         vertical_id: 'communications',
         severity: 'approaching',
       }),
@@ -334,7 +334,7 @@ describe('connection-display (AE8 / KD18)', () => {
       blocked: true,
       displayStatus: 'needs_refresh',
       gateCode: 'upload_stale',
-      system: 'mailchimp',
+      system: 'axios_hq',
       source: 'attempt',
     })
     expect(copy.title).toContain('Needs refresh')
@@ -422,7 +422,7 @@ describe('ownerConnectorActionRequiredCount (R62)', () => {
         connector_reminders: [
           {
             code: 'rotation_overdue',
-            system: 'mailchimp',
+            system: 'axios_hq',
             vertical_id: 'communications',
             severity: 'overdue',
           },
@@ -444,7 +444,7 @@ describe('ownerConnectorActionRequiredCount (R62)', () => {
         connector_reminders: [
           {
             code: 'wizard_incomplete',
-            system: 'mailchimp',
+            system: 'axios_hq',
             vertical_id: 'communications',
             severity: 'overdue',
           },
@@ -463,7 +463,7 @@ describe('overlay connector callout (U19 / AE32)', () => {
       reminders: [
         {
           code: 'upload_stale',
-          system: 'mailchimp',
+          system: 'axios_hq',
           vertical_id: 'communications',
           severity: 'overdue',
         },
@@ -530,7 +530,7 @@ describe('overlay connector callout (U19 / AE32)', () => {
           audit_payload: {
             event: 'gate_blocked',
             display_status: 'action_required',
-            system: 'mailchimp',
+            system: 'axios_hq',
             vertical_id: 'communications',
           },
         },
@@ -575,7 +575,7 @@ describe('overlay connector callout (U19 / AE32)', () => {
         reminders: [
           {
             code: 'upload_approaching',
-            system: 'mailchimp',
+            system: 'axios_hq',
             vertical_id: 'communications',
             severity: 'approaching',
           },

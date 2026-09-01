@@ -59,8 +59,6 @@ ALLOWED_TEST_DETAIL_CODES: Final[frozenset[str]] = frozenset(
 class ConnectionSystem(StrEnum):
     """Supported integration systems for connections onboarding."""
 
-    # Historical connection.system values still persist; not creatable.
-    MAILCHIMP = "mailchimp"
     AXIOS_HEADQUARTERS = "axios_headquarters"
     PAYLOCITY = "paylocity"
     LEVER = "lever"

@@ -164,7 +164,7 @@ To mark timeout locally, run the existing reaper (`POST /reap` — see [`app/rea
 
 Cloud Build YAML for `auth0-dev` is S08; the service is **not deployed** until Jose approves the first submit. Do not treat the YAML as a live URL. When a runtime identity exists, grants are an ops follow-up — see [`infra/README.md`](../../infra/README.md).
 
-Do **not** treat dataset-wide `dataEditor` on `external_hash_index` as acceptable: that dataset also holds Mailchimp hashed raw / marts. Bind table-level editor on `auth0_hashed_raw` and `auth0_email_hash__build` only, plus project `jobUser` and GSM `secretAccessor` on `dpra-connections-auth0-{connection_id}`.
+Do **not** treat dataset-wide `dataEditor` on `external_hash_index` as acceptable: that dataset also holds other vertical hashed raw / marts. Bind table-level editor on `auth0_hashed_raw` and `auth0_email_hash__build` only, plus project `jobUser` and GSM `secretAccessor` on `dpra-connections-auth0-{connection_id}`.
 
 ## Auth0 matching on dev
 
@@ -247,4 +247,4 @@ curl -sS -X PUT "http://127.0.0.1:8000/requests/${REQUEST_ID}/dispositions/auth0
   -d '{"status":4,"vendor_record_ids":["auth0|opaque-id"]}'
 ```
 
-`matching.review` still opens from the DROP result. Mailchimp PUT stays rejected.
+`matching.review` still opens from the DROP result.

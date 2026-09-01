@@ -328,7 +328,7 @@ def test_auth_me_needs_connector_setup_when_wizard_incomplete(
             return_value=[
                 ConnectorReminderOut(
                     code="wizard_incomplete",
-                    system="mailchimp",
+                    system="axios_headquarters",
                     vertical_id=VERTICAL_COMMUNICATIONS,
                     severity="overdue",
                 )
@@ -1029,7 +1029,7 @@ async def test_collect_home_comments_people_hr_excludes_communications_only() ->
 def test_needs_connector_setup_only_for_data_owner_wizard_incomplete() -> None:
     reminder = ConnectorReminderOut(
         code="wizard_incomplete",
-        system="mailchimp",
+        system="axios_headquarters",
         vertical_id=VERTICAL_COMMUNICATIONS,
         severity="overdue",
     )

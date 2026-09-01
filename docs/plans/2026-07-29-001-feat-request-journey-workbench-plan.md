@@ -13,6 +13,8 @@ extends: "docs/plans/2026-07-27-001-feat-legal-admin-ia-visual-plan.md"
 revises_chrome_of: "docs/plans/2026-07-27-001-feat-legal-admin-ia-visual-plan.md"
 ---
 
+> **SUPERSEDED (Mailchimp):** Communications is Axios HQ; Mailchimp is not a coming-soon or live vertical — historical plan text left intact.
+
 ## Goal Capsule
 
 Ship a **request journey workbench** on opened batch and individual request detail: a consistent four-stage high-level rail (**Ingest → Matching → Fulfillment → Notice**), with Matching and Fulfillment as **separate per-vertical clusters** that can run at the same time, plus the **full journey completion** path Legal needs (defaults, Legal kickoff with optional status change, Access identity-comment gate, suppression/access packs per vertical, templates, attachments, Notice rules).

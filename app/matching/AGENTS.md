@@ -32,7 +32,7 @@ those intakes. Target Cloud Run names: `data-vertical-matching-dev` /
   (adapter, duration, match_count, lookup_state, BQ table names, redacted errors —
   never hashes/dwids/emails/phones). Reaper `max_attempts` default is **5**
   (≥3 retries after the initial attempt).
-- **Chunk drain (Method E):** queue stays one `matching_attempts` row per request.
+- **Chunk drain:** queue stays one `matching_attempts` row per request.
   Hot path is set-based BigQuery (`lookup_dwids_by_hashes`) in ≤10K homogeneous
   chunks. `POST /ensure-drain` acquires singleton `matching_drain_lease` and starts
   Cloud Run Job `data-vertical-matching-drain-dev` (5 tasks → `python -m matching.chunk_drain`).

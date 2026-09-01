@@ -698,6 +698,9 @@ async def _run_connection_test(
     )
     if inspect.isawaitable(result):
         result = await result
+    if isinstance(result, tuple) and len(result) == 3:
+        ok, detail, _triage = result
+        return bool(ok), str(detail)
     if isinstance(result, tuple) and len(result) == 2:
         ok, detail = result
         return bool(ok), str(detail)
@@ -731,8 +734,10 @@ async def list_connections(_principal: SuperAdminPrincipal):
 
 @router.post("", response_model=ConnectionResponse, status_code=201)
 async def create_connection(body: ConnectionCreateBody, principal: SuperAdminPrincipal):
-    _require_database()
+    # Validate catalog before DB gate so retired systems (e.g. mailchimp) return 422
+    # without requiring DATABASE_URL — hermetic tests and clients get a stable error.
     system = _validate_system(body.system)
+    _require_database()
     display_name = body.display_name.strip()
     if not display_name:
         raise HTTPException(status_code=422, detail="display_name required")

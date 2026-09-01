@@ -100,6 +100,12 @@ REQUEST_DISPATCHER_URL="$(service_url "request-dispatcher${SUFFIX}")"
 DATA_FULFILLMENT_URL="$(service_url "data-fulfillment-dispatcher${SUFFIX}")"
 DROP_NOTICE_URL="$(service_url "drop-notice-dispatcher${SUFFIX}")"
 REAPER_URL="$(service_url "reaper${SUFFIX}")"
+AUTH0_WORKER_URL="$(service_url "auth0${SUFFIX}")"
+AXIOS_HQ_WORKER_URL="$(service_url "axios-headquarters${SUFFIX}")"
+PAYLOCITY_WORKER_URL="$(service_url "paylocity${SUFFIX}")"
+LEVER_WORKER_URL="$(service_url "lever${SUFFIX}")"
+HR_ALUMNI_WORKER_URL="$(service_url "hr-alumni${SUFFIX}")"
+BIZDEV_CONTACTS_WORKER_URL="$(service_url "bizdev-contacts${SUFFIX}")"
 
 # Jose-gated dual-run: prefer data-vertical-matching, fall back to matching while
 # the old service still exists. Job id stays ${PREFIX}-matching.
@@ -114,7 +120,19 @@ else
   fi
 fi
 
-for label in DROP_CONNECTOR_URL DROP_INGESTOR_URL REQUEST_DISPATCHER_URL DATA_FULFILLMENT_URL REAPER_URL; do
+for label in \
+  DROP_CONNECTOR_URL \
+  DROP_INGESTOR_URL \
+  REQUEST_DISPATCHER_URL \
+  DATA_FULFILLMENT_URL \
+  REAPER_URL \
+  AUTH0_WORKER_URL \
+  AXIOS_HQ_WORKER_URL \
+  PAYLOCITY_WORKER_URL \
+  LEVER_WORKER_URL \
+  HR_ALUMNI_WORKER_URL \
+  BIZDEV_CONTACTS_WORKER_URL
+do
   if [[ -z "${!label}" ]]; then
     echo "WARN: ${label} unresolved — using placeholder; describe services before apply." >&2
     eval "${label}=https://PLACEHOLDER.invalid"
@@ -154,6 +172,56 @@ upsert_http_job "${PREFIX}-matching" \
 upsert_http_job "${PREFIX}-data-fulfillment" \
   "${DATA_FULFILLMENT_URL}/fulfill" "*/5 * * * *"
 
+# Auth0 vertical: hash index refresh (daily 13:00 UTC, ahead of the 14:00 UTC
+# DROP connector pull) and matching drain catch-all, both on the auth0 worker.
+upsert_http_job "${PREFIX}-auth0-hash-refresh" \
+  "${AUTH0_WORKER_URL}/hash-refresh/process" "0 13 * * *"
+upsert_http_job "${PREFIX}-auth0-matching" \
+  "${AUTH0_WORKER_URL}/ensure-drain" "*/5 * * * *"
+
+# Remaining vertical spines (axios headquarters / paylocity / lever / hr alumni /
+# bizdev contacts) — same cadence as Auth0. Drain Jobs are started by each worker
+# /ensure-drain when AXIOS_DRAIN_JOB_NAME / PAYLOCITY_DRAIN_JOB_NAME /
+# LEVER_DRAIN_JOB_NAME / HR_ALUMNI_DRAIN_JOB_NAME / BIZDEV_CONTACTS_DRAIN_JOB_NAME
+# are set.
+upsert_http_job "${PREFIX}-axios-headquarters-hash-refresh" \
+  "${AXIOS_HQ_WORKER_URL}/hash-refresh/process" "0 13 * * *"
+upsert_http_job "${PREFIX}-axios-headquarters-matching" \
+  "${AXIOS_HQ_WORKER_URL}/ensure-drain" "*/5 * * * *"
+upsert_http_job "${PREFIX}-paylocity-hash-refresh" \
+  "${PAYLOCITY_WORKER_URL}/hash-refresh/process" "0 13 * * *"
+upsert_http_job "${PREFIX}-paylocity-matching" \
+  "${PAYLOCITY_WORKER_URL}/ensure-drain" "*/5 * * * *"
+upsert_http_job "${PREFIX}-lever-hash-refresh" \
+  "${LEVER_WORKER_URL}/hash-refresh/process" "0 13 * * *"
+upsert_http_job "${PREFIX}-lever-matching" \
+  "${LEVER_WORKER_URL}/ensure-drain" "*/5 * * * *"
+upsert_http_job "${PREFIX}-hr-alumni-hash-refresh" \
+  "${HR_ALUMNI_WORKER_URL}/hash-refresh/process" "0 13 * * *"
+upsert_http_job "${PREFIX}-hr-alumni-matching" \
+  "${HR_ALUMNI_WORKER_URL}/ensure-drain" "*/5 * * * *"
+upsert_http_job "${PREFIX}-bizdev-contacts-hash-refresh" \
+  "${BIZDEV_CONTACTS_WORKER_URL}/hash-refresh/process" "0 13 * * *"
+upsert_http_job "${PREFIX}-bizdev-contacts-matching" \
+  "${BIZDEV_CONTACTS_WORKER_URL}/ensure-drain" "*/5 * * * *"
+
+echo
+echo "Retire legacy google-sheets scheduler jobs (apply deletes only after hr-alumni + bizdev-contacts workers are live):"
+for retired_job in \
+  "${PREFIX}-google-sheets-hash-refresh" \
+  "${PREFIX}-google-sheets-matching"
+do
+  if gcloud scheduler jobs describe "${retired_job}" \
+      --project="${PROJECT}" --location="${REGION}" >/dev/null 2>&1; then
+    run gcloud scheduler jobs delete "${retired_job}" \
+      --project="${PROJECT}" \
+      --location="${REGION}" \
+      --quiet
+  else
+    echo "  (skip delete — ${retired_job} not found)"
+  fi
+done
+
 if [[ -n "${DROP_NOTICE_URL}" ]]; then
   echo "DROP_NOTICE_URL=${DROP_NOTICE_URL}"
   # Wednesday 00:00 / 04:00 America/Los_Angeles — CPPA response upload + amend.
@@ -174,7 +242,13 @@ for svc in \
   "${MATCHING_SERVICE}" \
   "data-fulfillment-dispatcher${SUFFIX}" \
   "drop-notice-dispatcher${SUFFIX}" \
-  "reaper${SUFFIX}"
+  "reaper${SUFFIX}" \
+  "auth0${SUFFIX}" \
+  "axios-headquarters${SUFFIX}" \
+  "paylocity${SUFFIX}" \
+  "lever${SUFFIX}" \
+  "hr-alumni${SUFFIX}" \
+  "bizdev-contacts${SUFFIX}"
 do
   if [[ -z "${svc}" ]]; then
     echo "WARN: MATCHING_SERVICE unresolved — skipping matching invoker grant." >&2

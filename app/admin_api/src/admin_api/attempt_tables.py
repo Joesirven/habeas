@@ -26,7 +26,6 @@ from habeas_privacy_core.queue.constants import (
     AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
     AUTH0_ATTEMPTS_TABLE,
     GOOGLE_SHEETS_ATTEMPTS_TABLE,
-    MAILCHIMP_ATTEMPTS_TABLE,
 )
 from habeas_privacy_core.queue.reap import ReapedTableConfig
 
@@ -43,7 +42,6 @@ BROWSER_VERTICAL_ATTEMPT_TABLES: frozenset[str] = frozenset(
     {
         AUTH0_ATTEMPTS_TABLE,
         AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
-        MAILCHIMP_ATTEMPTS_TABLE,
         GOOGLE_SHEETS_ATTEMPTS_TABLE,
     }
 )

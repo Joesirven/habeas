@@ -13,15 +13,13 @@ All Cloud Run FastAPI deployables. **Each app subdirectory has its own AGENTS.md
 
 ## All apps (version 0)
 
-[`admin_api/`](admin_api/) · [`matching/`](matching/) · [`request_dispatcher/`](request_dispatcher/) · [`drop_connector/`](drop_connector/) · [`drop_ingestor/`](drop_ingestor/) · [`hash_index_refresh/`](hash_index_refresh/) · [`data_fulfillment_dispatcher/`](data_fulfillment_dispatcher/) · [`reaper/`](reaper/) · [`sla_monitor/`](sla_monitor/) · [`cassandra/`](cassandra/) · [`axios_headquarters/`](axios_headquarters/) · [`paylocity/`](paylocity/) · [`lever/`](lever/) · [`auth0/`](auth0/) · [`google_sheets/`](google_sheets/)
+[`admin_api/`](admin_api/) · [`matching/`](matching/) · [`request_dispatcher/`](request_dispatcher/) · [`drop_connector/`](drop_connector/) · [`drop_ingestor/`](drop_ingestor/) · [`hash_index_refresh/`](hash_index_refresh/) · [`data_fulfillment_dispatcher/`](data_fulfillment_dispatcher/) · [`reaper/`](reaper/) · [`sla_monitor/`](sla_monitor/) · [`cassandra/`](cassandra/) · [`axios_headquarters/`](axios_headquarters/) · [`paylocity/`](paylocity/) · [`lever/`](lever/) · [`auth0/`](auth0/) · [`hr_alumni/`](hr_alumni/) · [`bizdev_contacts/`](bizdev_contacts/)
 
-[`mailchimp/`](mailchimp/) is retired (package kept; do not deploy). Communications uses [`axios_headquarters/`](axios_headquarters/).
-
-Do not create duplicate Axios HQ workers elsewhere. Web connection create uses catalog id `axios_hq`; core catalog and attempts table use `axios_headquarters`.
+Communications uses [`axios_headquarters/`](axios_headquarters/). Do not create duplicate Axios HQ workers elsewhere. Web connection create uses catalog id `axios_hq`; core catalog and attempts table use `axios_headquarters`.
 
 ## Prod vertical workers (2026-08-25)
 
-Deployed on `example-gcp-project`: `auth0-prod`, `axios-headquarters-prod`, `google-sheets-prod`, `lever-prod`, `paylocity-prod`, `drop-notice-dispatcher-prod`. Cassandra stays off prod. Deploy via `infra/cloudbuild/axios-headquarters-prod.yaml`.
+Deployed on `example-gcp-project`: `auth0-prod`, `axios-headquarters-prod`, `hr-alumni-prod`, `bizdev-contacts-prod`, `lever-prod`, `paylocity-prod`, `drop-notice-dispatcher-prod`. Retired unified `google-sheets-prod` — see stub [`google_sheets/README.md`](google_sheets/README.md). Cassandra stays off prod. Deploy via `infra/cloudbuild/axios-headquarters-prod.yaml`.
 
 ## Rules
 

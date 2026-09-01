@@ -548,11 +548,11 @@ async def test_delete_connection_hard_deletes_row(
     connection_id = uuid4()
     connection = Connection(
         id=str(connection_id),
-        system="mailchimp",
-        display_name="Marketing list",
+        system="axios_headquarters",
+        display_name="Axios HQ list",
         status="connected",
         owner_email="owner@example.com",
-        secret_resource_name=f"dpra/connections/mailchimp/{connection_id}",
+        secret_resource_name=f"dpra/connections/axios_headquarters/{connection_id}",
         last_tested_at=None,
         last_test_ok=True,
         last_test_detail="ok",
@@ -665,28 +665,17 @@ async def test_test_connection_persists_failure_detail_and_status(
         captured["ok"] = ok
         captured["detail"] = detail
         captured["tested_at"] = tested_at
-        captured["triage"] = triage
         return connection.model_copy(
             update={
                 "status": "failed" if not ok else "connected",
                 "last_test_ok": ok,
                 "last_test_detail": detail,
                 "last_tested_at": tested_at,
-                "metadata": {
-                    **(connection.metadata or {}),
-                    "last_test_triage": triage or {"detail": detail},
-                },
             }
         )
 
     async def _run_test(*_args, **_kwargs):
-        return False, "auth_failed", {
-            "detail": "auth_failed",
-            "step": "users_get",
-            "status_code": 401,
-            "status_class": "4xx",
-            "error_kind": "http",
-        }
+        return False, "auth_failed"
 
     conn = AsyncMock()
 
@@ -704,6 +693,11 @@ async def test_test_connection_persists_failure_detail_and_status(
     monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
     monkeypatch.setattr(connections_admin.connections_db, "set_test_result", _set_test_result)
     monkeypatch.setattr(
+        connections_admin.connections_db,
+        "update_connection_status",
+        AsyncMock(return_value=connection),
+    )
+    monkeypatch.setattr(
         connections_admin,
         "_load_stored_credentials",
         lambda _name: {"api_key": "x"},
@@ -717,8 +711,6 @@ async def test_test_connection_persists_failure_detail_and_status(
     assert captured["ok"] is False
     assert captured["detail"] == "auth_failed"
     assert captured["connection_id"] == str(connection_id)
-    assert captured["triage"]["status_code"] == 401
-    assert captured["triage"]["step"] == "users_get"
 
 
 @pytest.mark.skipif(
@@ -782,11 +774,11 @@ def test_list_connections_includes_display_status(
     connection_id = uuid4()
     row = Connection(
         id=str(connection_id),
-        system="mailchimp",
-        display_name="Marketing list",
+        system="axios_headquarters",
+        display_name="Axios HQ list",
         status="connected",
         owner_email="owner@example.com",
-        secret_resource_name=f"dpra/connections/mailchimp/{connection_id}",
+        secret_resource_name=f"dpra/connections/axios_headquarters/{connection_id}",
         last_tested_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
         last_test_ok=True,
         last_test_detail="ok",
@@ -795,8 +787,9 @@ def test_list_connections_includes_display_status(
         updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
         metadata={
             "wizard_completed_at": "2026-08-01T12:00:00+00:00",
-            "active_mode": "live",
-            "credentials_rotated_at": "2026-08-01T12:00:00+00:00",
+            "active_mode": "upload",
+            "last_successful_upload_at": "2026-08-25T12:00:00+00:00",
+            "refresh_cadence": "rarely",
         },
     )
 
@@ -959,7 +952,8 @@ async def test_force_mode_paylocity_upload_to_live(
 
 
 @pytest.mark.asyncio
-async def test_force_live_on_hr_alumni_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_force_live_on_hr_alumni_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Alumni Sheets may use Live; only upload-only systems reject Live."""
     connection_id = uuid4()
     connection = Connection(
         id=str(connection_id),
@@ -976,9 +970,20 @@ async def test_force_live_on_hr_alumni_rejected(monkeypatch: pytest.MonkeyPatch)
         updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
         metadata={"active_mode": "upload"},
     )
+    updated = connection.model_copy(
+        update={"metadata": {**connection.metadata, "active_mode": "live"}}
+    )
+    mode_events: list[dict[str, object]] = []
 
     async def _get_connection(*_args, **_kwargs):
         return connection
+
+    async def _merge_connection_metadata(*_args, **_kwargs):
+        return updated
+
+    async def _insert_connection_mode_event(*_args, **kwargs):
+        mode_events.append(dict(kwargs))
+        return 1
 
     conn = AsyncMock()
 
@@ -994,16 +999,26 @@ async def test_force_live_on_hr_alumni_rejected(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(connections_admin, "_require_database", lambda: None)
     monkeypatch.setattr(connections_admin, "get_pool", lambda: FakePool())
     monkeypatch.setattr(connections_admin.connections_db, "get_connection", _get_connection)
+    monkeypatch.setattr(
+        connections_admin.connections_db,
+        "merge_connection_metadata",
+        _merge_connection_metadata,
+    )
+    monkeypatch.setattr(
+        connections_admin.connections_db,
+        "insert_connection_mode_event",
+        _insert_connection_mode_event,
+    )
 
-    with pytest.raises(HTTPException) as exc_info:
-        await connections_admin.force_connection_mode(
-            connection_id,
-            connections_admin.ForceModeBody(mode="live"),
-            principal,
-        )
+    result = await connections_admin.force_connection_mode(
+        connection_id,
+        connections_admin.ForceModeBody(mode="live"),
+        principal,
+    )
 
-    assert exc_info.value.status_code == 422
-    assert exc_info.value.detail == "live mode not allowed for this system"
+    assert result.system == "hr_alumni"
+    assert (result.metadata or {}).get("active_mode") == "live"
+    assert mode_events and mode_events[0]["to_mode"] == "live"
 
 
 @pytest.mark.asyncio

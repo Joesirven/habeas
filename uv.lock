@@ -21,6 +21,7 @@ members = [
     "admin-api",
     "auth0-worker",
     "axios-headquarters-worker",
+    "bizdev-contacts-worker",
     "cassandra-worker",
     "habeas-cli",
     "habeas-privacy-core",
@@ -29,8 +30,8 @@ members = [
     "drop-connector",
     "drop-ingestor",
     "drop-notice-dispatcher",
-    "google-sheets-worker",
     "hash-index-refresh",
+    "hr-alumni-worker",
     "lever-worker",
     "matching-worker",
     "paylocity-worker",
@@ -236,14 +237,18 @@ version = "0.1.0"
 source = { editable = "app/axios_headquarters" }
 dependencies = [
     { name = "habeas-privacy-core" },
+    { name = "dbt-bigquery" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "dbt-bigquery", specifier = ">=1.8" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 
@@ -320,6 +325,27 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c0/f6/688d2cd64bfd0b14d805ddb8a565e11ca1fb0fd6817175d58b10052b6d88/bcrypt-5.0.0-cp39-abi3-win32.whl", hash = "sha256:64d7ce196203e468c457c37ec22390f1a61c85c6f0b8160fd752940ccfb3a683", size = 153725, upload-time = "2025-09-25T19:50:34.384Z" },
     { url = "https://files.pythonhosted.org/packages/9f/b9/9d9a641194a730bda138b3dfe53f584d61c58cd5230e37566e83ec2ffa0d/bcrypt-5.0.0-cp39-abi3-win_amd64.whl", hash = "sha256:64ee8434b0da054d830fa8e89e1c8bf30061d539044a39524ff7dec90481e5c2", size = 150912, upload-time = "2025-09-25T19:50:35.69Z" },
     { url = "https://files.pythonhosted.org/packages/27/44/d2ef5e87509158ad2187f4dd0852df80695bb1ee0cfe0a684727b01a69e0/bcrypt-5.0.0-cp39-abi3-win_arm64.whl", hash = "sha256:f2347d3534e76bf50bca5500989d6c1d05ed64b440408057a37673282c654927", size = 144953, upload-time = "2025-09-25T19:50:37.32Z" },
+]
+
+[[package]]
+name = "bizdev-contacts-worker"
+version = "0.1.0"
+source = { editable = "app/bizdev_contacts" }
+dependencies = [
+    { name = "habeas-privacy-core" },
+    { name = "dbt-bigquery" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "dbt-bigquery", specifier = ">=1.8" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 
 [[package]]
@@ -1291,23 +1317,6 @@ wheels = [
 ]
 
 [[package]]
-name = "google-sheets-worker"
-version = "0.1.0"
-source = { editable = "app/google_sheets" }
-dependencies = [
-    { name = "habeas-privacy-core" },
-    { name = "fastapi" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
-]
-
-[[package]]
 name = "googleapis-common-protos"
 version = "1.75.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1482,6 +1491,27 @@ requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
     { name = "dbt-bigquery", specifier = ">=1.8" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+]
+
+[[package]]
+name = "hr-alumni-worker"
+version = "0.1.0"
+source = { editable = "app/hr_alumni" }
+dependencies = [
+    { name = "habeas-privacy-core" },
+    { name = "dbt-bigquery" },
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "dbt-bigquery", specifier = ">=1.8" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 
@@ -1679,6 +1709,7 @@ version = "0.1.0"
 source = { editable = "app/lever" }
 dependencies = [
     { name = "habeas-privacy-core" },
+    { name = "dbt-bigquery" },
     { name = "fastapi" },
     { name = "google-cloud-bigquery" },
     { name = "uvicorn", extra = ["standard"] },
@@ -1687,6 +1718,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "dbt-bigquery", specifier = ">=1.8" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "google-cloud-bigquery", specifier = ">=3.25" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
@@ -2301,14 +2333,18 @@ version = "0.1.0"
 source = { editable = "app/paylocity" }
 dependencies = [
     { name = "habeas-privacy-core" },
+    { name = "dbt-bigquery" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "habeas-privacy-core", editable = "libs/habeas-privacy-core" },
+    { name = "dbt-bigquery", specifier = ">=1.8" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 

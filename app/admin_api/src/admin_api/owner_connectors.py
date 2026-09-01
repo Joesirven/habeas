@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -285,6 +286,21 @@ def _memory_upload_allowed() -> bool:
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return True
     flag = os.environ.get("CONNECTIONS_UPLOAD_ALLOW_MEMORY", "").strip().lower()
+    return flag in {"1", "true", "yes"}
+
+
+def _hash_refresh_autoprocess_enabled() -> bool:
+    """Kill-switch for the post-upload worker process kick. Default on.
+
+    The kick only triggers processing of an attempt the upload already
+    enqueued; it is single-flighted by the worker claim and can never fail
+    the upload, so the safe default is the approved automatic behavior. Set
+    ``OWNER_UPLOAD_HASH_REFRESH_AUTOPROCESS=0`` to pause kicks without a
+    deploy (enqueue still happens; super_admin process stays available).
+    """
+    flag = os.environ.get("OWNER_UPLOAD_HASH_REFRESH_AUTOPROCESS", "").strip().lower()
+    if not flag:
+        return True
     return flag in {"1", "true", "yes"}
 
 
@@ -794,18 +810,44 @@ def _live_test_failed(connection: Connection) -> bool:
     return connection.status == "failed"
 
 
+# Strong refs to in-flight kick tasks so the loop cannot reap them
+# mid-flight (and tests can drain them).
+_owner_hash_refresh_kick_tasks: set[asyncio.Task[None]] = set()
+
+
+def _schedule_owner_hash_refresh_kick(system: str) -> None:
+    """Kick the worker ``/hash-refresh/process`` in the background.
+
+    Fire-and-forget (same ``loop.create_task`` convention as
+    ``drop_pipeline._schedule_background``): the upload response never waits
+    on the worker call and a failed kick never fails the upload. No-op when
+    autoprocess is disabled or no event loop is running.
+    """
+    if not _hash_refresh_autoprocess_enabled():
+        return
+    from admin_api.remaining_vertical_ops import kick_remaining_hash_refresh_process
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(kick_remaining_hash_refresh_process(system))
+    _owner_hash_refresh_kick_tasks.add(task)
+    task.add_done_callback(_owner_hash_refresh_kick_tasks.discard)
+
+
 async def _enqueue_owner_hash_refresh(conn: Any, *, system: str) -> int | None:
-    """Enqueue remaining-vertical hash-refresh in-process. No worker HTTP.
+    """Enqueue remaining-vertical hash-refresh in-process, then kick the worker.
 
     Uses ``enqueue_remaining_hash_refresh`` so catalog ``axios_hq`` aliases to
-    the worker slug before core enqueue. Discard the returned canonical slug —
-    do not persist it on connection metadata (catalog write id stays ``axios_hq``).
-    Remaining matching is per-request with no bulk fan-out.
+    the worker slug before core enqueue. The returned canonical slug feeds only
+    the background process kick — never connection metadata (catalog write id
+    stays ``axios_hq``). Remaining matching is per-request with no bulk fan-out.
     """
     from admin_api.remaining_vertical_ops import enqueue_remaining_hash_refresh
 
     try:
-        attempt_id, _canonical = await enqueue_remaining_hash_refresh(
+        attempt_id, canonical = await enqueue_remaining_hash_refresh(
             conn, system=system
         )
     except HTTPException as exc:
@@ -814,6 +856,7 @@ async def _enqueue_owner_hash_refresh(conn: Any, *, system: str) -> int | None:
             return None
         raise
     logger.info("owner_hash_refresh_enqueued system=%s attempt_id=%s", system, attempt_id)
+    _schedule_owner_hash_refresh_kick(canonical)
     return int(attempt_id)
 
 
@@ -1493,7 +1536,7 @@ async def save_live_credentials(
         )
 
         share_sa = _service_account_from_metadata(dict(connection.metadata or {}))
-        test_ok, detail = await test_connection(
+        test_ok, detail, _triage = await test_connection(
             system,
             cleaned,
             impersonate_service_account=share_sa,
@@ -1555,7 +1598,7 @@ async def test_live_connection(
             raise HTTPException(status_code=400, detail="secret not stored")
 
         share_sa = _service_account_from_metadata(dict(connection.metadata or {}))
-        test_ok, detail = await test_connection(
+        test_ok, detail, _triage = await test_connection(
             system,
             credentials,
             impersonate_service_account=share_sa,

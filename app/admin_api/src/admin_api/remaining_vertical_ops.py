@@ -3,23 +3,26 @@
 Allowlisted systems: ``axios_headquarters``, ``paylocity``, ``lever``,
 ``hr_alumni``, ``bizdev_contacts``. Catalog ``axios_hq`` aliases to
 ``axios_headquarters`` (same worker URL and attempts table — no second
-mart). ``system=mailchimp``, ``cassandra``, and any other slug is 404.
+mart). ``system=cassandra`` and any other slug is 404.
 
 Hash-refresh enqueue inserts a single-flight ``vertical_hash_refresh_attempts``
 row for the canonical system. Process proxies to ``POST /hash-refresh/process``.
 Owner path should call ``enqueue_remaining_hash_refresh`` in-process (same
 core ``enqueue_vertical_hash_refresh``) — never a worker URL from the browser.
+After an in-process enqueue, ``kick_remaining_hash_refresh_process`` fires a
+best-effort background process kick so the mart builds without a manual
+super_admin call.
 
 Matching enqueue inserts a claim-ready attempts row (``step='matching'``).
 Process proxies to ``POST /matching/submit``. Worker URLs are settings-only
 (no client URL).
 
-``hr_alumni`` and ``bizdev_contacts`` share ``google_sheets_worker_url`` and
-``google_sheets_attempts``. Point that URL at a shared Sheets worker or a
-dedicated alumni / contact-us Cloud Run service — there is no second env var.
+``hr_alumni`` and ``bizdev_contacts`` each have a dedicated worker URL and
+attempts table (``hr_alumni_attempts``, ``bizdev_contacts_attempts``).
 
-Local defaults use distinct ports (Auth0 8080 / Mailchimp 8081 reserved):
-axios_headquarters 8082, paylocity 8083, lever 8084, google_sheets 8085.
+Local defaults use distinct ports (Auth0 8080):
+axios_headquarters 8082, paylocity 8083, lever 8084, hr_alumni 8085,
+bizdev_contacts 8087.
 
 Match-candidates are snapshot-only (no live BigQuery). Data owners need a
 catalog vertical assignment from ``get_bindings_for_system(system)``.
@@ -54,7 +57,8 @@ from habeas_privacy_core.db.vertical_matching import (
 )
 from habeas_privacy_core.queue.constants import (
     AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
-    GOOGLE_SHEETS_ATTEMPTS_TABLE,
+    BIZDEV_CONTACTS_ATTEMPTS_TABLE,
+    HR_ALUMNI_ATTEMPTS_TABLE,
     LEVER_ATTEMPTS_TABLE,
     PAYLOCITY_ATTEMPTS_TABLE,
     STEP_MATCHING,
@@ -91,8 +95,8 @@ ATTEMPTS_TABLE_BY_SYSTEM: dict[str, str] = {
     "axios_headquarters": AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
     "paylocity": PAYLOCITY_ATTEMPTS_TABLE,
     "lever": LEVER_ATTEMPTS_TABLE,
-    "hr_alumni": GOOGLE_SHEETS_ATTEMPTS_TABLE,
-    "bizdev_contacts": GOOGLE_SHEETS_ATTEMPTS_TABLE,
+    "hr_alumni": HR_ALUMNI_ATTEMPTS_TABLE,
+    "bizdev_contacts": BIZDEV_CONTACTS_ATTEMPTS_TABLE,
 }
 
 CANDIDATES_AUDIT_COMMAND = "request.vertical_match_candidates"
@@ -109,18 +113,15 @@ MatchPrincipal = Annotated[
 
 
 class RemainingVerticalOpsSettings(CoreSettings):
-    """Worker base URLs for remaining-vertical process proxies.
-
-    ``google_sheets_worker_url`` is shared by ``hr_alumni`` and
-    ``bizdev_contacts`` (no dedicated alumni / contact-us env).
-    """
+    """Worker base URLs for remaining-vertical process proxies."""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     axios_headquarters_worker_url: str = "http://127.0.0.1:8082"
     paylocity_worker_url: str = "http://127.0.0.1:8083"
     lever_worker_url: str = "http://127.0.0.1:8084"
-    google_sheets_worker_url: str = "http://127.0.0.1:8085"
+    hr_alumni_worker_url: str = "http://127.0.0.1:8085"
+    bizdev_contacts_worker_url: str = "http://127.0.0.1:8087"
 
 
 settings = RemainingVerticalOpsSettings()
@@ -180,7 +181,7 @@ def _canonical_remaining_system(system: str) -> str:
 
 def _require_remaining_system(system: str) -> str:
     key = _canonical_remaining_system(system)
-    if key == "mailchimp" or key not in REMAINING_VERTICAL_SYSTEMS:
+    if key not in REMAINING_VERTICAL_SYSTEMS:
         raise HTTPException(status_code=404, detail="not found")
     return key
 
@@ -193,7 +194,11 @@ def _worker_url_for(system: str) -> str:
         return settings.paylocity_worker_url
     if key == "lever":
         return settings.lever_worker_url
-    return settings.google_sheets_worker_url
+    if key == "hr_alumni":
+        return settings.hr_alumni_worker_url
+    if key == "bizdev_contacts":
+        return settings.bizdev_contacts_worker_url
+    raise HTTPException(status_code=404, detail="not found")
 
 
 def _attempts_table_for(system: str) -> str:
@@ -334,6 +339,34 @@ async def proxy_post_payload(
             "detail": f"upstream unreachable: {exc}",
             "url": url,
         }
+
+
+async def kick_remaining_hash_refresh_process(system: str) -> None:
+    """Best-effort worker ``/hash-refresh/process`` kick. Never raises.
+
+    Scheduled fire-and-forget after an in-process enqueue (owner upload /
+    extract / wizard complete) so the BigQuery mart builds without a manual
+    super_admin process call. Single-flight is enforced by the worker claim,
+    so duplicate kicks are harmless (``{"processed": False, "reason":
+    "idle"}``). Logs system + status class only — no URIs, no payload.
+    """
+    key = _canonical_remaining_system(system)
+    if key not in REMAINING_VERTICAL_SYSTEMS:
+        logger.info("remaining_hash_refresh_kick_skip system=%s", key)
+        return
+    url = f"{_worker_url_for(key).rstrip('/')}/hash-refresh/process"
+    try:
+        status_code, _payload = await proxy_post_payload(
+            url, timeout=HASH_REFRESH_PROXY_TIMEOUT
+        )
+    except Exception:  # noqa: BLE001 — a failed kick must never fail the upload
+        logger.info("remaining_hash_refresh_kick_failed system=%s", key)
+        return
+    logger.info(
+        "remaining_hash_refresh_kick system=%s status_class=%s",
+        key,
+        f"{status_code // 100}xx",
+    )
 
 
 def _parse_vendor_ids(raw: Any) -> list[str]:
@@ -580,5 +613,6 @@ __all__ = [
     "REMAINING_VERTICAL_SYSTEMS",
     "enqueue_remaining_hash_refresh",
     "enqueue_remaining_matching",
+    "kick_remaining_hash_refresh_process",
     "router",
 ]

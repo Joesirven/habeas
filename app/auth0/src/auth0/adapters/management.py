@@ -63,10 +63,12 @@ _HOSTNAME_RE = re.compile(
 )
 _GZIP_MAGIC = b"\x1f\x8b"
 _TERMINAL_JOB_FAILURE = frozenset({"failed", "error", "expired"})
-# Auth0 bulk-export sample location host (official docs example):
-# pus3-auth0-export-users-us-east-2.s3.us-east-2.amazonaws.com
+# Auth0 bulk-export location hosts (S3 pre-signed). Docs sample:
+# pus3-auth0-export-users-us-east-2.s3.us-east-2.amazonaws.com — observed
+# production tenant: l0-prod-prod-us-1-usw2-export-users.s3.us-west-2.amazonaws.com.
+# Both carry the ``-export-users`` label; the marker must not assume "auth0-".
 # https://auth0.com/docs/manage-users/user-migration/bulk-user-exports
-_EXPORT_HOST_MARKER = "auth0-export-users"
+_EXPORT_HOST_MARKER = "-export-users"
 _EXPORT_HOST_SUFFIX = ".amazonaws.com"
 _BLOCKED_EXPORT_HOSTS = frozenset(
     {

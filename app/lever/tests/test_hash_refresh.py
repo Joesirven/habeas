@@ -209,22 +209,56 @@ def _hash_refresh_mocks(*, claim: dict | None, extract, dbt):
         )
 
 
-def test_hash_refresh_idle_when_no_claim(client):
+def test_hash_refresh_in_flight_when_self_enqueue_still_unclaimable(client):
+    """No pending row → self-enqueue → still no claim means another refresh holds it."""
     extract = AsyncMock()
     dbt = MagicMock()
     with _hash_refresh_mocks(claim=None, extract=extract, dbt=dbt) as mocks:
-        response = client.post("/hash-refresh/process")
+        with patch(
+            "lever.main.enqueue_vertical_hash_refresh",
+            new_callable=AsyncMock,
+            return_value=9,
+        ) as enqueue:
+            response = client.post("/hash-refresh/process")
 
     assert response.status_code == 200
-    assert response.json() == {"processed": False, "reason": "idle"}
+    assert response.json() == {"processed": False, "reason": "in_flight"}
     _assert_no_pii(response.json())
-    mocks.claim.assert_awaited_once()
+    enqueue.assert_awaited_once()
+    assert enqueue.await_args.kwargs["system"] == "lever"
+    assert mocks.claim.await_count == 2
     assert mocks.claim.await_args.kwargs["system"] == "lever"
     extract.assert_not_called()
     dbt.assert_not_called()
     mocks.mark.assert_not_called()
     mocks.record.assert_not_called()
-    mocks.conn.execute.assert_not_called()
+
+
+def test_hash_refresh_self_enqueues_then_processes(client):
+    """Scheduler cadence path: idle queue → enqueue → claim → run pipeline."""
+    extract = AsyncMock(return_value=7)
+    dbt = MagicMock(return_value=DbtRunResult(ok=True, returncode=0, stdout="ok", stderr=""))
+    claim_row = {"id": 9}
+    with _hash_refresh_mocks(claim=claim_row, extract=extract, dbt=dbt) as mocks:
+        mocks.claim.side_effect = [None, claim_row]
+        mocks.claim.return_value = None
+        with patch(
+            "lever.main.enqueue_vertical_hash_refresh",
+            new_callable=AsyncMock,
+            return_value=9,
+        ) as enqueue:
+            response = client.post("/hash-refresh/process")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["processed"] is True
+    assert body["attempt_id"] == 9
+    assert body["status"] == "success"
+    assert body["rows_written"] == 7
+    enqueue.assert_awaited_once()
+    assert mocks.claim.await_count == 2
+    extract.assert_awaited_once()
+    dbt.assert_called_once()
 
 
 def test_hash_refresh_success_records_extract_rows(client):

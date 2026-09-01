@@ -7,7 +7,7 @@
 - Tool: **dbmate** — raw SQL with `-- migrate:up` / `-- migrate:down`
 - **Unified folder only:** `db/migrations/` — no migrations inside `app/<name>/`
 - Naming: `YYYYMMDDHHMMSS_<scope>_<description>.sql`  
-  Examples: `core_create_requests`, `matching_create_matching_attempts`, `mailchimp_create_mailchimp_attempts`
+  Examples: `core_create_requests`, `matching_create_matching_attempts`, `auth0_create_auth0_attempts`
 - Expand-then-contract for zero-downtime changes
 - Never edit a migration that has been applied to production — add a new file
 - `REVOKE UPDATE, DELETE` on append-only audit and attempt tables

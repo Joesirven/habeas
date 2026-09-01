@@ -124,7 +124,7 @@ describe('owner fulfillment row helpers (AE30)', () => {
     expect(isAutomaticFulfillmentVertical('data')).toBe(true)
     expect(isAutomaticFulfillmentVertical('cassandra')).toBe(true)
     expect(isAutomaticFulfillmentVertical('communications')).toBe(false)
-    expect(isAutomaticFulfillmentVertical('mailchimp')).toBe(false)
+    expect(isAutomaticFulfillmentVertical('axios_hq')).toBe(false)
   })
 
   test('assigned-only SaaS is waiting on kickoff; cluster kicked_off stays true', () => {
@@ -459,7 +459,7 @@ describe('owner inbox row identity', () => {
     const other = matchingItem({
       request_id: requestId,
       vertical: 'communications',
-      system: 'mailchimp',
+      system: 'axios_hq',
     })
     const visible = ownerVisibleInboxItems([assigned, other], ['people_hr'])
     expect(visible).toEqual([assigned])
@@ -610,12 +610,12 @@ describe('parseNeedsAttentionSearch + mergeNeedsAttentionSearch', () => {
       parseNeedsAttentionSearch({
         kind: 'fulfillment',
         vertical: 'communications',
-        system: 'mailchimp',
+        system: 'axios_hq',
       }),
     ).toEqual({
       kind: 'fulfillment',
       vertical: 'communications',
-      system: 'mailchimp',
+      system: 'axios_hq',
     })
   })
 
@@ -1125,7 +1125,7 @@ describe('batchClusterAsSubsteps not-live labels', () => {
     const steps = batchClusterAsSubsteps(
       [
         {
-          vertical: 'mailchimp',
+          vertical: 'communications',
           label: 'Communications',
           live: false,
           actionable: false,
@@ -1145,10 +1145,10 @@ describe('batchClusterAsSubsteps not-live labels', () => {
       ],
       'matching',
     )
-    expect(steps.find((step) => step.key === 'matching-mailchimp')?.statusLabel).toBe(
+    expect(steps.find((step) => step.key === 'matching-communications')?.statusLabel).toBe(
       CATALOG_ONLY_NOT_LIVE_LABEL,
     )
-    expect(steps.find((step) => step.key === 'matching-mailchimp')?.statusLabel).not.toBe(
+    expect(steps.find((step) => step.key === 'matching-communications')?.statusLabel).not.toBe(
       'Soon',
     )
     expect(steps.find((step) => step.key === 'matching-data')?.statusLabel).toBe(
@@ -1160,7 +1160,7 @@ describe('batchClusterAsSubsteps not-live labels', () => {
     const steps = batchClusterAsSubsteps(
       [
         {
-          vertical: 'mailchimp',
+          vertical: 'communications',
           label: 'Communications',
           live: false,
           actionable: false,

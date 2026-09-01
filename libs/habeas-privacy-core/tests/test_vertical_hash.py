@@ -70,13 +70,13 @@ class TestEmptyInputs:
 class TestHashedVendorRecord:
     def test_accepts_hashed_fields_only(self) -> None:
         record = HashedVendorRecord(
-            system="mailchimp",
-            vendor_record_id="mc-123",
+            system="axios_headquarters",
+            vendor_record_id="ax-123",
             email_hash="KA18MT/ph6IHYjzT9zwETySDQyvSh87YuoSBpOQtkhE=",
             extracted_at=datetime(2026, 7, 30, 12, 0, tzinfo=UTC),
         )
-        assert record.system == "mailchimp"
-        assert record.vendor_record_id == "mc-123"
+        assert record.system == "axios_headquarters"
+        assert record.vendor_record_id == "ax-123"
         assert record.email_hash is not None
         assert record.phone_hash is None
         assert record.ndz_hash is None
@@ -91,8 +91,8 @@ class TestHashedVendorRecord:
     def test_rejects_plaintext_extra_fields(self) -> None:
         with pytest.raises(ValidationError):
             HashedVendorRecord(
-                system="mailchimp",
-                vendor_record_id="mc-123",
+                system="axios_headquarters",
+                vendor_record_id="ax-123",
                 email="anna.smith@domain.com",
                 extracted_at=datetime(2026, 7, 30, 12, 0, tzinfo=UTC),
             )

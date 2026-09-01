@@ -16,7 +16,7 @@ After `matching.review` approval, fulfill by `request_type`:
   `communication_attempts` purpose `access_delivery` status `pending`
   (operator copies shareable URL outside the platform — no mailer).
 
-Does **not** call Tier-C suppression APIs (mailchimp, paylocity, etc.).
+Does **not** call Tier-C suppression APIs (paylocity, axios headquarters, etc.).
 
 - `POST /fulfill` — one `request_id` or batch of ready rows
 - Gate: `is_matching_review_approved`

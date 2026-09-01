@@ -87,7 +87,10 @@ def _pool_with_conn(conn: MagicMock, monkeypatch: pytest.MonkeyPatch) -> MagicMo
 def test_worker_key_for_attempt_table_exceptions() -> None:
     assert at.worker_key_for_attempt_table("drop_ingest_attempts") == "drop_ingestor"
     assert at.worker_key_for_attempt_table("matching_attempts") == "matching"
-    assert at.worker_key_for_attempt_table("mailchimp_attempts") == "mailchimp"
+    assert (
+        at.worker_key_for_attempt_table("axios_headquarters_attempts")
+        == "axios_headquarters"
+    )
 
 
 def test_deny_list_and_required_columns() -> None:
@@ -151,12 +154,12 @@ async def test_discover_skips_deny_and_non_queue_tables() -> None:
             [
                 _Row(table_name="core_queue_test_attempts"),
                 _Row(table_name="communication_attempts"),
-                _Row(table_name="mailchimp_attempts"),
+                _Row(table_name="axios_headquarters_attempts"),
                 _Row(table_name="matching_attempts"),
             ],
             # communication columns (missing required)
             [_Row(column_name=c) for c in ("id", "status", "contacted_at", "request_id")],
-            # mailchimp columns
+            # axios_headquarters columns
             [_Row(column_name=c) for c in _QUEUE_COLUMNS],
             # matching columns
             [_Row(column_name=c) for c in _QUEUE_COLUMNS],
@@ -164,7 +167,7 @@ async def test_discover_skips_deny_and_non_queue_tables() -> None:
     )
     metas = await at.discover_attempt_tables(conn)
     names = [m["table_name"] for m in metas]
-    assert names == ["mailchimp_attempts", "matching_attempts"]
+    assert names == ["axios_headquarters_attempts", "matching_attempts"]
     assert all(m["supports_attempt_retry"] for m in metas)
 
 
@@ -198,8 +201,8 @@ def test_catalog_and_rows_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
                 "supports_attempt_retry": True,
             },
             {
-                "table_name": "mailchimp_attempts",
-                "worker_key": "mailchimp",
+                "table_name": "axios_headquarters_attempts",
+                "worker_key": "axios_headquarters",
                 "columns": list(_QUEUE_COLUMNS),
                 "projected_columns": at.projectable_columns(_QUEUE_COLUMNS),
                 "supports_attempt_retry": True,
@@ -238,7 +241,7 @@ def test_catalog_and_rows_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
         body = catalog.json()
         assert {t["table_name"] for t in body["tables"]} == {
             "matching_attempts",
-            "mailchimp_attempts",
+            "axios_headquarters_attempts",
         }
         matching = next(
             t for t in body["tables"] if t["table_name"] == "matching_attempts"
@@ -285,8 +288,8 @@ def test_retry_config_discovery_driven(monkeypatch: pytest.MonkeyPatch) -> None:
                 "supports_attempt_retry": True,
             },
             {
-                "table_name": "mailchimp_attempts",
-                "worker_key": "mailchimp",
+                "table_name": "axios_headquarters_attempts",
+                "worker_key": "axios_headquarters",
                 "columns": list(_QUEUE_COLUMNS),
                 "projected_columns": at.projectable_columns(_QUEUE_COLUMNS),
                 "supports_attempt_retry": True,
@@ -299,7 +302,7 @@ def test_retry_config_discovery_driven(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(at, "discover_attempt_tables", fake_discover)
 
     async def fake_names(_conn: Any) -> tuple[str, ...]:
-        return ("matching_attempts", "mailchimp_attempts")
+        return ("matching_attempts", "axios_headquarters_attempts")
 
     monkeypatch.setattr(at, "discover_attempt_table_names", fake_names)
 
@@ -307,13 +310,15 @@ def test_retry_config_discovery_driven(monkeypatch: pytest.MonkeyPatch) -> None:
         got = client.get("/ops/health/retry-config", headers=_SUPER_HEADERS)
         assert got.status_code == 200
         names = {t["table_name"] for t in got.json()["tables"]}
-        assert "mailchimp_attempts" in names
+        assert "axios_headquarters_attempts" in names
         assert "matching_attempts" in names
-        mailchimp = next(
-            t for t in got.json()["tables"] if t["table_name"] == "mailchimp_attempts"
+        axios_hq = next(
+            t
+            for t in got.json()["tables"]
+            if t["table_name"] == "axios_headquarters_attempts"
         )
-        assert mailchimp["worker_key"] == "mailchimp"
-        assert mailchimp["supports_attempt_retry"] is True
+        assert axios_hq["worker_key"] == "axios_headquarters"
+        assert axios_hq["supports_attempt_retry"] is True
 
         rejected = client.patch(
             "/ops/health/retry-config",
@@ -332,8 +337,8 @@ def test_retry_config_discovery_driven(monkeypatch: pytest.MonkeyPatch) -> None:
         ok = client.patch(
             "/ops/health/retry-config",
             headers=_SUPER_HEADERS,
-            json={"table_name": "mailchimp_attempts", "max_attempts": 6},
+            json={"table_name": "axios_headquarters_attempts", "max_attempts": 6},
         )
         assert ok.status_code == 200
-        assert ok.json()["table_name"] == "mailchimp_attempts"
+        assert ok.json()["table_name"] == "axios_headquarters_attempts"
         assert ok.json()["max_attempts"] == 6

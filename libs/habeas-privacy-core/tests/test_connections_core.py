@@ -71,7 +71,8 @@ def test_sanitize_test_detail_allowlists_codes():
 
 def test_sanitize_test_detail_allowlists_live_success_codes():
     for code in (
-        "mailchimp_ok",
+        "mailchimp_ok",  # historical last_test_detail — keep allowlisted
+        "axios_headquarters_ok",
         "paylocity_ok",
         "lever_ok",
         "auth0_ok",
@@ -121,8 +122,8 @@ def test_invite_ttl_constant():
 
 def test_in_memory_secret_writer_put_and_get():
     writer = InMemorySecretWriter()
-    writer.put_secret("dpra/connections/mailchimp/abc", '{"api_key":"x"}')
-    assert writer.get_secret("dpra/connections/mailchimp/abc") == '{"api_key":"x"}'
+    writer.put_secret("dpra/connections/axios_headquarters/abc", '{"api_key":"x"}')
+    assert writer.get_secret("dpra/connections/axios_headquarters/abc") == '{"api_key":"x"}'
 
 
 def test_in_memory_secret_writer_overwrites():
@@ -145,8 +146,8 @@ def test_get_secret_writer_defaults_to_in_memory(monkeypatch: pytest.MonkeyPatch
 
 def test_secret_resource_name_format():
     assert (
-        secret_resource_name("mailchimp", "550e8400-e29b-41d4-a716-446655440000")
-        == "dpra/connections/mailchimp/550e8400-e29b-41d4-a716-446655440000"
+        secret_resource_name("axios_headquarters", "550e8400-e29b-41d4-a716-446655440000")
+        == "dpra/connections/axios_headquarters/550e8400-e29b-41d4-a716-446655440000"
     )
 
 
@@ -225,8 +226,8 @@ async def test_insert_and_get_connection(pool):
 
         created = await insert_connection(
             conn,
-            system="mailchimp",
-            display_name="Marketing list",
+            system="axios_headquarters",
+            display_name="Axios HQ list",
             created_by="super_admin@example.com",
             owner_email="owner@example.com",
         )
@@ -234,8 +235,8 @@ async def test_insert_and_get_connection(pool):
 
         assert loaded is not None
         assert loaded.id == created.id
-        assert loaded.system == "mailchimp"
-        assert loaded.display_name == "Marketing list"
+        assert loaded.system == "axios_headquarters"
+        assert loaded.display_name == "Axios HQ list"
         assert loaded.status == "pending"
         assert loaded.owner_email == "owner@example.com"
         assert loaded.metadata == {}
@@ -346,7 +347,7 @@ async def test_set_test_result(pool):
 
         connection = await insert_connection(
             conn,
-            system="mailchimp",
+            system="axios_headquarters",
             display_name="Newsletter",
             created_by="admin@example.com",
         )

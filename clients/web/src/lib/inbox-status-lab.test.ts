@@ -58,7 +58,7 @@ describe('isRequestUuid', () => {
     expect(isRequestUuid('p:42')).toBe(false)
     expect(isRequestUuid('p:42::single_match')).toBe(false)
     expect(isRequestUuid('p:42::single_match::matching')).toBe(false)
-    expect(isRequestUuid(`${SAMPLE_UUID}::mailchimp::cassandra`)).toBe(false)
+    expect(isRequestUuid(`${SAMPLE_UUID}::communications::cassandra`)).toBe(false)
     expect(isRequestUuid('undefined')).toBe(false)
     expect(isRequestUuid('')).toBe(false)
     expect(isRequestUuid('thread:batch:42')).toBe(false)
@@ -72,7 +72,7 @@ describe('filterRequestUuids', () => {
         SAMPLE_UUID,
         'p:42',
         'p:42::single_match::matching',
-        `${SAMPLE_UUID}::mailchimp::cassandra`,
+        `${SAMPLE_UUID}::communications::cassandra`,
         SAMPLE_UUID,
         '22222222-2222-4222-8222-222222222222',
       ]),
@@ -109,15 +109,15 @@ describe('inboxReviewItemKey', () => {
 
   test('uses request_id + vertical when system is missing', () => {
     expect(
-      inboxReviewItemKey({ request_id: SAMPLE_UUID, vertical: 'mailchimp' }),
-    ).toBe(`${SAMPLE_UUID}::mailchimp`)
+      inboxReviewItemKey({ request_id: SAMPLE_UUID, vertical: 'communications' }),
+    ).toBe(`${SAMPLE_UUID}::communications`)
     expect(
       inboxReviewItemKey({
         request_id: SAMPLE_UUID,
-        vertical: 'mailchimp',
+        vertical: 'communications',
         system: '  ',
       }),
-    ).toBe(`${SAMPLE_UUID}::mailchimp`)
+    ).toBe(`${SAMPLE_UUID}::communications`)
   })
 
   test('falls back to request_id when vertical and system are missing', () => {
@@ -164,7 +164,7 @@ describe('inboxReviewItemKey', () => {
 describe('isInboxReviewItemKey', () => {
   test('accepts UUID, UUID::vertical, and UUID::vertical::system', () => {
     expect(isInboxReviewItemKey(SAMPLE_UUID)).toBe(true)
-    expect(isInboxReviewItemKey(`${SAMPLE_UUID}::mailchimp`)).toBe(true)
+    expect(isInboxReviewItemKey(`${SAMPLE_UUID}::communications`)).toBe(true)
     expect(isInboxReviewItemKey(`${SAMPLE_UUID}::data::cassandra`)).toBe(true)
   })
 
@@ -172,7 +172,7 @@ describe('isInboxReviewItemKey', () => {
     expect(isInboxReviewItemKey('p:42')).toBe(false)
     expect(isInboxReviewItemKey(STACK_KEY)).toBe(false)
     expect(isInboxReviewItemKey('thread:batch:42')).toBe(false)
-    expect(isInboxReviewItemKey(`${SAMPLE_UUID}::mailchimp::`)).toBe(false)
+    expect(isInboxReviewItemKey(`${SAMPLE_UUID}::communications::`)).toBe(false)
   })
 })
 
@@ -181,10 +181,10 @@ describe('inboxReviewItemVerticalLabel', () => {
     expect(
       inboxReviewItemVerticalLabel({
         request_id: SAMPLE_UUID,
-        vertical: 'mailchimp',
-        vertical_label: 'Mailchimp audiences',
+        vertical: 'communications',
+        vertical_label: 'Axios HQ audiences',
       }),
-    ).toBe('Mailchimp audiences')
+    ).toBe('Axios HQ audiences')
   })
 
   test('falls back to catalog label, then null', () => {
@@ -271,9 +271,9 @@ describe('inboxSystemFilterOptions', () => {
 describe('requestIdsFromSelectedReviewItems', () => {
   test('maps checked review items to request ids without selecting unchecked verticals', () => {
     const items = [
-      { request_id: SAMPLE_UUID, vertical: 'mailchimp' },
+      { request_id: SAMPLE_UUID, vertical: 'communications' },
       { request_id: SAMPLE_UUID, vertical: 'salesforce' },
-      { request_id: SECOND_UUID, vertical: 'mailchimp' },
+      { request_id: SECOND_UUID, vertical: 'communications' },
     ]
     expect(
       requestIdsFromSelectedReviewItems(
@@ -306,7 +306,7 @@ describe('selectedReviewTargets', () => {
 
   test('includes nullable system when the row is vertical-only', () => {
     const items = [
-      { request_id: SAMPLE_UUID, vertical: 'mailchimp' },
+      { request_id: SAMPLE_UUID, vertical: 'communications' },
       { request_id: SAMPLE_UUID, vertical: 'salesforce' },
     ]
     expect(
@@ -315,7 +315,7 @@ describe('selectedReviewTargets', () => {
         new Set(items.map((item) => inboxReviewItemKey(item))),
       ),
     ).toEqual([
-      { request_id: SAMPLE_UUID, vertical: 'mailchimp', system: null },
+      { request_id: SAMPLE_UUID, vertical: 'communications', system: null },
       { request_id: SAMPLE_UUID, vertical: 'salesforce', system: null },
     ])
   })
@@ -360,7 +360,7 @@ describe('inboxItemSourceFilterKey', () => {
     expect(
       inboxItemSourceFilterKey({
         intake_source: 'drop',
-        system: 'mailchimp',
+        system: 'axios_hq',
         matched_via: 'email',
       }),
     ).toBe('drop')
@@ -911,25 +911,25 @@ describe('inboxStatusLabApplyStatus DWID resolve', () => {
       matched_contacts: [{ dwid: 'drop-dwid' }],
     })
     const owner = spyOn(api, 'getOwnerVerticalMatchingResults').mockResolvedValue({
-      matched_contacts: [{ dwid: 'mailchimp-dwid' }],
+      matched_contacts: [{ dwid: 'axios-hq-dwid' }],
     })
     const promote = spyOn(api, 'postDropMatchingResultPromote').mockResolvedValue({})
 
     await inboxStatusLabApplyStatus(
       [SAMPLE_UUID],
       '3',
-      [{ request_id: SAMPLE_UUID, vertical: 'mailchimp', system: null }],
+      [{ request_id: SAMPLE_UUID, vertical: 'communications', system: null }],
     )
 
     expect(drop).not.toHaveBeenCalled()
-    expect(owner.mock.calls).toEqual([[SAMPLE_UUID, 'mailchimp', undefined]])
+    expect(owner.mock.calls).toEqual([[SAMPLE_UUID, 'communications', undefined]])
     expect(promote.mock.calls).toEqual([
       [
         SAMPLE_UUID,
         {
           response_status: 3,
-          dwids: ['mailchimp-dwid'],
-          vertical: 'mailchimp',
+          dwids: ['axios-hq-dwid'],
+          vertical: 'communications',
         },
       ],
     ])
@@ -965,7 +965,7 @@ describe('inboxStatusLabApplyStatus DWID resolve', () => {
     await inboxStatusLabApplyStatus(
       [SAMPLE_UUID],
       '5',
-      [{ request_id: SAMPLE_UUID, vertical: 'mailchimp', system: 'mailchimp' }],
+      [{ request_id: SAMPLE_UUID, vertical: 'communications', system: 'axios_hq' }],
     )
 
     expect(drop).not.toHaveBeenCalled()
@@ -976,8 +976,8 @@ describe('inboxStatusLabApplyStatus DWID resolve', () => {
         {
           response_status: 5,
           dwids: [],
-          vertical: 'mailchimp',
-          system: 'mailchimp',
+          vertical: 'communications',
+          system: 'axios_hq',
         },
       ],
     ])
@@ -1019,7 +1019,7 @@ describe('inboxStatusLabApplyStatus DWID resolve', () => {
     const result = await inboxStatusLabApplyStatus(
       [SAMPLE_UUID],
       '4',
-      [{ request_id: SAMPLE_UUID, vertical: 'mailchimp', system: 'mailchimp' }],
+      [{ request_id: SAMPLE_UUID, vertical: 'communications', system: 'axios_hq' }],
     )
 
     expect(promote).not.toHaveBeenCalled()

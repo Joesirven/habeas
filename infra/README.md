@@ -535,7 +535,7 @@ Do **not** treat Cloud Run **Jobs** (`data-vertical-matching-drain-dev`) as flee
 | `cassandra` | `cassandra-dev` | *(not deployed — stays stub)* |
 | `axios_headquarters` | `axios-headquarters-dev` | `axios-headquarters-prod` |
 
-Mailchimp is **retired** — do not deploy `mailchimp-prod`. Communications vertical is **Axios HQ** (`axios_headquarters`); prod deploy via `infra/cloudbuild/axios-headquarters-prod.yaml`.
+Communications vertical is **Axios HQ** (`axios_headquarters`); prod deploy via `infra/cloudbuild/axios-headquarters-prod.yaml`.
 
 Rules: service name = kebab-case + `-dev`; `google_sheets` → `google-sheets-dev` (hyphen), worker_key stays underscore. Health probe path is always `GET {service_url}/readyz`.
 
@@ -559,7 +559,7 @@ Rules: service name = kebab-case + `-dev`; `google_sheets` → `google-sheets-de
 
 **Owner mapped upload (prod):** `admin-api-prod` sets `CONNECTIONS_UPLOAD_BUCKET=gs://example-gcp-project-dpra-uploads` (objects at `connections/{system}/{connection_id}/upload.csv`). Vertical workers need `GCS_TRANSPORT=google` to read those objects during `POST /hash-refresh/process`. Hash-refresh **enqueue** runs in-process on owner upload; **process** is super_admin via `POST /ops/verticals/{system}/hash-refresh/process` (Auth0 uses `/ops/verticals/auth0/...`). No per-vertical Scheduler in v1 — ops or a follow-up job must call process after enqueue.
 
-**Not live in prod:** `cassandra-prod` (stub / do-not-write until explicit cutover). `mailchimp-prod` is retired. Legacy `matching-prod` may still exist in the project; do not point admin-api at it.
+**Not live in prod:** `cassandra-prod` (stub / do-not-write until explicit cutover). Legacy `matching-prod` may still exist in the project; do not point admin-api at it.
 
 ## Manual deploy (dev)
 

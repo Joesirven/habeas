@@ -12,8 +12,8 @@ from request_dispatcher.dispatch import (
     DispatchCandidate,
     enqueue_auth0_matching,
     enqueue_axios_headquarters_matching,
-    enqueue_google_sheets_matching,
-    enqueue_mailchimp_matching,
+    enqueue_bizdev_contacts_matching,
+    enqueue_hr_alumni_matching,
     find_requests_needing_auth0_matching,
     find_requests_needing_matching,
     run_dispatch,
@@ -29,7 +29,8 @@ def _dispatch_conn(
     triage_batches: list[list[dict[str, Any]]] | None = None,
     matching_inserts: list[dict[str, Any]] | None = None,
     auth0_inserts: list[dict[str, Any]] | None = None,
-    google_sheets_inserts: list[dict[str, Any]] | None = None,
+    hr_alumni_inserts: list[dict[str, Any]] | None = None,
+    bizdev_contacts_inserts: list[dict[str, Any]] | None = None,
     axios_headquarters_inserts: list[dict[str, Any]] | None = None,
 ) -> AsyncMock:
     """Mock conn: fetch = triage scan; fetchrow = set-based INSERT results."""
@@ -37,7 +38,8 @@ def _dispatch_conn(
     triage = list(triage_batches or [[]])
     matching = list(matching_inserts or [_insert_row(0)])
     auth0 = list(auth0_inserts or [_insert_row(0)])
-    sheets = list(google_sheets_inserts or [_insert_row(0)])
+    hr_alumni = list(hr_alumni_inserts or [_insert_row(0)])
+    bizdev = list(bizdev_contacts_inserts or [_insert_row(0)])
     axios = list(axios_headquarters_inserts or [_insert_row(0)])
 
     async def fake_fetch(_query: str, *_args: Any) -> list[dict[str, Any]]:
@@ -54,9 +56,13 @@ def _dispatch_conn(
             if auth0:
                 return auth0.pop(0)
             return _insert_row(0)
-        if "INSERT INTO google_sheets_attempts" in query:
-            if sheets:
-                return sheets.pop(0)
+        if "INSERT INTO hr_alumni_attempts" in query:
+            if hr_alumni:
+                return hr_alumni.pop(0)
+            return _insert_row(0)
+        if "INSERT INTO bizdev_contacts_attempts" in query:
+            if bizdev:
+                return bizdev.pop(0)
             return _insert_row(0)
         if "INSERT INTO axios_headquarters_attempts" in query:
             if axios:
@@ -756,8 +762,10 @@ async def test_dispatch_logs_counts_only_no_request_ids():
     extra = log_mock.call_args.kwargs["extra"]
     assert extra["enqueued"] == 1
     assert extra["auth0_enqueued"] == 0
-    assert extra["mailchimp_enqueued"] == 0
-    assert extra["google_sheets_enqueued"] == 0
+    assert extra["hr_alumni_enqueued"] == 0
+    assert extra["bizdev_contacts_enqueued"] == 0
+    assert "google_sheets_enqueued" not in extra
+    assert "mailchimp_enqueued" not in extra
     assert "request_id" not in extra
     assert "request_ids" not in extra
     assert request_id not in str(log_mock.call_args)
@@ -790,9 +798,13 @@ async def test_untranslatable_rule_enqueues_only_verified_clear_rows():
             new_callable=AsyncMock,
         ) as auth0_row_mock,
         patch(
-            "request_dispatcher.dispatch.enqueue_google_sheets_matching",
+            "request_dispatcher.dispatch.enqueue_hr_alumni_matching",
             new_callable=AsyncMock,
-        ) as sheets_row_mock,
+        ) as hr_alumni_row_mock,
+        patch(
+            "request_dispatcher.dispatch.enqueue_bizdev_contacts_matching",
+            new_callable=AsyncMock,
+        ) as bizdev_row_mock,
         patch(
             "request_dispatcher.dispatch.fetch_active_rule",
             new_callable=AsyncMock,
@@ -812,10 +824,11 @@ async def test_untranslatable_rule_enqueues_only_verified_clear_rows():
     assert enqueued == [request_id]
     assert result.enqueued == 1
     assert result.auth0_enqueued == 1
-    assert result.mailchimp_enqueued == 0
-    assert result.google_sheets_enqueued == 1
+    assert result.hr_alumni_enqueued == 1
+    assert result.bizdev_contacts_enqueued == 1
     auth0_row_mock.assert_awaited_once()
-    sheets_row_mock.assert_awaited_once()
+    hr_alumni_row_mock.assert_awaited_once()
+    bizdev_row_mock.assert_awaited_once()
     assert route_mock.await_count == 1
     conn.fetch.assert_awaited()
     matching_sql = next(
@@ -857,7 +870,7 @@ async def test_drain_all_uses_larger_batch():
 
 
 @pytest.mark.asyncio
-async def test_dispatch_enqueues_google_sheets_for_drop_email_not_mailchimp():
+async def test_dispatch_enqueues_hr_alumni_and_bizdev_for_drop_email():
     request_id = "55555555-5555-5555-5555-555555555556"
     conn = _dispatch_conn(
         triage_batches=[
@@ -866,7 +879,8 @@ async def test_dispatch_enqueues_google_sheets_for_drop_email_not_mailchimp():
         ],
         matching_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
         auth0_inserts=[_insert_row(0), _insert_row(0)],
-        google_sheets_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
+        hr_alumni_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
+        bizdev_contacts_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
         axios_headquarters_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
     )
 
@@ -876,13 +890,13 @@ async def test_dispatch_enqueues_google_sheets_for_drop_email_not_mailchimp():
             new_callable=AsyncMock,
         ) as matching_mock,
         patch(
-            "request_dispatcher.dispatch.enqueue_mailchimp_matching",
+            "request_dispatcher.dispatch.enqueue_hr_alumni_matching",
             new_callable=AsyncMock,
-        ) as mailchimp_row_mock,
+        ) as hr_alumni_row_mock,
         patch(
-            "request_dispatcher.dispatch.enqueue_google_sheets_matching",
+            "request_dispatcher.dispatch.enqueue_bizdev_contacts_matching",
             new_callable=AsyncMock,
-        ) as sheets_row_mock,
+        ) as bizdev_row_mock,
         patch(
             "request_dispatcher.dispatch.fetch_active_rule",
             new_callable=AsyncMock,
@@ -897,18 +911,21 @@ async def test_dispatch_enqueues_google_sheets_for_drop_email_not_mailchimp():
         result = await run_dispatch(conn, limit=10)
 
     assert result.enqueued == 1
-    assert result.mailchimp_enqueued == 0
-    assert result.google_sheets_enqueued == 1
+    assert result.hr_alumni_enqueued == 1
+    assert result.bizdev_contacts_enqueued == 1
     assert result.axios_headquarters_enqueued == 1
     matching_mock.assert_not_awaited()
-    mailchimp_row_mock.assert_not_awaited()
-    sheets_row_mock.assert_not_awaited()
+    hr_alumni_row_mock.assert_not_awaited()
+    bizdev_row_mock.assert_not_awaited()
 
-    sheets_sql = _insert_sql(conn, "google_sheets_attempts")
-    _assert_email_vertical_sql(sheets_sql, "google_sheets_attempts")
+    hr_alumni_sql = _insert_sql(conn, "hr_alumni_attempts")
+    _assert_email_vertical_sql(hr_alumni_sql, "hr_alumni_attempts")
+    bizdev_sql = _insert_sql(conn, "bizdev_contacts_attempts")
+    _assert_email_vertical_sql(bizdev_sql, "bizdev_contacts_attempts")
     axios_sql = _insert_sql(conn, "axios_headquarters_attempts")
     _assert_email_vertical_sql(axios_sql, "axios_headquarters_attempts")
     all_sql = " ".join(call.args[0] for call in conn.fetchrow.await_args_list)
+    assert "google_sheets_attempts" not in all_sql
     assert "mailchimp_attempts" not in all_sql
     for people_table in _PEOPLE_ATTEMPT_TABLES:
         assert people_table not in all_sql
@@ -916,7 +933,7 @@ async def test_dispatch_enqueues_google_sheets_for_drop_email_not_mailchimp():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("list_type", ["Phone", "NDZ"])
-async def test_dispatch_does_not_enqueue_sheets_for_non_email(list_type: str):
+async def test_dispatch_does_not_enqueue_hr_alumni_for_non_email(list_type: str):
     request_id = "66666666-6666-6666-6666-666666666667"
     conn = _dispatch_conn(
         triage_batches=[
@@ -925,18 +942,15 @@ async def test_dispatch_does_not_enqueue_sheets_for_non_email(list_type: str):
         ],
         matching_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
         auth0_inserts=[_insert_row(0), _insert_row(0)],
-        google_sheets_inserts=[_insert_row(0), _insert_row(0)],
+        hr_alumni_inserts=[_insert_row(0), _insert_row(0)],
+        bizdev_contacts_inserts=[_insert_row(0), _insert_row(0)],
     )
 
     with (
         patch(
-            "request_dispatcher.dispatch.enqueue_mailchimp_matching",
+            "request_dispatcher.dispatch.enqueue_hr_alumni_matching",
             new_callable=AsyncMock,
-        ) as mailchimp_row_mock,
-        patch(
-            "request_dispatcher.dispatch.enqueue_google_sheets_matching",
-            new_callable=AsyncMock,
-        ) as sheets_row_mock,
+        ) as hr_alumni_row_mock,
         patch(
             "request_dispatcher.dispatch.fetch_active_rule",
             new_callable=AsyncMock,
@@ -951,27 +965,30 @@ async def test_dispatch_does_not_enqueue_sheets_for_non_email(list_type: str):
         result = await run_dispatch(conn, limit=10)
 
     assert result.enqueued == 1
-    assert result.mailchimp_enqueued == 0
-    assert result.google_sheets_enqueued == 0
+    assert result.hr_alumni_enqueued == 0
+    assert result.bizdev_contacts_enqueued == 0
     assert result.axios_headquarters_enqueued == 0
-    mailchimp_row_mock.assert_not_awaited()
-    sheets_row_mock.assert_not_awaited()
-    sheets_sql = _insert_sql(conn, "google_sheets_attempts")
-    _assert_email_vertical_sql(sheets_sql, "google_sheets_attempts")
+    hr_alumni_row_mock.assert_not_awaited()
+    hr_alumni_sql = _insert_sql(conn, "hr_alumni_attempts")
+    _assert_email_vertical_sql(hr_alumni_sql, "hr_alumni_attempts")
+    bizdev_sql = _insert_sql(conn, "bizdev_contacts_attempts")
+    _assert_email_vertical_sql(bizdev_sql, "bizdev_contacts_attempts")
     axios_sql = _insert_sql(conn, "axios_headquarters_attempts")
     _assert_email_vertical_sql(axios_sql, "axios_headquarters_attempts")
     all_sql = " ".join(call.args[0] for call in conn.fetchrow.await_args_list)
+    assert "google_sheets_attempts" not in all_sql
     assert "mailchimp_attempts" not in all_sql
 
 
 @pytest.mark.asyncio
-async def test_dispatch_backfills_sheets_when_matching_already_enqueued():
+async def test_dispatch_backfills_hr_alumni_when_matching_already_enqueued():
     request_id = "88888888-8888-8888-8888-888888888889"
     conn = _dispatch_conn(
         triage_batches=[[], []],
         matching_inserts=[_insert_row(0), _insert_row(0)],
         auth0_inserts=[_insert_row(0), _insert_row(0)],
-        google_sheets_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
+        hr_alumni_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
+        bizdev_contacts_inserts=[_insert_row(0), _insert_row(0)],
     )
 
     with (
@@ -980,13 +997,9 @@ async def test_dispatch_backfills_sheets_when_matching_already_enqueued():
             new_callable=AsyncMock,
         ) as matching_mock,
         patch(
-            "request_dispatcher.dispatch.enqueue_mailchimp_matching",
+            "request_dispatcher.dispatch.enqueue_hr_alumni_matching",
             new_callable=AsyncMock,
-        ) as mailchimp_row_mock,
-        patch(
-            "request_dispatcher.dispatch.enqueue_google_sheets_matching",
-            new_callable=AsyncMock,
-        ) as sheets_row_mock,
+        ) as hr_alumni_row_mock,
         patch(
             "request_dispatcher.dispatch.fetch_active_rule",
             new_callable=AsyncMock,
@@ -1001,39 +1014,40 @@ async def test_dispatch_backfills_sheets_when_matching_already_enqueued():
         result = await run_dispatch(conn, limit=10)
 
     assert result.enqueued == 0
-    assert result.mailchimp_enqueued == 0
-    assert result.google_sheets_enqueued == 1
+    assert result.hr_alumni_enqueued == 1
     matching_mock.assert_not_awaited()
-    mailchimp_row_mock.assert_not_awaited()
-    sheets_row_mock.assert_not_awaited()
+    hr_alumni_row_mock.assert_not_awaited()
     _assert_email_vertical_sql(
-        _insert_sql(conn, "google_sheets_attempts"),
-        "google_sheets_attempts",
+        _insert_sql(conn, "hr_alumni_attempts"),
+        "hr_alumni_attempts",
     )
     all_sql = " ".join(call.args[0] for call in conn.fetchrow.await_args_list)
+    assert "google_sheets_attempts" not in all_sql
     assert "mailchimp_attempts" not in all_sql
 
 
 @pytest.mark.asyncio
-async def test_enqueue_mailchimp_matching_is_noop():
-    request_id = "55555555-5555-5555-5555-555555555557"
-    conn = AsyncMock()
-
-    await enqueue_mailchimp_matching(conn, request_id)
-
-    conn.execute.assert_not_awaited()
-    conn.fetchrow.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_enqueue_google_sheets_matching_inserts_pending_row():
+async def test_enqueue_hr_alumni_matching_inserts_pending_row():
     request_id = "55555555-5555-5555-5555-555555555558"
     conn = AsyncMock()
 
-    await enqueue_google_sheets_matching(conn, request_id)
+    await enqueue_hr_alumni_matching(conn, request_id)
 
     sql = conn.execute.await_args.args[0]
-    assert "INSERT INTO google_sheets_attempts" in sql
+    assert "INSERT INTO hr_alumni_attempts" in sql
+    assert "ON CONFLICT (request_id, step, attempt_number) DO NOTHING" in sql
+    assert conn.execute.await_args.args[2] == "matching"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_bizdev_contacts_matching_inserts_pending_row():
+    request_id = "55555555-5555-5555-5555-555555555557"
+    conn = AsyncMock()
+
+    await enqueue_bizdev_contacts_matching(conn, request_id)
+
+    sql = conn.execute.await_args.args[0]
+    assert "INSERT INTO bizdev_contacts_attempts" in sql
     assert "ON CONFLICT (request_id, step, attempt_number) DO NOTHING" in sql
     assert conn.execute.await_args.args[2] == "matching"
 

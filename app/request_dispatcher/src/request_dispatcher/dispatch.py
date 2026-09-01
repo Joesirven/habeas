@@ -13,7 +13,8 @@ from habeas_privacy_core.models.intake import DropListType
 from habeas_privacy_core.queue.constants import (
     AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
     AUTH0_ATTEMPTS_TABLE,
-    GOOGLE_SHEETS_ATTEMPTS_TABLE,
+    BIZDEV_CONTACTS_ATTEMPTS_TABLE,
+    HR_ALUMNI_ATTEMPTS_TABLE,
     MATCHING_ATTEMPTS_TABLE,
     MATCHING_STEP,
 )
@@ -66,8 +67,8 @@ class DispatchResult:
     request_ids: list[str] = field(default_factory=list)
     enqueued: int = 0
     auth0_enqueued: int = 0
-    mailchimp_enqueued: int = 0
-    google_sheets_enqueued: int = 0
+    hr_alumni_enqueued: int = 0
+    bizdev_contacts_enqueued: int = 0
     axios_headquarters_enqueued: int = 0
     held_for_triage: int = 0
     skipped_open_triage: int = 0
@@ -310,7 +311,8 @@ def _email_vertical_insert_sql(table: str) -> str:
         """
 
 
-_GOOGLE_SHEETS_INSERT_SQL = _email_vertical_insert_sql(GOOGLE_SHEETS_ATTEMPTS_TABLE)
+_HR_ALUMNI_INSERT_SQL = _email_vertical_insert_sql(HR_ALUMNI_ATTEMPTS_TABLE)
+_BIZDEV_CONTACTS_INSERT_SQL = _email_vertical_insert_sql(BIZDEV_CONTACTS_ATTEMPTS_TABLE)
 _AXIOS_HEADQUARTERS_INSERT_SQL = _email_vertical_insert_sql(AXIOS_HEADQUARTERS_ATTEMPTS_TABLE)
 
 
@@ -452,16 +454,24 @@ async def enqueue_auth0_matching(conn: DbConnection, request_id: str) -> None:
     )
 
 
-async def enqueue_mailchimp_matching(_conn: DbConnection, _request_id: str) -> None:
-    """No-op: Mailchimp is retired. Do not insert ``mailchimp_attempts`` rows."""
-    return
-
-
-async def enqueue_google_sheets_matching(conn: DbConnection, request_id: str) -> None:
-    """Enqueue pending Google Sheets matching (step=matching, attempt 1) if none exists."""
+async def enqueue_hr_alumni_matching(conn: DbConnection, request_id: str) -> None:
+    """Enqueue pending HR Alumni matching (step=matching, attempt 1) if none exists."""
     await conn.execute(
         f"""
-        INSERT INTO {GOOGLE_SHEETS_ATTEMPTS_TABLE} (request_id, step, attempt_number, status)
+        INSERT INTO {HR_ALUMNI_ATTEMPTS_TABLE} (request_id, step, attempt_number, status)
+        VALUES ($1::uuid, $2::varchar, 1, 'pending')
+        ON CONFLICT (request_id, step, attempt_number) DO NOTHING
+        """,
+        UUID(request_id),
+        MATCHING_STEP,
+    )
+
+
+async def enqueue_bizdev_contacts_matching(conn: DbConnection, request_id: str) -> None:
+    """Enqueue pending BizDev Contacts matching (step=matching, attempt 1) if none exists."""
+    await conn.execute(
+        f"""
+        INSERT INTO {BIZDEV_CONTACTS_ATTEMPTS_TABLE} (request_id, step, attempt_number, status)
         VALUES ($1::uuid, $2::varchar, 1, 'pending')
         ON CONFLICT (request_id, step, attempt_number) DO NOTHING
         """,
@@ -524,8 +534,10 @@ async def _hold_legal_triage_candidates(
         if candidate.list_type == DropListType.EMAIL.value:
             await enqueue_auth0_matching(conn, request_id)
             result.auth0_enqueued += 1
-            await enqueue_google_sheets_matching(conn, request_id)
-            result.google_sheets_enqueued += 1
+            await enqueue_hr_alumni_matching(conn, request_id)
+            result.hr_alumni_enqueued += 1
+            await enqueue_bizdev_contacts_matching(conn, request_id)
+            result.bizdev_contacts_enqueued += 1
             await enqueue_axios_headquarters_matching(conn, request_id)
             result.axios_headquarters_enqueued += 1
     return enqueued_here
@@ -603,19 +615,22 @@ async def run_dispatch(
     while True:
         matching_room = _MAX_ENQUEUE_PER_CALL - result.enqueued
         auth0_room = _MAX_ENQUEUE_PER_CALL - result.auth0_enqueued
-        sheets_room = _MAX_ENQUEUE_PER_CALL - result.google_sheets_enqueued
+        hr_alumni_room = _MAX_ENQUEUE_PER_CALL - result.hr_alumni_enqueued
+        bizdev_room = _MAX_ENQUEUE_PER_CALL - result.bizdev_contacts_enqueued
         axios_room = _MAX_ENQUEUE_PER_CALL - result.axios_headquarters_enqueued
         if (
             matching_room <= 0
             and auth0_room <= 0
-            and sheets_room <= 0
+            and hr_alumni_room <= 0
+            and bizdev_room <= 0
             and axios_room <= 0
         ):
             break
 
         enqueued_before = result.enqueued
         auth0_before = result.auth0_enqueued
-        sheets_before = result.google_sheets_enqueued
+        hr_alumni_before = result.hr_alumni_enqueued
+        bizdev_before = result.bizdev_contacts_enqueued
         axios_before = result.axios_headquarters_enqueued
 
         if scan_legal_holds:
@@ -648,16 +663,27 @@ async def run_dispatch(
         else:
             n_auth0 = 0
 
-        if sheets_room > 0:
-            n_sheets, sheets_ids = await _insert_email_vertical_attempts(
+        if hr_alumni_room > 0:
+            n_hr_alumni, hr_alumni_ids = await _insert_email_vertical_attempts(
                 conn,
-                sql=_GOOGLE_SHEETS_INSERT_SQL,
-                limit=min(batch, sheets_room),
+                sql=_HR_ALUMNI_INSERT_SQL,
+                limit=min(batch, hr_alumni_room),
             )
-            result.google_sheets_enqueued += n_sheets
-            _extend_request_ids(result, sheets_ids)
+            result.hr_alumni_enqueued += n_hr_alumni
+            _extend_request_ids(result, hr_alumni_ids)
         else:
-            n_sheets = 0
+            n_hr_alumni = 0
+
+        if bizdev_room > 0:
+            n_bizdev, bizdev_ids = await _insert_email_vertical_attempts(
+                conn,
+                sql=_BIZDEV_CONTACTS_INSERT_SQL,
+                limit=min(batch, bizdev_room),
+            )
+            result.bizdev_contacts_enqueued += n_bizdev
+            _extend_request_ids(result, bizdev_ids)
+        else:
+            n_bizdev = 0
 
         if axios_room > 0:
             n_axios, axios_ids = await _insert_email_vertical_attempts(
@@ -673,11 +699,13 @@ async def run_dispatch(
         if (
             result.enqueued == enqueued_before
             and result.auth0_enqueued == auth0_before
-            and result.google_sheets_enqueued == sheets_before
+            and result.hr_alumni_enqueued == hr_alumni_before
+            and result.bizdev_contacts_enqueued == bizdev_before
             and result.axios_headquarters_enqueued == axios_before
             and n_match == 0
             and n_auth0 == 0
-            and n_sheets == 0
+            and n_hr_alumni == 0
+            and n_bizdev == 0
             and n_axios == 0
         ):
             break
@@ -688,8 +716,8 @@ async def run_dispatch(
             "event": "dispatch_complete",
             "enqueued": result.enqueued,
             "auth0_enqueued": result.auth0_enqueued,
-            "mailchimp_enqueued": result.mailchimp_enqueued,
-            "google_sheets_enqueued": result.google_sheets_enqueued,
+            "hr_alumni_enqueued": result.hr_alumni_enqueued,
+            "bizdev_contacts_enqueued": result.bizdev_contacts_enqueued,
             "axios_headquarters_enqueued": result.axios_headquarters_enqueued,
             "held_for_triage": result.held_for_triage,
             "skipped_open_triage": result.skipped_open_triage,

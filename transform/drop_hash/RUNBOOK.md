@@ -20,12 +20,25 @@ All three are clustered on `(state, hash_value)`. Matching lookups use `hash_val
 - ADC / service account with BigQuery Data Editor on `drop_hash_index`, read on `person_db`
 - `normalize_name` UDF deployed (see `udf/README.md`)
 
-## 1. Normalize package tests (optional gate)
+## 1. Normalize package tests (CI / optional local gate)
+
+Hermetic CPPA vectors are on default root pytest (`testpaths` includes
+`transform/drop_hash/drop_normalize/tests`). Prefer repo root:
+
+```bash
+uv run --group dev pytest transform/drop_hash/drop_normalize/tests -q
+# or: uv run --group dev pytest   # full default discovery includes them
+```
+
+Package-local alternative:
 
 ```bash
 cd transform/drop_hash/drop_normalize
-uv run pytest tests -q
+uv run --group dev pytest tests -q
 ```
+
+BigQuery dbt asserts (`tests/assert_cppa_*_vector.sql`) and UDF vectors are **not**
+in this hermetic gate — see README § Tests.
 
 ## 2. Apply / refresh name UDF
 

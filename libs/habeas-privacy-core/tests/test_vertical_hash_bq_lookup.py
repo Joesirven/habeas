@@ -1,4 +1,4 @@
-"""Unit tests for Auth0 external-hash mart lookup (mocked BigQuery client)."""
+"""Unit tests for external-hash mart lookup (mocked BigQuery client)."""
 
 from __future__ import annotations
 
@@ -11,10 +11,34 @@ import pytest
 from habeas_privacy_core.vertical_hash.bq_lookup import (
     AUTH0_EMAIL_HASH_BUILD_TABLE,
     AUTH0_SYSTEM,
+    AXIOS_HEADQUARTERS_EMAIL_HASH_BUILD_TABLE,
+    AXIOS_HEADQUARTERS_SYSTEM,
+    BIZDEV_CONTACTS_EMAIL_HASH_BUILD_TABLE,
+    BIZDEV_CONTACTS_SYSTEM,
     DEFAULT_BQ_DATASET,
     DEFAULT_BQ_PROJECT,
+    EMAIL_HASH_MARTS,
+    GOOGLE_SHEETS_EMAIL_HASH_BUILD_TABLE,
+    GOOGLE_SHEETS_SYSTEM,
+    HR_ALUMNI_EMAIL_HASH_BUILD_TABLE,
+    HR_ALUMNI_SYSTEM,
+    LEVER_EMAIL_HASH_BUILD_TABLE,
+    LEVER_SYSTEM,
+    PAYLOCITY_EMAIL_HASH_BUILD_TABLE,
+    PAYLOCITY_SYSTEM,
     Auth0HashLookupError,
+    VerticalHashLookupError,
     lookup_auth0_vendor_ids_by_email_hash,
+    lookup_auth0_vendor_ids_by_email_hashes,
+    lookup_axios_headquarters_vendor_ids_by_email_hashes,
+    lookup_bizdev_contacts_vendor_ids_by_email_hashes,
+    lookup_google_sheets_vendor_ids_by_email_hashes,
+    lookup_hr_alumni_vendor_ids_by_email_hashes,
+    lookup_lever_vendor_ids_by_email_hashes,
+    lookup_paylocity_vendor_ids_by_email_hash,
+    lookup_paylocity_vendor_ids_by_email_hashes,
+    lookup_vendor_ids_by_email_hash,
+    lookup_vendor_ids_by_email_hashes,
 )
 from habeas_privacy_core.vertical_hash.hashing import email_hash_from_raw
 
@@ -22,6 +46,35 @@ from habeas_privacy_core.vertical_hash.hashing import email_hash_from_raw
 EMAIL_HASH = "KA18MT/ph6IHYjzT9zwETySDQyvSh87YuoSBpOQtkhE="
 VENDOR_ID = "auth0|opaque-user-1"
 RAW_EMAIL = "anna.smith@domain.com"
+
+_BATCH_VERTICALS: list[tuple[str, str, Any]] = [
+    (
+        AXIOS_HEADQUARTERS_SYSTEM,
+        AXIOS_HEADQUARTERS_EMAIL_HASH_BUILD_TABLE,
+        lookup_axios_headquarters_vendor_ids_by_email_hashes,
+    ),
+    (
+        PAYLOCITY_SYSTEM,
+        PAYLOCITY_EMAIL_HASH_BUILD_TABLE,
+        lookup_paylocity_vendor_ids_by_email_hashes,
+    ),
+    (LEVER_SYSTEM, LEVER_EMAIL_HASH_BUILD_TABLE, lookup_lever_vendor_ids_by_email_hashes),
+    (
+        HR_ALUMNI_SYSTEM,
+        HR_ALUMNI_EMAIL_HASH_BUILD_TABLE,
+        lookup_hr_alumni_vendor_ids_by_email_hashes,
+    ),
+    (
+        BIZDEV_CONTACTS_SYSTEM,
+        BIZDEV_CONTACTS_EMAIL_HASH_BUILD_TABLE,
+        lookup_bizdev_contacts_vendor_ids_by_email_hashes,
+    ),
+    (
+        GOOGLE_SHEETS_SYSTEM,
+        GOOGLE_SHEETS_EMAIL_HASH_BUILD_TABLE,
+        lookup_google_sheets_vendor_ids_by_email_hashes,
+    ),
+]
 
 
 class _FakeRow(dict):
@@ -38,11 +91,26 @@ class _FakeJob:
 
 def _params(client: MagicMock) -> dict[str, Any]:
     job_config = client.query.call_args.kwargs["job_config"]
-    return {p.name: p.value for p in job_config.query_parameters}
+    out: dict[str, Any] = {}
+    for p in job_config.query_parameters:
+        out[p.name] = getattr(p, "values", None) or getattr(p, "value", None)
+    return out
 
 
 def _sql(client: MagicMock) -> str:
     return client.query.call_args.args[0]
+
+
+def test_email_hash_marts_cover_external_verticals() -> None:
+    assert EMAIL_HASH_MARTS[AUTH0_SYSTEM] == AUTH0_EMAIL_HASH_BUILD_TABLE
+    assert EMAIL_HASH_MARTS[AXIOS_HEADQUARTERS_SYSTEM] == (
+        AXIOS_HEADQUARTERS_EMAIL_HASH_BUILD_TABLE
+    )
+    assert EMAIL_HASH_MARTS[PAYLOCITY_SYSTEM] == PAYLOCITY_EMAIL_HASH_BUILD_TABLE
+    assert EMAIL_HASH_MARTS[LEVER_SYSTEM] == LEVER_EMAIL_HASH_BUILD_TABLE
+    assert EMAIL_HASH_MARTS[HR_ALUMNI_SYSTEM] == HR_ALUMNI_EMAIL_HASH_BUILD_TABLE
+    assert EMAIL_HASH_MARTS[BIZDEV_CONTACTS_SYSTEM] == BIZDEV_CONTACTS_EMAIL_HASH_BUILD_TABLE
+    assert EMAIL_HASH_MARTS[GOOGLE_SHEETS_SYSTEM] == GOOGLE_SHEETS_EMAIL_HASH_BUILD_TABLE
 
 
 def test_lookup_zero_hits() -> None:
@@ -56,9 +124,10 @@ def test_lookup_zero_hits() -> None:
     assert f"{DEFAULT_BQ_PROJECT}.{DEFAULT_BQ_DATASET}.{AUTH0_EMAIL_HASH_BUILD_TABLE}" in _sql(
         client
     )
-    assert f"system = '{AUTH0_SYSTEM}'" in _sql(client)
+    assert "system = @system" in _sql(client)
     assert "hash_value = @hash_value" in _sql(client)
     assert _params(client)["hash_value"] == EMAIL_HASH
+    assert _params(client)["system"] == AUTH0_SYSTEM
     assert EMAIL_HASH not in _sql(client)
 
 
@@ -165,6 +234,7 @@ def test_timeout_raises_typed_retry_error() -> None:
     with pytest.raises(Auth0HashLookupError) as exc_info:
         lookup_auth0_vendor_ids_by_email_hash(EMAIL_HASH, client=client)
 
+    assert isinstance(exc_info.value, VerticalHashLookupError)
     assert exc_info.value.retry_seconds >= 60
 
 
@@ -268,6 +338,159 @@ def test_omitted_client_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client.query.call_count == 1
 
 
+def test_lookup_by_hashes_set_based() -> None:
+    hash_a = EMAIL_HASH
+    hash_b = "other-hash-value-BBBBBBBBBBBBBBBBBBBBBBBBBB="
+    hash_c = "missing-hash-CCCCCCCCCCCCCCCCCCCCCCCCCCCC="
+    client = MagicMock()
+    client.query.return_value = _FakeJob(
+        [
+            _FakeRow(hash_value=hash_a, vendor_record_id=VENDOR_ID),
+            _FakeRow(hash_value=hash_a, vendor_record_id="auth0|second"),
+            _FakeRow(hash_value=hash_b, vendor_record_id=None),
+        ]
+    )
+
+    out = lookup_auth0_vendor_ids_by_email_hashes(
+        [hash_a, hash_b, hash_c, hash_a],
+        client=client,
+    )
+
+    assert out[hash_a] == [VENDOR_ID, "auth0|second"]
+    assert out[hash_b] == []
+    assert out[hash_c] == []
+    assert "UNNEST(@hash_values)" in _sql(client)
+    assert "system = @system" in _sql(client)
+    assert "LEFT JOIN" in _sql(client)
+    assert AUTH0_EMAIL_HASH_BUILD_TABLE in _sql(client)
+    assert hash_a not in _sql(client)
+    params = _params(client)
+    assert params["hash_values"] == [hash_a, hash_b, hash_c]
+    assert params["system"] == AUTH0_SYSTEM
+
+
+def test_lookup_by_hashes_empty() -> None:
+    client = MagicMock()
+    assert lookup_auth0_vendor_ids_by_email_hashes([], client=client) == {}
+    assert lookup_auth0_vendor_ids_by_email_hashes(["", "  "], client=client) == {}
+    client.query.assert_not_called()
+
+
+def test_lookup_by_hashes_rejects_plaintext() -> None:
+    client = MagicMock()
+    with pytest.raises(ValueError, match="must not contain plaintext"):
+        lookup_auth0_vendor_ids_by_email_hashes([EMAIL_HASH, RAW_EMAIL], client=client)
+    client.query.assert_not_called()
+
+
+def test_lookup_by_hashes_timeout_raises_typed_retry() -> None:
+    client = MagicMock()
+    client.query.side_effect = TimeoutError("deadline exceeded / timeout")
+
+    with pytest.raises(Auth0HashLookupError) as exc_info:
+        lookup_auth0_vendor_ids_by_email_hashes([EMAIL_HASH], client=client)
+
+    assert exc_info.value.retry_seconds >= 60
+
+
+def test_lookup_by_hashes_logs_counts_not_ids(caplog: pytest.LogCaptureFixture) -> None:
+    client = MagicMock()
+    client.query.return_value = _FakeJob(
+        [_FakeRow(hash_value=EMAIL_HASH, vendor_record_id=VENDOR_ID)]
+    )
+
+    with caplog.at_level(logging.INFO):
+        lookup_auth0_vendor_ids_by_email_hashes([EMAIL_HASH], client=client)
+
+    combined = " ".join(
+        f"{record.getMessage()} {record.__dict__}" for record in caplog.records
+    )
+    assert RAW_EMAIL not in combined
+    assert EMAIL_HASH not in combined
+    assert VENDOR_ID not in combined
+
+
+def test_lookup_by_hashes_reads_tuple_rows() -> None:
+    client = MagicMock()
+    client.query.return_value = _FakeJob([(EMAIL_HASH, "auth0|tuple-1")])
+
+    out = lookup_auth0_vendor_ids_by_email_hashes([EMAIL_HASH], client=client)
+
+    assert out[EMAIL_HASH] == ["auth0|tuple-1"]
+
+
+@pytest.mark.parametrize("system,table,wrapper", _BATCH_VERTICALS)
+def test_vertical_batch_unnest_sql_shape(
+    system: str,
+    table: str,
+    wrapper: Any,
+) -> None:
+    hash_a = EMAIL_HASH
+    hash_b = "other-hash-value-BBBBBBBBBBBBBBBBBBBBBBBBBB="
+    vendor = f"{system}|opaque-1"
+    client = MagicMock()
+    client.query.return_value = _FakeJob(
+        [
+            _FakeRow(hash_value=hash_a, vendor_record_id=vendor),
+            _FakeRow(hash_value=hash_b, vendor_record_id=None),
+        ]
+    )
+
+    out = wrapper([hash_a, hash_b, hash_a], client=client)
+
+    assert out[hash_a] == [vendor]
+    assert out[hash_b] == []
+    sql = _sql(client)
+    assert "UNNEST(@hash_values)" in sql
+    assert "LEFT JOIN" in sql
+    assert "system = @system" in sql
+    assert table in sql
+    assert f"{DEFAULT_BQ_PROJECT}.{DEFAULT_BQ_DATASET}.{table}" in sql
+    assert hash_a not in sql
+    assert vendor not in sql
+    params = _params(client)
+    assert params["hash_values"] == [hash_a, hash_b]
+    assert params["system"] == system
+
+
+def test_generic_batch_requires_table_and_system() -> None:
+    client = MagicMock()
+    with pytest.raises(ValueError, match="table and system"):
+        lookup_vendor_ids_by_email_hashes([EMAIL_HASH], table="", system="auth0", client=client)
+    with pytest.raises(ValueError, match="table and system"):
+        lookup_vendor_ids_by_email_hashes(
+            [EMAIL_HASH], table="auth0_email_hash__build", system="", client=client
+        )
+    client.query.assert_not_called()
+
+
+def test_paylocity_single_lookup_uses_mart() -> None:
+    client = MagicMock()
+    client.query.return_value = _FakeJob([_FakeRow(vendor_record_id="pay|1")])
+
+    result = lookup_paylocity_vendor_ids_by_email_hash(EMAIL_HASH, client=client)
+
+    assert result == ["pay|1"]
+    assert PAYLOCITY_EMAIL_HASH_BUILD_TABLE in _sql(client)
+    assert _params(client)["system"] == PAYLOCITY_SYSTEM
+
+
+def test_generic_single_lookup_raises_vertical_error() -> None:
+    client = MagicMock()
+    client.query.side_effect = TimeoutError("deadline exceeded / timeout")
+
+    with pytest.raises(VerticalHashLookupError) as exc_info:
+        lookup_vendor_ids_by_email_hash(
+            EMAIL_HASH,
+            table=LEVER_EMAIL_HASH_BUILD_TABLE,
+            system=LEVER_SYSTEM,
+            client=client,
+        )
+
+    assert not isinstance(exc_info.value, Auth0HashLookupError)
+    assert exc_info.value.retry_seconds >= 60
+
+
 def test_default_client_requires_bigquery_package(monkeypatch: pytest.MonkeyPatch) -> None:
     import builtins
 
@@ -290,5 +513,5 @@ def test_default_client_requires_bigquery_package(monkeypatch: pytest.MonkeyPatc
         return real_import(name, globals_, locals_, fromlist, level)
 
     monkeypatch.setattr(builtins, "__import__", guarded)
-    with pytest.raises(Auth0HashLookupError, match="not installed"):
+    with pytest.raises(VerticalHashLookupError, match="not installed"):
         bq_lookup._default_client()

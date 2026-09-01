@@ -186,12 +186,12 @@ class TestMergeFleetInventory:
         inv = merge_fleet_inventory(
             env_prefix="dpra-dev",
             discovery_mode="local",
-            attempt_tables=["mailchimp_attempts", "core_queue_test_attempts"],
+            attempt_tables=["axios_headquarters_attempts", "core_queue_test_attempts"],
         )
         workers = _by_key(inv)
-        assert "mailchimp" in workers
-        assert workers["mailchimp"].attempt_table == "mailchimp_attempts"
-        assert workers["mailchimp"].label == "Mailchimp"
+        assert "axios_headquarters" in workers
+        assert workers["axios_headquarters"].attempt_table == "axios_headquarters_attempts"
+        assert workers["axios_headquarters"].label == "Axios HQ"
         # deny-listed test table must not create a worker
         assert "core_queue_test" not in workers
 

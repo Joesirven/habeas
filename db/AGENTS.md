@@ -6,7 +6,9 @@ Single PostgreSQL database (Cloud SQL). **All migrations** live in `migrations/`
 
 ## Naming
 
-`YYYYMMDDHHMMSS_<scope>_<description>.sql` — scopes: `core_`, `matching_`, `mailchimp_`, etc.
+`YYYYMMDDHHMMSS_<scope>_<description>.sql` — scopes: `core_`, `matching_`, `auth0_`, `axios_headquarters_`, etc.
+
+Mailchimp is retired — historical `mailchimp_*` migration prefixes remain; do not add new ones.
 
 ## v0 live events
 

@@ -53,7 +53,6 @@ Connect to admin-api `GET /live/events` via same-origin `/api/live/events` (Serv
 - Matching inventory (code-backed; do not invent APIs or routes):
   - **Live:** `data`, `auth0`
   - **Catalog-only / not live:** Axios HQ (`axios_hq`), Lever, Paylocity, Cassandra
-  - **Retired:** Mailchimp
   - Copy: catalog-only / not live — never “coming soon”
 - Results lab (`/requests/matching-results-lab`): ops queue is landed
   `GET /ops/drop/matching-results` (ids/counts). Add-person search by vertical:

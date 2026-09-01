@@ -34,15 +34,15 @@ const SAMPLE: FleetWorkersPayload = {
       supports_unified_runs: true,
     },
     {
-      worker_key: 'mailchimp',
-      label: 'Mailchimp',
+      worker_key: 'axios_headquarters',
+      label: 'Axios HQ',
       deployed: true,
       scheduled: false,
-      service_name: 'mailchimp-dev',
+      service_name: 'axios-headquarters-dev',
       base_url: null,
       sources: ['cloud_run'],
       schedule_job_keys: [],
-      attempt_table: 'mailchimp_attempts',
+      attempt_table: 'axios_headquarters_attempts',
       health: { ok: false, status_code: 503 },
     },
   ],
@@ -50,11 +50,11 @@ const SAMPLE: FleetWorkersPayload = {
 
 describe('worker-fleet helpers', () => {
   test('orderedWorkerKeys preserves API order', () => {
-    expect(orderedWorkerKeys(SAMPLE)).toEqual(['matching', 'mailchimp'])
+    expect(orderedWorkerKeys(SAMPLE)).toEqual(['matching', 'axios_headquarters'])
   })
 
   test('workerByKey + attemptTableForWorker', () => {
-    expect(workerByKey(SAMPLE, 'mailchimp')?.label).toBe('Mailchimp')
+    expect(workerByKey(SAMPLE, 'axios_headquarters')?.label).toBe('Axios HQ')
     expect(attemptTableForWorker(SAMPLE, 'matching')).toBe('matching_attempts')
     expect(attemptTableForWorker(SAMPLE, 'missing')).toBeNull()
   })
@@ -63,7 +63,7 @@ describe('worker-fleet helpers', () => {
     expect(buildJobFilterOptions(SAMPLE)).toEqual([
       { value: '', label: 'All workers' },
       { value: 'matching', label: 'Matching' },
-      { value: 'mailchimp', label: 'Mailchimp' },
+      { value: 'axios_headquarters', label: 'Axios HQ' },
     ])
   })
 

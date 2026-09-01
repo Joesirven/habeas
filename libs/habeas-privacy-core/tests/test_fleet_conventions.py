@@ -134,7 +134,7 @@ class TestLabelsAndEnvUrls:
         assert label_from_worker_key("matching") == "Matching"
 
     def test_label_uses_connection_system(self) -> None:
-        assert label_from_worker_key("mailchimp") == "Mailchimp"
+        assert label_from_worker_key("axios_headquarters") == "Axios HQ"
 
     def test_parse_worker_fleet_urls(self) -> None:
         raw = '{"matching": "http://localhost:8081/", "reaper": "http://localhost:8082"}'
