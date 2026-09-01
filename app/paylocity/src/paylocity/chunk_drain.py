@@ -25,6 +25,9 @@ from typing import Any
 from uuid import UUID
 
 from habeas_privacy_core.audit.redaction import redact_error_text
+from habeas_privacy_core.connections.matching_gate import (
+    evaluate_matching_drain_readiness,
+)
 from habeas_privacy_core.db.vertical_matching import upsert_vertical_matching_snapshot
 from habeas_privacy_core.models.intake import DropListType
 from habeas_privacy_core.queue.constants import PAYLOCITY_ATTEMPTS_TABLE, STEP_MATCHING
@@ -48,7 +51,7 @@ logger = logging.getLogger(__name__)
 SYSTEM = "paylocity"
 PAYLOCITY_LEASE_KEY = "paylocity"
 DEFAULT_DRAIN_LEASE_HOLDER = "paylocity-matching-drain"
-DEFAULT_CHUNK_LIMIT = 1_000
+DEFAULT_CHUNK_LIMIT = 10_000
 COMPLETE_BATCH_SIZE = 250
 DEFAULT_CLAIM_LEASE_MINUTES = 15
 LOOKUP_RETRY_SECONDS = 60
@@ -769,6 +772,7 @@ async def ensure_drain(
     *,
     holder: str | None = None,
     start_job: Callable[[], Awaitable[None]] | None = None,
+    bq_client: Any | None = None,
 ) -> dict[str, Any]:
     """Acquire the Paylocity drain lease if pending Paylocity matching work exists."""
     lease_holder = holder or drain_lease_holder()
@@ -780,6 +784,30 @@ async def ensure_drain(
             "pending": 0,
             "reaped": reaped,
             "lease_acquired": False,
+        }
+
+    readiness = await evaluate_matching_drain_readiness(
+        conn,
+        system=SYSTEM,
+        mart_table=PAYLOCITY_EMAIL_HASH_BUILD_TABLE,
+        bq_client=bq_client,
+    )
+    if not readiness.ready:
+        logger.info(
+            "paylocity_ensure_drain_skipped",
+            extra={
+                "event": "paylocity_ensure_drain_skipped",
+                "reason": readiness.reason,
+                "pending": pending_n,
+                "gate_code": readiness.gate.code,
+            },
+        )
+        return {
+            "status": readiness.reason,
+            "pending": pending_n,
+            "reaped": reaped,
+            "lease_acquired": False,
+            "gate_code": readiness.gate.code,
         }
 
     acquired = await acquire_drain_lease(

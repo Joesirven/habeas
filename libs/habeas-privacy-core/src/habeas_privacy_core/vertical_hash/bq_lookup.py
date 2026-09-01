@@ -50,6 +50,7 @@ __all__ = [
     "lookup_lever_vendor_ids_by_email_hashes",
     "lookup_paylocity_vendor_ids_by_email_hash",
     "lookup_paylocity_vendor_ids_by_email_hashes",
+    "email_hash_mart_exists",
     "lookup_vendor_ids_by_email_hash",
     "lookup_vendor_ids_by_email_hashes",
 ]
@@ -100,6 +101,59 @@ class Auth0HashLookupError(VerticalHashLookupError):
 
 class BigQueryClient(Protocol):
     def query(self, sql: str, job_config: Any = None) -> Any: ...
+
+
+def email_hash_mart_exists(
+    system: str,
+    *,
+    client: BigQueryClient | None = None,
+    project: str | None = None,
+    dataset: str | None = None,
+    table: str | None = None,
+) -> bool:
+    """Return True when the serving-build mart table exists in BigQuery.
+
+    Resolves the table from ``EMAIL_HASH_MARTS`` unless *table* is provided.
+    Missing / unknown systems return False. Never logs table row contents.
+    """
+    system_id = (system or "").strip()
+    table_id = (table or EMAIL_HASH_MARTS.get(system_id) or "").strip()
+    if not system_id or not table_id:
+        return False
+
+    project_id = _resolve_project(project)
+    dataset_id = _resolve_dataset(dataset)
+    fq_table = f"{project_id}.{dataset_id}.{table_id}"
+    bq_client = client if client is not None else _default_client()
+    get_table = getattr(bq_client, "get_table", None)
+    if not callable(get_table):
+        logger.error(
+            "vertical hash mart existence check unavailable",
+            extra={"system": system_id, "table": table_id},
+        )
+        return False
+    try:
+        get_table(fq_table)
+        return True
+    except Exception as exc:
+        name = type(exc).__name__
+        detail = redact_error_text(str(exc)).lower()
+        if name == "NotFound" or "not found" in detail or "404" in detail:
+            logger.info(
+                "vertical hash mart missing",
+                extra={"system": system_id, "table": table_id},
+            )
+            return False
+        logger.error(
+            "vertical hash mart existence check failed",
+            extra={
+                "error_class": name,
+                "error_detail": redact_error_text(str(exc)),
+                "system": system_id,
+                "table": table_id,
+            },
+        )
+        return False
 
 
 def lookup_vendor_ids_by_email_hash(

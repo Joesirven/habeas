@@ -31,6 +31,24 @@ def _hermetic_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "")
 
 
+@pytest.fixture(autouse=True)
+def _drain_readiness_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    from habeas_privacy_core.connections.freshness import GateResult
+    from habeas_privacy_core.connections.matching_gate import DrainReadiness
+
+    async def _ready(*_a: Any, **_k: Any) -> DrainReadiness:
+        return DrainReadiness(
+            ready=True,
+            reason="ok",
+            gate=GateResult(allowed=True, code="ok", display_status="connected"),
+        )
+
+    monkeypatch.setattr(
+        "lever.chunk_drain.evaluate_matching_drain_readiness",
+        _ready,
+    )
+
+
 class _RecordingConn:
     def __init__(
         self,

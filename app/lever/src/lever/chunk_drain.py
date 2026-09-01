@@ -23,6 +23,7 @@ from uuid import UUID
 
 from habeas_privacy_core.audit.redaction import redact_error_text
 from habeas_privacy_core.connections.matching_gate import (
+    evaluate_matching_drain_readiness,
     evaluate_vertical_matching_gate,
     gate_block_audit,
     vertical_id_from_attempt_row,
@@ -36,6 +37,7 @@ from habeas_privacy_core.queue.drain_lease import (
     renew_drain_lease,
 )
 from habeas_privacy_core.vertical_hash.audit import build_vertical_audit_payload
+from habeas_privacy_core.vertical_hash.bq_lookup import LEVER_EMAIL_HASH_BUILD_TABLE
 
 from lever.bq_lookup import LeverHashLookupError, lookup_lever_vendor_ids_by_email_hashes
 from lever.vertical_match import ADAPTER, LEVER_VERTICAL
@@ -45,7 +47,7 @@ logger = logging.getLogger(__name__)
 SYSTEM = "lever"
 LEVER_LEASE_KEY = "lever"
 DEFAULT_DRAIN_LEASE_HOLDER = "lever-matching-drain"
-DEFAULT_CHUNK_LIMIT = 1_000
+DEFAULT_CHUNK_LIMIT = 10_000
 COMPLETE_BATCH_SIZE = 250
 DEFAULT_CLAIM_LEASE_MINUTES = 15
 LOOKUP_RETRY_SECONDS = 60
@@ -714,6 +716,7 @@ async def ensure_drain(
     *,
     holder: str | None = None,
     start_job: Callable[[], Awaitable[None]] | None = None,
+    bq_client: Any | None = None,
 ) -> dict[str, Any]:
     """Acquire the Lever drain lease if pending Lever matching work exists."""
     lease_holder = holder or drain_lease_holder()
@@ -725,6 +728,30 @@ async def ensure_drain(
             "pending": 0,
             "reaped": reaped,
             "lease_acquired": False,
+        }
+
+    readiness = await evaluate_matching_drain_readiness(
+        conn,
+        system=SYSTEM,
+        mart_table=LEVER_EMAIL_HASH_BUILD_TABLE,
+        bq_client=bq_client,
+    )
+    if not readiness.ready:
+        logger.info(
+            "lever_ensure_drain_skipped",
+            extra={
+                "event": "lever_ensure_drain_skipped",
+                "reason": readiness.reason,
+                "pending": pending_n,
+                "gate_code": readiness.gate.code,
+            },
+        )
+        return {
+            "status": readiness.reason,
+            "pending": pending_n,
+            "reaped": reaped,
+            "lease_acquired": False,
+            "gate_code": readiness.gate.code,
         }
 
     acquired = await acquire_drain_lease(

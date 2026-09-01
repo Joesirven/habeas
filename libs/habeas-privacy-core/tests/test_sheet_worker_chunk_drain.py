@@ -32,6 +32,24 @@ def _hermetic_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "")
 
 
+@pytest.fixture(autouse=True)
+def _drain_readiness_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    from habeas_privacy_core.connections.freshness import GateResult
+    from habeas_privacy_core.connections.matching_gate import DrainReadiness
+
+    async def _ready(*_a: Any, **_k: Any) -> DrainReadiness:
+        return DrainReadiness(
+            ready=True,
+            reason="ok",
+            gate=GateResult(allowed=True, code="ok", display_status="connected"),
+        )
+
+    monkeypatch.setattr(
+        "habeas_privacy_core.sheet_worker.chunk_drain.evaluate_matching_drain_readiness",
+        _ready,
+    )
+
+
 class _RecordingConn:
     def __init__(
         self,
@@ -229,6 +247,76 @@ async def test_ensure_drain_uses_config_lease_key() -> None:
     assert out["status"] == "started"
     assert out["lease_key"] == cfg.lease_key
     assert acquire.await_args.kwargs["lease_key"] == cfg.lease_key
+
+
+@pytest.mark.asyncio
+async def test_ensure_drain_skips_when_mart_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from habeas_privacy_core.connections.freshness import GateResult
+    from habeas_privacy_core.connections.matching_gate import DrainReadiness
+
+    cfg = hr_alumni_config()
+    conn = _RecordingConn(fetchval=5)
+    acquire = AsyncMock(return_value=True)
+
+    async def _blocked(*_a: Any, **_k: Any) -> DrainReadiness:
+        return DrainReadiness(
+            ready=False,
+            reason="mart_missing",
+            gate=GateResult(allowed=True, code="ok", display_status="connected"),
+        )
+
+    monkeypatch.setattr(
+        "habeas_privacy_core.sheet_worker.chunk_drain.evaluate_matching_drain_readiness",
+        _blocked,
+    )
+    with (
+        patch(
+            "habeas_privacy_core.sheet_worker.chunk_drain.reap_stale_claims",
+            new_callable=AsyncMock,
+            return_value=0,
+        ),
+        patch("habeas_privacy_core.sheet_worker.chunk_drain.acquire_drain_lease", acquire),
+    ):
+        out = await ensure_drain(conn, cfg)
+
+    assert out["status"] == "mart_missing"
+    assert out["pending"] == 5
+    assert out["lease_acquired"] is False
+    acquire.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_skips_when_gate_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from habeas_privacy_core.connections.freshness import GateResult
+    from habeas_privacy_core.connections.matching_gate import DrainReadiness
+
+    cfg = hr_alumni_config()
+    conn = _RecordingConn(fetch_rows=[_claim_row()])
+
+    async def _blocked(*_a: Any, **_k: Any) -> DrainReadiness:
+        return DrainReadiness(
+            ready=False,
+            reason="gate_blocked",
+            gate=GateResult(
+                allowed=False,
+                code="sheets_refresh_stale",
+                display_status="needs_refresh",
+            ),
+        )
+
+    monkeypatch.setattr(
+        "habeas_privacy_core.sheet_worker.chunk_drain.evaluate_matching_drain_readiness",
+        _blocked,
+    )
+    out = await process_matching_chunk(conn, cfg, worker_id="w1")
+    assert out["status"] == "gate_blocked"
+    assert out["claimed"] == 0
+    assert conn.executemany_calls == []
+    assert conn.sql == []
 
 
 def test_build_chunk_drain_module_binds_config() -> None:

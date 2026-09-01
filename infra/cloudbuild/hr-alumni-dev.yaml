@@ -43,7 +43,7 @@ steps:
       - --service-account=${_RUNTIME_SA}
       - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
       - --timeout=3600
-      - --set-env-vars=SERVICE_NAME=hr-alumni,WORKER_ID=hr-alumni-dev,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,GCS_TRANSPORT=google,DATABASE_URL=${_DATABASE_URL},EXTERNAL_HASH_DBT_DIR=/app/transform/external_hash,DBT_PROFILES_DIR=/app/transform/external_hash,EXTERNAL_HASH_BQ_DATASET=external_hash_index,EXTERNAL_HASH_DBT_TIMEOUT_SECONDS=3300,HR_ALUMNI_DRAIN_JOB_NAME=${_DRAIN_JOB},HR_ALUMNI_DRAIN_JOB_REGION=${_REGION},HR_ALUMNI_DRAIN_LEASE_HOLDER=hr-alumni-matching-drain,HR_ALUMNI_DRAIN_TASK_COUNT=5
+      - --set-env-vars=SERVICE_NAME=hr-alumni,WORKER_ID=hr-alumni-dev,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,GCS_TRANSPORT=google,DATABASE_URL=${_DATABASE_URL},EXTERNAL_HASH_DBT_DIR=/app/transform/external_hash,DBT_PROFILES_DIR=/app/transform/external_hash,EXTERNAL_HASH_BQ_DATASET=external_hash_index,EXTERNAL_HASH_DBT_TIMEOUT_SECONDS=3300,HR_ALUMNI_DRAIN_JOB_NAME=${_DRAIN_JOB},HR_ALUMNI_DRAIN_JOB_REGION=${_REGION},HR_ALUMNI_DRAIN_LEASE_HOLDER=hr-alumni-matching-drain,HR_ALUMNI_DRAIN_TASK_COUNT=5,HR_ALUMNI_DRAIN_CHUNK_LIMIT=10000
 
   # admin-api-dev runtime SA only — never user/IAP run.invoker on workers
   - id: grant-admin-api-invoker
@@ -80,7 +80,7 @@ steps:
           --set-cloudsql-instances="${_CLOUDSQL_INSTANCE}" \
           --command=python \
           --args=-m,hr_alumni.chunk_drain \
-          --set-env-vars="SERVICE_NAME=hr-alumni-matching-drain,WORKER_ID=${_DRAIN_JOB},GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},HR_ALUMNI_DRAIN_TASK_COUNT=5,HR_ALUMNI_DRAIN_LEASE_HOLDER=hr-alumni-matching-drain,PYTHONPATH=/app/app/hr_alumni/src" \
+          --set-env-vars="SERVICE_NAME=hr-alumni-matching-drain,WORKER_ID=${_DRAIN_JOB},GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},HR_ALUMNI_DRAIN_TASK_COUNT=5,HR_ALUMNI_DRAIN_CHUNK_LIMIT=10000,HR_ALUMNI_DRAIN_LEASE_HOLDER=hr-alumni-matching-drain,PYTHONPATH=/app/app/hr_alumni/src" \
           --quiet
 
         gcloud run jobs add-iam-policy-binding "${_DRAIN_JOB}" \

@@ -10,6 +10,7 @@ import pytest
 
 from habeas_privacy_core.connections.freshness import DisplayStatus, GateCode
 from habeas_privacy_core.connections.matching_gate import (
+    evaluate_matching_drain_readiness,
     evaluate_system_matching_gate,
     evaluate_vertical_matching_gate,
     gate_block_audit,
@@ -316,3 +317,55 @@ def test_vertical_id_from_attempt_row() -> None:
     )
     assert vertical_id_from_attempt_row({}) is None
     assert vertical_id_from_attempt_row(None) is None
+
+
+@pytest.mark.asyncio
+async def test_evaluate_matching_drain_readiness_mart_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from habeas_privacy_core.connections.freshness import GateResult
+
+    async def _ok_gate(*_a: object, **_k: object) -> GateResult:
+        return GateResult(
+            allowed=True, code=GateCode.OK, display_status=DisplayStatus.CONNECTED
+        )
+
+    monkeypatch.setattr(
+        "habeas_privacy_core.connections.matching_gate.evaluate_system_matching_gate",
+        _ok_gate,
+    )
+    monkeypatch.setattr(
+        "habeas_privacy_core.connections.matching_gate.email_hash_mart_exists",
+        lambda *_a, **_k: False,
+    )
+    out = await evaluate_matching_drain_readiness(
+        AsyncMock(), system="hr_alumni", mart_table="hr_alumni_email_hash__build"
+    )
+    assert out.ready is False
+    assert out.reason == "mart_missing"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_matching_drain_readiness_gate_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from habeas_privacy_core.connections.freshness import GateResult
+
+    async def _blocked(*_a: object, **_k: object) -> GateResult:
+        return GateResult(
+            allowed=False,
+            code=GateCode.SHEETS_REFRESH_STALE,
+            display_status=DisplayStatus.NEEDS_REFRESH,
+        )
+
+    monkeypatch.setattr(
+        "habeas_privacy_core.connections.matching_gate.evaluate_system_matching_gate",
+        _blocked,
+    )
+    monkeypatch.setattr(
+        "habeas_privacy_core.connections.matching_gate.email_hash_mart_exists",
+        lambda *_a, **_k: True,
+    )
+    out = await evaluate_matching_drain_readiness(AsyncMock(), system="hr_alumni")
+    assert out.ready is False
+    assert out.reason == "gate_blocked"

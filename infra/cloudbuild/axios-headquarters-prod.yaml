@@ -41,7 +41,7 @@ steps:
       - --no-allow-unauthenticated
       - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
       - --timeout=3600
-      - --set-env-vars=SERVICE_NAME=axios_headquarters,WORKER_ID=axios-headquarters-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,GCS_TRANSPORT=google,DATABASE_URL=${_DATABASE_URL},EXTERNAL_HASH_DBT_DIR=/app/transform/external_hash,DBT_PROFILES_DIR=/app/transform/external_hash,EXTERNAL_HASH_BQ_DATASET=external_hash_index,EXTERNAL_HASH_DBT_TIMEOUT_SECONDS=3300,AXIOS_DRAIN_JOB_NAME=${_DRAIN_JOB},AXIOS_DRAIN_JOB_REGION=${_REGION},AXIOS_DRAIN_LEASE_HOLDER=axios-headquarters-matching-drain,AXIOS_DRAIN_TASK_COUNT=5
+      - --set-env-vars=SERVICE_NAME=axios_headquarters,WORKER_ID=axios-headquarters-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,GCS_TRANSPORT=google,DATABASE_URL=${_DATABASE_URL},EXTERNAL_HASH_DBT_DIR=/app/transform/external_hash,DBT_PROFILES_DIR=/app/transform/external_hash,EXTERNAL_HASH_BQ_DATASET=external_hash_index,EXTERNAL_HASH_DBT_TIMEOUT_SECONDS=3300,AXIOS_DRAIN_JOB_NAME=${_DRAIN_JOB},AXIOS_DRAIN_JOB_REGION=${_REGION},AXIOS_DRAIN_LEASE_HOLDER=axios-headquarters-matching-drain,AXIOS_DRAIN_TASK_COUNT=5,AXIOS_DRAIN_CHUNK_LIMIT=10000
 
   # admin-api runtime SA only — never user/IAP run.invoker on workers. Never allUsers.
   - id: grant-admin-api-invoker
@@ -79,7 +79,7 @@ steps:
           --set-cloudsql-instances="${_CLOUDSQL_INSTANCE}" \
           --command=python \
           --args=-m,axios_headquarters.chunk_drain \
-          --set-env-vars="SERVICE_NAME=axios-headquarters-matching-drain,WORKER_ID=${_DRAIN_JOB},GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},AXIOS_DRAIN_TASK_COUNT=5,AXIOS_DRAIN_LEASE_HOLDER=axios-headquarters-matching-drain,PYTHONPATH=/app/app/axios_headquarters/src" \
+          --set-env-vars="SERVICE_NAME=axios-headquarters-matching-drain,WORKER_ID=${_DRAIN_JOB},GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},AXIOS_DRAIN_TASK_COUNT=5,AXIOS_DRAIN_CHUNK_LIMIT=10000,AXIOS_DRAIN_LEASE_HOLDER=axios-headquarters-matching-drain,PYTHONPATH=/app/app/axios_headquarters/src" \
           --quiet
 
         # axios-headquarters-prod runtime SA must execute this Job from /ensure-drain.

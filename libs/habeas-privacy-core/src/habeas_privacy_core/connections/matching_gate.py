@@ -17,6 +17,8 @@ from habeas_privacy_core.connections.catalog import (
     get_bindings_for_vertical,
     get_vertical,
 )
+from dataclasses import dataclass
+
 from habeas_privacy_core.connections.freshness import (
     DisplayStatus,
     GateCode,
@@ -24,13 +26,26 @@ from habeas_privacy_core.connections.freshness import (
     connection_gate_input,
     evaluate_connection_gate,
 )
+from habeas_privacy_core.vertical_hash.bq_lookup import email_hash_mart_exists
 
 __all__ = [
+    "DrainReadiness",
+    "evaluate_matching_drain_readiness",
     "evaluate_system_matching_gate",
     "evaluate_vertical_matching_gate",
     "gate_block_audit",
     "vertical_id_from_attempt_row",
 ]
+
+
+@dataclass(frozen=True)
+class DrainReadiness:
+    """Whether matching drain may claim work / start a Job for one system."""
+
+    ready: bool
+    reason: str
+    gate: GateResult
+    blocking_system: str | None = None
 
 
 def catalog_vertical_id_for_system(system: str) -> str | None:
@@ -217,3 +232,40 @@ def gate_block_audit(*, system: str, gate: GateResult) -> dict[str, Any]:
     if gate.blocking_system and gate.blocking_system != system:
         payload["blocking_system"] = gate.blocking_system
     return payload
+
+
+async def evaluate_matching_drain_readiness(
+    conn: Any,
+    *,
+    system: str,
+    vertical_id: str | None = None,
+    mart_table: str | None = None,
+    bq_client: Any | None = None,
+    now: datetime | None = None,
+) -> DrainReadiness:
+    """Gate drain on connection freshness and BigQuery mart existence.
+
+    Uses the calling system's own connection gate (not sibling AND). Missing or
+    unreachable mart tables return ``reason='mart_missing'`` so Jobs do not
+    burn the queue with lookup errors.
+    """
+    gate = await evaluate_system_matching_gate(
+        conn, system=system, vertical_id=vertical_id, now=now
+    )
+    if not gate.allowed:
+        return DrainReadiness(
+            ready=False,
+            reason="gate_blocked",
+            gate=gate,
+            blocking_system=gate.blocking_system or system,
+        )
+    if not email_hash_mart_exists(
+        system, client=bq_client, table=mart_table
+    ):
+        return DrainReadiness(
+            ready=False,
+            reason="mart_missing",
+            gate=gate,
+            blocking_system=system,
+        )
+    return DrainReadiness(ready=True, reason="ok", gate=gate)

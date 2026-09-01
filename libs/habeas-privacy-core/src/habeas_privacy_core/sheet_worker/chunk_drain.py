@@ -21,6 +21,9 @@ from typing import Any
 from uuid import UUID
 
 from habeas_privacy_core.audit.redaction import redact_error_text
+from habeas_privacy_core.connections.matching_gate import (
+    evaluate_matching_drain_readiness,
+)
 from habeas_privacy_core.db.vertical_matching import upsert_vertical_matching_snapshot
 from habeas_privacy_core.models.intake import DropListType
 from habeas_privacy_core.queue.constants import STEP_MATCHING
@@ -38,7 +41,7 @@ from habeas_privacy_core.vertical_hash.audit import build_vertical_audit_payload
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CHUNK_LIMIT = 1_000
+DEFAULT_CHUNK_LIMIT = 10_000
 COMPLETE_BATCH_SIZE = 250
 DEFAULT_CLAIM_LEASE_MINUTES = 15
 LOOKUP_RETRY_SECONDS = 60
@@ -390,6 +393,30 @@ async def process_matching_chunk(
     persist: Any | None = None,
 ) -> dict[str, Any]:
     """Claim one chunk, run set-based BQ lookup, bulk-complete."""
+    readiness = await evaluate_matching_drain_readiness(
+        conn,
+        system=config.system_id,
+        vertical_id=config.vertical_id,
+        mart_table=config.mart_table,
+        bq_client=bq_client,
+    )
+    if not readiness.ready:
+        logger.info(
+            "sheet_drain_skipped",
+            extra={
+                "event": "sheet_drain_skipped",
+                "reason": readiness.reason,
+                "system": config.system_id,
+                "gate_code": readiness.gate.code,
+            },
+        )
+        return {
+            "status": readiness.reason,
+            "claimed": 0,
+            "completed": 0,
+            "gate_code": readiness.gate.code,
+        }
+
     claimed = await claim_matching_chunk(
         conn,
         config,
@@ -700,6 +727,7 @@ async def ensure_drain(
     *,
     holder: str | None = None,
     start_job: Callable[[], Awaitable[None]] | None = None,
+    bq_client: Any | None = None,
 ) -> dict[str, Any]:
     """Acquire the drain lease if pending matching work exists for this system."""
     lease_holder = holder or drain_lease_holder(config)
@@ -711,6 +739,32 @@ async def ensure_drain(
             "pending": 0,
             "reaped": reaped,
             "lease_acquired": False,
+        }
+
+    readiness = await evaluate_matching_drain_readiness(
+        conn,
+        system=config.system_id,
+        vertical_id=config.vertical_id,
+        mart_table=config.mart_table,
+        bq_client=bq_client,
+    )
+    if not readiness.ready:
+        logger.info(
+            "sheet_ensure_drain_skipped",
+            extra={
+                "event": "sheet_ensure_drain_skipped",
+                "reason": readiness.reason,
+                "system": config.system_id,
+                "pending": pending_n,
+                "gate_code": readiness.gate.code,
+            },
+        )
+        return {
+            "status": readiness.reason,
+            "pending": pending_n,
+            "reaped": reaped,
+            "lease_acquired": False,
+            "gate_code": readiness.gate.code,
         }
 
     acquired = await acquire_drain_lease(
@@ -771,6 +825,7 @@ async def run_drain_budget(
     worker_id: str,
     max_chunks: int = 50,
     holder: str | None = None,
+    bq_client: Any | None = None,
 ) -> dict[str, Any]:
     """Acquire the lease and process chunks until idle or ``max_chunks``."""
     lease_holder = holder or drain_lease_holder(config)
@@ -778,6 +833,22 @@ async def run_drain_budget(
     pending_before = await _pending_matching_count(conn, config)
     if pending_before <= 0:
         return {"status": "idle", "pending": 0, "chunks": 0, "completed": 0}
+
+    readiness = await evaluate_matching_drain_readiness(
+        conn,
+        system=config.system_id,
+        vertical_id=config.vertical_id,
+        mart_table=config.mart_table,
+        bq_client=bq_client,
+    )
+    if not readiness.ready:
+        return {
+            "status": readiness.reason,
+            "pending": pending_before,
+            "chunks": 0,
+            "completed": 0,
+            "gate_code": readiness.gate.code,
+        }
 
     acquired = await acquire_drain_lease(
         conn, holder=lease_holder, lease_key=config.lease_key
@@ -878,6 +949,8 @@ async def run_job_task(
             continue
         last_status = str(result.get("status") or "idle")
         claimed = int(result.get("claimed") or 0)
+        if last_status in ("gate_blocked", "mart_missing"):
+            break
         if last_status in ("idle", "error") or claimed == 0:
             if await _pending_matching_count(conn, config) <= 0:
                 break

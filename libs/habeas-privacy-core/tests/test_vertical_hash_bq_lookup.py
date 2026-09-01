@@ -28,6 +28,7 @@ from habeas_privacy_core.vertical_hash.bq_lookup import (
     PAYLOCITY_SYSTEM,
     Auth0HashLookupError,
     VerticalHashLookupError,
+    email_hash_mart_exists,
     lookup_auth0_vendor_ids_by_email_hash,
     lookup_auth0_vendor_ids_by_email_hashes,
     lookup_axios_headquarters_vendor_ids_by_email_hashes,
@@ -111,6 +112,28 @@ def test_email_hash_marts_cover_external_verticals() -> None:
     assert EMAIL_HASH_MARTS[HR_ALUMNI_SYSTEM] == HR_ALUMNI_EMAIL_HASH_BUILD_TABLE
     assert EMAIL_HASH_MARTS[BIZDEV_CONTACTS_SYSTEM] == BIZDEV_CONTACTS_EMAIL_HASH_BUILD_TABLE
     assert EMAIL_HASH_MARTS[GOOGLE_SHEETS_SYSTEM] == GOOGLE_SHEETS_EMAIL_HASH_BUILD_TABLE
+
+
+def test_email_hash_mart_exists_true() -> None:
+    client = MagicMock()
+    client.get_table.return_value = object()
+    assert email_hash_mart_exists(HR_ALUMNI_SYSTEM, client=client) is True
+    client.get_table.assert_called_once_with(
+        f"{DEFAULT_BQ_PROJECT}.{DEFAULT_BQ_DATASET}.{HR_ALUMNI_EMAIL_HASH_BUILD_TABLE}"
+    )
+
+
+def test_email_hash_mart_exists_false_on_not_found() -> None:
+    class NotFound(Exception):
+        pass
+
+    client = MagicMock()
+    client.get_table.side_effect = NotFound("404 Not found: Table")
+    assert email_hash_mart_exists(HR_ALUMNI_SYSTEM, client=client) is False
+
+
+def test_email_hash_mart_exists_unknown_system() -> None:
+    assert email_hash_mart_exists("unknown_system", client=MagicMock()) is False
 
 
 def test_lookup_zero_hits() -> None:

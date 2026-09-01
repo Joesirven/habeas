@@ -26,6 +26,9 @@ from typing import Any
 from uuid import UUID
 
 from habeas_privacy_core.audit.redaction import redact_error_text
+from habeas_privacy_core.connections.matching_gate import (
+    evaluate_matching_drain_readiness,
+)
 from habeas_privacy_core.db.vertical_matching import upsert_vertical_matching_snapshot
 from habeas_privacy_core.models.intake import DropListType
 from habeas_privacy_core.queue.constants import (
@@ -51,7 +54,7 @@ logger = logging.getLogger(__name__)
 SYSTEM = "axios_headquarters"
 AXIOS_LEASE_KEY = "axios_headquarters"
 DEFAULT_DRAIN_LEASE_HOLDER = "axios-headquarters-matching-drain"
-DEFAULT_CHUNK_LIMIT = 1_000
+DEFAULT_CHUNK_LIMIT = 10_000
 COMPLETE_BATCH_SIZE = 250
 DEFAULT_CLAIM_LEASE_MINUTES = 15
 LOOKUP_RETRY_SECONDS = 60
@@ -535,6 +538,28 @@ async def process_axios_matching_chunk(
     persist: Any | None = None,
 ) -> dict[str, Any]:
     """Claim one Axios HQ chunk, set-based BQ lookup, persist snapshots, bulk-complete."""
+    readiness = await evaluate_matching_drain_readiness(
+        conn,
+        system=SYSTEM,
+        mart_table=AXIOS_HEADQUARTERS_EMAIL_HASH_BUILD_TABLE,
+        bq_client=bq_client,
+    )
+    if not readiness.ready:
+        logger.info(
+            "axios_drain_skipped",
+            extra={
+                "event": "axios_drain_skipped",
+                "reason": readiness.reason,
+                "gate_code": readiness.gate.code,
+            },
+        )
+        return {
+            "status": readiness.reason,
+            "claimed": 0,
+            "completed": 0,
+            "gate_code": readiness.gate.code,
+        }
+
     claimed = await claim_axios_matching_chunk(
         conn,
         worker_id=worker_id,
@@ -826,6 +851,7 @@ async def ensure_drain(
     *,
     holder: str | None = None,
     start_job: Callable[[], Awaitable[None]] | None = None,
+    bq_client: Any | None = None,
 ) -> dict[str, Any]:
     """Acquire the Axios HQ drain lease if pending matching work exists."""
     lease_holder = holder or drain_lease_holder()
@@ -837,6 +863,30 @@ async def ensure_drain(
             "pending": 0,
             "reaped": reaped,
             "lease_acquired": False,
+        }
+
+    readiness = await evaluate_matching_drain_readiness(
+        conn,
+        system=SYSTEM,
+        mart_table=AXIOS_HEADQUARTERS_EMAIL_HASH_BUILD_TABLE,
+        bq_client=bq_client,
+    )
+    if not readiness.ready:
+        logger.info(
+            "axios_ensure_drain_skipped",
+            extra={
+                "event": "axios_ensure_drain_skipped",
+                "reason": readiness.reason,
+                "pending": pending_n,
+                "gate_code": readiness.gate.code,
+            },
+        )
+        return {
+            "status": readiness.reason,
+            "pending": pending_n,
+            "reaped": reaped,
+            "lease_acquired": False,
+            "gate_code": readiness.gate.code,
         }
 
     acquired = await acquire_drain_lease(
@@ -999,6 +1049,8 @@ async def run_job_task(
             continue
         last_status = str(result.get("status") or "idle")
         claimed = int(result.get("claimed") or 0)
+        if last_status in ("gate_blocked", "mart_missing"):
+            break
         if last_status in ("idle", "error") or claimed == 0:
             if await _pending_axios_matching_count(conn) <= 0:
                 break

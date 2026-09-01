@@ -32,6 +32,24 @@ def _hermetic_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "")
 
 
+@pytest.fixture(autouse=True)
+def _drain_readiness_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    from habeas_privacy_core.connections.freshness import GateResult
+    from habeas_privacy_core.connections.matching_gate import DrainReadiness
+
+    async def _ready(*_a: Any, **_k: Any) -> DrainReadiness:
+        return DrainReadiness(
+            ready=True,
+            reason="ok",
+            gate=GateResult(allowed=True, code="ok", display_status="connected"),
+        )
+
+    monkeypatch.setattr(
+        "habeas_privacy_core.sheet_worker.chunk_drain.evaluate_matching_drain_readiness",
+        _ready,
+    )
+
+
 class _RecordingConn:
     def __init__(
         self,
@@ -158,16 +176,23 @@ async def test_process_chunk_batch_lookup_and_bulk_completes() -> None:
 async def test_ensure_drain_uses_hr_alumni_lease_key() -> None:
     conn = _RecordingConn(fetchval=3)
 
-    with patch(
-        "habeas_privacy_core.sheet_worker.chunk_drain.acquire_drain_lease",
-        new_callable=AsyncMock,
-        return_value=True,
-    ) as acquire:
-        with patch(
+    with (
+        patch(
+            "habeas_privacy_core.sheet_worker.chunk_drain.reap_stale_claims",
+            new_callable=AsyncMock,
+            return_value=0,
+        ),
+        patch(
+            "habeas_privacy_core.sheet_worker.chunk_drain.acquire_drain_lease",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as acquire,
+        patch(
             "habeas_privacy_core.sheet_worker.chunk_drain.renew_drain_lease",
             new_callable=AsyncMock,
-        ):
-            out = await ensure_drain(conn, CONFIG)
+        ),
+    ):
+        out = await ensure_drain(conn, CONFIG)
 
     assert out["status"] == "started"
     assert out["lease_key"] == "hr_alumni"

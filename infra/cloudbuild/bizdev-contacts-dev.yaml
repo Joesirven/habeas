@@ -43,7 +43,7 @@ steps:
       - --service-account=${_RUNTIME_SA}
       - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
       - --timeout=3600
-      - --set-env-vars=SERVICE_NAME=bizdev-contacts,WORKER_ID=bizdev-contacts-dev,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,GCS_TRANSPORT=google,DATABASE_URL=${_DATABASE_URL},EXTERNAL_HASH_DBT_DIR=/app/transform/external_hash,DBT_PROFILES_DIR=/app/transform/external_hash,EXTERNAL_HASH_BQ_DATASET=external_hash_index,EXTERNAL_HASH_DBT_TIMEOUT_SECONDS=3300,BIZDEV_CONTACTS_DRAIN_JOB_NAME=${_DRAIN_JOB},BIZDEV_CONTACTS_DRAIN_JOB_REGION=${_REGION},BIZDEV_CONTACTS_DRAIN_LEASE_HOLDER=bizdev-contacts-matching-drain,BIZDEV_CONTACTS_DRAIN_TASK_COUNT=5
+      - --set-env-vars=SERVICE_NAME=bizdev-contacts,WORKER_ID=bizdev-contacts-dev,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,GCS_TRANSPORT=google,DATABASE_URL=${_DATABASE_URL},EXTERNAL_HASH_DBT_DIR=/app/transform/external_hash,DBT_PROFILES_DIR=/app/transform/external_hash,EXTERNAL_HASH_BQ_DATASET=external_hash_index,EXTERNAL_HASH_DBT_TIMEOUT_SECONDS=3300,BIZDEV_CONTACTS_DRAIN_JOB_NAME=${_DRAIN_JOB},BIZDEV_CONTACTS_DRAIN_JOB_REGION=${_REGION},BIZDEV_CONTACTS_DRAIN_LEASE_HOLDER=bizdev-contacts-matching-drain,BIZDEV_CONTACTS_DRAIN_TASK_COUNT=5,BIZDEV_CONTACTS_DRAIN_CHUNK_LIMIT=10000
 
   # admin-api-dev runtime SA only — never user/IAP run.invoker on workers
   - id: grant-admin-api-invoker
@@ -80,7 +80,7 @@ steps:
           --set-cloudsql-instances="${_CLOUDSQL_INSTANCE}" \
           --command=python \
           --args=-m,bizdev_contacts.chunk_drain \
-          --set-env-vars="SERVICE_NAME=bizdev-contacts-matching-drain,WORKER_ID=${_DRAIN_JOB},GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},BIZDEV_CONTACTS_DRAIN_TASK_COUNT=5,BIZDEV_CONTACTS_DRAIN_LEASE_HOLDER=bizdev-contacts-matching-drain,PYTHONPATH=/app/app/bizdev_contacts/src" \
+          --set-env-vars="SERVICE_NAME=bizdev-contacts-matching-drain,WORKER_ID=${_DRAIN_JOB},GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},BIZDEV_CONTACTS_DRAIN_TASK_COUNT=5,BIZDEV_CONTACTS_DRAIN_CHUNK_LIMIT=10000,BIZDEV_CONTACTS_DRAIN_LEASE_HOLDER=bizdev-contacts-matching-drain,PYTHONPATH=/app/app/bizdev_contacts/src" \
           --quiet
 
         gcloud run jobs add-iam-policy-binding "${_DRAIN_JOB}" \

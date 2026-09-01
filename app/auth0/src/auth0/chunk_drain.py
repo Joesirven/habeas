@@ -21,6 +21,9 @@ from typing import Any
 from uuid import UUID
 
 from habeas_privacy_core.audit.redaction import redact_error_text
+from habeas_privacy_core.connections.matching_gate import (
+    evaluate_matching_drain_readiness,
+)
 from habeas_privacy_core.db.vertical_matching import (
     AUTH0_VERTICAL,
     upsert_vertical_matching_snapshot,
@@ -34,6 +37,8 @@ from habeas_privacy_core.queue.drain_lease import (
 )
 from habeas_privacy_core.vertical_hash.audit import build_vertical_audit_payload
 from habeas_privacy_core.vertical_hash.bq_lookup import (
+    AUTH0_EMAIL_HASH_BUILD_TABLE,
+    AUTH0_SYSTEM,
     Auth0HashLookupError,
     lookup_auth0_vendor_ids_by_email_hashes,
 )
@@ -45,7 +50,7 @@ logger = logging.getLogger(__name__)
 SYSTEM = "auth0"
 AUTH0_LEASE_KEY = "auth0"
 DEFAULT_DRAIN_LEASE_HOLDER = "auth0-matching-drain"
-DEFAULT_CHUNK_LIMIT = 1_000
+DEFAULT_CHUNK_LIMIT = 10_000
 COMPLETE_BATCH_SIZE = 250
 DEFAULT_CLAIM_LEASE_MINUTES = 15
 LOOKUP_RETRY_SECONDS = 60
@@ -345,6 +350,28 @@ async def process_auth0_matching_chunk(
     persist: Any | None = None,
 ) -> dict[str, Any]:
     """Claim one Auth0 chunk, set-based BQ lookup, persist snapshots, bulk-complete."""
+    readiness = await evaluate_matching_drain_readiness(
+        conn,
+        system=AUTH0_SYSTEM,
+        mart_table=AUTH0_EMAIL_HASH_BUILD_TABLE,
+        bq_client=bq_client,
+    )
+    if not readiness.ready:
+        logger.info(
+            "auth0_drain_skipped",
+            extra={
+                "event": "auth0_drain_skipped",
+                "reason": readiness.reason,
+                "gate_code": readiness.gate.code,
+            },
+        )
+        return {
+            "status": readiness.reason,
+            "claimed": 0,
+            "completed": 0,
+            "gate_code": readiness.gate.code,
+        }
+
     claimed = await claim_auth0_matching_chunk(
         conn,
         worker_id=worker_id,
@@ -636,6 +663,7 @@ async def ensure_drain(
     *,
     holder: str | None = None,
     start_job: Callable[[], Awaitable[None]] | None = None,
+    bq_client: Any | None = None,
 ) -> dict[str, Any]:
     """Acquire the Auth0 drain lease if pending Auth0 matching work exists."""
     lease_holder = holder or drain_lease_holder()
@@ -647,6 +675,30 @@ async def ensure_drain(
             "pending": 0,
             "reaped": reaped,
             "lease_acquired": False,
+        }
+
+    readiness = await evaluate_matching_drain_readiness(
+        conn,
+        system=AUTH0_SYSTEM,
+        mart_table=AUTH0_EMAIL_HASH_BUILD_TABLE,
+        bq_client=bq_client,
+    )
+    if not readiness.ready:
+        logger.info(
+            "auth0_ensure_drain_skipped",
+            extra={
+                "event": "auth0_ensure_drain_skipped",
+                "reason": readiness.reason,
+                "pending": pending_n,
+                "gate_code": readiness.gate.code,
+            },
+        )
+        return {
+            "status": readiness.reason,
+            "pending": pending_n,
+            "reaped": reaped,
+            "lease_acquired": False,
+            "gate_code": readiness.gate.code,
         }
 
     acquired = await acquire_drain_lease(
@@ -802,6 +854,8 @@ async def run_job_task(
             continue
         last_status = str(result.get("status") or "idle")
         claimed = int(result.get("claimed") or 0)
+        if last_status in ("gate_blocked", "mart_missing"):
+            break
         if last_status in ("idle", "error") or claimed == 0:
             if await _pending_auth0_matching_count(conn) <= 0:
                 break
