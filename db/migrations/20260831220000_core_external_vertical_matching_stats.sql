@@ -523,42 +523,167 @@ ON CONFLICT (download_id, vertical, stage) DO UPDATE
        in_flight = EXCLUDED.in_flight,
        updated_at = NOW();
 
--- Backfill people_hr (composite paylocity + lever + hr_alumni).
+-- Backfill people_hr (composite paylocity + lever + optional hr_alumni).
 DELETE FROM drop_bulk_vertical_stats
  WHERE vertical = 'people_hr'
    AND stage = 'matching';
 
-INSERT INTO drop_bulk_vertical_stats (
-    download_id, vertical, stage, total, open, success, failed, in_flight
-)
-SELECT
-    sub.download_id,
-    'people_hr',
-    'matching',
-    COUNT(*)::bigint,
-    COUNT(*) FILTER (WHERE sub.bucket = 'open')::bigint,
-    COUNT(*) FILTER (WHERE sub.bucket = 'success')::bigint,
-    COUNT(*) FILTER (WHERE sub.bucket = 'failed')::bigint,
-    COUNT(*) FILTER (WHERE sub.bucket = 'in_flight')::bigint
-  FROM (
-    SELECT
-           r.bulk_process_download_id AS download_id,
-           core_people_hr_matching_bucket(r.id) AS bucket
-      FROM requests r
-      JOIN drop_raw_requests drr
-        ON r.intake_source = 'drop'
-       AND r.raw_record_id = drr.id
-       AND drr.list_type = 'Email'
-     WHERE r.bulk_process_download_id IS NOT NULL
-  ) sub
- GROUP BY sub.download_id
-ON CONFLICT (download_id, vertical, stage) DO UPDATE
-   SET total = EXCLUDED.total,
-       open = EXCLUDED.open,
-       success = EXCLUDED.success,
-       failed = EXCLUDED.failed,
-       in_flight = EXCLUDED.in_flight,
-       updated_at = NOW();
+DO $$
+BEGIN
+    IF to_regclass('public.hr_alumni_attempts') IS NOT NULL THEN
+        INSERT INTO drop_bulk_vertical_stats (
+            download_id, vertical, stage, total, open, success, failed, in_flight
+        )
+        SELECT
+            sub.download_id,
+            'people_hr',
+            'matching',
+            COUNT(*)::bigint,
+            COUNT(*) FILTER (WHERE sub.bucket = 'open')::bigint,
+            COUNT(*) FILTER (WHERE sub.bucket = 'success')::bigint,
+            COUNT(*) FILTER (WHERE sub.bucket = 'failed')::bigint,
+            COUNT(*) FILTER (WHERE sub.bucket = 'in_flight')::bigint
+          FROM (
+            SELECT
+                er.download_id,
+                CASE
+                    WHEN pay.status IN (
+                        'submit_error', 'outcome_error', 'timeout', 'failed'
+                    ) OR lev.status IN (
+                        'submit_error', 'outcome_error', 'timeout', 'failed'
+                    ) OR hr.status IN (
+                        'submit_error', 'outcome_error', 'timeout', 'failed'
+                    ) THEN 'failed'
+                    WHEN pay.status = 'in_flight'
+                      OR lev.status = 'in_flight'
+                      OR hr.status = 'in_flight' THEN 'in_flight'
+                    WHEN pay.status IS NULL
+                     AND lev.status IS NULL
+                     AND hr.status IS NULL THEN 'open'
+                    WHEN pay.status IN ('pending', 'claimed', 'abandoned')
+                      OR lev.status IN ('pending', 'claimed', 'abandoned')
+                      OR hr.status IN ('pending', 'claimed', 'abandoned') THEN 'open'
+                    WHEN (pay.status IS NULL OR pay.status = 'success')
+                     AND (lev.status IS NULL OR lev.status = 'success')
+                     AND (hr.status IS NULL OR hr.status = 'success')
+                     AND (
+                         pay.status IS NOT NULL
+                         OR lev.status IS NOT NULL
+                         OR hr.status IS NOT NULL
+                     ) THEN 'success'
+                    ELSE 'open'
+                END AS bucket
+              FROM (
+                SELECT r.id AS request_id, r.bulk_process_download_id AS download_id
+                  FROM requests r
+                  JOIN drop_raw_requests drr
+                    ON r.intake_source = 'drop'
+                   AND r.raw_record_id = drr.id
+                   AND drr.list_type = 'Email'
+                 WHERE r.bulk_process_download_id IS NOT NULL
+              ) er
+              LEFT JOIN LATERAL (
+                SELECT status
+                  FROM paylocity_attempts pa
+                 WHERE pa.request_id = er.request_id
+                   AND pa.step = 'matching'
+                 ORDER BY pa.attempt_number DESC, pa.attempted_at DESC
+                 LIMIT 1
+              ) pay ON TRUE
+              LEFT JOIN LATERAL (
+                SELECT status
+                  FROM lever_attempts la
+                 WHERE la.request_id = er.request_id
+                   AND la.step = 'matching'
+                 ORDER BY la.attempt_number DESC, la.attempted_at DESC
+                 LIMIT 1
+              ) lev ON TRUE
+              LEFT JOIN LATERAL (
+                SELECT status
+                  FROM hr_alumni_attempts ha
+                 WHERE ha.request_id = er.request_id
+                   AND ha.step = 'matching'
+                 ORDER BY ha.attempt_number DESC, ha.attempted_at DESC
+                 LIMIT 1
+              ) hr ON TRUE
+          ) sub
+         GROUP BY sub.download_id
+        ON CONFLICT (download_id, vertical, stage) DO UPDATE
+           SET total = EXCLUDED.total,
+               open = EXCLUDED.open,
+               success = EXCLUDED.success,
+               failed = EXCLUDED.failed,
+               in_flight = EXCLUDED.in_flight,
+               updated_at = NOW();
+    ELSE
+        INSERT INTO drop_bulk_vertical_stats (
+            download_id, vertical, stage, total, open, success, failed, in_flight
+        )
+        SELECT
+            sub.download_id,
+            'people_hr',
+            'matching',
+            COUNT(*)::bigint,
+            COUNT(*) FILTER (WHERE sub.bucket = 'open')::bigint,
+            COUNT(*) FILTER (WHERE sub.bucket = 'success')::bigint,
+            COUNT(*) FILTER (WHERE sub.bucket = 'failed')::bigint,
+            COUNT(*) FILTER (WHERE sub.bucket = 'in_flight')::bigint
+          FROM (
+            SELECT
+                er.download_id,
+                CASE
+                    WHEN pay.status IN (
+                        'submit_error', 'outcome_error', 'timeout', 'failed'
+                    ) OR lev.status IN (
+                        'submit_error', 'outcome_error', 'timeout', 'failed'
+                    ) THEN 'failed'
+                    WHEN pay.status = 'in_flight'
+                      OR lev.status = 'in_flight' THEN 'in_flight'
+                    WHEN pay.status IS NULL AND lev.status IS NULL THEN 'open'
+                    WHEN pay.status IN ('pending', 'claimed', 'abandoned')
+                      OR lev.status IN ('pending', 'claimed', 'abandoned') THEN 'open'
+                    WHEN (pay.status IS NULL OR pay.status = 'success')
+                     AND (lev.status IS NULL OR lev.status = 'success')
+                     AND (pay.status IS NOT NULL OR lev.status IS NOT NULL)
+                     THEN 'success'
+                    ELSE 'open'
+                END AS bucket
+              FROM (
+                SELECT r.id AS request_id, r.bulk_process_download_id AS download_id
+                  FROM requests r
+                  JOIN drop_raw_requests drr
+                    ON r.intake_source = 'drop'
+                   AND r.raw_record_id = drr.id
+                   AND drr.list_type = 'Email'
+                 WHERE r.bulk_process_download_id IS NOT NULL
+              ) er
+              LEFT JOIN LATERAL (
+                SELECT status
+                  FROM paylocity_attempts pa
+                 WHERE pa.request_id = er.request_id
+                   AND pa.step = 'matching'
+                 ORDER BY pa.attempt_number DESC, pa.attempted_at DESC
+                 LIMIT 1
+              ) pay ON TRUE
+              LEFT JOIN LATERAL (
+                SELECT status
+                  FROM lever_attempts la
+                 WHERE la.request_id = er.request_id
+                   AND la.step = 'matching'
+                 ORDER BY la.attempt_number DESC, la.attempted_at DESC
+                 LIMIT 1
+              ) lev ON TRUE
+          ) sub
+         GROUP BY sub.download_id
+        ON CONFLICT (download_id, vertical, stage) DO UPDATE
+           SET total = EXCLUDED.total,
+               open = EXCLUDED.open,
+               success = EXCLUDED.success,
+               failed = EXCLUDED.failed,
+               in_flight = EXCLUDED.in_flight,
+               updated_at = NOW();
+    END IF;
+END $$;
 
 -- Backfill bizdev when the split-sheet worker table exists (post-20260831200000).
 DO $$
