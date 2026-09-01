@@ -1,17 +1,15 @@
 -- migrate:up
--- migrate:transaction:false
 -- Heavy backfill for external vertical matching stats (split from 20260831220000).
--- Runs outside a transaction so CREATE INDEX CONCURRENTLY is allowed.
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_axios_headquarters_attempts_request_matching
+CREATE INDEX IF NOT EXISTS ix_axios_headquarters_attempts_request_matching
     ON axios_headquarters_attempts (request_id, attempt_number DESC, attempted_at DESC)
     WHERE step = 'matching';
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_paylocity_attempts_request_matching
+CREATE INDEX IF NOT EXISTS ix_paylocity_attempts_request_matching
     ON paylocity_attempts (request_id, attempt_number DESC, attempted_at DESC)
     WHERE step = 'matching';
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_lever_attempts_request_matching
+CREATE INDEX IF NOT EXISTS ix_lever_attempts_request_matching
     ON lever_attempts (request_id, attempt_number DESC, attempted_at DESC)
     WHERE step = 'matching';
 
@@ -82,7 +80,7 @@ DO $$
 BEGIN
     IF to_regclass('public.hr_alumni_attempts') IS NOT NULL THEN
         EXECUTE $sql$
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_hr_alumni_attempts_request_matching
+            CREATE INDEX IF NOT EXISTS ix_hr_alumni_attempts_request_matching
                 ON hr_alumni_attempts (request_id, attempt_number DESC, attempted_at DESC)
                 WHERE step = 'matching'
         $sql$;
@@ -252,7 +250,7 @@ BEGIN
     END IF;
 
     EXECUTE $sql$
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_bizdev_contacts_attempts_request_matching
+        CREATE INDEX IF NOT EXISTS ix_bizdev_contacts_attempts_request_matching
             ON bizdev_contacts_attempts (request_id, attempt_number DESC, attempted_at DESC)
             WHERE step = 'matching'
     $sql$;
@@ -316,12 +314,11 @@ BEGIN
 END $$;
 
 -- migrate:down
--- migrate:transaction:false
-DROP INDEX CONCURRENTLY IF EXISTS ix_bizdev_contacts_attempts_request_matching;
-DROP INDEX CONCURRENTLY IF EXISTS ix_hr_alumni_attempts_request_matching;
-DROP INDEX CONCURRENTLY IF EXISTS ix_lever_attempts_request_matching;
-DROP INDEX CONCURRENTLY IF EXISTS ix_paylocity_attempts_request_matching;
-DROP INDEX CONCURRENTLY IF EXISTS ix_axios_headquarters_attempts_request_matching;
+DROP INDEX IF EXISTS ix_bizdev_contacts_attempts_request_matching;
+DROP INDEX IF EXISTS ix_hr_alumni_attempts_request_matching;
+DROP INDEX IF EXISTS ix_lever_attempts_request_matching;
+DROP INDEX IF EXISTS ix_paylocity_attempts_request_matching;
+DROP INDEX IF EXISTS ix_axios_headquarters_attempts_request_matching;
 
 DELETE FROM drop_bulk_vertical_stats
  WHERE vertical IN ('communications', 'people_hr', 'bizdev')
