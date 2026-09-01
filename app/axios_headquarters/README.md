@@ -1,6 +1,6 @@
 # Axios HQ worker
 
-Upload-every-batch Communications vertical (replaces retired Mailchimp).
+Upload-every-batch Communications vertical.
 
 Owner wizard method: Axios HQ CSV upload (every batch). Not an HTTP API.
 

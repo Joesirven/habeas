@@ -9,6 +9,8 @@ product_contract_source: ce-plan-bootstrap
 execution: code
 ---
 
+> **SUPERSEDED (Mailchimp):** Communications is Axios HQ (`axios_headquarters`); do not deploy or extend Mailchimp — historical plan text left intact.
+
 ## Goal Capsule
 
 Stand up the Tier-C / non–data-warehouse verticals for California DROP with the session-settled pattern: **hash in the worker (never persist plaintext PII) → write hashed raw to BigQuery → dbt versioned builds into serving marts → per-system Cloud Run workers own matching and suppression via `step` on per-system attempt tables.**

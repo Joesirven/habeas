@@ -6,7 +6,7 @@ import json
 import os
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import asyncpg
 import pytest
@@ -15,6 +15,7 @@ from admin_api.main import app
 from admin_api.request_journey import (
     JOURNEY_STAGES,
     JourneyStage,
+    NeedsAttentionAssignment,
     RequestJourneyResponse,
     WorkbenchStage,
     assert_no_pii_keys,
@@ -3305,3 +3306,192 @@ async def test_workbench_axios_hq_snapshot_without_disposition_is_waiting(
     serialized = json.dumps(dumped)
     for forbidden in ("email", "phone", "first_name", "last_name", "hash_value"):
         assert forbidden not in serialized
+
+
+@pytest.mark.asyncio
+async def test_list_matching_needs_attention_batches_assignment_lookup() -> None:
+    """One assignment query for the whole page — no per-row N+1 round trips."""
+    request_a = "11111111-1111-2222-3333-444444444444"
+    request_b = "55555555-6666-7777-8888-999999999999"
+    base_rows = [
+        {
+            "request_id": request_a,
+            "approval_id": 101,
+            "intake_source": "drop",
+            "received_at": None,
+            "raw_record_id": None,
+            "requested_at": "2026-08-20T00:00:00+00:00",
+            "review_status": "pending",
+            "requestor_state": "ca",
+            "matched": True,
+            "match_count": 1,
+            "matched_via": "drop_hash",
+            "bulk_process_id": 42,
+            "source_csv_filename": "member-a.csv",
+        },
+        {
+            "request_id": request_b,
+            "approval_id": None,
+            "intake_source": "drop",
+            "received_at": None,
+            "raw_record_id": None,
+            "requested_at": "2026-08-21T00:00:00+00:00",
+            "review_status": "none",
+            "requestor_state": None,
+            "matched": None,
+            "match_count": None,
+            "matched_via": None,
+            "bulk_process_id": 42,
+            "source_csv_filename": "member-a.csv",
+        },
+    ]
+    assignment_rows = [
+        {
+            "request_id": request_a,
+            "approver_role": "reviewer",
+            "context_jsonb": json.dumps(
+                {"kind": "assign", "assignee_identity": "rev@habeas.com"}
+            ),
+        }
+    ]
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(side_effect=[base_rows, assignment_rows])
+
+    items = await request_journey.list_matching_needs_attention(conn, limit=100)
+
+    # Base query + one batched assignment query — never one lookup per row.
+    assert conn.fetch.await_count == 2
+    batch_args = conn.fetch.await_args_list[1].args
+    assert "DISTINCT ON (request_id)" in batch_args[0]
+    assert batch_args[1] == [UUID(request_a), UUID(request_b)]
+    assert batch_args[2] == WORKFLOW_ASSIGNMENT_ACTION
+
+    by_id = {item.request_id: item for item in items}
+    assert by_id[request_a].assignment == NeedsAttentionAssignment(
+        target_role="reviewer",
+        kind="assign",
+        assignee_identity="rev@habeas.com",
+    )
+    assert by_id[request_b].assignment is None
+    # Non-assignment fields are untouched by the batching refactor.
+    assert by_id[request_a].matched is True
+    assert by_id[request_a].match_count == 1
+    assert by_id[request_a].review_status == "pending"
+    assert by_id[request_a].requestor_state == "CA"
+    assert by_id[request_a].bulk_process_id == 42
+    assert by_id[request_b].approval_id is None
+    assert by_id[request_b].matched is None
+    assert by_id[request_b].requestor_state is None
+
+
+@pytest.mark.asyncio
+async def test_needs_attention_assignments_batch_field_mapping() -> None:
+    """Batch helper exposes the same fields _needs_attention_assignment did."""
+    request_a = "11111111-1111-2222-3333-444444444444"
+    request_b = "55555555-6666-7777-8888-999999999999"
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(
+        return_value=[
+            {
+                "request_id": request_a,
+                "approver_role": "legal",
+                "context_jsonb": {"kind": "escalate"},
+            },
+            {
+                "request_id": request_b,
+                "approver_role": "data_owner",
+                "context_jsonb": None,
+            },
+        ]
+    )
+
+    assignments = await request_journey._needs_attention_assignments_batch(
+        conn, [request_a, request_b]
+    )
+
+    assert assignments[request_a] == NeedsAttentionAssignment(
+        target_role="legal", kind="escalate", assignee_identity=None
+    )
+    assert assignments[request_b] == NeedsAttentionAssignment(
+        target_role="data_owner", kind=None, assignee_identity=None
+    )
+    # Same filters as get_current_assignment: pending workflow.assignment only,
+    # latest requested_at per request.
+    sql, ids, action = conn.fetch.await_args.args
+    assert "status = 'pending'" in sql
+    assert "ORDER BY request_id, requested_at DESC" in sql
+    assert ids == [UUID(request_a), UUID(request_b)]
+    assert action == WORKFLOW_ASSIGNMENT_ACTION
+
+
+@pytest.mark.asyncio
+async def test_needs_attention_assignments_batch_empty_page() -> None:
+    conn = AsyncMock()
+    assert await request_journey._needs_attention_assignments_batch(conn, []) == {}
+    conn.fetch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_needs_attention_statement_scope_sets_timeout() -> None:
+    statements: list[str] = []
+
+    class _Tx:
+        async def __aenter__(self) -> _Tx:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class _Conn:
+        def transaction(self) -> _Tx:
+            return _Tx()
+
+        async def execute(self, sql: str) -> None:
+            statements.append(sql)
+
+    async with request_journey.needs_attention_statement_scope(_Conn()):
+        pass
+
+    assert statements == [
+        "SET LOCAL statement_timeout = "
+        f"{request_journey.NEEDS_ATTENTION_STATEMENT_TIMEOUT_MS}"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_needs_attention_statement_scope_noop_on_mock() -> None:
+    conn = AsyncMock()
+    async with request_journey.needs_attention_statement_scope(conn):
+        pass
+    conn.execute.assert_not_called()
+
+
+def test_needs_attention_statement_timeout_maps_to_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """statement_timeout (asyncpg QueryCanceledError) → clean 503, no internals.
+
+    TestClient without ``with`` skips lifespan (no real pool from .env); the
+    handler's own acquire is faked, so this stays hermetic.
+    """
+    roles.settings.require_iap_identity = True
+    roles.settings.admin_api_super_admins = "admin@example.com"
+    _owner_matching_review_pool(monkeypatch)
+    monkeypatch.setattr(
+        request_journey,
+        "list_needs_attention",
+        AsyncMock(
+            side_effect=asyncpg.QueryCanceledError(
+                "canceling statement due to statement timeout"
+            )
+        ),
+    )
+
+    client = TestClient(app)
+    response = client.get(
+        "/ops/requests/needs-attention?kind=matching&limit=5",
+        headers=signed_headers("admin@example.com"),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "needs-attention query timed out"

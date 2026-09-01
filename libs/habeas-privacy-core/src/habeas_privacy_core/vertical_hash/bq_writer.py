@@ -1,6 +1,6 @@
 """Write hashed-raw vendor rows to BigQuery ``external_hash_index``.
 
-Persists only the Mailchimp hashed-raw contract columns — ``email_hash``,
+Persists only the hashed-raw contract columns — ``email_hash``,
 ``vendor_record_id``, ``system``, ``extracted_at``. Hashing happens before
 write via ``habeas_privacy_core.vertical_hash``; this module never accepts
 or emits plaintext email.

@@ -307,8 +307,7 @@ def upload_allowed(system: str) -> bool:
     True only when template headers exist in ``UPLOAD_TEMPLATE_REQUIRED_HEADERS``.
     Do not infer Upload from ``allowed_approaches`` / ``APPROACH_UPLOAD``. Auth0
     may still bind ``APPROACH_UPLOAD`` (SPA complete-wizard quirk) while this
-    returns False — keep that binding; do not add Auth0 here. Mailchimp stays
-    retired.
+    returns False — keep that binding; do not add Auth0 here.
     """
     return _canonical_system(system) in UPLOAD_TEMPLATE_REQUIRED_HEADERS
 

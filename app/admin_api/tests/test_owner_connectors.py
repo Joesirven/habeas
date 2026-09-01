@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
@@ -15,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from admin_api import lab_sheets_oauth
 from admin_api import main as admin_main
-from admin_api import owner_connectors, roles
+from admin_api import owner_connectors, remaining_vertical_ops, roles
 from admin_api.main import app
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER, ROLE_DATA_USER
 
@@ -943,7 +946,7 @@ def test_live_credentials_fail_does_not_stamp_active_mode_live(
     monkeypatch.setattr(
         owner_connectors,
         "test_connection",
-        AsyncMock(return_value=(False, "auth_failed")),
+        AsyncMock(return_value=(False, "auth_failed", {})),
     )
     monkeypatch.setattr(
         owner_connectors.connections_db,
@@ -1036,11 +1039,14 @@ async def test_enqueue_owner_hash_refresh_uses_remaining_helper(
         "habeas_privacy_core.db.vertical_hash_refresh.enqueue_vertical_hash_refresh",
         fake_core,
     )
+    kick = MagicMock()
+    monkeypatch.setattr(owner_connectors, "_schedule_owner_hash_refresh_kick", kick)
     attempt_id = await owner_connectors._enqueue_owner_hash_refresh(
         AsyncMock(), system=inbound
     )
     assert attempt_id == 99
     assert captured["system"] == core_system
+    kick.assert_called_once_with(core_system)
 
 
 @pytest.mark.asyncio
@@ -1055,21 +1061,30 @@ async def test_enqueue_owner_hash_refresh_does_not_return_canonical_slug(
         "admin_api.remaining_vertical_ops.enqueue_remaining_hash_refresh",
         fake_remaining,
     )
+    kick = MagicMock()
+    monkeypatch.setattr(owner_connectors, "_schedule_owner_hash_refresh_kick", kick)
     result = await owner_connectors._enqueue_owner_hash_refresh(
         AsyncMock(), system="axios_hq"
     )
     assert result == 17
     assert result != "axios_headquarters"
+    # Canonical slug feeds the worker kick only — never the return value.
+    kick.assert_called_once_with("axios_headquarters")
 
 
 @pytest.mark.asyncio
-async def test_enqueue_owner_hash_refresh_skips_cassandra() -> None:
+async def test_enqueue_owner_hash_refresh_skips_cassandra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     conn = AsyncMock()
+    kick = MagicMock()
+    monkeypatch.setattr(owner_connectors, "_schedule_owner_hash_refresh_kick", kick)
     attempt_id = await owner_connectors._enqueue_owner_hash_refresh(
         conn, system="cassandra"
     )
     assert attempt_id is None
     conn.fetchval.assert_not_awaited()
+    kick.assert_not_called()
 
 
 def test_persistable_column_mapping_keeps_header_names_only() -> None:
@@ -1255,7 +1270,7 @@ def test_lever_live_credentials_success_stamps_rotation(
     monkeypatch.setattr(
         owner_connectors,
         "test_connection",
-        AsyncMock(return_value=(True, "lever_ok")),
+        AsyncMock(return_value=(True, "lever_ok", {})),
     )
     set_test = AsyncMock(return_value=current)
     update_status = AsyncMock(return_value=current)
@@ -1399,7 +1414,7 @@ def test_live_credentials_failed_test_allows_retry_without_wizard_complete(
     monkeypatch.setattr(
         owner_connectors,
         "test_connection",
-        AsyncMock(return_value=(False, "auth_failed")),
+        AsyncMock(return_value=(False, "auth_failed", {})),
     )
     get_conn = AsyncMock(return_value=current)
     monkeypatch.setattr(owner_connectors.connections_db, "get_connection", get_conn)
@@ -1509,7 +1524,7 @@ def test_live_retest_uses_stored_secret(
 
     helpers = _patch_owner_access(monkeypatch, connection=current)
     helpers["merge"].side_effect = _apply_merge
-    test_mock = AsyncMock(return_value=(True, "lever_ok"))
+    test_mock = AsyncMock(return_value=(True, "lever_ok", {}))
     monkeypatch.setattr(owner_connectors, "test_connection", test_mock)
     monkeypatch.setattr(
         owner_connectors.connections_db,
@@ -2411,6 +2426,294 @@ def test_sheets_oauth_does_not_log_email(
     assert "refresh-owner-1" not in joined
     assert "hr-owner@example.com" not in joined
 
+
+def test_hash_refresh_autoprocess_flag_default_and_parse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OWNER_UPLOAD_HASH_REFRESH_AUTOPROCESS", raising=False)
+    assert owner_connectors._hash_refresh_autoprocess_enabled() is True
+    for truthy in ("1", "true", "yes"):
+        monkeypatch.setenv("OWNER_UPLOAD_HASH_REFRESH_AUTOPROCESS", truthy)
+        assert owner_connectors._hash_refresh_autoprocess_enabled() is True
+    for falsy in ("0", "false", "no", "off"):
+        monkeypatch.setenv("OWNER_UPLOAD_HASH_REFRESH_AUTOPROCESS", falsy)
+        assert owner_connectors._hash_refresh_autoprocess_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_schedule_kick_is_fire_and_forget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scheduler returns without awaiting; the kick runs on the loop."""
+    monkeypatch.setenv("OWNER_UPLOAD_HASH_REFRESH_AUTOPROCESS", "1")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_kick(system: str) -> None:
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(
+        "admin_api.remaining_vertical_ops.kick_remaining_hash_refresh_process",
+        slow_kick,
+    )
+    owner_connectors._schedule_owner_hash_refresh_kick("paylocity")
+    await asyncio.sleep(0)
+    assert started.is_set()
+    release.set()
+    await asyncio.gather(*list(owner_connectors._owner_hash_refresh_kick_tasks))
+    assert not owner_connectors._owner_hash_refresh_kick_tasks
+
+
+@pytest.mark.asyncio
+async def test_schedule_kick_noops_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OWNER_UPLOAD_HASH_REFRESH_AUTOPROCESS", "0")
+    kick = AsyncMock()
+    monkeypatch.setattr(
+        "admin_api.remaining_vertical_ops.kick_remaining_hash_refresh_process",
+        kick,
+    )
+    owner_connectors._schedule_owner_hash_refresh_kick("paylocity")
+    await asyncio.sleep(0)
+    kick.assert_not_called()
+    assert not owner_connectors._owner_hash_refresh_kick_tasks
+
+
+def test_schedule_kick_noops_without_running_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OWNER_UPLOAD_HASH_REFRESH_AUTOPROCESS", "1")
+    owner_connectors._schedule_owner_hash_refresh_kick("paylocity")
+    assert not owner_connectors._owner_hash_refresh_kick_tasks
+
+
+def _wire_real_enqueue_and_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    real_enqueue: Any,
+    proxy_error: Exception | None = None,
+) -> list[dict[str, Any]]:
+    """Restore the real enqueue helper; stub remaining-ops enqueue + worker proxy."""
+    monkeypatch.setattr(owner_connectors, "_enqueue_owner_hash_refresh", real_enqueue)
+
+    async def fake_remaining_enqueue(_conn: object, *, system: str) -> tuple[int, str]:
+        return 99, system
+
+    monkeypatch.setattr(
+        "admin_api.remaining_vertical_ops.enqueue_remaining_hash_refresh",
+        fake_remaining_enqueue,
+    )
+    calls: list[dict[str, Any]] = []
+
+    async def fake_proxy(
+        url: str, *, json_body: Any = None, timeout: float = 0.0
+    ) -> tuple[int, dict]:
+        calls.append({"url": url, "timeout": timeout})
+        if proxy_error is not None:
+            raise proxy_error
+        return 200, {"processed": True}
+
+    monkeypatch.setattr(
+        "admin_api.remaining_vertical_ops.proxy_post_payload", fake_proxy
+    )
+    return calls
+
+
+def _drain_kick_tasks(timeout_s: float = 5.0) -> None:
+    """Wait for fire-and-forget kick tasks scheduled on the app loop."""
+    deadline = time.monotonic() + timeout_s
+    while owner_connectors._owner_hash_refresh_kick_tasks:
+        if time.monotonic() >= deadline:
+            raise AssertionError("hash-refresh kick task did not finish")
+        time.sleep(0.01)
+
+
+def test_upload_kicks_hash_refresh_process_after_enqueue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful upload enqueue auto-kicks the worker process (fire-and-forget)."""
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "upload"}
+    current = _connection(metadata=meta)
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        current.status = "connected"
+        current.last_test_ok = True
+        return current
+
+    real_enqueue = owner_connectors._enqueue_owner_hash_refresh
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    _patch_ingest_writes(monkeypatch, current)
+    calls = _wire_real_enqueue_and_proxy(monkeypatch, real_enqueue=real_enqueue)
+    monkeypatch.setattr(
+        remaining_vertical_ops.settings,
+        "paylocity_worker_url",
+        "http://127.0.0.1:8083",
+    )
+    monkeypatch.setenv("OWNER_UPLOAD_HASH_REFRESH_AUTOPROCESS", "1")
+
+    with TestClient(app) as client:
+        upload = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/upload",
+            headers=_owner_headers(),
+            data={"multi_pii_delimiter": ""},
+            files={"file": ("paylocity.csv", PAYLOCITY_CSV, "text/csv")},
+        )
+        assert upload.status_code == 200
+        assert upload.json()["ok"] is True
+        _drain_kick_tasks()
+
+    assert len(calls) == 1
+    assert calls[0]["url"] == "http://127.0.0.1:8083/hash-refresh/process"
+    assert calls[0]["timeout"] == remaining_vertical_ops.HASH_REFRESH_PROXY_TIMEOUT
+
+
+def test_upload_succeeds_when_hash_refresh_kick_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed kick is logged (codes only) and never fails the upload."""
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "upload"}
+    current = _connection(metadata=meta)
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        current.status = "connected"
+        current.last_test_ok = True
+        return current
+
+    real_enqueue = owner_connectors._enqueue_owner_hash_refresh
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    _patch_ingest_writes(monkeypatch, current)
+    calls = _wire_real_enqueue_and_proxy(
+        monkeypatch,
+        real_enqueue=real_enqueue,
+        proxy_error=RuntimeError("worker unreachable"),
+    )
+    monkeypatch.setattr(
+        remaining_vertical_ops.settings,
+        "paylocity_worker_url",
+        "http://127.0.0.1:8083",
+    )
+    monkeypatch.setenv("OWNER_UPLOAD_HASH_REFRESH_AUTOPROCESS", "1")
+    # admin_main structured logging bypasses caplog — assert on the logger.
+    kick_logger = MagicMock()
+    monkeypatch.setattr(remaining_vertical_ops, "logger", kick_logger)
+
+    with TestClient(app) as client:
+        upload = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/upload",
+            headers=_owner_headers(),
+            data={"multi_pii_delimiter": ""},
+            files={"file": ("paylocity.csv", PAYLOCITY_CSV, "text/csv")},
+        )
+        assert upload.status_code == 200
+        assert upload.json()["ok"] is True
+        _drain_kick_tasks()
+
+    assert len(calls) == 1
+    kick_logger.info.assert_called_once_with(
+        "remaining_hash_refresh_kick_failed system=%s", "paylocity"
+    )
+
+
+def test_upload_does_not_kick_when_autoprocess_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meta: dict = {"vertical_id": VERTICAL_PEOPLE_HR, "active_mode": "upload"}
+    current = _connection(metadata=meta)
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        current.status = "connected"
+        current.last_test_ok = True
+        return current
+
+    real_enqueue = owner_connectors._enqueue_owner_hash_refresh
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    _patch_ingest_writes(monkeypatch, current)
+    calls = _wire_real_enqueue_and_proxy(monkeypatch, real_enqueue=real_enqueue)
+    monkeypatch.setenv("OWNER_UPLOAD_HASH_REFRESH_AUTOPROCESS", "0")
+
+    with TestClient(app) as client:
+        upload = client.post(
+            f"/owner/verticals/{VERTICAL_PEOPLE_HR}/systems/paylocity/upload",
+            headers=_owner_headers(),
+            data={"multi_pii_delimiter": ""},
+            files={"file": ("paylocity.csv", PAYLOCITY_CSV, "text/csv")},
+        )
+        assert upload.status_code == 200
+        assert upload.json()["ok"] is True
+        time.sleep(0.1)
+
+    assert calls == []
+    assert not owner_connectors._owner_hash_refresh_kick_tasks
+
+
+def test_sheets_oauth_extract_kicks_hash_refresh_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sheets extract funnels through ``_ingest_owner_csv`` — same auto-kick."""
+    meta: dict = {
+        "vertical_id": VERTICAL_PEOPLE_HR,
+        "active_mode": "live",
+        "credentials_rotated_at": NOW.isoformat(),
+    }
+    current = _connection(system="hr_alumni", metadata=meta, status="invited")
+    secret_name = connections_db.secret_resource_name("hr_alumni", str(CONNECTION_ID))
+    current = current.model_copy(update={"secret_resource_name": secret_name})
+    owner_connectors.get_secret_writer().put_secret(
+        secret_name,
+        json.dumps({"auth_mode": "oauth", "refresh_token": "refresh-owner-1"}),
+    )
+
+    def _apply_merge(_conn, connection_id, patch):  # noqa: ANN001
+        meta.update(patch)
+        current.metadata = dict(meta)
+        return current
+
+    real_enqueue = owner_connectors._enqueue_owner_hash_refresh
+    helpers = _patch_owner_access(monkeypatch, connection=current)
+    helpers["merge"].side_effect = _apply_merge
+    _patch_ingest_writes(monkeypatch, current)
+    calls = _wire_real_enqueue_and_proxy(monkeypatch, real_enqueue=real_enqueue)
+    monkeypatch.setattr(
+        remaining_vertical_ops.settings,
+        "hr_alumni_worker_url",
+        "http://127.0.0.1:8085",
+    )
+    monkeypatch.setenv("OWNER_UPLOAD_HASH_REFRESH_AUTOPROCESS", "1")
+    monkeypatch.setattr(
+        owner_connectors,
+        "_access_token_from_refresh",
+        AsyncMock(return_value="access-extract"),
+    )
+    monkeypatch.setattr(
+        owner_connectors,
+        "extract_sheet_values_csv",
+        AsyncMock(return_value=(True, "google_sheets_ok", _ALUMNI_CSV)),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"{_ALUMNI_OAUTH_PATH}/extract",
+            headers=_owner_headers(),
+            json={"spreadsheet_id": "sheet-1", "tab": "Sheet1"},
+        )
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        _drain_kick_tasks()
+
+    assert len(calls) == 1
+    assert calls[0]["url"] == "http://127.0.0.1:8085/hash-refresh/process"
+    assert calls[0]["timeout"] == remaining_vertical_ops.HASH_REFRESH_PROXY_TIMEOUT
 
 FULL_NAME_PAYLOCITY_CSV = (
     b"Name,Email\n"

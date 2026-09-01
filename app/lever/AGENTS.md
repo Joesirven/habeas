@@ -16,7 +16,16 @@ Candidate matching and archive/opt-out suppression via Lever API.
 - Never persist plaintext PII from vendor extracts — Postgres `audit_payload` and BQ rows are
   hashed values and opaque vendor ids only.
 - Routes: `POST /matching/submit`, `POST /matching/collect`, `POST /suppression/submit`,
-  `POST /suppression/collect`, `POST /hash-refresh/process`.
+  `POST /suppression/collect`, `POST /hash-refresh/process`, `POST /ensure-drain`.
+- Matching chunk drain (same as Auth0 / Data spine): `POST /ensure-drain` acquires the
+  `matching_drain_lease` row `lease_key='lever'` and starts Cloud Run Job
+  `lever-matching-drain-{dev,prod}` (5 tasks → `python -m lever.chunk_drain`) when
+  `LEVER_DRAIN_JOB_NAME` is set; without it, runs an inline budgeted chunk loop.
+  Catch-all Scheduler hits `/ensure-drain` (not one-row `/matching/submit`).
+  Drain path evaluates the freshness matching gate before mart lookup (same as
+  `/matching/submit`).
+  `/hash-refresh/process` self-enqueues (single-flight) when idle so the daily
+  Scheduler job drives the refresh cadence without admin-api in the loop.
 - Matching looks up `lever_email_hash__build` (Auth0 snapshot pattern). Empty mart or
   missing email hash → `match_count=0` snapshot, not stub success.
 - Hash refresh hashes the mapped upload; missing `gcs_uri` or empty extract is a typed

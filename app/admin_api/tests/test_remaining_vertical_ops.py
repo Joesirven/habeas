@@ -13,7 +13,8 @@ from admin_api import remaining_vertical_ops, roles
 from habeas_privacy_core.auth import IAP_EMAIL_HEADER
 from habeas_privacy_core.queue.constants import (
     AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
-    GOOGLE_SHEETS_ATTEMPTS_TABLE,
+    BIZDEV_CONTACTS_ATTEMPTS_TABLE,
+    HR_ALUMNI_ATTEMPTS_TABLE,
     LEVER_ATTEMPTS_TABLE,
     PAYLOCITY_ATTEMPTS_TABLE,
     STEP_MATCHING,
@@ -39,15 +40,15 @@ DEFAULT_WORKER_URLS = {
     "paylocity": "http://127.0.0.1:8083",
     "lever": "http://127.0.0.1:8084",
     "hr_alumni": "http://127.0.0.1:8085",
-    "bizdev_contacts": "http://127.0.0.1:8085",
+    "bizdev_contacts": "http://127.0.0.1:8087",
 }
 
 ATTEMPTS_TABLES = {
     "axios_headquarters": AXIOS_HEADQUARTERS_ATTEMPTS_TABLE,
     "paylocity": PAYLOCITY_ATTEMPTS_TABLE,
     "lever": LEVER_ATTEMPTS_TABLE,
-    "hr_alumni": GOOGLE_SHEETS_ATTEMPTS_TABLE,
-    "bizdev_contacts": GOOGLE_SHEETS_ATTEMPTS_TABLE,
+    "hr_alumni": HR_ALUMNI_ATTEMPTS_TABLE,
+    "bizdev_contacts": BIZDEV_CONTACTS_ATTEMPTS_TABLE,
 }
 
 OWNER_VERTICAL = {
@@ -112,8 +113,13 @@ def _reset_roles(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(
         remaining_vertical_ops.settings,
-        "google_sheets_worker_url",
+        "hr_alumni_worker_url",
         "http://127.0.0.1:8085",
+    )
+    monkeypatch.setattr(
+        remaining_vertical_ops.settings,
+        "bizdev_contacts_worker_url",
+        "http://127.0.0.1:8087",
     )
 
 
@@ -204,31 +210,36 @@ def test_default_worker_urls_are_distinct_local_ports():
         "axios_headquarters": fields["axios_headquarters_worker_url"].default,
         "paylocity": fields["paylocity_worker_url"].default,
         "lever": fields["lever_worker_url"].default,
-        "sheets": fields["google_sheets_worker_url"].default,
+        "hr_alumni": fields["hr_alumni_worker_url"].default,
+        "bizdev_contacts": fields["bizdev_contacts_worker_url"].default,
     }
     assert defaults == {
         "axios_headquarters": "http://127.0.0.1:8082",
         "paylocity": "http://127.0.0.1:8083",
         "lever": "http://127.0.0.1:8084",
-        "sheets": "http://127.0.0.1:8085",
+        "hr_alumni": "http://127.0.0.1:8085",
+        "bizdev_contacts": "http://127.0.0.1:8087",
     }
-    assert len(set(defaults.values())) == 4
+    assert len(set(defaults.values())) == 5
     for url in defaults.values():
         assert "run.app" not in url
 
 
-def test_alumni_and_contact_us_share_google_sheets_worker_url():
+def test_alumni_and_bizdev_have_dedicated_worker_urls_and_tables():
     assert remaining_vertical_ops._worker_url_for("hr_alumni") == (
-        remaining_vertical_ops.settings.google_sheets_worker_url
+        remaining_vertical_ops.settings.hr_alumni_worker_url
     )
     assert remaining_vertical_ops._worker_url_for("bizdev_contacts") == (
-        remaining_vertical_ops.settings.google_sheets_worker_url
+        remaining_vertical_ops.settings.bizdev_contacts_worker_url
+    )
+    assert remaining_vertical_ops._worker_url_for("hr_alumni") != (
+        remaining_vertical_ops._worker_url_for("bizdev_contacts")
     )
     assert remaining_vertical_ops.ATTEMPTS_TABLE_BY_SYSTEM["hr_alumni"] == (
-        GOOGLE_SHEETS_ATTEMPTS_TABLE
+        HR_ALUMNI_ATTEMPTS_TABLE
     )
     assert remaining_vertical_ops.ATTEMPTS_TABLE_BY_SYSTEM["bizdev_contacts"] == (
-        GOOGLE_SHEETS_ATTEMPTS_TABLE
+        BIZDEV_CONTACTS_ATTEMPTS_TABLE
     )
     assert remaining_vertical_ops.AXIOS_HEADQUARTERS_ATTEMPTS_TABLE == (
         "axios_headquarters_attempts"
@@ -766,6 +777,69 @@ async def test_enqueue_remaining_hash_refresh_rejects_cassandra():
 
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail == "not found"
+
+
+@pytest.mark.asyncio
+async def test_kick_hash_refresh_process_posts_to_canonical_worker(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, Any] = {}
+
+    async def fake_proxy(url: str, *, json_body: Any = None, timeout: float = 0.0):
+        captured["url"] = url
+        captured["timeout"] = timeout
+        return 200, {"processed": True}
+
+    monkeypatch.setattr(remaining_vertical_ops, "proxy_post_payload", fake_proxy)
+
+    await remaining_vertical_ops.kick_remaining_hash_refresh_process("axios_hq")
+
+    assert captured["url"] == "http://127.0.0.1:8082/hash-refresh/process"
+    assert captured["timeout"] == remaining_vertical_ops.HASH_REFRESH_PROXY_TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_kick_hash_refresh_process_never_raises_on_proxy_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("worker down")
+
+    monkeypatch.setattr(remaining_vertical_ops, "proxy_post_payload", boom)
+
+    await remaining_vertical_ops.kick_remaining_hash_refresh_process("paylocity")
+
+
+@pytest.mark.asyncio
+async def test_kick_hash_refresh_process_logs_codes_only(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    async def fake_proxy(url: str, *, json_body: Any = None, timeout: float = 0.0):
+        return 500, {"status": "error", "detail": "dbt failed", "url": url}
+
+    monkeypatch.setattr(remaining_vertical_ops, "proxy_post_payload", fake_proxy)
+
+    with caplog.at_level("INFO", logger="admin_api.remaining_vertical_ops"):
+        await remaining_vertical_ops.kick_remaining_hash_refresh_process("paylocity")
+
+    joined = " ".join(record.getMessage() for record in caplog.records)
+    assert "remaining_hash_refresh_kick" in joined
+    assert "status_class=5xx" in joined
+    assert "8083" not in joined
+    assert "dbt failed" not in joined
+
+
+@pytest.mark.asyncio
+async def test_kick_hash_refresh_process_skips_unknown_system(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    proxy = AsyncMock(return_value=(200, {"processed": True}))
+    monkeypatch.setattr(remaining_vertical_ops, "proxy_post_payload", proxy)
+
+    await remaining_vertical_ops.kick_remaining_hash_refresh_process("cassandra")
+
+    proxy.assert_not_called()
 
 
 @pytest.mark.asyncio

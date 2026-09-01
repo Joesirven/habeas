@@ -1,0 +1,96 @@
+# bizdev-contacts-prod — twin of bizdev-contacts-dev. Cloud SQL dpra-prod + _DATABASE_URL.
+# Run infra/scripts/provision_sheet_worker_service_accounts.sh before first deploy.
+substitutions:
+  _REGION: us-east4
+  _PROJECT: example-gcp-project
+  _SERVICE: bizdev-contacts-prod
+  _TAG: latest
+  _CLOUDSQL_INSTANCE: example-gcp-project:us-east4:dpra-prod
+  _DRAIN_JOB: bizdev-contacts-matching-drain-prod
+  _RUNTIME_SA: dpra-bizdev-contacts-worker@example-gcp-project.iam.gserviceaccount.com
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+      - -f
+      - app/bizdev_contacts/Dockerfile
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --service-account=${_RUNTIME_SA}
+      - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
+      - --timeout=3600
+      - --set-env-vars=SERVICE_NAME=bizdev-contacts,WORKER_ID=bizdev-contacts-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,GCS_TRANSPORT=google,DATABASE_URL=${_DATABASE_URL},EXTERNAL_HASH_DBT_DIR=/app/transform/external_hash,DBT_PROFILES_DIR=/app/transform/external_hash,EXTERNAL_HASH_BQ_DATASET=external_hash_index,EXTERNAL_HASH_DBT_TIMEOUT_SECONDS=3300,BIZDEV_CONTACTS_DRAIN_JOB_NAME=${_DRAIN_JOB},BIZDEV_CONTACTS_DRAIN_JOB_REGION=${_REGION},BIZDEV_CONTACTS_DRAIN_LEASE_HOLDER=bizdev-contacts-matching-drain,BIZDEV_CONTACTS_DRAIN_TASK_COUNT=5
+
+  # admin-api runtime SA only — never user/IAP run.invoker on workers. Never allUsers.
+  - id: grant-admin-api-invoker
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - add-iam-policy-binding
+      - ${_SERVICE}
+      - --region=${_REGION}
+      - --member=serviceAccount:95660886550-compute@developer.gserviceaccount.com
+      - --role=roles/run.invoker
+      - --quiet
+
+  # BizDev Contacts matching drain Job — chunk drain (5 parallel tasks), same image.
+  # /ensure-drain on the service starts executions when BIZDEV_CONTACTS_DRAIN_JOB_NAME is set.
+  - id: deploy-drain-job
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        IMAGE="us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}"
+        gcloud run jobs deploy "${_DRAIN_JOB}" \
+          --project="${_PROJECT}" \
+          --region="${_REGION}" \
+          --image="$${IMAGE}" \
+          --tasks=5 \
+          --parallelism=5 \
+          --task-timeout=3600 \
+          --max-retries=1 \
+          --service-account="${_RUNTIME_SA}" \
+          --set-cloudsql-instances="${_CLOUDSQL_INSTANCE}" \
+          --command=python \
+          --args=-m,bizdev_contacts.chunk_drain \
+          --set-env-vars="SERVICE_NAME=bizdev-contacts-matching-drain,WORKER_ID=${_DRAIN_JOB},GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},BIZDEV_CONTACTS_DRAIN_TASK_COUNT=5,BIZDEV_CONTACTS_DRAIN_LEASE_HOLDER=bizdev-contacts-matching-drain,PYTHONPATH=/app/app/bizdev_contacts/src" \
+          --quiet
+
+        # bizdev-contacts-prod runtime SA must execute this Job from /ensure-drain.
+        gcloud run jobs add-iam-policy-binding "${_DRAIN_JOB}" \
+          --project="${_PROJECT}" \
+          --region="${_REGION}" \
+          --member="serviceAccount:${_RUNTIME_SA}" \
+          --role="roles/run.developer" \
+          --quiet || true
+
+images:
+  - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}

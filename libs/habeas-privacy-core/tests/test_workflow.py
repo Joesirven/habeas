@@ -103,14 +103,14 @@ async def test_secret_manager_caches_and_refreshes():
         calls["count"] += 1
         return f"value-for-{secret_id}"
 
-    first = await get_secret("mailchimp-api-key", fetcher=fetcher)
-    second = await get_secret("mailchimp-api-key", fetcher=fetcher)
-    assert first == second == "value-for-mailchimp-api-key"
+    first = await get_secret("axios-headquarters-api-key", fetcher=fetcher)
+    second = await get_secret("axios-headquarters-api-key", fetcher=fetcher)
+    assert first == second == "value-for-axios-headquarters-api-key"
     assert calls["count"] == 1
 
     clear_secret_cache()
-    third = await get_secret("mailchimp-api-key", fetcher=fetcher)
-    assert third == "value-for-mailchimp-api-key"
+    third = await get_secret("axios-headquarters-api-key", fetcher=fetcher)
+    assert third == "value-for-axios-headquarters-api-key"
     assert calls["count"] == 2
 
 
@@ -390,7 +390,7 @@ async def test_release_approved_updates_only_matching_rows(pool):
             """
             INSERT INTO approval_requests (
                 request_id, action_type, status, expires_at, decided_by, decided_at
-            ) VALUES ($1, 'suppress.mailchimp', 'approved', NOW() + INTERVAL '1 day',
+            ) VALUES ($1, 'suppress.axios_headquarters', 'approved', NOW() + INTERVAL '1 day',
                       'lauren@habeas.com', NOW())
             RETURNING id
             """,

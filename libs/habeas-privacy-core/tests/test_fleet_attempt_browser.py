@@ -121,10 +121,10 @@ class TestSafeSelect:
 
     def test_attempt_table_meta(self) -> None:
         meta = attempt_table_meta(
-            "mailchimp_attempts",
+            "axios_headquarters_attempts",
             available_columns=_AVAILABLE,
         )
-        assert meta.worker_key == "mailchimp"
+        assert meta.worker_key == "axios_headquarters"
         assert "status" in meta.filterable_columns
         assert "id" in meta.sortable_columns
         assert "email" not in meta.filterable_columns

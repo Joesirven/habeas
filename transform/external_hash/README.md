@@ -119,7 +119,6 @@ dbt build --select stg_auth0_hashed mart_auth0_email_hash
 | Lever | `lever_hashed_raw` | `mart_lever_email_hash` (`lever_email_hash__build`) | Yes |
 | Alumni Google Sheet | `hr_alumni_hashed_raw` | `mart_hr_alumni_email_hash` (`hr_alumni_email_hash__build`) | Yes |
 | Contact Us Google Sheet | `bizdev_contacts_hashed_raw` | `mart_bizdev_contacts_email_hash` (`bizdev_contacts_email_hash__build`) | Yes |
-| Mailchimp | — | — | Retired (no dbt models) |
 | Cassandra | — | — | No (suppress-only pipe) |
 
 ## Worker contract

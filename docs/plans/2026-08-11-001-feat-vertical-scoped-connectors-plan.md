@@ -14,6 +14,8 @@ enriched: 2026-08-17
 provenance_slice_2026_08_17: user-directed 2026-08-17 — data-owner workbench: post-match selector, SaaS manual fulfillment after Legal kickoff, port legal/admin IA patterns to data owner; incomplete forks merged (nav badge, Tasks fetch, palette without People)
 ---
 
+> **SUPERSEDED (Mailchimp):** Communications walkthrough/system is Axios HQ (`axios_hq`); do not deploy or extend Mailchimp — historical plan text left intact.
+
 # Vertical-scoped connectors - Plan
 
 ## Goal Capsule

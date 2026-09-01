@@ -883,7 +883,6 @@ const OWNER_UPLOAD_ALLOWED: Readonly<Record<string, boolean>> = {
   google_sheets: false,
   alumni_google_sheet: false,
   contact_us_google_sheet: false,
-  mailchimp: false,
 }
 
 export function ownerUploadAllowed(
@@ -896,7 +895,6 @@ export function ownerUploadAllowed(
 
 /**
  * Confirmed owner-facing method names. Axios HQ / Cassandra are omitted (no live method).
- * Do not add Mailchimp.
  */
 export const CONNECTION_METHOD_LABELS: Readonly<Record<string, string>> = {
   paylocity: 'SFTP',

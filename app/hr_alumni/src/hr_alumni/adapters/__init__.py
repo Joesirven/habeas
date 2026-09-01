@@ -1,0 +1,1 @@
+"""HR Alumni vendor adapters."""

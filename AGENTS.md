@@ -93,7 +93,7 @@ If pre-merge → read [`.agent/modules/review-personas.md`](.agent/modules/revie
 
 ## Prod status (2026-08-25)
 
-On `example-gcp-project`: Cloud SQL `dpra-prod`, Secret Manager `database-url-prod`, and the DROP spine plus vertical workers are live — `admin-api-prod` (`_MATCHING_URL` → `data-vertical-matching-prod`, not legacy `matching-prod`; `max-instances=3`), `drop-connector-prod`, `drop-ingestor-prod`, `request-dispatcher-prod`, `data-vertical-matching-prod`, `hash-index-refresh-prod`, `data-fulfillment-dispatcher-prod`, `drop-notice-dispatcher-prod`, `reaper-prod`, and vertical workers `auth0-prod`, `axios-headquarters-prod`, `google-sheets-prod`, `lever-prod`, `paylocity-prod`.
+On `example-gcp-project`: Cloud SQL `dpra-prod`, Secret Manager `database-url-prod`, and the DROP spine plus vertical workers are live — `admin-api-prod` (`_MATCHING_URL` → `data-vertical-matching-prod`, not legacy `matching-prod`; `max-instances=3`), `drop-connector-prod`, `drop-ingestor-prod`, `request-dispatcher-prod`, `data-vertical-matching-prod`, `hash-index-refresh-prod`, `data-fulfillment-dispatcher-prod`, `drop-notice-dispatcher-prod`, `reaper-prod`, and vertical workers `auth0-prod`, `axios-headquarters-prod`, `hr-alumni-prod`, `bizdev-contacts-prod`, `lever-prod`, `paylocity-prod` (retired unified `google-sheets-prod`).
 
 **DROP intake (complete):** first production CA DROP pull finished (~1.84M requests); Data-vertical matching is complete. Ops orchestration used `POST /ops/drop/prod/confirm-run` (admin-api spine: connector download → ingestor land/promote → dispatch → ensure-drain) — that is the cutover runbook endpoint, not an open blocker. Ongoing pulls use scheduled `drop-connector-prod` `/download`.
 

@@ -55,7 +55,7 @@ def test_redact_payload_scrubs_known_patterns():
 
 
 def test_redact_payload_scrubs_comment_and_notes():
-    owner_comment = "done in Mailchimp for Jane Doe"
+    owner_comment = "done in Axios HQ for Jane Doe"
     payload = {
         "status": "completed_in_source",
         "comment": owner_comment,

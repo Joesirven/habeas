@@ -90,7 +90,7 @@ def _schema_modes(job_config: Any) -> dict[str, str]:
     return modes
 
 
-def test_write_hashed_raw_mailchimp_shape() -> None:
+def test_write_hashed_raw_auth0_shape() -> None:
     client = _FakeClient()
     rows_written = write_hashed_raw(
         AUTH0_HASHED_RAW_TABLE,
@@ -177,7 +177,7 @@ def test_write_hashed_raw_rejects_non_auth0_system() -> None:
     with pytest.raises(HashedRawWriteError, match="does not match destination table") as exc_info:
         write_hashed_raw(
             AUTH0_HASHED_RAW_TABLE,
-            [_auth0_record(system="mailchimp")],
+            [_auth0_record(system="axios_headquarters")],
             client=client,
         )
 

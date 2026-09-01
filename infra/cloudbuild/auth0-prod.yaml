@@ -5,6 +5,8 @@ substitutions:
   _SERVICE: auth0-prod
   _TAG: latest
   _CLOUDSQL_INSTANCE: example-gcp-project:us-east4:dpra-prod
+  _DRAIN_JOB: auth0-matching-drain-prod
+  _RUNTIME_SA: 95660886550-compute@developer.gserviceaccount.com
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -39,7 +41,7 @@ steps:
       - --no-allow-unauthenticated
       - --add-cloudsql-instances=${_CLOUDSQL_INSTANCE}
       - --timeout=3600
-      - --set-env-vars=SERVICE_NAME=auth0,WORKER_ID=auth0-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,GCS_TRANSPORT=google,DATABASE_URL=${_DATABASE_URL},AUTH0_CONNECTION_ID=f950f290-3109-4ec4-b5c8-62b501a4812c,EXTERNAL_HASH_DBT_DIR=/app/transform/external_hash,DBT_PROFILES_DIR=/app/transform/external_hash,EXTERNAL_HASH_BQ_DATASET=external_hash_index,EXTERNAL_HASH_DBT_TIMEOUT_SECONDS=3300
+      - --set-env-vars=SERVICE_NAME=auth0,WORKER_ID=auth0-prod,GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,GCS_TRANSPORT=google,DATABASE_URL=${_DATABASE_URL},AUTH0_CONNECTION_ID=626da32e-f0fb-4320-99f6-9627bf83bffb,EXTERNAL_HASH_DBT_DIR=/app/transform/external_hash,DBT_PROFILES_DIR=/app/transform/external_hash,EXTERNAL_HASH_BQ_DATASET=external_hash_index,EXTERNAL_HASH_DBT_TIMEOUT_SECONDS=3300,AUTH0_DRAIN_JOB_NAME=${_DRAIN_JOB},AUTH0_DRAIN_JOB_REGION=${_REGION},AUTH0_DRAIN_LEASE_HOLDER=auth0-matching-drain,AUTH0_DRAIN_TASK_COUNT=5
 
   # admin-api runtime SA only — never user/IAP run.invoker on workers. Never allUsers.
   - id: grant-admin-api-invoker
@@ -54,6 +56,39 @@ steps:
       - --member=serviceAccount:95660886550-compute@developer.gserviceaccount.com
       - --role=roles/run.invoker
       - --quiet
+
+  # Auth0 matching drain Job — Method E shell (5 parallel tasks), same image.
+  # /ensure-drain on the service starts executions when AUTH0_DRAIN_JOB_NAME is set.
+  - id: deploy-drain-job
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        IMAGE="us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}"
+        gcloud run jobs deploy "${_DRAIN_JOB}" \
+          --project="${_PROJECT}" \
+          --region="${_REGION}" \
+          --image="$${IMAGE}" \
+          --tasks=5 \
+          --parallelism=5 \
+          --task-timeout=3600 \
+          --max-retries=1 \
+          --service-account="${_RUNTIME_SA}" \
+          --set-cloudsql-instances="${_CLOUDSQL_INSTANCE}" \
+          --command=python \
+          --args=-m,auth0.chunk_drain \
+          --set-env-vars="SERVICE_NAME=auth0-matching-drain,WORKER_ID=${_DRAIN_JOB},GCP_PROJECT=${_PROJECT},LOG_LEVEL=INFO,DATABASE_URL=${_DATABASE_URL},AUTH0_DRAIN_TASK_COUNT=5,AUTH0_DRAIN_LEASE_HOLDER=auth0-matching-drain,PYTHONPATH=/app/app/auth0/src" \
+          --quiet
+
+        # auth0-prod runtime SA must execute this Job from /ensure-drain.
+        gcloud run jobs add-iam-policy-binding "${_DRAIN_JOB}" \
+          --project="${_PROJECT}" \
+          --region="${_REGION}" \
+          --member="serviceAccount:${_RUNTIME_SA}" \
+          --role="roles/run.developer" \
+          --quiet || true
 
 images:
   - us-east4-docker.pkg.dev/${_PROJECT}/data-privacy/${_SERVICE}:${_TAG}

@@ -14,6 +14,8 @@ status_note: >
   KB: SirvenOS External-Integrations § Connections onboarding.
 ---
 
+> **SUPERSEDED (Mailchimp):** Communications is Axios HQ (`axios_hq` / `axios_headquarters`); do not treat Mailchimp as a live connection system — historical plan text left intact.
+
 ## Goal Capsule
 
 Ship a **super_admin Connections** surface under Ops so Habeas can create per-system integration connections, send a **safe owner invite** (copyable signed URL; optional mailto), and let the owner submit dedicated credentials into **Secret Manager** with a **connection test** — without Slack DMs of secrets.

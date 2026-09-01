@@ -94,12 +94,32 @@ Disable swap (e.g. dry run): `--vars '{perform_serving_swap: false}'`.
 
 ## Tests
 
-CPPA golden vectors: `tests/assert_cppa_*_vector.sql` (literal inputs, no MDR PII).
+### Hermetic Python (CI / default pytest)
+
+CPPA v1.2.0 golden vectors live under `drop_normalize/tests/` (literal inputs, no MDR
+PII). Root pytest discovers them via `testpaths` + `pythonpath` in the workspace
+`pyproject.toml` — no manual `PYTHONPATH`:
 
 ```bash
+# From repo root (also covered by default `uv run --group dev pytest`)
+uv run --group dev pytest transform/drop_hash/drop_normalize/tests -q
+
+# Package-local (optional)
 cd transform/drop_hash/drop_normalize
-uv run pytest tests -q
+uv run --group dev pytest tests -q
 ```
+
+Algorithms are not changed by CI wiring; vectors must keep matching Base64(SHA-256 UTF-8)
+of DROP-standardized forms.
+
+### BigQuery dbt / UDF asserts (not in default CI)
+
+SQL golden checks under `tests/assert_cppa_*_vector.sql` (email, phone, dob, zip) and
+`udf/tests/test_udf_vectors.sql` (name UDF) require Application Default Credentials,
+dataset `drop_hash_index`, and an applied `normalize_name` UDF. They run with
+`dbt test` / `bq query` from this directory — **not** via root pytest or Cloud Build
+today. Name / NDZ SQL coverage beyond the UDF script remains a known gap versus the
+full hermetic Python suite (P1-CI-2).
 
 ## Worker contract
 

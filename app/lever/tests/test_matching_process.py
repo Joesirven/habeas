@@ -16,8 +16,10 @@ from habeas_privacy_core.queue.constants import LEVER_ATTEMPTS_TABLE, STEP_MATCH
 from fastapi.testclient import TestClient
 from lever.bq_lookup import (
     LEVER_EMAIL_HASH_BUILD_TABLE,
+    LEVER_SYSTEM,
     LeverHashLookupError,
     lookup_lever_vendor_ids_by_email_hash,
+    lookup_lever_vendor_ids_by_email_hashes,
 )
 from lever.vertical_match import LEVER_VERTICAL, VerticalMatchOutcome, run_lever_vertical_match
 
@@ -150,11 +152,18 @@ def test_lookup_empty_mart_is_zero_hits() -> None:
     assert result == []
     sql = client.query.call_args.args[0]
     assert LEVER_EMAIL_HASH_BUILD_TABLE in sql
-    assert "system = 'lever'" in sql
+    assert "system = @system" in sql
     assert "hash_value = @hash_value" in sql
     assert _EMAIL_HASH not in sql
     assert PII_EMAIL not in sql
     assert _VENDOR_ID not in sql
+    job_config = client.query.call_args.kwargs["job_config"]
+    params = {
+        p.name: (getattr(p, "values", None) or getattr(p, "value", None))
+        for p in job_config.query_parameters
+    }
+    assert params["system"] == LEVER_SYSTEM
+    assert params["hash_value"] == _EMAIL_HASH
 
 
 def test_lookup_rejects_plaintext_without_query() -> None:
@@ -165,6 +174,65 @@ def test_lookup_rejects_plaintext_without_query() -> None:
 
     assert PII_EMAIL not in str(exc_info.value)
     client.query.assert_not_called()
+
+
+def test_lookup_by_hashes_set_based() -> None:
+    hash_a = _EMAIL_HASH
+    hash_b = "other-hash-value-BBBBBBBBBBBBBBBBBBBBBBBBBB="
+    hash_c = "missing-hash-CCCCCCCCCCCCCCCCCCCCCCCCCCCC="
+    client = MagicMock()
+    client.query.return_value = _FakeJob(
+        [
+            _FakeRow(hash_value=hash_a, vendor_record_id=_VENDOR_ID),
+            _FakeRow(hash_value=hash_a, vendor_record_id="lever|second"),
+            _FakeRow(hash_value=hash_b, vendor_record_id=None),
+        ]
+    )
+
+    out = lookup_lever_vendor_ids_by_email_hashes(
+        [hash_a, hash_b, hash_c, hash_a],
+        client=client,
+    )
+
+    assert out[hash_a] == [_VENDOR_ID, "lever|second"]
+    assert out[hash_b] == []
+    assert out[hash_c] == []
+    sql = client.query.call_args.args[0]
+    assert "UNNEST(@hash_values)" in sql
+    assert "system = @system" in sql
+    assert LEVER_EMAIL_HASH_BUILD_TABLE in sql
+    assert hash_a not in sql
+    job_config = client.query.call_args.kwargs["job_config"]
+    params = {
+        p.name: (getattr(p, "values", None) or getattr(p, "value", None))
+        for p in job_config.query_parameters
+    }
+    assert params["hash_values"] == [hash_a, hash_b, hash_c]
+    assert params["system"] == LEVER_SYSTEM
+
+
+def test_lookup_by_hashes_empty() -> None:
+    client = MagicMock()
+    assert lookup_lever_vendor_ids_by_email_hashes([], client=client) == {}
+    assert lookup_lever_vendor_ids_by_email_hashes(["", "  "], client=client) == {}
+    client.query.assert_not_called()
+
+
+def test_lookup_by_hashes_rejects_plaintext() -> None:
+    client = MagicMock()
+    with pytest.raises(ValueError, match="must not contain plaintext"):
+        lookup_lever_vendor_ids_by_email_hashes([_EMAIL_HASH, PII_EMAIL], client=client)
+    client.query.assert_not_called()
+
+
+def test_lookup_by_hashes_timeout_raises_typed_retry() -> None:
+    client = MagicMock()
+    client.query.side_effect = TimeoutError("deadline exceeded / timeout")
+
+    with pytest.raises(LeverHashLookupError) as exc_info:
+        lookup_lever_vendor_ids_by_email_hashes([_EMAIL_HASH], client=client)
+
+    assert exc_info.value.retry_seconds >= 60
 
 
 @pytest.mark.asyncio

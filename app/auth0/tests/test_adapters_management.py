@@ -20,6 +20,8 @@ _TOKEN = "tok_test_opaque"
 _JOB_ID = "job_test0000000001"
 # Host pattern from Auth0 bulk-export docs sample location.
 _EXPORT_HOST = "pus3-auth0-export-users-us-east-2.s3.us-east-2.amazonaws.com"
+# Observed production tenant export host (no "auth0-" label prefix).
+_EXPORT_HOST_PROD = "l0-prod-prod-us-1-usw2-export-users.s3.us-west-2.amazonaws.com"
 _EXPORT_URL = f"https://{_EXPORT_HOST}/job/{_JOB_ID}/users.json.gz"
 _EMAIL_A = "alpha@example.com"
 _EMAIL_B = "bravo@example.com"
@@ -133,6 +135,16 @@ async def test_iter_users_yields_vendor_id_and_email() -> None:
     handler = _export_handler([{"user_id": "auth0|aaa", "email": _EMAIL_A}])
     rows = await _collect(handler)
     assert rows == [("auth0|aaa", _EMAIL_A)]
+
+
+@pytest.mark.asyncio
+async def test_iter_users_accepts_prod_style_export_host() -> None:
+    """Real tenant export hosts carry ``-export-users`` without an ``auth0-`` prefix."""
+    location = f"https://{_EXPORT_HOST_PROD}/exports/users.json.gz"
+    handler = _export_handler([{"user_id": "auth0|aaa", "email": _EMAIL_A}], location=location)
+    rows = await _collect(handler)
+    assert rows == [("auth0|aaa", _EMAIL_A)]
+    assert _EXPORT_HOST_PROD in handler.state["hosts"]
 
 
 @pytest.mark.asyncio

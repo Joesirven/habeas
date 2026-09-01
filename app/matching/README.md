@@ -28,7 +28,7 @@ is a new adapter class, not a new app.
 - Reaper default `max_attempts` is **5** (≥3 retries after the initial attempt); Health
   Configuration may override via admin_api (floor 4).
 
-## Chunk drain (Method E)
+## Chunk drain
 
 - Queue remains **one `matching_attempts` row per request**.
 - Hot path: `POST /ensure-drain` acquires a single-flight `matching_drain_lease`, then
@@ -74,7 +74,7 @@ Auth0 lookup failure is **non-fatal** to the DROP attempt. Allowlisted audit key
 | `EXTERNAL_HASH_BQ_DATASET` | Dataset (default `external_hash_index`) |
 | `GCP_PROJECT` | Already required for chunk drain |
 
-**IAM (Jose-gated):** matching-dev runtime SA needs project `roles/bigquery.jobUser` and **table-level** `roles/bigquery.dataViewer` on `external_hash_index.auth0_email_hash__build` — not dataset-wide write (Mailchimp shares `external_hash_index`). See [`infra/README.md`](../../infra/README.md) (matching-dev + Auth0 mart).
+**IAM (Jose-gated):** matching-dev runtime SA needs project `roles/bigquery.jobUser` and **table-level** `roles/bigquery.dataViewer` on `external_hash_index.auth0_email_hash__build` — not dataset-wide write (other verticals share `external_hash_index`). See [`infra/README.md`](../../infra/README.md) (matching-dev + Auth0 mart).
 
 Dev path: (1) local hash refresh until the mart has rows, (2) DROP dispatch / `/ops/drop/ensure-drain` on **matching-dev**, (3) SELECT `request_vertical_matching` (`vertical=auth0`), (4) owner GET / PUT on admin-api — [`app/admin_api/README.md`](../admin_api/README.md) § Auth0 vertical.
 

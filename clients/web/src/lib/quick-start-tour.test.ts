@@ -19,9 +19,9 @@ function connector(
   overrides: Partial<OwnerConnectorSystem> = {},
 ): OwnerConnectorSystem {
   return {
-    system: 'mailchimp',
-    display_name: 'Mailchimp',
-    allowed_approaches: ['live', 'upload'],
+    system: 'axios_hq',
+    display_name: 'Axios HQ',
+    allowed_approaches: ['upload'],
     connection_id: 'conn-1',
     status: 'connected',
     last_test_ok: true,
@@ -102,7 +102,7 @@ describe('isOwnerQuickStartTourEligible (KD32)', () => {
     const reminders: ConnectorReminder[] = [
       {
         code: 'wizard_incomplete',
-        system: 'mailchimp',
+        system: 'axios_hq',
         vertical_id: 'communications',
         severity: 'approaching',
       },

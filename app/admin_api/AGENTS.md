@@ -95,9 +95,8 @@ Do **not** re-enable Cloud Run IAP on admin-api. Do **not** re-run `infra/cloudb
   (`axios_hq`), `lever`, and `paylocity` are treated live for write-gates
   (aliases → `communications` / `people_hr`) — not extra live write keys.
   Retracted slug `axios_headquarters` is **unknown** on disposition/kickoff
-  write paths (not coming-soon). Coming-soon write keys (`cassandra`, `bizdev`)
-  stay catalog-only and rejected on write. Mailchimp is retired from the
-  catalog — not a coming-soon write vertical. Historical `tech` is an Auth0
+  write paths (not coming-soon).   Coming-soon write keys (`cassandra`, `bizdev`)
+  stay catalog-only and rejected on write. Historical `tech` is an Auth0
   read alias, not a second live write key. Cassandra is **suppress-only** —
   no matching, hash-refresh, or dbt; keep it out of `LIVE_VERTICALS`. Status
   3/4 require a selection (`dwids` for `data`, defaulting to the matching

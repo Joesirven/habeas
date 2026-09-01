@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
+import asyncpg
 from habeas_privacy_core.audit.writer import write_audit
 from habeas_privacy_core.auth import (
     ROLE_ADMIN,
@@ -110,6 +113,32 @@ NEEDS_ATTENTION_KINDS: tuple[NeedsAttentionKind, ...] = (
     "delivery",
     "all",
 )
+
+# Inbox budget: the matching base query ran 182s on prod over ~1.84M-row
+# tables before supporting indexes; the web fetcher gives up at 30s.
+NEEDS_ATTENTION_STATEMENT_TIMEOUT_MS = 15_000
+
+
+def _supports_local_statement_timeout(conn: Any) -> bool:
+    """Skip unittest mocks — MagicMock.transaction/execute are callable."""
+    if type(conn).__module__.startswith("unittest.mock"):
+        return False
+    return callable(getattr(conn, "transaction", None)) and callable(
+        getattr(conn, "execute", None)
+    )
+
+
+@asynccontextmanager
+async def needs_attention_statement_scope(conn: Any) -> AsyncIterator[None]:
+    """SET LOCAL statement_timeout = 15s inside a transaction (no-op on test mocks)."""
+    if not _supports_local_statement_timeout(conn):
+        yield
+        return
+    async with conn.transaction():
+        await conn.execute(
+            f"SET LOCAL statement_timeout = {int(NEEDS_ATTENTION_STATEMENT_TIMEOUT_MS)}"
+        )
+        yield
 
 OPS_COMMENT_COMMAND = "ops.comment"
 
@@ -369,6 +398,45 @@ async def _needs_attention_assignment(
         kind=assignment_raw.get("kind"),
         assignee_identity=assignment_raw.get("assignee_identity"),
     )
+
+
+async def _needs_attention_assignments_batch(
+    conn: Any, request_ids: list[str]
+) -> dict[str, NeedsAttentionAssignment]:
+    """Page-wide variant of ``_needs_attention_assignment`` — one round trip.
+
+    DISTINCT ON (request_id) ordered by requested_at DESC is the per-request
+    ``ORDER BY requested_at DESC LIMIT 1`` in ``get_current_assignment``
+    grouped over the page; same pending/action filters, same field mapping.
+    """
+    if not request_ids:
+        return {}
+    rows = await conn.fetch(
+        """
+        SELECT DISTINCT ON (request_id)
+               request_id::text AS request_id,
+               approver_role,
+               context_jsonb
+          FROM approval_requests
+         WHERE request_id = ANY($1::uuid[])
+           AND action_type = $2
+           AND status = 'pending'
+         ORDER BY request_id, requested_at DESC
+        """,
+        [UUID(request_id) for request_id in request_ids],
+        WORKFLOW_ASSIGNMENT_ACTION,
+    )
+    assignments: dict[str, NeedsAttentionAssignment] = {}
+    for row in rows:
+        context = row["context_jsonb"] or {}
+        if isinstance(context, str):
+            context = json.loads(context)
+        assignments[str(row["request_id"])] = NeedsAttentionAssignment(
+            target_role=row["approver_role"],
+            kind=context.get("kind"),
+            assignee_identity=context.get("assignee_identity"),
+        )
+    return assignments
 
 
 def _attempt_stage_status(raw_status: str | None) -> StageStatus:
@@ -2109,11 +2177,14 @@ async def list_matching_needs_attention(
 
     items: list[NeedsAttentionItem] = []
     bulk_by_csv: dict[str, int | None] = {}
+    assignments = await _needs_attention_assignments_batch(
+        conn, [str(row["request_id"]) for row in rows]
+    )
     for row in rows:
         match_count = (
             int(row["match_count"]) if row["match_count"] is not None else None
         )
-        assignment = await _needs_attention_assignment(conn, row["request_id"])
+        assignment = assignments.get(str(row["request_id"]))
         state = row["requestor_state"]
         state_acronym = str(state).strip().upper()[:2] if state else None
         bulk_process_id = (
@@ -2975,29 +3046,35 @@ async def needs_attention(
     if assignee_filter is not None and assignee_filter.strip().lower() == "me":
         assignee_filter = viewer.email
     pool = get_pool()
-    async with pool.acquire() as conn:
-        owner_verticals: list[str] | None = None
-        if is_vertical_operator_role(viewer.role):
-            owner_verticals = await fetch_principal_verticals(
-                conn, email=viewer.email
-            )
-            # ``assignee`` filters legal ``workflow.assignment`` — not DO vertical scope.
-            assignee_filter = None
-        try:
-            response = await list_needs_attention(
-                conn,
-                limit=limit,
-                offset=offset,
-                kind=kind,
-                assignee=assignee_filter,
-                owner_verticals=owner_verticals,
-                vertical=vertical,
-                system=system,
-            )
-        except OwnerVerticalForbidden as exc:
-            raise HTTPException(status_code=403, detail="vertical access denied") from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        async with pool.acquire() as conn:
+            async with needs_attention_statement_scope(conn):
+                owner_verticals: list[str] | None = None
+                if is_vertical_operator_role(viewer.role):
+                    owner_verticals = await fetch_principal_verticals(
+                        conn, email=viewer.email
+                    )
+                    # ``assignee`` filters legal ``workflow.assignment`` — not DO vertical scope.
+                    assignee_filter = None
+                try:
+                    response = await list_needs_attention(
+                        conn,
+                        limit=limit,
+                        offset=offset,
+                        kind=kind,
+                        assignee=assignee_filter,
+                        owner_verticals=owner_verticals,
+                        vertical=vertical,
+                        system=system,
+                    )
+                except OwnerVerticalForbidden as exc:
+                    raise HTTPException(status_code=403, detail="vertical access denied") from exc
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except asyncpg.QueryCanceledError as exc:
+        raise HTTPException(
+            status_code=503, detail="needs-attention query timed out"
+        ) from exc
     assert_no_pii_keys(response.model_dump())
     return response
 

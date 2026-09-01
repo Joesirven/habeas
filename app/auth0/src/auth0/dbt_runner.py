@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-# Auth0 models only — do not build Mailchimp or other verticals.
+# Auth0 models only — do not build other verticals.
 AUTH0_DBT_SELECT = ("stg_auth0_hashed", "mart_auth0_email_hash")
 
 

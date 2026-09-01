@@ -27,6 +27,7 @@ from habeas_privacy_core.connections.matching_gate import (
 from habeas_privacy_core.db.pool import close_pool, create_pool, get_pool, ping
 from habeas_privacy_core.db.vertical_hash_refresh import (
     claim_vertical_hash_refresh,
+    enqueue_vertical_hash_refresh,
     mark_vertical_hash_refresh_in_flight,
     record_vertical_hash_refresh_run,
 )
@@ -322,6 +323,30 @@ async def matching_collect():
     return {"collected": 0}
 
 
+@app.post("/ensure-drain")
+async def ensure_drain_endpoint():
+    """Start the Paylocity matching drain Job when configured; else inline loop."""
+    if not settings.database_url:
+        raise HTTPException(status_code=503, detail="database not configured")
+
+    from paylocity.chunk_drain import (
+        ensure_drain,
+        run_drain_budget,
+        start_drain_job_execution,
+    )
+
+    job_name = os.environ.get("PAYLOCITY_DRAIN_JOB_NAME", "").strip()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        if job_name:
+
+            async def _start() -> None:
+                await start_drain_job_execution()
+
+            return await ensure_drain(conn, start_job=_start)
+        return await run_drain_budget(conn, worker_id=settings.worker_id)
+
+
 @app.post("/suppression/submit")
 async def suppression_submit():
     """Submit Paylocity suppression.
@@ -467,7 +492,18 @@ async def hash_refresh_process():
             lease_minutes=settings.hash_refresh_lease_minutes,
         )
         if claim is None:
-            return {"processed": False, "reason": "idle"}
+            # Scheduler-driven cadence: no pending row means enqueue one
+            # (single-flight) and claim it. Admin-api enqueue stays the
+            # ad-hoc path; an in-flight refresh still claims nothing.
+            await enqueue_vertical_hash_refresh(conn, system=SYSTEM)
+            claim = await claim_vertical_hash_refresh(
+                conn,
+                system=SYSTEM,
+                worker_id=settings.worker_id,
+                lease_minutes=settings.hash_refresh_lease_minutes,
+            )
+        if claim is None:
+            return {"processed": False, "reason": "in_flight"}
 
         attempt_id = int(claim["id"])
         await mark_vertical_hash_refresh_in_flight(conn, attempt_id)

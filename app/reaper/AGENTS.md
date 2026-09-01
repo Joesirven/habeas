@@ -9,9 +9,9 @@ Shared worker — releases expired leases, marks timeouts, inserts retry rows ac
 - Runs every minute; system-agnostic
 - `matching_attempts` uses default `ReapedTableConfig.max_attempts=5`
   (initial attempt + ≥3 retries before terminal failure)
-- Also reaps vertical attempt tables: `mailchimp_attempts`, `paylocity_attempts`,
+- Also reaps vertical attempt tables: `paylocity_attempts`,
   `lever_attempts`, `auth0_attempts`, `google_sheets_attempts`, `cassandra_attempts`,
-  `axios_headquarters_attempts`
+  `axios_headquarters_attempts` (Communications; Mailchimp retired)
 - On each `/reap`, merges `ops_retry_config` overrides when the table exists
   (Health Configuration PATCH; floor 4)
 - Also runs `reconcile_ungated_matching_reviews` to backfill missing

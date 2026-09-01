@@ -265,7 +265,6 @@ describe('ownerUploadAllowed', () => {
     expect(ownerUploadAllowed('google_sheets')).toBe(false)
     expect(ownerUploadAllowed('alumni_google_sheet')).toBe(false)
     expect(ownerUploadAllowed('contact_us_google_sheet')).toBe(false)
-    expect(ownerUploadAllowed('mailchimp')).toBe(false)
   })
 })
 
