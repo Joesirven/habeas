@@ -1,4 +1,5 @@
--- migrate:up transaction:false
+-- migrate:up
+-- migrate:transaction:false
 -- Heavy backfill for external vertical matching stats (split from 20260831220000).
 -- Runs outside a transaction so CREATE INDEX CONCURRENTLY is allowed.
 
@@ -314,7 +315,8 @@ BEGIN
            updated_at = NOW();
 END $$;
 
--- migrate:down transaction:false
+-- migrate:down
+-- migrate:transaction:false
 DROP INDEX CONCURRENTLY IF EXISTS ix_bizdev_contacts_attempts_request_matching;
 DROP INDEX CONCURRENTLY IF EXISTS ix_hr_alumni_attempts_request_matching;
 DROP INDEX CONCURRENTLY IF EXISTS ix_lever_attempts_request_matching;
