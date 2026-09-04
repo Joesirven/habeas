@@ -223,6 +223,33 @@ export const OPS_EXPAND_DETAIL_TIMEOUT_MS = 45_000
 /** Default abort for slow ops reads (full pipeline, worker trends, …). */
 export const OPS_QUERY_TIMEOUT_MS = 30_000
 
+/** Home inbox poll cadence. */
+export const INBOX_POLL_INTERVAL_MS = 30_000
+
+/** Ceiling for the inbox poll backoff after repeated failures. */
+export const INBOX_POLL_MAX_INTERVAL_MS = 300_000
+
+type PollableQueryState = {
+  state: { fetchStatus: string; fetchFailureCount: number }
+}
+
+/**
+ * Poll cadence for needs-attention reads — the most expensive admin-api query.
+ *
+ * Holds the timer while a fetch is outstanding so a slow inbox never has a
+ * second copy queued behind it, and backs off exponentially while the API is
+ * shedding (503) so an open Home tab cannot keep a struggling pool busy.
+ */
+export function inboxRefetchInterval(query: PollableQueryState): number | false {
+  if (query.state.fetchStatus === 'fetching') return false
+  const failures = query.state.fetchFailureCount
+  if (failures <= 0) return INBOX_POLL_INTERVAL_MS
+  return Math.min(
+    INBOX_POLL_INTERVAL_MS * 2 ** failures,
+    INBOX_POLL_MAX_INTERVAL_MS,
+  )
+}
+
 export type AdminApiFetchInit = RequestInit & {
   /** When set, abort the request after this many milliseconds. */
   timeoutMs?: number

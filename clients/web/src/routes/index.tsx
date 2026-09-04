@@ -24,6 +24,7 @@ import {
   getLegalPortfolio,
   getNeedsAttention,
   getOwnerFulfillmentNeedsAttention,
+  inboxRefetchInterval,
   type DropPipelineStatus,
 } from '@/lib/api'
 import {
@@ -46,7 +47,7 @@ function OperatorDashboardHome() {
   const attentionQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'home'],
     queryFn: () => getNeedsAttention(200),
-    refetchInterval: 10_000,
+    refetchInterval: inboxRefetchInterval,
     placeholderData: (previous) => previous,
   })
 
@@ -523,13 +524,13 @@ function DataOwnerHome() {
   const attentionQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'do-home'],
     queryFn: () => getNeedsAttention({ limit: 1000, kind: 'matching' }),
-    refetchInterval: 10_000,
+    refetchInterval: inboxRefetchInterval,
     placeholderData: (previous) => previous,
   })
   const fulfillmentQuery = useQuery({
     queryKey: ['admin-api', 'ops', 'requests', 'needs-attention', 'do-fulfillment'],
     queryFn: () => getOwnerFulfillmentNeedsAttention({ limit: 1000 }),
-    refetchInterval: 10_000,
+    refetchInterval: inboxRefetchInterval,
     placeholderData: (previous) => previous,
   })
   const matchingItems = attentionQuery.data?.items ?? []
