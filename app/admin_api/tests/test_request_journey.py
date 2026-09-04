@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import os
 from typing import Any
@@ -3361,6 +3363,19 @@ async def test_list_matching_needs_attention_batches_assignment_lookup() -> None
 
     # Base query + one batched assignment query — never one lookup per row.
     assert conn.fetch.await_count == 2
+    matching_sql = conn.fetch.await_args_list[0].args[0]
+    assert "batch AS" not in matching_sql
+    assert "LEFT JOIN batch" not in matching_sql
+    assert "drop_ingest_attempts" not in matching_sql
+    assert "drop_connector_attempts" not in matching_sql
+    assert "source_csv_filename" in matching_sql
+    assert "matching_results_latest" in matching_sql
+    assert "FROM approval_requests ar" in matching_sql
+    assert "ar.status = 'pending'" in matching_sql
+    assert "\n            UNION\n" not in matching_sql
+    assert "candidates AS" not in matching_sql
+    assert "DISTINCT ON (mr.request_id)" not in matching_sql
+    assert "FROM matching_results mr" not in matching_sql
     batch_args = conn.fetch.await_args_list[1].args
     assert "DISTINCT ON (request_id)" in batch_args[0]
     assert batch_args[1] == [UUID(request_a), UUID(request_b)]
@@ -3378,7 +3393,7 @@ async def test_list_matching_needs_attention_batches_assignment_lookup() -> None
     assert by_id[request_a].match_count == 1
     assert by_id[request_a].review_status == "pending"
     assert by_id[request_a].requestor_state == "CA"
-    assert by_id[request_a].bulk_process_id == 42
+    assert by_id[request_a].bulk_process_id is None
     assert by_id[request_b].approval_id is None
     assert by_id[request_b].matched is None
     assert by_id[request_b].requestor_state is None
@@ -3495,3 +3510,181 @@ def test_needs_attention_statement_timeout_maps_to_503(
 
     assert response.status_code == 503
     assert response.json()["detail"] == "needs-attention query timed out"
+
+
+def test_needs_attention_query_is_not_bounded_by_task_cancellation() -> None:
+    """The inbox statements must not sit inside an ``asyncio.timeout``.
+
+    Cancelling asyncpg mid-scan makes it wait on a server-side cancel plus
+    ROLLBACK before the handler can answer; on loaded prod that turned a 24s
+    budget into 49s-900s responses. ``statement_timeout`` is the ceiling because
+    Postgres cancelling its own statement leaves a reusable connection.
+    """
+    code = "\n".join(
+        line
+        for line in inspect.getsource(request_journey.needs_attention).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+    # The one permitted asyncio.timeout guards the pool wait, ahead of the scope.
+    assert code.count("asyncio.timeout") == 1
+    assert code.index("needs_attention_acquire_timeout_seconds") < code.index(
+        "needs_attention_statement_scope"
+    )
+
+
+def test_needs_attention_pool_acquire_wait_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A saturated pool sheds the request instead of queueing on it."""
+    roles.settings.require_iap_identity = True
+    roles.settings.admin_api_super_admins = "admin@example.com"
+
+    class _Acquire:
+        async def __aenter__(self) -> Any:
+            await asyncio.sleep(30)
+            return AsyncMock()
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+    class _Pool:
+        def acquire(self) -> _Acquire:
+            return _Acquire()
+
+    monkeypatch.setattr(request_journey.settings, "database_url", "postgres://local")
+    monkeypatch.setattr(request_journey, "get_pool", lambda: _Pool())
+    monkeypatch.setenv("NEEDS_ATTENTION_POOL_ACQUIRE_TIMEOUT_MS", "20")
+
+    client = TestClient(app)
+    response = client.get(
+        "/ops/requests/needs-attention?kind=matching&limit=5",
+        headers=signed_headers("admin@example.com"),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "needs-attention inbox is busy"
+
+
+def test_needs_attention_timeout_env_overrides() -> None:
+    assert request_journey.needs_attention_acquire_timeout_seconds() == pytest.approx(
+        request_journey.NEEDS_ATTENTION_POOL_ACQUIRE_TIMEOUT_MS / 1000
+    )
+    assert (
+        request_journey.needs_attention_statement_timeout_ms()
+        == request_journey.NEEDS_ATTENTION_STATEMENT_TIMEOUT_MS
+    )
+
+
+def test_needs_attention_worst_case_stays_under_web_abort() -> None:
+    """Acquire + statement ceiling must resolve before the web fetcher's 30s abort.
+
+    Otherwise the browser cancels first and the query keeps running server-side —
+    the exact failure these ceilings exist to prevent.
+    """
+    worst_case_ms = (
+        request_journey.NEEDS_ATTENTION_POOL_ACQUIRE_TIMEOUT_MS
+        + request_journey.NEEDS_ATTENTION_STATEMENT_TIMEOUT_MS
+    )
+    assert worst_case_ms < 30_000
+
+
+def test_needs_attention_statement_timeout_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEEDS_ATTENTION_STATEMENT_TIMEOUT_MS", "31000")
+    assert request_journey.needs_attention_statement_timeout_ms() == 31_000
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "not-a-number", "0", "-5"])
+def test_needs_attention_timeouts_ignore_unusable_env(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("NEEDS_ATTENTION_STATEMENT_TIMEOUT_MS", raw)
+    assert (
+        request_journey.needs_attention_statement_timeout_ms()
+        == request_journey.NEEDS_ATTENTION_STATEMENT_TIMEOUT_MS
+    )
+
+
+@pytest.mark.asyncio
+async def test_bulk_process_id_for_raw_uses_caller_filename() -> None:
+    """Inbox rows already select the filename; re-reading it cost a round trip per row."""
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(side_effect=AssertionError("no per-row filename lookup"))
+    cache: dict[str, int | None] = {"drop-2026-08-21.csv": 42}
+
+    resolved = await request_journey._bulk_process_id_for_raw(
+        conn,
+        raw_record_id=7,
+        cache=cache,
+        source_csv_filename="drop-2026-08-21.csv",
+    )
+
+    assert resolved == 42
+    conn.fetchval.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_list_matching_needs_attention_resolves_bulk_via_csv_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DROP batch id is a post-query CSV lookup — not a DISTINCT ON join."""
+    request_a = "11111111-1111-2222-3333-444444444444"
+    request_b = "55555555-6666-7777-8888-999999999999"
+    base_rows = [
+        {
+            "request_id": request_a,
+            "approval_id": 101,
+            "intake_source": "drop",
+            "received_at": None,
+            "raw_record_id": 7,
+            "requested_at": "2026-08-20T00:00:00+00:00",
+            "review_status": "pending",
+            "requestor_state": "ca",
+            "matched": True,
+            "match_count": 1,
+            "matched_via": "drop_hash",
+            "source_csv_filename": "member-a.csv",
+        },
+        {
+            "request_id": request_b,
+            "approval_id": None,
+            "intake_source": "drop",
+            "received_at": None,
+            "raw_record_id": 8,
+            "requested_at": "2026-08-21T00:00:00+00:00",
+            "review_status": "none",
+            "requestor_state": None,
+            "matched": None,
+            "match_count": None,
+            "matched_via": None,
+            "source_csv_filename": "member-a.csv",
+        },
+    ]
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(side_effect=[base_rows, []])
+    lookups: list[str] = []
+
+    async def _resolve(
+        _conn: object,
+        *,
+        raw_record_id: int,
+        cache: dict[str, int | None] | None = None,
+        source_csv_filename: str | None = None,
+    ) -> int | None:
+        assert raw_record_id in {7, 8}
+        assert source_csv_filename == "member-a.csv"
+        assert cache is not None
+        csv_key = str(source_csv_filename)
+        if csv_key in cache:
+            return cache[csv_key]
+        lookups.append(csv_key)
+        cache[csv_key] = 99
+        return 99
+
+    monkeypatch.setattr(request_journey, "_bulk_process_id_for_raw", _resolve)
+    items = await request_journey.list_matching_needs_attention(conn, limit=100)
+
+    assert lookups == ["member-a.csv"]
+    assert [item.bulk_process_id for item in items] == [99, 99]

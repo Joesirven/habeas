@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -114,9 +116,54 @@ NEEDS_ATTENTION_KINDS: tuple[NeedsAttentionKind, ...] = (
     "all",
 )
 
-# Inbox budget: the matching base query ran 182s on prod over ~1.84M-row
-# tables before supporting indexes; the web fetcher gives up at 30s.
-NEEDS_ATTENTION_STATEMENT_TIMEOUT_MS = 15_000
+# Inbox ceiling, enforced by Postgres. The matching base query used to join every
+# candidate to drop_raw + ingest + connector (the batch CTE) and ran past 26s on
+# ~1.84M rows; bulk_process_id is now filled after the query from
+# source_csv_filename, one lookup per distinct CSV instead of per row.
+#
+# Letting Postgres cancel its own statement is what keeps a slow inbox from
+# occupying a pool connection. Do not bound this with asyncio.timeout instead:
+# it looks equivalent, but cancelling mid-scan makes asyncpg wait on a
+# server-side cancel plus ROLLBACK before it can answer, and on loaded prod that
+# turned a 24s budget into 49s-900s responses.
+NEEDS_ATTENTION_STATEMENT_TIMEOUT_MS = 26_000
+
+# Ceiling on the pool queue wait only. Shedding here is cheap because no
+# connection is held yet, so a saturated pool answers immediately instead of
+# stacking readers behind a slow scan. Both values are readable from the
+# environment so prod can be retuned with --update-env-vars, not a rebuild.
+NEEDS_ATTENTION_POOL_ACQUIRE_TIMEOUT_MS = 2_000
+
+
+def _env_timeout_seconds(name: str, default_ms: int) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default_ms / 1000
+    try:
+        value = int(raw)
+    except ValueError:
+        return default_ms / 1000
+    return value / 1000 if value > 0 else default_ms / 1000
+
+
+def needs_attention_acquire_timeout_seconds() -> float:
+    """Ceiling on waiting for a pool connection before shedding the request."""
+    return _env_timeout_seconds(
+        "NEEDS_ATTENTION_POOL_ACQUIRE_TIMEOUT_MS",
+        NEEDS_ATTENTION_POOL_ACQUIRE_TIMEOUT_MS,
+    )
+
+
+def needs_attention_statement_timeout_ms() -> int:
+    """Per-statement ceiling applied inside the inbox transaction."""
+    return int(
+        _env_timeout_seconds(
+            "NEEDS_ATTENTION_STATEMENT_TIMEOUT_MS",
+            NEEDS_ATTENTION_STATEMENT_TIMEOUT_MS,
+        )
+        * 1000
+    )
+
 
 
 def _supports_local_statement_timeout(conn: Any) -> bool:
@@ -130,13 +177,13 @@ def _supports_local_statement_timeout(conn: Any) -> bool:
 
 @asynccontextmanager
 async def needs_attention_statement_scope(conn: Any) -> AsyncIterator[None]:
-    """SET LOCAL statement_timeout = 15s inside a transaction (no-op on test mocks)."""
+    """SET LOCAL statement_timeout inside a transaction (no-op on test mocks)."""
     if not _supports_local_statement_timeout(conn):
         yield
         return
     async with conn.transaction():
         await conn.execute(
-            f"SET LOCAL statement_timeout = {int(NEEDS_ATTENTION_STATEMENT_TIMEOUT_MS)}"
+            f"SET LOCAL statement_timeout = {needs_attention_statement_timeout_ms()}"
         )
         yield
 
@@ -2063,112 +2110,33 @@ async def list_matching_needs_attention(
     """Matching.review inbox rows (PII-safe)."""
     rows = await conn.fetch(
         """
-        WITH latest_mr AS (
-            SELECT DISTINCT ON (mr.request_id)
-                   mr.request_id,
-                   mr.matched,
-                   mr.match_count,
-                   mr.matched_via,
-                   mr.recorded_at
-              FROM matching_results mr
-             ORDER BY mr.request_id, mr.recorded_at DESC
-        ),
-        latest_review AS (
-            SELECT DISTINCT ON (ar.request_id)
-                   ar.id AS approval_id,
-                   ar.request_id,
-                   ar.status AS review_status,
-                   ar.requested_at
-              FROM approval_requests ar
-             WHERE ar.action_type = $1
-             ORDER BY ar.request_id, ar.requested_at DESC
-        ),
-        candidates AS (
-            -- Matched (or not-found) results awaiting review: pending gate OR no gate yet.
-            SELECT r.id AS request_id,
-                   r.intake_source,
-                   r.received_at,
-                   r.raw_record_id,
-                   UPPER(TRIM(r.requestor_state)) AS requestor_state,
-                   lm.matched,
-                   lm.match_count,
-                   lm.matched_via,
-                   lr.approval_id,
-                   COALESCE(lr.review_status, 'none') AS review_status,
-                   COALESCE(lr.requested_at, lm.recorded_at, r.received_at) AS sort_at
-              FROM latest_mr lm
-              JOIN requests r ON r.id = lm.request_id
-              LEFT JOIN latest_review lr ON lr.request_id = lm.request_id
-              LEFT JOIN drop_raw_requests drr
-                ON drr.id = r.raw_record_id
-               AND r.intake_source = 'drop'
-             WHERE COALESCE(lr.review_status, 'none') IN ('pending', 'none')
-               AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
-               AND NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)
-
-            UNION
-
-            -- Pending gates without a matching_results row yet (edge / race).
-            SELECT r.id AS request_id,
-                   r.intake_source,
-                   r.received_at,
-                   r.raw_record_id,
-                   UPPER(TRIM(r.requestor_state)) AS requestor_state,
-                   NULL::boolean AS matched,
-                   NULL::int AS match_count,
-                   NULL::text AS matched_via,
-                   ar.id AS approval_id,
-                   ar.status AS review_status,
-                   ar.requested_at AS sort_at
-              FROM approval_requests ar
-              JOIN requests r ON r.id = ar.request_id
-             WHERE ar.action_type = $1
-               AND ar.status = 'pending'
-               AND NOT EXISTS (
-                     SELECT 1 FROM matching_results mr WHERE mr.request_id = ar.request_id
-                   )
-        ),
-        batch AS (
-            -- Attribute via land *or* promote ledger: promote rows always stamp
-            -- source_csv_filename + gcs_uri at land-complete; land enqueue rows
-            -- sometimes have a null filename when the ZIP member list was empty.
-            SELECT DISTINCT ON (c.request_id)
-                   c.request_id,
-                   conn.id AS bulk_process_id
-              FROM candidates c
-              JOIN drop_raw_requests drr
-                ON drr.id = c.raw_record_id
-               AND c.intake_source = 'drop'
-              JOIN drop_ingest_attempts i
-                ON i.source_csv_filename = drr.source_csv_filename
-               AND i.step IN ('land', 'promote')
-               AND i.status != 'abandoned'
-               AND i.gcs_uri IS NOT NULL
-              JOIN drop_connector_attempts conn
-                ON conn.gcs_uri = i.gcs_uri
-               AND conn.step = 'download'
-               AND conn.status != 'abandoned'
-             ORDER BY c.request_id, conn.attempted_at DESC
-        )
-        SELECT c.request_id::text AS request_id,
-               c.approval_id,
-               c.intake_source,
-               c.received_at,
-               c.raw_record_id,
-               c.sort_at AS requested_at,
-               c.review_status,
-               c.requestor_state,
-               c.matched,
-               c.match_count,
-               c.matched_via,
-               b.bulk_process_id,
-               drr_csv.source_csv_filename
-          FROM candidates c
-          LEFT JOIN batch b ON b.request_id = c.request_id
-          LEFT JOIN drop_raw_requests drr_csv
-            ON drr_csv.id = c.raw_record_id
-           AND c.intake_source = 'drop'
-         ORDER BY c.sort_at ASC NULLS LAST
+        -- Prod is one pending matching.review per request (~1.84M). Materializing
+        -- every candidate then joining DROP/batch tables sorts the full wave and
+        -- blows 26s. Page pending gates first (ix_approval_requests_action_pending),
+        -- then join only the LIMIT rows. Not the reverted two-branch page rewrite.
+        SELECT r.id::text AS request_id,
+               ar.id AS approval_id,
+               r.intake_source,
+               r.received_at,
+               r.raw_record_id,
+               ar.requested_at,
+               ar.status AS review_status,
+               UPPER(TRIM(r.requestor_state)) AS requestor_state,
+               l.matched,
+               l.match_count,
+               l.matched_via,
+               drr.source_csv_filename
+          FROM approval_requests ar
+          JOIN requests r ON r.id = ar.request_id
+          LEFT JOIN matching_results_latest l ON l.request_id = r.id
+          LEFT JOIN drop_raw_requests drr
+            ON drr.id = r.raw_record_id
+           AND r.intake_source = 'drop'
+         WHERE ar.action_type = $1
+           AND ar.status = 'pending'
+           AND (r.intake_source != 'drop' OR drr.response_status IS NULL)
+           AND NOT EXISTS (SELECT 1 FROM request_closures rc WHERE rc.request_id = r.id)
+         ORDER BY ar.requested_at ASC NULLS LAST
          LIMIT $2
         """,
         MATCHING_REVIEW_ACTION,
@@ -2187,20 +2155,17 @@ async def list_matching_needs_attention(
         assignment = assignments.get(str(row["request_id"]))
         state = row["requestor_state"]
         state_acronym = str(state).strip().upper()[:2] if state else None
-        bulk_process_id = (
-            int(row["bulk_process_id"])
-            if row["bulk_process_id"] is not None
-            else None
-        )
-        if (
-            bulk_process_id is None
-            and row["intake_source"] == "drop"
-            and row["raw_record_id"] is not None
-        ):
+        bulk_process_id = None
+        if row["intake_source"] == "drop" and row["raw_record_id"] is not None:
             bulk_process_id = await _bulk_process_id_for_raw(
                 conn,
                 raw_record_id=int(row["raw_record_id"]),
                 cache=bulk_by_csv,
+                source_csv_filename=(
+                    str(row["source_csv_filename"])
+                    if row["source_csv_filename"] is not None
+                    else None
+                ),
             )
         review_status = str(row["review_status"] or "none")
         items.append(
@@ -2871,16 +2836,22 @@ async def _bulk_process_id_for_raw(
     *,
     raw_record_id: int,
     cache: dict[str, int | None] | None = None,
+    source_csv_filename: str | None = None,
 ) -> int | None:
-    """Resolve download attempt id for a DROP raw row (inbox batch key)."""
-    source_csv_filename = await conn.fetchval(
-        """
-        SELECT source_csv_filename
-          FROM drop_raw_requests
-         WHERE id = $1
-        """,
-        raw_record_id,
-    )
+    """Resolve download attempt id for a DROP raw row (inbox batch key).
+
+    Pass ``source_csv_filename`` when the caller's row already selected it —
+    inbox lists do, and looking it up per row cost a round trip each.
+    """
+    if source_csv_filename is None:
+        source_csv_filename = await conn.fetchval(
+            """
+            SELECT source_csv_filename
+              FROM drop_raw_requests
+             WHERE id = $1
+            """,
+            raw_record_id,
+        )
     if not source_csv_filename:
         return None
     csv_key = str(source_csv_filename)
@@ -3047,7 +3018,19 @@ async def needs_attention(
         assignee_filter = viewer.email
     pool = get_pool()
     try:
-        async with pool.acquire() as conn:
+        async with AsyncExitStack() as stack:
+            # Bound only the queue wait. Cancelling here is safe because no
+            # connection is held yet — see the note below on why the query
+            # itself must not be bounded this way.
+            async with asyncio.timeout(needs_attention_acquire_timeout_seconds()):
+                conn = await stack.enter_async_context(pool.acquire())
+            # statement_timeout is the ceiling on the work itself, deliberately.
+            # An asyncio.timeout around these statements looks equivalent but is
+            # not: cancelling mid-scan makes asyncpg wait on a server-side cancel
+            # plus ROLLBACK before it can answer, and on loaded prod that turned a
+            # 24s budget into 49s–900s responses. Postgres cancelling its own
+            # statement returns a clean QueryCanceledError and a reusable
+            # connection.
             async with needs_attention_statement_scope(conn):
                 owner_verticals: list[str] | None = None
                 if is_vertical_operator_role(viewer.role):
@@ -3068,12 +3051,18 @@ async def needs_attention(
                         system=system,
                     )
                 except OwnerVerticalForbidden as exc:
-                    raise HTTPException(status_code=403, detail="vertical access denied") from exc
+                    raise HTTPException(
+                        status_code=403, detail="vertical access denied"
+                    ) from exc
                 except ValueError as exc:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
     except asyncpg.QueryCanceledError as exc:
         raise HTTPException(
             status_code=503, detail="needs-attention query timed out"
+        ) from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=503, detail="needs-attention inbox is busy"
         ) from exc
     assert_no_pii_keys(response.model_dump())
     return response
