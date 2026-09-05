@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 
 import { Button } from '@/components/ui/button'
-import type { OwnerCredentialPreview, RefreshCadence } from '@/lib/api'
+import type { OwnerConnectorSystem, OwnerCredentialPreview, RefreshCadence } from '@/lib/api'
 import {
   CADENCE_OPTION_IDS,
   CADENCE_OPTION_RARELY,
@@ -9,7 +9,18 @@ import {
   CADENCE_OPTION_WITH_NEW_BATCHES,
   type CadenceOptionId,
 } from '@/lib/owner-connector-ui'
+import { isSystemComplete } from '@/lib/owner-wizard-flow'
 import { cn } from '@/lib/utils'
+
+/**
+ * Wizard completion is surfaced at top level when the API grows the field and
+ * inside `metadata.wizard_completed_at` otherwise — accept either.
+ */
+export function ownerConnectorWizardCompleted(connector: OwnerConnectorSystem): boolean {
+  if (isSystemComplete(connector)) return true
+  const fromMetadata = connector.metadata?.wizard_completed_at
+  return typeof fromMetadata === 'string' && fromMetadata.length > 0
+}
 
 /** Shared quiet field styling for owner wizard inputs and selects. */
 export const OWNER_FIELD_CLASS =

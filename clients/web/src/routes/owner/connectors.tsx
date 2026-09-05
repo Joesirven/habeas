@@ -46,7 +46,6 @@ import {
   displayStatusChip,
   filterOwnerWizardConnectors,
   filterRemindersForOwnerConnectorsPage,
-  isOwnerConnectorsHiddenSystem,
   isOwnerConnectorsHiddenVertical,
   isSheetsOwnerSystem,
   livePingIsNotMatchingExtract,
@@ -423,6 +422,25 @@ function ConnectorCadenceSelect({
   )
 }
 
+/** Inline gear (no icon library in this app) for configured-connection settings. */
+function GearIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-4 w-4"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  )
+}
+
 function ConnectorStatusRow({
   verticalId,
   connector,
@@ -466,14 +484,26 @@ function ConnectorStatusRow({
             gateAllowed={connector.gate_allowed}
           />
           {canConfigure ? (
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={() => onOpenWizard(connector.system)}
-            >
-              {completed ? 'Review' : 'Set up'}
-            </Button>
+            completed ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => onOpenWizard(connector.system)}
+                aria-label={`Connection settings for ${connectorTitle(verticalId, connector)}`}
+                title="Connection settings"
+              >
+                <GearIcon />
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => onOpenWizard(connector.system)}
+              >
+                Start wizard
+              </Button>
+            )
           ) : null}
         </div>
       </div>
@@ -486,14 +516,12 @@ function VerticalConnectorsSection({
   selected,
   onSelect,
   initialWizardSystem,
-  wizardAutoOpen,
   onWizardClosed,
 }: {
   verticalId: string
   selected: boolean
   onSelect: () => void
   initialWizardSystem?: string
-  wizardAutoOpen?: boolean
   onWizardClosed?: () => void
 }) {
   const { role } = useAuth()
@@ -505,31 +533,19 @@ function VerticalConnectorsSection({
   })
 
   const list = listQuery.data
-  const needsSetup = useMemo(
-    () =>
-      list?.connectors.some(
-        (connector) =>
-          !isOwnerConnectorsHiddenSystem(connector.system) &&
-          (connector.display_status === 'needs_setup' ||
-            connector.display_status === 'action_required'),
-      ) ?? false,
-    [list],
-  )
   const [wizardOpen, setWizardOpen] = useState(false)
   const [wizardSystem, setWizardSystem] = useState<string | undefined>(initialWizardSystem)
 
-  // Auto-open on Sheets OAuth resume, or on needs_setup/action_required when this
-  // section is the only/selected one (stacked modals across sections are never OK).
-  // initialWizardSystem can arrive AFTER mount (redeem mutation resolves async),
-  // so re-sync the target system, not just the open flag.
+  // Auto-open only on Sheets OAuth resume. initialWizardSystem can arrive
+  // AFTER mount (redeem mutation resolves async), so re-sync the target
+  // system, not just the open flag. No needs-setup auto-open: the per-row
+  // Start wizard buttons are the entry points now.
   useEffect(() => {
     if (initialWizardSystem) {
       setWizardSystem(initialWizardSystem)
       setWizardOpen(true)
-      return
     }
-    if (wizardAutoOpen && needsSetup) setWizardOpen(true)
-  }, [initialWizardSystem, wizardAutoOpen, needsSetup])
+  }, [initialWizardSystem])
 
   const invalidate = () => {
     void queryClient.invalidateQueries({
@@ -604,16 +620,6 @@ function VerticalConnectorsSection({
           <h3 className="text-sm font-medium text-ink">{list.display_label}</h3>
           <p className="text-[11px] text-mute">{connectors.length} system(s)</p>
         </button>
-        {canWizard ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            onClick={() => openWizard()}
-          >
-            Start wizard
-          </Button>
-        ) : null}
       </div>
 
       {canConfigure ? <VerticalNotificationsControl verticalId={verticalId} /> : null}
@@ -632,7 +638,7 @@ function VerticalConnectorsSection({
 
       {canWizard ? (
         <WizardDialog
-          key={wizardSystem ?? 'hub'}
+          key={wizardSystem ?? 'none'}
           open={wizardOpen}
           onOpenChange={handleWizardOpenChange}
           verticalId={verticalId}
@@ -1025,9 +1031,6 @@ function OwnerConnectorsBody({ search }: { search?: OwnerConnectorsSearch }) {
             selected={verticalFilter === verticalId}
             initialWizardSystem={
               oauthResume?.verticalId === verticalId ? oauthResume.system : undefined
-            }
-            wizardAutoOpen={
-              verticalFilter === verticalId || visibleVerticals.length === 1
             }
             onWizardClosed={() => setOauthResume(null)}
             onSelect={() =>
