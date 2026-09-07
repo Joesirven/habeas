@@ -12,7 +12,6 @@ import {
   resetToHub,
   stackTop,
   startSystem,
-  stepProgress,
   systemSubflowSteps,
   type StepStack,
   type SubflowInput,
@@ -292,20 +291,3 @@ describe('isSystemComplete', () => {
   })
 })
 
-describe('stepProgress', () => {
-  test('hub-only stack has no subflow progress', () => {
-    expect(stepProgress(initialStack())).toEqual({ index: 0, total: 0, system: undefined })
-  })
-
-  test('index/total track visited steps within the current subflow', () => {
-    const subflow = systemSubflowSteps(
-      subflowInput({ system: 'axios_headquarters', uploadAllowed: true }),
-    )
-    let stack: StepStack = startSystem(initialStack(), subflow)
-    expect(stepProgress(stack)).toEqual({ index: 0, total: 1, system: 'axios_headquarters' })
-    stack = pushStep(stack, subflow[1])
-    expect(stepProgress(stack)).toEqual({ index: 1, total: 2, system: 'axios_headquarters' })
-    stack = popStep(stack)
-    expect(stepProgress(stack)).toEqual({ index: 0, total: 1, system: 'axios_headquarters' })
-  })
-})

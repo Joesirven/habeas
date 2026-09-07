@@ -189,20 +189,3 @@ export function startSystem(stack: StepStack, steps: WizardStep[]): StepStack {
 export function isSystemComplete(c: { wizard_completed_at?: string | null }): boolean {
   return typeof c.wizard_completed_at === 'string' && c.wizard_completed_at.length > 0
 }
-
-/**
- * Progress within the current system's subflow (hub excluded). `index` is
- * 0-based; `total` counts steps known so far, i.e. steps visited since the
- * hub — the total grows as the owner advances, since runtime branches make
- * the full length unknowable up front. `system` is the current step's system.
- */
-export function stepProgress(stack: StepStack): { index: number; total: number; system?: string } {
-  const subflowLength = Math.max(stack.length - 1, 0)
-  if (subflowLength === 0) return { index: 0, total: 0 }
-  const top = stackTop(stack)
-  return {
-    index: subflowLength - 1,
-    total: subflowLength,
-    system: 'system' in top ? top.system : undefined,
-  }
-}

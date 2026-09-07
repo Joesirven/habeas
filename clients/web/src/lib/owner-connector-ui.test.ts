@@ -1358,7 +1358,6 @@ describe('connectors.tsx source smoke (modal wizard + copy guards)', () => {
       'sheets-step.tsx',
       'wizard-dialog.tsx',
       'wizard-shared.tsx',
-      'system-hub.tsx',
       'credential-steps.tsx',
       'upload-steps.tsx',
     ]
@@ -1422,5 +1421,30 @@ describe('wizard runner wiring (QCQA source locks)', () => {
     )
     expect(dialog).toContain('finalizeExtractMutation')
     expect(dialog).toContain('formatStepColumnLabel')
+  })
+
+  test('wizard is per-connection: no in-modal hub, Back at first step closes, done closes', () => {
+    const dialog = readFileSync(
+      join(here, '..', 'components', 'owner', 'wizard-dialog.tsx'),
+      'utf8',
+    )
+    // The hub component is gone — the settings page rows are the picker.
+    expect(dialog).not.toContain('SystemHub')
+    expect(dialog).not.toContain('resetToHub')
+    // Back from the subflow's first step closes the dialog (no hub to land on).
+    expect(dialog).toContain('flow.stack.length <= 2')
+    // Completing a system closes the dialog instead of returning to a hub.
+    expect(dialog).toContain('onOpenChange(false)')
+  })
+
+  test('each system row owns its wizard entry: Start wizard before setup, gear after', () => {
+    const source = readFileSync(
+      join(here, '..', 'routes', 'owner', 'connectors.tsx'),
+      'utf8',
+    )
+    expect(source).toContain('Start wizard')
+    expect(source).toContain('Connection settings for')
+    // No vertical-level auto-open — rows are the only entry (OAuth resume aside).
+    expect(source).not.toContain('wizardAutoOpen')
   })
 })

@@ -1,18 +1,21 @@
 /**
- * WizardDialog — the "Configure data system" modal for a data vertical.
+ * WizardDialog — the "Configure data system" modal for ONE connection.
  *
- * Step model lives in `@/lib/owner-wizard-flow` (pure TS). The dialog is the
- * runner: it owns the history stack plus the *planned* steps for the active
- * system, and all per-system draft state (credentials, column mapping,
- * formats, upload result/headers, sheets draft, cadence).
+ * Opened from a system row on the Data vertical settings page (the page is
+ * the any-order picker; there is no in-modal hub). Step model lives in
+ * `@/lib/owner-wizard-flow` (pure TS). The dialog is the runner: it owns the
+ * history stack plus the *planned* steps for the active system, and all
+ * per-system draft state (credentials, column mapping, formats, upload
+ * result/headers, sheets draft, cadence).
  *
  * Flow-logic approach for dynamic steps
  * -------------------------------------
  * `startSystem` pushes only the subflow's first step; `planned` holds the full
- * ordered plan for the active system. Because the stack is hub + this system's
+ * ordered plan for the active system. Because the stack is base + this system's
  * visited steps only, the next step is always `planned[stack.length - 1]`, so
  * Back (`popStep`) never corrupts forward navigation — re-advancing replays the
- * same planned step instead of duplicating it.
+ * same planned step instead of duplicating it. Back from the first step closes
+ * the dialog.
  * - choice resolve: splice `branchSteps(input, mode)` into `planned` after the
  *   choice step, then advance.
  * - mapping confirm (upload and sheets): drop any stale `format` steps from
@@ -70,7 +73,6 @@ import {
   initialStack,
   popStep,
   pushStep,
-  resetToHub,
   stackTop,
   startSystem,
   systemSubflowSteps,
@@ -87,9 +89,13 @@ import {
   readOwnerSheetsOauthSession,
   type SheetsConnectDraft,
 } from './sheets-step'
-import { SystemHub, ownerConnectorWizardCompleted } from './system-hub'
 import { FormatStep, MappingStep, UploadFileStep } from './upload-steps'
-import { CadenceStep, SystemDoneStep, WizardStepShell } from './wizard-shared'
+import {
+  CadenceStep,
+  SystemDoneStep,
+  WizardStepShell,
+  ownerConnectorWizardCompleted,
+} from './wizard-shared'
 
 /**
  * Per-system upload format drafts. `delimiter` stores the
@@ -99,9 +105,9 @@ import { CadenceStep, SystemDoneStep, WizardStepShell } from './wizard-shared'
 type UploadFormatDrafts = { email?: string; phone?: string; name?: string; delimiter?: string }
 
 type FlowState = {
-  /** True history — index 0 is the hub, top is the current step. */
+  /** True history — index 0 is the (never rendered) base, top is the current step. */
   stack: StepStack
-  /** Full ordered plan for the active system subflow (hub excluded). */
+  /** Full ordered plan for the active system subflow (base excluded). */
   planned: WizardStep[]
 }
 
@@ -474,6 +480,11 @@ export function WizardDialog({
   }
 
   function goBack() {
+    // No hub: Back from the subflow's first step closes the dialog.
+    if (flow.stack.length <= 2) {
+      onOpenChange(false)
+      return
+    }
     setFlow(({ stack, planned }) => ({ stack: popStep(stack), planned }))
   }
 
@@ -539,14 +550,15 @@ export function WizardDialog({
   }
 
   function handleSystemDoneContinue(system: string) {
-    setFlow(({ stack }) => ({ stack: resetToHub(stack), planned: [] }))
-    setActiveInput(null)
     onSystemCompleted?.(system)
     const done = new Set(completedThisSession)
     done.add(system)
     const visible = connectors.filter(
       (connector) => !isOwnerConnectorsHiddenSystem(connector.system),
     )
+    // Per-connection wizard: finishing closes the dialog (the settings page
+    // is the picker). Still fire onAllDone when every system is configured.
+    onOpenChange(false)
     if (
       visible.length > 0 &&
       visible.every(
@@ -600,15 +612,14 @@ export function WizardDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, pendingSystem, previewForSystem, previewQuery.data])
 
-  // Preview failure for a live-only system: toast + stay on the hub.
+  // Preview failure for a live-only system: toast once; the body shows an
+  // inline Retry while pendingSystem stays set (no hub to fall back to).
   useEffect(() => {
     if (!pendingSystem || !previewQuery.isError) return
     actionToast.error({
       title: 'Could not load credential fields',
       description: actionToast.safeErrorMessage(previewQuery.error, 'Try again.'),
-      action: { label: 'Retry', onClick: () => void previewQuery.refetch() },
     })
-    setPendingSystem(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingSystem, previewQuery.isError])
 
@@ -693,7 +704,9 @@ export function WizardDialog({
   function renderStep(step: WizardStep) {
     switch (step.kind) {
       case 'hub':
-        return <SystemHub verticalId={verticalId} connectors={connectors} onSelect={selectSystem} />
+        // Transient base frame — the auto-start effect immediately enters the
+        // target system's subflow. Never a rendered destination.
+        return <SkeletonLines lines={3} />
 
       case 'choice':
         return renderChoiceStep(step.system)
@@ -887,7 +900,7 @@ export function WizardDialog({
                 size="sm"
                 onClick={() => handleSystemDoneContinue(step.system)}
               >
-                Back to systems
+                Done
               </Button>
             }
           />
@@ -909,7 +922,7 @@ export function WizardDialog({
         <DialogHeader className="shrink-0 space-y-1 border-b border-line px-4 py-2.5 pr-12">
           <DialogTitle className="text-base">Configure data system</DialogTitle>
           <DialogDescription className="sr-only">
-            Set up data systems for {verticalLabel} — in any order.
+            Configure one {verticalLabel} connection, step by step.
           </DialogDescription>
           {top.kind === 'hub' ? (
             <p className="text-xs text-mute">{verticalLabel}</p>
@@ -923,12 +936,38 @@ export function WizardDialog({
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
           <div className="mx-auto w-full max-w-2xl">
             {pendingSystem ? (
-              <div className="space-y-3">
-                <p className="text-xs text-mute">
-                  Loading {displayNameFor(pendingSystem)} setup…
-                </p>
-                <SkeletonLines lines={3} />
-              </div>
+              previewQuery.isError ? (
+                <div className="space-y-3">
+                  <p className="text-xs text-red-800">
+                    Could not load {displayNameFor(pendingSystem)} setup.
+                  </p>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void previewQuery.refetch()}
+                    >
+                      Retry
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onOpenChange(false)}
+                    >
+                      Close
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <p className="text-xs text-mute">
+                    Loading {displayNameFor(pendingSystem)} setup…
+                  </p>
+                  <SkeletonLines lines={3} />
+                </div>
+              )
             ) : (
               renderStep(top)
             )}
