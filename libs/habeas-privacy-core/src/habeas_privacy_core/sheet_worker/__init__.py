@@ -35,6 +35,10 @@ from habeas_privacy_core.sheet_worker.vertical_match import (
     VerticalMatchOutcome,
     lookup_vendor_ids_by_email_hash,
     lookup_vendor_ids_by_email_hashes,
+    lookup_vendor_ids_by_hashes,
+    mart_table_for_list_type,
+    normalize_drop_list_type,
+    primary_hash_for_list_type,
     run_vertical_match,
 )
 
@@ -60,6 +64,10 @@ __all__ = [
     "load_connection_upload",
     "lookup_vendor_ids_by_email_hash",
     "lookup_vendor_ids_by_email_hashes",
+    "lookup_vendor_ids_by_hashes",
+    "mart_table_for_list_type",
+    "normalize_drop_list_type",
+    "primary_hash_for_list_type",
     "process_matching_chunk",
     "run_drain_budget",
     "run_external_hash_dbt_build",

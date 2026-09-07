@@ -21,6 +21,10 @@ import {
   parseOwnerMapLabSearch,
 } from '@/routes/dev/owner-map-alternatives'
 import {
+  MappingWorkbenchSamplesPage,
+  parseMappingWorkbenchLabSearch,
+} from '@/routes/dev/mapping-workbench-samples'
+import {
   MatchQualityLabPage,
   parseMatchQualityLabSearch,
 } from '@/routes/dev/match-quality'
@@ -111,6 +115,17 @@ export function createLabRoutes(
     },
   })
 
+  const mappingWorkbenchSamplesLabRoute = createRoute({
+    getParentRoute: () => parent,
+    path: '/dev/mapping-workbench-samples',
+    validateSearch: (search: Record<string, unknown>) =>
+      parseMappingWorkbenchLabSearch(search),
+    component: function MappingWorkbenchSamplesRoute() {
+      const search = mappingWorkbenchSamplesLabRoute.useSearch()
+      return <MappingWorkbenchSamplesPage search={search} />
+    },
+  })
+
   const matchQualityLabRoute = createRoute({
     getParentRoute: () => parent,
     path: '/dev/match-quality',
@@ -143,6 +158,7 @@ export function createLabRoutes(
     tokenResourceServerLabRoute,
     ownerMapFallbackLabRoute,
     ownerMapAlternativesLabRoute,
+    mappingWorkbenchSamplesLabRoute,
     matchQualityLabRoute,
     pipelineLiveLabRoute,
   ]

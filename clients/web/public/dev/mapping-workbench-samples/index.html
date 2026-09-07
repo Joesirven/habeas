@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mapping workbench samples — pick one</title>
+  <style>
+    :root {
+      --navy: #1e4191;
+      --mid: #2b7bb9;
+      --canvas: #f8fafc;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --border: #e2e8f0;
+      --surface: #fff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+      background: var(--canvas);
+      color: var(--ink);
+      line-height: 1.45;
+    }
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 1.5rem;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    header h1 { margin: 0; font-size: 1.125rem; color: var(--navy); }
+    header p { margin: 0.35rem 0 0; color: var(--muted); font-size: 0.875rem; }
+    main {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 1.25rem 1.5rem 3rem;
+      display: grid;
+      gap: 0.75rem;
+    }
+    a.card {
+      display: block;
+      text-decoration: none;
+      color: inherit;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.1rem;
+      transition: border-color 0.12s, box-shadow 0.12s;
+    }
+    a.card:hover {
+      border-color: var(--mid);
+      box-shadow: 0 1px 3px rgb(15 23 42 / 8%);
+    }
+    .letter {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.75rem;
+      height: 1.75rem;
+      border-radius: 6px;
+      background: var(--navy);
+      color: #fff;
+      font-size: 0.75rem;
+      font-weight: 600;
+      margin-right: 0.5rem;
+    }
+    .title { font-weight: 600; font-size: 0.95rem; }
+    .blurb { margin: 0.45rem 0 0; color: var(--muted); font-size: 0.8125rem; }
+    .meta { margin-top: 0.5rem; font-size: 0.75rem; color: var(--mid); }
+    .note {
+      margin: 1rem 0 0;
+      padding: 0.75rem 1rem;
+      background: #fff;
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      font-size: 0.8125rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Owner mapping workbench — 8 samples</h1>
+    <p>Header → assign → format/clean · derived Email / Phone / NDZ (not toggles) · Habeas ops chrome. Open each, then tell the orchestrator which letter(s) to keep.</p>
+  </header>
+  <main>
+    <a class="card" href="01-attio-stepper.html">
+      <span class="letter">A</span><span class="title">Attio stepper</span>
+      <p class="blurb">Horizontal Header → Assign → Format → Confirm stepper with live derived chips.</p>
+      <p class="meta">Model: claude-opus · open mockup →</p>
+    </a>
+    <a class="card" href="02-midday-confirm-modal.html">
+      <span class="letter">B</span><span class="title">Midday modal</span>
+      <p class="blurb">Confirm-import modal over dimmed connection page; delimiter + format + NDZ hint.</p>
+      <p class="meta">Model: claude-fable · open mockup →</p>
+    </a>
+    <a class="card" href="03-spreadsheet-header-pick.html">
+      <span class="letter">C</span><span class="title">Spreadsheet header pick</span>
+      <p class="blurb">CSV grid; pick header row; assign via column dropdowns; format drawer.</p>
+      <p class="meta">Model: composer-2.5 · open mockup →</p>
+    </a>
+    <a class="card" href="04-dual-pane-preview.html">
+      <span class="letter">D</span><span class="title">Dual pane preview</span>
+      <p class="blurb">Left map columns; right live sample preview; partial NDZ “n of 4”.</p>
+      <p class="meta">Model: composer-2.5-fast · open mockup →</p>
+    </a>
+    <a class="card" href="05-capability-rail.html">
+      <span class="letter">E</span><span class="title">Capability rail</span>
+      <p class="blurb">Large derived Email/Phone/NDZ status cards; lists follow variables.</p>
+      <p class="meta">Model: grok-4.5 · open mockup →</p>
+    </a>
+    <a class="card" href="06-three-column-ops.html">
+      <span class="letter">F</span><span class="title">Three-column ops</span>
+      <p class="blurb">Headers | canonical drop targets | format; sticky derived bar + Save.</p>
+      <p class="meta">Model: grok-4.6 · open mockup →</p>
+    </a>
+    <a class="card" href="07-post-upload-sheet.html">
+      <span class="letter">G</span><span class="title">Post-upload sheet</span>
+      <p class="blurb">Upload-ready connection card + full-height right drawer workbench (revisit path).</p>
+      <p class="meta">Model: gpt-5.6 · open mockup →</p>
+    </a>
+    <a class="card" href="08-compact-ops-table.html">
+      <span class="letter">H</span><span class="title">Compact ops table</span>
+      <p class="blurb">Single dense page: toolbar + variable rows + sticky Confirm. No wizard chrome.</p>
+      <p class="meta">Model: kimi-k3 · open mockup →</p>
+    </a>
+    <p class="note">
+      Congruence nits to ignore or strip if picked: H invents <code>external_id</code>/<code>state</code>;
+      F includes <code>full_name</code> (UI convenience only — NDZ still needs the four parts).
+      Canonical keys stay email / phone / first_name / last_name / dob / zip.
+    </p>
+  </main>
+</body>
+</html>

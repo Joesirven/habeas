@@ -1,9 +1,10 @@
 """Write hashed-raw vendor rows to BigQuery ``external_hash_index``.
 
 Persists only the hashed-raw contract columns — ``email_hash``,
-``vendor_record_id``, ``system``, ``extracted_at``. Hashing happens before
-write via ``habeas_privacy_core.vertical_hash``; this module never accepts
-or emits plaintext email.
+``phone_hash``, ``ndz_hash``, ``vendor_record_id``, ``system``,
+``extracted_at``. Hashing happens before write via
+``habeas_privacy_core.vertical_hash``; this module never accepts or emits
+plaintext identifiers.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from habeas_privacy_core.audit.redaction import redact_error_text
+from habeas_privacy_core.vertical_hash.hashing import assert_opaque_hash
 from habeas_privacy_core.vertical_hash.models import HashedVendorRecord
 
 __all__ = [
@@ -42,12 +44,16 @@ WRITE_TRUNCATE = "WRITE_TRUNCATE"
 
 HASHED_RAW_COLUMNS: tuple[str, ...] = (
     "email_hash",
+    "phone_hash",
+    "ndz_hash",
     "vendor_record_id",
     "system",
     "extracted_at",
 )
 HASHED_RAW_SCHEMA: tuple[tuple[str, str, str], ...] = (
-    ("email_hash", "STRING", "REQUIRED"),
+    ("email_hash", "STRING", "NULLABLE"),
+    ("phone_hash", "STRING", "NULLABLE"),
+    ("ndz_hash", "STRING", "NULLABLE"),
     ("vendor_record_id", "STRING", "REQUIRED"),
     ("system", "STRING", "REQUIRED"),
     ("extracted_at", "TIMESTAMP", "REQUIRED"),
@@ -121,10 +127,11 @@ def write_hashed_raw(
 ) -> int:
     """Load hashed-raw rows with full-replace (``WRITE_TRUNCATE``) by default.
 
-    Returns the number of rows written. Records without ``email_hash`` are
-    skipped. Extra / plaintext fields are rejected. Empty incoming or
-    all-skipped batches raise ``HashedRawEmptyReplaceError`` and do not
-    truncate. Logs counts only.
+    Returns the number of rows written. Records with no ``email_hash``,
+    ``phone_hash``, or ``ndz_hash`` are skipped. Extra / plaintext fields are
+    rejected. Empty incoming or all-skipped batches raise
+    ``HashedRawEmptyReplaceError`` and do not truncate. Logs counts only —
+    never hash or identifier values.
     """
     destination = qualify_table_id(table_id)
     expected_system = _expected_system_for_table(destination)
@@ -160,20 +167,34 @@ def _hashed_raw_rows(
     records: Sequence[HashedVendorRecord | Mapping[str, Any]],
     *,
     expected_system: str | None,
-) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
+) -> list[dict[str, str | None]]:
+    rows: list[dict[str, str | None]] = []
     for record in records:
         parsed = _as_record(record)
         if not parsed.vendor_record_id.strip() or not parsed.system.strip():
             raise HashedRawWriteError("hashed-raw record is missing required identifiers")
         if expected_system is not None and parsed.system != expected_system:
             raise HashedRawWriteError("hashed-raw system does not match destination table")
-        if not parsed.email_hash:
+        email_hash = _normalized_hash(parsed.email_hash)
+        phone_hash = _normalized_hash(parsed.phone_hash)
+        ndz_hash = _normalized_hash(parsed.ndz_hash)
+        if not email_hash and not phone_hash and not ndz_hash:
             continue
-        if "@" in parsed.email_hash:
-            raise HashedRawWriteError("email_hash must not contain plaintext")
-        row = {
-            "email_hash": parsed.email_hash,
+        for label, hash_value in (
+            ("email_hash", email_hash),
+            ("phone_hash", phone_hash),
+            ("ndz_hash", ndz_hash),
+        ):
+            if hash_value is None:
+                continue
+            try:
+                assert_opaque_hash(hash_value, label=label)
+            except ValueError as exc:
+                raise HashedRawWriteError(str(exc)) from None
+        row: dict[str, str | None] = {
+            "email_hash": email_hash,
+            "phone_hash": phone_hash,
+            "ndz_hash": ndz_hash,
             "vendor_record_id": parsed.vendor_record_id,
             "system": parsed.system,
             "extracted_at": _timestamp_value(parsed.extracted_at),
@@ -182,6 +203,13 @@ def _hashed_raw_rows(
             raise HashedRawWriteError("hashed-raw insert row has unexpected columns")
         rows.append(row)
     return rows
+
+
+def _normalized_hash(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
 
 
 def _as_record(record: HashedVendorRecord | Mapping[str, Any]) -> HashedVendorRecord:

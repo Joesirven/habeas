@@ -185,6 +185,11 @@ function settingsGroup(showOwnerConnectors: boolean, showDevLabs: boolean): NavG
       children.push({ label: 'Sheets OAuth', to: '/dev/sheets-oauth', temp: true })
       children.push({ label: 'Sheets cadence', to: '/dev/sheets-cadence-lab', temp: true })
       children.push({ label: 'Pending settings', to: '/dev/pending-settings', temp: true })
+      children.push({
+        label: 'Mapping workbench samples',
+        to: '/dev/mapping-workbench-samples',
+        temp: true,
+      })
       children.push({ label: 'All labs', to: '/dev', exact: true, temp: true })
     }
   }

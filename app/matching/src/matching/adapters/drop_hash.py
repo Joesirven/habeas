@@ -48,6 +48,7 @@ def primary_hash_for_list_type(
     if list_type == DropListType.NDZ:
         value = (
             hash_fields.get("concatenated_hash")
+            or hash_fields.get("ndz_hash")
             or hash_fields.get("pii_hash")
             or hash_fields.get("hash")
         )

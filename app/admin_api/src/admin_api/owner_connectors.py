@@ -41,9 +41,11 @@ from habeas_privacy_core.connections.catalog import (
     APPROACH_UPLOAD,
     VERTICAL_DATA,
     connection_method_label,
+    derive_list_capability,
     get_bindings_for_vertical,
     get_vertical,
     is_approach_allowed,
+    list_capability_from_metadata,
     upload_allowed,
 )
 from habeas_privacy_core.connections.freshness import (
@@ -115,6 +117,15 @@ class CadenceBody(BaseModel):
     refresh_cadence: str | None = Field(default=None, max_length=32)
 
 
+class MappingSaveBody(BaseModel):
+    column_mapping: dict[str, str] = Field(default_factory=dict)
+    multi_pii_delimiter: str | None = None
+    email_format: str | None = None
+    phone_format: str | None = None
+    name_format: str | None = None
+    detected_headers: list[str] | None = None
+
+
 class ConnectorSystemOut(BaseModel):
     system: str
     display_name: str
@@ -129,6 +140,7 @@ class ConnectorSystemOut(BaseModel):
     connection_method_label: str | None = None
     upload_allowed: bool
     connection_method: str | None = None
+    list_capability: dict[str, Any] | None = None
 
 
 class ConnectorListOut(BaseModel):
@@ -212,6 +224,7 @@ class SheetsOauthExtractBody(BaseModel):
     column_mapping: dict[str, str] | None = None
     email_format: str | None = None
     phone_format: str | None = None
+    name_format: str | None = None
 
 
 class CredentialFieldOut(BaseModel):
@@ -514,6 +527,7 @@ def _connection_to_out(
             connection_method_label=method_label,
             upload_allowed=upload_allowed(system),
             connection_method=method_label,
+            list_capability=list_capability_from_metadata(persist_system, {}).as_dict(),
         )
     metadata = dict(connection.metadata or {})
     display_status, gate_code, gate_allowed = gate_fields_from_parts(
@@ -536,6 +550,9 @@ def _connection_to_out(
         connection_method_label=method_label,
         upload_allowed=upload_allowed(system),
         connection_method=method_label,
+        list_capability=list_capability_from_metadata(
+            persist_system, metadata
+        ).as_dict(),
     )
 
 
@@ -969,6 +986,8 @@ async def _ingest_owner_csv(
         uploaded_at = datetime.now(timezone.utc).isoformat()
         row_count = int(stats.get("row_count") or 0)
         persisted_mapping = _persistable_column_mapping(column_mapping)
+        capability = derive_list_capability(system, persisted_mapping)
+        detected_raw = stats.get("detected_headers")
         patch: dict[str, Any] = {
             "vertical_id": vertical_id,
             "gcs_uri": gcs_uri,
@@ -977,7 +996,12 @@ async def _ingest_owner_csv(
             "last_successful_refresh_at": uploaded_at,
             "upload_row_count": row_count,
             "column_mapping": persisted_mapping,
+            "list_capability": capability.as_dict(),
         }
+        if isinstance(detected_raw, list):
+            headers = [str(item).strip() for item in detected_raw if str(item).strip()]
+            if headers:
+                patch["detected_headers"] = headers
         if name_format is not None and persisted_mapping and "full_name" in persisted_mapping:
             patch["name_format"] = name_format
         if extra_metadata:
@@ -1440,6 +1464,81 @@ async def upload_system_csv(
         name_format=resolved_name_format,
         allow_live_mode=False,
         log_event="owner_upload",
+    )
+
+
+@router.post(
+    "/verticals/{vertical_id}/systems/{system}/mapping",
+    response_model=ConnectorSystemOut,
+)
+async def save_owner_mapping(
+    vertical_id: str,
+    system: str,
+    body: MappingSaveBody,
+    principal: VerticalAccessPrincipal,
+    _role: OwnerRolePrincipal,
+) -> ConnectorSystemOut:
+    """Persist a revisited mapping without requiring a new file upload."""
+    _validate_vertical(vertical_id)
+    _reject_owner_mutations(vertical_id, principal)
+    binding = _binding_or_404(vertical_id, system)
+    system = binding.system
+
+    raw_delimiter = body.multi_pii_delimiter
+    if isinstance(raw_delimiter, str) and raw_delimiter.strip() == "":
+        raw_delimiter = None
+    try:
+        delimiter = validate_multi_pii_delimiter(raw_delimiter)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid multi_pii_delimiter") from exc
+
+    persisted_mapping = _persistable_column_mapping(body.column_mapping)
+    capability = derive_list_capability(system, persisted_mapping)
+    patch: dict[str, Any] = {
+        "vertical_id": vertical_id,
+        "column_mapping": persisted_mapping,
+        "list_capability": capability.as_dict(),
+        "multi_pii_delimiter": delimiter,
+    }
+    if body.email_format:
+        patch["email_format"] = body.email_format
+    if body.phone_format:
+        patch["phone_format"] = body.phone_format
+    if body.name_format and persisted_mapping and "full_name" in persisted_mapping:
+        patch["name_format"] = body.name_format
+    if body.detected_headers:
+        headers = [str(item).strip() for item in body.detected_headers if str(item).strip()]
+        if headers:
+            patch["detected_headers"] = headers
+
+    _require_database()
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        connection = await _resolve_connection(
+            conn,
+            vertical_id=vertical_id,
+            system=system,
+            created_by=principal.email,
+        )
+        updated = await _merge_metadata(conn, UUID(str(connection.id)), patch)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="connection not found")
+        gcs_uri = (updated.metadata or {}).get("gcs_uri")
+        if isinstance(gcs_uri, str) and gcs_uri.strip():
+            await _enqueue_owner_hash_refresh(conn, system=system)
+    logger.info(
+        "owner_mapping_saved connection_id=%s system=%s email=%s phone=%s ndz=%s",
+        updated.id,
+        system,
+        capability.email,
+        capability.phone,
+        capability.ndz,
+    )
+    return _connection_to_out(
+        system=system,
+        allowed_approaches=sorted(binding.allowed_approaches),
+        connection=updated,
+        display_name=updated.display_name,
     )
 
 
@@ -2050,6 +2149,15 @@ async def extract_owner_sheets_oauth(
             if str(key).strip() and str(value).strip()
         } or None
 
+    from admin_api.upload_templates import NAME_FORMATS
+
+    raw_name_format = body.name_format
+    if isinstance(raw_name_format, str) and raw_name_format.strip() == "":
+        raw_name_format = None
+    resolved_name_format = raw_name_format.strip().lower() if raw_name_format else None
+    if resolved_name_format is not None and resolved_name_format not in NAME_FORMATS:
+        raise HTTPException(status_code=422, detail="invalid name_format")
+
     _require_database()
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -2087,6 +2195,7 @@ async def extract_owner_sheets_oauth(
         column_mapping=parsed_mapping,
         email_format=body.email_format,
         phone_format=body.phone_format,
+        name_format=resolved_name_format,
         allow_live_mode=True,
         extra_metadata={
             "spreadsheet_id": body.spreadsheet_id.strip(),

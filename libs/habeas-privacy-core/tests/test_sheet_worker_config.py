@@ -22,7 +22,12 @@ def test_hr_alumni_config_fields() -> None:
     assert cfg.vertical_id == VERTICAL_PEOPLE_HR
     assert cfg.mart_table == "hr_alumni_email_hash__build"
     assert cfg.hashed_raw_table == "hr_alumni_hashed_raw"
-    assert cfg.dbt_select == ("stg_hr_alumni_hashed", "mart_hr_alumni_email_hash")
+    assert cfg.dbt_select == (
+        "stg_hr_alumni_hashed",
+        "mart_hr_alumni_email_hash",
+        "mart_hr_alumni_phone_hash",
+        "mart_hr_alumni_ndz_hash",
+    )
     assert cfg.adapter_label == "sheets_hash"
     assert cfg.env_prefix == "HR_ALUMNI"
     assert cfg.service_name == "hr-alumni"
@@ -36,6 +41,12 @@ def test_bizdev_contacts_config_fields() -> None:
     assert cfg.lease_key == "bizdev_contacts"
     assert cfg.mart_table == "bizdev_contacts_email_hash__build"
     assert cfg.hashed_raw_table == "bizdev_contacts_hashed_raw"
+    assert cfg.dbt_select == (
+        "stg_bizdev_contacts_hashed",
+        "mart_bizdev_contacts_email_hash",
+        "mart_bizdev_contacts_phone_hash",
+        "mart_bizdev_contacts_ndz_hash",
+    )
     assert cfg.env_prefix == "BIZDEV_CONTACTS"
 
 
@@ -63,7 +74,12 @@ def test_custom_service_name_override() -> None:
         vertical_id=VERTICAL_PEOPLE_HR,
         mart_table="hr_alumni_email_hash__build",
         hashed_raw_table="hr_alumni_hashed_raw",
-        dbt_select=("stg_hr_alumni_hashed", "mart_hr_alumni_email_hash"),
+        dbt_select=(
+            "stg_hr_alumni_hashed",
+            "mart_hr_alumni_email_hash",
+            "mart_hr_alumni_phone_hash",
+            "mart_hr_alumni_ndz_hash",
+        ),
         adapter_label="sheets_hash",
         env_prefix="HR_ALUMNI",
         service_name="hr-alumni-prod",

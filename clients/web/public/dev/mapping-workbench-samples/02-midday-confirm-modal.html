@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sample B — Midday modal</title>
+<style>
+  :root {
+    --navy: #1E4191;
+    --navy-600: #17346f;
+    --navy-050: #eef2fb;
+    --canvas: #F8FAFC;
+    --ink: #0f172a;
+    --ink-2: #475569;
+    --ink-3: #94a3b8;
+    --line: #e2e8f0;
+    --line-2: #cbd5e1;
+    --green: #15803d;
+    --green-bg: #ecfdf3;
+    --green-line: #bbe5c8;
+    --amber: #92600a;
+    --amber-bg: #fef6e7;
+    --amber-line: #f2ddb0;
+    --white: #ffffff;
+    --radius: 10px;
+    --mono: "SF Mono", ui-monospace, Menlo, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
+    background: var(--canvas);
+    color: var(--ink);
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+
+  /* ============ Dimmed connection page behind the modal ============ */
+  .page {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    filter: blur(1.5px);
+    pointer-events: none;
+    user-select: none;
+  }
+  .topbar {
+    height: 52px; background: var(--white); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 14px; padding: 0 20px; flex-shrink: 0;
+  }
+  .brandmark {
+    width: 26px; height: 26px; border-radius: 7px; background: var(--navy);
+    color: #fff; font-weight: 700; font-size: 12px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .topbar .crumbs { font-size: 12.5px; color: var(--ink-2); }
+  .topbar .crumbs b { color: var(--ink); font-weight: 600; }
+  .topbar .crumbs span { margin: 0 6px; color: var(--ink-3); }
+  .page-body { flex: 1; padding: 22px 26px; overflow: hidden; }
+  .conn-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .conn-head h1 { font-size: 18px; font-weight: 650; letter-spacing: -0.01em; }
+  .conn-badge {
+    font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 999px;
+    background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber-line);
+  }
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+  .card {
+    background: var(--white); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 12px 14px;
+  }
+  .card .k { font-size: 11px; color: var(--ink-3); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  .card .v { font-size: 16px; font-weight: 650; margin-top: 4px; }
+  .card .s { font-size: 11.5px; color: var(--ink-2); margin-top: 2px; }
+  .ghost-table {
+    background: var(--white); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 14px; height: 320px;
+  }
+  .ghost-row { height: 12px; border-radius: 4px; background: var(--canvas); margin-bottom: 10px; }
+  .ghost-row.w80 { width: 80%; } .ghost-row.w60 { width: 60%; } .ghost-row.w90 { width: 90%; } .ghost-row.w70 { width: 70%; }
+
+  .scrim {
+    position: fixed; inset: 0;
+    background: rgba(15, 23, 42, 0.48);
+  }
+
+  /* ============ Modal ============ */
+  .modal-wrap {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .modal {
+    width: 880px; max-width: 100%; max-height: calc(100vh - 48px);
+    background: var(--white); border-radius: 14px;
+    box-shadow: 0 24px 64px rgba(15, 23, 42, 0.35), 0 2px 8px rgba(15, 23, 42, 0.12);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .modal-head {
+    padding: 16px 20px 14px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: flex-start; gap: 12px;
+  }
+  .modal-head .file-ic {
+    width: 34px; height: 34px; border-radius: 8px; background: var(--navy-050);
+    color: var(--navy); display: flex; align-items: center; justify-content: center;
+    font-size: 15px; flex-shrink: 0; margin-top: 1px;
+  }
+  .modal-head h2 { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
+  .modal-head .sub { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+  .modal-head .sub code { font-family: var(--mono); font-size: 11px; background: var(--canvas); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+  .modal-close {
+    margin-left: auto; width: 28px; height: 28px; border-radius: 7px; border: none;
+    background: transparent; color: var(--ink-3); font-size: 16px; cursor: pointer; line-height: 1;
+  }
+  .modal-close:hover { background: var(--canvas); color: var(--ink); }
+
+  .modal-body { overflow-y: auto; padding: 0 20px; }
+
+  /* Header-row control strip */
+  .hdr-strip {
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 0; border-bottom: 1px solid var(--line);
+  }
+  .hdr-strip .lbl { font-size: 12px; font-weight: 600; color: var(--ink); }
+  .stepper {
+    display: inline-flex; align-items: stretch; border: 1px solid var(--line-2);
+    border-radius: 7px; overflow: hidden; background: var(--white);
+  }
+  .stepper button {
+    width: 26px; border: none; background: var(--white); color: var(--ink-2);
+    font-size: 13px; cursor: pointer;
+  }
+  .stepper button:hover { background: var(--canvas); }
+  .stepper .num {
+    width: 34px; display: flex; align-items: center; justify-content: center;
+    font-size: 12.5px; font-weight: 650; border-left: 1px solid var(--line);
+    border-right: 1px solid var(--line); font-family: var(--mono);
+  }
+  .hdr-strip .hint { font-size: 11.5px; color: var(--ink-3); }
+  .hdr-strip .hint code { font-family: var(--mono); font-size: 10.5px; }
+
+  /* Mapping rows */
+  .map-section { padding: 12px 0 4px; }
+  .map-cols-head {
+    display: grid; grid-template-columns: 1fr 24px 220px 190px; gap: 10px;
+    padding: 0 0 8px; font-size: 10.5px; font-weight: 650; color: var(--ink-3);
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .map-row {
+    display: grid; grid-template-columns: 1fr 24px 220px 190px; gap: 10px;
+    align-items: center; padding: 7px 0; border-top: 1px solid var(--line);
+  }
+  .src { min-width: 0; }
+  .src .name { font-size: 12.5px; font-weight: 600; font-family: var(--mono); }
+  .src .sample {
+    font-size: 11px; color: var(--ink-3); font-family: var(--mono);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px;
+  }
+  .arrow { color: var(--line-2); font-size: 13px; text-align: center; }
+  select, .fmt-select {
+    width: 100%; height: 30px; padding: 0 26px 0 9px; font-size: 12.5px;
+    border: 1px solid var(--line-2); border-radius: 7px; background: var(--white);
+    color: var(--ink); appearance: none; cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2394a3b8' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 9px center;
+    font-family: inherit;
+  }
+  select:focus { outline: 2px solid var(--navy); outline-offset: -1px; border-color: var(--navy); }
+  select.mapped { border-color: var(--navy); background-color: var(--navy-050); font-weight: 600; color: var(--navy-600); }
+  select.skipped { color: var(--ink-3); }
+  .fmt-cell { display: flex; align-items: center; gap: 6px; }
+  .fmt-cell .dash { color: var(--line-2); font-size: 12px; padding-left: 4px; }
+
+  /* Settings row */
+  .settings {
+    display: flex; align-items: center; gap: 20px;
+    padding: 12px 0; border-top: 1px solid var(--line); margin-top: 2px;
+  }
+  .setting { display: flex; align-items: center; gap: 8px; }
+  .setting .lbl { font-size: 12px; font-weight: 600; }
+  .setting .lbl small { display: block; font-weight: 400; font-size: 10.5px; color: var(--ink-3); }
+  .delim-input {
+    width: 52px; height: 30px; text-align: center; font-family: var(--mono);
+    font-size: 13px; border: 1px solid var(--line-2); border-radius: 7px;
+  }
+  .delim-input:focus { outline: 2px solid var(--navy); outline-offset: -1px; }
+  .setting .note { font-size: 11px; color: var(--ink-3); }
+  .setting .note code { font-family: var(--mono); font-size: 10.5px; background: var(--canvas); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+
+  /* Derived capability strip */
+  .cap-strip {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--canvas); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 10px 12px; margin: 4px 0 14px;
+  }
+  .cap-strip .cap-lbl { font-size: 11px; font-weight: 650; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.05em; margin-right: 4px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px;
+    border: 1px solid; cursor: default;
+  }
+  .chip .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .chip.on  { background: var(--green-bg); color: var(--green); border-color: var(--green-line); }
+  .chip.on .dot { background: var(--green); }
+  .chip.off { background: var(--white); color: var(--ink-3); border-color: var(--line); }
+  .chip.off .dot { background: var(--line-2); }
+  .cap-strip .cap-note { font-size: 11.5px; color: var(--ink-2); margin-left: auto; }
+  .cap-strip .cap-note b { color: var(--ink); font-weight: 600; }
+
+  /* Footer */
+  .modal-foot {
+    display: flex; align-items: center; gap: 10px;
+    padding: 13px 20px; border-top: 1px solid var(--line); background: var(--white);
+  }
+  .foot-meta { font-size: 11.5px; color: var(--ink-3); }
+  .foot-meta b { color: var(--ink-2); font-weight: 600; }
+  .btn {
+    height: 33px; padding: 0 15px; border-radius: 8px; font-size: 12.5px;
+    font-weight: 600; cursor: pointer; border: 1px solid var(--line-2);
+    background: var(--white); color: var(--ink); font-family: inherit;
+  }
+  .btn:hover { background: var(--canvas); }
+  .btn.primary { background: var(--navy); border-color: var(--navy); color: #fff; }
+  .btn.primary:hover { background: var(--navy-600); }
+  .spacer { flex: 1; }
+
+  .sample-tag {
+    position: fixed; top: 10px; left: 12px; z-index: 50;
+    font-size: 10.5px; font-weight: 650; letter-spacing: 0.04em;
+    background: var(--ink); color: #fff; padding: 3px 9px; border-radius: 999px;
+    opacity: 0.85;
+  }
+</style>
+</head>
+<body>
+
+<div class="sample-tag">SAMPLE B — MIDDAY MODAL</div>
+
+<!-- Dimmed connection page underneath -->
+<div class="page" aria-hidden="true">
+  <div class="topbar">
+    <div class="brandmark">C</div>
+    <div class="crumbs"><b>Data Privacy</b><span>/</span>People &amp; HR<span>/</span><b>Alumni Google Sheet</b></div>
+  </div>
+  <div class="page-body">
+    <div class="conn-head">
+      <h1>Alumni Google Sheet</h1>
+      <span class="conn-badge">Mapping incomplete</span>
+    </div>
+    <div class="cards">
+      <div class="card"><div class="k">Last upload</div><div class="v">alumni_export_q3.csv</div><div class="s">Sep 2, 2026 · 12,481 rows</div></div>
+      <div class="card"><div class="k">Enabled lists</div><div class="v">Email only</div><div class="s">Phone &amp; NDZ pending mapping</div></div>
+      <div class="card"><div class="k">Hash refresh</div><div class="v">Awaiting mapping</div><div class="s">Runs after save</div></div>
+    </div>
+    <div class="ghost-table">
+      <div class="ghost-row w90"></div><div class="ghost-row w70"></div><div class="ghost-row w80"></div>
+      <div class="ghost-row w60"></div><div class="ghost-row w90"></div><div class="ghost-row w70"></div>
+      <div class="ghost-row w80"></div><div class="ghost-row w60"></div>
+    </div>
+  </div>
+</div>
+
+<div class="scrim"></div>
+
+<!-- Confirm / import modal -->
+<div class="modal-wrap">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+
+    <div class="modal-head">
+      <div class="file-ic">⇪</div>
+      <div>
+        <h2 id="modal-title">Confirm column mapping</h2>
+        <div class="sub"><code>alumni_export_q3.csv</code> · 7 columns detected · 12,481 rows · Alumni Google Sheet</div>
+      </div>
+      <button class="modal-close" aria-label="Close">✕</button>
+    </div>
+
+    <div class="modal-body">
+
+      <div class="hdr-strip">
+        <span class="lbl">Header row</span>
+        <div class="stepper">
+          <button aria-label="Decrease">−</button>
+          <div class="num">1</div>
+          <button aria-label="Increase">+</button>
+        </div>
+        <span class="hint">Row 1 detected as headers — <code>work_email, mobile, fname, lname, birth_date, postal, notes</code></span>
+      </div>
+
+      <div class="map-section">
+        <div class="map-cols-head">
+          <div>CSV column · sample</div>
+          <div></div>
+          <div>Destination variable</div>
+          <div>Format</div>
+        </div>
+
+        <div class="map-row">
+          <div class="src">
+            <div class="name">work_email</div>
+            <div class="sample">jordan.reyes@example.org; j.reyes@alt.example</div>
+          </div>
+          <div class="arrow">→</div>
+          <select class="mapped"><option>Email</option></select>
+          <div class="fmt-cell">
+            <select class="fmt-select"><option>Lowercase + trim</option><option>Trim only</option><option>As-is</option></select>
+          </div>
+        </div>
+
+        <div class="map-row">
+          <div class="src">
+            <div class="name">mobile</div>
+            <div class="sample">(555) 014-2287; 555-014-9931</div>
+          </div>
+          <div class="arrow">→</div>
+          <select class="mapped"><option>Phone</option></select>
+          <div class="fmt-cell">
+            <select class="fmt-select"><option>Digits only (US 10)</option><option>E.164</option><option>As-is</option></select>
+          </div>
+        </div>
+
+        <div class="map-row">
+          <div class="src">
+            <div class="name">fname</div>
+            <div class="sample">Jordan · Priya · Malik</div>
+          </div>
+          <div class="arrow">→</div>
+          <select class="mapped"><option>First name</option></select>
+          <div class="fmt-cell"><span class="dash">—</span></div>
+        </div>
+
+        <div class="map-row">
+          <div class="src">
+            <div class="name">lname</div>
+            <div class="sample">Reyes · Natarajan · Osei</div>
+          </div>
+          <div class="arrow">→</div>
+          <select class="mapped"><option>Last name</option></select>
+          <div class="fmt-cell"><span class="dash">—</span></div>
+        </div>
+
+        <div class="map-row">
+          <div class="src">
+            <div class="name">birth_date</div>
+            <div class="sample">1987-04-12 · 1993-11-02</div>
+          </div>
+          <div class="arrow">→</div>
+          <select class="mapped"><option>Date of birth</option></select>
+          <div class="fmt-cell"><span class="dash">—</span></div>
+        </div>
+
+        <div class="map-row">
+          <div class="src">
+            <div class="name">postal</div>
+            <div class="sample">94110 · 02139 · 30318</div>
+          </div>
+          <div class="arrow">→</div>
+          <select><option>Not mapped</option><option>ZIP</option></select>
+          <div class="fmt-cell"><span class="dash">—</span></div>
+        </div>
+
+        <div class="map-row">
+          <div class="src">
+            <div class="name">notes</div>
+            <div class="sample">Left 2021 · Rehire eligible · —</div>
+          </div>
+          <div class="arrow">→</div>
+          <select class="skipped"><option>Skip column</option></select>
+          <div class="fmt-cell"><span class="dash">—</span></div>
+        </div>
+      </div>
+
+      <div class="settings">
+        <div class="setting">
+          <span class="lbl">Multi-PII delimiter<small>splits multiple emails / phones in one cell</small></span>
+          <input class="delim-input" value=";" aria-label="Multi-PII delimiter">
+        </div>
+        <div class="setting">
+          <span class="note">Applies to mapped <code>email</code> and <code>phone</code> cells only.</span>
+        </div>
+      </div>
+
+      <div class="cap-strip" aria-label="Derived list support (read-only)">
+        <span class="cap-lbl">Lists this mapping enables</span>
+        <span class="chip on"><span class="dot"></span>Email</span>
+        <span class="chip on"><span class="dot"></span>Phone</span>
+        <span class="chip off"><span class="dot"></span>NDZ</span>
+        <span class="cap-note">NDZ needs <b>ZIP</b> — map <b>postal</b> to enable. Derived from mapping; not a setting.</span>
+      </div>
+
+    </div>
+
+    <div class="modal-foot">
+      <div class="foot-meta">Saving is reversible · hash refresh follows on the normal cadence · <b>no raw PII leaves this preview</b></div>
+      <div class="spacer"></div>
+      <button class="btn">Back to preview</button>
+      <button class="btn primary">Save mapping &amp; enable lists</button>
+    </div>
+
+  </div>
+</div>
+
+</body>
+</html>

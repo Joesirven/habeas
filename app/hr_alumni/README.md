@@ -12,7 +12,7 @@ Depends on [`habeas-privacy-core`](../../libs/habeas-privacy-core/) (`sheet_work
 | Route | Role |
 |-------|------|
 | `GET /healthz`, `GET /readyz` | Health (ready needs `DATABASE_URL`) |
-| `POST /matching/submit` | One-row claim + mart lookup |
+| `POST /matching/submit` | One-row claim + mart lookup (Email / Phone / NDZ) |
 | `POST /matching/collect` | Collect stub (`collected: 0`) |
 | `POST /ensure-drain` | Chunk drain (`lease_key='hr_alumni'`) |
 | `POST /suppression/submit` | Stub suppression claim |
@@ -22,8 +22,9 @@ Depends on [`habeas-privacy-core`](../../libs/habeas-privacy-core/) (`sheet_work
 ## Matching drain
 
 - Hot path: `POST /ensure-drain` → `matching_drain_lease` `lease_key='hr_alumni'`
-  → claim chunk of `hr_alumni_attempts` → load DROP email hashes → set-based
-  BigQuery lookup on `hr_alumni_email_hash__build` → snapshot upsert + bulk complete.
+  → claim chunk of `hr_alumni_attempts` → load DROP Email / Phone / NDZ hashes → set-based
+  BigQuery lookup on `hr_alumni_email_hash__build` / `hr_alumni_phone_hash__build` /
+  `hr_alumni_ndz_hash__build` by list type → snapshot upsert + bulk complete.
 - Job entrypoint: `python -m hr_alumni.chunk_drain` when `HR_ALUMNI_DRAIN_JOB_NAME`
   is set (infra owns cloudbuild / scheduler).
 - Without the Job env, `/ensure-drain` runs an inline budgeted chunk loop.
@@ -31,5 +32,7 @@ Depends on [`habeas-privacy-core`](../../libs/habeas-privacy-core/) (`sheet_work
 ## Hash refresh
 
 Source is owner Upload (`metadata.gcs_uri` + `column_mapping`), not live Sheets API.
-Pipeline: load connection → core `sheet_worker.hash_extract` → optional
-`transform/external_hash` dbt (`stg_hr_alumni_hashed`, `mart_hr_alumni_email_hash`).
+Pipeline: load connection → core `sheet_worker.hash_extract` (nullable `email_hash` /
+`phone_hash` / `ndz_hash` on `hr_alumni_hashed_raw`) → optional
+`transform/external_hash` dbt (`stg_hr_alumni_hashed`, `mart_hr_alumni_email_hash`,
+`mart_hr_alumni_phone_hash`, `mart_hr_alumni_ndz_hash`).

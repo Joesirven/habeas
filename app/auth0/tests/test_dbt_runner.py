@@ -30,6 +30,8 @@ _EXTERNAL_HASH_DIR = _REPO_ROOT / "transform" / "external_hash"
 _AUTH0_MODEL_SQL = {
     "stg_auth0_hashed": Path("models/staging/stg_auth0_hashed.sql"),
     "mart_auth0_email_hash": Path("models/marts/mart_auth0_email_hash.sql"),
+    "mart_auth0_phone_hash": Path("models/marts/mart_auth0_phone_hash.sql"),
+    "mart_auth0_ndz_hash": Path("models/marts/mart_auth0_ndz_hash.sql"),
 }
 # Profile name must match transform/external_hash/dbt_project.yml ``profile:``.
 # Shape copied from transform/drop_hash/profiles.yml.example (oauth / ADC);
@@ -54,6 +56,7 @@ _EXPECTED_CMD = [
     "--select",
     "stg_auth0_hashed",
     "mart_auth0_email_hash",
+    "mart_auth0_phone_hash",
 ]
 
 
@@ -66,7 +69,12 @@ def _completed(*, returncode: int = 0, stdout: str = "", stderr: str = "") -> Ma
 
 
 def test_select_targets_auth0_models_only() -> None:
-    assert AUTH0_DBT_SELECT == ("stg_auth0_hashed", "mart_auth0_email_hash")
+    assert AUTH0_DBT_SELECT == (
+        "stg_auth0_hashed",
+        "mart_auth0_email_hash",
+        "mart_auth0_phone_hash",
+        "mart_auth0_ndz_hash",
+    )
 
 
 def test_success_invokes_dbt_build_with_auth0_select(
@@ -187,11 +195,21 @@ def test_auth0_dbt_select_matches_sql_files_on_disk() -> None:
     assert tuple(_AUTH0_MODEL_SQL) == AUTH0_DBT_SELECT
 
     staging = (_EXTERNAL_HASH_DIR / _AUTH0_MODEL_SQL["stg_auth0_hashed"]).read_text()
-    mart = (_EXTERNAL_HASH_DIR / _AUTH0_MODEL_SQL["mart_auth0_email_hash"]).read_text()
+    email_mart = (
+        _EXTERNAL_HASH_DIR / _AUTH0_MODEL_SQL["mart_auth0_email_hash"]
+    ).read_text()
+    phone_mart = (
+        _EXTERNAL_HASH_DIR / _AUTH0_MODEL_SQL["mart_auth0_phone_hash"]
+    ).read_text()
+    ndz_mart = (
+        _EXTERNAL_HASH_DIR / _AUTH0_MODEL_SQL["mart_auth0_ndz_hash"]
+    ).read_text()
 
     assert "source('external_hash_index', 'auth0_hashed_raw')" in staging
-    assert "ref('stg_auth0_hashed')" in mart
-    assert "alias='auth0_email_hash__build'" in mart
+    assert "ref('stg_auth0_hashed')" in email_mart
+    assert "alias='auth0_email_hash__build'" in email_mart
+    assert "alias='auth0_phone_hash__build'" in phone_mart
+    assert "alias='auth0_ndz_hash__build'" in ndz_mart
 
 
 def test_dbt_parse_auth0_external_hash_models() -> None:

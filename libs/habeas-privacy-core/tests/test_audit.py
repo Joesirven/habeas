@@ -54,6 +54,28 @@ def test_redact_payload_scrubs_known_patterns():
     assert "[REDACTED]" in redacted["ssn"]
 
 
+def test_redact_payload_scrubs_ndz_part_keys():
+    payload = {
+        "phone_number": "4155550100",
+        "first_name": "Jane",
+        "last_name": "Doe",
+        "dob": "1990-01-15",
+        "date_of_birth": "1990-01-15",
+        "zip": "94105",
+        "zip_code": "94105",
+        "status": "ok",
+    }
+    redacted = redact_payload(payload)
+    assert redacted["phone_number"] == "[REDACTED]"
+    assert redacted["first_name"] == "[REDACTED]"
+    assert redacted["last_name"] == "[REDACTED]"
+    assert redacted["dob"] == "[REDACTED]"
+    assert redacted["date_of_birth"] == "[REDACTED]"
+    assert redacted["zip"] == "[REDACTED]"
+    assert redacted["zip_code"] == "[REDACTED]"
+    assert redacted["status"] == "ok"
+
+
 def test_redact_payload_scrubs_comment_and_notes():
     owner_comment = "done in Axios HQ for Jane Doe"
     payload = {

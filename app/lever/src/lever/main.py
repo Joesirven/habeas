@@ -56,7 +56,12 @@ ATTEMPTS_TABLE = LEVER_ATTEMPTS_TABLE
 SUPPRESS_LEVER_ACTION = "suppress.lever"
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _DEFAULT_EXTERNAL_HASH_DBT_DIR = _REPO_ROOT / "transform" / "external_hash"
-LEVER_DBT_SELECT = ("stg_lever_hashed", "mart_lever_email_hash")
+LEVER_DBT_SELECT = (
+    "stg_lever_hashed",
+    "mart_lever_email_hash",
+    "mart_lever_phone_hash",
+    "mart_lever_ndz_hash",
+)
 
 
 class Settings(CoreSettings):

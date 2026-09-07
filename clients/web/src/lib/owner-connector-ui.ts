@@ -1387,6 +1387,30 @@ export function uploadMappingComplete(
   return targets.some((id) => Boolean(mapping[id]?.trim()))
 }
 
+const NDZ_CANONICAL_KEYS = ['first_name', 'last_name', 'dob', 'zip'] as const
+
+export type DerivedListCapability = {
+  email: boolean
+  phone: boolean
+  ndz: boolean
+  ndzMappedCount: number
+  enabledListTypes: Array<'Email' | 'Phone' | 'NDZ'>
+}
+
+/** Live preview of DROP list types from mapping completeness (Sample A). */
+export function deriveListCapability(mapping: Record<string, string>): DerivedListCapability {
+  const mapped = (key: string) => Boolean(mapping[key]?.trim())
+  const email = mapped('email')
+  const phone = mapped('phone')
+  const ndzMappedCount = NDZ_CANONICAL_KEYS.filter((key) => mapped(key)).length
+  const ndz = ndzMappedCount === NDZ_CANONICAL_KEYS.length
+  const enabledListTypes: Array<'Email' | 'Phone' | 'NDZ'> = []
+  if (email) enabledListTypes.push('Email')
+  if (phone) enabledListTypes.push('Phone')
+  if (ndz) enabledListTypes.push('NDZ')
+  return { email, phone, ndz, ndzMappedCount, enabledListTypes }
+}
+
 export const EMAIL_FORMAT_OPTIONS = [
   { id: 'loose', label: 'Loose — @ and a dot in the domain' },
   { id: 'standard', label: 'Standard — one @ and a dotted domain' },

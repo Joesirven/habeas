@@ -258,6 +258,7 @@ def parse_upload_csv(
         "usable_identifier_count": usable,
         "accepted_row_count": accepted_rows,
         "rejected_row_count": 0,
+        "detected_headers": fieldnames,
     }
 
 

@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sample G — Post-upload sheet</title>
+  <style>
+    :root {
+      --navy: #1e4191;
+      --mid: #2b7bb9;
+      --ink: #0f172a;
+      --soft: #334155;
+      --mute: #64748b;
+      --line: #e2e8f0;
+      --panel: #f1f5f9;
+      --canvas: #f8fafc;
+      --white: #fff;
+      --green: #047857;
+      --green-bg: #ecfdf5;
+      --green-line: #a7f3d0;
+      --radius: 8px;
+      --shadow: 0 24px 60px rgba(15, 23, 42, .18), 0 4px 14px rgba(15, 23, 42, .08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      min-height: 100vh;
+      background: var(--canvas);
+      color: var(--ink);
+      font-family: "DM Sans", Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, select { font: inherit; }
+    button { cursor: pointer; }
+    .app { min-height: 100vh; }
+    .topbar {
+      height: 58px;
+      display: flex;
+      align-items: center;
+      padding: 0 28px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.96);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--navy);
+      font-weight: 750;
+      letter-spacing: -.02em;
+    }
+    .mark {
+      width: 25px;
+      height: 25px;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      background: var(--navy);
+      color: white;
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .topnav { display: flex; gap: 22px; margin-left: 52px; color: var(--mute); font-size: 13px; }
+    .topnav span:last-child { color: var(--ink); font-weight: 650; }
+    .avatar { margin-left: auto; width: 28px; height: 28px; border-radius: 50%; background: #dbeafe; color: var(--navy); display: grid; place-items: center; font-size: 11px; font-weight: 750; }
+    main { padding: 42px 48px; max-width: 1180px; }
+    .eyebrow { font-size: 10px; font-weight: 700; color: var(--mute); text-transform: uppercase; letter-spacing: .13em; }
+    h1 { margin: 8px 0 8px; font-size: 25px; line-height: 1.2; letter-spacing: -.035em; font-weight: 680; }
+    .lede { margin: 0; max-width: 590px; color: var(--soft); font-size: 14px; line-height: 1.55; }
+    .vertical-card { margin-top: 30px; padding: 18px; max-width: 720px; border: 1px solid var(--line); border-radius: var(--radius); background: white; }
+    .vertical-head { display: flex; align-items: center; justify-content: space-between; padding-bottom: 14px; }
+    .vertical-title { font-size: 14px; font-weight: 680; }
+    .micro { margin-top: 4px; font-size: 11px; color: var(--mute); }
+    .outline-btn, .ghost-btn, .primary-btn {
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 650;
+      transition: .16s ease;
+    }
+    .outline-btn { border: 1px solid var(--line); background: white; color: var(--ink); }
+    .outline-btn:hover { border-color: #94a3b8; background: var(--canvas); }
+    .connection {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: white;
+    }
+    .sheet-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 7px; background: #e7f7ed; color: #18794e; }
+    .connection-copy { flex: 1; min-width: 0; }
+    .connection-title { font-size: 13px; font-weight: 680; }
+    .connection-meta { margin-top: 3px; color: var(--mute); font-size: 11px; }
+    .ready {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border: 1px solid var(--green-line);
+      border-radius: 5px;
+      background: var(--green-bg);
+      color: var(--green);
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .review-btn { border: 0; background: transparent; color: var(--navy); font-size: 12px; font-weight: 700; }
+    .revisit {
+      margin-top: 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 11px 12px;
+      border: 1px solid #bfdbfe;
+      border-radius: 7px;
+      background: #eff6ff;
+      color: #1e3a8a;
+      font-size: 12px;
+    }
+    .revisit strong { font-weight: 700; }
+    .revisit button { margin-left: auto; border: 0; background: transparent; color: var(--navy); font-size: 11px; font-weight: 750; text-decoration: underline; text-underline-offset: 3px; }
+    .scrim { position: fixed; inset: 58px 0 0; background: rgba(15, 23, 42, .18); }
+    .drawer {
+      position: fixed;
+      z-index: 2;
+      top: 0;
+      right: 0;
+      width: min(560px, 100vw);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background: white;
+      box-shadow: var(--shadow);
+    }
+    .drawer-top {
+      padding: 23px 26px 17px;
+      border-bottom: 1px solid var(--line);
+    }
+    .drawer-label { font-size: 10px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; color: var(--mid); }
+    .title-row { margin-top: 7px; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+    .drawer h2 { margin: 0; font-size: 20px; letter-spacing: -.025em; font-weight: 690; }
+    .subtitle { margin: 5px 0 0; color: var(--mute); font-size: 12px; }
+    .close {
+      width: 31px;
+      height: 31px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: white;
+      color: var(--soft);
+      font-size: 18px;
+      line-height: 1;
+    }
+    .success {
+      margin-top: 16px;
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 11px 12px;
+      border: 1px solid var(--green-line);
+      border-radius: 7px;
+      background: var(--green-bg);
+      color: #065f46;
+    }
+    .success-icon { width: 19px; height: 19px; flex: 0 0 auto; border-radius: 50%; background: var(--green); color: white; display: grid; place-items: center; font-size: 11px; }
+    .success strong { display: block; font-size: 12px; }
+    .success span { display: block; margin-top: 2px; font-size: 11px; line-height: 1.4; color: #047857; }
+    .stepper { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 18px; }
+    .step {
+      position: relative;
+      padding-top: 15px;
+      border-top: 2px solid var(--line);
+      color: var(--mute);
+      font-size: 11px;
+      font-weight: 680;
+      text-align: left;
+    }
+    .step::before {
+      content: attr(data-number);
+      position: absolute;
+      top: -11px;
+      left: 0;
+      width: 20px;
+      height: 20px;
+      display: grid;
+      place-items: center;
+      border: 2px solid white;
+      border-radius: 50%;
+      background: var(--line);
+      color: var(--soft);
+      font-size: 9px;
+    }
+    .step.active, .step.done { border-color: var(--navy); color: var(--navy); }
+    .step.active::before, .step.done::before { background: var(--navy); color: white; }
+    .drawer-body { flex: 1; overflow: auto; padding: 22px 26px 26px; }
+    .panel { display: none; }
+    .panel.active { display: block; animation: in .18s ease; }
+    @keyframes in { from { opacity: 0; transform: translateX(5px); } to { opacity: 1; transform: none; } }
+    .section-heading { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -.015em; }
+    .section-copy { margin: 6px 0 18px; color: var(--mute); font-size: 12px; line-height: 1.5; }
+    .detected {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 14px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--canvas);
+      font-size: 12px;
+    }
+    .detected strong { display: block; margin-bottom: 3px; }
+    .detected span { color: var(--mute); font-size: 11px; }
+    .mini-chip, .live-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      border: 1px solid #bfdbfe;
+      border-radius: 5px;
+      background: #eff6ff;
+      color: var(--navy);
+      font-size: 10px;
+      font-weight: 700;
+      padding: 4px 7px;
+    }
+    .map-list { margin-top: 17px; display: grid; gap: 10px; }
+    .map-row {
+      display: grid;
+      grid-template-columns: minmax(120px, 1fr) 24px minmax(145px, 1.15fr);
+      align-items: center;
+      gap: 9px;
+    }
+    .source {
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--soft);
+      background: white;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+    }
+    .arrow { color: #94a3b8; text-align: center; }
+    select {
+      width: 100%;
+      padding: 9px 31px 9px 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      outline: 0;
+      background: white;
+      color: var(--ink);
+      font-size: 12px;
+    }
+    select:focus { border-color: var(--mid); box-shadow: 0 0 0 3px rgba(43,123,185,.14); }
+    .live-summary { margin-top: 19px; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
+    .live-summary-top { display: flex; align-items: center; justify-content: space-between; color: var(--soft); font-size: 11px; font-weight: 680; }
+    .chips { margin-top: 9px; display: flex; flex-wrap: wrap; gap: 6px; min-height: 25px; }
+    .live-chip { background: white; border-color: var(--line); color: var(--soft); }
+    .live-chip b { color: var(--navy); font-weight: 750; }
+    .option-list { display: grid; gap: 10px; }
+    .option {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: white;
+      text-align: left;
+    }
+    .option.selected { border-color: var(--navy); box-shadow: 0 0 0 1px var(--navy); background: #f8faff; }
+    .radio { width: 15px; height: 15px; flex: 0 0 auto; margin-top: 1px; border: 1px solid #94a3b8; border-radius: 50%; display: grid; place-items: center; }
+    .selected .radio::after { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--navy); }
+    .option strong { display: block; font-size: 12px; }
+    .option small { display: block; margin-top: 4px; color: var(--mute); font-size: 11px; line-height: 1.4; }
+    .format-grid { display: grid; gap: 14px; }
+    label { display: grid; gap: 6px; color: var(--soft); font-size: 11px; font-weight: 680; }
+    .preview { margin-top: 18px; padding: 13px; border: 1px solid var(--line); border-radius: 7px; }
+    .preview-head { display: flex; justify-content: space-between; align-items: center; font-size: 11px; font-weight: 700; }
+    .preview-row { margin-top: 11px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .preview-cell { padding: 9px; border-radius: 5px; background: var(--canvas); color: var(--mute); font-size: 10px; }
+    .preview-cell b { display: block; margin-bottom: 4px; color: var(--ink); font-size: 11px; }
+    .drawer-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 15px 26px;
+      border-top: 1px solid var(--line);
+      background: white;
+    }
+    .ghost-btn { border: 0; background: transparent; color: var(--soft); }
+    .ghost-btn:hover { background: var(--panel); }
+    .primary-btn { min-width: 106px; border: 1px solid var(--navy); background: var(--navy); color: white; }
+    .primary-btn:hover { background: #173676; }
+    .footer-note { margin-left: auto; color: var(--mute); font-size: 10px; }
+    @media (max-width: 760px) {
+      .topnav { display: none; }
+      main { padding: 28px 18px; }
+      .drawer { width: 100vw; }
+      .scrim { display: none; }
+      .drawer-top, .drawer-body, .drawer-footer { padding-left: 20px; padding-right: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand"><span class="mark">C</span><span>Habeas</span></div>
+      <nav class="topnav"><span>Requests</span><span>Ops</span><span>Data settings</span></nav>
+      <div class="avatar">JS</div>
+    </header>
+    <main>
+      <div class="eyebrow">Settings</div>
+      <h1>Data vertical settings</h1>
+      <p class="lede">Connect systems and keep their matching data current. You can return to any system to review its mapping after setup.</p>
+      <section class="vertical-card">
+        <div class="vertical-head">
+          <div><div class="vertical-title">People / HR</div><div class="micro">2 systems · owner access</div></div>
+          <button class="outline-btn">Add system</button>
+        </div>
+        <div class="connection">
+          <div class="sheet-icon" aria-hidden="true">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M5 3.5h10l4 4V20a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.7"/><path d="M15 3.5V8h4M8 12h8M8 16h8M11 9v10" stroke="currentColor" stroke-width="1.4"/></svg>
+          </div>
+          <div class="connection-copy"><div class="connection-title">Alumni</div><div class="connection-meta">alumni-september.csv · uploaded just now</div></div>
+          <span class="ready"><span class="dot"></span>Upload ready</span>
+          <button class="review-btn" onclick="reopen()">Review mapping</button>
+        </div>
+        <div class="revisit">
+          <span aria-hidden="true">↺</span>
+          <span><strong>Need to change this later?</strong> Reopen mapping from this connection card at any time.</span>
+          <button onclick="reopen()">Show me</button>
+        </div>
+      </section>
+    </main>
+    <div class="scrim" aria-hidden="true"></div>
+    <aside class="drawer" aria-label="Alumni mapping workbench">
+      <div class="drawer-top">
+        <div class="drawer-label">Sample G — Post-upload sheet</div>
+        <div class="title-row">
+          <div><h2>Map Alumni columns</h2><p class="subtitle">People / HR · alumni-september.csv</p></div>
+          <button class="close" aria-label="Close mapping" onclick="closeSheet()">×</button>
+        </div>
+        <div class="success">
+          <div class="success-icon">✓</div>
+          <div><strong>Upload complete · 4,826 rows ready</strong><span>Now tell Habeas which identifiers these columns contain.</span></div>
+        </div>
+        <div class="stepper" aria-label="Mapping progress">
+          <div class="step active" data-step="0" data-number="1">Header</div>
+          <div class="step" data-step="1" data-number="2">Assign</div>
+          <div class="step" data-step="2" data-number="3">Format</div>
+        </div>
+      </div>
+      <div class="drawer-body">
+        <section class="panel active" data-panel="0">
+          <h3 class="section-heading">Confirm the header row</h3>
+          <p class="section-copy">Habeas found labels in the first row. Confirm before assigning fields.</p>
+          <div class="detected">
+            <div><strong>Row 1 looks like a header</strong><span>6 named columns · no duplicate labels</span></div>
+            <span class="mini-chip">Detected</span>
+          </div>
+          <div class="preview">
+            <div class="preview-head"><span>File preview</span><span class="micro">Values masked</span></div>
+            <div class="preview-row">
+              <div class="preview-cell"><b>personal_email</b>m•••@example.org</div>
+              <div class="preview-cell"><b>mobile</b>(•••) •••-0182</div>
+              <div class="preview-cell"><b>first_name</b>M••••</div>
+              <div class="preview-cell"><b>postal</b>2••••</div>
+            </div>
+          </div>
+          <div class="option-list" style="margin-top:14px">
+            <button class="option selected" onclick="selectOption(this)"><span class="radio"></span><span><strong>Use row 1 as headers</strong><small>Recommended · mapping begins with personal_email, mobile, first_name…</small></span></button>
+            <button class="option" onclick="selectOption(this)"><span class="radio"></span><span><strong>My file has no header row</strong><small>Habeas will label the columns A, B, C…</small></span></button>
+          </div>
+        </section>
+        <section class="panel" data-panel="1">
+          <h3 class="section-heading">Assign identifier fields</h3>
+          <p class="section-copy">Map at least one identifier. Unassigned columns are safely ignored.</p>
+          <div class="map-list">
+            <div class="map-row"><div class="source">personal_email</div><div class="arrow">→</div><select class="mapping" onchange="renderChips()"><option>Ignore</option><option selected>Email</option><option>Phone</option><option>First name</option><option>Last name</option><option>ZIP</option></select></div>
+            <div class="map-row"><div class="source">mobile</div><div class="arrow">→</div><select class="mapping" onchange="renderChips()"><option>Ignore</option><option>Email</option><option selected>Phone</option><option>First name</option><option>Last name</option><option>ZIP</option></select></div>
+            <div class="map-row"><div class="source">first_name</div><div class="arrow">→</div><select class="mapping" onchange="renderChips()"><option>Ignore</option><option>Email</option><option>Phone</option><option selected>First name</option><option>Last name</option><option>ZIP</option></select></div>
+            <div class="map-row"><div class="source">last_name</div><div class="arrow">→</div><select class="mapping" onchange="renderChips()"><option>Ignore</option><option>Email</option><option>Phone</option><option>First name</option><option selected>Last name</option><option>ZIP</option></select></div>
+            <div class="map-row"><div class="source">postal</div><div class="arrow">→</div><select class="mapping" onchange="renderChips()"><option>Ignore</option><option>Email</option><option>Phone</option><option>First name</option><option>Last name</option><option selected>ZIP</option></select></div>
+            <div class="map-row"><div class="source">class_year</div><div class="arrow">→</div><select class="mapping" onchange="renderChips()"><option selected>Ignore</option><option>Email</option><option>Phone</option><option>First name</option><option>Last name</option><option>ZIP</option></select></div>
+          </div>
+          <div class="live-summary">
+            <div class="live-summary-top"><span>Live mapping</span><span id="mapped-count">5 assigned</span></div>
+            <div class="chips" id="live-chips"></div>
+          </div>
+        </section>
+        <section class="panel" data-panel="2">
+          <h3 class="section-heading">Confirm value formats</h3>
+          <p class="section-copy">Choose how Habeas should interpret the mapped values. You can revise these settings after connecting.</p>
+          <div class="format-grid">
+            <label>Email format<select><option selected>Standard email addresses</option><option>Lowercase email addresses</option></select></label>
+            <label>Phone format<select><option selected>US phone numbers · 10 digits</option><option>International · country code included</option></select></label>
+            <label>More than one value in a cell<select><option selected>Separated by commas</option><option>Separated by semicolons</option><option>Separated by pipes</option></select></label>
+          </div>
+          <div class="live-summary">
+            <div class="live-summary-top"><span>Ready to use for matching</span><span style="color:var(--green)">5 identifiers</span></div>
+            <div class="chips">
+              <span class="live-chip"><b>Email</b> standard</span>
+              <span class="live-chip"><b>Phone</b> US 10-digit</span>
+              <span class="live-chip"><b>Multi-value</b> comma</span>
+            </div>
+          </div>
+          <div class="revisit" style="margin-top:14px">
+            <span aria-hidden="true">↺</span>
+            <span><strong>This mapping stays editable.</strong> Return via Alumni → Review mapping.</span>
+          </div>
+        </section>
+      </div>
+      <footer class="drawer-footer">
+        <button class="ghost-btn" id="back" onclick="back()" style="visibility:hidden">← Back</button>
+        <span class="footer-note" id="save-note">Nothing saved until you continue</span>
+        <button class="primary-btn" id="next" onclick="next()">Continue</button>
+      </footer>
+    </aside>
+  </div>
+  <script>
+    let step = 0;
+    const panels = [...document.querySelectorAll(".panel")];
+    const steps = [...document.querySelectorAll(".step")];
+    const backButton = document.getElementById("back");
+    const nextButton = document.getElementById("next");
+    const saveNote = document.getElementById("save-note");
+
+    function showStep(nextStep) {
+      step = Math.max(0, Math.min(2, nextStep));
+      panels.forEach((panel, index) => panel.classList.toggle("active", index === step));
+      steps.forEach((item, index) => {
+        item.classList.toggle("active", index === step);
+        item.classList.toggle("done", index < step);
+      });
+      backButton.style.visibility = step === 0 ? "hidden" : "visible";
+      nextButton.textContent = step === 2 ? "Save mapping" : "Continue";
+      saveNote.textContent = step === 2 ? "Saved to Alumni connection" : "Nothing saved until you continue";
+    }
+    function next() {
+      if (step < 2) showStep(step + 1);
+      else {
+        nextButton.textContent = "Saved ✓";
+        nextButton.style.background = "#047857";
+        nextButton.style.borderColor = "#047857";
+        saveNote.textContent = "You can revisit from the connection card";
+        setTimeout(closeSheet, 800);
+      }
+    }
+    function back() { showStep(step - 1); }
+    function selectOption(option) {
+      option.parentElement.querySelectorAll(".option").forEach(item => item.classList.remove("selected"));
+      option.classList.add("selected");
+    }
+    function renderChips() {
+      const rows = [...document.querySelectorAll(".map-row")];
+      const assigned = rows.filter(row => row.querySelector("select").value !== "Ignore");
+      document.getElementById("mapped-count").textContent = `${assigned.length} assigned`;
+      document.getElementById("live-chips").innerHTML = assigned.map(row => {
+        const source = row.querySelector(".source").textContent;
+        const target = row.querySelector("select").value;
+        return `<span class="live-chip"><b>${target}</b> ${source}</span>`;
+      }).join("");
+    }
+    function closeSheet() {
+      document.querySelector(".drawer").style.display = "none";
+      document.querySelector(".scrim").style.display = "none";
+    }
+    function reopen() {
+      document.querySelector(".drawer").style.display = "flex";
+      document.querySelector(".scrim").style.display = "block";
+      nextButton.textContent = "Continue";
+      nextButton.style.background = "";
+      nextButton.style.borderColor = "";
+      showStep(0);
+    }
+    renderChips();
+  </script>
+</body>
+</html>

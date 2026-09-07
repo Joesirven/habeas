@@ -141,6 +141,7 @@ Land/promote only — no `DROP_API_KEY`. Needs `DATABASE_URL`.
 |------|---------|
 | [`cloudbuild/admin-web-dev.yaml`](cloudbuild/admin-web-dev.yaml) | Build/push/deploy `admin-web-dev` |
 | [`cloudbuild/admin-web-prod.yaml`](cloudbuild/admin-web-prod.yaml) | Build/push/deploy `admin-web-prod` (Architecture B bake) |
+| [`cloudbuild/admin-web-qa.yaml`](cloudbuild/admin-web-qa.yaml) | Build/push/deploy `admin-web-qa` — prod-shaped QA front door (labs off) wired to **admin-api-dev**, so external testers never write prod |
 
 Bun/Vite multi-stage build → nginx on port 8080. `VITE_ADMIN_API_URL` and `VITE_GOOGLE_CLIENT_ID` are **build args**. **Architecture B is the intended authorized identity:** the SPA calls admin-api as a resource server with a Google Identity Services user ID token (`Authorization: Bearer`, `aud` = OAuth client). Yamls bake the admin-api origin (`admin-web-dev.yaml` → admin-api-dev; `admin-web-prod.yaml` must bake `VITE_ADMIN_API_URL=https://admin-api-prod-hsa55rg7ja-uk.a.run.app`). Master yaml was reverted in `2094211`; ARCH-B is re-shipping the bake. **Bake ≠ live traffic** until that cutover — do not invent a traffic percent. Prod `VITE_GOOGLE_CLIENT_ID` comes from Secret Manager `iap-oauth-client-id` at `gcloud builds submit` via `--substitutions` — never commit the value (same project brand as `IAP_OAUTH_CLIENT_ID`). IAP stays on admin-web as the human SSO front door. nginx `ADMIN_API_UPSTREAM` stays for same-origin `/api` — **Server-Sent Events** (`GET /api/live/events`) and empty-VITE local/emergency rollback, not a standing prod JSON path. admin-api: Cloud Run IAP **off**, `REQUIRE_IAP_IDENTITY=true`, `IAP_OAUTH_CLIENT_ID` already set, CORS already includes admin-web-prod. Live `admin-api-dev` IAM already has `allUsers` + compute SA + `jsirven@` (that is how DEV B works); copy that invoker set to `admin-api-prod`. Workers never get `allUsers`. No runtime secrets. Labs (`VITE_ENABLE_LABS`) are DEV-only: `true` on `admin-web-dev`, `false` on `admin-web-prod`.
 
@@ -151,6 +152,9 @@ gcloud builds submit --config=infra/cloudbuild/admin-web-dev.yaml --project=exam
 CLIENT_ID="$(gcloud secrets versions access latest --secret=iap-oauth-client-id --project=example-gcp-project)"
 gcloud builds submit --config=infra/cloudbuild/admin-web-prod.yaml --project=example-gcp-project . \
   --substitutions=_VITE_GOOGLE_CLIENT_ID="$CLIENT_ID"
+
+# QA — same SPA/labs-off build as prod, but every API hop is admin-api-dev
+gcloud builds submit --config=infra/cloudbuild/admin-web-qa.yaml --project=example-gcp-project .
 ```
 
 `admin-api-dev` / `admin-api-prod` `_CORS_ORIGINS` already include both `admin-web-*` origins. After a new web origin, append it there and redeploy admin-api.
@@ -171,8 +175,15 @@ Owner wizard `/owner/connectors` → **Connect Google Sheets** (systems `hr_alum
 
 One-time setup:
 
-1. **GSM secrets:** create `sheets-lab-oauth-client-id` and `sheets-lab-oauth-client-secret` (values from the Sheets OAuth web client; local-dev copies live in repo-root `.env`). Grant the admin-api runtime SA `roles/secretmanager.secretAccessor` on both.
-2. **Cloud Console (not scriptable):** on that OAuth client, register authorized redirect URIs `https://admin-web-prod-hsa55rg7ja-uk.a.run.app/owner/connectors` (prod) and `https://admin-web-dev-hsa55rg7ja-uk.a.run.app/owner/connectors` (dev). Without this, Google shows `redirect_uri_mismatch` **after** our start endpoint succeeds.
+1. **APIs:** enable both `sheets.googleapis.com` (tab/extract) and `drive.googleapis.com` (spreadsheet picker). Without Drive, redeem succeeds then `GET .../sheets-oauth/files` maps Google’s 403 to 401 and the wizard shows “Could not list spreadsheets.”
+   `gcloud services enable sheets.googleapis.com drive.googleapis.com --project=example-gcp-project`
+2. **GSM secrets:** create `sheets-lab-oauth-client-id` and `sheets-lab-oauth-client-secret` (values from the Sheets OAuth web client; local-dev copies live in repo-root `.env`). Grant the admin-api runtime SA `roles/secretmanager.secretAccessor` on both.
+3. **Cloud Console (not scriptable):** on the Sheets OAuth **web** client (`sheets-lab-oauth-client-id` in GSM — not the IAP / GIS client), register authorized redirect URIs with no trailing slash:
+   - `https://admin-web-prod-hsa55rg7ja-uk.a.run.app/owner/connectors`
+   - `https://admin-web-dev-hsa55rg7ja-uk.a.run.app/owner/connectors`
+   - `https://admin-web-qa-hsa55rg7ja-uk.a.run.app/owner/connectors`
+   - `http://127.0.0.1:5173/owner/connectors` and `http://localhost:5173/owner/connectors` (local Vite; also `5174` if you use that port)
+   Without these, Google shows `redirect_uri_mismatch` **after** our start endpoint succeeds. `admin-api-dev` `SHEETS_LAB_ALLOWED_REDIRECT_URIS` must also list any origin you register (QA is on the dev API, not prod).
 
 Failure modes: origin missing from `SHEETS_LAB_ALLOWED_REDIRECT_URIS` → start returns 400 `redirect_uri_not_allowed`; secrets missing → 503 `sheets_oauth_not_configured`. `--session-affinity` is on both deploys because OAuth sessions are in-process memory (prod `max-instances=3`) — the callback must land on the instance that started the flow. Local dev unchanged: repo-root `.env` values + default localhost allowlist.
 
@@ -241,6 +252,7 @@ gcloud builds submit --config=infra/cloudbuild/hash-index-refresh-dev.yaml \
 | Service | URL |
 |---------|-----|
 | `admin-web-dev` (browser IAP — Habeas Platform) | `https://admin-web-dev-hsa55rg7ja-uk.a.run.app` |
+| `admin-web-qa` (browser IAP — QA front door, labs off, calls admin-api-dev) | `https://admin-web-qa-hsa55rg7ja-uk.a.run.app` |
 | `admin-api-dev` (API — IAP off; app-level identity) | `https://admin-api-dev-hsa55rg7ja-uk.a.run.app` |
 
 | Surface | Invoker |

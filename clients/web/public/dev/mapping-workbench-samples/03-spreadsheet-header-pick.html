@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sample C — Spreadsheet header pick</title>
+  <style>
+    :root {
+      --navy: #1E4191;
+      --navy-dark: #162f6b;
+      --navy-light: #2d5ab8;
+      --canvas: #F8FAFC;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --border-strong: #cbd5e1;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --text-subtle: #94a3b8;
+      --chip-email: #0ea5e9;
+      --chip-phone: #8b5cf6;
+      --chip-ndz: #f59e0b;
+      --success: #16a34a;
+      --warning: #d97706;
+      --radius: 4px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --mono: "SF Mono", "Cascadia Code", "Consolas", monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--font);
+      font-size: 12px;
+      line-height: 1.4;
+      color: var(--text);
+      background: var(--canvas);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Top bar ── */
+    .topbar {
+      background: var(--navy);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      height: 40px;
+      flex-shrink: 0;
+    }
+    .topbar-left { display: flex; align-items: center; gap: 12px; }
+    .topbar-logo {
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: 0.02em;
+    }
+    .topbar-badge {
+      background: rgba(255,255,255,0.15);
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-weight: 500;
+    }
+    .topbar-title {
+      font-size: 12px;
+      font-weight: 500;
+      opacity: 0.9;
+    }
+    .topbar-actions { display: flex; gap: 8px; }
+    .btn {
+      font-family: var(--font);
+      font-size: 11px;
+      font-weight: 600;
+      border: none;
+      border-radius: var(--radius);
+      cursor: pointer;
+      padding: 5px 12px;
+      transition: background 0.12s;
+    }
+    .btn-ghost {
+      background: rgba(255,255,255,0.12);
+      color: #fff;
+    }
+    .btn-ghost:hover { background: rgba(255,255,255,0.22); }
+    .btn-primary {
+      background: #fff;
+      color: var(--navy);
+    }
+    .btn-primary:hover { background: #e8edf7; }
+    .btn-primary:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    /* ── Sticky derived chips bar ── */
+    .chips-bar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 6px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    .chips-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 12px;
+      border: 1.5px solid;
+    }
+    .chip-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+    }
+    .chip-email { color: var(--chip-email); border-color: var(--chip-email); background: #f0f9ff; }
+    .chip-email .chip-dot { background: var(--chip-email); }
+    .chip-phone { color: var(--chip-phone); border-color: var(--chip-phone); background: #f5f3ff; }
+    .chip-phone .chip-dot { background: var(--chip-phone); }
+    .chip-ndz { color: var(--chip-ndz); border-color: var(--chip-ndz); background: #fffbeb; }
+    .chip-ndz .chip-dot { background: var(--chip-ndz); }
+    .chip.missing {
+      opacity: 0.4;
+      border-style: dashed;
+    }
+    .chip-source {
+      font-weight: 400;
+      font-size: 10px;
+      opacity: 0.75;
+    }
+    .chips-spacer { flex: 1; }
+    .step-indicator {
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+    .step-indicator strong { color: var(--navy); }
+
+    /* ── Main layout ── */
+    .main {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+    .workspace {
+      flex: 1;
+      padding: 12px 16px;
+      overflow: auto;
+    }
+
+    /* ── Section headers ── */
+    .section-hd {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .section-hd h2 {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--navy);
+    }
+    .section-hd span {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* ── CSV grid ── */
+    .grid-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: auto;
+      margin-bottom: 16px;
+    }
+    table.csv {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 11px;
+    }
+    table.csv th,
+    table.csv td {
+      border: 1px solid var(--border);
+      padding: 4px 8px;
+      white-space: nowrap;
+      max-width: 140px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    table.csv .row-num {
+      width: 28px;
+      text-align: center;
+      background: var(--canvas);
+      color: var(--text-subtle);
+      font-size: 10px;
+      font-family: var(--mono);
+      user-select: none;
+      position: sticky;
+      left: 0;
+      z-index: 2;
+    }
+    table.csv .row-pick {
+      width: 24px;
+      text-align: center;
+      background: var(--canvas);
+      position: sticky;
+      left: 28px;
+      z-index: 2;
+    }
+    table.csv .row-pick input {
+      accent-color: var(--navy);
+      cursor: pointer;
+    }
+    table.csv tr.data-row {
+      cursor: pointer;
+    }
+    table.csv tr.data-row:hover td {
+      background: #f1f5f9;
+    }
+    table.csv tr.header-row td {
+      background: #e8edf7;
+      font-weight: 700;
+      color: var(--navy);
+      border-top: 2px solid var(--navy);
+      border-bottom: 2px solid var(--navy);
+    }
+    table.csv tr.header-row .row-num {
+      background: #d4dff0;
+      color: var(--navy);
+      font-weight: 700;
+    }
+    table.csv tr.pre-header td {
+      color: var(--text-subtle);
+      font-style: italic;
+    }
+
+    /* ── Column mapping row ── */
+    .mapping-row {
+      display: flex;
+      gap: 0;
+      margin-bottom: 16px;
+      overflow-x: auto;
+    }
+    .mapping-col {
+      flex: 1;
+      min-width: 100px;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .mapping-col-header {
+      background: var(--navy);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 5px 8px;
+      text-align: center;
+      cursor: pointer;
+      border-right: 1px solid var(--navy-dark);
+      position: relative;
+      transition: background 0.12s;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .mapping-col-header:first-child { border-radius: var(--radius) 0 0 0; }
+    .mapping-col-header:last-child { border-radius: 0 var(--radius) 0 0; border-right: none; }
+    .mapping-col-header:hover { background: var(--navy-light); }
+    .mapping-col-header.active {
+      background: var(--navy-light);
+      box-shadow: inset 0 -3px 0 #fff;
+    }
+    .mapping-col-header.mapped::after {
+      content: "✓";
+      position: absolute;
+      top: 2px;
+      right: 4px;
+      font-size: 8px;
+      opacity: 0.7;
+    }
+    .mapping-col-header.unmapped {
+      background: #64748b;
+    }
+    .mapping-select-wrap {
+      border: 1px solid var(--border);
+      border-top: none;
+      padding: 3px;
+      background: var(--surface);
+    }
+    .mapping-select-wrap select {
+      width: 100%;
+      font-family: var(--font);
+      font-size: 10px;
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 2px 4px;
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+    }
+    .mapping-select-wrap select:focus {
+      outline: 2px solid var(--navy);
+      outline-offset: -1px;
+    }
+  .mapping-select-wrap select.mapped-var {
+      border-color: var(--navy);
+      font-weight: 600;
+      color: var(--navy);
+    }
+
+    /* ── Format drawer ── */
+    .drawer {
+      width: 300px;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      transition: transform 0.2s;
+    }
+    .drawer.collapsed {
+      width: 0;
+      overflow: hidden;
+      border-left: none;
+    }
+    .drawer-hd {
+      background: var(--navy);
+      color: #fff;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .drawer-hd h3 {
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .drawer-close {
+      background: none;
+      border: none;
+      color: #fff;
+      font-size: 16px;
+      cursor: pointer;
+      opacity: 0.7;
+      line-height: 1;
+    }
+    .drawer-close:hover { opacity: 1; }
+    .drawer-body {
+      padding: 12px 14px;
+      overflow-y: auto;
+      flex: 1;
+    }
+    .drawer-empty {
+      color: var(--text-muted);
+      font-size: 11px;
+      text-align: center;
+      padding: 32px 16px;
+    }
+    .field-group {
+      margin-bottom: 14px;
+    }
+    .field-group label {
+      display: block;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+    .field-group .value {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--navy);
+    }
+    .field-group select,
+    .field-group input {
+      width: 100%;
+      font-family: var(--font);
+      font-size: 11px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      padding: 5px 8px;
+      background: var(--surface);
+    }
+    .field-group select:focus,
+    .field-group input:focus {
+      outline: 2px solid var(--navy);
+      outline-offset: -1px;
+    }
+    .preview-box {
+      background: var(--canvas);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 8px;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--text);
+      word-break: break-all;
+    }
+    .preview-label {
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+    .hash-preview {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px dashed var(--border);
+    }
+    .hash-preview .hash-value {
+      font-family: var(--mono);
+      font-size: 9px;
+      color: var(--text-muted);
+      word-break: break-all;
+    }
+    .drawer-ft {
+      padding: 10px 14px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 8px;
+    }
+    .btn-secondary {
+      background: var(--canvas);
+      color: var(--text);
+      border: 1px solid var(--border-strong);
+      flex: 1;
+    }
+    .btn-secondary:hover { background: #e2e8f0; }
+    .btn-accent {
+      background: var(--navy);
+      color: #fff;
+      flex: 1;
+    }
+    .btn-accent:hover { background: var(--navy-dark); }
+
+    /* ── Status footer ── */
+    .statusbar {
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding: 4px 16px;
+      font-size: 10px;
+      color: var(--text-muted);
+      display: flex;
+      gap: 16px;
+      flex-shrink: 0;
+    }
+    .statusbar .ok { color: var(--success); font-weight: 600; }
+    .statusbar .warn { color: var(--warning); font-weight: 600; }
+
+    /* ── Hint callout ── */
+    .hint {
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: var(--radius);
+      padding: 6px 10px;
+      font-size: 11px;
+      color: #1e40af;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .hint-icon { font-size: 14px; }
+  </style>
+</head>
+<body>
+
+  <!-- Top bar -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="topbar-logo">Habeas</span>
+      <span class="topbar-badge">Owner mapping</span>
+      <span class="topbar-title">Sample C — Spreadsheet header pick</span>
+    </div>
+    <div class="topbar-actions">
+      <button class="btn btn-ghost">Reset</button>
+      <button class="btn btn-primary" id="btn-save" disabled>Save mapping</button>
+    </div>
+  </header>
+
+  <!-- Sticky derived chips -->
+  <div class="chips-bar">
+    <span class="chips-label">Derived</span>
+    <span class="chip chip-email" id="chip-email">
+      <span class="chip-dot"></span>
+      Email
+      <span class="chip-source" id="chip-email-src">—</span>
+    </span>
+    <span class="chip chip-phone" id="chip-phone">
+      <span class="chip-dot"></span>
+      Phone
+      <span class="chip-source" id="chip-phone-src">—</span>
+    </span>
+    <span class="chip chip-ndz" id="chip-ndz">
+      <span class="chip-dot"></span>
+      NDZ
+      <span class="chip-source" id="chip-ndz-src">—</span>
+    </span>
+    <span class="chips-spacer"></span>
+    <span class="step-indicator">Step <strong id="step-num">1</strong> of 2 — <span id="step-label">Pick header row</span></span>
+  </div>
+
+  <div class="main">
+    <div class="workspace">
+      <div class="hint" id="hint">
+        <span class="hint-icon">①</span>
+        <span id="hint-text">Click a row or use the radio to mark which row contains column headers.</span>
+      </div>
+
+      <div class="section-hd">
+        <h2>Uploaded file</h2>
+        <span>hr_alumni_export_2026-08.csv · 847 rows · 6 columns</span>
+      </div>
+
+      <!-- CSV preview grid -->
+      <div class="grid-wrap">
+        <table class="csv" id="csv-table">
+          <thead>
+            <tr>
+              <th class="row-num">#</th>
+              <th class="row-pick"></th>
+              <th>A</th><th>B</th><th>C</th><th>D</th><th>E</th><th>F</th>
+            </tr>
+          </thead>
+          <tbody id="csv-body"></tbody>
+        </table>
+      </div>
+
+      <!-- Column mapping (visible after header pick) -->
+      <div id="mapping-section" style="display:none;">
+        <div class="section-hd">
+          <h2>Column mapping</h2>
+          <span>Click a column header, then choose a canonical variable</span>
+        </div>
+        <div class="mapping-row" id="mapping-row"></div>
+      </div>
+    </div>
+
+    <!-- Format drawer -->
+    <aside class="drawer collapsed" id="drawer">
+      <div class="drawer-hd">
+        <h3 id="drawer-title">Field format</h3>
+        <button class="drawer-close" id="drawer-close" title="Close">×</button>
+      </div>
+      <div class="drawer-body" id="drawer-body">
+        <div class="drawer-empty">Select a mapped column to configure formatting.</div>
+      </div>
+      <div class="drawer-ft" id="drawer-ft" style="display:none;">
+        <button class="btn btn-secondary" id="drawer-cancel">Cancel</button>
+        <button class="btn btn-accent" id="drawer-apply">Apply</button>
+      </div>
+    </aside>
+  </div>
+
+  <footer class="statusbar">
+    <span>Connection: <strong>HR Alumni Sheet</strong></span>
+    <span>Vertical: People/HR</span>
+    <span id="status-mapped">Mapped: 0 / 6</span>
+    <span id="status-hash" class="warn">Hash gates: incomplete</span>
+  </footer>
+
+<script>
+(function () {
+  const RAW_ROWS = [
+    ["Habeas HR Export — Confidential", "", "", "", "", ""],
+    ["Generated: 2026-08-14", "", "", "", "", ""],
+    ["", "", "", "", "", ""],
+    ["Employee ID", "Full Name", "Work Email", "Mobile Phone", "City", "State"],
+    ["E-1042", "Maria Chen", "dev-owner-18@example.com", "415-555-0198", "Oakland", "CA"],
+    ["E-1087", "James Okonkwo", "dev-owner-16@example.com", "(510) 555-0142", "Berkeley", "CA"],
+    ["E-1103", "Priya Sharma", "dev-owner-19@example.com", "925-555-0167", "Walnut Creek", "CA"],
+    ["E-1156", "Alex Rivera", "a.rivera@example.com", "", "San Jose", "CA"],
+    ["E-1199", "Sam Taylor", "sam.t@contractor.io", "650-555-0133", "Palo Alto", "CA"],
+  ];
+
+  const HEADER_ROW_DEFAULT = 3; // 0-indexed row 3 = "Employee ID…"
+  const COLS = ["A","B","C","D","E","F"];
+
+  const CANONICAL_VARS = [
+    { value: "", label: "— skip —" },
+    { value: "employee_id", label: "Employee ID" },
+    { value: "full_name", label: "Full name" },
+    { value: "first_name", label: "First name" },
+    { value: "last_name", label: "Last name" },
+    { value: "email", label: "Email" },
+    { value: "phone", label: "Phone" },
+    { value: "city", label: "City" },
+    { value: "state", label: "State" },
+    { value: "zip", label: "ZIP / postal" },
+    { value: "country", label: "Country" },
+  ];
+
+  const FORMAT_OPTS = {
+    email: [
+      { value: "lowercase_trim", label: "Lowercase + trim" },
+      { value: "gmail_dots", label: "Gmail dot-normalize" },
+    ],
+    phone: [
+      { value: "e164_us", label: "E.164 (US default)" },
+      { value: "digits_only", label: "Digits only" },
+    ],
+    default: [
+      { value: "trim", label: "Trim whitespace" },
+      { value: "upper", label: "Uppercase" },
+      { value: "lower", label: "Lowercase" },
+    ],
+  };
+
+  const HASH_MAP = {
+    email: "email",
+    phone: "phone",
+    full_name: "ndz",
+    first_name: "ndz",
+    last_name: "ndz",
+    city: "ndz",
+    state: "ndz",
+    zip: "ndz",
+  };
+
+  let headerRowIdx = HEADER_ROW_DEFAULT;
+  let mappings = {};       // colIdx → canonical value
+  let formats = {};        // colIdx → format value
+  let activeCol = null;
+
+  const csvBody = document.getElementById("csv-body");
+  const mappingSection = document.getElementById("mapping-section");
+  const mappingRow = document.getElementById("mapping-row");
+  const drawer = document.getElementById("drawer");
+  const drawerBody = document.getElementById("drawer-body");
+  const drawerFt = document.getElementById("drawer-ft");
+  const drawerTitle = document.getElementById("drawer-title");
+
+  function renderGrid() {
+    csvBody.innerHTML = "";
+    RAW_ROWS.forEach((row, ri) => {
+      const tr = document.createElement("tr");
+      tr.className = "data-row";
+      if (ri < headerRowIdx) tr.classList.add("pre-header");
+      if (ri === headerRowIdx) tr.classList.add("header-row");
+
+      const numTd = document.createElement("td");
+      numTd.className = "row-num";
+      numTd.textContent = ri + 1;
+      tr.appendChild(numTd);
+
+      const pickTd = document.createElement("td");
+      pickTd.className = "row-pick";
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "header-row";
+      radio.checked = ri === headerRowIdx;
+      radio.addEventListener("change", () => setHeaderRow(ri));
+      pickTd.appendChild(radio);
+      tr.appendChild(pickTd);
+
+      row.forEach(cell => {
+        const td = document.createElement("td");
+        td.textContent = cell;
+        td.title = cell;
+        tr.appendChild(td);
+      });
+
+      tr.addEventListener("click", (e) => {
+        if (e.target.tagName === "INPUT") return;
+        setHeaderRow(ri);
+      });
+
+      csvBody.appendChild(tr);
+    });
+  }
+
+  function setHeaderRow(idx) {
+    headerRowIdx = idx;
+    renderGrid();
+    renderMapping();
+    mappingSection.style.display = "block";
+    document.getElementById("step-num").textContent = "2";
+    document.getElementById("step-label").textContent = "Map columns";
+    document.getElementById("hint-text").textContent =
+      "Click a column header below, then assign a canonical variable from the dropdown.";
+    updateChips();
+    updateStatus();
+  }
+
+  function getHeaderLabels() {
+    return RAW_ROWS[headerRowIdx].map((h, i) => h || `Column ${COLS[i]}`);
+  }
+
+  function renderMapping() {
+    const labels = getHeaderLabels();
+    mappingRow.innerHTML = "";
+    labels.forEach((label, ci) => {
+      const col = document.createElement("div");
+      col.className = "mapping-col";
+
+      const hdr = document.createElement("div");
+      hdr.className = "mapping-col-header" + (mappings[ci] ? " mapped" : " unmapped");
+      if (activeCol === ci) hdr.classList.add("active");
+      hdr.textContent = label;
+      hdr.title = label;
+      hdr.addEventListener("click", () => selectCol(ci));
+      col.appendChild(hdr);
+
+      const wrap = document.createElement("div");
+      wrap.className = "mapping-select-wrap";
+      const sel = document.createElement("select");
+      CANONICAL_VARS.forEach(v => {
+        const opt = document.createElement("option");
+        opt.value = v.value;
+        opt.textContent = v.label;
+        if (mappings[ci] === v.value) opt.selected = true;
+        sel.appendChild(opt);
+      });
+      if (mappings[ci]) sel.classList.add("mapped-var");
+      sel.addEventListener("change", () => {
+        mappings[ci] = sel.value;
+        if (sel.value) formats[ci] = formats[ci] || defaultFormat(sel.value);
+        else delete formats[ci];
+        renderMapping();
+        updateChips();
+        updateStatus();
+        if (sel.value) selectCol(ci);
+      });
+      wrap.appendChild(sel);
+      col.appendChild(wrap);
+      mappingRow.appendChild(col);
+    });
+  }
+
+  function defaultFormat(varName) {
+    if (varName === "email") return "lowercase_trim";
+    if (varName === "phone") return "e164_us";
+    return "trim";
+  }
+
+  function selectCol(ci) {
+    activeCol = ci;
+    renderMapping();
+    const varName = mappings[ci];
+    if (varName) {
+      openDrawer(ci, varName);
+    } else {
+      closeDrawer();
+    }
+  }
+
+  function sampleValue(ci) {
+    for (let r = headerRowIdx + 1; r < RAW_ROWS.length; r++) {
+      const v = RAW_ROWS[r][ci];
+      if (v) return v;
+    }
+    return "(no data)";
+  }
+
+  function formatPreview(raw, varName, fmt) {
+    if (!raw || raw === "(no data)") return raw;
+    if (varName === "email" && fmt === "lowercase_trim") return raw.toLowerCase().trim();
+    if (varName === "phone" && fmt === "e164_us") {
+      const d = raw.replace(/\D/g, "");
+      if (d.length === 10) return "+1" + d;
+      if (d.length === 11 && d[0] === "1") return "+" + d;
+      return "+" + d;
+    }
+    if (fmt === "trim") return raw.trim();
+    if (fmt === "upper") return raw.toUpperCase();
+    if (fmt === "lower") return raw.toLowerCase();
+    return raw;
+  }
+
+  function fakeHash(val) {
+    let h = 0;
+    for (let i = 0; i < val.length; i++) h = ((h << 5) - h + val.charCodeAt(i)) | 0;
+    const hex = Math.abs(h).toString(16).padStart(8, "0");
+    return hex.repeat(8).slice(0, 64);
+  }
+
+  function openDrawer(ci, varName) {
+    drawer.classList.remove("collapsed");
+    const label = getHeaderLabels()[ci];
+    const canonLabel = CANONICAL_VARS.find(v => v.value === varName)?.label || varName;
+    drawerTitle.textContent = `Format — ${canonLabel}`;
+    drawerFt.style.display = "flex";
+
+    const fmtKey = (varName === "email" || varName === "phone") ? varName : "default";
+    const opts = FORMAT_OPTS[fmtKey];
+    const curFmt = formats[ci] || defaultFormat(varName);
+    const raw = sampleValue(ci);
+    const preview = formatPreview(raw, varName, curFmt);
+    const hashType = HASH_MAP[varName];
+
+    drawerBody.innerHTML = `
+      <div class="field-group">
+        <label>Source column</label>
+        <div class="value">${label} (${COLS[ci]})</div>
+      </div>
+      <div class="field-group">
+        <label>Canonical variable</label>
+        <div class="value">${canonLabel}</div>
+      </div>
+      <div class="field-group">
+        <label>Normalize</label>
+        <select id="fmt-select">
+          ${opts.map(o => `<option value="${o.value}"${o.value === curFmt ? " selected" : ""}>${o.label}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field-group">
+        <div class="preview-label">Sample input → output</div>
+        <div class="preview-box" id="fmt-preview-raw">${raw}</div>
+        <div style="text-align:center;color:var(--text-subtle);font-size:10px;margin:4px 0;">↓</div>
+        <div class="preview-box" id="fmt-preview-out">${preview}</div>
+      </div>
+      ${hashType ? `
+      <div class="hash-preview">
+        <div class="preview-label">Feeds <strong>${hashType.toUpperCase()}</strong> hash gate</div>
+        <div class="hash-value" id="fmt-hash">${fakeHash(preview)}</div>
+      </div>` : ""}
+    `;
+
+    const fmtSel = document.getElementById("fmt-select");
+    fmtSel.addEventListener("change", () => {
+      const p = formatPreview(raw, varName, fmtSel.value);
+      document.getElementById("fmt-preview-out").textContent = p;
+      const hv = document.getElementById("fmt-hash");
+      if (hv) hv.textContent = fakeHash(p);
+    });
+
+    document.getElementById("drawer-apply").onclick = () => {
+      formats[ci] = fmtSel.value;
+      updateChips();
+      updateStatus();
+    };
+    document.getElementById("drawer-cancel").onclick = closeDrawer;
+  }
+
+  function closeDrawer() {
+    drawer.classList.add("collapsed");
+    activeCol = null;
+    renderMapping();
+  }
+
+  function updateChips() {
+    const derived = { email: null, phone: null, ndz: null };
+    Object.entries(mappings).forEach(([ci, v]) => {
+      const ht = HASH_MAP[v];
+      if (ht && !derived[ht]) derived[ht] = getHeaderLabels()[ci];
+    });
+
+    ["email", "phone", "ndz"].forEach(type => {
+      const chip = document.getElementById("chip-" + type);
+      const src = document.getElementById("chip-" + type + "-src");
+      if (derived[type]) {
+        chip.classList.remove("missing");
+        src.textContent = "← " + derived[type];
+      } else {
+        chip.classList.add("missing");
+        src.textContent = "unmapped";
+      }
+    });
+  }
+
+  function updateStatus() {
+    const mapped = Object.values(mappings).filter(Boolean).length;
+    document.getElementById("status-mapped").textContent = `Mapped: ${mapped} / 6`;
+    const hasEmail = Object.values(mappings).includes("email");
+    const hasPhone = Object.values(mappings).includes("phone");
+    const hasNdz = Object.values(mappings).some(v => HASH_MAP[v] === "ndz");
+    const complete = hasEmail && hasPhone && hasNdz;
+    const el = document.getElementById("status-hash");
+    el.textContent = complete ? "Hash gates: ready" : "Hash gates: incomplete";
+    el.className = complete ? "ok" : "warn";
+    document.getElementById("btn-save").disabled = !complete;
+  }
+
+  document.getElementById("drawer-close").addEventListener("click", closeDrawer);
+
+  // Init
+  renderGrid();
+  // Pre-select sensible defaults for demo
+  mappings = { 0: "employee_id", 1: "full_name", 2: "email", 3: "phone", 4: "city", 5: "state" };
+  formats = { 0: "trim", 1: "trim", 2: "lowercase_trim", 3: "e164_us", 4: "trim", 5: "upper" };
+  renderMapping();
+  mappingSection.style.display = "block";
+  document.getElementById("step-num").textContent = "2";
+  document.getElementById("step-label").textContent = "Map columns";
+  document.getElementById("hint-text").textContent =
+    "Click a column header below, then assign a canonical variable from the dropdown.";
+  updateChips();
+  updateStatus();
+})();
+</script>
+</body>
+</html>

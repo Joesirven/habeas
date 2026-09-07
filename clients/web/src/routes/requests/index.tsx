@@ -875,7 +875,7 @@ function RequestRows({
 export function RequestsPage() {
   const navigate = useNavigate()
   const search = useSearch({ from: '/requests' })
-  const { role } = useMe()
+  const { role, isSuperAdmin } = useMe()
   const legalAdmin = isLegalAdminPersona(role)
   const [ephemeralSearch, setEphemeralSearch] = useState('')
   const viewMode: ViewMode = search.view === 'batch' ? 'batch' : 'flat'
@@ -932,6 +932,8 @@ export function RequestsPage() {
     queryFn: getDropGlobalStats,
     refetchInterval: 15_000,
     staleTime: 10_000,
+    // /ops/drop/stats/global is super_admin-only; other roles looped 403s every 15s.
+    enabled: isSuperAdmin,
   })
 
   const attentionByRequestId = useMemo(() => {
@@ -1219,7 +1221,7 @@ export function RequestsPage() {
             }
           />
         </div>
-      ) : statsQuery.isPending ? (
+      ) : isSuperAdmin && statsQuery.isPending ? (
         <div className="grid gap-3 sm:grid-cols-3">
           {Array.from({ length: 3 }, (_, index) => (
             <div key={index} className="rounded-lg border border-line/80 bg-paper/60 px-4 py-3">

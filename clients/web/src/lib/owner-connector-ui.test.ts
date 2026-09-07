@@ -48,6 +48,7 @@ import {
   visibleReminderBanners,
   suggestUploadColumnMapping,
   uploadMappingComplete,
+  deriveListCapability,
   parseCsvHeaderRow,
   parseCsvDocument,
   serializeCsvDocument,
@@ -1256,6 +1257,27 @@ describe('upload identifier fields (full_name)', () => {
     expect(uploadMappingComplete({ first_name: 'First' })).toBe(true)
     expect(uploadMappingComplete({})).toBe(false)
   })
+
+  test('deriveListCapability follows email / phone / four-part NDZ', () => {
+    expect(deriveListCapability({ email: 'Work Mail' }).enabledListTypes).toEqual(['Email'])
+    expect(deriveListCapability({ phone: 'Mobile' }).enabledListTypes).toEqual(['Phone'])
+    expect(
+      deriveListCapability({
+        first_name: 'Given',
+        last_name: 'Family',
+        dob: 'DOB',
+      }).ndz,
+    ).toBe(false)
+    expect(
+      deriveListCapability({
+        first_name: 'Given',
+        last_name: 'Family',
+        dob: 'DOB',
+        zip: 'ZIP',
+      }).enabledListTypes,
+    ).toEqual(['NDZ'])
+    expect(deriveListCapability({ full_name: 'Name' }).ndz).toBe(false)
+  })
 })
 
 describe('NAME_FORMAT_OPTIONS', () => {
@@ -1383,5 +1405,22 @@ describe('wizard runner wiring (QCQA source locks)', () => {
   test('upload client sends name_format so the owner’s name order choice is honored', () => {
     const source = readFileSync(join(here, 'api.ts'), 'utf8')
     expect(source).toContain("form.append('name_format', formats.nameFormat)")
+  })
+
+  test('sheets connect reads headers only; mapping and formats run after', () => {
+    const sheetsStep = readFileSync(
+      join(here, '..', 'components', 'owner', 'sheets-step.tsx'),
+      'utf8',
+    )
+    expect(sheetsStep).toContain('onHeadersReady')
+    expect(sheetsStep).not.toContain('EMAIL_FORMAT_OPTIONS')
+    expect(sheetsStep).not.toContain('PHONE_FORMAT_OPTIONS')
+    expect(sheetsStep).not.toContain('MULTI_PII_DELIMITER_OPTIONS')
+    const dialog = readFileSync(
+      join(here, '..', 'components', 'owner', 'wizard-dialog.tsx'),
+      'utf8',
+    )
+    expect(dialog).toContain('finalizeExtractMutation')
+    expect(dialog).toContain('formatStepColumnLabel')
   })
 })

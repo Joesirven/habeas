@@ -372,6 +372,7 @@ def test_hash_fields_from_raw_payload_keeps_drop_keys_only() -> None:
             "concatenated_hash": "ghi",
             "email_hash": "jkl",
             "phone_hash": "mno",
+            "ndz_hash": "ndz",
             "pii_hash": "pqr",
             "hash": "stu",
             "plain_field": "ignored",
@@ -383,6 +384,7 @@ def test_hash_fields_from_raw_payload_keeps_drop_keys_only() -> None:
         "concatenated_hash": "ghi",
         "email_hash": "jkl",
         "phone_hash": "mno",
+        "ndz_hash": "ndz",
         "pii_hash": "pqr",
         "hash": "stu",
     }

@@ -39,6 +39,19 @@ from habeas_privacy_core.queue.drain_lease import (
 from habeas_privacy_core.vertical_hash import bq_lookup as _core_bq_lookup
 from habeas_privacy_core.vertical_hash.audit import build_vertical_audit_payload
 
+from habeas_privacy_core.vertical_hash.bq_lookup import (
+    PAYLOCITY_NDZ_HASH_BUILD_TABLE,
+    PAYLOCITY_PHONE_HASH_BUILD_TABLE,
+    hash_mart_exists,
+    lookup_vendor_ids_by_ndz_hashes,
+    lookup_vendor_ids_by_phone_hashes,
+)
+from habeas_privacy_core.vertical_hash.drop_list_hash import (
+    normalize_drop_list_type,
+    primary_hash_for_list_type,
+)
+from habeas_privacy_core.vertical_hash.hashing import assert_opaque_hash
+
 from paylocity.vertical_match import (
     ADAPTER,
     PAYLOCITY_EMAIL_HASH_BUILD_TABLE,
@@ -56,20 +69,18 @@ COMPLETE_BATCH_SIZE = 250
 DEFAULT_CLAIM_LEASE_MINUTES = 15
 LOOKUP_RETRY_SECONDS = 60
 
+_HASH_LABEL_BY_KIND: dict[str, str] = {
+    "email": "email_hash",
+    "phone": "phone_hash",
+    "ndz": "ndz_hash",
+}
+
 _LOAD_CHUNK_HASHES_SQL = """
 SELECT r.id, drr.list_type, drr.raw_payload
 FROM requests r
 JOIN drop_raw_requests drr ON drr.id = r.raw_record_id
 WHERE r.id = ANY($1::uuid[])
 """
-
-# Same keys Paylocity vertical_match / DROP matching read from raw_payload.
-_EMAIL_HASH_FIELD_KEYS = (
-    "hashed_email",
-    "email_hash",
-    "pii_hash",
-    "hash",
-)
 
 
 def drain_lease_holder() -> str:
@@ -338,16 +349,10 @@ async def reap_worker_paylocity_claims(conn: Any, worker_id: str) -> int:
     return released
 
 
-def _is_email_list_type(list_type: Any) -> bool:
-    if list_type is None:
-        return False
-    if list_type == DropListType.EMAIL:
-        return True
-    return str(list_type) == DropListType.EMAIL.value
-
-
-def _email_hash_from_raw_payload(raw_payload: Any) -> str | None:
-    """Extract DROP email hash from raw_payload. Never log values."""
+def _hash_from_raw_payload(
+    raw_payload: Any, *, list_type: DropListType
+) -> str | None:
+    """Extract DROP precomputed hash from raw_payload. Never log values."""
     document: Any = raw_payload
     if isinstance(document, str):
         try:
@@ -356,14 +361,7 @@ def _email_hash_from_raw_payload(raw_payload: Any) -> str | None:
             return None
     if not isinstance(document, dict):
         return None
-    for key in _EMAIL_HASH_FIELD_KEYS:
-        value = document.get(key)
-        if value is None:
-            continue
-        cleaned = str(value).strip()
-        if cleaned:
-            return cleaned
-    return None
+    return primary_hash_for_list_type(list_type, document)
 
 
 async def _load_chunk_hash_payloads(
@@ -466,6 +464,59 @@ async def complete_paylocity_matching_attempts(
     return completed
 
 
+
+def _mart_table_for_kind(kind: str) -> str | None:
+    if kind == "email":
+        return PAYLOCITY_EMAIL_HASH_BUILD_TABLE
+    if kind == "phone":
+        return PAYLOCITY_PHONE_HASH_BUILD_TABLE
+    if kind == "ndz":
+        return PAYLOCITY_NDZ_HASH_BUILD_TABLE
+    return None
+
+
+def _mart_exists_for_kind(
+    kind: str,
+    *,
+    client: Any | None = None,
+) -> bool:
+    table = _mart_table_for_kind(kind)
+    if not table:
+        return False
+    return bool(
+        hash_mart_exists(
+            SYSTEM,
+            list_type=kind,
+            table=table,
+            client=client,
+        )
+    )
+
+
+def _lookup_hashes_for_kind(
+    kind: str,
+    hash_values: list[str],
+    *,
+    bq_client: Any | None,
+) -> dict[str, list[str]]:
+    if kind == "email":
+        batch_lookup, _error_type = _resolve_batch_lookup()
+        return batch_lookup(hash_values, client=bq_client)
+    if kind == "phone":
+        return lookup_vendor_ids_by_phone_hashes(
+            hash_values,
+            table=PAYLOCITY_PHONE_HASH_BUILD_TABLE,
+            system=SYSTEM,
+            client=bq_client,
+        )
+    return lookup_vendor_ids_by_ndz_hashes(
+        hash_values,
+        table=PAYLOCITY_NDZ_HASH_BUILD_TABLE,
+        system=SYSTEM,
+        client=bq_client,
+    )
+
+
 async def process_paylocity_matching_chunk(
     conn: Any,
     *,
@@ -491,7 +542,6 @@ async def process_paylocity_matching_chunk(
     )
 
     prepared: list[dict[str, Any]] = []
-    hash_values: list[str] = []
     outcomes: list[dict[str, Any]] = []
     zero_hit: list[dict[str, Any]] = []
     batch_lookup, lookup_error_type = _resolve_batch_lookup()
@@ -518,20 +568,27 @@ async def process_paylocity_matching_chunk(
             )
             continue
 
-        if not _is_email_list_type(payload_row["list_type"]):
+        list_type = normalize_drop_list_type(payload_row["list_type"])
+        if list_type is None:
             zero_hit.append(
                 {"attempt_id": attempt_id, "request_id": request_id}
             )
             continue
 
-        hash_value = _email_hash_from_raw_payload(payload_row["raw_payload"])
+        kind = list_type.name.lower()
+        hash_value = _hash_from_raw_payload(
+            payload_row["raw_payload"], list_type=list_type
+        )
         if not hash_value:
             zero_hit.append(
                 {"attempt_id": attempt_id, "request_id": request_id}
             )
             continue
 
-        if "@" in hash_value:
+        label = _HASH_LABEL_BY_KIND.get(kind, "hash")
+        try:
+            hash_value = assert_opaque_hash(hash_value, label=label)
+        except ValueError as exc:
             outcomes.append(
                 {
                     "attempt_id": attempt_id,
@@ -543,7 +600,7 @@ async def process_paylocity_matching_chunk(
                     "audit_payload": _error_audit(
                         error_code="paylocity_invalid_hash",
                         error_class="ValueError",
-                        error_detail="email_hash must not contain plaintext",
+                        error_detail=str(exc),
                     ),
                 }
             )
@@ -554,9 +611,9 @@ async def process_paylocity_matching_chunk(
                 "attempt_id": attempt_id,
                 "request_id": request_id,
                 "hash_value": hash_value,
+                "list_kind": kind,
             }
         )
-        hash_values.append(hash_value)
 
     for item in zero_hit:
         try:
@@ -595,85 +652,140 @@ async def process_paylocity_matching_chunk(
                 }
             )
 
+    remaining: list[dict[str, Any]] = []
     if prepared:
-        def _run_batch_lookup() -> dict[str, list[str]]:
-            if lookup_batch is not None:
-                return lookup_batch(hash_values)
-            return batch_lookup(
-                hash_values,
-                client=bq_client,
-            )
-
-        typed_lookup_errors: tuple[type[BaseException], ...] = (
-            lookup_error_type,
-            PaylocityHashLookupError,
-        )
-        try:
-            hits_by_hash = await asyncio.to_thread(_run_batch_lookup)
-        except typed_lookup_errors as exc:
-            retry_after = datetime.now(UTC) + timedelta(
-                seconds=int(getattr(exc, "retry_seconds", None) or LOOKUP_RETRY_SECONDS)
-            )
-            safe = redact_error_text(str(exc))
-            for item in prepared:
-                outcomes.append(
-                    {
-                        "attempt_id": item["attempt_id"],
-                        "worker_id": worker_id,
-                        "status": "submit_error",
-                        "error_code": "paylocity_lookup_error",
-                        "error_message": "paylocity_lookup_error",
-                        "retry_after": retry_after,
-                        "audit_payload": _error_audit(
-                            error_code="paylocity_lookup_error",
-                            error_class=type(exc).__name__,
-                            error_detail=safe,
-                        ),
-                    }
-                )
-            logger.error(
-                "paylocity_drain_bq_lookup_error",
-                extra={
-                    "event": "paylocity_drain_bq_lookup_error",
-                    "claimed": len(claimed),
-                    "prepared": len(prepared),
-                    "error_summary": safe,
-                },
-            )
-            prepared = []
-        except Exception as exc:
-            retry_after = datetime.now(UTC) + timedelta(
-                seconds=LOOKUP_RETRY_SECONDS
-            )
-            safe = redact_error_text(str(exc))
-            for item in prepared:
-                outcomes.append(
-                    {
-                        "attempt_id": item["attempt_id"],
-                        "worker_id": worker_id,
-                        "status": "submit_error",
-                        "error_code": "paylocity_lookup_error",
-                        "error_message": "paylocity_lookup_error",
-                        "retry_after": retry_after,
-                        "audit_payload": _error_audit(
-                            error_code="paylocity_lookup_error",
-                            error_class=type(exc).__name__,
-                            error_detail=safe,
-                        ),
-                    }
-                )
-            logger.error(
-                "paylocity_drain_bq_lookup_error",
-                extra={
-                    "event": "paylocity_drain_bq_lookup_error",
-                    "claimed": len(claimed),
-                    "prepared": len(prepared),
-                    "error_summary": safe,
-                },
-            )
-            prepared = []
-
+        by_kind: dict[str, list[dict[str, Any]]] = {}
         for item in prepared:
+            by_kind.setdefault(str(item["list_kind"]), []).append(item)
+
+        hits_by_hash: dict[str, list[str]] = {}
+        for kind, group in by_kind.items():
+            if lookup_batch is None:
+                try:
+                    mart_ok = await asyncio.to_thread(
+                        _mart_exists_for_kind,
+                        kind,
+                        client=bq_client,
+                    )
+                except Exception as exc:
+                    mart_ok = False
+                    safe = redact_error_text(str(exc))
+                    logger.error(
+                        "paylocity_drain_mart_check_error",
+                        extra={
+                            "event": "paylocity_drain_mart_check_error",
+                            "list_kind": kind,
+                            "error_summary": safe,
+                        },
+                    )
+                if not mart_ok:
+                    retry_after = datetime.now(UTC) + timedelta(
+                        seconds=LOOKUP_RETRY_SECONDS
+                    )
+                    for item in group:
+                        outcomes.append(
+                            {
+                                "attempt_id": item["attempt_id"],
+                                "worker_id": worker_id,
+                                "status": "submit_error",
+                                "error_code": "paylocity_lookup_error",
+                                "error_message": "paylocity_lookup_error",
+                                "retry_after": retry_after,
+                                "audit_payload": _error_audit(
+                                    error_code="paylocity_lookup_error",
+                                    error_class="PaylocityHashLookupError",
+                                    error_detail=(
+                                        f"mart missing for list_type={kind}"
+                                    ),
+                                ),
+                            }
+                        )
+                    logger.info(
+                        "paylocity_drain_mart_missing",
+                        extra={
+                            "event": "paylocity_drain_mart_missing",
+                            "list_kind": kind,
+                            "prepared": len(group),
+                        },
+                    )
+                    continue
+
+            hashes = [str(item["hash_value"]) for item in group]
+
+            def _run_batch_lookup(
+                _kind: str = kind, _hashes: list[str] = hashes
+            ) -> dict[str, list[str]]:
+                if lookup_batch is not None:
+                    return lookup_batch(_hashes)
+                return _lookup_hashes_for_kind(_kind, _hashes, bq_client=bq_client)
+
+            try:
+                hits_by_hash.update(await asyncio.to_thread(_run_batch_lookup))
+                remaining.extend(group)
+            except PaylocityHashLookupError as exc:
+                retry_after = datetime.now(UTC) + timedelta(
+                    seconds=int(getattr(exc, "retry_seconds", None) or LOOKUP_RETRY_SECONDS)
+                )
+                safe = redact_error_text(str(exc))
+                for item in group:
+                    outcomes.append(
+                        {
+                            "attempt_id": item["attempt_id"],
+                            "worker_id": worker_id,
+                            "status": "submit_error",
+                            "error_code": "paylocity_lookup_error",
+                            "error_message": "paylocity_lookup_error",
+                            "retry_after": retry_after,
+                            "audit_payload": _error_audit(
+                                error_code="paylocity_lookup_error",
+                                error_class=type(exc).__name__,
+                                error_detail=safe,
+                            ),
+                        }
+                    )
+                logger.error(
+                    "paylocity_drain_bq_lookup_error",
+                    extra={
+                        "event": "paylocity_drain_bq_lookup_error",
+                        "claimed": len(claimed),
+                        "prepared": len(group),
+                        "list_kind": kind,
+                        "error_summary": safe,
+                    },
+                )
+            except Exception as exc:
+                retry_after = datetime.now(UTC) + timedelta(
+                    seconds=LOOKUP_RETRY_SECONDS
+                )
+                safe = redact_error_text(str(exc))
+                for item in group:
+                    outcomes.append(
+                        {
+                            "attempt_id": item["attempt_id"],
+                            "worker_id": worker_id,
+                            "status": "submit_error",
+                            "error_code": "paylocity_lookup_error",
+                            "error_message": "paylocity_lookup_error",
+                            "retry_after": retry_after,
+                            "audit_payload": _error_audit(
+                                error_code="paylocity_lookup_error",
+                                error_class=type(exc).__name__,
+                                error_detail=safe,
+                            ),
+                        }
+                    )
+                logger.error(
+                    "paylocity_drain_bq_lookup_error",
+                    extra={
+                        "event": "paylocity_drain_bq_lookup_error",
+                        "claimed": len(claimed),
+                        "prepared": len(group),
+                        "list_kind": kind,
+                        "error_summary": safe,
+                    },
+                )
+
+        for item in remaining:
             vendor_ids = list(hits_by_hash.get(item["hash_value"], []) or [])
             match_count = len(vendor_ids)
             try:
@@ -789,7 +901,6 @@ async def ensure_drain(
     readiness = await evaluate_matching_drain_readiness(
         conn,
         system=SYSTEM,
-        mart_table=PAYLOCITY_EMAIL_HASH_BUILD_TABLE,
         bq_client=bq_client,
     )
     if not readiness.ready:

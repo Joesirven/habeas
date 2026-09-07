@@ -851,6 +851,10 @@ def test_mapped_upload_persists_column_mapping_and_enqueues_hash_refresh(
     assert upload.status_code == 200
     assert upload.json()["ok"] is True
     assert meta["column_mapping"] == MAPPED_PAYLOCITY_COLUMNS
+    assert meta["list_capability"]["email"] is True
+    assert meta["list_capability"]["phone"] is False
+    assert meta["list_capability"]["ndz"] is False
+    assert meta["list_capability"]["enabled_list_types"] == ["Email"]
     assert meta.get("gcs_uri")
     helpers["enqueue"].assert_awaited_once()
     assert helpers["enqueue"].await_args.kwargs["system"] == "paylocity"
@@ -2102,6 +2106,55 @@ def test_sheets_oauth_start_rejects_lab_redirect(monkeypatch: pytest.MonkeyPatch
         )
     assert response.status_code == 400
     assert response.json()["detail"] == "redirect_uri_not_allowed"
+
+
+def test_sheets_oauth_start_rejects_admin_web_qa_when_not_allowlisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_sheets_oauth(monkeypatch)
+    monkeypatch.setattr(
+        lab_sheets_oauth.settings,
+        "sheets_lab_allowed_redirect_uris",
+        "http://127.0.0.1:5173/dev/sheets-oauth",
+    )
+    current = _connection(system="hr_alumni", metadata={"vertical_id": VERTICAL_PEOPLE_HR})
+    _patch_owner_access(monkeypatch, connection=current)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"{_ALUMNI_OAUTH_PATH}/start",
+            headers=_owner_headers(),
+            json={
+                "redirect_uri": "https://admin-web-qa-hsa55rg7ja-uk.a.run.app/owner/connectors"
+            },
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "redirect_uri_not_allowed"
+
+
+def test_sheets_oauth_start_accepts_admin_web_qa_when_allowlisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_sheets_oauth(monkeypatch)
+    monkeypatch.setattr(
+        lab_sheets_oauth.settings,
+        "sheets_lab_allowed_redirect_uris",
+        "https://admin-web-qa-hsa55rg7ja-uk.a.run.app/owner/connectors",
+    )
+    current = _connection(system="hr_alumni", metadata={"vertical_id": VERTICAL_PEOPLE_HR})
+    _patch_owner_access(monkeypatch, connection=current)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"{_ALUMNI_OAUTH_PATH}/start",
+            headers=_owner_headers(),
+            json={
+                "redirect_uri": "https://admin-web-qa-hsa55rg7ja-uk.a.run.app/owner/connectors"
+            },
+        )
+    assert response.status_code == 200
+    assert "owner%2Fconnectors" in response.json()["authorize_url"]
+    assert "admin-web-qa-hsa55rg7ja-uk.a.run.app" in response.json()["authorize_url"]
 
 
 def test_sheets_oauth_redeem_stores_refresh_token(

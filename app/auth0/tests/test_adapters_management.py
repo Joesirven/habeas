@@ -26,6 +26,13 @@ _EXPORT_URL = f"https://{_EXPORT_HOST}/job/{_JOB_ID}/users.json.gz"
 _EMAIL_A = "alpha@example.com"
 _EMAIL_B = "bravo@example.com"
 _EMAIL_C = "charlie@example.com"
+_PHONE_A = "+14155550100"
+_PHONE_B = "4155550199"
+_EXPORT_FIELDS = [
+    {"name": "user_id"},
+    {"name": "email"},
+    {"name": "phone_number"},
+]
 
 _CREDENTIALS = {
     "domain": _DOMAIN,
@@ -76,7 +83,7 @@ def _export_handler(
         if request.method == "POST" and request.url.path == "/api/v2/jobs/users-exports":
             body = json.loads(request.content)
             assert body["format"] == "json"
-            assert body["fields"] == [{"name": "user_id"}, {"name": "email"}]
+            assert body["fields"] == _EXPORT_FIELDS
             assert "limit" not in body
             return httpx.Response(
                 200,
@@ -115,7 +122,7 @@ async def _collect(
     max_pages: int | None = None,
     max_users: int | None = None,
     rate_limit_retries: int = 3,
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str | None, str | None]]:
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport, timeout=5.0) as client:
         adapter = ManagementExtractAdapter(
@@ -131,10 +138,60 @@ async def _collect(
 
 
 @pytest.mark.asyncio
-async def test_iter_users_yields_vendor_id_and_email() -> None:
+async def test_iter_users_yields_vendor_id_email_and_phone() -> None:
+    handler = _export_handler(
+        [
+            {
+                "user_id": "auth0|aaa",
+                "email": _EMAIL_A,
+                "phone_number": _PHONE_A,
+            }
+        ]
+    )
+    rows = await _collect(handler)
+    assert rows == [("auth0|aaa", _EMAIL_A, _PHONE_A)]
+
+
+@pytest.mark.asyncio
+async def test_iter_users_phone_none_when_absent() -> None:
     handler = _export_handler([{"user_id": "auth0|aaa", "email": _EMAIL_A}])
     rows = await _collect(handler)
-    assert rows == [("auth0|aaa", _EMAIL_A)]
+    assert rows == [("auth0|aaa", _EMAIL_A, None)]
+
+
+@pytest.mark.asyncio
+async def test_iter_users_yields_phone_only_user() -> None:
+    handler = _export_handler(
+        [{"user_id": "auth0|sms", "phone_number": _PHONE_A}]
+    )
+    rows = await _collect(handler)
+    assert rows == [("auth0|sms", None, _PHONE_A)]
+
+
+@pytest.mark.asyncio
+async def test_iter_users_accepts_nonstandard_phone_key_in_ndjson() -> None:
+    """Accept ``phone`` only if already present in the row; job requests ``phone_number``."""
+    handler = _export_handler(
+        [{"user_id": "auth0|custom", "email": _EMAIL_A, "phone": _PHONE_B}]
+    )
+    rows = await _collect(handler)
+    assert rows == [("auth0|custom", _EMAIL_A, _PHONE_B)]
+
+
+@pytest.mark.asyncio
+async def test_iter_users_prefers_phone_number_over_phone() -> None:
+    handler = _export_handler(
+        [
+            {
+                "user_id": "auth0|both",
+                "email": _EMAIL_A,
+                "phone_number": _PHONE_A,
+                "phone": _PHONE_B,
+            }
+        ]
+    )
+    rows = await _collect(handler)
+    assert rows == [("auth0|both", _EMAIL_A, _PHONE_A)]
 
 
 @pytest.mark.asyncio
@@ -143,7 +200,7 @@ async def test_iter_users_accepts_prod_style_export_host() -> None:
     location = f"https://{_EXPORT_HOST_PROD}/exports/users.json.gz"
     handler = _export_handler([{"user_id": "auth0|aaa", "email": _EMAIL_A}], location=location)
     rows = await _collect(handler)
-    assert rows == [("auth0|aaa", _EMAIL_A)]
+    assert rows == [("auth0|aaa", _EMAIL_A, None)]
     assert _EXPORT_HOST_PROD in handler.state["hosts"]
 
 
@@ -156,7 +213,7 @@ async def test_iter_users_accepts_object_credentials() -> None:
             domain=_DOMAIN, client_id=_CLIENT_ID, client_secret=_CLIENT_SECRET
         ),
     )
-    assert rows == [("auth0|obj", _EMAIL_A)]
+    assert rows == [("auth0|obj", _EMAIL_A, None)]
 
 
 @pytest.mark.asyncio
@@ -168,8 +225,8 @@ async def test_iter_users_exports_more_than_1000_users() -> None:
     handler = _export_handler(users, polls_before_done=2)
     rows = await _collect(handler)
     assert len(rows) == 1205
-    assert rows[0] == ("auth0|0000", "user0000@example.com")
-    assert rows[-1] == ("auth0|1204", "user1204@example.com")
+    assert rows[0] == ("auth0|0000", "user0000@example.com", None)
+    assert rows[-1] == ("auth0|1204", "user1204@example.com", None)
     assert "/api/v2/users" not in handler.state["paths"]
     assert all("page" not in query for query in handler.state["queries"])
 
@@ -198,21 +255,28 @@ async def test_iter_users_stops_on_empty_ndjson_lines() -> None:
         ]
     )
     rows = await _collect(handler)
-    assert rows == [("auth0|a", _EMAIL_A), ("auth0|b", _EMAIL_B)]
+    assert rows == [
+        ("auth0|a", _EMAIL_A, None),
+        ("auth0|b", _EMAIL_B, None),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_iter_users_skips_users_without_email() -> None:
+async def test_iter_users_skips_users_without_email_or_phone() -> None:
     handler = _export_handler(
         [
             {"user_id": "auth0|no-email"},
-            {"user_id": "auth0|blank", "email": "   "},
+            {"user_id": "auth0|blank", "email": "   ", "phone_number": "  "},
             {"user_id": "auth0|ok", "email": _EMAIL_A},
+            {"user_id": "auth0|phone-ok", "phone_number": _PHONE_A},
             {"email": _EMAIL_B},
         ]
     )
     rows = await _collect(handler)
-    assert rows == [("auth0|ok", _EMAIL_A)]
+    assert rows == [
+        ("auth0|ok", _EMAIL_A, None),
+        ("auth0|phone-ok", None, _PHONE_A),
+    ]
 
 
 @pytest.mark.asyncio
@@ -269,7 +333,10 @@ async def test_iter_users_max_users_equals_export_size_is_complete() -> None:
         ]
     )
     rows = await _collect(handler, max_users=2)
-    assert rows == [("auth0|1", _EMAIL_A), ("auth0|2", _EMAIL_B)]
+    assert rows == [
+        ("auth0|1", _EMAIL_A, None),
+        ("auth0|2", _EMAIL_B, None),
+    ]
 
 
 @pytest.mark.asyncio
@@ -333,7 +400,7 @@ async def test_iter_users_retries_429_then_succeeds() -> None:
         extra={"on_request": on_request},
     )
     rows = await _collect(handler)
-    assert rows == [("auth0|ok", _EMAIL_A)]
+    assert rows == [("auth0|ok", _EMAIL_A, None)]
     assert hits["export"] == 2
 
 
@@ -403,12 +470,16 @@ async def test_iter_users_download_omits_bearer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_iter_users_never_logs_email_or_client_secret(
+async def test_iter_users_never_logs_email_phone_or_client_secret(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     handler = _export_handler(
         [
-            {"user_id": "auth0|logged", "email": _EMAIL_A},
+            {
+                "user_id": "auth0|logged",
+                "email": _EMAIL_A,
+                "phone_number": _PHONE_A,
+            },
             {"user_id": "auth0|skip-me"},
         ]
     )
@@ -422,6 +493,7 @@ async def test_iter_users_never_logs_email_or_client_secret(
     )
     assert _CLIENT_SECRET not in blob
     assert _EMAIL_A not in blob
+    assert _PHONE_A not in blob
     assert _TOKEN not in blob
     assert _EXPORT_URL not in blob
     assert "auth0|skip-me" not in blob

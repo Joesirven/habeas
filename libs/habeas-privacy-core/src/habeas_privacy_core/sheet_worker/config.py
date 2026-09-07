@@ -53,7 +53,11 @@ class SheetWorkerConfig:
 
 
 def hr_alumni_config() -> SheetWorkerConfig:
-    """Preset config for the Alumni sheet worker."""
+    """Preset config for the Alumni sheet worker.
+
+    ``mart_table`` stays the email serving-build alias for backward-compatible
+    ensure_drain / gate checks. ``dbt_select`` builds email, phone, and ndz marts.
+    """
     return SheetWorkerConfig(
         system_id="hr_alumni",
         attempts_table=HR_ALUMNI_ATTEMPTS_TABLE,
@@ -61,14 +65,23 @@ def hr_alumni_config() -> SheetWorkerConfig:
         vertical_id=VERTICAL_PEOPLE_HR,
         mart_table="hr_alumni_email_hash__build",
         hashed_raw_table="hr_alumni_hashed_raw",
-        dbt_select=("stg_hr_alumni_hashed", "mart_hr_alumni_email_hash"),
+        dbt_select=(
+            "stg_hr_alumni_hashed",
+            "mart_hr_alumni_email_hash",
+            "mart_hr_alumni_phone_hash",
+            "mart_hr_alumni_ndz_hash",
+        ),
         adapter_label="sheets_hash",
         env_prefix="HR_ALUMNI",
     )
 
 
 def bizdev_contacts_config() -> SheetWorkerConfig:
-    """Preset config for the Contact Us sheet worker."""
+    """Preset config for the Contact Us sheet worker.
+
+    ``mart_table`` stays the email serving-build alias for backward-compatible
+    ensure_drain / gate checks. ``dbt_select`` builds email, phone, and ndz marts.
+    """
     return SheetWorkerConfig(
         system_id="bizdev_contacts",
         attempts_table=BIZDEV_CONTACTS_ATTEMPTS_TABLE,
@@ -76,7 +89,12 @@ def bizdev_contacts_config() -> SheetWorkerConfig:
         vertical_id=VERTICAL_BIZDEV,
         mart_table="bizdev_contacts_email_hash__build",
         hashed_raw_table="bizdev_contacts_hashed_raw",
-        dbt_select=("stg_bizdev_contacts_hashed", "mart_bizdev_contacts_email_hash"),
+        dbt_select=(
+            "stg_bizdev_contacts_hashed",
+            "mart_bizdev_contacts_email_hash",
+            "mart_bizdev_contacts_phone_hash",
+            "mart_bizdev_contacts_ndz_hash",
+        ),
         adapter_label="sheets_hash",
         env_prefix="BIZDEV_CONTACTS",
     )

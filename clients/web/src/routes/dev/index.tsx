@@ -19,6 +19,10 @@ const LABS = [
     label: 'Owner map alternatives (8 variants)',
   },
   {
+    to: '/dev/mapping-workbench-samples',
+    label: 'Mapping workbench samples (A–H)',
+  },
+  {
     to: '/dev/match-quality',
     label: 'Match quality (8 variants)',
   },

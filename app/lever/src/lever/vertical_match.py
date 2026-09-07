@@ -1,9 +1,10 @@
 """Lever worker matching — mart lookup + snapshot persist.
 
-Loads the request's DROP email hash (same field order as matching/drop_hash
-ADR-21), looks up opaque vendor ids on ``lever_email_hash__build``, and
-upserts ``request_vertical_matching``. Lookup failures are typed — they fail
-this Lever attempt only. DROP results live on matching-dev and are not touched.
+Loads the request's DROP hash for Email / Phone / NDZ (same field order as
+matching/drop_hash ADR-21), looks up opaque vendor ids on the matching Lever
+serving mart, and upserts ``request_vertical_matching``. Lookup failures are
+typed — they fail this Lever attempt only. DROP results live on matching-dev
+and are not touched.
 
 Never logs email, hashes, or vendor ids. ``source_matching_attempt_id`` stays
 ``None`` — the snapshot FK is ``matching_attempts``, not ``lever_attempts``.
@@ -23,6 +24,17 @@ from habeas_privacy_core.db.requests import get_request
 from habeas_privacy_core.db.vertical_matching import upsert_vertical_matching_snapshot
 from habeas_privacy_core.models.intake import DropListType, RequestRecord
 from habeas_privacy_core.models.request import IntakeSource
+from habeas_privacy_core.vertical_hash.bq_lookup import (
+    LEVER_PHONE_HASH_BUILD_TABLE,
+    LEVER_NDZ_HASH_BUILD_TABLE,
+    lookup_vendor_ids_by_ndz_hashes,
+    lookup_vendor_ids_by_phone_hashes,
+)
+from habeas_privacy_core.vertical_hash.drop_list_hash import (
+    normalize_drop_list_type,
+    primary_hash_for_list_type,
+)
+from habeas_privacy_core.vertical_hash.hashing import assert_opaque_hash
 
 from lever.bq_lookup import LeverHashLookupError, lookup_lever_vendor_ids_by_email_hash
 
@@ -30,6 +42,12 @@ logger = logging.getLogger(__name__)
 
 ADAPTER = "lever_hash"
 LEVER_VERTICAL = "lever"
+
+_HASH_LABEL_BY_KIND: dict[str, str] = {
+    "email": "email_hash",
+    "phone": "phone_hash",
+    "ndz": "ndz_hash",
+}
 
 __all__ = [
     "ADAPTER",
@@ -50,34 +68,29 @@ class VerticalMatchOutcome:
     error_detail: str | None = None
 
 
-def _is_email_list_type(list_type: DropListType | str | None) -> bool:
-    if list_type is None:
-        return False
-    if list_type == DropListType.EMAIL:
-        return True
-    return str(list_type) == DropListType.EMAIL.value
+def _list_kind(list_type: DropListType | str | None) -> str | None:
+    normalized = normalize_drop_list_type(list_type)
+    if normalized is None:
+        return None
+    return normalized.name.lower()
 
 
-def _email_hash(
+def _hash_from_fields(
     *,
+    kind: str,
     email_hash: str | None,
     hash_fields: dict[str, Any] | None,
 ) -> str | None:
-    """Copy of matching.vertical_match._email_hash (EMAIL fields only; no matching.*)."""
-    if email_hash is not None and str(email_hash).strip():
-        return str(email_hash).strip()
-    if not hash_fields:
-        return None
-    value = (
-        hash_fields.get("hashed_email")
-        or hash_fields.get("email_hash")
-        or hash_fields.get("pii_hash")
-        or hash_fields.get("hash")
+    """Select DROP precomputed hash for Email / Phone / NDZ via shared router."""
+    list_type = {
+        "email": DropListType.EMAIL,
+        "phone": DropListType.PHONE,
+        "ndz": DropListType.NDZ,
+    }[kind]
+    return primary_hash_for_list_type(
+        list_type, hash_fields, email_hash=email_hash
     )
-    if value is None:
-        return None
-    cleaned = str(value).strip()
-    return cleaned or None
+
 
 
 def _error_code(exc: BaseException) -> str:
@@ -106,23 +119,30 @@ def _failure_outcome(exc: BaseException) -> VerticalMatchOutcome:
     )
 
 
-async def _email_hash_from_record(conn: Any, record: RequestRecord) -> str | None:
+async def _hash_from_record(
+    conn: Any, record: RequestRecord
+) -> tuple[str | None, str | None]:
     if record.intake_source != IntakeSource.DROP or record.raw_record_id is None:
-        return None
+        return None, None
     try:
         payload = await request_resolver(conn, IntakeSource.DROP, int(record.raw_record_id))
     except LookupError:
-        return None
-    if not _is_email_list_type(payload.list_type):
-        return None
-    return _email_hash(email_hash=None, hash_fields=payload.hash_fields)
+        return None, None
+    kind = _list_kind(payload.list_type)
+    if kind is None:
+        return None, None
+    return kind, _hash_from_fields(
+        kind=kind, email_hash=None, hash_fields=payload.hash_fields
+    )
 
 
-async def _load_drop_email_hash(conn: Any, request_id: str) -> str | None:
+async def _load_drop_hash(
+    conn: Any, request_id: str
+) -> tuple[str | None, str | None]:
     record = await get_request(conn, request_id)
     if record is None:
         raise LookupError("request not found")
-    return await _email_hash_from_record(conn, record)
+    return await _hash_from_record(conn, record)
 
 
 async def _persist_snapshot(
@@ -145,6 +165,23 @@ async def _persist_snapshot(
     )
 
 
+
+def _default_lookup(kind: str, hash_value: str) -> list[str]:
+    if kind == "email":
+        return lookup_lever_vendor_ids_by_email_hash(hash_value)
+    if kind == "phone":
+        return lookup_vendor_ids_by_phone_hashes(
+            [hash_value],
+            table=LEVER_PHONE_HASH_BUILD_TABLE,
+            system="lever",
+        ).get(hash_value, [])
+    return lookup_vendor_ids_by_ndz_hashes(
+        [hash_value],
+        table=LEVER_NDZ_HASH_BUILD_TABLE,
+        system="lever",
+    ).get(hash_value, [])
+
+
 async def run_lever_vertical_match(
     conn: Any,
     *,
@@ -152,29 +189,34 @@ async def run_lever_vertical_match(
     attempt_id: int,
     hash_fields: dict[str, Any] | None = None,
     email_hash: str | None = None,
+    list_type: DropListType | str | None = None,
     lookup: Callable[[str], list[str]] | None = None,
     persist: Any | None = None,
 ) -> VerticalMatchOutcome:
     """Look up Lever vendor ids for one claimed ``lever_attempts`` matching row.
 
-    Missing email hash (phone / NDZ / non-DROP / empty fields) persists a
-    zero-hit snapshot and succeeds. Empty mart (lookup returns no ids) also
-    persists ``match_count=0``. ``LeverHashLookupError`` and plaintext-``@``
-    ``ValueError`` persist nothing and return a typed failure.
+    Routes Email / Phone / NDZ via DROP precomputed hashes. Missing hash or
+    unsupported list type persists a zero-hit snapshot and succeeds. Empty mart
+    (lookup returns no ids) also persists ``match_count=0``.
+    ``LeverHashLookupError`` and opaque-hash ``ValueError`` persist nothing and
+    return a typed failure.
     """
     del attempt_id
     upsert = persist or upsert_vertical_matching_snapshot
     try:
         if email_hash is not None or hash_fields is not None:
-            hash_value = _email_hash(email_hash=email_hash, hash_fields=hash_fields)
+            kind = _list_kind(list_type) or "email"
+            hash_value = _hash_from_fields(
+                kind=kind, email_hash=email_hash, hash_fields=hash_fields
+            )
         else:
-            hash_value = await _load_drop_email_hash(conn, request_id)
+            kind, hash_value = await _load_drop_hash(conn, request_id)
     except LookupError as exc:
         return _failure_outcome(exc)
     except Exception as exc:
         return _failure_outcome(exc)
 
-    if not hash_value:
+    if not hash_value or kind is None:
         try:
             await _persist_snapshot(
                 upsert,
@@ -194,12 +236,17 @@ async def run_lever_vertical_match(
         )
         return VerticalMatchOutcome(ok=True, match_count=0)
 
-    if "@" in hash_value:
-        return _failure_outcome(ValueError("email_hash must not contain plaintext"))
+    label = _HASH_LABEL_BY_KIND.get(kind, "hash")
+    try:
+        hash_value = assert_opaque_hash(hash_value, label=label)
+    except ValueError as exc:
+        return _failure_outcome(exc)
 
     try:
-        lookup_fn = lookup or lookup_lever_vendor_ids_by_email_hash
-        vendor_ids = await asyncio.to_thread(lookup_fn, hash_value)
+        if lookup is not None:
+            vendor_ids = await asyncio.to_thread(lookup, hash_value)
+        else:
+            vendor_ids = await asyncio.to_thread(_default_lookup, kind, hash_value)
         ids = list(vendor_ids or [])
         match_count = len(ids)
         await _persist_snapshot(

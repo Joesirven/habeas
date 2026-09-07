@@ -1,4 +1,4 @@
-"""Auth0 Management API extract — users only (user_id + email in memory).
+"""Auth0 Management API extract — users only (user_id + email + phone in memory).
 
 Required Management API application scopes: ``read:users``.
 
@@ -16,13 +16,20 @@ Full export uses the official users-export job:
   (`bulk export
   <https://auth0.com/docs/manage-users/user-migration/bulk-user-exports>`_)
 
+Phone comes from the Auth0 normalized profile field ``phone_number``
+(`User Profile Structure
+<https://auth0.com/docs/manage-users/user-accounts/user-profiles/user-profile-structure>`_),
+which bulk export supports when listed in ``fields``. There is no standard
+top-level ``phone`` attribute on Auth0 users; SMS / passwordless phone
+lives on ``phone_number``. NDZ parts are not in this export.
+
 See also the 1000-record limitation on
 `List or Search Users
 <https://auth0.com/docs/api/management/v2/users/get-users>`_.
 
 Credentials are passed in (GSM resolution is owned elsewhere). Never logs
-email, ``client_secret``, access tokens, download URLs, or raw payloads —
-counts and opaque job ids only.
+email, phone, ``client_secret``, access tokens, download URLs, or raw
+payloads — counts and opaque job ids only.
 """
 
 from __future__ import annotations
@@ -155,12 +162,13 @@ class ManagementExtractAdapter:
     async def iter_users(
         self,
         credentials: ManagementCredentials | Mapping[str, str],
-    ) -> AsyncIterator[tuple[str, str]]:
-        """Yield ``(vendor_record_id, email)`` for users that have an email.
+    ) -> AsyncIterator[tuple[str, str | None, str | None]]:
+        """Yield ``(vendor_record_id, email, phone)`` for hashable users.
 
-        Skips users without a usable ``user_id`` or email. Does not persist
-        or log plaintext email. A test-only yield cap never completes as a
-        quiet success — it raises ``export_incomplete``.
+        Skips users without a usable ``user_id`` or without at least one of
+        email / ``phone_number``. Does not persist or log plaintext email or
+        phone. A test-only yield cap never completes as a quiet success — it
+        raises ``export_incomplete``.
         """
         domain = _normalize_domain(_credential_field(credentials, "domain"))
         client_id = _credential_field(credentials, "client_id")
@@ -192,9 +200,9 @@ class ManagementExtractAdapter:
                 if max_users is not None and yielded >= max_users:
                     remaining = True
                     break
-                vendor_record_id, email = record
+                vendor_record_id, email, phone = record
                 yielded += 1
-                yield vendor_record_id, email
+                yield vendor_record_id, email, phone
 
         logger.info(
             "auth0_management_users_done system=%s step=%s yielded=%s skipped=%s",
@@ -267,7 +275,13 @@ class ManagementExtractAdapter:
             headers={"Authorization": f"Bearer {token}"},
             json={
                 "format": "json",
-                "fields": [{"name": "user_id"}, {"name": "email"}],
+                # phone_number is the Auth0 profile field bulk export supports;
+                # there is no standard top-level "phone" field to request.
+                "fields": [
+                    {"name": "user_id"},
+                    {"name": "email"},
+                    {"name": "phone_number"},
+                ],
             },
         )
         job_id = payload.get("id")
@@ -491,14 +505,31 @@ def _users_from_export_bytes(payload: bytes) -> list[dict[str, Any]]:
     return users
 
 
-def _user_record(user: dict[str, Any]) -> tuple[str, str] | None:
-    vendor_record_id = user.get("user_id")
-    email = user.get("email")
-    if not isinstance(vendor_record_id, str) or not vendor_record_id.strip():
+def _optional_string(value: Any) -> str | None:
+    if not isinstance(value, str):
         return None
-    if not isinstance(email, str) or not email.strip():
+    stripped = value.strip()
+    return stripped or None
+
+
+def _user_record(user: dict[str, Any]) -> tuple[str, str | None, str | None] | None:
+    """Map an export row to ``(user_id, email, phone)``.
+
+    Phone is read from Auth0's ``phone_number`` field (requested in the export
+    job). A nonstandard ``phone`` key is accepted only if present in the NDJSON
+    (e.g. custom attribute already flattened into the row) — it is not
+    requested in ``fields``.
+    """
+    vendor_record_id = _optional_string(user.get("user_id"))
+    if vendor_record_id is None:
         return None
-    return vendor_record_id.strip(), email.strip()
+    email = _optional_string(user.get("email"))
+    phone = _optional_string(user.get("phone_number"))
+    if phone is None:
+        phone = _optional_string(user.get("phone"))
+    if email is None and phone is None:
+        return None
+    return vendor_record_id, email, phone
 
 
 def _validated_export_location(location: str) -> str:

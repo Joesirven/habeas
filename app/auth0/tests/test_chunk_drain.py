@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -18,7 +19,10 @@ from auth0.chunk_drain import (
     run_job_task,
     start_drain_job_execution,
 )
-from habeas_privacy_core.vertical_hash.bq_lookup import Auth0HashLookupError
+from habeas_privacy_core.vertical_hash.bq_lookup import (
+    Auth0HashLookupError,
+    VerticalHashLookupError,
+)
 
 _REQUEST_ID = "11111111-2222-3333-4444-555555555555"
 _EMAIL_HASH = "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY="
@@ -93,10 +97,16 @@ def _payload_row(
     request_id: str = _REQUEST_ID,
     list_type: str = "Email",
     hashed_email: str | None = _EMAIL_HASH,
+    hashed_phone: str | None = None,
+    concatenated_hash: str | None = None,
 ) -> dict[str, Any]:
     raw: dict[str, Any] = {}
     if hashed_email is not None:
         raw["hashed_email"] = hashed_email
+    if hashed_phone is not None:
+        raw["hashed_phone"] = hashed_phone
+    if concatenated_hash is not None:
+        raw["concatenated_hash"] = concatenated_hash
     return {"id": request_id, "list_type": list_type, "raw_payload": raw}
 
 
@@ -170,8 +180,8 @@ async def test_process_chunk_batch_lookup_and_bulk_completes() -> None:
 async def test_process_chunk_one_bq_call_for_many_hashes() -> None:
     rid_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     rid_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-    hash_a = "hash-alpha-AAAAAAAAAAAAAAAAAAAAAAAAAAA="
-    hash_b = "hash-beta-BBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+    hash_a = "aGFzaC1hbHBoYS1BQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+    hash_b = "aGFzaC1iZXRhLUJCQkJCQkJCQkJCQkJCQkJCQkJCQkI="
     conn = _RecordingConn(
         fetch_queue=[
             [
@@ -279,6 +289,253 @@ async def test_process_chunk_missing_email_hash_zero_hit_success() -> None:
     persist.assert_awaited_once()
     assert persist.await_args.kwargs["match_count"] == 0
     assert persist.await_args.kwargs["vendor_record_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_phone_list_type_looks_up_phone_hash() -> None:
+    phone_hash = "cGhvbmUtaGFzaC1BQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+    conn = _RecordingConn(
+        fetch_queue=[
+            [{"id": 41, "request_id": _REQUEST_ID, "attempt_number": 1}],
+            [
+                _payload_row(
+                    list_type="Phone",
+                    hashed_email=None,
+                    hashed_phone=phone_hash,
+                )
+            ],
+        ]
+    )
+    persist = AsyncMock()
+    lookup_calls: list[list[str]] = []
+
+    def _lookup(hashes: list[str]) -> dict[str, list[str]]:
+        lookup_calls.append(list(hashes))
+        return {phone_hash: [_VENDOR_ID]}
+
+    out = await process_auth0_matching_chunk(
+        conn,
+        worker_id="w1",
+        lookup_batch=_lookup,
+        persist=persist,
+    )
+
+    assert out["status"] == "ok"
+    assert out["completed"] == 1
+    assert out["errors"] == 0
+    assert lookup_calls == [[phone_hash]]
+    persist.assert_awaited_once()
+    assert persist.await_args.kwargs["match_count"] == 1
+    assert persist.await_args.kwargs["vendor_record_ids"] == [_VENDOR_ID]
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_ndz_list_type_looks_up_ndz_hash() -> None:
+    ndz_hash = "bmR6LWhhc2gtb3BhcXVlLWJhc2U2NC12YWx1ZS0xAAA="
+    conn = _RecordingConn(
+        fetch_queue=[
+            [{"id": 45, "request_id": _REQUEST_ID, "attempt_number": 1}],
+            [
+                _payload_row(
+                    list_type="NDZ",
+                    hashed_email=None,
+                    concatenated_hash=ndz_hash,
+                )
+            ],
+        ]
+    )
+    persist = AsyncMock()
+    lookup_calls: list[list[str]] = []
+
+    def _lookup(hashes: list[str]) -> dict[str, list[str]]:
+        lookup_calls.append(list(hashes))
+        return {ndz_hash: [_VENDOR_ID]}
+
+    out = await process_auth0_matching_chunk(
+        conn,
+        worker_id="w1",
+        lookup_batch=_lookup,
+        persist=persist,
+    )
+
+    assert out["status"] == "ok"
+    assert out["completed"] == 1
+    assert out["errors"] == 0
+    assert lookup_calls == [[ndz_hash]]
+    persist.assert_awaited_once()
+    assert persist.await_args.kwargs["match_count"] == 1
+    assert persist.await_args.kwargs["vendor_record_ids"] == [_VENDOR_ID]
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_phone_vertical_error_maps_to_auth0_with_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    phone_hash = "cGhvbmUtaGFzaC1BQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+    conn = _RecordingConn(
+        fetch_queue=[
+            [{"id": 46, "request_id": _REQUEST_ID, "attempt_number": 1}],
+            [
+                _payload_row(
+                    list_type="Phone",
+                    hashed_email=None,
+                    hashed_phone=phone_hash,
+                )
+            ],
+        ]
+    )
+    persist = AsyncMock()
+    monkeypatch.setattr(
+        "auth0.chunk_drain._mart_exists_for_kind",
+        lambda *_a, **_k: True,
+    )
+
+    def _raise(*_a: Any, **_k: Any) -> dict[str, list[str]]:
+        raise VerticalHashLookupError("bq timeout", retry_seconds=90)
+
+    monkeypatch.setattr(
+        "auth0.chunk_drain.lookup_vendor_ids_by_phone_hashes",
+        _raise,
+    )
+
+    out = await process_auth0_matching_chunk(
+        conn,
+        worker_id="w1",
+        persist=persist,
+    )
+
+    assert out["errors"] == 1
+    persist.assert_not_awaited()
+    _sql, args = conn.executemany_calls[0]
+    assert args[0][2] == "auth0_lookup_error"
+    retry_after = args[0][4]
+    assert retry_after is not None
+    audit = json.loads(args[0][5])
+    assert audit["error_class"] == "Auth0HashLookupError"
+    assert "bq timeout" in (audit.get("error_detail") or "")
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_phone_mart_missing_fails_without_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    phone_hash = "cGhvbmUtaGFzaC1vcGFxdWUtYmFzZTY0LXZhbHVlLTE="
+    conn = _RecordingConn(
+        fetch_queue=[
+            [{"id": 42, "request_id": _REQUEST_ID, "attempt_number": 1}],
+            [
+                _payload_row(
+                    list_type="Phone",
+                    hashed_email=None,
+                    hashed_phone=phone_hash,
+                )
+            ],
+        ]
+    )
+    persist = AsyncMock()
+    monkeypatch.setattr(
+        "auth0.chunk_drain._mart_exists_for_kind",
+        lambda *_a, **_k: False,
+    )
+    core_lookup = MagicMock(side_effect=AssertionError("must not query BQ"))
+    monkeypatch.setattr(
+        "auth0.chunk_drain._lookup_hashes_for_kind",
+        core_lookup,
+    )
+
+    out = await process_auth0_matching_chunk(
+        conn,
+        worker_id="w1",
+        persist=persist,
+    )
+
+    assert out["status"] == "ok"
+    assert out["errors"] == 1
+    persist.assert_not_awaited()
+    core_lookup.assert_not_called()
+    sql, args = conn.executemany_calls[0]
+    assert "'submit_error'" in sql
+    assert args[0][2] == "auth0_lookup_error"
+    assert args[0][4] is not None
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_ndz_mart_missing_fails_without_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Opaque SHA-256 Base64 shape so early assert_opaque_hash passes and mart gate runs.
+    ndz_hash = "bmR6LWhhc2gtb3BhcXVlLWJhc2U2NC12YWx1ZS0xAAA="
+    conn = _RecordingConn(
+        fetch_queue=[
+            [{"id": 43, "request_id": _REQUEST_ID, "attempt_number": 1}],
+            [
+                _payload_row(
+                    list_type="NDZ",
+                    hashed_email=None,
+                    concatenated_hash=ndz_hash,
+                )
+            ],
+        ]
+    )
+    persist = AsyncMock()
+    monkeypatch.setattr(
+        "auth0.chunk_drain._mart_exists_for_kind",
+        lambda *_a, **_k: False,
+    )
+    core_lookup = MagicMock(side_effect=AssertionError("must not query BQ"))
+    monkeypatch.setattr(
+        "auth0.chunk_drain._lookup_hashes_for_kind",
+        core_lookup,
+    )
+
+    out = await process_auth0_matching_chunk(
+        conn,
+        worker_id="w1",
+        persist=persist,
+    )
+
+    assert out["status"] == "ok"
+    assert out["errors"] == 1
+    persist.assert_not_awaited()
+    core_lookup.assert_not_called()
+    _sql, args = conn.executemany_calls[0]
+    assert args[0][2] == "auth0_lookup_error"
+    assert args[0][4] is not None
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_phone_plaintext_rejects_with_phone_hash_label() -> None:
+    conn = _RecordingConn(
+        fetch_queue=[
+            [{"id": 44, "request_id": _REQUEST_ID, "attempt_number": 1}],
+            [
+                _payload_row(
+                    list_type="Phone",
+                    hashed_email=None,
+                    hashed_phone="4155551212",
+                )
+            ],
+        ]
+    )
+    persist = AsyncMock()
+    lookup = MagicMock(side_effect=AssertionError("lookup must not run"))
+
+    out = await process_auth0_matching_chunk(
+        conn,
+        worker_id="w1",
+        lookup_batch=lookup,
+        persist=persist,
+    )
+
+    assert out["errors"] == 1
+    persist.assert_not_awaited()
+    lookup.assert_not_called()
+    _sql, args = conn.executemany_calls[0]
+    assert args[0][2] == "auth0_invalid_hash"
+    assert args[0][4] is None
+    audit = json.loads(args[0][5])
+    assert audit["error_detail"] == "phone_hash must not contain plaintext"
+    assert "4155551212" not in args[0][5]
 
 
 @pytest.mark.asyncio

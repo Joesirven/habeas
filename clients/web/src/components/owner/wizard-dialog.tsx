@@ -15,9 +15,10 @@
  * same planned step instead of duplicating it.
  * - choice resolve: splice `branchSteps(input, mode)` into `planned` after the
  *   choice step, then advance.
- * - mapping confirm: drop any stale `format` steps from the unvisited tail of
- *   `planned`, insert `formatStepsForMapping(system, mapping)` ahead of
- *   cadence/system-done, then advance.
+ * - mapping confirm (upload and sheets): drop any stale `format` steps from
+ *   the unvisited tail of `planned`, insert `formatStepsForMapping(system,
+ *   mapping)` ahead of cadence/system-done, then advance. Format and
+ *   delimiter never run before a column is mapped.
  * - live-seed-choice "upload now": replace the unvisited tail (cadence /
  *   system-done from the live branch) with `branchSteps(input, 'upload')`.
  */
@@ -36,6 +37,7 @@ import {
 import {
   completeOwnerConnectorWizard,
   getOwnerConnectorCredentialPreview,
+  ownerSheetsOauthExtract,
   setOwnerConnectorCadence,
   setOwnerConnectorMode,
   uploadOwnerConnectorCsv,
@@ -63,6 +65,7 @@ import {
 } from '@/lib/owner-connector-ui'
 import {
   branchSteps,
+  formatStepColumnLabel,
   formatStepsForMapping,
   initialStack,
   popStep,
@@ -162,7 +165,6 @@ export function WizardDialog({
   const [sheetsDraftBySystem, setSheetsDraftBySystem] = useState<
     Record<string, SheetsConnectDraft>
   >({})
-  const [delimiterKeyBySystem, setDelimiterKeyBySystem] = useState<Record<string, string>>({})
 
   const wasOpenRef = useRef(false)
   const autoStartedForRef = useRef<string | null>(null)
@@ -212,25 +214,43 @@ export function WizardDialog({
     },
   })
 
-  // The first upload fires right after file pick (early validation, before the
-  // owner has confirmed mapping/formats). This finalize re-uploads the same file
-  // with the confirmed mapping + chosen formats so the persisted column_mapping /
-  // name_format / delimiter match what the owner actually decided.
+  function confirmedFormats(system: string) {
+    const mapping = mappingBySystem[system] ?? {}
+    const formats = formatsBySystem[system] ?? {}
+    const payload = Object.values(mapping).some((value) => value?.trim()) ? mapping : null
+    const delimiter = delimiterValueFromKey(formats.delimiter ?? FORMAT_DEFAULTS.delimiter)
+    return {
+      mapping,
+      payload,
+      delimiter,
+      emailFormat: mapping.email ? (formats.email ?? FORMAT_DEFAULTS.email) : undefined,
+      phoneFormat: mapping.phone ? (formats.phone ?? FORMAT_DEFAULTS.phone) : undefined,
+      nameFormat: mapping.full_name
+        ? ((formats.name ?? FORMAT_DEFAULTS.name) as 'first_last' | 'last_first')
+        : undefined,
+    }
+  }
+
+  // The first upload/extract fires before mapping and formats. This finalize
+  // re-runs with the confirmed mapping + chosen formats so persisted
+  // column_mapping / name_format / delimiter match what the owner decided.
   const finalizeUploadMutation = useMutation({
     mutationFn: ({ system }: { system: string }) => {
       const file = fileBySystem[system]
       if (!file) return Promise.resolve(null)
-      const mapping = mappingBySystem[system] ?? {}
-      const formats = formatsBySystem[system] ?? {}
-      const payload = Object.values(mapping).some((value) => value?.trim()) ? mapping : null
-      const delimiter = delimiterValueFromKey(formats.delimiter ?? FORMAT_DEFAULTS.delimiter)
-      return uploadOwnerConnectorCsv(verticalId, system, file, delimiter, payload, {
-        emailFormat: mapping.email ? (formats.email ?? FORMAT_DEFAULTS.email) : undefined,
-        phoneFormat: mapping.phone ? (formats.phone ?? FORMAT_DEFAULTS.phone) : undefined,
-        nameFormat: mapping.full_name
-          ? ((formats.name ?? FORMAT_DEFAULTS.name) as 'first_last' | 'last_first')
-          : undefined,
-      })
+      const confirmed = confirmedFormats(system)
+      return uploadOwnerConnectorCsv(
+        verticalId,
+        system,
+        file,
+        confirmed.delimiter,
+        confirmed.payload,
+        {
+          emailFormat: confirmed.emailFormat,
+          phoneFormat: confirmed.phoneFormat,
+          nameFormat: confirmed.nameFormat,
+        },
+      )
     },
     onSuccess: (result, { system }) => {
       if (!result) {
@@ -260,12 +280,60 @@ export function WizardDialog({
     },
   })
 
-  function finalizeUpload(system: string) {
-    if (!fileBySystem[system]) {
+  const finalizeExtractMutation = useMutation({
+    mutationFn: ({ system }: { system: string }) => {
+      const draft = sheetsDraftBySystem[system]
+      if (!draft?.spreadsheetId || !draft.tab) return Promise.resolve(null)
+      const confirmed = confirmedFormats(system)
+      return ownerSheetsOauthExtract(verticalId, system, {
+        spreadsheet_id: draft.spreadsheetId,
+        tab: draft.tab,
+        multi_pii_delimiter: confirmed.delimiter,
+        column_mapping: confirmed.payload,
+        email_format: confirmed.emailFormat,
+        phone_format: confirmed.phoneFormat,
+        name_format: confirmed.nameFormat,
+      })
+    },
+    onSuccess: (result, { system }) => {
+      if (!result) {
+        advance()
+        return
+      }
+      setUploadResultBySystem((current) => ({ ...current, [system]: result }))
+      if (!result.ok) {
+        actionToast.error({
+          title: 'Extract needs attention',
+          description:
+            result.detail === 'upload_rows_rejected'
+              ? 'Some rows were rejected with these choices. Go back to adjust the mapping or formats.'
+              : 'Check the column mapping, then try again.',
+          action: { label: 'Retry', onClick: () => finalizeExtractMutation.mutate({ system }) },
+        })
+        return
+      }
       advance()
+    },
+    onError: (error, { system }) => {
+      actionToast.error({
+        title: 'Could not finish the extract',
+        description: actionToast.safeErrorMessage(error, 'Try again.'),
+        action: { label: 'Retry', onClick: () => finalizeExtractMutation.mutate({ system }) },
+      })
+    },
+  })
+
+  function finalizeUpload(system: string) {
+    if (fileBySystem[system]) {
+      finalizeUploadMutation.mutate({ system })
       return
     }
-    finalizeUploadMutation.mutate({ system })
+    const draft = sheetsDraftBySystem[system]
+    if (draft?.method === 'oauth' && draft.spreadsheetId && draft.tab) {
+      finalizeExtractMutation.mutate({ system })
+      return
+    }
+    advance()
   }
 
   function invalidate() {
@@ -290,6 +358,32 @@ export function WizardDialog({
   function ensureMode(connector: OwnerConnectorSystem, mode: 'live' | 'upload') {
     if (activeModeFromMetadata(connector.metadata) === mode) return
     modeMutation.mutate({ system: connector.system, mode })
+  }
+
+  function seedMappingFromMetadata(system: string, metadata: Record<string, unknown>) {
+    const raw = metadata.column_mapping
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const mapping: Record<string, string> = {}
+      for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+        if (typeof value === 'string' && value.trim()) mapping[key] = value
+      }
+      if (Object.keys(mapping).length > 0) {
+        setMappingBySystem((current) =>
+          current[system] && Object.keys(current[system]).length > 0
+            ? current
+            : { ...current, [system]: mapping },
+        )
+      }
+    }
+    const headers = metadata.detected_headers
+    if (Array.isArray(headers)) {
+      const next = headers.map((item) => String(item).trim()).filter(Boolean)
+      if (next.length > 0) {
+        setHeadersBySystem((current) =>
+          current[system]?.length ? current : { ...current, [system]: next },
+        )
+      }
+    }
   }
 
   function seedCadence(system: string, metadata: Record<string, unknown>) {
@@ -337,6 +431,7 @@ export function WizardDialog({
     setActiveInput(input)
     setFlow(({ stack }) => ({ stack: startSystem(stack, steps), planned: steps }))
     seedCadence(connector.system, connector.metadata)
+    seedMappingFromMetadata(connector.system, connector.metadata)
     if (input.isSheets) {
       seedSheetsDraft(connector)
       return
@@ -478,7 +573,6 @@ export function WizardDialog({
       setUploadResultBySystem({})
       setCadenceBySystem({})
       setSheetsDraftBySystem({})
-      setDelimiterKeyBySystem({})
     }
     wasOpenRef.current = open
     if (!open) autoStartedForRef.current = null
@@ -703,6 +797,10 @@ export function WizardDialog({
         return (
           <FormatStep
             formatId={step.formatId}
+            columnLabel={formatStepColumnLabel(
+              step.formatId,
+              mappingBySystem[step.system] ?? {},
+            )}
             value={
               formatsBySystem[step.system]?.[step.formatId] ?? FORMAT_DEFAULTS[step.formatId]
             }
@@ -714,7 +812,7 @@ export function WizardDialog({
             }
             onBack={goBack}
             onContinue={() => {
-              // Last format step before cadence → persist the final upload.
+              // Last format step before cadence → persist mapping + formats.
               const next = flow.planned[flow.stack.length - 1]
               if (next?.kind === 'cadence') {
                 finalizeUpload(step.system)
@@ -731,16 +829,16 @@ export function WizardDialog({
           <SheetsConnectPanel
             verticalId={verticalId}
             connector={activeConnector}
-            delimiterKey={delimiterKeyBySystem[step.system] ?? 'none'}
-            onDelimiterChange={(key) =>
-              setDelimiterKeyBySystem((current) => ({ ...current, [step.system]: key }))
-            }
             draft={sheetsDraftBySystem[step.system] ?? emptySheetsConnectDraft()}
             onDraftChange={(next) =>
               setSheetsDraftBySystem((current) => ({ ...current, [step.system]: next }))
             }
             onBack={goBack}
             onContinue={advance}
+            onHeadersReady={(result, headers) => handleUploaded(step.system, result, headers)}
+            onFileSelected={(file) =>
+              setFileBySystem((current) => ({ ...current, [step.system]: file }))
+            }
             invalidate={invalidate}
           />
         )

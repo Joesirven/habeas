@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sample D — Dual pane preview</title>
+  <style>
+    :root {
+      --navy: #1E4191;
+      --mid: #2B7BB9;
+      --light: #428BCA;
+      --canvas: #F8FAFC;
+      --surface: #FFFFFF;
+      --border: #E2E8F0;
+      --ink: #0F172A;
+      --muted: #64748B;
+      --success: #15803D;
+      --success-bg: #F0FDF4;
+      --success-border: #BBF7D0;
+      --warn: #B45309;
+      --warn-bg: #FFFBEB;
+      --warn-border: #FDE68A;
+      --inactive: #94A3B8;
+      --inactive-bg: #F1F5F9;
+      --radius: 6px;
+      --shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+      background: var(--canvas);
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.45;
+      min-height: 100vh;
+    }
+
+    .app {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 20px 24px 32px;
+    }
+
+    /* Sticky header */
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: rgba(255, 255, 255, 0.95);
+      border-bottom: 1px solid var(--border);
+      margin: -20px -24px 0;
+      padding: 16px 24px 0;
+    }
+
+    .eyebrow {
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    .title-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+
+    h1 {
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 2px;
+    }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .btn {
+      font: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      padding: 6px 12px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--ink);
+      cursor: pointer;
+    }
+
+    .btn:hover { background: var(--canvas); }
+
+    .btn-primary {
+      background: var(--navy);
+      border-color: var(--navy);
+      color: #fff;
+    }
+
+    .btn-primary:hover { background: #183575; }
+
+    /* Capability chips */
+    .chips {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+
+    .chips-label {
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 500;
+      margin-right: 2px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      border: 1px solid transparent;
+    }
+
+    .chip.on {
+      background: var(--success-bg);
+      color: var(--success);
+      border-color: var(--success-border);
+    }
+
+    .chip.partial {
+      background: var(--warn-bg);
+      color: var(--warn);
+      border-color: var(--warn-border);
+    }
+
+    .chip.off {
+      background: var(--inactive-bg);
+      color: var(--inactive);
+      border-color: var(--border);
+    }
+
+    .chip svg { flex-shrink: 0; }
+
+    /* Tabs */
+    .tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .tab {
+      font: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--muted);
+      background: none;
+      border: none;
+      padding: 10px 14px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+    }
+
+    .tab:hover { color: var(--ink); }
+
+    .tab.active {
+      color: var(--navy);
+      border-bottom-color: var(--navy);
+    }
+
+    /* Main content */
+    .panel {
+      display: none;
+      padding-top: 16px;
+    }
+
+    .panel.active { display: block; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    /* Dual pane */
+    .dual-pane {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      min-height: 420px;
+    }
+
+    .pane-left {
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .pane-right {
+      display: flex;
+      flex-direction: column;
+      background: #FAFBFC;
+    }
+
+    .pane-header {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--muted);
+      background: var(--surface);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .pane-header .hint {
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: 0;
+      font-size: 11px;
+    }
+
+    .column-list {
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    .column-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      align-items: center;
+      padding: 9px 14px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+
+    .column-row:last-child { border-bottom: none; }
+
+    .column-row:hover { background: #F8FAFC; }
+
+    .column-row.selected {
+      background: #EEF4FB;
+      box-shadow: inset 3px 0 0 var(--mid);
+    }
+
+    .source-col {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .col-icon {
+      width: 22px;
+      height: 22px;
+      border-radius: 4px;
+      background: var(--inactive-bg);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--muted);
+      flex-shrink: 0;
+    }
+
+    .col-name {
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .col-meta {
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    select.attr-select {
+      width: 100%;
+      font: inherit;
+      font-size: 12px;
+      padding: 5px 8px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      color: var(--ink);
+      cursor: pointer;
+    }
+
+    select.attr-select:focus {
+      outline: none;
+      border-color: var(--mid);
+      box-shadow: 0 0 0 2px rgba(43, 123, 185, 0.15);
+    }
+
+    select.attr-select.mapped {
+      border-color: var(--light);
+      background: #F7FBFF;
+    }
+
+    /* Preview pane */
+    .preview-body {
+      flex: 1;
+      padding: 14px;
+      overflow-y: auto;
+    }
+
+    .preview-title {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 2px;
+    }
+
+    .preview-map {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+
+    .preview-map strong {
+      color: var(--mid);
+      font-weight: 600;
+    }
+
+    .preview-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .preview-table th,
+    .preview-table td {
+      padding: 7px 10px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .preview-table th {
+      background: var(--canvas);
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--muted);
+    }
+
+    .preview-table tr:last-child td { border-bottom: none; }
+
+    .preview-table td.value {
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 11px;
+    }
+
+    .preview-table td.row-num {
+      color: var(--muted);
+      width: 36px;
+    }
+
+    .stats {
+      display: flex;
+      gap: 12px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+
+    .stat {
+      padding: 8px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      min-width: 100px;
+    }
+
+    .stat-value {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--navy);
+    }
+
+    .stat-label {
+      font-size: 10px;
+      color: var(--muted);
+      margin-top: 1px;
+    }
+
+    /* Placeholder panels */
+    .placeholder {
+      padding: 40px 24px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .placeholder strong { color: var(--ink); display: block; margin-bottom: 4px; }
+
+    /* Format panel */
+    .format-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      padding: 16px;
+    }
+
+    .field label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 5px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .field input,
+    .field select {
+      width: 100%;
+      font: inherit;
+      font-size: 12px;
+      padding: 7px 10px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+
+    .footer-note {
+      margin-top: 12px;
+      font-size: 11px;
+      color: var(--muted);
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="eyebrow">Connections · Mapping workbench</div>
+      <div class="title-row">
+        <div>
+          <h1>Sample D — Dual pane preview</h1>
+          <p class="subtitle">Paylocity export · 847 rows · header row 1</p>
+        </div>
+        <div class="actions">
+          <button class="btn" type="button">Discard</button>
+          <button class="btn btn-primary" type="button">Save mapping</button>
+        </div>
+      </div>
+
+      <div class="chips" id="capability-chips">
+        <span class="chips-label">Derived capability</span>
+        <span class="chip on" id="chip-email">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M10 3L6 6.5 2 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><rect x="1.5" y="2.5" width="9" height="7" rx="1" stroke="currentColor" stroke-width="1.2"/></svg>
+          Email
+        </span>
+        <span class="chip on" id="chip-phone">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><rect x="3.5" y="1.5" width="5" height="9" rx="1" stroke="currentColor" stroke-width="1.2"/><circle cx="6" cy="9" r="0.6" fill="currentColor"/></svg>
+          Phone
+        </span>
+        <span class="chip partial" id="chip-ndz" title="Requires first_name, last_name, dob, and zip">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="4.5" stroke="currentColor" stroke-width="1.2"/><path d="M6 4v2.5l1.5 1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+          NDZ · 2 of 4
+        </span>
+      </div>
+
+      <nav class="tabs" role="tablist">
+        <button class="tab" role="tab" data-tab="header" aria-selected="false">Header</button>
+        <button class="tab active" role="tab" data-tab="assign" aria-selected="true">Assign</button>
+        <button class="tab" role="tab" data-tab="format" aria-selected="false">Format</button>
+      </nav>
+    </header>
+
+    <!-- Header panel -->
+    <section class="panel" id="panel-header" role="tabpanel">
+      <div class="card">
+        <div class="placeholder">
+          <strong>Header row</strong>
+          Row 1 contains column labels. Preview uses rows 2–21 for sample values.
+        </div>
+      </div>
+    </section>
+
+    <!-- Assign panel (dual pane) -->
+    <section class="panel active" id="panel-assign" role="tabpanel">
+      <div class="card dual-pane">
+        <div class="pane-left">
+          <div class="pane-header">
+            <span>Source columns</span>
+            <span class="hint">12 columns</span>
+          </div>
+          <div class="column-list" id="column-list"></div>
+        </div>
+        <div class="pane-right">
+          <div class="pane-header">
+            <span>Live preview</span>
+            <span class="hint" id="preview-hint">Select a column</span>
+          </div>
+          <div class="preview-body" id="preview-body">
+            <p class="placeholder" style="padding: 60px 0;">Click a source column to preview sample values.</p>
+          </div>
+        </div>
+      </div>
+      <p class="footer-note">Canonical keys only · capability chips update as you assign</p>
+    </section>
+
+    <!-- Format panel -->
+    <section class="panel" id="panel-format" role="tabpanel">
+      <div class="card">
+        <div class="format-grid">
+          <div class="field">
+            <label for="email-format">Email format</label>
+            <select id="email-format">
+              <option>Lowercase trim</option>
+              <option>As-is</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="phone-format">Phone format</label>
+            <select id="phone-format">
+              <option>E.164 (US default)</option>
+              <option>Digits only</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="dob-format">Date of birth format</label>
+            <select id="dob-format">
+              <option>YYYY-MM-DD</option>
+              <option>MM/DD/YYYY</option>
+              <option>DD-MMM-YYYY</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="delimiter">Multi-PII delimiter</label>
+            <input id="delimiter" type="text" value=";" placeholder=";" />
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const CANONICAL = [
+      { value: "", label: "— Unmapped —" },
+      { value: "email", label: "email" },
+      { value: "phone", label: "phone" },
+      { value: "first_name", label: "first_name" },
+      { value: "last_name", label: "last_name" },
+      { value: "dob", label: "dob" },
+      { value: "zip", label: "zip" },
+    ];
+
+    const NDZ_KEYS = ["first_name", "last_name", "dob", "zip"];
+
+    const columns = [
+      { id: "emp_id", name: "Employee_ID", samples: ["10482", "10483", "10484", "10485", "10486", "10487", "10488", "10489"], mapped: "" },
+      { id: "work_email", name: "Work_Email", samples: ["j.smith@co.com", "maria.g@co.com", "lee.k@co.com", "a.patel@co.com", "t.nguyen@co.com", "s.oconnor@co.com", "d.kim@co.com", "r.brown@co.com"], mapped: "email" },
+      { id: "mobile", name: "Mobile_Phone", samples: ["+14155550102", "+14155550218", "4155550344", "+1 (415) 555-0199", "415-555-0271", "+14155550388", "4155550412", "+14155550456"], mapped: "phone" },
+      { id: "given", name: "First_Name", samples: ["James", "Maria", "Lee", "Asha", "Tuan", "Sean", "Dana", "Riley"], mapped: "first_name" },
+      { id: "family", name: "Last_Name", samples: ["Smith", "Garcia", "Kim", "Patel", "Nguyen", "O'Connor", "Kim", "Brown"], mapped: "last_name" },
+      { id: "birth", name: "Date_of_Birth", samples: ["1988-03-14", "1992-11-02", "1979-07-28", "1985-01-19", "1990-09-05", "1983-12-30", "1995-04-17", "1987-08-08"], mapped: "" },
+      { id: "zipcode", name: "ZIP_Code", samples: ["94107", "94601", "94110", "94301", "94016", "94122", "94103", "94115"], mapped: "" },
+      { id: "dept", name: "Department", samples: ["Engineering", "People Ops", "Finance", "Engineering", "Legal", "Sales", "Marketing", "Engineering"], mapped: "" },
+      { id: "title", name: "Job_Title", samples: ["Sr Analyst", "HRBP", "Controller", "Staff Eng", "Counsel", "AE", "PMM", "Eng Mgr"], mapped: "" },
+      { id: "status", name: "Employment_Status", samples: ["Active", "Active", "Active", "Active", "Active", "Active", "Leave", "Active"], mapped: "" },
+      { id: "start", name: "Hire_Date", samples: ["2019-04-01", "2021-08-15", "2016-02-20", "2020-11-03", "2018-06-12", "2022-01-10", "2017-09-25", "2015-03-18"], mapped: "" },
+      { id: "loc", name: "Work_Location", samples: ["SF", "Oakland", "SF", "Palo Alto", "SF", "Remote-CA", "SF", "SF"], mapped: "" },
+    ];
+
+    let selectedId = "work_email";
+
+    function updateChips() {
+      const mapped = new Set(columns.filter(c => c.mapped).map(c => c.mapped));
+      const emailOn = mapped.has("email");
+      const phoneOn = mapped.has("phone");
+      const ndzCount = NDZ_KEYS.filter(k => mapped.has(k)).length;
+      const ndzOn = ndzCount === 4;
+
+      setChip("chip-email", emailOn ? "on" : "off", "Email");
+      setChip("chip-phone", phoneOn ? "on" : "off", "Phone");
+
+      const ndzEl = document.getElementById("chip-ndz");
+      if (ndzOn) {
+        ndzEl.className = "chip on";
+        ndzEl.textContent = "";
+        ndzEl.innerHTML = chipIcon("ndz") + " NDZ";
+        ndzEl.title = "All four name/DOB/ZIP fields mapped";
+      } else if (ndzCount > 0) {
+        ndzEl.className = "chip partial";
+        ndzEl.innerHTML = chipIcon("partial") + ` NDZ · ${ndzCount} of 4`;
+        ndzEl.title = "Requires first_name, last_name, dob, and zip";
+      } else {
+        ndzEl.className = "chip off";
+        ndzEl.innerHTML = chipIcon("ndz") + " NDZ";
+        ndzEl.title = "Requires first_name, last_name, dob, and zip";
+      }
+    }
+
+    function chipIcon(kind) {
+      if (kind === "partial") {
+        return '<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="4.5" stroke="currentColor" stroke-width="1.2"/><path d="M6 4v2.5l1.5 1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>';
+      }
+      return '<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2.5 6.5l2.5 2.5 4.5-5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    }
+
+    function setChip(id, state, label) {
+      const el = document.getElementById(id);
+      el.className = `chip ${state}`;
+      const icons = {
+        email: '<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M10 3L6 6.5 2 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><rect x="1.5" y="2.5" width="9" height="7" rx="1" stroke="currentColor" stroke-width="1.2"/></svg>',
+        phone: '<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><rect x="3.5" y="1.5" width="5" height="9" rx="1" stroke="currentColor" stroke-width="1.2"/><circle cx="6" cy="9" r="0.6" fill="currentColor"/></svg>',
+      };
+      const key = id.replace("chip-", "");
+      el.innerHTML = (icons[key] || "") + " " + label;
+    }
+
+    function renderColumnList() {
+      const list = document.getElementById("column-list");
+      list.innerHTML = columns.map(col => {
+        const opts = CANONICAL.map(c => {
+          const taken = columns.some(x => x.id !== col.id && x.mapped === c.value && c.value);
+          const disabled = taken ? "disabled" : "";
+          const sel = col.mapped === c.value ? "selected" : "";
+          return `<option value="${c.value}" ${sel} ${disabled}>${c.label}</option>`;
+        }).join("");
+        const mappedClass = col.mapped ? "mapped" : "";
+        const selectedClass = col.id === selectedId ? "selected" : "";
+        return `
+          <div class="column-row ${selectedClass}" data-id="${col.id}">
+            <div class="source-col">
+              <span class="col-icon">${col.name.charAt(0)}</span>
+              <div>
+                <div class="col-name">${col.name}</div>
+                <div class="col-meta">Col ${columns.indexOf(col) + 1}</div>
+              </div>
+            </div>
+            <select class="attr-select ${mappedClass}" data-id="${col.id}" aria-label="Map ${col.name}">
+              ${opts}
+            </select>
+          </div>`;
+      }).join("");
+
+      list.querySelectorAll(".column-row").forEach(row => {
+        row.addEventListener("click", e => {
+          if (e.target.tagName === "SELECT") return;
+          selectedId = row.dataset.id;
+          renderColumnList();
+          renderPreview();
+        });
+      });
+
+      list.querySelectorAll(".attr-select").forEach(sel => {
+        sel.addEventListener("change", e => {
+          e.stopPropagation();
+          const col = columns.find(c => c.id === sel.dataset.id);
+          col.mapped = sel.value;
+          selectedId = col.id;
+          updateChips();
+          renderColumnList();
+          renderPreview();
+        });
+        sel.addEventListener("click", e => e.stopPropagation());
+      });
+    }
+
+    function renderPreview() {
+      const col = columns.find(c => c.id === selectedId);
+      const body = document.getElementById("preview-body");
+      const hint = document.getElementById("preview-hint");
+      if (!col) return;
+
+      hint.textContent = `${col.samples.length} sample rows`;
+      const mapLabel = col.mapped
+        ? `Mapped to <strong>${col.mapped}</strong>`
+        : "Not mapped to a canonical key";
+
+      const nonEmpty = col.samples.filter(s => s && s.trim()).length;
+      const unique = new Set(col.samples).size;
+
+      body.innerHTML = `
+        <div class="preview-title">${col.name}</div>
+        <div class="preview-map">${mapLabel}</div>
+        <table class="preview-table">
+          <thead><tr><th>#</th><th>Value</th></tr></thead>
+          <tbody>
+            ${col.samples.map((v, i) => `
+              <tr>
+                <td class="row-num">${i + 2}</td>
+                <td class="value">${escapeHtml(v)}</td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+        <div class="stats">
+          <div class="stat"><div class="stat-value">${nonEmpty}/${col.samples.length}</div><div class="stat-label">Non-empty</div></div>
+          <div class="stat"><div class="stat-value">${unique}</div><div class="stat-label">Distinct</div></div>
+          <div class="stat"><div class="stat-value">${col.mapped ? "✓" : "—"}</div><div class="stat-label">Canonical</div></div>
+        </div>`;
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+
+    // Tabs
+    document.querySelectorAll(".tab").forEach(tab => {
+      tab.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach(t => {
+          t.classList.remove("active");
+          t.setAttribute("aria-selected", "false");
+        });
+        document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
+        tab.classList.add("active");
+        tab.setAttribute("aria-selected", "true");
+        document.getElementById(`panel-${tab.dataset.tab}`).classList.add("active");
+      });
+    });
+
+    updateChips();
+    renderColumnList();
+    renderPreview();
+  </script>
+</body>
+</html>

@@ -18,9 +18,16 @@ Shared library package. Each submodule under `src/habeas_privacy_core/` has its 
 | [`auth/`](src/habeas_privacy_core/auth/) | IAP header + Bearer Google ID token identity parsing |
 | [`live/`](src/habeas_privacy_core/live/) | NOTIFY helpers for live events |
 | [`connections/`](src/habeas_privacy_core/connections/) | Vertical catalog, connection models, Secret Manager paths (no secret values logged); freshness/matching gate (`freshness.py`, `matching_gate.py`) |
-| [`vertical_hash/`](src/habeas_privacy_core/vertical_hash/) | External vertical hash helpers + allowlisted attempt audit |
+| [`vertical_hash/`](src/habeas_privacy_core/vertical_hash/) | External vertical hash helpers — `drop_list_hash`, nullable hashed_raw (`email`/`phone`/`ndz`), multi-mart lookups + allowlisted attempt audit |
+| [`sheet_worker/`](src/habeas_privacy_core/sheet_worker/) | Shared Sheets worker primitives (hash extract, list-type mart match/drain) for `hr_alumni` / `bizdev_contacts` |
 
 Vendor adapters belong in `app/<name>/adapters/`, not here.
+
+**External phone/NDZ:** `vertical_hash.drop_list_hash` routes DROP list types to
+precomputed hash fields (never invent plaintext hashing). Hashed-raw rows keep
+nullable `email_hash` / `phone_hash` / `ndz_hash` (≥1 required). Matching/
+drain pick the per-kind serving mart. Marts and cutover order live in
+[`transform/external_hash`](../../transform/external_hash/) — do not duplicate here.
 
 **Connections / gate:** Connecting credentials or completing Upload does not alone clear
 matching — `evaluate_connection_gate` (Upload cadence / Live ~180-day rotation / wizard).

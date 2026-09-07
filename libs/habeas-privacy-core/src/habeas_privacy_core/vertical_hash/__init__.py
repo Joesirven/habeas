@@ -47,12 +47,20 @@ from habeas_privacy_core.vertical_hash.bq_writer import (
     qualify_table_id,
     write_hashed_raw,
 )
+from habeas_privacy_core.vertical_hash.drop_list_hash import (
+    normalize_drop_list_type,
+    primary_hash_for_list_type,
+)
 from habeas_privacy_core.vertical_hash.hashing import (
     email_hash_from_raw,
     hash_std,
+    ndz_hash_from_parts,
     phone_hash_from_raw,
+    standardize_dob,
     standardize_email,
+    standardize_name,
     standardize_phone,
+    standardize_zip,
 )
 from habeas_privacy_core.vertical_hash.models import HashedVendorRecord
 
@@ -101,9 +109,15 @@ __all__ = [
     "lookup_paylocity_vendor_ids_by_email_hashes",
     "lookup_vendor_ids_by_email_hash",
     "lookup_vendor_ids_by_email_hashes",
+    "ndz_hash_from_parts",
+    "normalize_drop_list_type",
     "phone_hash_from_raw",
+    "primary_hash_for_list_type",
     "qualify_table_id",
+    "standardize_dob",
     "standardize_email",
+    "standardize_name",
     "standardize_phone",
+    "standardize_zip",
     "write_hashed_raw",
 ]

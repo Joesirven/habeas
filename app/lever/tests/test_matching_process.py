@@ -26,10 +26,12 @@ from lever.vertical_match import LEVER_VERTICAL, VerticalMatchOutcome, run_lever
 _REQUEST_ID = "11111111-2222-3333-4444-555555555555"
 _ATTEMPT_ID = 42
 _EMAIL_HASH = "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY="
+_PHONE_HASH = "cGhvbmUtaGFzaC1BQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+_NDZ_HASH = "bmR6LWhhc2gtb3BhcXVlLWJhc2U2NC12YWx1ZS0xAAA="
 _VENDOR_ID = "lever-opaque-must-not-audit"
 PII_EMAIL = "jane.doe@example.com"
 
-_PII_TOKENS = (_EMAIL_HASH, _VENDOR_ID, PII_EMAIL)
+_PII_TOKENS = (_EMAIL_HASH, _PHONE_HASH, _NDZ_HASH, _VENDOR_ID, PII_EMAIL)
 _AUDIT_FORBIDDEN_KEYS = frozenset(
     {
         "email",
@@ -126,6 +128,7 @@ async def _run_process(
     *,
     email_hash: str | None = _EMAIL_HASH,
     hash_fields: dict[str, Any] | None = None,
+    list_type: DropListType | str | None = None,
     lookup: Any | None = None,
     persist: Any | None = None,
 ) -> tuple[VerticalMatchOutcome, MagicMock, AsyncMock]:
@@ -137,6 +140,7 @@ async def _run_process(
         attempt_id=_ATTEMPT_ID,
         email_hash=email_hash,
         hash_fields=hash_fields,
+        list_type=list_type,
         lookup=lookup_fn,
         persist=upsert,
     )
@@ -178,8 +182,8 @@ def test_lookup_rejects_plaintext_without_query() -> None:
 
 def test_lookup_by_hashes_set_based() -> None:
     hash_a = _EMAIL_HASH
-    hash_b = "other-hash-value-BBBBBBBBBBBBBBBBBBBBBBBBBB="
-    hash_c = "missing-hash-CCCCCCCCCCCCCCCCCCCCCCCCCCCC="
+    hash_b = "aGFzaC1iLXBhZC14eHh4eHh4eHh4eHh4eHh4eHh4eDA="
+    hash_c = "aGFzaC1jLXBhZC15eXl5eXl5eXl5eXl5eXl5eXl5eTA="
     client = MagicMock()
     client.query.return_value = _FakeJob(
         [
@@ -253,6 +257,61 @@ async def test_email_hash_present_looks_up_upserts_and_succeeds():
 
 
 @pytest.mark.asyncio
+async def test_phone_hash_present_looks_up_upserts_and_succeeds():
+    outcome, lookup_fn, persist = await _run_process(
+        email_hash=None,
+        hash_fields={"hashed_phone": _PHONE_HASH},
+        list_type=DropListType.PHONE,
+    )
+
+    lookup_fn.assert_called_once_with(_PHONE_HASH)
+    persist.assert_awaited_once()
+    kwargs = persist.await_args.kwargs
+    assert kwargs["match_count"] == 1
+    assert kwargs["vendor_record_ids"] == [_VENDOR_ID]
+    assert kwargs["vertical"] == LEVER_VERTICAL
+    assert kwargs["source_matching_attempt_id"] is None
+    assert outcome.ok is True
+    assert outcome.match_count == 1
+    assert outcome.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_ndz_hash_present_looks_up_upserts_and_succeeds():
+    outcome, lookup_fn, persist = await _run_process(
+        email_hash=None,
+        hash_fields={"concatenated_hash": _NDZ_HASH},
+        list_type=DropListType.NDZ,
+    )
+
+    lookup_fn.assert_called_once_with(_NDZ_HASH)
+    persist.assert_awaited_once()
+    kwargs = persist.await_args.kwargs
+    assert kwargs["match_count"] == 1
+    assert kwargs["vendor_record_ids"] == [_VENDOR_ID]
+    assert kwargs["vertical"] == LEVER_VERTICAL
+    assert outcome.ok is True
+    assert outcome.match_count == 1
+    assert outcome.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_phone_plaintext_rejects_with_phone_hash_label():
+    outcome, lookup_fn, persist = await _run_process(
+        email_hash=None,
+        hash_fields={"hashed_phone": "4155551212"},
+        list_type=DropListType.PHONE,
+    )
+
+    lookup_fn.assert_not_called()
+    persist.assert_not_awaited()
+    assert outcome.ok is False
+    assert outcome.error_code == "lever_invalid_hash"
+    assert outcome.error_detail == "phone_hash must not contain plaintext"
+    assert "4155551212" not in (outcome.error_detail or "")
+
+
+@pytest.mark.asyncio
 async def test_empty_mart_zero_hit_snapshot_not_stub_success():
     lookup_fn = MagicMock(return_value=[])
     outcome, _, persist = await _run_process(lookup=lookup_fn)
@@ -319,9 +378,9 @@ def test_matching_submit_empty_mart_zero_hit_snapshot(client):
             return_value=_gate_ok(),
         ),
         patch(
-            "lever.vertical_match._load_drop_email_hash",
+            "lever.vertical_match._load_drop_hash",
             new_callable=AsyncMock,
-            return_value=_EMAIL_HASH,
+            return_value=("email", _EMAIL_HASH),
         ),
         patch("lever.vertical_match.lookup_lever_vendor_ids_by_email_hash", lookup_fn),
         patch("lever.vertical_match.upsert_vertical_matching_snapshot", persist),
@@ -367,9 +426,9 @@ def test_matching_submit_no_email_hash_zero_hit_snapshot(client):
             return_value=_gate_ok(),
         ),
         patch(
-            "lever.vertical_match._load_drop_email_hash",
+            "lever.vertical_match._load_drop_hash",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=(None, None),
         ),
         patch("lever.vertical_match.lookup_lever_vendor_ids_by_email_hash", lookup_fn),
         patch("lever.vertical_match.upsert_vertical_matching_snapshot", persist),
@@ -409,9 +468,9 @@ def test_matching_submit_audit_payload_has_no_pii(client, caplog):
             return_value=_gate_ok(),
         ),
         patch(
-            "lever.vertical_match._load_drop_email_hash",
+            "lever.vertical_match._load_drop_hash",
             new_callable=AsyncMock,
-            return_value=_EMAIL_HASH,
+            return_value=("email", _EMAIL_HASH),
         ),
         patch("lever.vertical_match.lookup_lever_vendor_ids_by_email_hash", lookup_fn),
         patch("lever.vertical_match.upsert_vertical_matching_snapshot", persist),

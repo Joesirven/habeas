@@ -42,6 +42,7 @@ import {
   cadenceOptionFromMetadata,
   cadenceOptionIdsForSystems,
   connectionMethodLabel,
+  deriveListCapability,
   DIRECT_CONNECTION_LABEL,
   displayStatusChip,
   filterOwnerWizardConnectors,
@@ -423,6 +424,42 @@ function ConnectorCadenceSelect({
   )
 }
 
+function CapabilityChips({ connector }: { connector: OwnerConnectorSystem }) {
+  const mapping =
+    connector.metadata.column_mapping &&
+    typeof connector.metadata.column_mapping === 'object' &&
+    !Array.isArray(connector.metadata.column_mapping)
+      ? (connector.metadata.column_mapping as Record<string, string>)
+      : {}
+  const derived = deriveListCapability(mapping)
+  const email = connector.list_capability?.email ?? derived.email
+  const phone = connector.list_capability?.phone ?? derived.phone
+  const ndz = connector.list_capability?.ndz ?? derived.ndz
+  if (!connector.connection_id && !email && !phone && !ndz) return null
+  return (
+    <div className="flex flex-wrap gap-1 pt-0.5">
+      {(
+        [
+          { id: 'Email', on: email },
+          { id: 'Phone', on: phone },
+          { id: 'NDZ', on: ndz },
+        ] as const
+      ).map((chip) => (
+        <span
+          key={chip.id}
+          className={
+            chip.on
+              ? 'rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800'
+              : 'rounded border border-line bg-canvas px-1.5 py-0.5 text-[10px] text-mute'
+          }
+        >
+          {chip.id}
+        </span>
+      ))}
+    </div>
+  )
+}
+
 function ConnectorStatusRow({
   verticalId,
   connector,
@@ -456,6 +493,7 @@ function ConnectorStatusRow({
               ? `${connector.connection_id.slice(0, 8)}…`
               : 'not linked'}
           </p>
+          <CapabilityChips connector={connector} />
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {showCadence ? (

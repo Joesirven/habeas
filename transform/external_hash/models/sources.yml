@@ -15,9 +15,12 @@ sources:
           hash-refresh worker after in-memory standardize+hash (CPPA DROP v1.2.0).
         columns:
           - name: email_hash
-            description: Base64(SHA-256) of DROP-standardized email
-            tests:
-              - not_null
+            description: Base64(SHA-256) of DROP-standardized email (nullable)
+          - name: phone_hash
+            description: Base64(SHA-256) of DROP-standardized 10-digit phone (nullable)
+          - name: ndz_hash
+            description: >
+              Base64(SHA-256) of concat of FN/LN/DOB/ZIP Base64 digests (nullable)
           - name: vendor_record_id
             description: Opaque Auth0 user id (user_id vocabulary stays in app)
             tests:
@@ -40,7 +43,12 @@ sources:
           hash-refresh worker after in-memory standardize+hash (CPPA DROP v1.2.0).
         columns:
           - name: email_hash
-            description: Base64(SHA-256) of DROP-standardized email
+            description: Base64(SHA-256) of DROP-standardized email (nullable)
+          - name: phone_hash
+            description: Base64(SHA-256) of DROP-standardized 10-digit phone (nullable)
+          - name: ndz_hash
+            description: >
+              Base64(SHA-256) of concat of FN/LN/DOB/ZIP Base64 digests (nullable)
           - name: vendor_record_id
             description: Opaque Axios Headquarters row id
           - name: system
@@ -53,7 +61,12 @@ sources:
           worker after in-memory standardize+hash (CPPA DROP v1.2.0).
         columns:
           - name: email_hash
-            description: Base64(SHA-256) of DROP-standardized email
+            description: Base64(SHA-256) of DROP-standardized email (nullable)
+          - name: phone_hash
+            description: Base64(SHA-256) of DROP-standardized 10-digit phone (nullable)
+          - name: ndz_hash
+            description: >
+              Base64(SHA-256) of concat of FN/LN/DOB/ZIP Base64 digests (nullable)
           - name: vendor_record_id
             description: Opaque Paylocity employee id
           - name: system
@@ -66,7 +79,12 @@ sources:
           after in-memory standardize+hash (CPPA DROP v1.2.0).
         columns:
           - name: email_hash
-            description: Base64(SHA-256) of DROP-standardized email
+            description: Base64(SHA-256) of DROP-standardized email (nullable)
+          - name: phone_hash
+            description: Base64(SHA-256) of DROP-standardized 10-digit phone (nullable)
+          - name: ndz_hash
+            description: >
+              Base64(SHA-256) of concat of FN/LN/DOB/ZIP Base64 digests (nullable)
           - name: vendor_record_id
             description: Opaque Lever candidate id
           - name: system
@@ -79,7 +97,12 @@ sources:
           hash-refresh worker after in-memory standardize+hash (CPPA DROP v1.2.0).
         columns:
           - name: email_hash
-            description: Base64(SHA-256) of DROP-standardized email
+            description: Base64(SHA-256) of DROP-standardized email (nullable)
+          - name: phone_hash
+            description: Base64(SHA-256) of DROP-standardized 10-digit phone (nullable)
+          - name: ndz_hash
+            description: >
+              Base64(SHA-256) of concat of FN/LN/DOB/ZIP Base64 digests (nullable)
           - name: vendor_record_id
             description: Opaque Alumni sheet row id
           - name: system
@@ -92,7 +115,12 @@ sources:
           hash-refresh worker after in-memory standardize+hash (CPPA DROP v1.2.0).
         columns:
           - name: email_hash
-            description: Base64(SHA-256) of DROP-standardized email
+            description: Base64(SHA-256) of DROP-standardized email (nullable)
+          - name: phone_hash
+            description: Base64(SHA-256) of DROP-standardized 10-digit phone (nullable)
+          - name: ndz_hash
+            description: >
+              Base64(SHA-256) of concat of FN/LN/DOB/ZIP Base64 digests (nullable)
           - name: vendor_record_id
             description: Opaque Contact Us sheet row id
           - name: system

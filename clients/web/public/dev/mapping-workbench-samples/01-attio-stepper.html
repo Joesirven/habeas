@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sample A — Attio stepper · Habeas owner mapping workbench</title>
+<style>
+  :root{
+    --navy:#1E4191;
+    --mid:#2B7BB9;
+    --light:#428BCA;
+    --canvas:#F8FAFC;
+    --surface:#FFFFFF;
+    --border:#E2E8F0;
+    --ink:#0F172A;
+    --muted:#64748B;
+    --muted-soft:#94A3B8;
+    --ok:#0F766E;
+    --ok-bg:#ECFDF5;
+    --ok-border:#A7F3D0;
+    --warn:#92400E;
+    --warn-bg:#FFFBEB;
+    --warn-border:#FDE68A;
+    --radius:7px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--canvas);
+    color:var(--ink);
+    font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    font-size:13px;
+    line-height:1.45;
+    -webkit-font-smoothing:antialiased;
+  }
+  .shell{max-width:1180px;margin:0 auto;padding:0 24px 64px;}
+
+  /* ---------- header ---------- */
+  .topbar{
+    position:sticky;top:0;z-index:30;
+    background:rgba(255,255,255,.97);
+    border-bottom:1px solid var(--border);
+  }
+  .topbar-in{
+    max-width:1180px;margin:0 auto;padding:14px 24px;
+    display:flex;align-items:flex-start;justify-content:space-between;gap:24px;
+  }
+  .eyebrow{
+    font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+    color:var(--muted);margin:0 0 3px;
+  }
+  h1{font-size:19px;line-height:1.2;margin:0;font-weight:650;letter-spacing:-.01em;}
+  .thesis{margin:5px 0 0;color:var(--muted);font-size:12.5px;max-width:70ch;}
+  .ctx{
+    text-align:right;font-size:12px;color:var(--muted);white-space:nowrap;padding-top:2px;
+  }
+  .ctx b{display:block;color:var(--ink);font-weight:600;font-size:12.5px;}
+  .ctx .file{font-variant-numeric:tabular-nums;}
+
+  /* ---------- stepper ---------- */
+  .stepwrap{
+    position:sticky;top:74px;z-index:20;
+    background:rgba(248,250,252,.97);
+    border-bottom:1px solid var(--border);
+  }
+  .stepper{
+    max-width:1180px;margin:0 auto;padding:10px 24px;
+    display:flex;align-items:center;gap:0;
+  }
+  .step{
+    display:flex;align-items:center;gap:9px;
+    background:none;border:0;cursor:pointer;
+    padding:7px 12px;border-radius:var(--radius);
+    font:inherit;color:var(--muted);text-align:left;
+  }
+  .step:hover{background:#EEF2F7;color:var(--ink);}
+  .step:focus-visible{outline:2px solid var(--mid);outline-offset:1px;}
+  .step .num{
+    width:21px;height:21px;flex:none;border-radius:50%;
+    display:grid;place-items:center;
+    font-size:11px;font-weight:650;font-variant-numeric:tabular-nums;
+    border:1px solid var(--border);background:var(--surface);color:var(--muted);
+  }
+  .step .lbl{font-size:12.5px;font-weight:550;}
+  .step .sub{display:block;font-size:11px;font-weight:400;color:var(--muted-soft);}
+  .step[data-state="done"] .num{background:var(--navy);border-color:var(--navy);color:#fff;}
+  .step[data-state="done"] .lbl{color:var(--ink);}
+  .step[aria-current="step"]{background:#E8EEF8;}
+  .step[aria-current="step"] .num{background:var(--navy);border-color:var(--navy);color:#fff;}
+  .step[aria-current="step"] .lbl{color:var(--navy);font-weight:650;}
+  .rail{flex:1;height:1px;background:var(--border);min-width:14px;}
+  .rail.filled{background:var(--light);}
+
+  /* ---------- capability strip ---------- */
+  .capstrip{
+    display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    padding:12px 14px;margin:16px 0 14px;
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  }
+  .cap-label{font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);}
+  .cap-label span{display:block;text-transform:none;letter-spacing:0;font-weight:400;font-size:11px;color:var(--muted-soft);margin-top:1px;}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;}
+  .chip{
+    display:flex;align-items:center;gap:8px;
+    border:1px solid var(--border);border-radius:var(--radius);
+    background:#F1F5F9;padding:6px 11px 6px 9px;cursor:default;
+  }
+  .chip .dot{width:7px;height:7px;border-radius:50%;background:var(--muted-soft);flex:none;}
+  .chip .name{font-size:12.5px;font-weight:600;color:var(--muted);}
+  .chip .why{font-size:11px;color:var(--muted-soft);}
+  .chip[data-on="true"]{background:#E8EEF8;border-color:#C6D6EE;}
+  .chip[data-on="true"] .dot{background:var(--navy);}
+  .chip[data-on="true"] .name{color:var(--navy);}
+  .chip[data-on="true"] .why{color:var(--mid);}
+  .derived-note{margin-left:auto;font-size:11px;color:var(--muted-soft);}
+
+  /* ---------- panel ---------- */
+  .panel{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    box-shadow:0 1px 2px rgba(15,23,42,.04);
+  }
+  .panel-head{
+    padding:14px 16px;border-bottom:1px solid var(--border);
+    display:flex;align-items:baseline;justify-content:space-between;gap:16px;
+  }
+  .panel-head h2{margin:0;font-size:14.5px;font-weight:650;letter-spacing:-.005em;}
+  .panel-head p{margin:3px 0 0;color:var(--muted);font-size:12px;}
+  .panel-body{padding:16px;}
+  .panel-foot{
+    padding:12px 16px;border-top:1px solid var(--border);
+    display:flex;align-items:center;justify-content:space-between;gap:16px;
+    background:#FCFDFE;border-radius:0 0 var(--radius) var(--radius);
+  }
+  .foot-note{font-size:11.5px;color:var(--muted);}
+
+  /* ---------- controls ---------- */
+  button.btn{
+    font:inherit;font-size:12.5px;font-weight:600;
+    border-radius:var(--radius);padding:7px 13px;cursor:pointer;
+    border:1px solid var(--border);background:var(--surface);color:var(--ink);
+  }
+  button.btn:hover{background:#F1F5F9;}
+  button.btn.primary{background:var(--navy);border-color:var(--navy);color:#fff;}
+  button.btn.primary:hover{background:#1A3A82;}
+  button.btn.ghost{border-color:transparent;background:transparent;color:var(--mid);}
+  button.btn.ghost:hover{background:#EEF2F7;}
+  button.btn:focus-visible{outline:2px solid var(--mid);outline-offset:1px;}
+  button.btn[disabled]{opacity:.45;cursor:not-allowed;}
+  .btn-row{display:flex;gap:8px;align-items:center;}
+
+  select,input[type=text]{
+    font:inherit;font-size:12.5px;color:var(--ink);background:var(--surface);
+    border:1px solid var(--border);border-radius:6px;padding:5px 8px;min-width:150px;
+  }
+  select:focus,input[type=text]:focus{outline:2px solid var(--mid);outline-offset:-1px;border-color:var(--mid);}
+  select.unset{color:var(--muted);}
+
+  /* ---------- tables ---------- */
+  table{width:100%;border-collapse:collapse;font-size:12.5px;}
+  th{
+    text-align:left;font-weight:600;font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--muted);padding:7px 10px;border-bottom:1px solid var(--border);background:#FBFCFE;
+    white-space:nowrap;
+  }
+  td{padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:middle;}
+  tbody tr:last-child td{border-bottom:0;}
+  tbody tr:hover{background:#FBFCFE;}
+  .tbl{border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;}
+  .mono{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;font-size:11.5px;}
+  .sample{color:var(--muted);}
+  .colname{font-weight:600;}
+  .idx{color:var(--muted-soft);font-variant-numeric:tabular-nums;width:34px;}
+
+  /* row picker */
+  .rowpick td{cursor:pointer;}
+  tr[data-picked="true"]{background:#E8EEF8 !important;}
+  tr[data-picked="true"] td{border-bottom-color:#C6D6EE;}
+  tr[data-above="true"] td{color:var(--muted-soft);}
+  .radio{width:13px;height:13px;border-radius:50%;border:1px solid var(--muted-soft);display:inline-block;position:relative;top:2px;}
+  tr[data-picked="true"] .radio{border-color:var(--navy);box-shadow:inset 0 0 0 3px var(--navy);}
+
+  .badge{
+    display:inline-block;font-size:11px;font-weight:600;padding:2px 7px;border-radius:5px;
+    border:1px solid var(--border);background:#F1F5F9;color:var(--muted);white-space:nowrap;
+  }
+  .badge.ok{background:var(--ok-bg);border-color:var(--ok-border);color:var(--ok);}
+  .badge.wait{background:var(--warn-bg);border-color:var(--warn-border);color:var(--warn);}
+  .badge.nav{background:#E8EEF8;border-color:#C6D6EE;color:var(--navy);}
+
+  .grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;}
+  .card{border:1px solid var(--border);border-radius:var(--radius);}
+  .card h3{
+    margin:0;padding:9px 12px;border-bottom:1px solid var(--border);background:#FBFCFE;
+    font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);
+    display:flex;justify-content:space-between;align-items:center;gap:8px;
+  }
+  .card .body{padding:11px 12px;}
+  .opt{display:flex;align-items:center;gap:9px;padding:5px 0;}
+  .opt label{font-size:12.5px;}
+  .opt .hint{color:var(--muted);font-size:11.5px;}
+  .opt input[type=checkbox]{accent-color:var(--navy);width:14px;height:14px;}
+  .stack{display:flex;flex-direction:column;gap:2px;}
+  .kv{display:flex;justify-content:space-between;gap:12px;padding:4px 0;border-bottom:1px dashed var(--border);}
+  .kv:last-child{border-bottom:0;}
+  .kv .k{color:var(--muted);}
+  .arrow{color:var(--muted-soft);padding:0 4px;}
+  .empty{color:var(--muted);font-size:12px;padding:6px 0;}
+  .hidden{display:none !important;}
+
+  .summary-list{display:flex;flex-direction:column;gap:8px;}
+  .summary-row{
+    display:flex;align-items:center;gap:10px;padding:9px 11px;
+    border:1px solid var(--border);border-radius:var(--radius);background:#FBFCFE;
+  }
+  .summary-row[data-on="true"]{background:#F5F9FF;border-color:#C6D6EE;}
+  .summary-row .title{font-weight:650;font-size:12.5px;min-width:132px;}
+  .summary-row .desc{color:var(--muted);font-size:12px;}
+
+  /* toast */
+  .toast{
+    position:fixed;top:16px;right:16px;z-index:60;
+    background:var(--surface);border:1px solid var(--ok-border);
+    border-left:3px solid var(--navy);
+    border-radius:var(--radius);box-shadow:0 4px 14px rgba(15,23,42,.10);
+    padding:11px 13px;max-width:340px;
+  }
+  .toast b{display:block;font-size:12.5px;}
+  .toast span{display:block;color:var(--muted);font-size:11.5px;margin-top:2px;}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-in">
+    <div>
+      <p class="eyebrow">Owner mapping workbench · concept A</p>
+      <h1>Sample A — Attio stepper</h1>
+      <p class="thesis">One horizontal rail carries the owner from header row to confirm, while Email / Phone / NDZ support is derived from mapping completeness — never chosen.</p>
+    </div>
+    <div class="ctx">
+      <b>HR Alumni · People vertical</b>
+      <span class="file">alumni_export_2026-09-01.csv · 4,812 rows</span><br />
+      <span>Upload succeeded 12 min ago · mapping incomplete</span>
+    </div>
+  </div>
+</div>
+
+<div class="stepwrap">
+  <nav class="stepper" id="stepper" aria-label="Mapping steps"></nav>
+</div>
+
+<div class="shell">
+
+  <div class="capstrip">
+    <div class="cap-label">DROP list types<span>derived from mapping</span></div>
+    <div class="chips" id="chips"></div>
+    <div class="derived-note">Read-only — owners map columns, lists follow the variables.</div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <div>
+        <h2 id="panelTitle"></h2>
+        <p id="panelSub"></p>
+      </div>
+      <div id="panelAside"></div>
+    </div>
+    <div class="panel-body" id="panelBody"></div>
+    <div class="panel-foot">
+      <div class="foot-note" id="footNote"></div>
+      <div class="btn-row">
+        <button class="btn" id="backBtn">Back</button>
+        <button class="btn primary" id="nextBtn">Continue</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ---------------- fake sample file ---------------- */
+
+  var RAW_ROWS = [
+    ["Habeas alumni export", "generated 2026-09-01", "internal", "", "", ""],
+    ["", "", "", "", "", ""],
+    ["Given", "Family", "Work Email", "Mobile", "DOB", "ZIP"],
+    ["ada", "Nakamura", "A.Nakamura@Example.org ", "(415) 555-0142", "1988-04-12", "94110-2231"],
+    ["miguel", "Ortiz", "m.ortiz@example.org", "415.555.0177", "04/22/1979", "94612"],
+    ["priya", "Raman", "p.raman@example.org; praman@alt.example", "+1 415 555 0190", "1991-11-03", "94301"],
+    ["tomas", "Iverson", "t.iverson@example.org", "(510) 555-0118", "12/09/1984", "94607-1104"]
+  ];
+
+  var CANONICAL = [
+    { key: "email",      label: "email" },
+    { key: "phone",      label: "phone" },
+    { key: "first_name", label: "first_name" },
+    { key: "last_name",  label: "last_name" },
+    { key: "dob",        label: "dob" },
+    { key: "zip",        label: "zip" }
+  ];
+
+  var STEPS = [
+    { id: "header",  label: "Header row",     sub: "confirm row 3" },
+    { id: "assign",  label: "Assign columns", sub: "6 canonical vars" },
+    { id: "format",  label: "Format / clean", sub: "normalize + split" },
+    { id: "confirm", label: "Confirm",        sub: "save mapping" }
+  ];
+
+  var state = {
+    step: 0,
+    headerRow: 2,
+    /* source column index -> canonical key ("" = unmapped) */
+    mapping: { 0: "first_name", 1: "last_name", 2: "email", 3: "phone", 4: "", 5: "" },
+    formats: {
+      emailLower: true,
+      emailTrim: true,
+      multiPii: true,
+      delimiter: ";",
+      phoneE164: true,
+      phoneRegion: "US",
+      nameTitleCase: true,
+      dobIso: true,
+      zip5: true
+    },
+    saved: false
+  };
+
+  /* ---------------- helpers ---------------- */
+
+  function el(id) { return document.getElementById(id); }
+  function headers() { return RAW_ROWS[state.headerRow]; }
+  function dataRows() { return RAW_ROWS.slice(state.headerRow + 1); }
+
+  function assignedIndex(canonKey) {
+    for (var i in state.mapping) {
+      if (state.mapping[i] === canonKey) { return Number(i); }
+    }
+    return -1;
+  }
+  function isMapped(canonKey) { return assignedIndex(canonKey) !== -1; }
+
+  var NDZ_PARTS = ["first_name", "last_name", "dob", "zip"];
+
+  function capability() {
+    var missing = NDZ_PARTS.filter(function (k) { return !isMapped(k); });
+    return {
+      email: { on: isMapped("email"), why: isMapped("email") ? "email mapped" : "needs email" },
+      phone: { on: isMapped("phone"), why: isMapped("phone") ? "phone mapped" : "needs phone" },
+      ndz: {
+        on: missing.length === 0,
+        why: missing.length === 0 ? "all four parts mapped" : "needs " + missing.join(", ")
+      }
+    };
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c];
+    });
+  }
+
+  /* ---------------- format / clean preview ---------------- */
+
+  function cleanEmail(v) {
+    var out = v;
+    if (state.formats.emailTrim) { out = out.trim(); }
+    if (state.formats.multiPii && state.formats.delimiter) {
+      var parts = out.split(state.formats.delimiter).map(function (p) { return p.trim(); }).filter(Boolean);
+      if (parts.length > 1) {
+        var first = state.formats.emailLower ? parts[0].toLowerCase() : parts[0];
+        return first + "  +" + (parts.length - 1) + " more";
+      }
+    }
+    return state.formats.emailLower ? out.toLowerCase() : out;
+  }
+
+  function cleanPhone(v) {
+    if (!state.formats.phoneE164) { return v.trim(); }
+    var digits = v.replace(/\D/g, "");
+    if (digits.length === 11 && digits[0] === "1") { digits = digits.slice(1); }
+    if (digits.length !== 10) { return v.trim() + "  (unparsed)"; }
+    return "+1" + digits;
+  }
+
+  function cleanName(v) {
+    var out = v.trim();
+    if (!state.formats.nameTitleCase) { return out; }
+    return out.charAt(0).toUpperCase() + out.slice(1).toLowerCase();
+  }
+
+  function cleanDob(v) {
+    var out = v.trim();
+    if (!state.formats.dobIso) { return out; }
+    var us = out.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if (us) { return us[3] + "-" + us[1] + "-" + us[2]; }
+    return out;
+  }
+
+  function cleanZip(v) {
+    var out = v.trim();
+    return state.formats.zip5 ? out.split("-")[0] : out;
+  }
+
+  function cleanValue(canonKey, raw) {
+    if (canonKey === "email") { return cleanEmail(raw); }
+    if (canonKey === "phone") { return cleanPhone(raw); }
+    if (canonKey === "first_name" || canonKey === "last_name") { return cleanName(raw); }
+    if (canonKey === "dob") { return cleanDob(raw); }
+    if (canonKey === "zip") { return cleanZip(raw); }
+    return raw;
+  }
+
+  function parseCount(canonKey) {
+    var col = assignedIndex(canonKey);
+    if (col === -1) { return null; }
+    var rows = dataRows();
+    var ok = rows.filter(function (r) {
+      var out = cleanValue(canonKey, r[col] || "");
+      return out && out.indexOf("(unparsed)") === -1;
+    }).length;
+    return ok + "/" + rows.length + " parse";
+  }
+
+  function sampleFor(colIdx) {
+    return dataRows().slice(0, 2).map(function (r) { return r[colIdx]; })
+      .filter(Boolean).join(" · ") || "—";
+  }
+
+  /* ---------------- stepper + chips ---------------- */
+
+  function renderStepper() {
+    var html = "";
+    STEPS.forEach(function (s, i) {
+      if (i > 0) {
+        html += '<div class="rail' + (i <= state.step ? " filled" : "") + '"></div>';
+      }
+      var st = i < state.step ? "done" : (i === state.step ? "current" : "todo");
+      html += '<button class="step" data-state="' + st + '" data-step="' + i + '"' +
+        (i === state.step ? ' aria-current="step"' : "") + '>' +
+        '<span class="num">' + (i + 1) + '</span>' +
+        '<span class="lbl">' + s.label + '<span class="sub">' + s.sub + '</span></span>' +
+        '</button>';
+    });
+    el("stepper").innerHTML = html;
+  }
+
+  function renderChips() {
+    var cap = capability();
+    var defs = [
+      { name: "Email", c: cap.email },
+      { name: "Phone", c: cap.phone },
+      { name: "NDZ", c: cap.ndz }
+    ];
+    el("chips").innerHTML = defs.map(function (d) {
+      return '<div class="chip" data-on="' + d.c.on + '">' +
+        '<span class="dot"></span>' +
+        '<span class="name">' + d.name + '</span>' +
+        '<span class="why">' + esc(d.c.why) + '</span>' +
+        '</div>';
+    }).join("");
+  }
+
+  /* ---------------- step 1 — header row ---------------- */
+
+  function stepHeader() {
+    el("panelTitle").textContent = "Choose the header row";
+    el("panelSub").textContent = "Everything above the chosen row is skipped. Detected headers update live.";
+    el("panelAside").innerHTML = '<span class="badge nav">' + headers().filter(Boolean).length + ' headers detected</span>';
+
+    var rows = RAW_ROWS.slice(0, 5).map(function (r, i) {
+      return '<tr class="rowpick" data-row="' + i + '" data-picked="' + (i === state.headerRow) + '"' +
+        (i < state.headerRow ? ' data-above="true"' : "") + '>' +
+        '<td class="idx"><span class="radio"></span></td>' +
+        '<td class="idx">' + (i + 1) + '</td>' +
+        r.map(function (c) { return '<td class="mono">' + esc(c || "—") + '</td>'; }).join("") +
+        '</tr>';
+    }).join("");
+
+    el("panelBody").innerHTML =
+      '<div class="tbl"><table><thead><tr>' +
+        '<th></th><th>Row</th>' + RAW_ROWS[0].map(function (_, i) { return '<th>Col ' + (i + 1) + '</th>'; }).join("") +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+      '<div class="card" style="margin-top:14px"><h3>Detected headers <span class="badge">row ' + (state.headerRow + 1) + '</span></h3>' +
+        '<div class="body">' + headers().map(function (h) {
+          return '<span class="badge" style="margin:0 6px 6px 0">' + esc(h || "(blank)") + '</span>';
+        }).join("") + '</div></div>';
+
+    Array.prototype.forEach.call(el("panelBody").querySelectorAll("tr.rowpick"), function (tr) {
+      tr.addEventListener("click", function () {
+        state.headerRow = Number(tr.getAttribute("data-row"));
+        render();
+      });
+    });
+
+    el("footNote").textContent = "Reversible — changing the header row re-reads samples but keeps assignments by column position.";
+  }
+
+  /* ---------------- step 2 — assign columns ---------------- */
+
+  function stepAssign() {
+    var cap = capability();
+    el("panelTitle").textContent = "Assign source columns to canonical variables";
+    el("panelSub").textContent = "Only email, phone, first_name, last_name, dob and zip exist. Each variable is used once.";
+    el("panelAside").innerHTML =
+      '<div class="btn-row">' +
+        '<button class="btn ghost" id="autoMap">Auto-map remaining</button>' +
+        '<button class="btn ghost" id="clearMap">Clear all</button>' +
+      '</div>';
+
+    var rows = headers().map(function (h, i) {
+      var cur = state.mapping[i] || "";
+      var opts = '<option value="">Not mapped</option>' + CANONICAL.map(function (c) {
+        var owner = assignedIndex(c.key);
+        var taken = owner !== -1 && owner !== i;
+        return '<option value="' + c.key + '"' + (cur === c.key ? " selected" : "") + '>' +
+          c.label + (taken ? "  (moves from " + headers()[owner] + ")" : "") + '</option>';
+      }).join("");
+      var status = cur
+        ? '<span class="badge ok">mapped</span>'
+        : '<span class="badge wait">unmapped</span>';
+      return '<tr>' +
+        '<td class="idx">' + (i + 1) + '</td>' +
+        '<td class="colname">' + esc(h || "(blank)") + '</td>' +
+        '<td class="mono sample">' + esc(sampleFor(i)) + '</td>' +
+        '<td><select data-col="' + i + '" class="' + (cur ? "" : "unset") + '">' + opts + '</select></td>' +
+        '<td>' + status + '</td>' +
+      '</tr>';
+    }).join("");
+
+    var unmapped = NDZ_PARTS.filter(function (k) { return !isMapped(k); });
+
+    el("panelBody").innerHTML =
+      '<div class="tbl"><table><thead><tr>' +
+        '<th></th><th>Source column</th><th>Sample values</th><th>Canonical variable</th><th>Status</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+      '<div class="grid2" style="margin-top:14px">' +
+        '<div class="card"><h3>Enablement math</h3><div class="body stack">' +
+          '<div class="kv"><span class="k">Email list</span><span>' + (cap.email.on ? "enabled" : "off") + ' — ' + esc(cap.email.why) + '</span></div>' +
+          '<div class="kv"><span class="k">Phone list</span><span>' + (cap.phone.on ? "enabled" : "off") + ' — ' + esc(cap.phone.why) + '</span></div>' +
+          '<div class="kv"><span class="k">NDZ list</span><span>' + (cap.ndz.on ? "enabled" : "off") + ' — ' + esc(cap.ndz.why) + '</span></div>' +
+        '</div></div>' +
+        '<div class="card"><h3>Partial NDZ is allowed</h3><div class="body">' +
+          (unmapped.length
+            ? '<p style="margin:0 0 6px">Saving with a partial name/DOB/ZIP set is fine. NDZ simply stays unsupported until <b>' + esc(unmapped.join(", ")) + '</b> ' + (unmapped.length === 1 ? "is" : "are") + ' mapped.</p>'
+            : '<p style="margin:0 0 6px">All four NDZ parts are mapped, so the NDZ list turns on at save.</p>') +
+          '<p class="empty" style="padding:0">Unsupported is not the same as an empty mart — an unsupported list is never enqueued or drained.</p>' +
+        '</div></div>' +
+      '</div>';
+
+    Array.prototype.forEach.call(el("panelBody").querySelectorAll("select[data-col]"), function (sel) {
+      sel.addEventListener("change", function () {
+        var col = Number(sel.getAttribute("data-col"));
+        var val = sel.value;
+        if (val) {
+          var prev = assignedIndex(val);
+          if (prev !== -1 && prev !== col) { state.mapping[prev] = ""; }
+        }
+        state.mapping[col] = val;
+        render();
+      });
+    });
+
+    el("autoMap").addEventListener("click", function () {
+      var guess = { "given": "first_name", "family": "last_name", "work email": "email", "mobile": "phone", "dob": "dob", "zip": "zip" };
+      headers().forEach(function (h, i) {
+        if (state.mapping[i]) { return; }
+        var g = guess[String(h).toLowerCase().trim()];
+        if (g && !isMapped(g)) { state.mapping[i] = g; }
+      });
+      render();
+    });
+    el("clearMap").addEventListener("click", function () {
+      headers().forEach(function (_, i) { state.mapping[i] = ""; });
+      render();
+    });
+
+    el("footNote").textContent = "Chips above update as you assign — the owner never picks which DROP lists to run.";
+  }
+
+  /* ---------------- step 3 — format / clean ---------------- */
+
+  function stepFormat() {
+    el("panelTitle").textContent = "Format and clean mapped values";
+    el("panelSub").textContent = "Options appear only for variables you mapped. Preview uses sample rows — no raw values are logged.";
+    el("panelAside").innerHTML = '<span class="badge nav">' + Object.keys(state.mapping).filter(function (k) { return state.mapping[k]; }).length + ' variables mapped</span>';
+
+    function opt(id, label, hint, on) {
+      return '<div class="opt"><input type="checkbox" id="' + id + '"' + (on ? " checked" : "") + ' />' +
+        '<label for="' + id + '">' + label + ' <span class="hint">' + hint + '</span></label></div>';
+    }
+
+    var cards = "";
+
+    if (isMapped("email")) {
+      cards += '<div class="card"><h3>email <span class="badge ok">' + parseCount("email") + '</span></h3><div class="body">' +
+        opt("f_emailLower", "Lowercase", "before hashing", state.formats.emailLower) +
+        opt("f_emailTrim", "Trim whitespace", "leading / trailing", state.formats.emailTrim) +
+        opt("f_multiPii", "Split multi-value cells", "one hash per address", state.formats.multiPii) +
+        '<div class="opt"><label for="f_delim">Delimiter</label>' +
+          '<input type="text" id="f_delim" value="' + esc(state.formats.delimiter) + '" style="min-width:60px;width:60px" /></div>' +
+        '</div></div>';
+    }
+    if (isMapped("phone")) {
+      cards += '<div class="card"><h3>phone <span class="badge ok">' + parseCount("phone") + '</span></h3><div class="body">' +
+        opt("f_phoneE164", "Normalize to E.164", "strip punctuation, add country code", state.formats.phoneE164) +
+        '<div class="opt"><label for="f_region">Default region</label>' +
+          '<select id="f_region" style="min-width:90px"><option' + (state.formats.phoneRegion === "US" ? " selected" : "") + '>US</option><option' + (state.formats.phoneRegion === "CA" ? " selected" : "") + '>CA</option></select></div>' +
+        '</div></div>';
+    }
+    if (isMapped("first_name") || isMapped("last_name")) {
+      cards += '<div class="card"><h3>first_name / last_name</h3><div class="body">' +
+        opt("f_nameTitle", "Title case", "ada → Ada", state.formats.nameTitleCase) +
+        '<p class="empty" style="padding:2px 0 0">Names only feed NDZ; they never form a standalone list.</p>' +
+        '</div></div>';
+    }
+    if (isMapped("dob")) {
+      cards += '<div class="card"><h3>dob <span class="badge ok">' + parseCount("dob") + '</span></h3><div class="body">' +
+        opt("f_dobIso", "Normalize to YYYY-MM-DD", "accepts MM/DD/YYYY", state.formats.dobIso) +
+        '</div></div>';
+    }
+    if (isMapped("zip")) {
+      cards += '<div class="card"><h3>zip <span class="badge ok">' + parseCount("zip") + '</span></h3><div class="body">' +
+        opt("f_zip5", "Truncate to 5 digits", "94110-2231 → 94110", state.formats.zip5) +
+        '</div></div>';
+    }
+    if (!cards) {
+      cards = '<div class="card"><div class="body empty">Nothing mapped yet — go back to Assign columns.</div></div>';
+    }
+
+    var mappedKeys = CANONICAL.filter(function (c) { return isMapped(c.key); });
+    var previewRows = dataRows().slice(0, 3).map(function (r) {
+      return '<tr>' + mappedKeys.map(function (c) {
+        var raw = r[assignedIndex(c.key)] || "";
+        return '<td class="mono"><span class="sample">' + esc(raw.trim() || "—") + '</span>' +
+          '<span class="arrow">→</span><b>' + esc(cleanValue(c.key, raw)) + '</b></td>';
+      }).join("") + '</tr>';
+    }).join("");
+
+    el("panelBody").innerHTML =
+      '<div class="grid2">' + cards + '</div>' +
+      (mappedKeys.length
+        ? '<div class="tbl" style="margin-top:14px"><table><thead><tr>' +
+            mappedKeys.map(function (c) { return '<th>' + c.label + '  raw → cleaned</th>'; }).join("") +
+          '</tr></thead><tbody>' + previewRows + '</tbody></table></div>'
+        : "");
+
+    function bindCheck(id, key) {
+      var node = el(id);
+      if (node) { node.addEventListener("change", function () { state.formats[key] = node.checked; render(); }); }
+    }
+    bindCheck("f_emailLower", "emailLower");
+    bindCheck("f_emailTrim", "emailTrim");
+    bindCheck("f_multiPii", "multiPii");
+    bindCheck("f_phoneE164", "phoneE164");
+    bindCheck("f_nameTitle", "nameTitleCase");
+    bindCheck("f_dobIso", "dobIso");
+    bindCheck("f_zip5", "zip5");
+    if (el("f_delim")) {
+      el("f_delim").addEventListener("input", function () { state.formats.delimiter = el("f_delim").value; render(); });
+    }
+    if (el("f_region")) {
+      el("f_region").addEventListener("change", function () { state.formats.phoneRegion = el("f_region").value; });
+    }
+
+    el("footNote").textContent = "Formats change hashing inputs only — the workbench stays reversible after save.";
+  }
+
+  /* ---------------- step 4 — confirm ---------------- */
+
+  function stepConfirm() {
+    var cap = capability();
+    el("panelTitle").textContent = "Confirm mapping and derived list types";
+    el("panelSub").textContent = "Saving persists the mapping, formats and the capability preview. Hash refresh follows the existing cadence.";
+    el("panelAside").innerHTML = state.saved ? '<span class="badge ok">saved</span>' : '<span class="badge wait">unsaved</span>';
+
+    var defs = [
+      { name: "Email list", c: cap.email, on: "Hash refresh builds the email mart; dispatcher may enqueue email attempts.", off: "Never enqueued, never drained, no email mart built for this connection." },
+      { name: "Phone list", c: cap.phone, on: "Hash refresh builds the phone mart; dispatcher may enqueue phone attempts.", off: "Never enqueued, never drained, no phone mart built for this connection." },
+      { name: "NDZ list", c: cap.ndz, on: "Hash refresh builds the NDZ mart from first_name, last_name, dob and zip.", off: "Cannot support — not the same as an empty mart." }
+    ];
+
+    var summary = CANONICAL.map(function (c) {
+      var i = assignedIndex(c.key);
+      return '<div class="kv"><span class="k mono">' + c.label + '</span>' +
+        '<span>' + (i === -1 ? '<span class="badge wait">unmapped</span>' : esc(headers()[i]) + ' <span class="badge ok">col ' + (i + 1) + '</span>') + '</span></div>';
+    }).join("");
+
+    el("panelBody").innerHTML =
+      '<div class="summary-list">' + defs.map(function (d) {
+        return '<div class="summary-row" data-on="' + d.c.on + '">' +
+          '<span class="title">' + d.name + '</span>' +
+          '<span class="badge ' + (d.c.on ? "nav" : "") + '">' + (d.c.on ? "enabled" : "unsupported") + '</span>' +
+          '<span class="desc">' + esc(d.c.on ? d.on : d.off) + ' <span class="mono">(' + esc(d.c.why) + ')</span></span>' +
+        '</div>';
+      }).join("") + '</div>' +
+      '<div class="grid2" style="margin-top:14px">' +
+        '<div class="card"><h3>Canonical variables</h3><div class="body">' + summary + '</div></div>' +
+        '<div class="card"><h3>Formats persisted</h3><div class="body stack">' +
+          '<div class="kv"><span class="k">Header row</span><span>row ' + (state.headerRow + 1) + '</span></div>' +
+          '<div class="kv"><span class="k">Email</span><span>' + (state.formats.emailLower ? "lowercase" : "as-is") + ', ' + (state.formats.emailTrim ? "trimmed" : "untrimmed") + '</span></div>' +
+          '<div class="kv"><span class="k">Multi-value delimiter</span><span class="mono">' + (state.formats.multiPii ? esc(state.formats.delimiter) : "off") + '</span></div>' +
+          '<div class="kv"><span class="k">Phone</span><span>' + (state.formats.phoneE164 ? "E.164 · " + state.formats.phoneRegion : "as-is") + '</span></div>' +
+          '<div class="kv"><span class="k">DOB / ZIP</span><span>' + (state.formats.dobIso ? "ISO date" : "as-is") + ' · ' + (state.formats.zip5 ? "5-digit" : "full") + '</span></div>' +
+        '</div></div>' +
+      '</div>';
+
+    el("footNote").textContent = "Mapping stays editable — reopen the workbench any time to add the missing variables.";
+  }
+
+  /* ---------------- render ---------------- */
+
+  var RENDERERS = [stepHeader, stepAssign, stepFormat, stepConfirm];
+
+  function render() {
+    STEPS[0].sub = "row " + (state.headerRow + 1) + " selected";
+    STEPS[1].sub = CANONICAL.filter(function (c) { return isMapped(c.key); }).length + " of 6 mapped";
+    var cap = capability();
+    var live = ["Email", "Phone", "NDZ"].filter(function (n, i) { return [cap.email, cap.phone, cap.ndz][i].on; });
+    STEPS[3].sub = live.length ? live.join(" · ") : "no list enabled";
+
+    renderStepper();
+    renderChips();
+    RENDERERS[state.step]();
+
+    el("backBtn").disabled = state.step === 0;
+    el("nextBtn").textContent = state.step === STEPS.length - 1 ? "Save mapping" : "Continue";
+    el("nextBtn").disabled = state.step === STEPS.length - 1 && !live.length;
+
+    Array.prototype.forEach.call(el("stepper").querySelectorAll(".step"), function (b) {
+      b.addEventListener("click", function () {
+        state.step = Number(b.getAttribute("data-step"));
+        render();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      });
+    });
+  }
+
+  function toast(title, line) {
+    var old = document.querySelector(".toast");
+    if (old) { old.remove(); }
+    var node = document.createElement("div");
+    node.className = "toast";
+    node.innerHTML = "<b>" + esc(title) + "</b><span>" + esc(line) + "</span>";
+    document.body.appendChild(node);
+    window.setTimeout(function () { node.remove(); }, 4200);
+  }
+
+  el("backBtn").addEventListener("click", function () {
+    if (state.step > 0) { state.step -= 1; render(); }
+  });
+  el("nextBtn").addEventListener("click", function () {
+    if (state.step < STEPS.length - 1) {
+      state.step += 1;
+      render();
+      return;
+    }
+    var cap = capability();
+    var live = ["Email", "Phone", "NDZ"].filter(function (n, i) { return [cap.email, cap.phone, cap.ndz][i].on; });
+    state.saved = true;
+    render();
+    toast("Mapping saved for HR Alumni", "Enabled list types: " + live.join(", ") + ". Hash refresh will build only these kinds.");
+  });
+
+  render();
+})();
+</script>
+
+</body>
+</html>

@@ -71,6 +71,18 @@ def test_t8_2_match_request_from_drop_payload():
             "drop_hash_ndz_composite",
             "ndz-composite",
         ),
+        (
+            DropListType.NDZ,
+            {"ndz_hash": "ndz-digest"},
+            "drop_hash_ndz_composite",
+            "ndz-digest",
+        ),
+        (
+            DropListType.NDZ,
+            {"concatenated_hash": "preferred", "ndz_hash": "secondary"},
+            "drop_hash_ndz_composite",
+            "preferred",
+        ),
     ],
 )
 def test_t8_4_primary_hash_paths(list_type, hash_fields, expected_via, expected_value):
@@ -87,6 +99,7 @@ def test_t8_4_primary_hash_paths(list_type, hash_fields, expected_via, expected_
         (DropListType.EMAIL, {"pii_hash": "e"}, "drop_hash_email"),
         (DropListType.PHONE, {"pii_hash": "p"}, "drop_hash_phone"),
         (DropListType.NDZ, {"concatenated_hash": "n"}, "drop_hash_ndz_composite"),
+        (DropListType.NDZ, {"ndz_hash": "n"}, "drop_hash_ndz_composite"),
     ],
 )
 async def test_t8_4_drop_hash_pipeline_list_type_paths(list_type, hash_fields, expected_via):

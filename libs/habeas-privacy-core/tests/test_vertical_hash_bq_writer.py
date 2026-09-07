@@ -20,13 +20,27 @@ from habeas_privacy_core.vertical_hash.bq_writer import (
     qualify_table_id,
     write_hashed_raw,
 )
-from habeas_privacy_core.vertical_hash.hashing import email_hash_from_raw
+from habeas_privacy_core.vertical_hash.hashing import email_hash_from_raw, phone_hash_from_raw
 from habeas_privacy_core.vertical_hash.models import HashedVendorRecord
 from pydantic import ValidationError
 
 # CPPA DROP v1.2.0 golden vector (same as test_vertical_hash.py)
 EMAIL_HASH = "KA18MT/ph6IHYjzT9zwETySDQyvSh87YuoSBpOQtkhE="
+PHONE_HASH = "vGM7y5n+hBXRSEAklhHDPCbysyNgYTmXdMcagGUOY8E="
+NDZ_HASH = "mKDnDvwF2inxrKcK1hJN2TRkxPfL6kzNNTtU12eH8Bw="
 EXTRACTED_AT = datetime(2026, 8, 24, 16, 0, tzinfo=UTC)
+RAW_EMAIL = "anna.smith@domain.com"
+RAW_PHONE = "+1(415)555-9317"
+RAW_PHONE_DIGITS = "4155559317"
+
+_EXPECTED_SCHEMA_MODES = {
+    "email_hash": "NULLABLE",
+    "phone_hash": "NULLABLE",
+    "ndz_hash": "NULLABLE",
+    "vendor_record_id": "REQUIRED",
+    "system": "REQUIRED",
+    "extracted_at": "REQUIRED",
+}
 
 
 class _FakeLoadJob:
@@ -36,11 +50,11 @@ class _FakeLoadJob:
 
 class _FakeClient:
     def __init__(self) -> None:
-        self.calls: list[tuple[list[dict[str, str]], str, Any]] = []
+        self.calls: list[tuple[list[dict[str, str | None]], str, Any]] = []
 
     def load_table_from_json(
         self,
-        json_rows: list[dict[str, str]],
+        json_rows: list[dict[str, str | None]],
         destination: str,
         job_config: Any = None,
     ) -> _FakeLoadJob:
@@ -106,34 +120,83 @@ def test_write_hashed_raw_auth0_shape() -> None:
     )
     assert _disposition(job_config) == WRITE_TRUNCATE
     assert _schema_names(job_config) == list(HASHED_RAW_COLUMNS)
-    assert _schema_modes(job_config) == {name: "REQUIRED" for name in HASHED_RAW_COLUMNS}
+    assert _schema_modes(job_config) == _EXPECTED_SCHEMA_MODES
     assert rows == [
         {
             "email_hash": EMAIL_HASH,
+            "phone_hash": None,
+            "ndz_hash": None,
             "vendor_record_id": "auth0|opaque-user-1",
             "system": "auth0",
             "extracted_at": EXTRACTED_AT.isoformat(),
         }
     ]
     assert set(rows[0]) == set(HASHED_RAW_COLUMNS)
-    for forbidden in ("email", "phone", "name", "dob", "zip", "phone_hash", "ndz_hash"):
+    for forbidden in ("email", "phone", "name", "dob", "zip"):
         assert forbidden not in rows[0]
         assert forbidden not in _schema_names(job_config)
 
 
-def test_write_hashed_raw_skips_missing_email_hash() -> None:
+def test_write_hashed_raw_skips_when_all_hashes_missing() -> None:
     client = _FakeClient()
     rows_written = write_hashed_raw(
         AUTH0_HASHED_RAW_TABLE,
         [
             _auth0_record(),
-            _auth0_record(vendor_record_id="auth0|no-email", email_hash=None),
+            _auth0_record(
+                vendor_record_id="auth0|no-hashes",
+                email_hash=None,
+                phone_hash=None,
+                ndz_hash=None,
+            ),
         ],
         client=client,
     )
 
     assert rows_written == 1
     assert len(client.calls[0][0]) == 1
+
+
+def test_write_hashed_raw_accepts_phone_only_row() -> None:
+    client = _FakeClient()
+    rows_written = write_hashed_raw(
+        AUTH0_HASHED_RAW_TABLE,
+        [
+            _auth0_record(
+                vendor_record_id="auth0|phone-only",
+                email_hash=None,
+                phone_hash=PHONE_HASH,
+            ),
+        ],
+        client=client,
+    )
+
+    assert rows_written == 1
+    row = client.calls[0][0][0]
+    assert row["email_hash"] is None
+    assert row["phone_hash"] == PHONE_HASH
+    assert row["ndz_hash"] is None
+
+
+def test_write_hashed_raw_accepts_ndz_only_row() -> None:
+    client = _FakeClient()
+    rows_written = write_hashed_raw(
+        AUTH0_HASHED_RAW_TABLE,
+        [
+            _auth0_record(
+                vendor_record_id="auth0|ndz-only",
+                email_hash=None,
+                ndz_hash=NDZ_HASH,
+            ),
+        ],
+        client=client,
+    )
+
+    assert rows_written == 1
+    row = client.calls[0][0][0]
+    assert row["email_hash"] is None
+    assert row["phone_hash"] is None
+    assert row["ndz_hash"] == NDZ_HASH
 
 
 def test_write_hashed_raw_empty_list_does_not_truncate() -> None:
@@ -150,8 +213,13 @@ def test_write_hashed_raw_all_skipped_does_not_truncate() -> None:
         write_hashed_raw(
             AUTH0_HASHED_RAW_TABLE,
             [
-                _auth0_record(email_hash=None),
-                _auth0_record(vendor_record_id="auth0|also-skipped", email_hash=None),
+                _auth0_record(email_hash=None, phone_hash=None, ndz_hash=None),
+                _auth0_record(
+                    vendor_record_id="auth0|also-skipped",
+                    email_hash="",
+                    phone_hash="  ",
+                    ndz_hash=None,
+                ),
             ],
             client=client,
         )
@@ -159,17 +227,12 @@ def test_write_hashed_raw_all_skipped_does_not_truncate() -> None:
     assert client.calls == []
 
 
-def test_write_hashed_raw_schema_fields_required() -> None:
+def test_write_hashed_raw_schema_fields_modes() -> None:
     client = _FakeClient()
     write_hashed_raw(AUTH0_HASHED_RAW_TABLE, [_auth0_record()], client=client)
 
     modes = _schema_modes(client.calls[0][2])
-    assert modes == {
-        "email_hash": "REQUIRED",
-        "vendor_record_id": "REQUIRED",
-        "system": "REQUIRED",
-        "extracted_at": "REQUIRED",
-    }
+    assert modes == _EXPECTED_SCHEMA_MODES
 
 
 def test_write_hashed_raw_rejects_non_auth0_system() -> None:
@@ -188,17 +251,23 @@ def test_write_hashed_raw_rejects_non_auth0_system() -> None:
     assert client.calls == []
 
 
-def test_write_hashed_raw_omits_optional_hash_fields() -> None:
+def test_write_hashed_raw_emits_optional_hash_fields() -> None:
     client = _FakeClient()
     write_hashed_raw(
         AUTH0_HASHED_RAW_TABLE,
-        [_auth0_record(phone_hash="vGM7y5n+hBXRSEAklhHDPCbysyNgYTmXdMcagGUOY8E=")],
+        [
+            _auth0_record(
+                phone_hash=PHONE_HASH,
+                ndz_hash=NDZ_HASH,
+            )
+        ],
         client=client,
     )
 
     row = client.calls[0][0][0]
-    assert "phone_hash" not in row
-    assert "ndz_hash" not in row
+    assert row["email_hash"] == EMAIL_HASH
+    assert row["phone_hash"] == PHONE_HASH
+    assert row["ndz_hash"] == NDZ_HASH
     assert set(row) == set(HASHED_RAW_COLUMNS)
 
 
@@ -238,12 +307,63 @@ def test_write_hashed_raw_rejects_plaintext_in_email_hash() -> None:
     with pytest.raises(HashedRawWriteError, match="must not contain plaintext") as exc_info:
         write_hashed_raw(
             AUTH0_HASHED_RAW_TABLE,
-            [_auth0_record(email_hash="anna.smith@domain.com")],
+            [_auth0_record(email_hash=RAW_EMAIL)],
             client=client,
         )
 
-    assert "anna.smith@domain.com" not in str(exc_info.value)
+    assert RAW_EMAIL not in str(exc_info.value)
     assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    "field,plaintext",
+    [
+        ("phone_hash", RAW_PHONE),
+        ("phone_hash", RAW_PHONE_DIGITS),
+        ("phone_hash", RAW_EMAIL),
+        ("ndz_hash", RAW_PHONE),
+        ("ndz_hash", RAW_EMAIL),
+        ("email_hash", RAW_PHONE_DIGITS),
+    ],
+)
+def test_write_hashed_raw_rejects_plaintext_phone_and_email_as_hashes(
+    field: str,
+    plaintext: str,
+) -> None:
+    client = _FakeClient()
+    overrides = {"email_hash": None, "phone_hash": None, "ndz_hash": None, field: plaintext}
+    with pytest.raises(HashedRawWriteError, match="must not contain plaintext") as exc_info:
+        write_hashed_raw(
+            AUTH0_HASHED_RAW_TABLE,
+            [_auth0_record(**overrides)],
+            client=client,
+        )
+
+    assert plaintext not in str(exc_info.value)
+    assert client.calls == []
+
+
+def test_write_hashed_raw_accepts_valid_phone_and_ndz_digests() -> None:
+    client = _FakeClient()
+    hashed_phone = phone_hash_from_raw(RAW_PHONE)
+    assert hashed_phone == PHONE_HASH
+
+    write_hashed_raw(
+        AUTH0_HASHED_RAW_TABLE,
+        [
+            _auth0_record(
+                email_hash=EMAIL_HASH,
+                phone_hash=hashed_phone,
+                ndz_hash=NDZ_HASH,
+            )
+        ],
+        client=client,
+    )
+
+    row = client.calls[0][0][0]
+    assert row["email_hash"] == EMAIL_HASH
+    assert row["phone_hash"] == PHONE_HASH
+    assert row["ndz_hash"] == NDZ_HASH
 
 
 def test_write_hashed_raw_uses_precomputed_vertical_hash() -> None:
@@ -315,11 +435,17 @@ def test_write_hashed_raw_client_error_has_no_cause_or_email() -> None:
 def test_write_hashed_raw_logs_counts_not_pii(caplog: pytest.LogCaptureFixture) -> None:
     client = _FakeClient()
     with caplog.at_level(logging.INFO):
-        write_hashed_raw(AUTH0_HASHED_RAW_TABLE, [_auth0_record()], client=client)
+        write_hashed_raw(
+            AUTH0_HASHED_RAW_TABLE,
+            [_auth0_record(phone_hash=PHONE_HASH, ndz_hash=NDZ_HASH)],
+            client=client,
+        )
 
     combined = " ".join(record.getMessage() for record in caplog.records)
     assert "anna.smith@domain.com" not in combined
     assert EMAIL_HASH not in combined
+    assert PHONE_HASH not in combined
+    assert NDZ_HASH not in combined
     assert "auth0|opaque-user-1" not in combined
 
 

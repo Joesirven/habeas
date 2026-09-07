@@ -24,6 +24,52 @@ models:
         description: Timestamp when this mart row was written
         tests:
           - not_null
+  - name: mart_axios_headquarters_phone_hash
+    description: >
+      Durable Axios Headquarters phone serving build
+      (axios_headquarters_phone_hash__build); swapped into national
+      axios_headquarters_phone_hash serving table per macros/README.md.
+      Clustered (system, hash_value).
+    columns:
+      - name: hash_value
+        description: Base64(SHA-256) of DROP-standardized 10-digit phone (from hashed raw)
+        tests:
+          - not_null
+      - name: vendor_record_id
+        description: Opaque Axios Headquarters row id for suppression adapter lookup
+        tests:
+          - not_null
+      - name: system
+        description: Bounded context identifier (axios_headquarters)
+        tests:
+          - not_null
+      - name: built_at
+        description: Timestamp when this mart row was written
+        tests:
+          - not_null
+  - name: mart_axios_headquarters_ndz_hash
+    description: >
+      Durable Axios Headquarters NDZ serving build
+      (axios_headquarters_ndz_hash__build); swapped into national
+      axios_headquarters_ndz_hash serving table per macros/README.md.
+      Clustered (system, hash_value).
+    columns:
+      - name: hash_value
+        description: Base64(SHA-256) of concat of FN/LN/DOB/ZIP Base64 digests
+        tests:
+          - not_null
+      - name: vendor_record_id
+        description: Opaque Axios Headquarters row id for suppression adapter lookup
+        tests:
+          - not_null
+      - name: system
+        description: Bounded context identifier (axios_headquarters)
+        tests:
+          - not_null
+      - name: built_at
+        description: Timestamp when this mart row was written
+        tests:
+          - not_null
   - name: mart_paylocity_email_hash
     description: >
       Durable Paylocity email serving build (paylocity_email_hash__build); swapped
@@ -32,6 +78,50 @@ models:
     columns:
       - name: hash_value
         description: Base64(SHA-256) of DROP-standardized email (from hashed raw)
+        tests:
+          - not_null
+      - name: vendor_record_id
+        description: Opaque Paylocity employee id for suppression adapter lookup
+        tests:
+          - not_null
+      - name: system
+        description: Bounded context identifier (paylocity)
+        tests:
+          - not_null
+      - name: built_at
+        description: Timestamp when this mart row was written
+        tests:
+          - not_null
+  - name: mart_paylocity_phone_hash
+    description: >
+      Durable Paylocity phone serving build (paylocity_phone_hash__build); swapped
+      into national paylocity_phone_hash serving table per macros/README.md.
+      Clustered (system, hash_value).
+    columns:
+      - name: hash_value
+        description: Base64(SHA-256) of DROP-standardized 10-digit phone (from hashed raw)
+        tests:
+          - not_null
+      - name: vendor_record_id
+        description: Opaque Paylocity employee id for suppression adapter lookup
+        tests:
+          - not_null
+      - name: system
+        description: Bounded context identifier (paylocity)
+        tests:
+          - not_null
+      - name: built_at
+        description: Timestamp when this mart row was written
+        tests:
+          - not_null
+  - name: mart_paylocity_ndz_hash
+    description: >
+      Durable Paylocity NDZ serving build (paylocity_ndz_hash__build); swapped
+      into national paylocity_ndz_hash serving table per macros/README.md.
+      Clustered (system, hash_value).
+    columns:
+      - name: hash_value
+        description: Base64(SHA-256) of concat of FN/LN/DOB/ZIP Base64 digests
         tests:
           - not_null
       - name: vendor_record_id
@@ -68,6 +158,50 @@ models:
         description: Timestamp when this mart row was written
         tests:
           - not_null
+  - name: mart_lever_phone_hash
+    description: >
+      Durable Lever phone serving build (lever_phone_hash__build); swapped
+      into national lever_phone_hash serving table per macros/README.md.
+      Clustered (system, hash_value).
+    columns:
+      - name: hash_value
+        description: Base64(SHA-256) of DROP-standardized 10-digit phone (from hashed raw)
+        tests:
+          - not_null
+      - name: vendor_record_id
+        description: Opaque Lever candidate id for suppression adapter lookup
+        tests:
+          - not_null
+      - name: system
+        description: Bounded context identifier (lever)
+        tests:
+          - not_null
+      - name: built_at
+        description: Timestamp when this mart row was written
+        tests:
+          - not_null
+  - name: mart_lever_ndz_hash
+    description: >
+      Durable Lever NDZ serving build (lever_ndz_hash__build); swapped
+      into national lever_ndz_hash serving table per macros/README.md.
+      Clustered (system, hash_value).
+    columns:
+      - name: hash_value
+        description: Base64(SHA-256) of concat of FN/LN/DOB/ZIP Base64 digests
+        tests:
+          - not_null
+      - name: vendor_record_id
+        description: Opaque Lever candidate id for suppression adapter lookup
+        tests:
+          - not_null
+      - name: system
+        description: Bounded context identifier (lever)
+        tests:
+          - not_null
+      - name: built_at
+        description: Timestamp when this mart row was written
+        tests:
+          - not_null
   - name: mart_hr_alumni_email_hash
     description: >
       Durable Alumni Google Sheet email serving build (hr_alumni_email_hash__build);
@@ -76,6 +210,50 @@ models:
     columns:
       - name: hash_value
         description: Base64(SHA-256) of DROP-standardized email (from hashed raw)
+        tests:
+          - not_null
+      - name: vendor_record_id
+        description: Opaque Alumni sheet row id for suppression adapter lookup
+        tests:
+          - not_null
+      - name: system
+        description: Bounded context identifier (hr_alumni)
+        tests:
+          - not_null
+      - name: built_at
+        description: Timestamp when this mart row was written
+        tests:
+          - not_null
+  - name: mart_hr_alumni_phone_hash
+    description: >
+      Durable Alumni Google Sheet phone serving build (hr_alumni_phone_hash__build);
+      swapped into national hr_alumni_phone_hash serving table per macros/README.md.
+      Clustered (system, hash_value).
+    columns:
+      - name: hash_value
+        description: Base64(SHA-256) of DROP-standardized 10-digit phone (from hashed raw)
+        tests:
+          - not_null
+      - name: vendor_record_id
+        description: Opaque Alumni sheet row id for suppression adapter lookup
+        tests:
+          - not_null
+      - name: system
+        description: Bounded context identifier (hr_alumni)
+        tests:
+          - not_null
+      - name: built_at
+        description: Timestamp when this mart row was written
+        tests:
+          - not_null
+  - name: mart_hr_alumni_ndz_hash
+    description: >
+      Durable Alumni Google Sheet NDZ serving build (hr_alumni_ndz_hash__build);
+      swapped into national hr_alumni_ndz_hash serving table per macros/README.md.
+      Clustered (system, hash_value).
+    columns:
+      - name: hash_value
+        description: Base64(SHA-256) of concat of FN/LN/DOB/ZIP Base64 digests
         tests:
           - not_null
       - name: vendor_record_id
@@ -113,15 +291,64 @@ models:
         description: Timestamp when this mart row was written
         tests:
           - not_null
-  - name: stg_auth0_hashed
+  - name: mart_bizdev_contacts_phone_hash
     description: >
-      Auth0 hashed-raw staging. Filtered to system = 'auth0' and non-null
-      email_hash. Grain is one row per Auth0 user_id (vendor_record_id).
+      Durable Contact Us Google Sheet phone serving build
+      (bizdev_contacts_phone_hash__build); swapped into national
+      bizdev_contacts_phone_hash serving table per macros/README.md.
+      Clustered (system, hash_value).
     columns:
-      - name: email_hash
-        description: Base64(SHA-256) of DROP-standardized email (from hashed raw)
+      - name: hash_value
+        description: Base64(SHA-256) of DROP-standardized 10-digit phone (from hashed raw)
         tests:
           - not_null
+      - name: vendor_record_id
+        description: Opaque Contact Us sheet row id for suppression adapter lookup
+        tests:
+          - not_null
+      - name: system
+        description: Bounded context identifier (bizdev_contacts)
+        tests:
+          - not_null
+      - name: built_at
+        description: Timestamp when this mart row was written
+        tests:
+          - not_null
+  - name: mart_bizdev_contacts_ndz_hash
+    description: >
+      Durable Contact Us Google Sheet NDZ serving build
+      (bizdev_contacts_ndz_hash__build); swapped into national
+      bizdev_contacts_ndz_hash serving table per macros/README.md.
+      Clustered (system, hash_value).
+    columns:
+      - name: hash_value
+        description: Base64(SHA-256) of concat of FN/LN/DOB/ZIP Base64 digests
+        tests:
+          - not_null
+      - name: vendor_record_id
+        description: Opaque Contact Us sheet row id for suppression adapter lookup
+        tests:
+          - not_null
+      - name: system
+        description: Bounded context identifier (bizdev_contacts)
+        tests:
+          - not_null
+      - name: built_at
+        description: Timestamp when this mart row was written
+        tests:
+          - not_null
+  - name: stg_auth0_hashed
+    description: >
+      Auth0 hashed-raw staging. Filtered to system = 'auth0'. Selects nullable
+      email_hash, phone_hash, and ndz_hash plus vendor metadata. Grain is one
+      row per Auth0 user_id (vendor_record_id).
+    columns:
+      - name: email_hash
+        description: Base64(SHA-256) of DROP-standardized email (nullable)
+      - name: phone_hash
+        description: Base64(SHA-256) of DROP-standardized 10-digit phone (nullable)
+      - name: ndz_hash
+        description: Base64(SHA-256) of concat of FN/LN/DOB/ZIP Base64 digests (nullable)
       - name: vendor_record_id
         description: Opaque Auth0 user id for suppression adapter lookup
         tests:
@@ -146,6 +373,58 @@ models:
     columns:
       - name: hash_value
         description: Base64(SHA-256) of DROP-standardized email (from hashed raw)
+        tests:
+          - not_null
+      - name: vendor_record_id
+        description: Opaque Auth0 user id for suppression adapter lookup
+        tests:
+          - unique
+          - not_null
+      - name: system
+        description: Bounded context identifier (auth0)
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['auth0']
+      - name: built_at
+        description: Timestamp when this mart row was written
+        tests:
+          - not_null
+  - name: mart_auth0_phone_hash
+    description: >
+      Durable Auth0 phone serving build (auth0_phone_hash__build); swapped
+      into national auth0_phone_hash serving table per macros/README.md.
+      Clustered (system, hash_value).
+    columns:
+      - name: hash_value
+        description: Base64(SHA-256) of DROP-standardized 10-digit phone (from hashed raw)
+        tests:
+          - not_null
+      - name: vendor_record_id
+        description: Opaque Auth0 user id for suppression adapter lookup
+        tests:
+          - unique
+          - not_null
+      - name: system
+        description: Bounded context identifier (auth0)
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['auth0']
+      - name: built_at
+        description: Timestamp when this mart row was written
+        tests:
+          - not_null
+  - name: mart_auth0_ndz_hash
+    description: >
+      Durable Auth0 NDZ serving build (auth0_ndz_hash__build); swapped
+      into national auth0_ndz_hash serving table per macros/README.md.
+      Clustered (system, hash_value).
+    columns:
+      - name: hash_value
+        description: Base64(SHA-256) of concat of FN/LN/DOB/ZIP Base64 digests
         tests:
           - not_null
       - name: vendor_record_id

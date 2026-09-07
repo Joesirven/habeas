@@ -60,7 +60,12 @@ ATTEMPTS_TABLE = PAYLOCITY_ATTEMPTS_TABLE
 SUPPRESS_PAYLOCITY_ACTION = "suppress.paylocity"
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _DEFAULT_EXTERNAL_HASH_DBT_DIR = _REPO_ROOT / "transform" / "external_hash"
-PAYLOCITY_DBT_SELECT = ("stg_paylocity_hashed", "mart_paylocity_email_hash")
+PAYLOCITY_DBT_SELECT = (
+    "stg_paylocity_hashed",
+    "mart_paylocity_email_hash",
+    "mart_paylocity_phone_hash",
+    "mart_paylocity_ndz_hash",
+)
 
 
 class Settings(CoreSettings):

@@ -7,8 +7,17 @@
 Communications vertical (Axios HQ) — upload-every-batch matching and suppression.
 
 - Attempt queue: `axios_headquarters_attempts` with `step IN ('matching','suppression')`.
-- Hash index: owner CSV upload → hash in worker memory → BigQuery `axios_headquarters_hashed_raw`
+- Hash index: owner CSV upload → hash in worker memory → BigQuery
+  `axios_headquarters_hashed_raw` (nullable `email_hash` / `phone_hash` / `ndz_hash`)
   → [`transform/external_hash`](../../transform/external_hash/) dbt marts.
+- Matching looks up Email / Phone / NDZ builds by DROP list type:
+  `axios_headquarters_{email,phone,ndz}_hash__build`. Empty mart or missing hash →
+  `match_count=0` snapshot, not stub success.
+- Hash refresh dbt select (from `transform/external_hash`):
+  `stg_axios_headquarters_hashed mart_axios_headquarters_email_hash
+  mart_axios_headquarters_phone_hash mart_axios_headquarters_ndz_hash`.
+  Phone/NDZ cutover order: [external_hash README](../../transform/external_hash/README.md#phonendz-cutover-order)
+  — do not invent deploy or dispatcher steps here.
 - Never persist plaintext PII from uploads — Postgres `audit_payload` and BQ rows are hashed
   values and opaque vendor ids only.
 - Routes: `POST /matching/submit`, `POST /matching/collect`, `POST /suppression/submit`,

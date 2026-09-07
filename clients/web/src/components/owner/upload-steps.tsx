@@ -16,6 +16,7 @@ import {
   PHONE_FORMAT_OPTIONS,
   UPLOAD_IDENTIFIER_FIELDS,
   delimiterValueFromKey,
+  deriveListCapability,
   parseCsvHeaderRow,
   suggestUploadColumnMapping,
   systemWizardCopy,
@@ -244,10 +245,12 @@ export function MappingStep({
     onChange(suggestUploadColumnMapping(headers))
   }, [headers, mapping, onChange])
 
+  const capability = deriveListCapability(mapping)
+
   return (
     <WizardStepShell
-      title="Match your columns"
-      description="Tell us which columns identify a person. Email or phone alone is enough — extra columns are ignored."
+      title="Assign columns"
+      description="Map source headers to canonical variables. Email, Phone, and NDZ follow the mapping — you do not pick lists."
       onBack={onBack}
       primary={
         <Button
@@ -261,6 +264,38 @@ export function MappingStep({
       }
     >
       <div className="space-y-3">
+        <div className="rounded-md border border-line bg-canvas px-3 py-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-mute">
+            DROP list types · derived
+          </p>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {(
+              [
+                { id: 'Email', on: capability.email, hint: 'email mapped' },
+                { id: 'Phone', on: capability.phone, hint: 'phone mapped' },
+                {
+                  id: 'NDZ',
+                  on: capability.ndz,
+                  hint: `${capability.ndzMappedCount} of 4 name / DOB / ZIP`,
+                },
+              ] as const
+            ).map((chip) => (
+              <span
+                key={chip.id}
+                className={
+                  chip.on
+                    ? 'rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800'
+                    : 'rounded-md border border-line bg-white px-2 py-0.5 text-[11px] text-mute'
+                }
+              >
+                {chip.id}
+                <span className="ml-1 font-normal text-mute">
+                  {chip.on ? 'on' : chip.hint}
+                </span>
+              </span>
+            ))}
+          </div>
+        </div>
         {headers.length === 0 ? (
           <p className="rounded-md border border-line bg-canvas px-3 py-2.5 text-xs text-ink">
             No columns were detected in that file. Go back and check that it's a CSV with a
@@ -332,25 +367,44 @@ const FORMAT_STEP_CONTENT: Record<
   },
 }
 
+function formatStepDescription(formatId: FormatStepId, columnLabel?: string): string {
+  const fallback = FORMAT_STEP_CONTENT[formatId].help
+  const column = columnLabel?.trim()
+  if (!column) return fallback
+  if (formatId === 'email') {
+    return `How strictly should we check values in the "${column}" column? Standard works for most exports.`
+  }
+  if (formatId === 'phone') {
+    return `How are phone numbers written in the "${column}" column? US 10-digit works for most exports.`
+  }
+  if (formatId === 'name') {
+    return `How should we read the "${column}" column as first and last name?`
+  }
+  return `If ${column} can hold several values in one cell, tell us what separates them.`
+}
+
 export function FormatStep({
   formatId,
   value,
   onChange,
   onBack,
   onContinue,
+  columnLabel,
 }: {
   formatId: FormatStepId
   value: string
   onChange: (value: string) => void
   onBack: () => void
   onContinue: () => void
+  /** Mapped source column — phone/email/delimiter copy names this column. */
+  columnLabel?: string
 }) {
   const content = FORMAT_STEP_CONTENT[formatId]
 
   return (
     <WizardStepShell
       title={content.title}
-      description={content.help}
+      description={formatStepDescription(formatId, columnLabel)}
       onBack={onBack}
       primary={
         <Button type="button" size="sm" onClick={onContinue}>

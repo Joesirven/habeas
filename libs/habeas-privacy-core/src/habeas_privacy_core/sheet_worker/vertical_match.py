@@ -1,8 +1,8 @@
 """Sheet worker matching — mart lookup + snapshot persist.
 
-Loads the request's DROP email hash, looks up opaque vendor ids on the
-configured external_hash mart, and upserts ``request_vertical_matching`` with
-``vertical`` = catalog system slug.
+Loads the request's DROP hash for Email / Phone / NDZ, looks up opaque vendor
+ids on the matching external_hash mart, and upserts
+``request_vertical_matching`` with ``vertical`` = catalog system slug.
 
 Never logs email, hashes, or vendor ids.
 ``source_matching_attempt_id`` stays ``None`` — the snapshot FK is
@@ -25,6 +25,11 @@ from habeas_privacy_core.db.vertical_matching import upsert_vertical_matching_sn
 from habeas_privacy_core.models.intake import DropListType, RequestRecord
 from habeas_privacy_core.models.request import IntakeSource
 from habeas_privacy_core.sheet_worker.config import SheetWorkerConfig
+from habeas_privacy_core.vertical_hash.drop_list_hash import (
+    normalize_drop_list_type,
+    primary_hash_for_list_type,
+)
+from habeas_privacy_core.vertical_hash.hashing import assert_opaque_hash
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +37,21 @@ DEFAULT_BQ_PROJECT = "example-gcp-project"
 DEFAULT_BQ_DATASET = "external_hash_index"
 LOOKUP_RETRY_SECONDS = 60
 
+_HASH_LABEL_BY_LIST_TYPE: dict[DropListType, str] = {
+    DropListType.EMAIL: "email_hash",
+    DropListType.PHONE: "phone_hash",
+    DropListType.NDZ: "ndz_hash",
+}
+
 __all__ = [
     "SheetHashLookupError",
     "VerticalMatchOutcome",
     "lookup_vendor_ids_by_email_hash",
     "lookup_vendor_ids_by_email_hashes",
+    "lookup_vendor_ids_by_hashes",
+    "mart_table_for_list_type",
+    "normalize_drop_list_type",
+    "primary_hash_for_list_type",
     "run_vertical_match",
 ]
 
@@ -60,33 +75,26 @@ class VerticalMatchOutcome:
     error_detail: str | None = None
 
 
-def _is_email_list_type(list_type: DropListType | str | None) -> bool:
-    if list_type is None:
-        return False
-    if list_type == DropListType.EMAIL:
-        return True
-    return str(list_type) == DropListType.EMAIL.value
-
-
-def _email_hash(
-    *,
-    email_hash: str | None,
-    hash_fields: dict[str, Any] | None,
+def mart_table_for_list_type(
+    config: SheetWorkerConfig,
+    list_type: DropListType | str,
 ) -> str | None:
-    if email_hash is not None and str(email_hash).strip():
-        return str(email_hash).strip()
-    if not hash_fields:
+    """Resolve serving-build table for list_type. Email uses config.mart_table."""
+    normalized = normalize_drop_list_type(list_type)
+    if normalized is None:
         return None
-    value = (
-        hash_fields.get("hashed_email")
-        or hash_fields.get("email_hash")
-        or hash_fields.get("pii_hash")
-        or hash_fields.get("hash")
-    )
-    if value is None:
+    if normalized == DropListType.EMAIL:
+        return config.mart_table
+    try:
+        from habeas_privacy_core.vertical_hash import bq_lookup as core_bq
+    except ImportError:
         return None
-    cleaned = str(value).strip()
-    return cleaned or None
+    system = config.system_id
+    if normalized == DropListType.PHONE:
+        return (getattr(core_bq, "PHONE_HASH_MARTS", {}) or {}).get(system)
+    if normalized == DropListType.NDZ:
+        return (getattr(core_bq, "NDZ_HASH_MARTS", {}) or {}).get(system)
+    return None
 
 
 def _error_code(exc: BaseException) -> str:
@@ -116,25 +124,30 @@ def _failure_outcome(config: SheetWorkerConfig, exc: BaseException) -> VerticalM
     )
 
 
-async def _email_hash_from_record(conn: Any, record: RequestRecord) -> str | None:
+async def _hash_from_record(
+    conn: Any, record: RequestRecord
+) -> tuple[DropListType | None, str | None]:
     if record.intake_source != IntakeSource.DROP or record.raw_record_id is None:
-        return None
+        return None, None
     try:
         payload = await request_resolver(
             conn, IntakeSource.DROP, int(record.raw_record_id)
         )
     except LookupError:
-        return None
-    if not _is_email_list_type(payload.list_type):
-        return None
-    return _email_hash(email_hash=None, hash_fields=payload.hash_fields)
+        return None, None
+    list_type = normalize_drop_list_type(payload.list_type)
+    if list_type is None:
+        return None, None
+    return list_type, primary_hash_for_list_type(list_type, payload.hash_fields)
 
 
-async def _load_drop_email_hash(conn: Any, request_id: str) -> str | None:
+async def _load_drop_hash(
+    conn: Any, request_id: str
+) -> tuple[DropListType | None, str | None]:
     record = await get_request(conn, request_id)
     if record is None:
         raise LookupError("request not found")
-    return await _email_hash_from_record(conn, record)
+    return await _hash_from_record(conn, record)
 
 
 async def _persist_snapshot(
@@ -474,6 +487,89 @@ def lookup_vendor_ids_by_email_hashes(
     return out
 
 
+def lookup_vendor_ids_by_hashes(
+    config: SheetWorkerConfig,
+    hash_values: list[str],
+    *,
+    list_type: DropListType | str,
+    client: Any | None = None,
+    project: str | None = None,
+    dataset: str | None = None,
+) -> dict[str, list[str]]:
+    """Set-based lookup against the Email / Phone / NDZ mart for this system."""
+    normalized = normalize_drop_list_type(list_type)
+    if normalized is None:
+        raise ValueError(f"unsupported list_type: {list_type!r}")
+
+    if normalized == DropListType.EMAIL:
+        return lookup_vendor_ids_by_email_hashes(
+            config,
+            hash_values,
+            client=client,
+            project=project,
+            dataset=dataset,
+        )
+
+    table = mart_table_for_list_type(config, normalized)
+    if not table:
+        raise SheetHashLookupError(
+            f"mart table missing for list_type={normalized.value}",
+            retry_seconds=LOOKUP_RETRY_SECONDS,
+        )
+
+    try:
+        from habeas_privacy_core.vertical_hash import bq_lookup as core_bq
+    except ImportError as exc:
+        raise SheetHashLookupError("vertical_hash bq_lookup unavailable") from exc
+
+    if normalized == DropListType.PHONE:
+        fn = getattr(core_bq, "lookup_vendor_ids_by_phone_hashes", None)
+        plaintext_label = "phone_hash"
+    else:
+        fn = getattr(core_bq, "lookup_vendor_ids_by_ndz_hashes", None)
+        plaintext_label = "ndz_hash"
+
+    if not callable(fn):
+        raise SheetHashLookupError(f"{plaintext_label} lookup unavailable")
+
+    try:
+        return fn(
+            hash_values,
+            table=table,
+            system=config.system_id,
+            client=client,
+            project=project,
+            dataset=dataset,
+        )
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise _as_sheet_lookup_error(exc) from None
+
+
+def _mart_exists_for_list_type(
+    config: SheetWorkerConfig,
+    list_type: DropListType,
+    *,
+    client: Any | None = None,
+) -> bool:
+    table = mart_table_for_list_type(config, list_type)
+    if not table:
+        return False
+    try:
+        from habeas_privacy_core.vertical_hash.bq_lookup import hash_mart_exists
+    except ImportError:
+        return False
+    return bool(
+        hash_mart_exists(
+            config.system_id,
+            list_type=list_type.value,
+            table=table,
+            client=client,
+        )
+    )
+
+
 async def run_vertical_match(
     conn: Any,
     config: SheetWorkerConfig,
@@ -482,29 +578,38 @@ async def run_vertical_match(
     attempt_id: int,
     hash_fields: dict[str, Any] | None = None,
     email_hash: str | None = None,
+    list_type: DropListType | str | None = None,
     lookup: Callable[..., list[str]] | None = None,
     persist: Any | None = None,
+    bq_client: Any | None = None,
 ) -> VerticalMatchOutcome:
     """Look up vendor ids for one claimed sheet matching row.
 
-    Missing email hash persists a zero-hit snapshot and succeeds.
-    ``SheetHashLookupError`` and plaintext-``@`` ``ValueError`` persist
-    nothing and return a typed failure.
+    Routes Email / Phone / NDZ to the matching mart. Missing hash persists a
+    zero-hit snapshot and succeeds. Unsupported list types also zero-hit.
+    Missing mart for Phone / NDZ fails closed (retry) without querying email.
+    ``SheetHashLookupError`` and opaque-hash ``ValueError`` (non-retry
+    ``sheets_invalid_hash``) persist nothing and return a typed failure.
     """
     del attempt_id
     key = config.system_id
     upsert = persist or upsert_vertical_matching_snapshot
     try:
         if email_hash is not None or hash_fields is not None:
-            hash_value = _email_hash(email_hash=email_hash, hash_fields=hash_fields)
+            resolved_type = normalize_drop_list_type(list_type) or DropListType.EMAIL
+            hash_value = primary_hash_for_list_type(
+                resolved_type,
+                hash_fields,
+                email_hash=email_hash,
+            )
         else:
-            hash_value = await _load_drop_email_hash(conn, request_id)
+            resolved_type, hash_value = await _load_drop_hash(conn, request_id)
     except LookupError as exc:
         return _failure_outcome(config, exc)
     except Exception as exc:
         return _failure_outcome(config, exc)
 
-    if not hash_value:
+    if resolved_type is None or not hash_value:
         try:
             await _persist_snapshot(
                 upsert,
@@ -526,20 +631,50 @@ async def run_vertical_match(
         )
         return VerticalMatchOutcome(ok=True, match_count=0)
 
-    if "@" in hash_value:
-        return _failure_outcome(
-            config, ValueError("email_hash must not contain plaintext")
-        )
+    label = _HASH_LABEL_BY_LIST_TYPE.get(resolved_type, "hash")
+    try:
+        hash_value = assert_opaque_hash(hash_value, label=label)
+    except ValueError as exc:
+        return _failure_outcome(config, exc)
+
+    if lookup is None and resolved_type != DropListType.EMAIL:
+        try:
+            exists = await asyncio.to_thread(
+                _mart_exists_for_list_type,
+                config,
+                resolved_type,
+                client=bq_client,
+            )
+        except Exception as exc:
+            return _failure_outcome(config, exc)
+        if not exists:
+            return _failure_outcome(
+                config,
+                SheetHashLookupError(
+                    f"mart missing for list_type={resolved_type.value}",
+                    retry_seconds=LOOKUP_RETRY_SECONDS,
+                ),
+            )
 
     try:
         if lookup is not None:
             vendor_ids = await asyncio.to_thread(lookup, hash_value)
-        else:
+        elif resolved_type == DropListType.EMAIL:
             vendor_ids = await asyncio.to_thread(
                 lookup_vendor_ids_by_email_hash,
                 config,
                 hash_value,
+                client=bq_client,
             )
+        else:
+            hits = await asyncio.to_thread(
+                lookup_vendor_ids_by_hashes,
+                config,
+                [hash_value],
+                list_type=resolved_type,
+                client=bq_client,
+            )
+            vendor_ids = list(hits.get(hash_value, []) or [])
         ids = list(vendor_ids or [])
         match_count = len(ids)
         await _persist_snapshot(

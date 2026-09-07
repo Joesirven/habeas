@@ -12,7 +12,9 @@
 
 Vite · React · TypeScript · TanStack Router · TanStack Query · shadcn · Bun
 
-Labs (`/dev/*`) are DEV-only — Cloud Build sets `VITE_ENABLE_LABS=true` on `admin-web-dev` and `false` on `admin-web-prod`.
+Labs (`/dev/*`) are DEV-only — Cloud Build sets `VITE_ENABLE_LABS=true` on `admin-web-dev` and `false` on `admin-web-prod` / `admin-web-qa`.
+
+Deployed front doors (all IAP SSO): `admin-web-dev` (labs on → admin-api-dev), `admin-web-prod` (labs off → admin-api-prod), `admin-web-qa` (`https://admin-web-qa-hsa55rg7ja-uk.a.run.app`, labs off, prod-shaped **QA** link deliberately wired to **admin-api-dev** so testers cannot write prod — never repoint it at admin-api-prod).
 
 ## Identity (Architecture B)
 

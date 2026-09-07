@@ -12,6 +12,10 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from habeas_privacy_core.connections.catalog import (
+    ListCapability,
+    filter_dbt_select,
+)
 from habeas_privacy_core.sheet_worker.config import SheetWorkerConfig
 
 __all__ = ["DbtRunResult", "run_external_hash_dbt_build"]
@@ -30,9 +34,12 @@ def run_external_hash_dbt_build(
     *,
     dbt_dir: str | Path,
     timeout_seconds: int,
+    capability: ListCapability | None = None,
 ) -> DbtRunResult:
-    """Run ``dbt build`` for one sheet system's staging + email-hash mart."""
+    """Run ``dbt build`` for one sheet system's staging + enabled-kind marts."""
     select = config.dbt_select
+    if capability is not None:
+        select = filter_dbt_select(select, capability)
     if not select:
         return DbtRunResult(ok=True, returncode=0, stdout="", stderr="")
 

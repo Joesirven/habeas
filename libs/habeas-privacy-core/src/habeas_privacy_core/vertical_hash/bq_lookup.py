@@ -5,37 +5,59 @@ plaintext email. Write path stays in ``bq_writer``.
 
 Auth0 APIs (``lookup_auth0_vendor_ids_by_email_hash(es)``, ``Auth0HashLookupError``)
 stay stable; other verticals share the same set-based UNNEST shape via
-``lookup_vendor_ids_by_email_hashes``.
+``lookup_vendor_ids_by_email_hashes`` (and phone / ndz parallels).
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from habeas_privacy_core.audit.redaction import redact_error_text
+from habeas_privacy_core.vertical_hash.hashing import assert_opaque_hash
+
+HashMartKind = Literal["email", "phone", "ndz"]
 
 __all__ = [
     "AUTH0_EMAIL_HASH_BUILD_TABLE",
+    "AUTH0_NDZ_HASH_BUILD_TABLE",
+    "AUTH0_PHONE_HASH_BUILD_TABLE",
     "AUTH0_SYSTEM",
     "AXIOS_HEADQUARTERS_EMAIL_HASH_BUILD_TABLE",
+    "AXIOS_HEADQUARTERS_NDZ_HASH_BUILD_TABLE",
+    "AXIOS_HEADQUARTERS_PHONE_HASH_BUILD_TABLE",
     "AXIOS_HEADQUARTERS_SYSTEM",
     "BIZDEV_CONTACTS_EMAIL_HASH_BUILD_TABLE",
+    "BIZDEV_CONTACTS_NDZ_HASH_BUILD_TABLE",
+    "BIZDEV_CONTACTS_PHONE_HASH_BUILD_TABLE",
     "BIZDEV_CONTACTS_SYSTEM",
     "DEFAULT_BQ_DATASET",
     "DEFAULT_BQ_PROJECT",
     "EMAIL_HASH_MARTS",
     "GOOGLE_SHEETS_EMAIL_HASH_BUILD_TABLE",
+    "GOOGLE_SHEETS_NDZ_HASH_BUILD_TABLE",
+    "GOOGLE_SHEETS_PHONE_HASH_BUILD_TABLE",
     "GOOGLE_SHEETS_SYSTEM",
     "HR_ALUMNI_EMAIL_HASH_BUILD_TABLE",
+    "HR_ALUMNI_NDZ_HASH_BUILD_TABLE",
+    "HR_ALUMNI_PHONE_HASH_BUILD_TABLE",
     "HR_ALUMNI_SYSTEM",
     "LEVER_EMAIL_HASH_BUILD_TABLE",
+    "LEVER_NDZ_HASH_BUILD_TABLE",
+    "LEVER_PHONE_HASH_BUILD_TABLE",
     "LEVER_SYSTEM",
+    "NDZ_HASH_MARTS",
     "PAYLOCITY_EMAIL_HASH_BUILD_TABLE",
+    "PAYLOCITY_NDZ_HASH_BUILD_TABLE",
+    "PAYLOCITY_PHONE_HASH_BUILD_TABLE",
     "PAYLOCITY_SYSTEM",
+    "PHONE_HASH_MARTS",
     "Auth0HashLookupError",
+    "HashMartKind",
     "VerticalHashLookupError",
+    "email_hash_mart_exists",
+    "hash_mart_exists",
     "lookup_auth0_vendor_ids_by_email_hash",
     "lookup_auth0_vendor_ids_by_email_hashes",
     "lookup_axios_headquarters_vendor_ids_by_email_hash",
@@ -50,9 +72,10 @@ __all__ = [
     "lookup_lever_vendor_ids_by_email_hashes",
     "lookup_paylocity_vendor_ids_by_email_hash",
     "lookup_paylocity_vendor_ids_by_email_hashes",
-    "email_hash_mart_exists",
     "lookup_vendor_ids_by_email_hash",
     "lookup_vendor_ids_by_email_hashes",
+    "lookup_vendor_ids_by_ndz_hashes",
+    "lookup_vendor_ids_by_phone_hashes",
 ]
 
 logger = logging.getLogger(__name__)
@@ -61,18 +84,32 @@ DEFAULT_BQ_PROJECT = "example-gcp-project"
 DEFAULT_BQ_DATASET = "external_hash_index"
 
 AUTH0_EMAIL_HASH_BUILD_TABLE = "auth0_email_hash__build"
+AUTH0_PHONE_HASH_BUILD_TABLE = "auth0_phone_hash__build"
+AUTH0_NDZ_HASH_BUILD_TABLE = "auth0_ndz_hash__build"
 AUTH0_SYSTEM = "auth0"
 AXIOS_HEADQUARTERS_EMAIL_HASH_BUILD_TABLE = "axios_headquarters_email_hash__build"
+AXIOS_HEADQUARTERS_PHONE_HASH_BUILD_TABLE = "axios_headquarters_phone_hash__build"
+AXIOS_HEADQUARTERS_NDZ_HASH_BUILD_TABLE = "axios_headquarters_ndz_hash__build"
 AXIOS_HEADQUARTERS_SYSTEM = "axios_headquarters"
 PAYLOCITY_EMAIL_HASH_BUILD_TABLE = "paylocity_email_hash__build"
+PAYLOCITY_PHONE_HASH_BUILD_TABLE = "paylocity_phone_hash__build"
+PAYLOCITY_NDZ_HASH_BUILD_TABLE = "paylocity_ndz_hash__build"
 PAYLOCITY_SYSTEM = "paylocity"
 LEVER_EMAIL_HASH_BUILD_TABLE = "lever_email_hash__build"
+LEVER_PHONE_HASH_BUILD_TABLE = "lever_phone_hash__build"
+LEVER_NDZ_HASH_BUILD_TABLE = "lever_ndz_hash__build"
 LEVER_SYSTEM = "lever"
 HR_ALUMNI_EMAIL_HASH_BUILD_TABLE = "hr_alumni_email_hash__build"
+HR_ALUMNI_PHONE_HASH_BUILD_TABLE = "hr_alumni_phone_hash__build"
+HR_ALUMNI_NDZ_HASH_BUILD_TABLE = "hr_alumni_ndz_hash__build"
 HR_ALUMNI_SYSTEM = "hr_alumni"
 BIZDEV_CONTACTS_EMAIL_HASH_BUILD_TABLE = "bizdev_contacts_email_hash__build"
+BIZDEV_CONTACTS_PHONE_HASH_BUILD_TABLE = "bizdev_contacts_phone_hash__build"
+BIZDEV_CONTACTS_NDZ_HASH_BUILD_TABLE = "bizdev_contacts_ndz_hash__build"
 BIZDEV_CONTACTS_SYSTEM = "bizdev_contacts"
 GOOGLE_SHEETS_EMAIL_HASH_BUILD_TABLE = "google_sheets_email_hash__build"
+GOOGLE_SHEETS_PHONE_HASH_BUILD_TABLE = "google_sheets_phone_hash__build"
+GOOGLE_SHEETS_NDZ_HASH_BUILD_TABLE = "google_sheets_ndz_hash__build"
 GOOGLE_SHEETS_SYSTEM = "google_sheets"
 
 # system catalog slug → dbt serving-build table alias in external_hash_index
@@ -84,6 +121,32 @@ EMAIL_HASH_MARTS: dict[str, str] = {
     HR_ALUMNI_SYSTEM: HR_ALUMNI_EMAIL_HASH_BUILD_TABLE,
     BIZDEV_CONTACTS_SYSTEM: BIZDEV_CONTACTS_EMAIL_HASH_BUILD_TABLE,
     GOOGLE_SHEETS_SYSTEM: GOOGLE_SHEETS_EMAIL_HASH_BUILD_TABLE,
+}
+
+PHONE_HASH_MARTS: dict[str, str] = {
+    AUTH0_SYSTEM: AUTH0_PHONE_HASH_BUILD_TABLE,
+    AXIOS_HEADQUARTERS_SYSTEM: AXIOS_HEADQUARTERS_PHONE_HASH_BUILD_TABLE,
+    PAYLOCITY_SYSTEM: PAYLOCITY_PHONE_HASH_BUILD_TABLE,
+    LEVER_SYSTEM: LEVER_PHONE_HASH_BUILD_TABLE,
+    HR_ALUMNI_SYSTEM: HR_ALUMNI_PHONE_HASH_BUILD_TABLE,
+    BIZDEV_CONTACTS_SYSTEM: BIZDEV_CONTACTS_PHONE_HASH_BUILD_TABLE,
+    GOOGLE_SHEETS_SYSTEM: GOOGLE_SHEETS_PHONE_HASH_BUILD_TABLE,
+}
+
+NDZ_HASH_MARTS: dict[str, str] = {
+    AUTH0_SYSTEM: AUTH0_NDZ_HASH_BUILD_TABLE,
+    AXIOS_HEADQUARTERS_SYSTEM: AXIOS_HEADQUARTERS_NDZ_HASH_BUILD_TABLE,
+    PAYLOCITY_SYSTEM: PAYLOCITY_NDZ_HASH_BUILD_TABLE,
+    LEVER_SYSTEM: LEVER_NDZ_HASH_BUILD_TABLE,
+    HR_ALUMNI_SYSTEM: HR_ALUMNI_NDZ_HASH_BUILD_TABLE,
+    BIZDEV_CONTACTS_SYSTEM: BIZDEV_CONTACTS_NDZ_HASH_BUILD_TABLE,
+    GOOGLE_SHEETS_SYSTEM: GOOGLE_SHEETS_NDZ_HASH_BUILD_TABLE,
+}
+
+_HASH_MART_BY_KIND: dict[str, dict[str, str]] = {
+    "email": EMAIL_HASH_MARTS,
+    "phone": PHONE_HASH_MARTS,
+    "ndz": NDZ_HASH_MARTS,
 }
 
 
@@ -103,9 +166,25 @@ class BigQueryClient(Protocol):
     def query(self, sql: str, job_config: Any = None) -> Any: ...
 
 
-def email_hash_mart_exists(
+def _normalize_mart_kind(
+    *,
+    list_type: str | None = None,
+    kind: str | None = None,
+) -> HashMartKind:
+    raw = (kind if kind is not None else list_type)
+    if raw is None or not str(raw).strip():
+        return "email"
+    normalized = str(raw).strip().lower()
+    if normalized in _HASH_MART_BY_KIND:
+        return normalized  # type: ignore[return-value]
+    raise ValueError(f"unsupported hash mart kind: {raw!r}")
+
+
+def hash_mart_exists(
     system: str,
     *,
+    list_type: str | None = None,
+    kind: str | None = None,
     client: BigQueryClient | None = None,
     project: str | None = None,
     dataset: str | None = None,
@@ -113,11 +192,21 @@ def email_hash_mart_exists(
 ) -> bool:
     """Return True when the serving-build mart table exists in BigQuery.
 
-    Resolves the table from ``EMAIL_HASH_MARTS`` unless *table* is provided.
-    Missing / unknown systems return False. Never logs table row contents.
+    Resolves the table from ``EMAIL_HASH_MARTS`` / ``PHONE_HASH_MARTS`` /
+    ``NDZ_HASH_MARTS`` via *kind* or *list_type* (``email`` / ``phone`` /
+    ``ndz``, case-insensitive) unless *table* is provided. Defaults to email
+    when neither is set. Missing / unknown systems return False. Never logs
+    table row contents.
     """
     system_id = (system or "").strip()
-    table_id = (table or EMAIL_HASH_MARTS.get(system_id) or "").strip()
+    if table is not None and str(table).strip():
+        table_id = str(table).strip()
+    else:
+        try:
+            mart_kind = _normalize_mart_kind(list_type=list_type, kind=kind)
+        except ValueError:
+            return False
+        table_id = (_HASH_MART_BY_KIND[mart_kind].get(system_id) or "").strip()
     if not system_id or not table_id:
         return False
 
@@ -156,6 +245,28 @@ def email_hash_mart_exists(
         return False
 
 
+def email_hash_mart_exists(
+    system: str,
+    *,
+    client: BigQueryClient | None = None,
+    project: str | None = None,
+    dataset: str | None = None,
+    table: str | None = None,
+) -> bool:
+    """Return True when the email serving-build mart table exists in BigQuery.
+
+    Thin wrapper around ``hash_mart_exists(..., kind="email")``.
+    """
+    return hash_mart_exists(
+        system,
+        kind="email",
+        client=client,
+        project=project,
+        dataset=dataset,
+        table=table,
+    )
+
+
 def lookup_vendor_ids_by_email_hash(
     hash_value: str,
     *,
@@ -174,8 +285,7 @@ def lookup_vendor_ids_by_email_hash(
     cleaned = (hash_value or "").strip()
     if not cleaned:
         return []
-    if "@" in cleaned:
-        raise ValueError("email_hash must not contain plaintext")
+    assert_opaque_hash(cleaned, label="email_hash")
 
     table_id = (table or "").strip()
     system_id = (system or "").strip()
@@ -253,14 +363,84 @@ def lookup_vendor_ids_by_email_hashes(
     map to empty lists). Empty ``hash_values`` returns {}. Never logs hashes or
     vendor ids — counts and table names only.
     """
+    return _lookup_vendor_ids_by_hashes(
+        hash_values,
+        table=table,
+        system=system,
+        client=client,
+        project=project,
+        dataset=dataset,
+        plaintext_label="email_hash",
+    )
+
+
+def lookup_vendor_ids_by_phone_hashes(
+    hash_values: list[str],
+    *,
+    table: str,
+    system: str,
+    client: BigQueryClient | None = None,
+    project: str | None = None,
+    dataset: str | None = None,
+) -> dict[str, list[str]]:
+    """Set-based mart lookup: one query for many phone hashes.
+
+    Same UNNEST / LEFT JOIN shape as ``lookup_vendor_ids_by_email_hashes``
+    (``hash_value`` + ``system``). Never logs hashes or vendor ids.
+    """
+    return _lookup_vendor_ids_by_hashes(
+        hash_values,
+        table=table,
+        system=system,
+        client=client,
+        project=project,
+        dataset=dataset,
+        plaintext_label="phone_hash",
+    )
+
+
+def lookup_vendor_ids_by_ndz_hashes(
+    hash_values: list[str],
+    *,
+    table: str,
+    system: str,
+    client: BigQueryClient | None = None,
+    project: str | None = None,
+    dataset: str | None = None,
+) -> dict[str, list[str]]:
+    """Set-based mart lookup: one query for many ndz hashes.
+
+    Same UNNEST / LEFT JOIN shape as ``lookup_vendor_ids_by_email_hashes``
+    (``hash_value`` + ``system``). Never logs hashes or vendor ids.
+    """
+    return _lookup_vendor_ids_by_hashes(
+        hash_values,
+        table=table,
+        system=system,
+        client=client,
+        project=project,
+        dataset=dataset,
+        plaintext_label="ndz_hash",
+    )
+
+
+def _lookup_vendor_ids_by_hashes(
+    hash_values: list[str],
+    *,
+    table: str,
+    system: str,
+    client: BigQueryClient | None = None,
+    project: str | None = None,
+    dataset: str | None = None,
+    plaintext_label: str,
+) -> dict[str, list[str]]:
     unique_hashes = list(
         dict.fromkeys(h.strip() for h in hash_values if h and str(h).strip())
     )
     if not unique_hashes:
         return {}
     for cleaned in unique_hashes:
-        if "@" in cleaned:
-            raise ValueError("email_hash must not contain plaintext")
+        assert_opaque_hash(cleaned, label=plaintext_label)
 
     table_id = (table or "").strip()
     system_id = (system or "").strip()

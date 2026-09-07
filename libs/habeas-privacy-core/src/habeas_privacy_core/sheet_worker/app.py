@@ -339,11 +339,17 @@ def create_sheet_worker_app(
             return count
 
         try:
+            from habeas_privacy_core.connections.catalog import (
+                list_capability_from_metadata,
+            )
+
+            capability = list_capability_from_metadata(config.system_id, metadata)
             dbt_result = await _await_if_needed(
                 run_external_hash_dbt_build(
                     config,
                     dbt_dir=runtime.external_hash_dbt_dir,
                     timeout_seconds=runtime.dbt_timeout_seconds,
+                    capability=capability,
                 )
             )
         except subprocess.TimeoutExpired:

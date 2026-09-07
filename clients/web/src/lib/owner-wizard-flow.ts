@@ -67,7 +67,7 @@ function uploadBranchSteps(input: SubflowInput): WizardStep[] {
 /**
  * Steps for one system's subflow (hub excluded).
  *
- * Upload branches intentionally end at cadence/system-done: format steps are
+ * Upload and Sheets branches end at cadence/system-done: format steps are
  * known only after mapping, so the runner inserts formatStepsForMapping(...)
  * between mapping and cadence at runtime. Systems allowing both modes return
  * only the choice step; the runner pushes branchSteps(input, mode) once the
@@ -78,6 +78,7 @@ export function systemSubflowSteps(input: SubflowInput): WizardStep[] {
   if (isSheets) {
     return [
       { kind: 'sheets', system },
+      { kind: 'mapping', system },
       { kind: 'cadence', system },
       { kind: 'system-done', system },
     ]
@@ -121,6 +122,26 @@ export function formatStepsForMapping(
     steps.push({ kind: 'format', system, formatId: 'delimiter' })
   }
   return steps
+}
+
+/** Source column the format step should name, from the confirmed mapping. */
+export function formatStepColumnLabel(
+  formatId: 'email' | 'phone' | 'name' | 'delimiter',
+  mapping: Record<string, string>,
+): string | undefined {
+  const mapped = (field: string) => {
+    const value = mapping[field]
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined
+  }
+  if (formatId === 'email') return mapped('email')
+  if (formatId === 'phone') return mapped('phone')
+  if (formatId === 'name') return mapped('full_name')
+  const columns = [mapped('email'), mapped('phone')].filter(
+    (value): value is string => Boolean(value),
+  )
+  if (columns.length === 0) return undefined
+  if (columns.length === 1) return columns[0]
+  return `${columns[0]} and ${columns[1]}`
 }
 
 /** History stack: index 0 is the hub, the last element is the current step. */

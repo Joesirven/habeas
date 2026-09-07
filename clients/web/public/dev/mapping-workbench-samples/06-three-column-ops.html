@@ -1,0 +1,995 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sample F — Three-column ops</title>
+  <style>
+    :root {
+      --navy: #1E4191;
+      --mid: #2B7BB9;
+      --light: #428BCA;
+      --canvas: #F8FAFC;
+      --surface: #FFFFFF;
+      --line: #E2E8F0;
+      --ink: #0F172A;
+      --mute: #64748B;
+      --ok: #166534;
+      --ok-bg: #ECFDF5;
+      --ok-line: #A7F3D0;
+      --wait: #92400E;
+      --wait-bg: #FFFBEB;
+      --wait-line: #FDE68A;
+      --fail: #991B1B;
+      --fail-bg: #FEF2F2;
+      --fail-line: #FECACA;
+      --pick: #EFF6FF;
+      --radius: 6px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: var(--canvas);
+      color: var(--ink);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    button, input, select { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+
+    .page {
+      min-height: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .top {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: rgba(255, 255, 255, 0.95);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .top-inner {
+      padding: 10px 16px 8px;
+    }
+
+    .kicker {
+      margin: 0;
+      font-size: 10px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--mute);
+      font-weight: 600;
+    }
+
+    h1 {
+      margin: 2px 0 0;
+      font-size: 18px;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+    }
+
+    .support {
+      margin: 2px 0 0;
+      color: var(--mute);
+      font-size: 12px;
+    }
+
+    .workbench {
+      flex: 1;
+      display: grid;
+      grid-template-columns: minmax(280px, 1.1fr) minmax(260px, 1fr) minmax(280px, 1.05fr);
+      min-height: 0;
+    }
+
+    .col {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      background: var(--surface);
+      border-right: 1px solid var(--line);
+    }
+
+    .col:last-child { border-right: 0; }
+
+    .col-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      background: var(--canvas);
+      min-height: 40px;
+    }
+
+    .col-head h2 {
+      margin: 0;
+      font-size: 11px;
+      font-weight: 650;
+      letter-spacing: 0.01em;
+    }
+
+    .col-head .meta {
+      color: var(--mute);
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .spinner {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .spinner label {
+      color: var(--mute);
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .stepper {
+      display: inline-flex;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: var(--surface);
+    }
+
+    .stepper button {
+      width: 22px;
+      height: 22px;
+      border: 0;
+      background: var(--surface);
+      color: var(--ink);
+      padding: 0;
+    }
+
+    .stepper button:hover { background: var(--canvas); }
+    .stepper button:disabled { color: #CBD5E1; cursor: default; }
+
+    .stepper input {
+      width: 28px;
+      height: 22px;
+      border: 0;
+      border-left: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+      background: var(--surface);
+      padding: 0;
+    }
+
+    .col-body {
+      flex: 1;
+      overflow: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th, td {
+      padding: 5px 8px;
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+      vertical-align: middle;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      background: var(--surface);
+      color: var(--mute);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      z-index: 1;
+    }
+
+    td.num, th.num {
+      width: 28px;
+      font-variant-numeric: tabular-nums;
+      color: var(--mute);
+      text-align: right;
+      padding-right: 6px;
+    }
+
+    .header-row {
+      cursor: grab;
+    }
+
+    .header-row:hover { background: #F8FAFC; }
+    .header-row.is-picked {
+      background: var(--pick);
+      outline: 1px solid var(--mid);
+      outline-offset: -1px;
+    }
+    .header-row.is-bound td:nth-child(2) { font-weight: 600; }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+    }
+
+    .sample {
+      color: var(--mute);
+      font-size: 11px;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      height: 18px;
+      padding: 0 6px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      color: var(--mute);
+      font-size: 10px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .chip.ok { background: var(--ok-bg); border-color: var(--ok-line); color: var(--ok); }
+    .chip.wait { background: var(--wait-bg); border-color: var(--wait-line); color: var(--wait); }
+    .chip.off { background: #F1F5F9; color: #94A3B8; }
+    .chip.navy { background: #E8EEF8; border-color: #C5D0E8; color: var(--navy); }
+
+    .targets { padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+
+    .target {
+      display: grid;
+      grid-template-columns: 88px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      min-height: 36px;
+      padding: 5px 8px;
+      border: 1px dashed var(--line);
+      border-radius: var(--radius);
+      background: var(--canvas);
+    }
+
+    .target.is-filled {
+      border-style: solid;
+      background: var(--surface);
+    }
+
+    .target.is-selected {
+      border-color: var(--navy);
+      box-shadow: 0 0 0 1px var(--navy);
+      background: #F4F7FC;
+    }
+
+    .target.is-over {
+      border-color: var(--mid);
+      background: var(--pick);
+    }
+
+    .target-key {
+      font-size: 10px;
+      color: var(--mute);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .target-label { font-weight: 600; font-size: 12px; }
+    .target-bound { color: var(--navy); font-size: 11px; }
+    .target-empty { color: var(--mute); font-size: 11px; }
+
+    .need {
+      display: block;
+      margin-top: 1px;
+      font-size: 10px;
+      color: var(--mute);
+      font-weight: 500;
+    }
+
+    .icon-btn {
+      width: 22px;
+      height: 22px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--surface);
+      color: var(--mute);
+      line-height: 1;
+      padding: 0;
+    }
+
+    .icon-btn:hover { color: var(--ink); border-color: #CBD5E1; }
+
+    .fmt { padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+
+    .fmt-empty {
+      margin: 24px 12px;
+      text-align: center;
+      color: var(--mute);
+      font-size: 12px;
+    }
+
+    .fmt h3 { margin: 0; font-size: 13px; font-weight: 650; }
+    .fmt p.help { margin: 2px 0 0; color: var(--mute); font-size: 11px; }
+
+    fieldset {
+      margin: 0;
+      padding: 0;
+      border: 0;
+    }
+
+    fieldset legend {
+      padding: 0 0 4px;
+      font-size: 10px;
+      font-weight: 650;
+      color: var(--mute);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .opt {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      margin-bottom: 4px;
+      cursor: pointer;
+    }
+
+    .opt:hover { border-color: var(--mid); }
+    .opt:has(input:checked) {
+      border-color: var(--navy);
+      background: #F4F7FC;
+    }
+
+    .opt input { margin-top: 2px; accent-color: var(--navy); }
+    .opt span { font-size: 12px; }
+
+    .preview {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .preview caption {
+      caption-side: top;
+      text-align: left;
+      padding: 6px 8px;
+      font-size: 10px;
+      font-weight: 650;
+      color: var(--mute);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      background: var(--canvas);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .preview td { font-size: 11px; }
+    .preview .fail { color: var(--fail); }
+
+    .counts {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .bar {
+      position: sticky;
+      bottom: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 16px;
+      background: var(--surface);
+      border-top: 1px solid var(--line);
+    }
+
+    .lists {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .lists .lbl {
+      font-size: 10px;
+      font-weight: 650;
+      color: var(--mute);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      margin-right: 2px;
+    }
+
+    .bar-note { color: var(--mute); font-size: 11px; }
+
+    .actions { display: flex; align-items: center; gap: 8px; }
+
+    .btn {
+      height: 28px;
+      padding: 0 12px;
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      background: var(--surface);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .btn:hover { background: var(--canvas); }
+
+    .btn-primary {
+      background: var(--navy);
+      border-color: var(--navy);
+      color: #fff;
+    }
+
+    .btn-primary:hover { background: #183576; }
+    .btn-primary:disabled { background: #94A3B8; border-color: #94A3B8; cursor: default; }
+
+    .toast {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      z-index: 40;
+      min-width: 260px;
+      max-width: 360px;
+      padding: 10px 12px;
+      background: var(--surface);
+      border: 1px solid #A7F3D0;
+      border-radius: var(--radius);
+      box-shadow: 0 4px 16px rgba(15, 23, 42, 0.08);
+      display: none;
+    }
+
+    .toast.show { display: block; }
+    .toast h4 { margin: 0; font-size: 13px; }
+    .toast p { margin: 2px 0 8px; color: var(--mute); font-size: 12px; }
+
+    @media (max-width: 960px) {
+      .workbench { grid-template-columns: 1fr; }
+      .col { border-right: 0; border-bottom: 1px solid var(--line); min-height: 280px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="top">
+      <div class="top-inner">
+        <p class="kicker">Owner mapping · People/HR · HR Alumni</p>
+        <h1>Sample F — Three-column ops</h1>
+        <p class="support">
+          Detect headers, drop them onto canonical variables, then format the selected mapping.
+          Email / Phone / NDZ follow completeness — not owner toggles.
+        </p>
+      </div>
+    </header>
+
+    <main class="workbench">
+      <section class="col" aria-labelledby="headers-title">
+        <div class="col-head">
+          <div>
+            <h2 id="headers-title">Detected headers</h2>
+            <div class="meta" id="header-meta">alumni_roster_2026q3.csv · 312 rows</div>
+          </div>
+          <div class="spinner">
+            <label for="header-row">Header row</label>
+            <div class="stepper">
+              <button type="button" id="row-dec" aria-label="Previous header row">−</button>
+              <input id="header-row" type="number" min="1" max="5" value="3" />
+              <button type="button" id="row-inc" aria-label="Next header row">+</button>
+            </div>
+          </div>
+        </div>
+        <div class="col-body">
+          <table>
+            <thead>
+              <tr>
+                <th class="num">#</th>
+                <th>Header</th>
+                <th>Sample</th>
+                <th>Bound</th>
+              </tr>
+            </thead>
+            <tbody id="header-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="col" aria-labelledby="targets-title">
+        <div class="col-head">
+          <h2 id="targets-title">Canonical variables</h2>
+          <span class="meta" id="target-meta">Drop a header · click to format</span>
+        </div>
+        <div class="col-body">
+          <div class="targets" id="targets"></div>
+        </div>
+      </section>
+
+      <section class="col" aria-labelledby="format-title">
+        <div class="col-head">
+          <h2 id="format-title">Format / clean</h2>
+          <span class="meta" id="format-meta">Select a mapping</span>
+        </div>
+        <div class="col-body">
+          <div class="fmt" id="format-pane"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="bar">
+      <div>
+        <div class="lists" id="capability" aria-live="polite"></div>
+        <p class="bar-note" id="capability-note"></p>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn" id="clear-pick">Clear pick</button>
+        <button type="button" class="btn btn-primary" id="save">Save mapping</button>
+      </div>
+    </footer>
+  </div>
+
+  <div class="toast" id="toast" role="status">
+    <h4>Mapping saved</h4>
+    <p id="toast-body"></p>
+    <button type="button" class="btn btn-primary" id="toast-dismiss">Dismiss</button>
+  </div>
+
+  <script>
+    const SHEET = [
+      ["Export ID", "HR-ALUM-2026Q3", "generated", "2026-08-21", "People/HR", "", "", "", ""],
+      ["CONFIDENTIAL", "internal use only", "do not forward", "", "", "", "", "", ""],
+      ["Employee ID", "Work Email", "Cell", "First", "Last", "DOB", "ZIP", "Department", "Status"],
+      ["A-1042", "ada.l@example.com", "(202) 555-0104", "Ada", "Lovelace", "12/10/1815", "20001", "Engineering", "Active"],
+      ["A-1108", "grace.h@example.com", "1-415-555-0199", "Grace", "Hopper", "1906-12-09", "94105", "Engineering", "Active"],
+      ["A-2214", "katherine.j@example.com; kj@example.net", "2025550144", "Katherine", "Johnson", "1918-08-26", "23666", "Research", "Alumni"],
+    ];
+
+    const CANONICAL = [
+      { id: "email", label: "Email", need: "Enables Email" },
+      { id: "phone", label: "Phone", need: "Enables Phone" },
+      { id: "first_name", label: "First name", need: "NDZ part" },
+      { id: "last_name", label: "Last name", need: "NDZ part" },
+      { id: "full_name", label: "Full name", need: "Split only · not NDZ" },
+      { id: "dob", label: "Date of birth", need: "NDZ part" },
+      { id: "zip", label: "ZIP", need: "NDZ part" },
+    ];
+
+    const FORMATS = {
+      email: {
+        title: "Email format",
+        help: "How strictly should we check email values? Standard works for most exports.",
+        key: "email",
+        options: [
+          { id: "loose", label: "Loose — @ and a dot in the domain" },
+          { id: "standard", label: "Standard — one @ and a dotted domain" },
+          { id: "strict", label: "Strict — standard plus a 2+ letter TLD" },
+        ],
+        extra: "delimiter",
+      },
+      phone: {
+        title: "Phone format",
+        help: "How are phone numbers written in your file? US 10-digit works for most exports.",
+        key: "phone",
+        options: [
+          { id: "digits_10_plus", label: "10 or more digits" },
+          { id: "us_10", label: "US 10-digit (or 1 + 10 digits)" },
+          { id: "e164", label: "E.164 — leading +, 10–15 digits" },
+        ],
+        extra: "delimiter",
+      },
+      full_name: {
+        title: "How are names written in your file?",
+        help: "Used to split a full-name column. NDZ still needs first, last, DOB, and ZIP mapped.",
+        key: "name",
+        options: [
+          { id: "first_last", label: "First Last" },
+          { id: "last_first", label: "Last, First" },
+        ],
+      },
+      first_name: {
+        title: "Name clean",
+        help: "Applied to the first-name column before hashing.",
+        key: "name_clean",
+        options: [
+          { id: "trim", label: "Trim whitespace" },
+          { id: "title", label: "Trim + title case" },
+        ],
+      },
+      last_name: {
+        title: "Name clean",
+        help: "Applied to the last-name column before hashing.",
+        key: "name_clean",
+        options: [
+          { id: "trim", label: "Trim whitespace" },
+          { id: "title", label: "Trim + title case" },
+        ],
+      },
+      dob: {
+        title: "Date of birth format",
+        help: "How dates appear in this column.",
+        key: "dob",
+        options: [
+          { id: "ymd", label: "YYYY-MM-DD" },
+          { id: "mdy", label: "M/D/YYYY" },
+          { id: "dmy", label: "D/M/YYYY" },
+        ],
+      },
+      zip: {
+        title: "ZIP clean",
+        help: "Normalize postal codes before NDZ hashing.",
+        key: "zip",
+        options: [
+          { id: "zip5", label: "5-digit ZIP" },
+          { id: "zip9", label: "ZIP+4 (keep last 4 when present)" },
+        ],
+      },
+    };
+
+    const DELIMITER_OPTIONS = [
+      { id: "none", label: "None (one value per cell)" },
+      { id: ";", label: ";" },
+      { id: "|", label: "|" },
+      { id: ",", label: "," },
+    ];
+
+    const state = {
+      headerRow: 3,
+      picked: null,
+      selected: "email",
+      mapping: {
+        email: "Work Email",
+        phone: "Cell",
+        first_name: "First",
+        last_name: "Last",
+        full_name: "",
+        dob: "DOB",
+        zip: "",
+      },
+      formats: {
+        email: "standard",
+        phone: "us_10",
+        name: "first_last",
+        name_clean: "trim",
+        dob: "mdy",
+        zip: "zip5",
+        delimiter: ";",
+      },
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    function headers() {
+      return SHEET[state.headerRow - 1].map((cell, i) => cell.trim() || `col_${i + 1}`);
+    }
+
+    function samplesFor(col) {
+      return SHEET.slice(state.headerRow)
+        .map((row) => row[col] || "")
+        .filter(Boolean)
+        .slice(0, 2);
+    }
+
+    function boundTo(header) {
+      return CANONICAL.find((c) => state.mapping[c.id] === header) || null;
+    }
+
+    function setHeaderRow(n) {
+      state.headerRow = Math.min(5, Math.max(1, n));
+      const next = new Set(headers());
+      for (const key of Object.keys(state.mapping)) {
+        if (state.mapping[key] && !next.has(state.mapping[key])) state.mapping[key] = "";
+      }
+      if (state.picked && !next.has(state.picked)) state.picked = null;
+      $("header-row").value = String(state.headerRow);
+      $("row-dec").disabled = state.headerRow <= 1;
+      $("row-inc").disabled = state.headerRow >= 5;
+      render();
+    }
+
+    function assign(canonicalId, header) {
+      for (const key of Object.keys(state.mapping)) {
+        if (state.mapping[key] === header) state.mapping[key] = "";
+      }
+      state.mapping[canonicalId] = header;
+      state.picked = null;
+      state.selected = canonicalId;
+      render();
+    }
+
+    function unmap(canonicalId) {
+      state.mapping[canonicalId] = "";
+      if (state.selected === canonicalId) state.selected = null;
+      render();
+    }
+
+    function capability() {
+      const m = state.mapping;
+      const email = Boolean(m.email);
+      const phone = Boolean(m.phone);
+      const ndz = Boolean(m.first_name && m.last_name && m.dob && m.zip);
+      const missing = ["first_name", "last_name", "dob", "zip"]
+        .filter((id) => !m[id])
+        .map((id) => CANONICAL.find((c) => c.id === id).label);
+      return { email, phone, ndz, missing };
+    }
+
+    function renderHeaders() {
+      const cols = headers();
+      $("header-meta").textContent =
+        `alumni_roster_2026q3.csv · 312 rows · ${cols.length} cols from row ${state.headerRow}`;
+      $("header-body").innerHTML = cols
+        .map((name, i) => {
+          const bound = boundTo(name);
+          const samples = samplesFor(i).join(" · ") || "—";
+          const picked = state.picked === name ? " is-picked" : "";
+          const boundCls = bound ? " is-bound" : "";
+          return `<tr class="header-row${picked}${boundCls}" draggable="true" data-header="${escapeAttr(name)}">
+            <td class="num">${i + 1}</td>
+            <td class="mono">${escapeHtml(name)}</td>
+            <td class="sample" title="${escapeAttr(samples)}">${escapeHtml(samples)}</td>
+            <td>${bound ? `<span class="chip navy">${escapeHtml(bound.id)}</span>` : `<span class="chip">—</span>`}</td>
+          </tr>`;
+        })
+        .join("");
+    }
+
+    function renderTargets() {
+      const filled = Object.values(state.mapping).filter(Boolean).length;
+      $("target-meta").textContent = `${filled} of ${CANONICAL.length} mapped`;
+      $("targets").innerHTML = CANONICAL.map((c) => {
+        const bound = state.mapping[c.id];
+        const selected = state.selected === c.id ? " is-selected" : "";
+        const filledCls = bound ? " is-filled" : "";
+        return `<div class="target${filledCls}${selected}" data-target="${c.id}" tabindex="0">
+          <div>
+            <div class="target-key">${c.id}</div>
+            <span class="need">${escapeHtml(c.need)}</span>
+          </div>
+          <div>
+            <div class="target-label">${escapeHtml(c.label)}</div>
+            ${bound
+              ? `<div class="target-bound mono">${escapeHtml(bound)}</div>`
+              : `<div class="target-empty">Drop header here</div>`}
+          </div>
+          ${bound
+            ? `<button type="button" class="icon-btn" data-unmap="${c.id}" aria-label="Unmap ${c.label}">×</button>`
+            : `<span></span>`}
+        </div>`;
+      }).join("");
+    }
+
+    function previewRows(id) {
+      const header = state.mapping[id];
+      if (!header) return [];
+      const cols = headers();
+      const idx = cols.indexOf(header);
+      if (idx < 0) return [];
+      return SHEET.slice(state.headerRow).map((row) => row[idx] || "").filter(Boolean).slice(0, 3);
+    }
+
+    function cleanPreview(id, raw) {
+      if (id === "phone") {
+        const digits = raw.replace(/\D/g, "");
+        if (state.formats.phone === "e164") return digits ? `+1${digits.slice(-10)}` : raw;
+        if (state.formats.phone === "us_10") return digits.slice(-10);
+        return digits;
+      }
+      if (id === "email") {
+        const first = state.formats.delimiter === "none" ? raw : raw.split(state.formats.delimiter)[0];
+        return first.trim().toLowerCase();
+      }
+      if (id === "zip") return raw.replace(/\D/g, "").slice(0, state.formats.zip === "zip9" ? 9 : 5);
+      if (id === "dob" && state.formats.dob === "ymd" && raw.includes("/")) {
+        const [m, d, y] = raw.split("/");
+        if (y) return `${y.padStart(4, "0")}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+      }
+      return raw.trim();
+    }
+
+    function countsFor(id) {
+      if (id === "email") return { ok: 309, fail: 3 };
+      if (id === "phone") return { ok: 301, fail: 11 };
+      if (id === "zip") return { ok: 312, fail: 0 };
+      return { ok: 312, fail: 0 };
+    }
+
+    function renderFormat() {
+      const id = state.selected;
+      const pane = $("format-pane");
+      if (!id || !state.mapping[id]) {
+        $("format-meta").textContent = "Select a mapping";
+        pane.innerHTML = `<p class="fmt-empty">Select a mapped variable to set format and clean. Preview uses this file only — nothing is logged.</p>`;
+        return;
+      }
+      const spec = FORMATS[id];
+      const field = CANONICAL.find((c) => c.id === id);
+      $("format-meta").textContent = `${field.label} ← ${state.mapping[id]}`;
+      const selected = state.formats[spec.key];
+      const options = spec.options
+        .map(
+          (opt) => `<label class="opt">
+            <input type="radio" name="fmt-${spec.key}" value="${opt.id}" ${opt.id === selected ? "checked" : ""} />
+            <span>${escapeHtml(opt.label)}</span>
+          </label>`,
+        )
+        .join("");
+      let extra = "";
+      if (spec.extra === "delimiter") {
+        extra = `<fieldset>
+          <legend>Multi-value delimiter</legend>
+          ${DELIMITER_OPTIONS.map(
+            (opt) => `<label class="opt">
+              <input type="radio" name="fmt-delimiter" value="${opt.id}" ${opt.id === state.formats.delimiter ? "checked" : ""} />
+              <span>${escapeHtml(opt.label)}</span>
+            </label>`,
+          ).join("")}
+        </fieldset>`;
+      }
+      const rows = previewRows(id);
+      const counts = countsFor(id);
+      const preview = rows
+        .map((raw) => {
+          const cleaned = cleanPreview(id, raw);
+          const fail = id === "email" && raw.includes(";");
+          return `<tr>
+            <td class="sample">${escapeHtml(raw)}</td>
+            <td class="mono ${fail ? "fail" : ""}">${escapeHtml(cleaned)}</td>
+          </tr>`;
+        })
+        .join("");
+      pane.innerHTML = `
+        <div>
+          <h3>${escapeHtml(spec.title)}</h3>
+          <p class="help">${escapeHtml(spec.help)}</p>
+        </div>
+        <fieldset>
+          <legend>Format</legend>
+          ${options}
+        </fieldset>
+        ${extra}
+        <table class="preview">
+          <caption>Live sample · 3 of 312</caption>
+          <thead><tr><th>File</th><th>After clean</th></tr></thead>
+          <tbody>${preview || `<tr><td colspan="2">No sample cells in this column.</td></tr>`}</tbody>
+        </table>
+        <div class="counts">
+          <span class="chip ok">${counts.ok} ok</span>
+          <span class="chip ${counts.fail ? "wait" : "off"}">${counts.fail} fail</span>
+        </div>`;
+    }
+
+    function renderCapability() {
+      const cap = capability();
+      const chip = (on, label, extra) =>
+        `<span class="chip ${on ? "ok" : "off"}">${label}${on ? "" : extra || ""}</span>`;
+      $("capability").innerHTML = `
+        <span class="lbl">Derived lists</span>
+        ${chip(cap.email, "Email")}
+        ${chip(cap.phone, "Phone")}
+        ${chip(cap.ndz, "NDZ", cap.missing.length ? ` · needs ${cap.missing[0]}` : "")}`;
+      $("capability-note").textContent = cap.ndz
+        ? "Email, Phone, and NDZ are enabled from this mapping."
+        : cap.missing.length
+          ? `Save allowed. NDZ stays off until ${cap.missing.join(", ")} ${cap.missing.length === 1 ? "is" : "are"} mapped.`
+          : "Map Email or Phone to enable at least one list.";
+      $("save").disabled = !cap.email && !cap.phone && !cap.ndz;
+    }
+
+    function render() {
+      renderHeaders();
+      renderTargets();
+      renderFormat();
+      renderCapability();
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    function escapeAttr(value) {
+      return escapeHtml(value);
+    }
+
+    $("header-row").addEventListener("change", (e) => setHeaderRow(Number(e.target.value) || 1));
+    $("row-dec").addEventListener("click", () => setHeaderRow(state.headerRow - 1));
+    $("row-inc").addEventListener("click", () => setHeaderRow(state.headerRow + 1));
+    $("clear-pick").addEventListener("click", () => {
+      state.picked = null;
+      render();
+    });
+
+    $("header-body").addEventListener("click", (e) => {
+      const row = e.target.closest(".header-row");
+      if (!row) return;
+      state.picked = row.dataset.header;
+      render();
+    });
+
+    $("header-body").addEventListener("dragstart", (e) => {
+      const row = e.target.closest(".header-row");
+      if (!row) return;
+      e.dataTransfer.setData("text/plain", row.dataset.header);
+      e.dataTransfer.effectAllowed = "copy";
+      state.picked = row.dataset.header;
+    });
+
+    $("targets").addEventListener("dragover", (e) => {
+      const target = e.target.closest(".target");
+      if (!target) return;
+      e.preventDefault();
+      target.classList.add("is-over");
+    });
+
+    $("targets").addEventListener("dragleave", (e) => {
+      const target = e.target.closest(".target");
+      if (target) target.classList.remove("is-over");
+    });
+
+    $("targets").addEventListener("drop", (e) => {
+      const target = e.target.closest(".target");
+      if (!target) return;
+      e.preventDefault();
+      assign(target.dataset.target, e.dataTransfer.getData("text/plain") || state.picked);
+    });
+
+    $("targets").addEventListener("click", (e) => {
+      const unmapBtn = e.target.closest("[data-unmap]");
+      if (unmapBtn) {
+        unmap(unmapBtn.dataset.unmap);
+        return;
+      }
+      const target = e.target.closest(".target");
+      if (!target) return;
+      if (state.picked) {
+        assign(target.dataset.target, state.picked);
+        return;
+      }
+      if (state.mapping[target.dataset.target]) {
+        state.selected = target.dataset.target;
+        render();
+      }
+    });
+
+    $("format-pane").addEventListener("change", (e) => {
+      const input = e.target;
+      if (!(input instanceof HTMLInputElement) || input.type !== "radio") return;
+      if (input.name === "fmt-delimiter") state.formats.delimiter = input.value;
+      else state.formats[input.name.replace("fmt-", "")] = input.value;
+      render();
+    });
+
+    $("save").addEventListener("click", () => {
+      const cap = capability();
+      const enabled = [
+        cap.email && "Email",
+        cap.phone && "Phone",
+        cap.ndz && "NDZ",
+      ].filter(Boolean);
+      $("toast-body").textContent = enabled.length
+        ? `Enabled lists: ${enabled.join(", ")}. Hash refresh will build only these kinds.`
+        : "Nothing enabled.";
+      $("toast").classList.add("show");
+    });
+
+    $("toast-dismiss").addEventListener("click", () => $("toast").classList.remove("show"));
+
+    setHeaderRow(3);
+  </script>
+</body>
+</html>

@@ -11,7 +11,17 @@ Human resources system matching and suppression; approval gating per legal rules
 - Hash index: **upload extract only** — `metadata.gcs_uri` + persisted `column_mapping`
   (canonical → source header names; do not invent CSV columns). Standardize+hash in
   worker memory (DROP-compatible CPPA rules via core `vertical_hash/`) → BigQuery
-  hashed raw → [`transform/external_hash`](../../transform/external_hash/) dbt marts.
+  hashed raw (nullable `email_hash` / `phone_hash` / `ndz_hash`) →
+  [`transform/external_hash`](../../transform/external_hash/) dbt marts.
+- Matching looks up Email / Phone / NDZ builds by DROP list type:
+  `paylocity_{email,phone,ndz}_hash__build`. Empty mart or missing hash →
+  `match_count=0` snapshot, not stub success.
+- Hash refresh dbt select (from `transform/external_hash`):
+  `stg_paylocity_hashed mart_paylocity_email_hash mart_paylocity_phone_hash
+  mart_paylocity_ndz_hash`.
+  Phone/NDZ mart cutover (hash-refresh/dbt): [external_hash README](../../transform/external_hash/README.md#phonendz-cutover-order)
+  — Paylocity is not enqueued by request-dispatcher (`DISPATCH_VERTICAL_LIST_TYPES`
+  does not apply).
 - Live SFTP connection test remains directory listing only (research S02 **no-go**).
   Do not `sftp.get` or parse SFTP directory files until a named file + header-only
   sample exists **out of git**. Matching uses upload marts, not SFTP connectivity.

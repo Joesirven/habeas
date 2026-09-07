@@ -21,6 +21,9 @@ mock.module('../dev/pipeline-live', () => ({
 const { mergeNeedsAttentionSearch, parseNeedsAttentionSearch } = await import('../../router')
 
 import {
+  INBOX_POLL_INTERVAL_MS,
+  INBOX_POLL_MAX_INTERVAL_MS,
+  inboxRefetchInterval,
   isOwnerVerticalTask,
   mergeOwnerFulfillmentItems,
   ownerFulfillmentItemFromApproval,
@@ -1098,6 +1101,7 @@ describe('production owner walkthrough — no design-lab chrome', () => {
     expect(router).not.toContain('@/routes/dev/')
     expect(router).not.toContain('matching-results-lab')
     expect(labs).toContain("path: '/dev/owner-map-alternatives'")
+    expect(labs).toContain("path: '/dev/mapping-workbench-samples'")
     expect(labs).toContain("path: '/dev/match-quality'")
     expect(labs).toContain("path: '/dev/pipeline-live'")
     expect(labs).toContain("path: '/dev/sheets-oauth'")
@@ -1191,5 +1195,28 @@ describe('stack matching status badge', () => {
     expect(summary.label).toContain('2 Single match')
     expect(summary.label).toContain('1 Multi-person')
     expect(summary.label).toContain('1 Not found')
+  })
+})
+
+describe('inbox poll cadence', () => {
+  const query = (fetchStatus: string, fetchFailureCount = 0) => ({
+    state: { fetchStatus, fetchFailureCount },
+  })
+
+  test('holds the timer while a fetch is still outstanding', () => {
+    expect(inboxRefetchInterval(query('fetching'))).toBe(false)
+  })
+
+  test('polls on the base interval once idle and healthy', () => {
+    expect(inboxRefetchInterval(query('idle'))).toBe(INBOX_POLL_INTERVAL_MS)
+  })
+
+  test('backs off exponentially while admin-api sheds the inbox', () => {
+    expect(inboxRefetchInterval(query('idle', 1))).toBe(INBOX_POLL_INTERVAL_MS * 2)
+    expect(inboxRefetchInterval(query('idle', 2))).toBe(INBOX_POLL_INTERVAL_MS * 4)
+  })
+
+  test('caps the backoff', () => {
+    expect(inboxRefetchInterval(query('idle', 50))).toBe(INBOX_POLL_MAX_INTERVAL_MS)
   })
 })

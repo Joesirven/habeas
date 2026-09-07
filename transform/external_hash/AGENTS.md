@@ -8,8 +8,16 @@ dbt project for external vertical hash-index serving tables in BigQuery.
 |------|------|
 | `models/sources.yml` | Hashed raw BQ sources only (no plaintext PII tables) |
 | `models/staging/` | Thin selects from hashed raw (`stg_*_hashed`) |
-| `models/marts/` | Serving builds → `(hash_value, vendor_record_id, system, built_at)` |
+| `models/marts/` | Serving builds → `(hash_value, vendor_record_id, system, built_at)` — email, phone, and ndz per system |
 | `macros/README.md` | Planned build+swap pattern (mirrors `drop_hash`) |
+
+## Phone / NDZ cutover
+
+Each in-scope system has email, phone, and ndz serving marts
+(`mart_{system}_{email,phone,ndz}_hash`). Widen request-dispatcher enqueue only after
+those marts are verified: set `DISPATCH_VERTICAL_LIST_TYPES=Email,Phone,NDZ` on
+request-dispatcher (default remains Email-only). Order and rationale:
+[README.md](README.md) § Phone/NDZ cutover order.
 
 ## Invariants
 

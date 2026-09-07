@@ -64,6 +64,7 @@ _HASH_FIELD_KEYS = (
     "concatenated_hash",
     "email_hash",
     "phone_hash",
+    "ndz_hash",
     "pii_hash",
     "hash",
 )

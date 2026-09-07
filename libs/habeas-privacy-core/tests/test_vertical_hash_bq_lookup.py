@@ -10,25 +10,42 @@ from unittest.mock import MagicMock
 import pytest
 from habeas_privacy_core.vertical_hash.bq_lookup import (
     AUTH0_EMAIL_HASH_BUILD_TABLE,
+    AUTH0_NDZ_HASH_BUILD_TABLE,
+    AUTH0_PHONE_HASH_BUILD_TABLE,
     AUTH0_SYSTEM,
     AXIOS_HEADQUARTERS_EMAIL_HASH_BUILD_TABLE,
+    AXIOS_HEADQUARTERS_NDZ_HASH_BUILD_TABLE,
+    AXIOS_HEADQUARTERS_PHONE_HASH_BUILD_TABLE,
     AXIOS_HEADQUARTERS_SYSTEM,
     BIZDEV_CONTACTS_EMAIL_HASH_BUILD_TABLE,
+    BIZDEV_CONTACTS_NDZ_HASH_BUILD_TABLE,
+    BIZDEV_CONTACTS_PHONE_HASH_BUILD_TABLE,
     BIZDEV_CONTACTS_SYSTEM,
     DEFAULT_BQ_DATASET,
     DEFAULT_BQ_PROJECT,
     EMAIL_HASH_MARTS,
     GOOGLE_SHEETS_EMAIL_HASH_BUILD_TABLE,
+    GOOGLE_SHEETS_NDZ_HASH_BUILD_TABLE,
+    GOOGLE_SHEETS_PHONE_HASH_BUILD_TABLE,
     GOOGLE_SHEETS_SYSTEM,
     HR_ALUMNI_EMAIL_HASH_BUILD_TABLE,
+    HR_ALUMNI_NDZ_HASH_BUILD_TABLE,
+    HR_ALUMNI_PHONE_HASH_BUILD_TABLE,
     HR_ALUMNI_SYSTEM,
     LEVER_EMAIL_HASH_BUILD_TABLE,
+    LEVER_NDZ_HASH_BUILD_TABLE,
+    LEVER_PHONE_HASH_BUILD_TABLE,
     LEVER_SYSTEM,
+    NDZ_HASH_MARTS,
     PAYLOCITY_EMAIL_HASH_BUILD_TABLE,
+    PAYLOCITY_NDZ_HASH_BUILD_TABLE,
+    PAYLOCITY_PHONE_HASH_BUILD_TABLE,
     PAYLOCITY_SYSTEM,
+    PHONE_HASH_MARTS,
     Auth0HashLookupError,
     VerticalHashLookupError,
     email_hash_mart_exists,
+    hash_mart_exists,
     lookup_auth0_vendor_ids_by_email_hash,
     lookup_auth0_vendor_ids_by_email_hashes,
     lookup_axios_headquarters_vendor_ids_by_email_hashes,
@@ -40,13 +57,19 @@ from habeas_privacy_core.vertical_hash.bq_lookup import (
     lookup_paylocity_vendor_ids_by_email_hashes,
     lookup_vendor_ids_by_email_hash,
     lookup_vendor_ids_by_email_hashes,
+    lookup_vendor_ids_by_ndz_hashes,
+    lookup_vendor_ids_by_phone_hashes,
 )
-from habeas_privacy_core.vertical_hash.hashing import email_hash_from_raw
+from habeas_privacy_core.vertical_hash.hashing import email_hash_from_raw, phone_hash_from_raw
 
 # CPPA DROP v1.2.0 golden vector (same as test_vertical_hash / writer tests)
 EMAIL_HASH = "KA18MT/ph6IHYjzT9zwETySDQyvSh87YuoSBpOQtkhE="
+PHONE_HASH = "vGM7y5n+hBXRSEAklhHDPCbysyNgYTmXdMcagGUOY8E="
+NDZ_HASH = "mKDnDvwF2inxrKcK1hJN2TRkxPfL6kzNNTtU12eH8Bw="
 VENDOR_ID = "auth0|opaque-user-1"
 RAW_EMAIL = "anna.smith@domain.com"
+RAW_PHONE = "+1(415)555-9317"
+RAW_PHONE_DIGITS = "4155559317"
 
 _BATCH_VERTICALS: list[tuple[str, str, Any]] = [
     (
@@ -114,6 +137,35 @@ def test_email_hash_marts_cover_external_verticals() -> None:
     assert EMAIL_HASH_MARTS[GOOGLE_SHEETS_SYSTEM] == GOOGLE_SHEETS_EMAIL_HASH_BUILD_TABLE
 
 
+def test_phone_and_ndz_hash_marts_cover_same_systems() -> None:
+    assert set(PHONE_HASH_MARTS) == set(EMAIL_HASH_MARTS)
+    assert set(NDZ_HASH_MARTS) == set(EMAIL_HASH_MARTS)
+    assert PHONE_HASH_MARTS[AUTH0_SYSTEM] == AUTH0_PHONE_HASH_BUILD_TABLE
+    assert NDZ_HASH_MARTS[AUTH0_SYSTEM] == AUTH0_NDZ_HASH_BUILD_TABLE
+    assert PHONE_HASH_MARTS[AXIOS_HEADQUARTERS_SYSTEM] == (
+        AXIOS_HEADQUARTERS_PHONE_HASH_BUILD_TABLE
+    )
+    assert NDZ_HASH_MARTS[AXIOS_HEADQUARTERS_SYSTEM] == (
+        AXIOS_HEADQUARTERS_NDZ_HASH_BUILD_TABLE
+    )
+    assert PHONE_HASH_MARTS[PAYLOCITY_SYSTEM] == PAYLOCITY_PHONE_HASH_BUILD_TABLE
+    assert NDZ_HASH_MARTS[PAYLOCITY_SYSTEM] == PAYLOCITY_NDZ_HASH_BUILD_TABLE
+    assert PHONE_HASH_MARTS[LEVER_SYSTEM] == LEVER_PHONE_HASH_BUILD_TABLE
+    assert NDZ_HASH_MARTS[LEVER_SYSTEM] == LEVER_NDZ_HASH_BUILD_TABLE
+    assert PHONE_HASH_MARTS[HR_ALUMNI_SYSTEM] == HR_ALUMNI_PHONE_HASH_BUILD_TABLE
+    assert NDZ_HASH_MARTS[HR_ALUMNI_SYSTEM] == HR_ALUMNI_NDZ_HASH_BUILD_TABLE
+    assert PHONE_HASH_MARTS[BIZDEV_CONTACTS_SYSTEM] == (
+        BIZDEV_CONTACTS_PHONE_HASH_BUILD_TABLE
+    )
+    assert NDZ_HASH_MARTS[BIZDEV_CONTACTS_SYSTEM] == BIZDEV_CONTACTS_NDZ_HASH_BUILD_TABLE
+    assert PHONE_HASH_MARTS[GOOGLE_SHEETS_SYSTEM] == GOOGLE_SHEETS_PHONE_HASH_BUILD_TABLE
+    assert NDZ_HASH_MARTS[GOOGLE_SHEETS_SYSTEM] == GOOGLE_SHEETS_NDZ_HASH_BUILD_TABLE
+    for system, table in PHONE_HASH_MARTS.items():
+        assert table == f"{system}_phone_hash__build"
+    for system, table in NDZ_HASH_MARTS.items():
+        assert table == f"{system}_ndz_hash__build"
+
+
 def test_email_hash_mart_exists_true() -> None:
     client = MagicMock()
     client.get_table.return_value = object()
@@ -121,6 +173,33 @@ def test_email_hash_mart_exists_true() -> None:
     client.get_table.assert_called_once_with(
         f"{DEFAULT_BQ_PROJECT}.{DEFAULT_BQ_DATASET}.{HR_ALUMNI_EMAIL_HASH_BUILD_TABLE}"
     )
+
+
+def test_hash_mart_exists_phone_and_ndz() -> None:
+    client = MagicMock()
+    client.get_table.return_value = object()
+    assert hash_mart_exists(AUTH0_SYSTEM, kind="phone", client=client) is True
+    client.get_table.assert_called_with(
+        f"{DEFAULT_BQ_PROJECT}.{DEFAULT_BQ_DATASET}.{AUTH0_PHONE_HASH_BUILD_TABLE}"
+    )
+    assert hash_mart_exists(AUTH0_SYSTEM, list_type="NDZ", client=client) is True
+    client.get_table.assert_called_with(
+        f"{DEFAULT_BQ_PROJECT}.{DEFAULT_BQ_DATASET}.{AUTH0_NDZ_HASH_BUILD_TABLE}"
+    )
+    assert hash_mart_exists(AUTH0_SYSTEM, list_type="Phone", client=client) is True
+
+
+def test_hash_mart_exists_defaults_to_email() -> None:
+    client = MagicMock()
+    client.get_table.return_value = object()
+    assert hash_mart_exists(HR_ALUMNI_SYSTEM, client=client) is True
+    client.get_table.assert_called_once_with(
+        f"{DEFAULT_BQ_PROJECT}.{DEFAULT_BQ_DATASET}.{HR_ALUMNI_EMAIL_HASH_BUILD_TABLE}"
+    )
+
+
+def test_hash_mart_exists_unsupported_kind() -> None:
+    assert hash_mart_exists(AUTH0_SYSTEM, kind="fax", client=MagicMock()) is False
 
 
 def test_email_hash_mart_exists_false_on_not_found() -> None:
@@ -363,8 +442,8 @@ def test_omitted_client_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_lookup_by_hashes_set_based() -> None:
     hash_a = EMAIL_HASH
-    hash_b = "other-hash-value-BBBBBBBBBBBBBBBBBBBBBBBBBB="
-    hash_c = "missing-hash-CCCCCCCCCCCCCCCCCCCCCCCCCCCC="
+    hash_b = PHONE_HASH
+    hash_c = NDZ_HASH
     client = MagicMock()
     client.query.return_value = _FakeJob(
         [
@@ -449,7 +528,7 @@ def test_vertical_batch_unnest_sql_shape(
     wrapper: Any,
 ) -> None:
     hash_a = EMAIL_HASH
-    hash_b = "other-hash-value-BBBBBBBBBBBBBBBBBBBBBBBBBB="
+    hash_b = PHONE_HASH
     vendor = f"{system}|opaque-1"
     client = MagicMock()
     client.query.return_value = _FakeJob(
@@ -483,6 +562,144 @@ def test_generic_batch_requires_table_and_system() -> None:
     with pytest.raises(ValueError, match="table and system"):
         lookup_vendor_ids_by_email_hashes(
             [EMAIL_HASH], table="auth0_email_hash__build", system="", client=client
+        )
+    client.query.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "lookup_fn,table,system",
+    [
+        (lookup_vendor_ids_by_phone_hashes, AUTH0_PHONE_HASH_BUILD_TABLE, AUTH0_SYSTEM),
+        (lookup_vendor_ids_by_ndz_hashes, AUTH0_NDZ_HASH_BUILD_TABLE, AUTH0_SYSTEM),
+        (
+            lookup_vendor_ids_by_phone_hashes,
+            PAYLOCITY_PHONE_HASH_BUILD_TABLE,
+            PAYLOCITY_SYSTEM,
+        ),
+        (
+            lookup_vendor_ids_by_ndz_hashes,
+            LEVER_NDZ_HASH_BUILD_TABLE,
+            LEVER_SYSTEM,
+        ),
+    ],
+)
+def test_phone_and_ndz_batch_unnest_sql_shape(
+    lookup_fn: Any,
+    table: str,
+    system: str,
+) -> None:
+    hash_a = EMAIL_HASH
+    hash_b = PHONE_HASH
+    vendor = f"{system}|opaque-1"
+    client = MagicMock()
+    client.query.return_value = _FakeJob(
+        [
+            _FakeRow(hash_value=hash_a, vendor_record_id=vendor),
+            _FakeRow(hash_value=hash_b, vendor_record_id=None),
+        ]
+    )
+
+    out = lookup_fn([hash_a, hash_b, hash_a], table=table, system=system, client=client)
+
+    assert out[hash_a] == [vendor]
+    assert out[hash_b] == []
+    sql = _sql(client)
+    assert "UNNEST(@hash_values)" in sql
+    assert "LEFT JOIN" in sql
+    assert "system = @system" in sql
+    assert table in sql
+    assert f"{DEFAULT_BQ_PROJECT}.{DEFAULT_BQ_DATASET}.{table}" in sql
+    assert hash_a not in sql
+    params = _params(client)
+    assert params["hash_values"] == [hash_a, hash_b]
+    assert params["system"] == system
+
+
+def test_phone_batch_empty_and_plaintext() -> None:
+    client = MagicMock()
+    assert lookup_vendor_ids_by_phone_hashes([], table=AUTH0_PHONE_HASH_BUILD_TABLE, system=AUTH0_SYSTEM, client=client) == {}
+    with pytest.raises(ValueError, match="phone_hash must not contain plaintext"):
+        lookup_vendor_ids_by_phone_hashes(
+            [RAW_EMAIL],
+            table=AUTH0_PHONE_HASH_BUILD_TABLE,
+            system=AUTH0_SYSTEM,
+            client=client,
+        )
+    client.query.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "lookup_fn,table,label,plaintext",
+    [
+        (lookup_vendor_ids_by_phone_hashes, AUTH0_PHONE_HASH_BUILD_TABLE, "phone_hash", RAW_PHONE),
+        (
+            lookup_vendor_ids_by_phone_hashes,
+            AUTH0_PHONE_HASH_BUILD_TABLE,
+            "phone_hash",
+            RAW_PHONE_DIGITS,
+        ),
+        (lookup_vendor_ids_by_phone_hashes, AUTH0_PHONE_HASH_BUILD_TABLE, "phone_hash", RAW_EMAIL),
+        (lookup_vendor_ids_by_ndz_hashes, AUTH0_NDZ_HASH_BUILD_TABLE, "ndz_hash", RAW_PHONE),
+        (lookup_vendor_ids_by_ndz_hashes, AUTH0_NDZ_HASH_BUILD_TABLE, "ndz_hash", RAW_EMAIL),
+        (lookup_vendor_ids_by_email_hashes, AUTH0_EMAIL_HASH_BUILD_TABLE, "email_hash", RAW_PHONE_DIGITS),
+    ],
+)
+def test_batch_lookup_rejects_plaintext_phone_and_email(
+    lookup_fn: Any,
+    table: str,
+    label: str,
+    plaintext: str,
+) -> None:
+    client = MagicMock()
+    with pytest.raises(ValueError, match=f"{label} must not contain plaintext") as exc_info:
+        lookup_fn([plaintext], table=table, system=AUTH0_SYSTEM, client=client)
+
+    assert plaintext not in str(exc_info.value)
+    client.query.assert_not_called()
+
+
+def test_single_lookup_rejects_plaintext_phone_digits() -> None:
+    client = MagicMock()
+    with pytest.raises(ValueError, match="email_hash must not contain plaintext") as exc_info:
+        lookup_vendor_ids_by_email_hash(RAW_PHONE_DIGITS, table=AUTH0_EMAIL_HASH_BUILD_TABLE, system=AUTH0_SYSTEM, client=client)
+
+    assert RAW_PHONE_DIGITS not in str(exc_info.value)
+    client.query.assert_not_called()
+
+
+def test_phone_and_ndz_batch_accepts_valid_digests() -> None:
+    hashed_phone = phone_hash_from_raw(RAW_PHONE)
+    assert hashed_phone == PHONE_HASH
+    client = MagicMock()
+    client.query.return_value = _FakeJob(
+        [_FakeRow(hash_value=PHONE_HASH, vendor_record_id=VENDOR_ID)]
+    )
+
+    phone_out = lookup_vendor_ids_by_phone_hashes(
+        [hashed_phone],
+        table=AUTH0_PHONE_HASH_BUILD_TABLE,
+        system=AUTH0_SYSTEM,
+        client=client,
+    )
+    assert phone_out[PHONE_HASH] == [VENDOR_ID]
+
+    client.query.return_value = _FakeJob(
+        [_FakeRow(hash_value=NDZ_HASH, vendor_record_id=VENDOR_ID)]
+    )
+    ndz_out = lookup_vendor_ids_by_ndz_hashes(
+        [NDZ_HASH],
+        table=AUTH0_NDZ_HASH_BUILD_TABLE,
+        system=AUTH0_SYSTEM,
+        client=client,
+    )
+    assert ndz_out[NDZ_HASH] == [VENDOR_ID]
+
+
+def test_ndz_batch_requires_table_and_system() -> None:
+    client = MagicMock()
+    with pytest.raises(ValueError, match="table and system"):
+        lookup_vendor_ids_by_ndz_hashes(
+            [EMAIL_HASH], table="", system=AUTH0_SYSTEM, client=client
         )
     client.query.assert_not_called()
 

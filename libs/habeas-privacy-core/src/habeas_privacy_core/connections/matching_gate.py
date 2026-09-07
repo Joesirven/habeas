@@ -13,9 +13,11 @@ from typing import Any
 
 from habeas_privacy_core.connections.catalog import (
     VERTICAL_DATA,
+    ListCapability,
     get_bindings_for_system,
     get_bindings_for_vertical,
     get_vertical,
+    list_capability_from_metadata,
 )
 from dataclasses import dataclass
 
@@ -26,7 +28,7 @@ from habeas_privacy_core.connections.freshness import (
     connection_gate_input,
     evaluate_connection_gate,
 )
-from habeas_privacy_core.vertical_hash.bq_lookup import email_hash_mart_exists
+from habeas_privacy_core.vertical_hash.bq_lookup import hash_mart_exists
 
 __all__ = [
     "DrainReadiness",
@@ -234,6 +236,47 @@ def gate_block_audit(*, system: str, gate: GateResult) -> dict[str, Any]:
     return payload
 
 
+def _row_metadata(row: Any) -> dict[str, Any]:
+    """Best-effort metadata from a connection row. Empty on mocks / missing."""
+    if row is None:
+        return {}
+    try:
+        mapping = dict(row)
+    except (TypeError, ValueError):
+        return {}
+    meta = mapping.get("metadata")
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except json.JSONDecodeError:
+            return {}
+    if isinstance(meta, dict):
+        return dict(meta)
+    return {}
+
+
+def _capability_for_drain(system: str, row: Any) -> ListCapability:
+    return list_capability_from_metadata(system, _row_metadata(row))
+
+
+def _enabled_hash_mart_exists(
+    system: str,
+    capability: ListCapability,
+    *,
+    mart_table: str | None = None,
+    bq_client: Any | None = None,
+) -> bool:
+    """True when an enabled kind has a mart (or *mart_table* for that kind)."""
+    kinds = capability.enabled_kinds
+    if not kinds:
+        return False
+    if mart_table is not None and str(mart_table).strip():
+        return hash_mart_exists(system, client=bq_client, table=mart_table)
+    return any(
+        hash_mart_exists(system, kind=kind, client=bq_client) for kind in kinds
+    )
+
+
 async def evaluate_matching_drain_readiness(
     conn: Any,
     *,
@@ -243,11 +286,13 @@ async def evaluate_matching_drain_readiness(
     bq_client: Any | None = None,
     now: datetime | None = None,
 ) -> DrainReadiness:
-    """Gate drain on connection freshness and BigQuery mart existence.
+    """Gate drain on freshness + marts for **enabled** list kinds only.
 
-    Uses the calling system's own connection gate (not sibling AND). Missing or
-    unreachable mart tables return ``reason='mart_missing'`` so Jobs do not
-    burn the queue with lookup errors.
+    Uses the calling system's own connection gate (not sibling AND). Ready when
+    the gate allows, at least one mapping/catalog-enabled kind exists, and that
+    kind has a serving mart (or *mart_table* when callers pass an override).
+    Unmapped / cannot-support kinds are ignored. No enabled kinds returns
+    ``reason='cannot_support'``. Missing marts return ``reason='mart_missing'``.
     """
     gate = await evaluate_system_matching_gate(
         conn, system=system, vertical_id=vertical_id, now=now
@@ -259,8 +304,18 @@ async def evaluate_matching_drain_readiness(
             gate=gate,
             blocking_system=gate.blocking_system or system,
         )
-    if not email_hash_mart_exists(
-        system, client=bq_client, table=mart_table
+    resolved = vertical_id or catalog_vertical_id_for_system(system)
+    row = await _fetch_connection_row(conn, system=system, vertical_id=resolved)
+    capability = _capability_for_drain(system, row)
+    if not capability.enabled_kinds:
+        return DrainReadiness(
+            ready=False,
+            reason="cannot_support",
+            gate=gate,
+            blocking_system=system,
+        )
+    if not _enabled_hash_mart_exists(
+        system, capability, mart_table=mart_table, bq_client=bq_client
     ):
         return DrainReadiness(
             ready=False,

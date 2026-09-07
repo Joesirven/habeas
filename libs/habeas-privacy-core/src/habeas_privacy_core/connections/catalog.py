@@ -5,8 +5,9 @@ Unit tests can rely on these constants without a database connection.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
 
 __all__ = [
     "APPROACH_LIVE",
@@ -14,9 +15,13 @@ __all__ = [
     "CATALOG_BINDINGS",
     "CATALOG_VERTICALS",
     "CONNECTION_METHOD_LABELS",
+    "LIST_CAPABILITY_SOURCE_CATALOG",
+    "LIST_CAPABILITY_SOURCE_MAPPING",
+    "ListCapability",
     "MANUAL_UPLOAD_LABEL",
     "MATCHING_SYSTEM_COLOR_TOKENS",
     "MATCHING_SYSTEM_LABELS",
+    "NDZ_CANONICAL_KEYS",
     "UPLOAD_ONLY_SYSTEMS",
     "UPLOAD_SYSTEMS",
     "SHEET_SYSTEMS",
@@ -32,10 +37,14 @@ __all__ = [
     "VerticalCatalogEntry",
     "VerticalSystemBinding",
     "connection_method_label",
+    "derive_list_capability",
+    "filter_dbt_select",
     "get_bindings_for_system",
     "get_bindings_for_vertical",
     "get_vertical",
+    "intersect_flood_and_capability",
     "is_approach_allowed",
+    "list_capability_from_metadata",
     "TEST_MATCHING_SYSTEM_LABELS",
     "list_matching_review_systems",
     "list_verticals",
@@ -351,3 +360,159 @@ def list_matching_review_systems(
             )
         )
     return rows
+
+
+LIST_CAPABILITY_SOURCE_MAPPING: Final[str] = "mapping"
+LIST_CAPABILITY_SOURCE_CATALOG: Final[str] = "catalog"
+
+# NDZ enablement requires the four canonical parts. full_name is UI convenience
+# only and never turns NDZ on by itself (KD5 / A1).
+NDZ_CANONICAL_KEYS: Final[tuple[str, ...]] = (
+    "first_name",
+    "last_name",
+    "dob",
+    "zip",
+)
+
+
+@dataclass(frozen=True)
+class ListCapability:
+    """Derived Email / Phone / NDZ support. Owners never toggle these."""
+
+    email: bool
+    phone: bool
+    ndz: bool
+    source: str
+
+    @property
+    def enabled_kinds(self) -> tuple[str, ...]:
+        kinds: list[str] = []
+        if self.email:
+            kinds.append("email")
+        if self.phone:
+            kinds.append("phone")
+        if self.ndz:
+            kinds.append("ndz")
+        return tuple(kinds)
+
+    @property
+    def enabled_list_types(self) -> tuple[str, ...]:
+        types: list[str] = []
+        if self.email:
+            types.append("Email")
+        if self.phone:
+            types.append("Phone")
+        if self.ndz:
+            types.append("NDZ")
+        return tuple(types)
+
+    def allows_list_type(self, list_type: str) -> bool:
+        return str(list_type) in self.enabled_list_types
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "email": self.email,
+            "phone": self.phone,
+            "ndz": self.ndz,
+            "source": self.source,
+            "enabled_list_types": list(self.enabled_list_types),
+        }
+
+
+def _mapping_has(mapping: dict[str, str], key: str) -> bool:
+    value = mapping.get(key)
+    return isinstance(value, str) and bool(value.strip())
+
+
+def derive_list_capability(
+    system: str,
+    column_mapping: dict[str, str] | None = None,
+) -> ListCapability:
+    """Email when ``email`` mapped; Phone when ``phone`` mapped; NDZ iff all four.
+
+    Auth0 is catalog email+phone, NDZ never. CA DROP / Cassandra is never a
+    capability source. Partial NDZ stays off; save is still allowed.
+    """
+    canonical = _canonical_system(system)
+    if canonical == "auth0":
+        return ListCapability(
+            email=True,
+            phone=True,
+            ndz=False,
+            source=LIST_CAPABILITY_SOURCE_CATALOG,
+        )
+    if canonical == "cassandra":
+        return ListCapability(
+            email=False,
+            phone=False,
+            ndz=False,
+            source=LIST_CAPABILITY_SOURCE_CATALOG,
+        )
+    mapping = {
+        str(key).strip(): str(value).strip()
+        for key, value in (column_mapping or {}).items()
+        if str(key).strip() and str(value).strip()
+    }
+    return ListCapability(
+        email=_mapping_has(mapping, "email"),
+        phone=_mapping_has(mapping, "phone"),
+        ndz=all(_mapping_has(mapping, key) for key in NDZ_CANONICAL_KEYS),
+        source=LIST_CAPABILITY_SOURCE_MAPPING,
+    )
+
+
+def _column_mapping_from_metadata(metadata: dict[str, Any] | None) -> dict[str, str] | None:
+    if not metadata:
+        return None
+    raw = metadata.get("column_mapping")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        canonical = str(key).strip()
+        source = str(value).strip()
+        if canonical and source:
+            out[canonical] = source
+    return out or None
+
+
+def list_capability_from_metadata(
+    system: str,
+    metadata: dict[str, Any] | None = None,
+) -> ListCapability:
+    """Recompute capability from persisted mapping (or Auth0 catalog)."""
+    return derive_list_capability(system, _column_mapping_from_metadata(metadata))
+
+
+def intersect_flood_and_capability(
+    flood: list[str],
+    capability: ListCapability,
+) -> list[str]:
+    """Flood valve ∩ mapped/catalog capability. Empty means never enqueue."""
+    allowed = set(capability.enabled_list_types)
+    return [item for item in flood if item in allowed]
+
+
+def filter_dbt_select(
+    models: tuple[str, ...],
+    capability: ListCapability,
+) -> tuple[str, ...]:
+    """Keep staging models; drop per-kind marts the capability does not enable."""
+    enabled = set(capability.enabled_kinds)
+    kept: list[str] = []
+    for model in models:
+        kind: str | None = None
+        if model.endswith("_email_hash"):
+            kind = "email"
+        elif model.endswith("_phone_hash"):
+            kind = "phone"
+        elif model.endswith("_ndz_hash"):
+            kind = "ndz"
+        if kind is None or kind in enabled:
+            kept.append(model)
+    return tuple(kept)

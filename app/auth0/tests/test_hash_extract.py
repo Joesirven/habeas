@@ -19,7 +19,7 @@ from auth0.hash_extract import (
     HashExtractError,
     run_hash_extract,
 )
-from habeas_privacy_core.vertical_hash import HashedVendorRecord, email_hash_from_raw
+from habeas_privacy_core.vertical_hash import HashedVendorRecord, email_hash_from_raw, phone_hash_from_raw
 from habeas_privacy_core.vertical_hash.bq_writer import (
     HASHED_RAW_COLUMNS,
     WRITE_TRUNCATE,
@@ -414,8 +414,15 @@ async def test_run_hash_extract_extracted_at_is_timezone_aware():
 @pytest.mark.asyncio
 async def test_run_hash_extract_jobs_export_seam_writes_hashed_only_columns():
     assert CPPA_HASH is not None
+    raw_phone = "+14155551212"
+    expected_phone_hash = phone_hash_from_raw(raw_phone)
+    assert expected_phone_hash is not None
     users = [
-        {"user_id": "auth0|cppa", "email": RAW_EMAIL},
+        {
+            "user_id": "auth0|cppa",
+            "email": RAW_EMAIL,
+            "phone_number": raw_phone,
+        },
         {"user_id": "auth0|second", "email": RAW_EMAIL_2},
     ]
     transport = httpx.MockTransport(_jobs_export_handler(users))
@@ -442,18 +449,62 @@ async def test_run_hash_extract_jobs_export_seam_writes_hashed_only_columns():
     first = json_rows[0]
     assert set(first) == set(HASHED_RAW_COLUMNS)
     assert first["email_hash"] == CPPA_HASH
+    assert first["phone_hash"] == expected_phone_hash
     assert first["vendor_record_id"] == "auth0|cppa"
     assert first["system"] == "auth0"
     assert first["email_hash"] != RAW_EMAIL
+    assert first["phone_hash"] != raw_phone
+    second = json_rows[1]
+    assert second["phone_hash"] in (None, "")
     for row in json_rows:
         assert "email" not in row
-        assert "phone_hash" not in row
-        assert "ndz_hash" not in row
+        assert "phone" not in row
+        assert "phone_number" not in row
+        assert "phone_hash" in row
+        assert "ndz_hash" in row
+        assert row["ndz_hash"] in (None, "")
         blob = " ".join(str(value) for value in row.values())
         assert RAW_EMAIL not in blob
         assert RAW_EMAIL_2 not in blob
+        assert raw_phone not in blob
         assert _SEAM_CREDS.client_secret not in blob
         assert "@" not in row["email_hash"]
+
+
+@pytest.mark.asyncio
+async def test_run_hash_extract_hashes_phone_leaves_ndz_none():
+    raw_phone = "4155551212"
+    phone_hash = "phone-digest-AAAAAAAAAAAAAAAAAAAAAAAA="
+    adapter = FakeAdapter(
+        [
+            ("auth0|phone-user", RAW_EMAIL, raw_phone),
+            ("auth0|email-only", RAW_EMAIL_2, None),
+        ]
+    )
+    writer = _writer_capture()
+
+    def phone_hasher(raw: str | None) -> str | None:
+        if raw == raw_phone:
+            return phone_hash
+        return None
+
+    rows = await run_hash_extract(
+        CREDENTIALS,
+        adapter=adapter,
+        email_hash_fn=_hasher_map({RAW_EMAIL: HASH_1, RAW_EMAIL_2: HASH_2}),
+        phone_hash_fn=phone_hasher,
+        write_hashed_raw_fn=writer,
+    )
+
+    assert rows == 2
+    records = writer.captured["records"]
+    assert records[0].email_hash == HASH_1
+    assert records[0].phone_hash == phone_hash
+    assert records[0].ndz_hash is None
+    assert records[1].email_hash == HASH_2
+    assert records[1].phone_hash is None
+    assert records[1].ndz_hash is None
+    _assert_no_raw_email(records, RAW_EMAIL, RAW_EMAIL_2, raw_phone)
 
 
 @pytest.mark.asyncio

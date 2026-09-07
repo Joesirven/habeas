@@ -348,7 +348,7 @@ async def test_run_hash_extract_applies_persisted_column_mapping():
 async def test_run_hash_extract_without_mapping_does_not_invent_work_email():
     writer = MagicMock()
 
-    with pytest.raises(HashExtractError, match="missing email column") as raised:
+    with pytest.raises(HashExtractError, match="missing identifier columns") as raised:
         await run_hash_extract(
             metadata={"gcs_uri": GCS_URI},
             email_hash_fn=_hasher_map({RAW_EMAIL: HASH_1}),
@@ -427,7 +427,7 @@ async def test_run_hash_extract_mapped_column_missing_does_not_write():
     content = _csv_bytes("email,employee_id", f"{RAW_EMAIL},E-1")
     writer = MagicMock()
 
-    with pytest.raises(HashExtractError, match="missing email column") as raised:
+    with pytest.raises(HashExtractError, match="missing identifier columns") as raised:
         await run_hash_extract(
             gcs_uri=GCS_URI,
             metadata={"column_mapping": {"email": "Work Email"}},
@@ -438,3 +438,31 @@ async def test_run_hash_extract_mapped_column_missing_does_not_write():
 
     writer.assert_not_called()
     _assert_error_has_no_pii(raised.value, RAW_EMAIL, "Work Email", GCS_URI)
+
+
+@pytest.mark.asyncio
+async def test_run_hash_extract_phone_and_ndz_when_columns_present():
+    csv_body = (
+        "employee_id,email,phone,first_name,last_name,dob,zip\n"
+        "e1,a@example.com,4155551212,Ada,Lovelace,1815-12-10,94107\n"
+    ).encode()
+    writer_rows = []
+
+    def writer(table_id, records):
+        writer_rows.extend(records)
+
+    rows = await run_hash_extract(
+        gcs_uri="gs://bucket/path.csv",
+        metadata={},
+        read_object_fn=lambda b, p: csv_body,
+        write_hashed_raw_fn=writer,
+        email_hash_fn=lambda v: f"e:{v}" if v else None,
+        phone_hash_fn=lambda v: f"p:{v}" if v else None,
+        ndz_hash_fn=lambda fn, ln, dob, z: f"n:{fn}:{ln}:{dob}:{z}",
+    )
+    assert rows == 1
+    rec = writer_rows[0]
+    assert rec.email_hash == "e:a@example.com"
+    assert rec.phone_hash == "p:4155551212"
+    assert rec.ndz_hash == "n:Ada:Lovelace:1815-12-10:94107"
+    assert rec.vendor_record_id == "e1"

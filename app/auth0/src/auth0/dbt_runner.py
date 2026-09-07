@@ -12,8 +12,19 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-# Auth0 models only — do not build other verticals.
-AUTH0_DBT_SELECT = ("stg_auth0_hashed", "mart_auth0_email_hash")
+from habeas_privacy_core.connections.catalog import (
+    derive_list_capability,
+    filter_dbt_select,
+)
+
+# Full Auth0 model set on disk. Runtime select drops kinds catalog cannot
+# support (NDZ never).
+AUTH0_DBT_SELECT = (
+    "stg_auth0_hashed",
+    "mart_auth0_email_hash",
+    "mart_auth0_phone_hash",
+    "mart_auth0_ndz_hash",
+)
 
 
 @dataclass(frozen=True)
@@ -29,21 +40,23 @@ def run_external_hash_dbt_build(
     dbt_dir: str | Path,
     timeout_seconds: int,
 ) -> DbtRunResult:
-    """Run ``dbt build`` for Auth0 staging + email-hash mart.
+    """Run ``dbt build`` for Auth0 staging + email/phone/ndz hash marts.
 
     Command (cwd = ``dbt_dir``)::
 
-        dbt build --select stg_auth0_hashed mart_auth0_email_hash
+        dbt build --select stg_auth0_hashed mart_auth0_email_hash \\
+            mart_auth0_phone_hash mart_auth0_ndz_hash
 
     ``DBT_PROFILES_DIR`` is set to the existing env value, or ``dbt_dir`` when
     unset. ``subprocess.TimeoutExpired`` is left for the caller to handle.
     """
     cwd = Path(dbt_dir)
+    select = filter_dbt_select(AUTH0_DBT_SELECT, derive_list_capability("auth0"))
     cmd = [
         "dbt",
         "build",
         "--select",
-        *AUTH0_DBT_SELECT,
+        *select,
     ]
     env = {
         **os.environ,

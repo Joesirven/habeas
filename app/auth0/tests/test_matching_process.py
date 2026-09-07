@@ -13,16 +13,21 @@ from auth0.vertical_match import VerticalMatchOutcome, run_auth0_vertical_match
 from habeas_privacy_core.models.intake import DropListType, DropMatchingPayload, RequestRecord
 from habeas_privacy_core.models.request import IntakeSource
 from habeas_privacy_core.queue.constants import AUTH0_ATTEMPTS_TABLE, STEP_MATCHING
-from habeas_privacy_core.vertical_hash.bq_lookup import Auth0HashLookupError
+from habeas_privacy_core.vertical_hash.bq_lookup import (
+    Auth0HashLookupError,
+    VerticalHashLookupError,
+)
 from fastapi.testclient import TestClient
 
 _REQUEST_ID = "11111111-2222-3333-4444-555555555555"
 _ATTEMPT_ID = 42
 _EMAIL_HASH = "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY="
+_PHONE_HASH = "cGhvbmUtaGFzaC1BQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+_NDZ_HASH = "bmR6LWhhc2gtb3BhcXVlLWJhc2U2NC12YWx1ZS0xAAA="
 _VENDOR_ID = "auth0|opaque-must-not-audit"
 PII_EMAIL = "jane.doe@example.com"
 
-_PII_TOKENS = (_EMAIL_HASH, _VENDOR_ID, PII_EMAIL)
+_PII_TOKENS = (_EMAIL_HASH, _PHONE_HASH, _NDZ_HASH, _VENDOR_ID, PII_EMAIL)
 _AUDIT_FORBIDDEN_KEYS = frozenset(
     {
         "email",
@@ -103,6 +108,7 @@ async def _run_process(
     *,
     email_hash: str | None = _EMAIL_HASH,
     hash_fields: dict[str, Any] | None = None,
+    list_type: DropListType | str | None = None,
     lookup: Any | None = None,
     persist: Any | None = None,
 ) -> tuple[VerticalMatchOutcome, MagicMock, AsyncMock]:
@@ -114,6 +120,7 @@ async def _run_process(
         attempt_id=_ATTEMPT_ID,
         email_hash=email_hash,
         hash_fields=hash_fields,
+        list_type=list_type,
         lookup=lookup_fn,
         persist=upsert,
     )
@@ -149,6 +156,85 @@ async def test_email_hash_present_looks_up_upserts_and_succeeds():
     assert outcome.ok is True
     assert outcome.match_count == 1
     assert outcome.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_phone_hash_present_looks_up_upserts_and_succeeds():
+    outcome, lookup_fn, persist = await _run_process(
+        email_hash=None,
+        hash_fields={"hashed_phone": _PHONE_HASH},
+        list_type=DropListType.PHONE,
+    )
+
+    lookup_fn.assert_called_once_with(_PHONE_HASH)
+    persist.assert_awaited_once()
+    kwargs = persist.await_args.kwargs
+    assert kwargs["match_count"] == 1
+    assert kwargs["vendor_record_ids"] == [_VENDOR_ID]
+    assert kwargs["vertical"] == "auth0"
+    assert kwargs["source_matching_attempt_id"] is None
+    assert outcome.ok is True
+    assert outcome.match_count == 1
+    assert outcome.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_ndz_hash_present_looks_up_upserts_and_succeeds():
+    outcome, lookup_fn, persist = await _run_process(
+        email_hash=None,
+        hash_fields={"concatenated_hash": _NDZ_HASH},
+        list_type=DropListType.NDZ,
+    )
+
+    lookup_fn.assert_called_once_with(_NDZ_HASH)
+    persist.assert_awaited_once()
+    kwargs = persist.await_args.kwargs
+    assert kwargs["match_count"] == 1
+    assert kwargs["vendor_record_ids"] == [_VENDOR_ID]
+    assert kwargs["vertical"] == "auth0"
+    assert outcome.ok is True
+    assert outcome.match_count == 1
+    assert outcome.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_phone_plaintext_rejects_with_phone_hash_label():
+    outcome, lookup_fn, persist = await _run_process(
+        email_hash=None,
+        hash_fields={"hashed_phone": "4155551212"},
+        list_type=DropListType.PHONE,
+    )
+
+    lookup_fn.assert_not_called()
+    persist.assert_not_awaited()
+    assert outcome.ok is False
+    assert outcome.error_code == "auth0_invalid_hash"
+    assert outcome.error_detail == "phone_hash must not contain plaintext"
+    assert "4155551212" not in (outcome.error_detail or "")
+
+
+@pytest.mark.asyncio
+async def test_phone_vertical_hash_error_maps_to_auth0_lookup_error():
+    persist = AsyncMock()
+    with patch(
+        "auth0.vertical_match.lookup_vendor_ids_by_phone_hashes",
+        side_effect=VerticalHashLookupError("bq timeout", retry_seconds=120),
+    ):
+        outcome = await run_auth0_vertical_match(
+            MagicMock(),
+            request_id=_REQUEST_ID,
+            attempt_id=_ATTEMPT_ID,
+            email_hash=None,
+            hash_fields={"hashed_phone": _PHONE_HASH},
+            list_type=DropListType.PHONE,
+            persist=persist,
+        )
+
+    persist.assert_not_awaited()
+    assert outcome.ok is False
+    assert outcome.error_code == "auth0_lookup_error"
+    assert outcome.error_class == "Auth0HashLookupError"
+    assert "bq timeout" in (outcome.error_detail or "")
 
 
 @pytest.mark.asyncio
@@ -196,9 +282,9 @@ def test_matching_submit_email_hash_looks_up_upserts_and_completes(client):
         patch("auth0.main.claim_next", new_callable=AsyncMock, return_value=claim_row),
         patch("auth0.main.get_pool") as get_pool,
         patch(
-            "auth0.vertical_match._load_drop_email_hash",
+            "auth0.vertical_match._load_drop_hash",
             new_callable=AsyncMock,
-            return_value=_EMAIL_HASH,
+            return_value=("email", _EMAIL_HASH),
         ),
         patch("auth0.vertical_match.lookup_auth0_vendor_ids_by_email_hash", lookup_fn),
         patch("auth0.vertical_match.upsert_vertical_matching_snapshot", persist),
@@ -239,9 +325,9 @@ def test_matching_submit_no_email_hash_zero_hit_snapshot(client):
         patch("auth0.main.claim_next", new_callable=AsyncMock, return_value=claim_row),
         patch("auth0.main.get_pool") as get_pool,
         patch(
-            "auth0.vertical_match._load_drop_email_hash",
+            "auth0.vertical_match._load_drop_hash",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=(None, None),
         ),
         patch("auth0.vertical_match.lookup_auth0_vendor_ids_by_email_hash", lookup_fn),
         patch("auth0.vertical_match.upsert_vertical_matching_snapshot", persist),
@@ -275,9 +361,9 @@ def test_matching_submit_lookup_error_fails_claimed_row(client):
         patch("auth0.main.claim_next", new_callable=AsyncMock, return_value=claim_row),
         patch("auth0.main.get_pool") as get_pool,
         patch(
-            "auth0.vertical_match._load_drop_email_hash",
+            "auth0.vertical_match._load_drop_hash",
             new_callable=AsyncMock,
-            return_value=_EMAIL_HASH,
+            return_value=("email", _EMAIL_HASH),
         ),
         patch("auth0.vertical_match.lookup_auth0_vendor_ids_by_email_hash", lookup_fn),
         patch("auth0.vertical_match.upsert_vertical_matching_snapshot", persist),
@@ -314,9 +400,9 @@ def test_matching_submit_audit_payload_has_no_pii(client, caplog):
         patch("auth0.main.claim_next", new_callable=AsyncMock, return_value=claim_row),
         patch("auth0.main.get_pool") as get_pool,
         patch(
-            "auth0.vertical_match._load_drop_email_hash",
+            "auth0.vertical_match._load_drop_hash",
             new_callable=AsyncMock,
-            return_value=_EMAIL_HASH,
+            return_value=("email", _EMAIL_HASH),
         ),
         patch("auth0.vertical_match.lookup_auth0_vendor_ids_by_email_hash", lookup_fn),
         patch("auth0.vertical_match.upsert_vertical_matching_snapshot", persist),
@@ -378,6 +464,86 @@ async def test_load_path_uses_drop_email_hash_fields():
         )
 
     lookup_fn.assert_called_once_with(_EMAIL_HASH)
+    persist.assert_awaited_once()
+    assert persist.await_args.kwargs["match_count"] == 0
+    assert outcome.ok is True
+    assert outcome.match_count == 0
+
+
+@pytest.mark.asyncio
+async def test_load_path_uses_drop_phone_hash_fields():
+    record = RequestRecord(
+        id=_REQUEST_ID,
+        received_at="2026-08-24T00:00:00+00:00",
+        intake_source=IntakeSource.DROP,
+        raw_record_id=10,
+        requestor_state="CA",
+    )
+    payload = DropMatchingPayload(
+        drop_record_id="drop-phone-1",
+        list_type=DropListType.PHONE,
+        hash_fields={"hashed_phone": _PHONE_HASH},
+    )
+    persist = AsyncMock()
+    lookup_fn = MagicMock(return_value=[_VENDOR_ID])
+
+    with (
+        patch("auth0.vertical_match.get_request", new_callable=AsyncMock, return_value=record),
+        patch(
+            "auth0.vertical_match.request_resolver",
+            new_callable=AsyncMock,
+            return_value=payload,
+        ),
+    ):
+        outcome = await run_auth0_vertical_match(
+            MagicMock(),
+            request_id=_REQUEST_ID,
+            attempt_id=_ATTEMPT_ID,
+            lookup=lookup_fn,
+            persist=persist,
+        )
+
+    lookup_fn.assert_called_once_with(_PHONE_HASH)
+    persist.assert_awaited_once()
+    assert persist.await_args.kwargs["match_count"] == 1
+    assert outcome.ok is True
+    assert outcome.match_count == 1
+
+
+@pytest.mark.asyncio
+async def test_load_path_uses_drop_ndz_hash_fields():
+    record = RequestRecord(
+        id=_REQUEST_ID,
+        received_at="2026-08-24T00:00:00+00:00",
+        intake_source=IntakeSource.DROP,
+        raw_record_id=11,
+        requestor_state="CA",
+    )
+    payload = DropMatchingPayload(
+        drop_record_id="drop-ndz-1",
+        list_type=DropListType.NDZ,
+        hash_fields={"concatenated_hash": _NDZ_HASH},
+    )
+    persist = AsyncMock()
+    lookup_fn = MagicMock(return_value=[])
+
+    with (
+        patch("auth0.vertical_match.get_request", new_callable=AsyncMock, return_value=record),
+        patch(
+            "auth0.vertical_match.request_resolver",
+            new_callable=AsyncMock,
+            return_value=payload,
+        ),
+    ):
+        outcome = await run_auth0_vertical_match(
+            MagicMock(),
+            request_id=_REQUEST_ID,
+            attempt_id=_ATTEMPT_ID,
+            lookup=lookup_fn,
+            persist=persist,
+        )
+
+    lookup_fn.assert_called_once_with(_NDZ_HASH)
     persist.assert_awaited_once()
     assert persist.await_args.kwargs["match_count"] == 0
     assert outcome.ok is True

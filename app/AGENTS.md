@@ -21,6 +21,11 @@ Communications uses [`axios_headquarters/`](axios_headquarters/). Do not create 
 
 Deployed on `example-gcp-project`: `auth0-prod`, `axios-headquarters-prod`, `hr-alumni-prod`, `bizdev-contacts-prod`, `lever-prod`, `paylocity-prod`, `drop-notice-dispatcher-prod`. Retired unified `google-sheets-prod` — see stub [`google_sheets/README.md`](google_sheets/README.md). Cassandra stays off prod. Deploy via `infra/cloudbuild/axios-headquarters-prod.yaml`.
 
+**External hash matching:** Vertical workers match DROP Email / Phone / NDZ against
+per-kind marts (`{system}_{email,phone,ndz}_hash__build`). Hashed raw + dbt home:
+[`transform/external_hash`](../transform/external_hash/). Dispatch stays Email-only
+until cutover — see [`request_dispatcher/`](request_dispatcher/).
+
 ## Rules
 
 - Import `habeas-privacy-core` only — no cross-import between apps.

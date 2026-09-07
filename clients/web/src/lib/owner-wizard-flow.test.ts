@@ -2,6 +2,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   branchSteps,
+  formatStepColumnLabel,
   formatStepsForMapping,
   initialStack,
   isSystemComplete,
@@ -48,9 +49,9 @@ function kinds(steps: WizardStep[]): string[] {
 }
 
 describe('systemSubflowSteps', () => {
-  test('sheets system → sheets, cadence, system-done', () => {
+  test('sheets system → sheets, mapping, cadence, system-done', () => {
     const steps = systemSubflowSteps(subflowInput({ system: 'hr_alumni', isSheets: true }))
-    expect(kinds(steps)).toEqual(['sheets', 'cadence', 'system-done'])
+    expect(kinds(steps)).toEqual(['sheets', 'mapping', 'cadence', 'system-done'])
     expect(steps.every((step) => step.system === 'hr_alumni')).toBe(true)
   })
 
@@ -186,6 +187,27 @@ describe('formatStepsForMapping', () => {
 
   test('empty-string mapping values count as unmapped', () => {
     expect(formatIds({ email: '', phone: 'Cell' })).toEqual(['phone', 'delimiter'])
+  })
+})
+
+describe('formatStepColumnLabel', () => {
+  test('names the mapped column for email, phone, and full_name', () => {
+    const mapping = { email: 'Work Email', phone: 'Cell', full_name: 'Employee' }
+    expect(formatStepColumnLabel('email', mapping)).toBe('Work Email')
+    expect(formatStepColumnLabel('phone', mapping)).toBe('Cell')
+    expect(formatStepColumnLabel('name', mapping)).toBe('Employee')
+  })
+
+  test('delimiter names both email and phone columns when present', () => {
+    expect(formatStepColumnLabel('delimiter', { email: 'Work Email', phone: 'Cell' })).toBe(
+      'Work Email and Cell',
+    )
+    expect(formatStepColumnLabel('delimiter', { phone: 'Cell' })).toBe('Cell')
+    expect(formatStepColumnLabel('delimiter', { first_name: 'First' })).toBeUndefined()
+  })
+
+  test('empty-string mapping values count as unmapped', () => {
+    expect(formatStepColumnLabel('phone', { phone: '  ' })).toBeUndefined()
   })
 })
 

@@ -9,6 +9,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from habeas_privacy_core.connections.freshness import DisplayStatus, GateCode
+from habeas_privacy_core.connections.catalog import (
+    derive_list_capability,
+    filter_dbt_select,
+    intersect_flood_and_capability,
+    list_capability_from_metadata,
+)
 from habeas_privacy_core.connections.matching_gate import (
     evaluate_matching_drain_readiness,
     evaluate_system_matching_gate,
@@ -335,14 +341,192 @@ async def test_evaluate_matching_drain_readiness_mart_missing(
         _ok_gate,
     )
     monkeypatch.setattr(
-        "habeas_privacy_core.connections.matching_gate.email_hash_mart_exists",
+        "habeas_privacy_core.connections.matching_gate.hash_mart_exists",
         lambda *_a, **_k: False,
     )
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "system": "hr_alumni",
+            "status": "connected",
+            "last_test_ok": True,
+            "metadata": {"column_mapping": {"email": "email"}},
+        }
+    )
     out = await evaluate_matching_drain_readiness(
-        AsyncMock(), system="hr_alumni", mart_table="hr_alumni_email_hash__build"
+        conn, system="hr_alumni", mart_table="hr_alumni_email_hash__build"
     )
     assert out.ready is False
     assert out.reason == "mart_missing"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_matching_drain_readiness_ready_when_phone_mart_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from habeas_privacy_core.connections.freshness import GateResult
+
+    async def _ok_gate(*_a: object, **_k: object) -> GateResult:
+        return GateResult(
+            allowed=True, code=GateCode.OK, display_status=DisplayStatus.CONNECTED
+        )
+
+    def _mart_exists(
+        _system: str,
+        *,
+        kind: str | None = None,
+        list_type: str | None = None,
+        table: str | None = None,
+        **_k: object,
+    ) -> bool:
+        del list_type, table
+        return kind == "phone"
+
+    monkeypatch.setattr(
+        "habeas_privacy_core.connections.matching_gate.evaluate_system_matching_gate",
+        _ok_gate,
+    )
+    monkeypatch.setattr(
+        "habeas_privacy_core.connections.matching_gate.hash_mart_exists",
+        _mart_exists,
+    )
+    out = await evaluate_matching_drain_readiness(AsyncMock(), system="auth0")
+    assert out.ready is True
+    assert out.reason == "ok"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_matching_drain_readiness_auth0_ndz_mart_only_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from habeas_privacy_core.connections.freshness import GateResult
+
+    async def _ok_gate(*_a: object, **_k: object) -> GateResult:
+        return GateResult(
+            allowed=True, code=GateCode.OK, display_status=DisplayStatus.CONNECTED
+        )
+
+    def _mart_exists(
+        _system: str,
+        *,
+        kind: str | None = None,
+        list_type: str | None = None,
+        table: str | None = None,
+        **_k: object,
+    ) -> bool:
+        del list_type, table
+        return kind == "ndz"
+
+    monkeypatch.setattr(
+        "habeas_privacy_core.connections.matching_gate.evaluate_system_matching_gate",
+        _ok_gate,
+    )
+    monkeypatch.setattr(
+        "habeas_privacy_core.connections.matching_gate.hash_mart_exists",
+        _mart_exists,
+    )
+    out = await evaluate_matching_drain_readiness(AsyncMock(), system="auth0")
+    assert out.ready is False
+    assert out.reason == "mart_missing"
+
+
+def test_derive_list_capability_mapping_and_partial_ndz() -> None:
+    email_only = derive_list_capability("paylocity", {"email": "Work Mail"})
+    assert email_only.email is True
+    assert email_only.phone is False
+    assert email_only.ndz is False
+    assert email_only.enabled_list_types == ("Email",)
+
+    partial_ndz = derive_list_capability(
+        "hr_alumni",
+        {"first_name": "Given", "last_name": "Family", "dob": "DOB"},
+    )
+    assert partial_ndz.ndz is False
+    assert partial_ndz.email is False
+
+    full_ndz = derive_list_capability(
+        "hr_alumni",
+        {
+            "first_name": "Given",
+            "last_name": "Family",
+            "dob": "DOB",
+            "zip": "ZIP",
+        },
+    )
+    assert full_ndz.ndz is True
+    assert full_ndz.enabled_list_types == ("NDZ",)
+
+    full_name_only = derive_list_capability("lever", {"full_name": "Name"})
+    assert full_name_only.ndz is False
+    assert full_name_only.enabled_kinds == ()
+
+
+def test_auth0_catalog_capability_never_ndz() -> None:
+    cap = derive_list_capability("auth0", {"first_name": "a", "last_name": "b", "dob": "c", "zip": "d"})
+    assert cap.source == "catalog"
+    assert cap.email is True
+    assert cap.phone is True
+    assert cap.ndz is False
+    assert cap.enabled_list_types == ("Email", "Phone")
+    drop = filter_dbt_select(
+        (
+            "stg_auth0_hashed",
+            "mart_auth0_email_hash",
+            "mart_auth0_phone_hash",
+            "mart_auth0_ndz_hash",
+        ),
+        cap,
+    )
+    assert drop == ("stg_auth0_hashed", "mart_auth0_email_hash", "mart_auth0_phone_hash")
+
+
+def test_cassandra_never_capability_source() -> None:
+    cap = derive_list_capability("cassandra", {"email": "email"})
+    assert cap.enabled_kinds == ()
+    assert intersect_flood_and_capability(["Email", "Phone"], cap) == []
+
+
+def test_list_capability_from_metadata_and_flood_intersect() -> None:
+    cap = list_capability_from_metadata(
+        "axios_headquarters",
+        {"column_mapping": {"email": "Work Email", "phone": "Mobile"}},
+    )
+    assert cap.enabled_list_types == ("Email", "Phone")
+    assert intersect_flood_and_capability(["Email"], cap) == ["Email"]
+    assert intersect_flood_and_capability(["Phone", "NDZ"], cap) == ["Phone"]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_matching_drain_readiness_cannot_support_unmapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from habeas_privacy_core.connections.freshness import GateResult
+
+    async def _ok_gate(*_a: object, **_k: object) -> GateResult:
+        return GateResult(
+            allowed=True, code=GateCode.OK, display_status=DisplayStatus.CONNECTED
+        )
+
+    monkeypatch.setattr(
+        "habeas_privacy_core.connections.matching_gate.evaluate_system_matching_gate",
+        _ok_gate,
+    )
+    monkeypatch.setattr(
+        "habeas_privacy_core.connections.matching_gate.hash_mart_exists",
+        lambda *_a, **_k: True,
+    )
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        return_value={
+            "system": "hr_alumni",
+            "status": "connected",
+            "last_test_ok": True,
+            "metadata": {},
+        }
+    )
+    out = await evaluate_matching_drain_readiness(conn, system="hr_alumni")
+    assert out.ready is False
+    assert out.reason == "cannot_support"
 
 
 @pytest.mark.asyncio
@@ -363,7 +547,7 @@ async def test_evaluate_matching_drain_readiness_gate_blocked(
         _blocked,
     )
     monkeypatch.setattr(
-        "habeas_privacy_core.connections.matching_gate.email_hash_mart_exists",
+        "habeas_privacy_core.connections.matching_gate.hash_mart_exists",
         lambda *_a, **_k: True,
     )
     out = await evaluate_matching_drain_readiness(AsyncMock(), system="hr_alumni")

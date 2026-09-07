@@ -60,7 +60,12 @@ ATTEMPTS_TABLE = AXIOS_HEADQUARTERS_ATTEMPTS_TABLE
 SUPPRESS_AXIOS_HEADQUARTERS_ACTION = "suppress.axios_headquarters"
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _DEFAULT_EXTERNAL_HASH_DBT_DIR = _REPO_ROOT / "transform" / "external_hash"
-AXIOS_HEADQUARTERS_DBT_SELECT = ("stg_axios_headquarters_hashed", "mart_axios_headquarters_email_hash")
+AXIOS_HEADQUARTERS_DBT_SELECT = (
+    "stg_axios_headquarters_hashed",
+    "mart_axios_headquarters_email_hash",
+    "mart_axios_headquarters_phone_hash",
+    "mart_axios_headquarters_ndz_hash",
+)
 
 
 class Settings(CoreSettings):

@@ -60,23 +60,37 @@ is a new adapter class, not a new app.
 
 ## Auth0 vertical
 
-After a successful **DROP email** match (v1; phone / NDZ skip this step), `matching-dev` and the local worker / chunk drain look up `example-gcp-project.external_hash_index.auth0_email_hash__build` (`system = 'auth0'`) and upsert `request_vertical_matching` (`vertical=auth0`, opaque `vendor_record_id`s, `match_count`). Same cycle as DROP — not a second `matching_attempts` row and not `app/auth0` stub `/matching/submit`.
+**Canonical path:** the Auth0 worker (`app/auth0`) matches Email, Phone, and NDZ
+against its own external_hash marts (`auth0_email_hash__build`,
+`auth0_phone_hash__build`, `auth0_ndz_hash__build`) via `/matching/submit` and
+upserts `request_vertical_matching`. See [`app/auth0/README.md`](../auth0/README.md).
+Phone/NDZ vertical enqueue is gated by request-dispatcher
+`DISPATCH_VERTICAL_LIST_TYPES` (Auth0, Axios HQ, `hr_alumni`, `bizdev_contacts` —
+default Email-only until marts are ready).
 
-Auth0 lookup failure is **non-fatal** to the DROP attempt. Allowlisted audit keys only: `auth0_match_count`, `auth0_bq_dataset`, `auth0_error_code`. Never log hashes, vendor ids, or emails.
+**matching-dev side-path (legacy / email-focused):** historical drain code and
+`Auth0HashPipeline` still reference the email mart only. Do not assume
+matching-dev looks up Phone or NDZ Auth0 marts, and do not treat that side-path
+as the source of truth for Auth0 phone/ndz matching. DROP drain itself stays
+Data-vertical only.
+
+Allowlisted audit keys on any Auth0 extras still include `auth0_match_count`,
+`auth0_bq_dataset`, `auth0_error_code`. Never log hashes, vendor ids, or emails.
 
 **Cadence is UNSET and out of scope.** Matching does **not** call `evaluate_connection_gate` or block when owner refresh cadence is missing.
 
-**`auth0-dev` is not deployed.** The mart is filled by **local** Auth0 hash refresh — [`app/auth0/README.md`](../auth0/README.md) § Auth0 matching on dev. Do not invent a Cloud Run Auth0 worker.
+**`auth0-dev` is not deployed.** Marts are filled by **local** Auth0 hash refresh —
+[`app/auth0/README.md`](../auth0/README.md) § Auth0 matching on dev. Do not invent a Cloud Run Auth0 worker for that local path.
 
 | Variable | Role |
 |----------|------|
-| `EXTERNAL_HASH_BQ_PROJECT` | BQ project for the Auth0 mart (default `example-gcp-project`) |
+| `EXTERNAL_HASH_BQ_PROJECT` | BQ project for Auth0 marts (default `example-gcp-project`) |
 | `EXTERNAL_HASH_BQ_DATASET` | Dataset (default `external_hash_index`) |
 | `GCP_PROJECT` | Already required for chunk drain |
 
-**IAM (Jose-gated):** matching-dev runtime SA needs project `roles/bigquery.jobUser` and **table-level** `roles/bigquery.dataViewer` on `external_hash_index.auth0_email_hash__build` — not dataset-wide write (other verticals share `external_hash_index`). See [`infra/README.md`](../../infra/README.md) (matching-dev + Auth0 mart).
+**IAM (Jose-gated):** any matching-dev SA that still reads the email side-path needs project `roles/bigquery.jobUser` and **table-level** `roles/bigquery.dataViewer` on `external_hash_index.auth0_email_hash__build` — not dataset-wide write. Auth0 worker mart reads (email / phone / NDZ) are owned by that worker’s identity — see [`app/auth0/README.md`](../auth0/README.md) and [`infra/README.md`](../../infra/README.md).
 
-Dev path: (1) local hash refresh until the mart has rows, (2) DROP dispatch / `/ops/drop/ensure-drain` on **matching-dev**, (3) SELECT `request_vertical_matching` (`vertical=auth0`), (4) owner GET / PUT on admin-api — [`app/admin_api/README.md`](../admin_api/README.md) § Auth0 vertical.
+Dev path: (1) local Auth0 hash refresh until email/phone/ndz marts exist, (2) dispatch + Auth0 worker `/matching/submit` (not matching-dev for phone/ndz), (3) SELECT `request_vertical_matching` (`vertical=auth0`), (4) owner GET / PUT on admin-api — [`app/admin_api/README.md`](../admin_api/README.md) § Auth0 vertical.
 
 ## Local
 
@@ -86,7 +100,9 @@ uv run --package matching-worker uvicorn matching.main:app \
   --reload --app-dir app/matching/src --port 8084
 ```
 
-Local `/process` and `/ensure-drain` run the same Auth0 lookup when a DROP email attempt succeeds (needs ADC + mart IAM on the caller). Deployed wave uses **matching-dev**, not this process.
+Local `/process` and `/ensure-drain` are DROP Data-vertical only. Auth0
+Email/Phone/NDZ matching runs on the Auth0 worker — see § Auth0 vertical.
+Deployed DROP wave uses **matching-dev** / `data-vertical-matching-*`, not this process.
 
 Depends on [`habeas-privacy-core`](../../libs/habeas-privacy-core/).
 

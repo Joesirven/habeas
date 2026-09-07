@@ -48,6 +48,10 @@ def _dispatch_conn(
         return []
 
     async def fake_fetchrow(query: str, *_args: Any) -> dict[str, Any]:
+        if "-- list_capability" in query or (
+            "FROM integration_connections" in query and "INSERT INTO" not in query
+        ):
+            return {"metadata": {"column_mapping": {"email": "email"}}}
         if "INSERT INTO matching_attempts" in query:
             if matching:
                 return matching.pop(0)
@@ -90,15 +94,15 @@ _PEOPLE_ATTEMPT_TABLES = (
 )
 
 
-def _assert_set_based_varchar_params(sql: str) -> None:
-    """Auth0/Email text binds must be ::varchar — uncast $1/$2/$3 is AmbiguousParameterError."""
+def _assert_set_based_bind_params(sql: str) -> None:
+    """Auth0/vertical text binds must be cast — uncast $1/$2/$3 is AmbiguousParameterError."""
     assert "$1::varchar" in sql
     assert "$2::varchar" in sql
-    assert "$3::varchar" in sql
+    assert "$3::text[]" in sql
     leftover = (
         sql.replace("$1::varchar", "")
         .replace("$2::varchar", "")
-        .replace("$3::varchar", "")
+        .replace("$3::text[]", "")
     )
     for needle in ("$1", "$2", "$3"):
         assert needle not in leftover, (
@@ -106,17 +110,26 @@ def _assert_set_based_varchar_params(sql: str) -> None:
         )
 
 
-def _assert_email_vertical_sql(sql: str, table: str) -> None:
+def _assert_vertical_sql(sql: str, table: str) -> None:
     assert f"INSERT INTO {table}" in sql
     assert "SELECT" in sql.upper()
     assert "ON CONFLICT (request_id, step, attempt_number) DO NOTHING" in sql
-    _assert_set_based_varchar_params(sql)
-    assert "drr.list_type = $3::varchar" in sql
+    _assert_set_based_bind_params(sql)
+    assert "drr.list_type = ANY($3::text[])" in sql
+    assert "EXISTS" in sql.upper()
+    assert "matching_attempts" in sql
     assert "status IN ('pending', 'success')" in sql
+    # List types are bind params, not SQL literals.
     assert "Phone" not in sql
     assert "NDZ" not in sql
+    assert "'Email'" not in sql
     for people_table in _PEOPLE_ATTEMPT_TABLES:
         assert people_table not in sql
+
+
+_EMAIL_ONLY_LIST_TYPES = ["Email"]
+_ALL_VERTICAL_LIST_TYPES = ["Email", "Phone", "NDZ"]
+_ENV_ALL_VERTICAL = "Email,Phone,NDZ"
 
 
 @pytest.mark.asyncio
@@ -179,8 +192,8 @@ async def test_t8_1_dispatcher_enqueues_matching_for_new_requests():
         for call in conn.fetchrow.await_args_list
         if "INSERT INTO auth0_attempts" in call.args[0]
     )
-    _assert_email_vertical_sql(auth0_sql, "auth0_attempts")
-    assert "Email" in conn.fetchrow.await_args_list[1].args
+    _assert_vertical_sql(auth0_sql, "auth0_attempts")
+    assert conn.fetchrow.await_args_list[1].args[3] == _EMAIL_ONLY_LIST_TYPES
 
 
 @pytest.mark.asyncio
@@ -483,8 +496,85 @@ async def test_dispatch_enqueues_auth0_for_drop_email_list():
         for call in conn.fetchrow.await_args_list
         if "INSERT INTO auth0_attempts" in call.args[0]
     )
-    _assert_email_vertical_sql(auth0_sql, "auth0_attempts")
-    assert conn.fetchrow.await_args_list[1].args[3] == "Email"
+    _assert_vertical_sql(auth0_sql, "auth0_attempts")
+    assert conn.fetchrow.await_args_list[1].args[3] == _EMAIL_ONLY_LIST_TYPES
+
+
+@pytest.mark.asyncio
+async def test_dispatch_default_list_types_email_only_excludes_phone(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Cutover default (or explicit Email) must not bind Phone for vertical enqueue."""
+    monkeypatch.delenv("DISPATCH_VERTICAL_LIST_TYPES", raising=False)
+    request_id = "55555555-5555-5555-5555-555555555560"
+    conn = _dispatch_conn(
+        triage_batches=[[], []],
+        matching_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
+        auth0_inserts=[_insert_row(0), _insert_row(0)],
+        hr_alumni_inserts=[_insert_row(0), _insert_row(0)],
+        bizdev_contacts_inserts=[_insert_row(0), _insert_row(0)],
+        axios_headquarters_inserts=[_insert_row(0), _insert_row(0)],
+    )
+
+    with (
+        patch(
+            "request_dispatcher.dispatch.fetch_active_rule",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "request_dispatcher.dispatch.should_route_to_legal_triage",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        await run_dispatch(conn, limit=10)
+
+    vertical_calls = [
+        call
+        for call in conn.fetchrow.await_args_list
+        if any(
+            f"INSERT INTO {table}" in call.args[0]
+            for table in (
+                "auth0_attempts",
+                "hr_alumni_attempts",
+                "bizdev_contacts_attempts",
+                "axios_headquarters_attempts",
+            )
+        )
+    ]
+    assert vertical_calls
+    for call in vertical_calls:
+        assert call.args[3] == _EMAIL_ONLY_LIST_TYPES
+        assert "Phone" not in call.args[3]
+        assert "NDZ" not in call.args[3]
+
+    monkeypatch.setenv("DISPATCH_VERTICAL_LIST_TYPES", "Email")
+    conn2 = _dispatch_conn(
+        triage_batches=[[], []],
+        matching_inserts=[_insert_row(0)],
+        auth0_inserts=[_insert_row(0)],
+    )
+    with (
+        patch(
+            "request_dispatcher.dispatch.fetch_active_rule",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "request_dispatcher.dispatch.should_route_to_legal_triage",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        await run_dispatch(conn2, limit=10)
+    auth0_call = next(
+        call
+        for call in conn2.fetchrow.await_args_list
+        if "INSERT INTO auth0_attempts" in call.args[0]
+    )
+    assert auth0_call.args[3] == _EMAIL_ONLY_LIST_TYPES
+    assert "Phone" not in auth0_call.args[3]
 
 
 @pytest.mark.asyncio
@@ -504,7 +594,11 @@ async def test_enqueue_auth0_matching_inserts_pending_row(monkeypatch: pytest.Mo
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("list_type", ["Phone", "NDZ"])
-async def test_dispatch_does_not_enqueue_auth0_for_non_email_drop(list_type: str):
+async def test_dispatch_enqueues_auth0_for_phone_and_ndz_drop(
+    list_type: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("DISPATCH_VERTICAL_LIST_TYPES", _ENV_ALL_VERTICAL)
     request_id = "66666666-6666-6666-6666-666666666666"
     conn = _dispatch_conn(
         triage_batches=[
@@ -512,7 +606,7 @@ async def test_dispatch_does_not_enqueue_auth0_for_non_email_drop(list_type: str
             [],
         ],
         matching_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
-        auth0_inserts=[_insert_row(0), _insert_row(0)],
+        auth0_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
     )
 
     with (
@@ -534,19 +628,20 @@ async def test_dispatch_does_not_enqueue_auth0_for_non_email_drop(list_type: str
         result = await run_dispatch(conn, limit=10)
 
     assert result.enqueued == 1
-    assert result.auth0_enqueued == 0
+    assert result.auth0_enqueued == 1
     auth0_row_mock.assert_not_awaited()
     auth0_sql = next(
         call.args[0]
         for call in conn.fetchrow.await_args_list
         if "INSERT INTO auth0_attempts" in call.args[0]
     )
-    _assert_email_vertical_sql(auth0_sql, "auth0_attempts")
+    _assert_vertical_sql(auth0_sql, "auth0_attempts")
+    assert conn.fetchrow.await_args_list[1].args[3] == _ALL_VERTICAL_LIST_TYPES
 
 
 @pytest.mark.asyncio
-async def test_find_requests_needing_auth0_matching_selects_email_gap():
-    """DROP Email with matching_attempts and no pending/success Auth0 row."""
+async def test_find_requests_needing_auth0_matching_selects_list_type_gap():
+    """DROP Email/Phone/NDZ with matching_attempts and no pending/success Auth0 row."""
     request_id = "77777777-7777-7777-7777-777777777777"
     conn = AsyncMock()
     conn.fetch = AsyncMock(
@@ -569,11 +664,12 @@ async def test_find_requests_needing_auth0_matching_selects_email_gap():
     assert "matching_attempts" in sql
     assert "auth0_attempts" in sql
     assert "status IN ('pending', 'success')" in sql
+    assert "drr.list_type = ANY($3::text[])" in sql
     assert "Phone" not in sql
     assert "NDZ" not in sql
     args = conn.fetch.await_args.args
     assert args[1] == 25
-    assert args[3] == "Email"
+    assert args[3] == _EMAIL_ONLY_LIST_TYPES
     assert args[4] == "matching"
 
 
@@ -619,17 +715,22 @@ async def test_dispatch_backfills_auth0_when_matching_already_enqueued():
         for call in conn.fetchrow.await_args_list
         if "INSERT INTO auth0_attempts" in call.args[0]
     )
-    _assert_email_vertical_sql(auth0_sql, "auth0_attempts")
+    _assert_vertical_sql(auth0_sql, "auth0_attempts")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("list_type", ["Phone", "NDZ"])
-async def test_dispatch_auth0_backfill_skips_non_email(list_type: str):
+async def test_dispatch_auth0_backfills_phone_and_ndz(
+    list_type: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Matching already present — set-based Auth0 INSERT covers Phone/NDZ too."""
+    monkeypatch.setenv("DISPATCH_VERTICAL_LIST_TYPES", _ENV_ALL_VERTICAL)
     request_id = "99999999-9999-9999-9999-999999999999"
     conn = _dispatch_conn(
-        triage_batches=[[{"id": request_id, "requestor_state": "CA", "list_type": list_type}]],
-        matching_inserts=[_insert_row(0)],
-        auth0_inserts=[_insert_row(0)],
+        triage_batches=[[], []],
+        matching_inserts=[_insert_row(0), _insert_row(0)],
+        auth0_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
     )
 
     with (
@@ -655,9 +756,18 @@ async def test_dispatch_auth0_backfill_skips_non_email(list_type: str):
         result = await run_dispatch(conn, limit=10)
 
     assert result.enqueued == 0
-    assert result.auth0_enqueued == 0
+    assert result.auth0_enqueued == 1
+    assert result.request_ids == [request_id]
     matching_mock.assert_not_awaited()
     auth0_row_mock.assert_not_awaited()
+    auth0_sql = next(
+        call.args[0]
+        for call in conn.fetchrow.await_args_list
+        if "INSERT INTO auth0_attempts" in call.args[0]
+    )
+    _assert_vertical_sql(auth0_sql, "auth0_attempts")
+    assert list_type in _ALL_VERTICAL_LIST_TYPES
+    assert conn.fetchrow.await_args_list[1].args[3] == _ALL_VERTICAL_LIST_TYPES
 
 
 @pytest.mark.asyncio
@@ -919,21 +1029,39 @@ async def test_dispatch_enqueues_hr_alumni_and_bizdev_for_drop_email():
     bizdev_row_mock.assert_not_awaited()
 
     hr_alumni_sql = _insert_sql(conn, "hr_alumni_attempts")
-    _assert_email_vertical_sql(hr_alumni_sql, "hr_alumni_attempts")
+    _assert_vertical_sql(hr_alumni_sql, "hr_alumni_attempts")
     bizdev_sql = _insert_sql(conn, "bizdev_contacts_attempts")
-    _assert_email_vertical_sql(bizdev_sql, "bizdev_contacts_attempts")
+    _assert_vertical_sql(bizdev_sql, "bizdev_contacts_attempts")
     axios_sql = _insert_sql(conn, "axios_headquarters_attempts")
-    _assert_email_vertical_sql(axios_sql, "axios_headquarters_attempts")
+    _assert_vertical_sql(axios_sql, "axios_headquarters_attempts")
     all_sql = " ".join(call.args[0] for call in conn.fetchrow.await_args_list)
     assert "google_sheets_attempts" not in all_sql
     assert "mailchimp_attempts" not in all_sql
     for people_table in _PEOPLE_ATTEMPT_TABLES:
         assert people_table not in all_sql
+    vertical_calls = [
+        call
+        for call in conn.fetchrow.await_args_list
+        if any(
+            f"INSERT INTO {table}" in call.args[0]
+            for table in (
+                "auth0_attempts",
+                "hr_alumni_attempts",
+                "bizdev_contacts_attempts",
+                "axios_headquarters_attempts",
+            )
+        )
+    ]
+    assert all(call.args[3] == _EMAIL_ONLY_LIST_TYPES for call in vertical_calls)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("list_type", ["Phone", "NDZ"])
-async def test_dispatch_does_not_enqueue_hr_alumni_for_non_email(list_type: str):
+async def test_dispatch_enqueues_verticals_for_phone_and_ndz(
+    list_type: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("DISPATCH_VERTICAL_LIST_TYPES", _ENV_ALL_VERTICAL)
     request_id = "66666666-6666-6666-6666-666666666667"
     conn = _dispatch_conn(
         triage_batches=[
@@ -941,9 +1069,10 @@ async def test_dispatch_does_not_enqueue_hr_alumni_for_non_email(list_type: str)
             [],
         ],
         matching_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
-        auth0_inserts=[_insert_row(0), _insert_row(0)],
-        hr_alumni_inserts=[_insert_row(0), _insert_row(0)],
-        bizdev_contacts_inserts=[_insert_row(0), _insert_row(0)],
+        auth0_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
+        hr_alumni_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
+        bizdev_contacts_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
+        axios_headquarters_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
     )
 
     with (
@@ -965,19 +1094,35 @@ async def test_dispatch_does_not_enqueue_hr_alumni_for_non_email(list_type: str)
         result = await run_dispatch(conn, limit=10)
 
     assert result.enqueued == 1
-    assert result.hr_alumni_enqueued == 0
-    assert result.bizdev_contacts_enqueued == 0
-    assert result.axios_headquarters_enqueued == 0
+    assert result.auth0_enqueued == 1
+    assert result.hr_alumni_enqueued == 1
+    assert result.bizdev_contacts_enqueued == 1
+    assert result.axios_headquarters_enqueued == 1
     hr_alumni_row_mock.assert_not_awaited()
     hr_alumni_sql = _insert_sql(conn, "hr_alumni_attempts")
-    _assert_email_vertical_sql(hr_alumni_sql, "hr_alumni_attempts")
+    _assert_vertical_sql(hr_alumni_sql, "hr_alumni_attempts")
     bizdev_sql = _insert_sql(conn, "bizdev_contacts_attempts")
-    _assert_email_vertical_sql(bizdev_sql, "bizdev_contacts_attempts")
+    _assert_vertical_sql(bizdev_sql, "bizdev_contacts_attempts")
     axios_sql = _insert_sql(conn, "axios_headquarters_attempts")
-    _assert_email_vertical_sql(axios_sql, "axios_headquarters_attempts")
+    _assert_vertical_sql(axios_sql, "axios_headquarters_attempts")
     all_sql = " ".join(call.args[0] for call in conn.fetchrow.await_args_list)
     assert "google_sheets_attempts" not in all_sql
     assert "mailchimp_attempts" not in all_sql
+    vertical_calls = [
+        call
+        for call in conn.fetchrow.await_args_list
+        if any(
+            f"INSERT INTO {table}" in call.args[0]
+            for table in (
+                "auth0_attempts",
+                "hr_alumni_attempts",
+                "bizdev_contacts_attempts",
+                "axios_headquarters_attempts",
+            )
+        )
+    ]
+    assert all(call.args[3] == _ALL_VERTICAL_LIST_TYPES for call in vertical_calls)
+    assert list_type in _ALL_VERTICAL_LIST_TYPES
 
 
 @pytest.mark.asyncio
@@ -1017,7 +1162,7 @@ async def test_dispatch_backfills_hr_alumni_when_matching_already_enqueued():
     assert result.hr_alumni_enqueued == 1
     matching_mock.assert_not_awaited()
     hr_alumni_row_mock.assert_not_awaited()
-    _assert_email_vertical_sql(
+    _assert_vertical_sql(
         _insert_sql(conn, "hr_alumni_attempts"),
         "hr_alumni_attempts",
     )
@@ -1063,3 +1208,61 @@ async def test_enqueue_axios_headquarters_matching_inserts_pending_row():
     assert "INSERT INTO axios_headquarters_attempts" in sql
     assert "ON CONFLICT (request_id, step, attempt_number) DO NOTHING" in sql
     assert conn.execute.await_args.args[2] == "matching"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_unmapped_phone_does_not_enqueue_even_when_flood_allows(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("DISPATCH_VERTICAL_LIST_TYPES", _ENV_ALL_VERTICAL)
+    request_id = "55555555-5555-5555-5555-555555555561"
+    conn = _dispatch_conn(
+        triage_batches=[[], []],
+        matching_inserts=[_insert_row(1, [request_id]), _insert_row(0)],
+        auth0_inserts=[_insert_row(0), _insert_row(0)],
+        hr_alumni_inserts=[_insert_row(0), _insert_row(0)],
+        bizdev_contacts_inserts=[_insert_row(0), _insert_row(0)],
+        axios_headquarters_inserts=[_insert_row(0), _insert_row(0)],
+    )
+
+    with (
+        patch(
+            "request_dispatcher.dispatch.fetch_active_rule",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "request_dispatcher.dispatch.should_route_to_legal_triage",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+    ):
+        await run_dispatch(conn, limit=10)
+
+    vertical_calls = [
+        call
+        for call in conn.fetchrow.await_args_list
+        if any(
+            f"INSERT INTO {table}" in call.args[0]
+            for table in (
+                "hr_alumni_attempts",
+                "bizdev_contacts_attempts",
+                "axios_headquarters_attempts",
+            )
+        )
+    ]
+    assert vertical_calls
+    for call in vertical_calls:
+        assert call.args[3] == ["Email"]
+        assert "Phone" not in call.args[3]
+        assert "NDZ" not in call.args[3]
+
+    auth0_calls = [
+        call
+        for call in conn.fetchrow.await_args_list
+        if "INSERT INTO auth0_attempts" in call.args[0]
+    ]
+    assert auth0_calls
+    for call in auth0_calls:
+        assert call.args[3] == ["Email", "Phone"]
+        assert "NDZ" not in call.args[3]

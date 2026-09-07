@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sample H — Compact ops table</title>
+<style>
+  :root {
+    --habeas: #1E4191;
+    --habeas-hover: #18346f;
+    --bg: #fafafa;
+    --surface: #ffffff;
+    --border: #e4e4e7;
+    --border-strong: #d4d4d8;
+    --text: #18181b;
+    --text-muted: #71717a;
+    --text-faint: #a1a1aa;
+    --ring: rgba(30, 65, 145, 0.25);
+    --green: #15803d;
+    --green-bg: #f0fdf4;
+    --green-border: #bbf7d0;
+    --gray-bg: #f4f4f5;
+    --mono: "SF Mono", ui-monospace, "Menlo", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ---------- Top bar ---------- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 16px;
+    height: 48px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .logo-dot {
+    width: 22px; height: 22px;
+    border-radius: 6px;
+    background: var(--habeas);
+    color: #fff;
+    font-weight: 700;
+    font-size: 11px;
+    display: flex; align-items: center; justify-content: center;
+    letter-spacing: 0.02em;
+  }
+  .topbar h1 { font-size: 13px; font-weight: 600; }
+  .topbar .crumb { color: var(--text-faint); }
+  .badge-sample {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--habeas);
+    background: rgba(30, 65, 145, 0.08);
+    border: 1px solid rgba(30, 65, 145, 0.2);
+    padding: 2px 7px;
+    border-radius: 999px;
+  }
+  .topbar .spacer { flex: 1; }
+  .file-chip {
+    display: flex; align-items: center; gap: 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    background: var(--gray-bg);
+    border: 1px solid var(--border);
+    padding: 4px 9px;
+    border-radius: 6px;
+  }
+  .file-chip svg { flex-shrink: 0; }
+
+  /* ---------- Toolbar ---------- */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 8px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  .tool-group { display: flex; align-items: center; gap: 8px; }
+  .tool-group label {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .tool-sep { width: 1px; height: 20px; background: var(--border); }
+  input[type="number"], select {
+    font: inherit;
+    font-size: 12px;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 4px 8px;
+    height: 28px;
+    outline: none;
+  }
+  input[type="number"] { width: 56px; font-family: var(--mono); }
+  input[type="number"]:focus, select:focus {
+    border-color: var(--habeas);
+    box-shadow: 0 0 0 3px var(--ring);
+  }
+  .btn {
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    border-radius: 6px;
+    padding: 0 12px;
+    height: 28px;
+    cursor: pointer;
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    color: var(--text);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .btn:hover { background: var(--gray-bg); }
+  .btn-primary {
+    background: var(--habeas);
+    border-color: var(--habeas);
+    color: #fff;
+  }
+  .btn-primary:hover { background: var(--habeas-hover); }
+  .btn-primary:disabled {
+    background: var(--border-strong);
+    border-color: var(--border-strong);
+    cursor: not-allowed;
+  }
+  .toolbar .meta {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-faint);
+    font-family: var(--mono);
+  }
+
+  /* ---------- Table ---------- */
+  .table-wrap {
+    flex: 1;
+    overflow: auto;
+    padding: 16px;
+  }
+  table {
+    width: 100%;
+    max-width: 1080px;
+    margin: 0 auto;
+    border-collapse: separate;
+    border-spacing: 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  thead th {
+    text-align: left;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-muted);
+    background: var(--gray-bg);
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+  }
+  tbody td {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+    height: 40px;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: #fafafe; }
+  tbody tr.mapped { background: #fcfdff; }
+
+  .var-cell { display: flex; align-items: center; gap: 8px; }
+  .var-name { font-weight: 600; font-size: 12.5px; }
+  .var-tag {
+    font-size: 9.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 1.5px 6px;
+    border-radius: 4px;
+    background: var(--gray-bg);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+  }
+  .var-tag.req { color: var(--habeas); background: rgba(30,65,145,0.07); border-color: rgba(30,65,145,0.18); }
+  .var-desc { font-size: 11px; color: var(--text-faint); margin-top: 1px; }
+
+  td select { width: 100%; max-width: 260px; font-family: var(--mono); font-size: 11.5px; }
+  td select.unmapped { color: var(--text-faint); font-style: italic; }
+
+  .fmt {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    background: var(--gray-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 7px;
+    white-space: nowrap;
+  }
+  .fmt.none { color: var(--text-faint); background: transparent; border-style: dashed; }
+
+  .sample {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .sample.empty { color: var(--text-faint); }
+
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border-strong); display: inline-block; }
+  .status-dot.on { background: var(--green); }
+
+  /* ---------- Sticky footer ---------- */
+  .footer {
+    flex-shrink: 0;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    box-shadow: 0 -4px 12px rgba(0,0,0,0.04);
+  }
+  .footer .derived-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-muted);
+  }
+  .enable-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--gray-bg);
+    color: var(--text-muted);
+    transition: all 0.15s;
+  }
+  .enable-chip.on {
+    background: var(--green-bg);
+    border-color: var(--green-border);
+    color: var(--green);
+  }
+  .enable-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: 0.5; }
+  .enable-chip.on .dot { opacity: 1; }
+  .footer .hint { font-size: 11px; color: var(--text-faint); margin-left: 4px; }
+  .footer .spacer { flex: 1; }
+  .footer .count { font-size: 11px; color: var(--text-muted); font-family: var(--mono); }
+</style>
+</head>
+<body>
+
+<!-- Top bar -->
+<header class="topbar">
+  <div class="logo-dot">C</div>
+  <h1>Sample H — Compact ops table</h1>
+  <span class="badge-sample">Mockup</span>
+  <span class="crumb">/ Owner mapping / Axios HQ upload</span>
+  <div class="spacer"></div>
+  <div class="file-chip">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+    axios_hq_roster_2026-08.csv
+  </div>
+</header>
+
+<!-- Toolbar -->
+<div class="toolbar">
+  <div class="tool-group">
+    <label for="headerRow">Header row</label>
+    <input type="number" id="headerRow" value="1" min="1" max="20">
+  </div>
+  <div class="tool-sep"></div>
+  <div class="tool-group">
+    <label for="delimiter">Delimiter</label>
+    <select id="delimiter">
+      <option selected>Comma ,</option>
+      <option>Tab</option>
+      <option>Semicolon ;</option>
+      <option>Pipe |</option>
+    </select>
+  </div>
+  <div class="tool-sep"></div>
+  <div class="tool-group">
+    <label for="encoding">Encoding</label>
+    <select id="encoding">
+      <option selected>UTF-8</option>
+      <option>Latin-1</option>
+    </select>
+  </div>
+  <button class="btn" id="reparse">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+    Re-parse
+  </button>
+  <span class="meta">1,247 rows · 9 columns · row 1 shown as samples</span>
+</div>
+
+<!-- Mapping table -->
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th style="width:34px"></th>
+        <th style="width:26%">Canonical variable</th>
+        <th style="width:28%">Source header</th>
+        <th style="width:14%">Format</th>
+        <th>Sample value</th>
+      </tr>
+    </thead>
+    <tbody id="mappingBody"><!-- rows rendered by JS --></tbody>
+  </table>
+</div>
+
+<!-- Sticky footer -->
+<footer class="footer">
+  <span class="derived-label">Derived enablement</span>
+  <span class="enable-chip" id="chipEmail"><span class="dot"></span>Email</span>
+  <span class="enable-chip" id="chipPhone"><span class="dot"></span>Phone</span>
+  <span class="enable-chip" id="chipNdz"><span class="dot"></span>NDZ</span>
+  <span class="hint" id="ndzHint"></span>
+  <div class="spacer"></div>
+  <span class="count" id="mapCount"></span>
+  <button class="btn">Discard</button>
+  <button class="btn btn-primary" id="confirmBtn" disabled>Confirm mapping</button>
+</footer>
+
+<script>
+  const HEADERS = [
+    { name: "— not mapped —", sample: "" },
+    { name: "email_address", sample: "jane.doe@axios.com" },
+    { name: "mobile_phone", sample: "+1 (202) 555-0148" },
+    { name: "fname", sample: "Jane" },
+    { name: "lname", sample: "Doe" },
+    { name: "birth_date", sample: "1987-03-14" },
+    { name: "zip5", sample: "20001" },
+    { name: "employee_id", sample: "AX-004217" },
+    { name: "dept", sample: "Editorial" },
+    { name: "hq_state", sample: "DC" }
+  ];
+
+  const VARIABLES = [
+    { key: "email",      name: "email",      desc: "Primary contact email",        tag: "required", fmt: "lowercase · trim",   guess: "email_address" },
+    { key: "phone",      name: "phone",      desc: "Mobile or direct line",        tag: "optional", fmt: "E.164",              guess: "mobile_phone" },
+    { key: "first_name", name: "first_name", desc: "Given name",                   tag: "NDZ",      fmt: "trim",               guess: "fname" },
+    { key: "last_name",  name: "last_name",  desc: "Family name",                  tag: "NDZ",      fmt: "trim",               guess: "lname" },
+    { key: "dob",        name: "dob",        desc: "Date of birth",                tag: "NDZ",      fmt: "YYYY-MM-DD",         guess: "birth_date" },
+    { key: "zip",        name: "zip",        desc: "5-digit postal code",          tag: "NDZ",      fmt: "zero-pad 5",         guess: "zip5" },
+    { key: "external_id",name: "external_id",desc: "Source system identifier",     tag: "optional", fmt: "as-is",              guess: "employee_id" },
+    { key: "state",      name: "state",      desc: "US state, 2-letter",           tag: "optional", fmt: "uppercase",          guess: "hq_state" }
+  ];
+
+  const state = {};
+
+  const body = document.getElementById("mappingBody");
+  VARIABLES.forEach(v => {
+    state[v.key] = v.guess;
+    const tr = document.createElement("tr");
+    tr.className = "mapped";
+    tr.innerHTML = `
+      <td><span class="status-dot on" data-dot="${v.key}"></span></td>
+      <td>
+        <div class="var-cell">
+          <div>
+            <span class="var-name">${v.name}</span>
+            <span class="var-tag ${v.tag === "required" ? "req" : ""}">${v.tag}</span>
+            <div class="var-desc">${v.desc}</div>
+          </div>
+        </div>
+      </td>
+      <td>
+        <select data-var="${v.key}">
+          ${HEADERS.map(h => `<option value="${h.name}" ${h.name === v.guess ? "selected" : ""}>${h.name}</option>`).join("")}
+        </select>
+      </td>
+      <td><span class="fmt" data-fmt="${v.key}">${v.fmt}</span></td>
+      <td><span class="sample" data-sample="${v.key}">${sampleFor(v.guess)}</span></td>
+    `;
+    body.appendChild(tr);
+  });
+
+  function sampleFor(headerName) {
+    const h = HEADERS.find(x => x.name === headerName);
+    return h && h.sample ? h.sample : "";
+  }
+
+  function refresh() {
+    let mapped = 0;
+    VARIABLES.forEach(v => {
+      const sel = state[v.key];
+      const isMapped = sel !== "— not mapped —";
+      if (isMapped) mapped++;
+      const dot = document.querySelector(`[data-dot="${v.key}"]`);
+      const fmt = document.querySelector(`[data-fmt="${v.key}"]`);
+      const smp = document.querySelector(`[data-sample="${v.key}"]`);
+      const select = document.querySelector(`select[data-var="${v.key}"]`);
+      dot.classList.toggle("on", isMapped);
+      select.classList.toggle("unmapped", !isMapped);
+      fmt.classList.toggle("none", !isMapped);
+      fmt.textContent = isMapped ? v.fmt : "—";
+      smp.classList.toggle("empty", !isMapped);
+      smp.textContent = isMapped ? sampleFor(sel) : "—";
+      select.closest("tr").classList.toggle("mapped", isMapped);
+    });
+
+    const email = state.email !== "— not mapped —";
+    const phone = state.phone !== "— not mapped —";
+    const ndzParts = ["first_name", "last_name", "dob", "zip"].filter(k => state[k] !== "— not mapped —");
+    const ndz = ndzParts.length === 4;
+
+    document.getElementById("chipEmail").classList.toggle("on", email);
+    document.getElementById("chipPhone").classList.toggle("on", phone);
+    document.getElementById("chipNdz").classList.toggle("on", ndz);
+    document.getElementById("ndzHint").textContent = ndz ? "" : `NDZ needs first/last/dob/zip (${ndzParts.length}/4)`;
+    document.getElementById("mapCount").textContent = `${mapped}/${VARIABLES.length} mapped`;
+    document.getElementById("confirmBtn").disabled = !(email || phone || ndz);
+  }
+
+  body.addEventListener("change", e => {
+    const sel = e.target.closest("select[data-var]");
+    if (!sel) return;
+    state[sel.dataset.var] = sel.value;
+    refresh();
+  });
+
+  document.getElementById("reparse").addEventListener("click", () => {
+    const row = document.getElementById("headerRow").value;
+    const delim = document.getElementById("delimiter").value;
+    document.querySelector(".toolbar .meta").textContent =
+      `1,247 rows · 9 columns · header row ${row} · ${delim.toLowerCase()} · samples refreshed`;
+  });
+
+  refresh();
+</script>
+</body>
+</html>

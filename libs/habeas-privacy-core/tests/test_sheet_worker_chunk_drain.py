@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,6 +26,7 @@ _REQUEST_ID = "11111111-2222-3333-4444-555555555555"
 _EMAIL_HASH = "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY="
 _VENDOR_ID = "gs-row-opaque-must-not-log"
 PII_EMAIL = "jane.doe@example.com"
+PII_PHONE = "4155551212"
 
 
 @pytest.fixture(autouse=True)
@@ -95,10 +97,22 @@ def _payload_row(
     request_id: str = _REQUEST_ID,
     list_type: str = "Email",
     hashed_email: str | None = _EMAIL_HASH,
+    hashed_phone: str | None = None,
+    concatenated_hash: str | None = None,
+    phone_hash: str | None = None,
+    ndz_hash: str | None = None,
 ) -> dict[str, Any]:
     raw: dict[str, Any] = {}
     if hashed_email is not None:
         raw["hashed_email"] = hashed_email
+    if hashed_phone is not None:
+        raw["hashed_phone"] = hashed_phone
+    if phone_hash is not None:
+        raw["phone_hash"] = phone_hash
+    if concatenated_hash is not None:
+        raw["concatenated_hash"] = concatenated_hash
+    if ndz_hash is not None:
+        raw["ndz_hash"] = ndz_hash
     return {"id": request_id, "list_type": list_type, "raw_payload": raw}
 
 
@@ -406,6 +420,219 @@ async def test_run_job_task_drains_until_idle() -> None:
     assert out["completed"] == 2
     release.assert_awaited()
     assert release.await_args.kwargs["lease_key"] == cfg.lease_key
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_phone_happy_path_looks_up() -> None:
+    cfg = hr_alumni_config()
+    phone_hash = "cGhvbmUtaGFzaC1vcGFxdWUtYmFzZTY0LXZhbHVlLTE="
+    vendor = "gs-phone-row-1"
+    conn = _RecordingConn(
+        fetch_queue=[
+            [_claim_row()],
+            [
+                _payload_row(
+                    list_type="Phone",
+                    hashed_email=None,
+                    phone_hash=phone_hash,
+                )
+            ],
+        ]
+    )
+    persist = AsyncMock()
+    lookup_calls: list[tuple[list[str], Any]] = []
+
+    def _lookup(hashes: list[str], **kwargs: Any) -> dict[str, list[str]]:
+        lookup_calls.append((list(hashes), kwargs.get("list_type")))
+        return {phone_hash: [vendor]}
+
+    out = await process_matching_chunk(
+        conn,
+        cfg,
+        worker_id="w1",
+        lookup_batch=_lookup,
+        persist=persist,
+    )
+
+    assert out["status"] == "ok"
+    assert out["errors"] == 0
+    assert len(lookup_calls) == 1
+    assert lookup_calls[0][0] == [phone_hash]
+    assert str(lookup_calls[0][1]) in ("Phone", "DropListType.PHONE")
+    persist.assert_awaited_once()
+    assert persist.await_args.kwargs["match_count"] == 1
+    body = " ".join(str(item) for item in conn.executemany_calls[0][1])
+    assert phone_hash not in body
+    assert vendor not in body
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_ndz_happy_path_looks_up() -> None:
+    cfg = hr_alumni_config()
+    ndz_hash = "bmR6LWhhc2gtb3BhcXVlLWJhc2U2NC12YWx1ZS0xAAA="
+    vendor = "gs-ndz-row-1"
+    conn = _RecordingConn(
+        fetch_queue=[
+            [_claim_row()],
+            [
+                _payload_row(
+                    list_type="NDZ",
+                    hashed_email=None,
+                    concatenated_hash=ndz_hash,
+                )
+            ],
+        ]
+    )
+    persist = AsyncMock()
+    lookup_calls: list[tuple[list[str], Any]] = []
+
+    def _lookup(hashes: list[str], **kwargs: Any) -> dict[str, list[str]]:
+        lookup_calls.append((list(hashes), kwargs.get("list_type")))
+        return {ndz_hash: [vendor]}
+
+    out = await process_matching_chunk(
+        conn,
+        cfg,
+        worker_id="w1",
+        lookup_batch=_lookup,
+        persist=persist,
+    )
+
+    assert out["status"] == "ok"
+    assert out["errors"] == 0
+    assert lookup_calls[0][0] == [ndz_hash]
+    persist.assert_awaited_once()
+    assert persist.await_args.kwargs["match_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_phone_plaintext_rejects_with_phone_hash_label() -> None:
+    cfg = hr_alumni_config()
+    conn = _RecordingConn(
+        fetch_queue=[
+            [_claim_row(attempt_id=44)],
+            [
+                _payload_row(
+                    list_type="Phone",
+                    hashed_email=None,
+                    hashed_phone=PII_PHONE,
+                )
+            ],
+        ]
+    )
+    persist = AsyncMock()
+    lookup = MagicMock(side_effect=AssertionError("lookup must not run"))
+
+    out = await process_matching_chunk(
+        conn,
+        cfg,
+        worker_id="w1",
+        lookup_batch=lookup,
+        persist=persist,
+    )
+
+    assert out["errors"] == 1
+    persist.assert_not_awaited()
+    lookup.assert_not_called()
+    _sql, args = conn.executemany_calls[0]
+    assert args[0][2] == "sheets_invalid_hash"
+    assert args[0][4] is None  # retry_after — non-retry
+    audit = json.loads(args[0][5])
+    assert audit["error_detail"] == "phone_hash must not contain plaintext"
+    assert PII_PHONE not in args[0][5]
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_groups_mixed_list_types_into_separate_lookups() -> None:
+    cfg = hr_alumni_config()
+    phone_hash = "cGhvbmUtaGFzaC1vcGFxdWUtYmFzZTY0LXZhbHVlLTE="
+    phone_request = "22222222-2222-3333-4444-555555555555"
+    conn = _RecordingConn(
+        fetch_queue=[
+            [
+                _claim_row(attempt_id=11),
+                _claim_row(attempt_id=12, request_id=phone_request),
+            ],
+            [
+                _payload_row(),
+                _payload_row(
+                    request_id=phone_request,
+                    list_type="Phone",
+                    hashed_email=None,
+                    phone_hash=phone_hash,
+                ),
+            ],
+        ]
+    )
+    persist = AsyncMock()
+    lookup_calls: list[tuple[list[str], Any]] = []
+
+    def _lookup(hashes: list[str], **kwargs: Any) -> dict[str, list[str]]:
+        lookup_calls.append((list(hashes), kwargs.get("list_type")))
+        return {h: ["v"] for h in hashes}
+
+    out = await process_matching_chunk(
+        conn,
+        cfg,
+        worker_id="w1",
+        lookup_batch=_lookup,
+        persist=persist,
+    )
+
+    assert out["status"] == "ok"
+    assert out["claimed"] == 2
+    assert out["completed"] == 2
+    assert len(lookup_calls) == 2
+    hash_batches = {tuple(call[0]) for call in lookup_calls}
+    assert (_EMAIL_HASH,) in hash_batches
+    assert (phone_hash,) in hash_batches
+    assert persist.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_process_chunk_phone_mart_missing_fails_without_email_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = hr_alumni_config()
+    phone_hash = "cGhvbmUtaGFzaC1vcGFxdWUtYmFzZTY0LXZhbHVlLTE="
+    conn = _RecordingConn(
+        fetch_queue=[
+            [_claim_row()],
+            [
+                _payload_row(
+                    list_type="Phone",
+                    hashed_email=None,
+                    phone_hash=phone_hash,
+                )
+            ],
+        ]
+    )
+    persist = AsyncMock()
+    monkeypatch.setattr(
+        "habeas_privacy_core.sheet_worker.chunk_drain._mart_exists_for_list_type",
+        lambda *_a, **_k: False,
+    )
+    core_lookup = MagicMock(side_effect=AssertionError("must not query email mart"))
+    monkeypatch.setattr(
+        "habeas_privacy_core.sheet_worker.chunk_drain.lookup_vendor_ids_by_hashes",
+        core_lookup,
+    )
+
+    out = await process_matching_chunk(
+        conn,
+        cfg,
+        worker_id="w1",
+        persist=persist,
+    )
+
+    assert out["status"] == "ok"
+    assert out["errors"] == 1
+    persist.assert_not_awaited()
+    core_lookup.assert_not_called()
+    sql, args = conn.executemany_calls[0]
+    assert "'submit_error'" in sql
+    assert args[0][2] == "sheets_lookup_error"
+    assert args[0][4] is not None
 
 
 def test_chunk_drain_logs_have_no_pii(caplog: pytest.LogCaptureFixture) -> None:

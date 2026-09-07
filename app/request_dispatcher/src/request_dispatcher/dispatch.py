@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import UUID
 
+from habeas_privacy_core.connections.catalog import (
+    derive_list_capability,
+    intersect_flood_and_capability,
+    list_capability_from_metadata,
+)
 from habeas_privacy_core.db.requests import enqueue_matching
 from habeas_privacy_core.models.intake import DropListType
 from habeas_privacy_core.queue.constants import (
@@ -46,6 +52,92 @@ _TRIAGE_SCAN_LIMIT = 200
 _ROUTE_TRIAGE_PREDICATES = frozenset({"requestor_state_not_in", "state_in"})
 
 logger = logging.getLogger(__name__)
+
+# Vertical enqueue list types — cutover default Email-only so prod does not flood
+# ~1.2M Phone/NDZ until ops sets DISPATCH_VERTICAL_LIST_TYPES after marts are ready.
+_ALLOWED_VERTICAL_LIST_TYPES = frozenset(
+    {
+        DropListType.EMAIL.value,
+        DropListType.PHONE.value,
+        DropListType.NDZ.value,
+    }
+)
+_DEFAULT_VERTICAL_LIST_TYPES: tuple[str, ...] = (DropListType.EMAIL.value,)
+_ENV_VERTICAL_LIST_TYPES = "DISPATCH_VERTICAL_LIST_TYPES"
+
+
+_CAPABILITY_META_SQL = """
+        -- list_capability
+        SELECT metadata
+          FROM integration_connections
+         WHERE system = $1
+           AND status <> 'revoked'
+         ORDER BY updated_at DESC
+         LIMIT 1
+        """
+
+
+def _vertical_list_types() -> list[str]:
+    """DROP list types eligible for Auth0, Axios HQ, hr_alumni, bizdev_contacts enqueue.
+
+    Reads ``DISPATCH_VERTICAL_LIST_TYPES`` (comma-separated). Allowed: Email,
+    Phone, NDZ. Default is Email only. Callers must still intersect with
+    mapping/catalog capability — flood valve never invents support.
+    """
+    raw = os.environ.get(_ENV_VERTICAL_LIST_TYPES)
+    if raw is None or not str(raw).strip():
+        return list(_DEFAULT_VERTICAL_LIST_TYPES)
+    parts = [part.strip() for part in str(raw).split(",") if part.strip()]
+    if not parts:
+        return list(_DEFAULT_VERTICAL_LIST_TYPES)
+    unknown = sorted({part for part in parts if part not in _ALLOWED_VERTICAL_LIST_TYPES})
+    if unknown:
+        raise ValueError(
+            f"{_ENV_VERTICAL_LIST_TYPES} has unknown values {unknown}; "
+            f"allowed: {sorted(_ALLOWED_VERTICAL_LIST_TYPES)}"
+        )
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for part in parts:
+        if part not in seen:
+            seen.add(part)
+            ordered.append(part)
+    return ordered
+
+
+def _list_types_for_capability(
+    *,
+    system: str,
+    metadata: dict[str, Any] | None = None,
+) -> list[str]:
+    """Flood valve ∩ mapping/catalog capability for one system."""
+    flood = _vertical_list_types()
+    if system == "auth0":
+        capability = derive_list_capability("auth0")
+    else:
+        capability = list_capability_from_metadata(system, metadata)
+    return intersect_flood_and_capability(flood, capability)
+
+
+async def _connection_metadata_for_system(
+    conn: DbConnection, system: str
+) -> dict[str, Any] | None:
+    row = await conn.fetchrow(_CAPABILITY_META_SQL, system)
+    if row is None:
+        return None
+    try:
+        mapping = dict(row)
+    except (TypeError, ValueError):
+        return None
+    if "n" in mapping and "request_ids" in mapping and "metadata" not in mapping:
+        return None
+    meta = mapping.get("metadata")
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except json.JSONDecodeError:
+            return None
+    return dict(meta) if isinstance(meta, dict) else None
 
 
 class DbConnection(Protocol):
@@ -212,7 +304,7 @@ _AUTH0_INSERT_SQL = f"""
               INNER JOIN drop_raw_requests drr
                 ON r.intake_source = 'drop'
                AND r.raw_record_id = drr.id
-               AND drr.list_type = $3::varchar
+               AND drr.list_type = ANY($3::text[])
              WHERE EXISTS (
                    SELECT 1
                      FROM {MATCHING_ATTEMPTS_TABLE} ma
@@ -256,8 +348,8 @@ _AUTH0_INSERT_SQL = f"""
         """
 
 
-def _email_vertical_insert_sql(table: str) -> str:
-    """DROP Email set-based enqueue — same shape as Auth0, including ::varchar casts."""
+def _vertical_insert_sql(table: str) -> str:
+    """DROP Email/Phone/NDZ set-based enqueue — same shape as Auth0."""
     return f"""
         WITH inserted AS (
             INSERT INTO {table}
@@ -267,7 +359,7 @@ def _email_vertical_insert_sql(table: str) -> str:
               INNER JOIN drop_raw_requests drr
                 ON r.intake_source = 'drop'
                AND r.raw_record_id = drr.id
-               AND drr.list_type = $3::varchar
+               AND drr.list_type = ANY($3::text[])
              WHERE EXISTS (
                    SELECT 1
                      FROM {MATCHING_ATTEMPTS_TABLE} ma
@@ -311,9 +403,9 @@ def _email_vertical_insert_sql(table: str) -> str:
         """
 
 
-_HR_ALUMNI_INSERT_SQL = _email_vertical_insert_sql(HR_ALUMNI_ATTEMPTS_TABLE)
-_BIZDEV_CONTACTS_INSERT_SQL = _email_vertical_insert_sql(BIZDEV_CONTACTS_ATTEMPTS_TABLE)
-_AXIOS_HEADQUARTERS_INSERT_SQL = _email_vertical_insert_sql(AXIOS_HEADQUARTERS_ATTEMPTS_TABLE)
+_HR_ALUMNI_INSERT_SQL = _vertical_insert_sql(HR_ALUMNI_ATTEMPTS_TABLE)
+_BIZDEV_CONTACTS_INSERT_SQL = _vertical_insert_sql(BIZDEV_CONTACTS_ATTEMPTS_TABLE)
+_AXIOS_HEADQUARTERS_INSERT_SQL = _vertical_insert_sql(AXIOS_HEADQUARTERS_ATTEMPTS_TABLE)
 
 
 async def find_requests_needing_matching(
@@ -374,12 +466,11 @@ async def find_requests_needing_auth0_matching(
     *,
     limit: int = 100,
 ) -> list[DispatchCandidate]:
-    """Return DROP Email requests with matching_attempts but no Auth0 matching row.
+    """Return DROP Email/Phone/NDZ requests with matching but no Auth0 matching row.
 
     Covers the split where ``enqueue_matching`` committed and Auth0 enqueue
     failed — those rows never reappear in ``find_requests_needing_matching``.
-    Phone/NDZ are excluded. Only pending/success Auth0 matching attempts
-    count as already enqueued.
+    Only pending/success Auth0 matching attempts count as already enqueued.
     """
     rows = await conn.fetch(
         f"""
@@ -390,7 +481,7 @@ async def find_requests_needing_auth0_matching(
           INNER JOIN drop_raw_requests drr
             ON r.intake_source = 'drop'
            AND r.raw_record_id = drr.id
-           AND drr.list_type = $3
+           AND drr.list_type = ANY($3::text[])
          WHERE EXISTS (
                SELECT 1
                  FROM {MATCHING_ATTEMPTS_TABLE} ma
@@ -425,7 +516,7 @@ async def find_requests_needing_auth0_matching(
         """,
         limit,
         WORKFLOW_ASSIGNMENT_ACTION,
-        DropListType.EMAIL.value,
+        _vertical_list_types(),
         MATCHING_STEP,
     )
     return [
@@ -531,15 +622,23 @@ async def _hold_legal_triage_candidates(
         result.enqueued += 1
         enqueued_here += 1
         _extend_request_ids(result, [request_id])
-        if candidate.list_type == DropListType.EMAIL.value:
+        list_type = candidate.list_type
+        if list_type in _list_types_for_capability(system="auth0"):
             await enqueue_auth0_matching(conn, request_id)
             result.auth0_enqueued += 1
-            await enqueue_hr_alumni_matching(conn, request_id)
-            result.hr_alumni_enqueued += 1
-            await enqueue_bizdev_contacts_matching(conn, request_id)
-            result.bizdev_contacts_enqueued += 1
-            await enqueue_axios_headquarters_matching(conn, request_id)
-            result.axios_headquarters_enqueued += 1
+        for system, enqueue_fn, attr in (
+            ("hr_alumni", enqueue_hr_alumni_matching, "hr_alumni_enqueued"),
+            ("bizdev_contacts", enqueue_bizdev_contacts_matching, "bizdev_contacts_enqueued"),
+            (
+                "axios_headquarters",
+                enqueue_axios_headquarters_matching,
+                "axios_headquarters_enqueued",
+            ),
+        ):
+            metadata = await _connection_metadata_for_system(conn, system)
+            if list_type in _list_types_for_capability(system=system, metadata=metadata):
+                await enqueue_fn(conn, request_id)
+                setattr(result, attr, getattr(result, attr) + 1)
     return enqueued_here
 
 
@@ -564,27 +663,35 @@ async def _insert_auth0_attempts(
     *,
     limit: int,
 ) -> tuple[int, list[str]]:
+    list_types = _list_types_for_capability(system="auth0")
+    if not list_types:
+        return 0, []
     row = await conn.fetchrow(
         _AUTH0_INSERT_SQL,
         MATCHING_STEP,
         WORKFLOW_ASSIGNMENT_ACTION,
-        DropListType.EMAIL.value,
+        list_types,
         limit,
     )
     return _insert_count(row)
 
 
-async def _insert_email_vertical_attempts(
+async def _insert_vertical_attempts(
     conn: DbConnection,
     *,
     sql: str,
+    system: str,
     limit: int,
 ) -> tuple[int, list[str]]:
+    metadata = await _connection_metadata_for_system(conn, system)
+    list_types = _list_types_for_capability(system=system, metadata=metadata)
+    if not list_types:
+        return 0, []
     row = await conn.fetchrow(
         sql,
         MATCHING_STEP,
         WORKFLOW_ASSIGNMENT_ACTION,
-        DropListType.EMAIL.value,
+        list_types,
         limit,
     )
     return _insert_count(row)
@@ -664,9 +771,10 @@ async def run_dispatch(
             n_auth0 = 0
 
         if hr_alumni_room > 0:
-            n_hr_alumni, hr_alumni_ids = await _insert_email_vertical_attempts(
+            n_hr_alumni, hr_alumni_ids = await _insert_vertical_attempts(
                 conn,
                 sql=_HR_ALUMNI_INSERT_SQL,
+                system="hr_alumni",
                 limit=min(batch, hr_alumni_room),
             )
             result.hr_alumni_enqueued += n_hr_alumni
@@ -675,9 +783,10 @@ async def run_dispatch(
             n_hr_alumni = 0
 
         if bizdev_room > 0:
-            n_bizdev, bizdev_ids = await _insert_email_vertical_attempts(
+            n_bizdev, bizdev_ids = await _insert_vertical_attempts(
                 conn,
                 sql=_BIZDEV_CONTACTS_INSERT_SQL,
+                system="bizdev_contacts",
                 limit=min(batch, bizdev_room),
             )
             result.bizdev_contacts_enqueued += n_bizdev
@@ -686,9 +795,10 @@ async def run_dispatch(
             n_bizdev = 0
 
         if axios_room > 0:
-            n_axios, axios_ids = await _insert_email_vertical_attempts(
+            n_axios, axios_ids = await _insert_vertical_attempts(
                 conn,
                 sql=_AXIOS_HEADQUARTERS_INSERT_SQL,
+                system="axios_headquarters",
                 limit=min(batch, axios_room),
             )
             result.axios_headquarters_enqueued += n_axios

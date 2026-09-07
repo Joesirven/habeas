@@ -2,8 +2,9 @@
 
 Singleton lease on ``matching_drain_lease``, SKIP LOCKED chunk claims on the
 configured attempts table, and a Job entrypoint that drains until the queue is
-empty for one catalog system. Hot path runs one set-based BigQuery lookup per
-chunk against the configured mart.
+empty for one catalog system. Hot path groups prepared rows by DROP list_type
+(Email / Phone / NDZ) and runs one set-based BigQuery lookup per group against
+the matching mart.
 
 Never logs emails, hashes, or vendor ids.
 """
@@ -14,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -21,6 +23,7 @@ from typing import Any
 from uuid import UUID
 
 from habeas_privacy_core.audit.redaction import redact_error_text
+from habeas_privacy_core.connections.catalog import list_capability_from_metadata
 from habeas_privacy_core.connections.matching_gate import (
     evaluate_matching_drain_readiness,
 )
@@ -35,9 +38,13 @@ from habeas_privacy_core.queue.drain_lease import (
 from habeas_privacy_core.sheet_worker.config import SheetWorkerConfig
 from habeas_privacy_core.sheet_worker.vertical_match import (
     SheetHashLookupError,
-    lookup_vendor_ids_by_email_hashes,
+    lookup_vendor_ids_by_hashes,
+    mart_table_for_list_type,
+    normalize_drop_list_type,
+    primary_hash_for_list_type,
 )
 from habeas_privacy_core.vertical_hash.audit import build_vertical_audit_payload
+from habeas_privacy_core.vertical_hash.hashing import assert_opaque_hash
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +60,23 @@ JOIN drop_raw_requests drr ON drr.id = r.raw_record_id
 WHERE r.id = ANY($1::uuid[])
 """
 
-_EMAIL_HASH_FIELD_KEYS = (
+# Same key families DropMatchingPayload / primary_hash_for_list_type read.
+_HASH_FIELD_KEYS = (
     "hashed_email",
+    "hashed_phone",
+    "concatenated_hash",
     "email_hash",
+    "phone_hash",
+    "ndz_hash",
     "pii_hash",
     "hash",
 )
+
+_HASH_LABEL_BY_LIST_TYPE: dict[DropListType, str] = {
+    DropListType.EMAIL: "email_hash",
+    DropListType.PHONE: "phone_hash",
+    DropListType.NDZ: "ndz_hash",
+}
 
 __all__ = [
     "ChunkDrainModule",
@@ -251,32 +269,45 @@ async def reap_worker_claims(
     return released
 
 
-def _is_email_list_type(list_type: Any) -> bool:
-    if list_type is None:
-        return False
-    if list_type == DropListType.EMAIL:
-        return True
-    return str(list_type) == DropListType.EMAIL.value
-
-
-def _email_hash_from_raw_payload(raw_payload: Any) -> str | None:
-    """Extract DROP email hash from raw_payload. Never log values."""
+def _hash_fields_from_raw_payload(raw_payload: Any) -> dict[str, Any]:
+    """Map DROP raw_payload hash keys in memory. Never log values."""
     document: Any = raw_payload
     if isinstance(document, str):
         try:
             document = json.loads(document)
         except json.JSONDecodeError:
-            return None
+            return {}
     if not isinstance(document, dict):
-        return None
-    for key in _EMAIL_HASH_FIELD_KEYS:
+        return {}
+    fields: dict[str, Any] = {}
+    for key in _HASH_FIELD_KEYS:
         value = document.get(key)
-        if value is None:
-            continue
-        cleaned = str(value).strip()
-        if cleaned:
-            return cleaned
-    return None
+        if value is not None and value != "":
+            fields[key] = value
+    return fields
+
+
+def _mart_exists_for_list_type(
+    config: SheetWorkerConfig,
+    list_type: DropListType,
+    *,
+    client: Any | None = None,
+) -> bool:
+    table = mart_table_for_list_type(config, list_type)
+    if not table:
+        return False
+    try:
+        from habeas_privacy_core.vertical_hash.bq_lookup import hash_mart_exists
+    except ImportError:
+        return False
+    return bool(
+        hash_mart_exists(
+            config.system_id,
+            list_type=list_type.value,
+            table=table,
+            client=client,
+        )
+    )
 
 
 async def _load_chunk_hash_payloads(
@@ -392,7 +423,7 @@ async def process_matching_chunk(
     lookup_batch: Callable[..., dict[str, list[str]]] | None = None,
     persist: Any | None = None,
 ) -> dict[str, Any]:
-    """Claim one chunk, run set-based BQ lookup, bulk-complete."""
+    """Claim one chunk, group by list_type, set-based BQ lookup, bulk-complete."""
     readiness = await evaluate_matching_drain_readiness(
         conn,
         system=config.system_id,
@@ -431,8 +462,31 @@ async def process_matching_chunk(
         conn,
         [UUID(str(row["request_id"])) for row in claimed],
     )
+    capability = None
+    try:
+        cap_row = await conn.fetchrow(
+            """
+            SELECT metadata
+              FROM integration_connections
+             WHERE system = $1
+               AND status <> 'revoked'
+             ORDER BY updated_at DESC
+             LIMIT 1
+            """,
+            config.system_id,
+        )
+        if cap_row is not None:
+            raw_meta = cap_row["metadata"]
+            if isinstance(raw_meta, str):
+                raw_meta = json.loads(raw_meta)
+            if isinstance(raw_meta, dict):
+                capability = list_capability_from_metadata(
+                    config.system_id, raw_meta
+                )
+    except Exception:
+        capability = None
 
-    prepared: list[dict[str, Any]] = []
+    prepared_by_list_type: dict[DropListType, list[dict[str, Any]]] = defaultdict(list)
     outcomes: list[dict[str, Any]] = []
     zero_hit: list[dict[str, Any]] = []
 
@@ -459,16 +513,39 @@ async def process_matching_chunk(
             )
             continue
 
-        if not _is_email_list_type(payload_row["list_type"]):
+        list_type = normalize_drop_list_type(payload_row["list_type"])
+        if list_type is None:
             zero_hit.append({"attempt_id": attempt_id, "request_id": request_id})
             continue
+        if capability is not None and not capability.allows_list_type(list_type.value):
+            outcomes.append(
+                {
+                    "attempt_id": attempt_id,
+                    "worker_id": worker_id,
+                    "status": "submit_error",
+                    "error_code": "cannot_support",
+                    "error_message": "cannot_support",
+                    "retry_after": None,
+                    "audit_payload": _error_audit(
+                        config=config,
+                        error_code="cannot_support",
+                        error_class="ListCapability",
+                        error_detail=f"list_type={list_type.value}",
+                    ),
+                }
+            )
+            continue
 
-        hash_value = _email_hash_from_raw_payload(payload_row["raw_payload"])
+        hash_fields = _hash_fields_from_raw_payload(payload_row["raw_payload"])
+        hash_value = primary_hash_for_list_type(list_type, hash_fields)
         if not hash_value:
             zero_hit.append({"attempt_id": attempt_id, "request_id": request_id})
             continue
 
-        if "@" in hash_value:
+        label = _HASH_LABEL_BY_LIST_TYPE.get(list_type, "hash")
+        try:
+            hash_value = assert_opaque_hash(hash_value, label=label)
+        except ValueError as exc:
             outcomes.append(
                 {
                     "attempt_id": attempt_id,
@@ -481,17 +558,18 @@ async def process_matching_chunk(
                         config=config,
                         error_code="sheets_invalid_hash",
                         error_class="ValueError",
-                        error_detail="email_hash must not contain plaintext",
+                        error_detail=str(exc),
                     ),
                 }
             )
             continue
 
-        prepared.append(
+        prepared_by_list_type[list_type].append(
             {
                 "attempt_id": attempt_id,
                 "request_id": request_id,
                 "hash_value": hash_value,
+                "list_type": list_type,
             }
         )
 
@@ -533,17 +611,79 @@ async def process_matching_chunk(
                 }
             )
 
-    if prepared:
+    for list_type, prepared in prepared_by_list_type.items():
+        if not prepared:
+            continue
+
+        if lookup_batch is None:
+            try:
+                mart_ok = await asyncio.to_thread(
+                    _mart_exists_for_list_type,
+                    config,
+                    list_type,
+                    client=bq_client,
+                )
+            except Exception as exc:
+                mart_ok = False
+                safe = redact_error_text(str(exc))
+                logger.error(
+                    "sheet_drain_mart_check_error",
+                    extra={
+                        "event": "sheet_drain_mart_check_error",
+                        "list_type": list_type.value,
+                        "system": config.system_id,
+                        "error_summary": safe,
+                    },
+                )
+            if not mart_ok:
+                retry_after = datetime.now(UTC) + timedelta(
+                    seconds=LOOKUP_RETRY_SECONDS
+                )
+                for item in prepared:
+                    outcomes.append(
+                        {
+                            "attempt_id": item["attempt_id"],
+                            "worker_id": worker_id,
+                            "status": "submit_error",
+                            "error_code": "sheets_lookup_error",
+                            "error_message": "sheets_lookup_error",
+                            "retry_after": retry_after,
+                            "audit_payload": _error_audit(
+                                config=config,
+                                error_code="sheets_lookup_error",
+                                error_class="SheetHashLookupError",
+                                error_detail=(
+                                    f"mart missing for list_type={list_type.value}"
+                                ),
+                            ),
+                        }
+                    )
+                logger.info(
+                    "sheet_drain_mart_missing",
+                    extra={
+                        "event": "sheet_drain_mart_missing",
+                        "list_type": list_type.value,
+                        "prepared": len(prepared),
+                        "system": config.system_id,
+                    },
+                )
+                continue
+
         hash_values = [item["hash_value"] for item in prepared]
 
         def _run_batch_lookup(
             _hashes: list[str] = hash_values,
+            _list_type: DropListType = list_type,
         ) -> dict[str, list[str]]:
             if lookup_batch is not None:
-                return lookup_batch(_hashes)
-            return lookup_vendor_ids_by_email_hashes(
+                try:
+                    return lookup_batch(_hashes, list_type=_list_type)
+                except TypeError:
+                    return lookup_batch(_hashes)
+            return lookup_vendor_ids_by_hashes(
                 config,
                 _hashes,
+                list_type=_list_type,
                 client=bq_client,
             )
 
@@ -580,6 +720,7 @@ async def process_matching_chunk(
                     "event": "sheet_drain_bq_lookup_error",
                     "claimed": len(claimed),
                     "prepared": len(prepared),
+                    "list_type": list_type.value,
                     "system": config.system_id,
                     "error_summary": safe,
                 },
@@ -611,53 +752,56 @@ async def process_matching_chunk(
                     "event": "sheet_drain_bq_lookup_error",
                     "claimed": len(claimed),
                     "prepared": len(prepared),
+                    "list_type": list_type.value,
                     "system": config.system_id,
                     "error_summary": safe,
                 },
             )
 
-        if not lookup_failed:
-            for item in prepared:
-                vendor_ids = list(hits_by_hash.get(item["hash_value"], []) or [])
-                match_count = len(vendor_ids)
-                try:
-                    await upsert(
-                        conn,
-                        request_id=item["request_id"],
-                        vertical=config.system_id,
-                        match_count=match_count,
-                        vendor_record_ids=vendor_ids,
-                        source_matching_attempt_id=None,
-                    )
-                    outcomes.append(
-                        {
-                            "attempt_id": item["attempt_id"],
-                            "worker_id": worker_id,
-                            "status": "success",
-                            "audit_payload": _success_audit(
-                                config=config, matched=match_count > 0
-                            ),
-                        }
-                    )
-                except Exception as exc:
-                    safe = redact_error_text(str(exc))
-                    outcomes.append(
-                        {
-                            "attempt_id": item["attempt_id"],
-                            "worker_id": worker_id,
-                            "status": "submit_error",
-                            "error_code": "sheets_lookup_error",
-                            "error_message": "sheets_lookup_error",
-                            "retry_after": datetime.now(UTC)
-                            + timedelta(seconds=LOOKUP_RETRY_SECONDS),
-                            "audit_payload": _error_audit(
-                                config=config,
-                                error_code="sheets_lookup_error",
-                                error_class=type(exc).__name__,
-                                error_detail=safe,
-                            ),
-                        }
-                    )
+        if lookup_failed:
+            continue
+
+        for item in prepared:
+            vendor_ids = list(hits_by_hash.get(item["hash_value"], []) or [])
+            match_count = len(vendor_ids)
+            try:
+                await upsert(
+                    conn,
+                    request_id=item["request_id"],
+                    vertical=config.system_id,
+                    match_count=match_count,
+                    vendor_record_ids=vendor_ids,
+                    source_matching_attempt_id=None,
+                )
+                outcomes.append(
+                    {
+                        "attempt_id": item["attempt_id"],
+                        "worker_id": worker_id,
+                        "status": "success",
+                        "audit_payload": _success_audit(
+                            config=config, matched=match_count > 0
+                        ),
+                    }
+                )
+            except Exception as exc:
+                safe = redact_error_text(str(exc))
+                outcomes.append(
+                    {
+                        "attempt_id": item["attempt_id"],
+                        "worker_id": worker_id,
+                        "status": "submit_error",
+                        "error_code": "sheets_lookup_error",
+                        "error_message": "sheets_lookup_error",
+                        "retry_after": datetime.now(UTC)
+                        + timedelta(seconds=LOOKUP_RETRY_SECONDS),
+                        "audit_payload": _error_audit(
+                            config=config,
+                            error_code="sheets_lookup_error",
+                            error_class=type(exc).__name__,
+                            error_detail=safe,
+                        ),
+                    }
+                )
 
     error_n = sum(1 for item in outcomes if item["status"] != "success")
     try:

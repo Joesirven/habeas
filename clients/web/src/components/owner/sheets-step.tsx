@@ -1,9 +1,8 @@
 /**
- * Sheets connect step for the owner wizard — SheetsConnectPanel moved wholesale
- * from connectors.tsx (Google sign-in OAuth flow, spreadsheet/tab pick, upload
- * fallback, mapping + rejected-row clean-up). Also home to the Sheets OAuth
- * session helpers, exported so the settings page can detect an OAuth return
- * and reopen the wizard at the sheets system.
+ * Sheets connect step for the owner wizard — Google sign-in, spreadsheet/tab
+ * pick, or CSV fallback. Mapping and format/delimiter steps run after this
+ * panel (same runner path as upload). OAuth session helpers live here so the
+ * settings page can detect an OAuth return and reopen the wizard.
  */
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
@@ -20,26 +19,14 @@ import {
   setOwnerConnectorMode,
   uploadOwnerConnectorCsv,
   type OwnerConnectorSystem,
-  type OwnerRejectedUploadRow,
   type OwnerSheetsOauthFile,
   type OwnerUploadResult,
 } from '@/lib/api'
 import { actionToast } from '@/lib/action-toast'
 import {
-  EMAIL_FORMAT_OPTIONS,
   MANUAL_UPLOAD_LABEL,
-  MULTI_PII_DELIMITER_OPTIONS,
-  PHONE_FORMAT_OPTIONS,
-  UPLOAD_IDENTIFIER_FIELDS,
-  delimiterValueFromKey,
   ownerConnectorDisplayName,
-  parseCsvDocument,
-  rejectedRowCodeLabel,
-  serializeCsvDocument,
-  suggestUploadColumnMapping,
   systemWizardCopy,
-  uploadMappingComplete,
-  type CsvDocument,
   type SheetsConnectMethod,
 } from '@/lib/owner-connector-ui'
 import { cn } from '@/lib/utils'
@@ -104,18 +91,6 @@ function connectorTitle(
   return ownerConnectorDisplayName(verticalId, connector.system, connector.display_name)
 }
 
-function csvTextFromUploadResult(result: OwnerUploadResult): string | null {
-  const extra = result as OwnerUploadResult & {
-    csv?: unknown
-    extracted_csv?: unknown
-  }
-  if (typeof extra.csv === 'string' && extra.csv.trim()) return extra.csv
-  if (typeof extra.extracted_csv === 'string' && extra.extracted_csv.trim()) {
-    return extra.extracted_csv
-  }
-  return null
-}
-
 function tabKey(tab: { title: string; sheet_id?: number | null }) {
   return tab.sheet_id != null ? `${tab.sheet_id}:${tab.title}` : tab.title
 }
@@ -126,12 +101,6 @@ export type SheetsConnectDraft = {
   spreadsheetId: string
   tab: string
   csvHeaders: string[]
-  columnMapping: Record<string, string>
-  needsMapping: boolean
-  workingDoc: CsvDocument | null
-  rejectedRows: OwnerRejectedUploadRow[]
-  emailFormat: string
-  phoneFormat: string
   uploadOk: boolean
 }
 
@@ -142,296 +111,63 @@ export function emptySheetsConnectDraft(): SheetsConnectDraft {
     spreadsheetId: '',
     tab: '',
     csvHeaders: [],
-    columnMapping: {},
-    needsMapping: false,
-    workingDoc: null,
-    rejectedRows: [],
-    emailFormat: 'standard',
-    phoneFormat: 'us_10',
     uploadOk: false,
   }
 }
 
-function MappingAndRejectedBlock({
-  csvHeaders,
-  columnMapping,
-  onColumnMappingChange,
-  needsMapping,
-  workingDoc,
-  rejectedRows,
-  onWorkingDocChange,
-  onResubmitCleaned,
-  resubmitting,
-  fileName,
-}: {
-  csvHeaders: string[]
-  columnMapping: Record<string, string>
-  onColumnMappingChange: (next: Record<string, string>) => void
-  needsMapping: boolean
-  workingDoc: CsvDocument | null
-  rejectedRows: OwnerRejectedUploadRow[]
-  onWorkingDocChange: (next: CsvDocument) => void
-  onResubmitCleaned: (file: File) => void
-  resubmitting: boolean
-  fileName: string
-}) {
-  const mappingReady = uploadMappingComplete(columnMapping)
-
-  return (
-    <>
-      {needsMapping && csvHeaders.length > 0 ? (
-        <div className="space-y-2 rounded-md border border-line bg-canvas px-3 py-2">
-          <p className="text-xs font-medium text-ink">Column mapping</p>
-          {UPLOAD_IDENTIFIER_FIELDS.map((field) => (
-            <label key={field.id} className="block space-y-1 text-xs">
-              <span className="text-ink">{field.label}</span>
-              <select
-                className={FIELD_CLASS}
-                value={columnMapping[field.id] ?? ''}
-                onChange={(event) =>
-                  onColumnMappingChange({ ...columnMapping, [field.id]: event.target.value })
-                }
-                aria-label={`Map ${field.label} column`}
-              >
-                <option value="">Select a column…</option>
-                {csvHeaders.map((header) => (
-                  <option key={`${field.id}:${header}`} value={header}>
-                    {header}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ))}
-          {!mappingReady ? (
-            <p className="text-[11px] text-mute">
-              Map at least one identifier (email, phone, name, date of birth, or ZIP). Extra
-              columns are ignored.
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-
-      {rejectedRows.length > 0 ? (
-        <div className="space-y-2 rounded-md border border-line bg-canvas px-3 py-2">
-          <p className="text-xs font-medium text-ink">Clean rejected rows</p>
-          <p className="text-[11px] text-mute">
-            {rejectedRows.length} row(s) failed validation.
-            {workingDoc
-              ? ' Edit the cells, then resubmit. The rest of the file is kept as-is.'
-              : ' Fix the flagged rows in the sheet, then extract again.'}
-          </p>
-          {workingDoc ? (
-            <>
-              <div className="overflow-x-auto">
-                <table className="w-full border-collapse text-xs">
-                  <thead>
-                    <tr>
-                      <th className="border-b border-line px-2 py-1 text-left font-medium text-mute">
-                        Row
-                      </th>
-                      <th className="border-b border-line px-2 py-1 text-left font-medium text-mute">
-                        Reason
-                      </th>
-                      {workingDoc.headers.map((header) => (
-                        <th
-                          key={header}
-                          className="border-b border-line px-2 py-1 text-left font-medium text-mute"
-                        >
-                          {header}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rejectedRows.map((rejected) => {
-                      const rowIndex = rejected.row - 1
-                      const cells = workingDoc.rows[rowIndex] ?? []
-                      return (
-                        <tr key={rejected.row}>
-                          <td className="px-2 py-1 align-top text-ink">{rejected.row}</td>
-                          <td className="px-2 py-1 align-top">
-                            <div className="flex flex-wrap gap-1">
-                              {rejected.codes.map((code) => (
-                                <Badge key={`${rejected.row}:${code}`} variant="fail">
-                                  {rejectedRowCodeLabel(code)}
-                                </Badge>
-                              ))}
-                            </div>
-                          </td>
-                          {workingDoc.headers.map((header, colIndex) => (
-                            <td key={`${rejected.row}:${header}`} className="px-1 py-1">
-                              <input
-                                className={FIELD_CLASS}
-                                value={cells[colIndex] ?? ''}
-                                aria-label={`Row ${rejected.row} ${header}`}
-                                onChange={(event) => {
-                                  const value = event.target.value
-                                  const rows = workingDoc.rows.map((row, index) =>
-                                    index === rowIndex
-                                      ? row.map((cell, cellIndex) =>
-                                          cellIndex === colIndex ? value : cell,
-                                        )
-                                      : row,
-                                  )
-                                  onWorkingDocChange({ ...workingDoc, rows })
-                                }}
-                              />
-                            </td>
-                          ))}
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={resubmitting}
-                onClick={() => {
-                  const next = new File([serializeCsvDocument(workingDoc)], fileName, {
-                    type: 'text/csv',
-                  })
-                  onResubmitCleaned(next)
-                }}
-              >
-                Resubmit cleaned rows
-              </Button>
-            </>
-          ) : (
-            <ul className="space-y-1 text-xs">
-              {rejectedRows.map((rejected) => (
-                <li key={rejected.row} className="flex flex-wrap items-center gap-1">
-                  <span className="text-ink">Row {rejected.row}</span>
-                  {rejected.codes.map((code) => (
-                    <Badge key={`${rejected.row}:${code}`} variant="fail">
-                      {rejectedRowCodeLabel(code)}
-                    </Badge>
-                  ))}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      ) : null}
-    </>
-  )
+function headersFromResult(result: OwnerUploadResult, fallback: string[] = []): string[] {
+  const detected = result.detected_headers?.filter((header) => header.trim()) ?? []
+  return detected.length > 0 ? detected : fallback
 }
 
-function applyConnectResultToDraft(
-  current: SheetsConnectDraft,
-  result: OwnerUploadResult,
-): SheetsConnectDraft {
-  if (result.ok) {
-    return {
-      ...current,
-      needsMapping: false,
-      workingDoc: null,
-      rejectedRows: [],
-      uploadOk: true,
-    }
-  }
-  if (result.detail === 'upload_needs_mapping') {
-    const headers = result.detected_headers?.filter((header) => header.trim()) ?? current.csvHeaders
-    return {
-      ...current,
-      csvHeaders: headers,
-      columnMapping: suggestUploadColumnMapping(headers),
-      needsMapping: true,
-      rejectedRows: [],
-      workingDoc: null,
-      uploadOk: false,
-    }
-  }
-  if (result.detail === 'upload_rows_rejected') {
-    const csvText = csvTextFromUploadResult(result)
-    return {
-      ...current,
-      rejectedRows: result.rejected_rows ?? [],
-      workingDoc: csvText ? parseCsvDocument(csvText) : current.workingDoc,
-      uploadOk: false,
-    }
-  }
-  return { ...current, uploadOk: false }
+function headersReady(result: OwnerUploadResult): boolean {
+  return result.ok || result.detail === 'upload_needs_mapping'
 }
 
-function toastConnectResult(result: OwnerUploadResult) {
-  if (result.ok) {
+function toastHeadersResult(result: OwnerUploadResult, kind: 'extract' | 'upload') {
+  if (headersReady(result)) {
+    const count = result.detected_headers?.filter((header) => header.trim()).length
     actionToast.success({
-      title: 'Extract validated',
+      title: kind === 'extract' ? 'Columns found' : 'File accepted',
       description:
-        result.upload_row_count != null
-          ? `${result.upload_row_count} usable row(s). Continue when ready.`
-          : 'Rows accepted. Continue when ready.',
-    })
-    return
-  }
-  if (result.detail === 'upload_needs_mapping') {
-    actionToast.info({
-      title: 'Map your columns',
-      description:
-        'Match at least one identifier — email, phone, name, date of birth, or ZIP — to a column.',
-    })
-    return
-  }
-  if (result.detail === 'upload_rows_rejected') {
-    actionToast.warning({
-      title: 'Rows need cleaning',
-      description: connectTestFailureMessage(result.detail),
+        count != null && count > 0
+          ? `${count} column${count === 1 ? '' : 's'} found. Map them next.`
+          : 'Map your columns next.',
     })
     return
   }
   actionToast.error({
-    title: 'Extract failed',
+    title: kind === 'extract' ? 'Extract failed' : 'Upload failed',
     description: connectTestFailureMessage(result.detail),
   })
 }
 
 /**
- * CSV upload branch of the sheets connect panel (moved from connectors.tsx —
- * the old UploadConnectPanel, now local to the sheets flow).
+ * CSV fallback on the sheets connect step. Headers only — mapping and
+ * format/delimiter run as later wizard steps.
  */
 function SheetsCsvUploadPanel({
   verticalId,
   connector,
-  delimiterKey,
-  onDelimiterChange,
   uploadOk,
   onUploadOkChange,
   onBack,
   onContinue,
+  onFileSelected,
+  onHeadersReady,
   invalidate,
 }: {
   verticalId: string
   connector: OwnerConnectorSystem
-  delimiterKey: string
-  onDelimiterChange: (key: string) => void
   uploadOk: boolean
   onUploadOkChange: (ok: boolean) => void
   onBack: () => void
   onContinue: () => void
+  onFileSelected?: (file: File | null) => void
+  onHeadersReady: (result: OwnerUploadResult, headers: string[]) => void
   invalidate: () => void
 }) {
   const [file, setFile] = useState<File | null>(null)
-  const [csvHeaders, setCsvHeaders] = useState<string[]>([])
-  const [columnMapping, setColumnMapping] = useState<Record<string, string>>({})
-  const [needsMapping, setNeedsMapping] = useState(false)
-  const [emailFormat, setEmailFormat] = useState<string>('standard')
-  const [phoneFormat, setPhoneFormat] = useState<string>('us_10')
-  const [workingDoc, setWorkingDoc] = useState<ReturnType<typeof parseCsvDocument> | null>(null)
-  const [rejectedRows, setRejectedRows] = useState<OwnerRejectedUploadRow[]>([])
-
-  const mappingReady = uploadMappingComplete(columnMapping)
-
-  const resetFileLocalState = () => {
-    setNeedsMapping(false)
-    setCsvHeaders([])
-    setColumnMapping({})
-    setWorkingDoc(null)
-    setRejectedRows([])
-    onUploadOkChange(false)
-  }
 
   const templateMutation = useMutation({
     mutationFn: () => downloadOwnerUploadTemplate(verticalId, connector.system),
@@ -463,67 +199,20 @@ function SheetsCsvUploadPanel({
   })
 
   const uploadMutation = useMutation({
-    mutationFn: async (overrideFile?: File) => {
-      const toUpload = overrideFile ?? file
-      if (!toUpload) throw new Error('Choose a CSV file first.')
-      return uploadOwnerConnectorCsv(
-        verticalId,
-        connector.system,
-        toUpload,
-        delimiterValueFromKey(delimiterKey),
-        needsMapping ? columnMapping : null,
-        { emailFormat, phoneFormat },
-      )
+    mutationFn: async () => {
+      if (!file) throw new Error('Choose a CSV file first.')
+      return uploadOwnerConnectorCsv(verticalId, connector.system, file, null, null, {})
     },
-    onSuccess: async (result, overrideFile) => {
+    onSuccess: (result) => {
       invalidate()
-      if (result.ok) {
-        setNeedsMapping(false)
-        setWorkingDoc(null)
-        setRejectedRows([])
-        onUploadOkChange(true)
-        actionToast.success({
-          title: 'Upload validated',
-          description:
-            result.upload_row_count != null
-              ? `${result.upload_row_count} usable row(s). Continue when ready.`
-              : 'File accepted. Continue when ready.',
-        })
+      toastHeadersResult(result, 'upload')
+      if (!headersReady(result)) {
+        onUploadOkChange(false)
         return
       }
-      onUploadOkChange(false)
-      if (result.detail === 'upload_needs_mapping') {
-        const headers =
-          result.detected_headers?.filter((h) => h.trim()) ?? csvHeaders
-        setCsvHeaders(headers)
-        setColumnMapping(suggestUploadColumnMapping(headers))
-        setNeedsMapping(true)
-        setRejectedRows([])
-        setWorkingDoc(null)
-        actionToast.info({
-          title: 'Map your columns',
-          description:
-            'Match at least one identifier — email, phone, name, date of birth, or ZIP — to a column in the file.',
-        })
-        return
-      }
-      if (result.detail === 'upload_rows_rejected') {
-        const source = overrideFile ?? file
-        if (source) {
-          const text = await source.text()
-          setWorkingDoc(parseCsvDocument(text))
-        }
-        setRejectedRows(result.rejected_rows ?? [])
-        actionToast.warning({
-          title: 'Rows need cleaning',
-          description: connectTestFailureMessage(result.detail),
-        })
-        return
-      }
-      actionToast.error({
-        title: 'Upload test failed',
-        description: connectTestFailureMessage(result.detail),
-      })
+      const headers = headersFromResult(result)
+      onUploadOkChange(true)
+      onHeadersReady(result, headers)
     },
     onError: (error) => {
       onUploadOkChange(false)
@@ -532,7 +221,7 @@ function SheetsCsvUploadPanel({
         description: actionToast.safeErrorMessage(error, 'Check the file and try again.'),
         action: {
           label: 'Retry',
-          onClick: () => uploadMutation.mutate(undefined),
+          onClick: () => uploadMutation.mutate(),
         },
       })
     },
@@ -545,7 +234,7 @@ function SheetsCsvUploadPanel({
       </h4>
       <p className="text-xs text-mute">
         {systemWizardCopy(connector.system)?.uploadHowto ??
-          'Upload your export as-is. Email alone or phone alone is enough. After upload, map columns if the headers do not match. Rows that fail the selected email or phone format stay in this step so you can clean them and resubmit.'}
+          'Upload your export as-is. You will map columns and choose formats next.'}
       </p>
       <div className="flex flex-wrap gap-1.5">
         <Button
@@ -560,198 +249,19 @@ function SheetsCsvUploadPanel({
       </div>
 
       <label className="block space-y-1 text-xs">
-        <span className="font-medium text-ink">Separator when a cell has more than one value</span>
-        <select
-          className={FIELD_CLASS}
-          value={delimiterKey}
-          onChange={(event) => onDelimiterChange(event.target.value)}
-          aria-label="Separator when a cell has more than one value"
-        >
-          {MULTI_PII_DELIMITER_OPTIONS.map((opt) => (
-            <option key={opt.key} value={opt.key}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label className="block space-y-1 text-xs">
-        <span className="font-medium text-ink">Email format</span>
-        <select
-          className={FIELD_CLASS}
-          value={emailFormat}
-          onChange={(event) => {
-            setEmailFormat(event.target.value)
-            onUploadOkChange(false)
-          }}
-          aria-label="Email format"
-        >
-          {EMAIL_FORMAT_OPTIONS.map((opt) => (
-            <option key={opt.id} value={opt.id}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label className="block space-y-1 text-xs">
-        <span className="font-medium text-ink">Phone format</span>
-        <select
-          className={FIELD_CLASS}
-          value={phoneFormat}
-          onChange={(event) => {
-            setPhoneFormat(event.target.value)
-            onUploadOkChange(false)
-          }}
-          aria-label="Phone format"
-        >
-          {PHONE_FORMAT_OPTIONS.map((opt) => (
-            <option key={opt.id} value={opt.id}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label className="block space-y-1 text-xs">
         <span className="font-medium text-ink">CSV file</span>
         <input
           type="file"
           accept=".csv,text/csv"
           className="block w-full text-xs text-ink file:mr-2 file:rounded file:border file:border-line file:bg-white file:px-2 file:py-1"
           onChange={(event) => {
-            setFile(event.target.files?.[0] ?? null)
-            resetFileLocalState()
+            const next = event.target.files?.[0] ?? null
+            setFile(next)
+            onFileSelected?.(next)
+            onUploadOkChange(false)
           }}
         />
       </label>
-
-      {needsMapping && csvHeaders.length > 0 ? (
-        <div className="space-y-2 rounded-md border border-line bg-canvas px-3 py-2">
-          <p className="text-xs font-medium text-ink">Column mapping</p>
-          {UPLOAD_IDENTIFIER_FIELDS.map((field) => (
-            <label key={field.id} className="block space-y-1 text-xs">
-              <span className="text-ink">{field.label}</span>
-              <select
-                className={FIELD_CLASS}
-                value={columnMapping[field.id] ?? ''}
-                onChange={(event) => {
-                  const value = event.target.value
-                  setColumnMapping((prev) => ({ ...prev, [field.id]: value }))
-                  onUploadOkChange(false)
-                }}
-                aria-label={`Map ${field.label} column`}
-              >
-                <option value="">Select a column…</option>
-                {csvHeaders.map((header) => (
-                  <option key={`${field.id}:${header}`} value={header}>
-                    {header}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ))}
-          {!mappingReady ? (
-            <p className="text-[11px] text-mute">
-              Map at least one identifier (email, phone, name, date of birth, or ZIP). Extra
-              columns are ignored.
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-
-      {workingDoc && rejectedRows.length > 0 ? (
-        <div className="space-y-2 rounded-md border border-line bg-canvas px-3 py-2">
-          <p className="text-xs font-medium text-ink">Clean rejected rows</p>
-          <p className="text-[11px] text-mute">
-            {rejectedRows.length} row(s) failed validation. Edit the cells, then resubmit. The
-            rest of the file is kept as-is.
-          </p>
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-xs">
-              <thead>
-                <tr>
-                  <th className="border-b border-line px-2 py-1 text-left font-medium text-mute">
-                    Row
-                  </th>
-                  <th className="border-b border-line px-2 py-1 text-left font-medium text-mute">
-                    Reason
-                  </th>
-                  {workingDoc.headers.map((header) => (
-                    <th
-                      key={header}
-                      className="border-b border-line px-2 py-1 text-left font-medium text-mute"
-                    >
-                      {header}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rejectedRows.map((rejected) => {
-                  const rowIndex = rejected.row - 1
-                  const cells = workingDoc.rows[rowIndex] ?? []
-                  return (
-                    <tr key={rejected.row}>
-                      <td className="px-2 py-1 align-top text-ink">{rejected.row}</td>
-                      <td className="px-2 py-1 align-top">
-                        <div className="flex flex-wrap gap-1">
-                          {rejected.codes.map((code) => (
-                            <Badge key={`${rejected.row}:${code}`} variant="fail">
-                              {rejectedRowCodeLabel(code)}
-                            </Badge>
-                          ))}
-                        </div>
-                      </td>
-                      {workingDoc.headers.map((header, colIndex) => (
-                        <td key={`${rejected.row}:${header}`} className="px-1 py-1">
-                          <input
-                            className={FIELD_CLASS}
-                            value={cells[colIndex] ?? ''}
-                            aria-label={`Row ${rejected.row} ${header}`}
-                            onChange={(event) => {
-                              const value = event.target.value
-                              setWorkingDoc((prev) => {
-                                if (!prev) return prev
-                                const rows = prev.rows.map((row, index) =>
-                                  index === rowIndex
-                                    ? row.map((cell, cellIndex) =>
-                                        cellIndex === colIndex ? value : cell,
-                                      )
-                                    : row,
-                                )
-                                return { ...prev, rows }
-                              })
-                            }}
-                          />
-                        </td>
-                      ))}
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={uploadMutation.isPending}
-            onClick={() => {
-              if (!workingDoc) return
-              const next = new File(
-                [serializeCsvDocument(workingDoc)],
-                file?.name ?? 'cleaned.csv',
-                { type: 'text/csv' },
-              )
-              setFile(next)
-              uploadMutation.mutate(next)
-            }}
-          >
-            Resubmit cleaned rows
-          </Button>
-        </div>
-      ) : null}
 
       <div className="flex flex-wrap justify-between gap-2">
         <Button type="button" size="sm" variant="ghost" onClick={onBack}>
@@ -762,18 +272,10 @@ function SheetsCsvUploadPanel({
             type="button"
             size="sm"
             variant="outline"
-            disabled={
-              !file ||
-              uploadMutation.isPending ||
-              (needsMapping && !mappingReady)
-            }
-            onClick={() => uploadMutation.mutate(undefined)}
+            disabled={!file || uploadMutation.isPending}
+            onClick={() => uploadMutation.mutate()}
           >
-            {uploadMutation.isPending
-              ? 'Uploading…'
-              : needsMapping
-                ? 'Apply mapping & test'
-                : 'Upload & test'}
+            {uploadMutation.isPending ? 'Uploading…' : 'Read columns'}
           </Button>
           <Button type="button" size="sm" disabled={!uploadOk} onClick={onContinue}>
             Continue
@@ -786,28 +288,27 @@ function SheetsCsvUploadPanel({
 
 /**
  * Sheets connect panel — sign in with Google and pick a spreadsheet/tab, or
- * upload a CSV. Owns its own OAuth redirect; the host dialog just renders it.
- * Props unchanged from the original connectors.tsx panel.
+ * upload a CSV. Mapping and format/delimiter are later wizard steps.
  */
 export function SheetsConnectPanel({
   verticalId,
   connector,
-  delimiterKey,
-  onDelimiterChange,
   draft,
   onDraftChange,
   onBack,
   onContinue,
+  onHeadersReady,
+  onFileSelected,
   invalidate,
 }: {
   verticalId: string
   connector: OwnerConnectorSystem
-  delimiterKey: string
-  onDelimiterChange: (key: string) => void
   draft: SheetsConnectDraft
   onDraftChange: (next: SheetsConnectDraft) => void
   onBack: () => void
   onContinue: () => void
+  onHeadersReady: (result: OwnerUploadResult, headers: string[]) => void
+  onFileSelected?: (file: File | null) => void
   invalidate: () => void
 }) {
   const systemLabel = connectorTitle(verticalId, connector)
@@ -828,7 +329,6 @@ export function SheetsConnectPanel({
   const files: OwnerSheetsOauthFile[] = filesQuery.data?.files ?? []
   const selectedFile = files.find((file) => file.spreadsheet_id === draft.spreadsheetId)
   const tabs = selectedFile?.tabs ?? []
-  const mappingReady = uploadMappingComplete(draft.columnMapping)
 
   const startMutation = useMutation({
     mutationFn: async () => {
@@ -866,16 +366,18 @@ export function SheetsConnectPanel({
       return ownerSheetsOauthExtract(verticalId, connector.system, {
         spreadsheet_id: draft.spreadsheetId,
         tab: draft.tab,
-        multi_pii_delimiter: delimiterValueFromKey(delimiterKey),
-        column_mapping: draft.needsMapping ? draft.columnMapping : null,
-        email_format: draft.emailFormat,
-        phone_format: draft.phoneFormat,
       })
     },
     onSuccess: (result) => {
       invalidate()
-      onDraftChange(applyConnectResultToDraft(draft, result))
-      toastConnectResult(result)
+      toastHeadersResult(result, 'extract')
+      if (!headersReady(result)) {
+        onDraftChange({ ...draft, uploadOk: false })
+        return
+      }
+      const headers = headersFromResult(result, draft.csvHeaders)
+      onDraftChange({ ...draft, csvHeaders: headers, uploadOk: true })
+      onHeadersReady(result, headers)
     },
     onError: (error) => {
       onDraftChange({ ...draft, uploadOk: false })
@@ -886,29 +388,6 @@ export function SheetsConnectPanel({
           label: 'Retry',
           onClick: () => extractMutation.mutate(),
         },
-      })
-    },
-  })
-
-  const cleanedUploadMutation = useMutation({
-    mutationFn: (file: File) =>
-      uploadOwnerConnectorCsv(
-        verticalId,
-        connector.system,
-        file,
-        delimiterValueFromKey(delimiterKey),
-        draft.needsMapping ? draft.columnMapping : null,
-        { emailFormat: draft.emailFormat, phoneFormat: draft.phoneFormat },
-      ),
-    onSuccess: (result) => {
-      invalidate()
-      onDraftChange(applyConnectResultToDraft(draft, result))
-      toastConnectResult(result)
-    },
-    onError: (error) => {
-      actionToast.error({
-        title: 'Upload failed',
-        description: actionToast.safeErrorMessage(error, 'Check the file and try again.'),
       })
     },
   })
@@ -925,8 +404,8 @@ export function SheetsConnectPanel({
     <div className="space-y-3">
       <h4 className="text-sm font-medium text-ink">{systemLabel} · Connect</h4>
       <p className="text-xs text-mute">
-        Sign in with Google to pick a sheet, or upload a CSV. Mapping and rejected-row clean-up are
-        the same either way.
+        Sign in with Google to pick a sheet, or upload a CSV. You will map columns and choose
+        formats next.
       </p>
 
       <div className="grid gap-2 sm:grid-cols-2">
@@ -1047,9 +526,7 @@ export function SheetsConnectPanel({
                           <span className="min-w-0">
                             <span className="block font-medium text-ink">{file.name}</span>
                             <span className="block text-[11px] text-mute">
-                              {file.tabs?.length
-                                ? `${file.tabs.length} tab(s)`
-                                : 'Spreadsheet'}
+                              {file.tabs?.length ? `${file.tabs.length} tab(s)` : 'Spreadsheet'}
                             </span>
                           </span>
                         </label>
@@ -1091,73 +568,6 @@ export function SheetsConnectPanel({
                   )}
                 </label>
               ) : null}
-
-              <label className="block space-y-1 text-xs">
-                <span className="font-medium text-ink">Separator when a cell has more than one value</span>
-                <select
-                  className={FIELD_CLASS}
-                  value={delimiterKey}
-                  onChange={(event) => onDelimiterChange(event.target.value)}
-                  aria-label="Separator when a cell has more than one value"
-                >
-                  {MULTI_PII_DELIMITER_OPTIONS.map((opt) => (
-                    <option key={opt.key} value={opt.key}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="block space-y-1 text-xs">
-                <span className="font-medium text-ink">Email format</span>
-                <select
-                  className={FIELD_CLASS}
-                  value={draft.emailFormat}
-                  onChange={(event) =>
-                    onDraftChange({ ...draft, emailFormat: event.target.value, uploadOk: false })
-                  }
-                  aria-label="Email format"
-                >
-                  {EMAIL_FORMAT_OPTIONS.map((opt) => (
-                    <option key={opt.id} value={opt.id}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="block space-y-1 text-xs">
-                <span className="font-medium text-ink">Phone format</span>
-                <select
-                  className={FIELD_CLASS}
-                  value={draft.phoneFormat}
-                  onChange={(event) =>
-                    onDraftChange({ ...draft, phoneFormat: event.target.value, uploadOk: false })
-                  }
-                  aria-label="Phone format"
-                >
-                  {PHONE_FORMAT_OPTIONS.map((opt) => (
-                    <option key={opt.id} value={opt.id}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <MappingAndRejectedBlock
-                csvHeaders={draft.csvHeaders}
-                columnMapping={draft.columnMapping}
-                onColumnMappingChange={(next) =>
-                  onDraftChange({ ...draft, columnMapping: next, uploadOk: false })
-                }
-                needsMapping={draft.needsMapping}
-                workingDoc={draft.workingDoc}
-                rejectedRows={draft.rejectedRows}
-                onWorkingDocChange={(next) => onDraftChange({ ...draft, workingDoc: next })}
-                onResubmitCleaned={(file) => cleanedUploadMutation.mutate(file)}
-                resubmitting={cleanedUploadMutation.isPending || extractMutation.isPending}
-                fileName={`${connector.system}-cleaned.csv`}
-              />
             </div>
           )}
         </div>
@@ -1167,12 +577,12 @@ export function SheetsConnectPanel({
         <SheetsCsvUploadPanel
           verticalId={verticalId}
           connector={connector}
-          delimiterKey={delimiterKey}
-          onDelimiterChange={onDelimiterChange}
           uploadOk={draft.uploadOk}
           onUploadOkChange={(ok) => onDraftChange({ ...draft, uploadOk: ok })}
           onBack={onBack}
           onContinue={onContinue}
+          onFileSelected={onFileSelected}
+          onHeadersReady={onHeadersReady}
           invalidate={invalidate}
         />
       ) : (
@@ -1186,19 +596,10 @@ export function SheetsConnectPanel({
                 type="button"
                 size="sm"
                 variant="outline"
-                disabled={
-                  !draft.spreadsheetId ||
-                  !draft.tab ||
-                  extractMutation.isPending ||
-                  (draft.needsMapping && !mappingReady)
-                }
+                disabled={!draft.spreadsheetId || !draft.tab || extractMutation.isPending}
                 onClick={() => extractMutation.mutate()}
               >
-                {extractMutation.isPending
-                  ? 'Extracting…'
-                  : draft.needsMapping
-                    ? 'Apply mapping & extract'
-                    : 'Extract & test'}
+                {extractMutation.isPending ? 'Reading…' : 'Read columns'}
               </Button>
             ) : null}
             <Button

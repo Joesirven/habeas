@@ -3530,6 +3530,13 @@ export type OwnerConnectorSystem = {
   // if ConnectorSystemOut grows the field. Prefer wizardCompletedAt(metadata)
   // from @/lib/quick-start-tour.
   wizard_completed_at?: string | null
+  list_capability?: {
+    email: boolean
+    phone: boolean
+    ndz: boolean
+    source: string
+    enabled_list_types: string[]
+  } | null
 }
 
 export type OwnerConnectorList = {
@@ -3592,6 +3599,24 @@ export function patchOwnerVerticalSettings(
   return fetchAdminApi<OwnerVerticalSettings>(
     `/owner/verticals/${encodeURIComponent(verticalId)}/settings`,
     { method: 'PATCH', body: JSON.stringify(body) },
+  )
+}
+
+export function saveOwnerConnectorMapping(
+  verticalId: string,
+  system: string,
+  body: {
+    column_mapping: Record<string, string>
+    multi_pii_delimiter?: string | null
+    email_format?: string
+    phone_format?: string
+    name_format?: string
+    detected_headers?: string[]
+  },
+) {
+  return fetchAdminApi<OwnerConnectorSystem>(
+    `/owner/verticals/${encodeURIComponent(verticalId)}/systems/${encodeURIComponent(system)}/mapping`,
+    { method: 'POST', body: JSON.stringify(body) },
   )
 }
 
@@ -3796,6 +3821,7 @@ export type OwnerSheetsOauthExtractBody = {
   column_mapping?: Record<string, string> | null
   email_format?: string
   phone_format?: string
+  name_format?: 'first_last' | 'last_first'
 }
 
 function ownerSheetsOauthPath(verticalId: string, system: string, action: string) {

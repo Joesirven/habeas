@@ -1,8 +1,10 @@
-"""Extract Auth0 users, hash emails in memory, write hashed-raw rows.
+"""Extract Auth0 users, hash emails/phones in memory, write hashed-raw rows.
 
 Pipeline: resolve credentials (impl-05) → Management API users (impl-04) →
-DROP email hash via ``habeas_privacy_core.vertical_hash`` → BigQuery hashed-raw
-(impl-02). Raw emails and secrets are never persisted or logged.
+DROP email/phone hash via ``habeas_privacy_core.vertical_hash`` → BigQuery
+hashed-raw (impl-02). Auth0 exports typically carry email and phone only —
+``ndz_hash`` stays None (no name/DOB/ZIP). Raw PII and secrets are never
+persisted or logged.
 """
 
 from __future__ import annotations
@@ -13,7 +15,11 @@ from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Protocol
 
-from habeas_privacy_core.vertical_hash import HashedVendorRecord, email_hash_from_raw
+from habeas_privacy_core.vertical_hash import (
+    HashedVendorRecord,
+    email_hash_from_raw,
+    phone_hash_from_raw,
+)
 
 __all__ = [
     "DEFAULT_BQ_TABLE",
@@ -28,14 +34,18 @@ DEFAULT_BQ_TABLE = "auth0_hashed_raw"
 logger = logging.getLogger(__name__)
 
 EmailHashFn = Callable[[str | None], str | None]
+PhoneHashFn = Callable[[str | None], str | None]
 WriteHashedRawFn = Callable[[str, list[HashedVendorRecord]], object]
 LoadCredentialsFn = Callable[[str | None], object]
+
+# Adapter may yield (vendor_id, email) or (vendor_id, email, phone).
+UserRow = tuple[str, str | None] | tuple[str, str | None, str | None]
 
 
 class UserExtractAdapter(Protocol):
     """impl-04 ``ManagementExtractAdapter`` surface used by this orchestrator."""
 
-    def iter_users(self, credentials: object) -> AsyncIterator[tuple[str, str | None]]: ...
+    def iter_users(self, credentials: object) -> AsyncIterator[UserRow]: ...
 
 
 class HashExtractError(RuntimeError):
@@ -66,14 +76,25 @@ async def _maybe_await(value: object) -> object:
     return value
 
 
+def _unpack_user_row(row: object) -> tuple[str, str | None, str | None]:
+    if not isinstance(row, (tuple, list)) or len(row) < 2:
+        return "", None, None
+    vendor_record_id = str(row[0] or "")
+    email = row[1] if len(row) > 1 else None
+    phone = row[2] if len(row) > 2 else None
+    email_out = None if email is None else str(email)
+    phone_out = None if phone is None else str(phone)
+    return vendor_record_id, email_out, phone_out
+
+
 async def _iter_users(
     adapter: UserExtractAdapter, credentials: object
-) -> AsyncIterator[tuple[str, str | None]]:
+) -> AsyncIterator[tuple[str, str | None, str | None]]:
     stream = adapter.iter_users(credentials)
     if inspect.isawaitable(stream):
         stream = await stream
-    async for vendor_record_id, email in stream:
-        yield vendor_record_id, email
+    async for row in stream:
+        yield _unpack_user_row(row)
 
 
 def _resolve_credentials(
@@ -95,13 +116,15 @@ async def run_hash_extract(
     adapter: UserExtractAdapter | None = None,
     write_hashed_raw_fn: WriteHashedRawFn | None = None,
     email_hash_fn: EmailHashFn | None = None,
+    phone_hash_fn: PhoneHashFn | None = None,
     load_credentials_fn: LoadCredentialsFn | None = None,
 ) -> int:
-    """Hash Auth0 user emails in memory and write hashed-raw rows.
+    """Hash Auth0 user emails/phones in memory and write hashed-raw rows.
 
     Returns the number of hashed rows passed to the BigQuery writer. Users
-    without a vendor id or a hashable email are skipped (no null ``email_hash``
-    rows). ``system`` is always ``auth0``.
+    without a vendor id or any hashable email/phone are skipped. ``ndz_hash``
+    is always None (Auth0 export has no NDZ parts). ``system`` is always
+    ``auth0``.
 
     The writer is called only after ``iter_users`` completes successfully and
     at least one hashed row exists — never with an empty list (no
@@ -109,7 +132,8 @@ async def run_hash_extract(
     Wrapped failures use ``from None`` so URLs and emails on adapter/HTTP
     exceptions never appear on ``HashExtractError.__cause__``.
     """
-    hasher = email_hash_fn or email_hash_from_raw
+    email_hasher = email_hash_fn or email_hash_from_raw
+    phone_hasher = phone_hash_fn or phone_hash_from_raw
     writer = write_hashed_raw_fn or _write_hashed_raw()
     extract_adapter = adapter or _management_adapter()
 
@@ -127,19 +151,24 @@ async def run_hash_extract(
     skipped = 0
 
     try:
-        async for vendor_record_id, email in _iter_users(extract_adapter, resolved):
+        async for vendor_record_id, email, phone in _iter_users(
+            extract_adapter, resolved
+        ):
             if not vendor_record_id:
                 skipped += 1
                 continue
-            hashed = hasher(email)
-            if hashed is None:
+            email_hash = email_hasher(email)
+            phone_hash = phone_hasher(phone)
+            if email_hash is None and phone_hash is None:
                 skipped += 1
                 continue
             records.append(
                 HashedVendorRecord(
                     system=SYSTEM,
                     vendor_record_id=str(vendor_record_id),
-                    email_hash=hashed,
+                    email_hash=email_hash,
+                    phone_hash=phone_hash,
+                    ndz_hash=None,
                     extracted_at=extracted_at,
                 )
             )
